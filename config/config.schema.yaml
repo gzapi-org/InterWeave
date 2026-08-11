@@ -50,13 +50,35 @@ discovery:
       config:
         peers: list[multiaddr-with-peer-id, max=64]
     kademlia:
-      # Reserved type. In a minimum-v1 build without KademliaDiscovery,
-      # enabled=true is a hard validation/startup error; false is accepted.
+      # Fully specified optional provider; default remains disabled.
+      # A build without KademliaDiscovery rejects enabled=true at startup.
       enabled: bool = false
       priority: int
       config:
-        # deferred provider; schema finalized by future spike/ADR update
-        max_queries_per_minute: int
+        config_version: literal[1] = 1
+        # Required when enabled=true on a supporting build. Non-secret namespace.
+        network_id: string[regex=^[a-z0-9][a-z0-9._-]{0,63}$]?
+        mode: enum[client,server] = client
+        # First integration deliberately reuses data-plane trust for DHT routers.
+        routing_peer_policy: literal[data-plane-trusted]
+        seed_sources: list[enum[peer-cache,mdns,static-bootstrap], max=3]
+        candidate_ttl: duration = 30m
+        kbucket_size: integer[8..20] = 20
+        max_routing_peers: integer[20..1024] = 256
+        query_timeout: duration[5s..120s] = 30s
+        parallelism: integer[1..10] = 3
+        disjoint_query_paths: bool = true
+        max_concurrent_queries: integer[1..8] = 2
+        max_queries_per_minute: integer[1..60] = 6
+        exploration_interval: duration[30s..1h] = 60s
+        exploration_jitter_percent: integer[0..50] = 20
+        max_results_per_query: integer[1..20] = 20
+        target_routing_peers: integer[8..256] = 64
+        targeted_lookup_cooldown: duration[30s..1h] = 5m
+        bootstrap_min_interval: duration[1m..1h] = 5m
+        bootstrap_refresh_interval: duration[5m..24h] = 15m
+        # Peer-routing-only design: value/provider records are not used.
+        record_mode: literal[disabled]
 channels:
   desired: list[ChannelId, max=128]
 ipc:

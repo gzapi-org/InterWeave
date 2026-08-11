@@ -25,7 +25,7 @@ Default suggested configuration intent:
 1. peer-cache: fastest recent hints;
 2. mDNS: local low-latency paths;
 3. static bootstrap: deterministic external entry points;
-4. Kademlia: wider network exploration when enabled.
+4. Kademlia: trust-bounded wider network peer routing when explicitly enabled in a supporting build.
 
 ConnectionManager may prefer LAN/private or previously successful addresses independently of provider priority.
 
@@ -37,3 +37,10 @@ ConnectionManager may prefer LAN/private or previously successful addresses inde
 - provider backoff is independent.
 
 This is adaptive scheduling, not a mandatory sequential discovery pipeline.
+
+
+## Kademlia seed flow
+
+Configured seed-source observations (`peer-cache`, `static-bootstrap`, optionally `mdns`) may be forwarded as hints to Kademlia. They remain advisory and must pass trust/address/protocol eligibility before manual Kademlia routing insertion. Kademlia-derived observations are not recursively fed back into Kademlia as external seed hints.
+
+The first integration does not use unauthorized peers as DHT routing intermediaries; this preserves the existing connection and GossipSub trust boundary.

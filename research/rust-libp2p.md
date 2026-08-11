@@ -33,10 +33,15 @@ The v1 backend uses TCP + Noise + Yamux. Noise authenticates the libp2p transpor
 ## Discovery components
 
 - mDNS: useful passive/zero-config LAN candidate discovery, optional.
-- Kademlia: can find peers/routing candidates but needs bootstrap and has poisoning/privacy/complexity costs; deferred from v1.
+- Kademlia: current rust-libp2p exposes custom protocol names, manual K-bucket insertion, explicit client/server mode, bootstrap, closest-peer queries, disjoint paths, and routing/query events. The project has a complete optional peer-routing design but keeps it disabled by default.
 - Identify: useful after connection for protocol/address observations; not treated as discovery authority.
 - static bootstrap and peer cache are project-defined `DiscoveryProvider` implementations, not libp2p swarm special cases.
 
 ## Reachability components
 
 AutoNAT, Circuit Relay v2, DCUtR, and hole punching solve different reachability problems. v1 does not enable every mechanism by default. See ADR-0024 and `transport/libp2p/CONNECTIVITY.md`.
+
+
+## Kademlia integration snapshot
+
+The 2026-08-11 research pass inspected the `libp2p` 0.56.0 / `libp2p-kad` 0.48.0 documentation line. Key implementation facts and their project mapping are recorded in [kademlia-integration.md](kademlia-integration.md). Implementation must revalidate exact APIs before coding.

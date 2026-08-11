@@ -64,3 +64,28 @@ trust_policy_revision
 ```
 
 Labels must be bounded; never put raw payloads, private keys, arbitrary peer-supplied strings, or unbounded ChannelIds into metric label cardinality.
+
+
+## Kademlia diagnostics (when compiled and enabled)
+
+```text
+kademlia_enabled
+kademlia_mode
+kademlia_protocol_hash
+kademlia_routing_peers
+kademlia_nonempty_buckets
+kademlia_bootstrap_total
+kademlia_bootstrap_failures_total
+kademlia_last_bootstrap_success
+kademlia_queries_started_total{class}
+kademlia_queries_completed_total{class}
+kademlia_query_failures_total{class,reason}
+kademlia_query_timeouts_total{class}
+kademlia_candidates_emitted_total
+kademlia_candidates_expired_total
+kademlia_routing_insert_denied_total{reason}
+kademlia_record_write_attempts_total{kind}
+kademlia_driver_channel_overflow_total
+```
+
+Do not expose random lookup keys as ordinary metric labels/log fields. `network_id` and protocol hash are local diagnostics, not secrets or trust proof.

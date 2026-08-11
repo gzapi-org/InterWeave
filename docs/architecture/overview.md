@@ -24,7 +24,7 @@ remote trusted data-plane peer(s)
 |   |- PeerCacheDiscovery                  |
 |   |- MdnsDiscovery (optional)            |
 |   |- StaticBootstrapDiscovery            |
-|   `- KademliaDiscovery (deferred)        |
+|   `- KademliaDiscovery (optional/default-off)        |
 |                                          |
 |  PeerTrustPolicy                         |
 +--------------------+---------------------+
@@ -65,3 +65,8 @@ v1 capabilities exposed through the transport contract:
 - `durable_delivery`: no;
 - `offline_mailbox`: no;
 - `max_payload_bytes`: effective active-profile value, hard ceiling 49,152 bytes.
+
+
+## Optional Kademlia integration
+
+Kademlia remains disabled by default but is now fully specified as a private, trust-bounded, peer-routing-only DiscoveryProvider. The Swarm owns the concrete Kademlia behavior; the provider owns scheduling/normalization through a bounded internal handle. See [kademlia-integration.md](kademlia-integration.md) and ADR-0009.

@@ -18,7 +18,7 @@ For v1, authorization applies consistently to the data plane:
 - **broadcast propagation:** GossipSub messages whose authenticated original source is not locally trusted are handled as `Ignore`, not `Reject`, per ADR-0029;
 - **revocation:** removing a PeerId from the allowlist evicts active data-plane connectivity and emits operational trust/connection events.
 
-The profile's own local PeerId is intrinsically self-authorized and is not required in `allowed_peers`; the allowlist governs remote transport identities. Static bootstrap configuration remains reachability input only and does not add the bootstrap PeerId to the allowlist.
+The profile's own local PeerId is intrinsically self-authorized and is not required in `allowed_peers`; the allowlist governs remote transport identities. Static bootstrap configuration remains reachability input only and does not add the bootstrap PeerId to the allowlist. The first Kademlia integration also uses this same allowlist to admit DHT routing/query peers; Kademlia discovery never creates an alternate untrusted connection class.
 
 ## Alternatives considered
 

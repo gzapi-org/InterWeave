@@ -68,3 +68,25 @@ Inbound Channel metadata carries an opaque short-lived `reply_token` created by 
 - broadcast inbound -> token resolves to the same broadcast `channel`.
 
 `reply` follows that route subject to current policy. A broadcast reply after the calling bridge has left the channel fails as `ChannelNotJoined`; the token does not recreate a subscription. Claude does not manipulate Multiaddr, connection IDs, or mesh peers. Explicit `send` and `broadcast` remain available when a different route is desired.
+
+
+## Optional Kademlia discovery flow
+
+Kademlia remains disabled by default. When a supporting build is explicitly enabled:
+
+```text
+peer-cache/static/mDNS candidate hint
+ -> DiscoveryManager / KademliaDiscovery seed eligibility
+ -> PeerTrustPolicy + address/protocol checks
+ -> bounded KadControlHandle
+ -> Swarm-owned Kademlia driver
+ -> manual Behaviour::add_address
+ -> bootstrap / get_n_closest_peers query
+ -> QueryResult::GetClosestPeers { PeerInfo... }
+ -> KademliaDiscovery normalization + TTL
+ -> CandidatePeer{source=kademlia}
+ -> DiscoveryManager merge
+ -> ConnectionManager (still trust-gated)
+```
+
+Kademlia results do not trigger an automatic dial from the provider and do not grant trust. Client-mode DHT peers are not treated as generally discoverable through peer routing; targeted lookup is opportunistic for server-mode DHT participants only.

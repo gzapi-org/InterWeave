@@ -14,4 +14,4 @@ This roadmap starts only after architecture acceptance. Each phase should leave 
 | 7 | security hardening | trust admin path, rate limiting, key rotation tooling, fuzzing | rogue/flood/oversize/IPC tests pass |
 | 8 | operations | diagnostics, service packaging, migration, docs | clean install/update/restart scenarios |
 | 9 | connectivity hardening | relay/AutoNAT/DCUtR only as evidence requires | deployment matrix target reached |
-| 10 | advanced discovery | Kademlia only if accepted after spike | poisoning/diversity/privacy criteria satisfied |
+| 10 | optional Kademlia discovery | implement private peer-routing provider/driver; default remains disabled | SPIKE-003 + conformance + 20-node/security matrix |

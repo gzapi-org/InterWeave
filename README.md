@@ -46,7 +46,7 @@ The primary boundaries are:
 - The network runtime is a **separate, profile-scoped daemon** so Claude session restarts do not redefine transport identity or tear down P2P connectivity.
 - `Transport` and `DiscoveryProvider` are stable contracts. Claude-facing code does not depend on libp2p, GossipSub, mDNS, Kademlia, or multiaddresses.
 - Broadcast is GossipSub. Directed messaging is a dedicated libp2p request-response protocol; directed messages are never emulated by broadcasting and discarding at unrelated peers.
-- v1 discovery is composable: peer cache + optional mDNS + static bootstrap. Kademlia is designed but deferred until an implementation spike establishes a justified Internet-scale discovery need.
+- v1 discovery is composable: peer cache + optional mDNS + static bootstrap. Kademlia now has a complete integration blueprint but remains optional and `enabled: false` by default; it is peer-routing-only and never grants trust or stores channel/application records.
 - Discovery only produces **candidate reachability**. It never grants trust. v1 uses a deny-by-default static PeerId allowlist for ordinary data-plane connection admission, inbound source admission, and outbound direct sends.
 - Noise secures each admitted libp2p connection. GossipSub validation distinguishes objective invalidity (`Reject`) from valid-but-locally-unauthorized publishers (`Ignore`); trusted forwarding peers can still read plaintext, so group/application encryption remains deferred.
 - Delivery is realtime/best-effort, no global ordering, no durable mailbox, and no exactly-once claim. Broadcast requires the calling local client to be joined; direct send requires the destination to be trusted.
@@ -65,6 +65,7 @@ The primary boundaries are:
 - [Rust blueprint](docs/architecture/rust-blueprint.md)
 - [Implementation plan](roadmap/IMPLEMENTATION-PLAN.md)
 - [Amendment review memo](docs/architecture/AMENDMENT-REVIEW-2026-08-11.md)
+- [Kademlia design review memo](docs/architecture/KAD-REVIEW-2026-08-11.md)
 - [Final architecture review](docs/architecture/FINAL-REVIEW.md)
 
 ## Source snapshot
@@ -74,3 +75,8 @@ Research was refreshed 2026-08-11. The inspected `anthropics/claude-plugins-offi
 ## Repository name
 
 The working name **claude-p2p-channel** is retained because it describes the Claude integration boundary and transport class without implying an application protocol, project, team, or coordination model.
+
+
+## Optional Kademlia blueprint
+
+The repository includes a complete, implementation-ready Kademlia integration design while deliberately leaving it disabled. See [docs/architecture/kademlia-integration.md](docs/architecture/kademlia-integration.md), [discovery/providers/kademlia.md](discovery/providers/kademlia.md), and [ADR-0009](adr/0009-kademlia-role.md). The first integration is a private/trust-bounded peer-routing overlay, not the public IPFS DHT.

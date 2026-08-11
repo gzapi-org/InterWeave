@@ -20,7 +20,7 @@ Core v1 must work for:
 | Circuit Relay v2 | optional implementation target after spike if remote deployments require relays |
 | AutoNAT | deferred hardening |
 | DCUtR / hole punching | deferred hardening |
-| Kademlia | deferred discovery |
+| Kademlia | optional peer-routing discovery; fully designed, default disabled |
 
 A bootstrap node and a relay are different roles. Configuring the same machine for both never makes bootstrap authoritative.
 

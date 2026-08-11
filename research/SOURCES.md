@@ -41,6 +41,13 @@ MCP changed substantially in 2026. The Claude Channel reference remains authorit
 - GossipSub: https://docs.rs/libp2p/latest/libp2p/gossipsub/
 - mDNS: https://docs.rs/libp2p/latest/libp2p/mdns/
 - Kademlia: https://docs.rs/libp2p/latest/libp2p/kad/
+- Kademlia DHT specification: https://github.com/libp2p/specs/blob/master/kad-dht/README.md
+- Kademlia Behaviour: https://docs.rs/libp2p/latest/libp2p/kad/struct.Behaviour.html
+- Kademlia Config: https://docs.rs/libp2p/latest/libp2p/kad/struct.Config.html
+- Kademlia Event: https://docs.rs/libp2p/latest/libp2p/kad/enum.Event.html
+- Kademlia BucketInserts: https://docs.rs/libp2p/latest/libp2p/kad/enum.BucketInserts.html
+- Kademlia StoreInserts: https://docs.rs/libp2p/latest/libp2p/kad/enum.StoreInserts.html
+- Kademlia PeerInfo: https://docs.rs/libp2p/latest/libp2p/kad/struct.PeerInfo.html
 - Noise: https://docs.rs/libp2p/latest/libp2p/noise/
 - Identify: https://docs.rs/libp2p/latest/libp2p/identify/
 - AutoNAT: https://docs.rs/libp2p/latest/libp2p/autonat/

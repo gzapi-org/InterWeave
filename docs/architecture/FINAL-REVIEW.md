@@ -38,7 +38,7 @@ The strongest design property remains preserved: discovery is an independently r
 |---|---|---|
 | libp2p leaks into Claude plugin API? | **No** | bridge tools/events use ChannelId, peer identity, payload, reply token only |
 | discovery provider leaks into transport consumer? | **No** | only high-level provenance/health diagnostics cross runtime boundary |
-| Kademlia mandatory? | **No** | deferred; enabling it in unsupported build fails explicitly |
+| Kademlia mandatory? | **No** | fully designed optional peer-routing provider; default disabled; unsupported build rejects enablement |
 | bootstrap becomes authority/trust? | **No** | static provider is reachability only and data-plane dial still requires allowlist |
 | discovery becomes trust? | **No** | deny-by-default static trust remains independent |
 | discovery manages connections? | **No** | ConnectionManager alone owns dial/reconnect decisions |
@@ -71,7 +71,7 @@ The strongest design property remains preserved: discovery is an independently r
 3. rust-libp2p is the first backend, isolated behind neutral contracts.
 4. GossipSub is the broadcast primitive; validation uses explicit `Accept|Ignore|Reject` semantics.
 5. request-response is the dedicated direct primitive with transport acceptance semantics.
-6. v1 discovery is cache + optional mDNS + static bootstrap; Kademlia is deferred and cannot be enabled in an unsupported build.
+6. v1 discovery is cache + optional mDNS + static bootstrap; Kademlia has a complete private peer-routing integration blueprint but remains optional/default-disabled and cannot be enabled in an unsupported build.
 7. discovery candidates never grant trust or dial rights.
 8. v1 trust is a static PeerId allowlist, deny by default, applied to ordinary data-plane connectivity, original message source, and outbound direct destination.
 9. Noise protects peer connections; no group E2EE claim.
@@ -90,7 +90,7 @@ The strongest design property remains preserved: discovery is an independently r
 - no group E2EE from trusted forwarding peers;
 - asymmetric trust lists can interrupt GossipSub propagation at nodes that `Ignore` an unauthorized original publisher;
 - no universal NAT traversal guarantee;
-- no Kademlia in minimum v1;
+- no Kademlia in minimum v1; the optional implementation is fully designed but remains default-disabled;
 - static trust administration does not scale to large public networks;
 - same-user malicious local processes remain partly inside the IPC residual threat boundary;
 - channel/topic hashing does not defeat dictionary guessing;
@@ -122,7 +122,7 @@ New metadata fields or larger diagnostics must preserve the 128 KiB max-payload 
 
 1. Exact current Claude `channels` manifest and MCP SDK compatibility? -> SPIKE-001.
 2. Precise rust-libp2p request-response failure/cancellation behavior and codec ergonomics? -> SPIKE-002.
-3. Does Kademlia materially improve target discovery without unacceptable poisoning/privacy cost? -> SPIKE-003.
+3. Do the proposed Kademlia defaults and trust-bounded topology materially improve target discovery without unacceptable poisoning/privacy cost? -> SPIKE-003 before optional implementation/support.
 4. Which relay/NAT protocols are truly required for target deployments? -> SPIKE-004.
 5. Is same-user local-process isolation needed beyond OS socket ACLs/capability scoping? -> SPIKE-005 if deployment requires.
 

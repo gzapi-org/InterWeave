@@ -10,6 +10,12 @@
 | mDNS unavailable | LAN auto-discovery absent | mdns unavailable | static/cache continue |
 | Kademlia configured enabled but unsupported by build | profile fails configuration/startup; provider is never silently omitted | fatal explicit unsupported-provider diagnostic | disable it or install a build where approved provider exists |
 | Kademlia unavailable after future implementation | other providers/connections continue | provider unavailable | provider restart/disable |
+| Kademlia supported+enabled but no trusted eligible seed | provider starts but cannot bootstrap; no daemon failure | Kademlia unavailable/degraded, `routing_peers=0` | add/fix trusted server seed; other providers continue |
+| Kademlia protocol/network namespace mismatch | peer cannot join local DHT routing view | protocol mismatch/query failure diagnostic | align `network_id`/wire major |
+| Kademlia bootstrap/query timeout | query fails under bounded retry/rate budget | provider degraded; timeout counters | retry after backoff; other providers continue |
+| Kademlia routing peer trust revoked | remove from routing table and normal connection set | trust change + Kademlia routing removal | reseed through remaining trusted peers |
+| inbound Kademlia value/provider write | do not persist record | record-write-attempt counter | continue peer routing; investigate abusive peer |
+| Kademlia driver channel overload | never block Swarm; mark provider degraded and coalesce/drop noncritical driver diagnostics | overflow counter | workload drains/backoff; tune bounded capacity if evidence supports |
 | network partition | connections drop; local daemon lives | peer disconnects/dial failures | backoff + rediscovery/reconnect |
 | PeerId changes intentionally | peers see new identity | `IdentityChanged` / epoch | out-of-band trust update |
 | identity key missing on established profile | fail closed | daemon unavailable, explicit identity error | restore key or explicit reinitialize/rotate |

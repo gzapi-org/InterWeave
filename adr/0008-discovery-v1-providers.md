@@ -8,7 +8,7 @@ These three cover fast restart, zero-config LAN operation, and deterministic rem
 
 ## Decision
 
-Ship the architecture for PeerCacheDiscovery, optional MdnsDiscovery, and StaticBootstrapDiscovery as the minimum v1 provider set. Kademlia is deferred.
+Ship the architecture for PeerCacheDiscovery, optional MdnsDiscovery, and StaticBootstrapDiscovery as the minimum v1 provider set. Kademlia is outside the minimum v1 provider set but is fully designed as an optional/default-disabled provider in ADR-0009.
 
 ## Alternatives considered
 

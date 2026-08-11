@@ -8,7 +8,7 @@ Make discovery independently replaceable without turning the runtime into a gene
 PeerCache ----\
 mDNS ----------> DiscoveryManager -> CandidatePeerSet -> ConnectionManager
 Static --------/
-Kademlia -----/ (deferred)
+Kademlia -----/ (optional; default disabled)
 ```
 
 ## DiscoveryManager responsibilities
@@ -37,3 +37,10 @@ Default architecture caps:
 - provider-specific lower bounds where appropriate.
 
 On overflow, evict expired then least-recently-observed untrusted candidates; configured static entries are retained within their own explicit cap. Eviction is diagnostic, not silent authority loss.
+
+
+## Kademlia-specific integration
+
+Kademlia is unusual because the actual `libp2p::kad::Behaviour` must live inside the single Swarm owner. The optional `KademliaDiscovery` provider therefore owns only scheduling/normalization/health and communicates with a Kademlia driver inside `transport-libp2p` through a bounded internal handle. This does not change the generic DiscoveryProvider contract and does not give the provider Swarm ownership.
+
+See [../docs/architecture/kademlia-integration.md](../docs/architecture/kademlia-integration.md).

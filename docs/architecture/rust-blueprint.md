@@ -13,7 +13,7 @@ crates/
   discovery-cache/        # discovery-api
   discovery-static/       # discovery-api
   discovery-mdns/         # discovery-api + libp2p mdns adapter
-  discovery-kademlia/     # deferred; discovery-api + libp2p kad
+  discovery-kademlia/     # optional/default-off provider scheduler; discovery-api + narrow KadControlHandle
   transport-libp2p/       # libp2p backend, connection/pubsub/direct/identity
   transport-runtime/      # transport-api + discovery-api + trust-api
   ipc-protocol/           # NO libp2p, NO Claude
@@ -43,7 +43,7 @@ ipc-protocol ----> transport-api
           |   |   |                 v
        cache static mdns          rust-libp2p
                  \
-                  kademlia (deferred)
+                  kademlia (optional/default-off)
 ```
 
 No arrows point from `transport-api` to provider/backend crates. No neutral contract crate imports `libp2p`.
@@ -57,7 +57,8 @@ Within `transport-libp2p`:
 - `pubsub_manager` — GossipSub topic/subscription state plus ADR-0029 validation-result reporting;
 - `direct_manager` — request-response lifecycle;
 - `identity_manager` — key loading/PeerId;
-- `address_book` — normalized discovery observations -> libp2p addresses.
+- `address_book` — normalized discovery observations -> libp2p addresses;
+- `kademlia_driver` — optional `libp2p::kad::Behaviour` owner/adapter inside the Swarm task, exposing only a bounded internal `KadControlHandle`.
 
 These remain concrete modules until a second implementation requires independent substitution.
 
@@ -67,3 +68,8 @@ These remain concrete modules until a second implementation requires independent
 - runtime integration tests with in-memory/temp profiles;
 - libp2p multi-peer integration tests;
 - IPC compatibility fixtures shared with bridge implementation, including exact 49,152-byte payload request/event fixtures under the 131,072-byte JSON-body ceiling and client-capability authorization cases.
+
+
+## Kademlia construction order
+
+When a build includes Kademlia support, `transport-libp2p` is constructed first and returns a narrow `KadControlHandle` for its optional behavior slot. The composition root injects that handle into `discovery-kademlia`; `transport-libp2p` does not depend on the provider crate, avoiding a cycle. If configuration says `enabled: false`, the behavior slot is inactive and no Kademlia protocol is advertised or queried.

@@ -15,7 +15,7 @@ This matrix is an audit aid, not a replacement for the source task.
 | effective payload capability | `TRANSPORT.md`, `configuration.md`, ADR-0026 |
 | DiscoveryProvider | `contracts/DISCOVERY.md`, ADR-0006 |
 | discovery composition/priority | `discovery/COMPOSITION.md`, ADR-0007 |
-| peer cache/mDNS/static/Kademlia | `discovery/providers/*`, ADR-0008/0009 |
+| peer cache/mDNS/static/Kademlia | `discovery/providers/*`, `docs/architecture/kademlia-integration.md`, ADR-0008/0009 |
 | unsupported enabled provider fails | ADR-0009, `PROVIDER-CONTRACT.md`, `configuration.md` |
 | discovery != connection | ADR-0011, `components.md` |
 | trust-gated data-plane connectivity | ADR-0011/0012, `transport/libp2p/SECURITY.md` |

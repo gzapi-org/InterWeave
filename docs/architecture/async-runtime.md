@@ -13,7 +13,8 @@ main / daemon supervisor
   |- DiscoveryManager supervisor
   |    |- provider task: cache
   |    |- provider task: mDNS
-  |    `- provider task: static
+  |    |- provider task: static
+  |    `- provider task: Kademlia (optional; only when supported + enabled)
   |- cache writer/debounce task
   `- observability sink
 ```
@@ -40,3 +41,10 @@ Transient provider failure transitions health to degraded/unavailable, waits pro
 ## IPC event fan-out
 
 Runtime emits one normalized message event. IPC server fans out only to interested local clients and copies/retains payload under bounded memory accounting. Slow clients drop their own events rather than blocking other clients. Serialized frames are checked against the fixed 131,072-byte JSON-body ceiling before write.
+
+
+## Kademlia task interaction
+
+The optional Kademlia provider task never polls the Swarm. It sends bounded commands to the Swarm-owned Kademlia driver and consumes normalized driver events. Query rate/concurrency permits are acquired before commands are sent. Driver-event overflow must not block the Swarm; it marks the provider degraded and coalesces/drops noncritical diagnostics under explicit counters.
+
+`enabled: false` means no provider task, no Kademlia query scheduling, and no project Kademlia protocol participation.

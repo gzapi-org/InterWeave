@@ -69,3 +69,41 @@ Every provider runs `contracts/DISCOVERY-CONFORMANCE.md` tests. Providers additi
 ## Compatibility fixtures
 
 Keep wire/IPC golden fixtures by major version. IPC v1 fixtures **must** include an outbound request and inbound event carrying exactly 49,152 opaque payload bytes plus maximum bounded v1 envelope fields. A new implementation must parse prior compatible minor frames and reject unsupported major versions clearly.
+
+
+## Kademlia optional-provider test suite
+
+These tests are required before a build may advertise Kademlia as supported. `enabled: false` remains the shipped default.
+
+### Configuration/unit
+
+- disabled Kademlia creates no provider task, query, protocol advertisement, or routing state;
+- unsupported build + `enabled: true` is a hard configuration/startup failure;
+- supported build validates `network_id`, mode, bounds, and peer-routing-only `record_mode`;
+- protocol derivation from `network_id` has deterministic golden fixtures;
+- random exploration keys are independent of ChannelId/application input;
+- K-bucket insert path is manual and refuses unauthorized peers;
+- query concurrency/rate/cooldown budgets are deterministic under fake time;
+- `PeerInfo` normalization applies self/address/candidate limits and Kademlia TTL.
+
+### Multi-peer integration
+
+1. one trusted server seed + two client nodes bootstrap successfully;
+2. 10-20 trusted nodes converge under random exploration within configured query bounds;
+3. targeted lookup recovers an allowlisted server-mode DHT peer address not present in local cache, while no equivalent guarantee is asserted for client-mode peers;
+4. client-mode peers do not become Kademlia servers;
+5. server-mode peers answer peer-routing queries without storing value/provider records;
+6. trust revocation removes a Kademlia routing peer and prevents further query use;
+7. an unauthorized discovered peer is emitted only as advisory candidate state and never becomes a Kademlia routing/query connection;
+8. static/cache/mDNS seed observations merge with Kademlia provenance without duplicate peer identity;
+9. protocol/network namespace mismatch fails cleanly without public-IPFS-DHT fallback;
+10. Kademlia provider/driver failure does not stop direct/GossipSub traffic on existing peers.
+
+### Adversarial/load
+
+- malicious trusted router returns maximum hostile/stale address sets -> global caps hold;
+- trusted Sybil/eclipse simulation -> disjoint-path behavior and bootstrap diversity are measured/documented;
+- query flood trigger -> max concurrent/query-per-minute budgets hold;
+- inbound PUT_VALUE/ADD_PROVIDER flood -> no record store growth, bounded diagnostics;
+- driver event flood -> Swarm responsiveness remains within test threshold;
+- repeated bootstrap failure -> provider degrades without restart storm.

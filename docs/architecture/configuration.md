@@ -40,3 +40,10 @@ Safe reloadable classes: provider enable/disable/config **when supported by the 
 Trust reload can close now-unauthorized data-plane connections and emits `TrustPolicyChanged`. Invalid reload leaves the previous good configuration active and reports diagnostics.
 
 Restart-required classes: identity key path/rotation, IPC endpoint, core listen transport changes if backend cannot apply atomically.
+
+
+## Kademlia configuration rule
+
+The Kademlia schema is fully defined even though the provider remains optional. `enabled: false` is the shipped/default value. A supporting build may start Kademlia only after explicit opt-in; an unsupported build treats `enabled: true` as a hard validation/startup error.
+
+When enabled in a future supporting build, `network_id` is required and derives a private Kademlia protocol namespace. The first integration fixes `routing_peer_policy: data-plane-trusted` and `record_mode: disabled`; these are deliberate security invariants, not convenience defaults. See `kademlia-integration.md`.

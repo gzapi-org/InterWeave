@@ -10,7 +10,7 @@
 | GossipSub plaintext at trusted forwarding peers | trust-gated data-plane + explicit no-E2EE boundary | add higher-layer/group encryption only with concrete design |
 | asymmetric trust lists interrupt GossipSub propagation | ADR-0029 uses `Ignore` for valid unauthorized origin, never implicit `Reject` | revisit overlay/membership design if measured topology becomes unusable |
 | static trust does not scale | deliberate safe v1; applies to connection + send + source admission | design signed membership/enterprise policy when needed |
-| Kademlia poisoning/complexity | deferred; enabled unsupported config fails hard | SPIKE-003 + explicit ADR update before implementation |
+| Kademlia poisoning/complexity | full design: private protocol, trust-gated manual routing insertion, no records, disjoint paths, query/resource bounds; default disabled | SPIKE-003 + Phase 10 security/convergence matrix before support |
 | NAT prevents remote operation | narrow v1 reachability | SPIKE-004; optional relay/NAT features |
 | Sybil/eclipse in permissive future modes | deny-by-default v1 and no untrusted data-plane connections | require new policy/scoring design before AllowAll/public networks |
 | backpressure causes message loss | explicit best-effort + bounded queues | tune limits and surface counters; do not add hidden spool |

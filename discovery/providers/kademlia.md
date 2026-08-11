@@ -1,30 +1,122 @@
-# KademliaDiscovery (deferred v1)
 
-## Decision
+# KademliaDiscovery
 
-Architecture is specified, but the provider is not in the minimum v1 build. Wide-area discovery requirements must justify its attack surface and operational complexity first.
+Status: **fully specified optional provider; implementation deferred; `enabled: false` by default**.
 
-A minimum-v1 binary may recognize the provider type in configuration for forward compatibility, but `enabled: true` is a **hard configuration/startup error** until that binary actually includes an approved KademliaDiscovery implementation. `enabled: false` is permitted as a reserved disabled entry.
+The end-to-end design is [../../docs/architecture/kademlia-integration.md](../../docs/architecture/kademlia-integration.md). ADR-0009 is normative for the role and security boundary.
 
-## Future algorithm
+## Provider descriptor
 
-If implemented and enabled after an ADR update:
+Conceptual descriptor:
 
-1. seed Kademlia with candidates learned through static/cache/other providers;
-2. bootstrap the DHT only when at least one reachable DHT peer exists;
-3. perform rate-limited `get_closest_peers` queries on random, namespace-independent keys to diversify the routing view;
-4. normalize routing/query observations into CandidatePeer events;
-5. use Identify/address observations where required by rust-libp2p to learn usable addresses;
-6. expire stale provenance; never treat DHT presence as trust.
+```text
+name: kademlia
+interface_version: discovery-v1
+config_version: 1
+scope: network
+mode: active
+supports_expiry: true
+supports_hints: true
+```
 
-## Explicit exclusions
+## Purpose
 
-- no channel-name provider records;
-- no channel membership records;
-- no application role records;
-- no DHT-backed authorization;
-- no assumption that bootstrap nodes are honest.
+Produce advisory `CandidatePeer` observations by using a private, project-specific libp2p Kademlia peer-routing overlay.
 
-## Threats
+It does not provide:
 
-DHT poisoning, Sybil/eclipsing, stale addresses, privacy leakage, bootstrap capture, and network partitions. Mitigations include trust-gated data-plane connectivity/delivery, bounded query rates, peer diversity, multiple independent bootstrap hints, candidate caps, and future peer scoring/diversity policies.
+- trust or authorization;
+- channel membership;
+- value storage;
+- provider records;
+- durable peer registry;
+- direct dialing ownership;
+- GossipSub membership management.
+
+## Lifecycle
+
+### start
+
+1. Validate config and build support.
+2. If disabled, the provider is not instantiated.
+3. Obtain a bounded `KadControlHandle` from the libp2p backend.
+4. Set explicit client/server mode.
+5. Accept eligible seed hints from configured source providers.
+6. Begin bootstrap only after at least one trusted/routable DHT peer is admitted.
+7. Start bounded bootstrap/targeted/random query scheduling.
+
+### add_hint
+
+Accepted hints are normalized peer/address observations from configured seed sources. A hint does not go directly into the Kademlia routing table. The provider/driver path still applies address checks, `PeerTrustPolicy`, protocol-support/Identify evidence, routing-table bounds, and manual insertion.
+
+Kademlia-originated candidates are not fed back as external Kademlia seed hints.
+
+### shutdown
+
+- stop scheduling new queries;
+- cancel/settle bounded in-flight work;
+- remove/disable the Kademlia behavior/protocol participation;
+- emit expiry/removal for Kademlia-only provenance as appropriate;
+- terminate the provider event stream deterministically.
+
+## Event normalization
+
+Driver `PeerInfo`, routing updates, and successful query observations become normal discovery events:
+
+```text
+Discovered / Updated {
+  peer_id,
+  addresses,
+  source: kademlia,
+  observed_at,
+  expires_at: observed_at + candidate_ttl
+}
+```
+
+Routing-table eviction or TTL expiry removes only Kademlia provenance. DiscoveryManager decides whether the aggregate peer/address remains due to other providers.
+
+## Query classes
+
+- `bootstrap`: initial/self/bucket refresh;
+- `targeted`: opportunistic lookup keyed by an independently trusted **server-mode DHT participant** PeerId with missing/unusable addresses; client-mode peers are not promised to be discoverable by Kademlia peer routing;
+- `exploration`: random 32-byte keys with bounded `get_n_closest_peers` results.
+
+All classes share global rate/concurrency budgets.
+
+## Routing eligibility
+
+First integration rule:
+
+```text
+Kademlia routing peer
+  => valid PeerId/address
+  => not self
+  => allowed by PeerTrustPolicy
+  => expected Kademlia protocol support / eligible server observation
+  => project routing-table/resource limits
+```
+
+Discovery of an unauthorized PeerId is still legal, but the peer is not admitted as a Kademlia routing/query peer or dialed by this provider.
+
+## Record policy
+
+Kademlia is peer routing only. The future driver never invokes value/provider record APIs. Incoming record/provider-record writes are filtered and not persisted. Any later record use requires a new ADR.
+
+## Health
+
+`healthy`: recent query/bootstrap progress and at least one eligible route peer.
+
+`degraded`: warming, under target, intermittent query failures, or configured server mode without adequate reachability evidence.
+
+`unavailable`: no eligible route peer after grace, repeated bounded query failure, or driver unavailable.
+
+Provider failure never terminates other providers or existing data-plane connections.
+
+## Configuration compatibility
+
+A daemon may recognize this schema without containing the provider implementation. In that case:
+
+- `enabled: false` -> valid reserved configuration;
+- `enabled: true` -> hard configuration/startup failure.
+
+A supported build still defaults to `enabled: false` and requires explicit opt-in.

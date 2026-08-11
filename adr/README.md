@@ -12,7 +12,7 @@ All ADRs are **Accepted** architecture decisions unless later superseded.
 | [0006](./0006-discovery-provider-abstraction.md) | Define an event-stream-oriented `DiscoveryProvider` contract consumed only by DiscoveryManager. |
 | [0007](./0007-discovery-composition.md) | Run enabled providers concurrently under DiscoveryManager and merge by PeerId/address provenance. |
 | [0008](./0008-discovery-v1-providers.md) | Minimum v1 discovery is PeerCacheDiscovery, optional MdnsDiscovery, and StaticBootstrapDiscovery. |
-| [0009](./0009-kademlia-role.md) | Defer Kademlia; enabling it in a build that lacks the provider is a hard configuration error. |
+| [0009](./0009-kademlia-role.md) | Kademlia is fully designed as optional peer-routing discovery, remains disabled by default, and never bypasses trust or stores channel/application records. |
 | [0010](./0010-bootstrap-semantics.md) | Treat static bootstrap entries as reachability candidates only, never authority or implicit trust. |
 | [0011](./0011-discovery-connection-ownership.md) | Discovery owns candidates; ConnectionManager alone owns trust-gated dialing/retention/reconnect. |
 | [0012](./0012-trust-vs-discovery.md) | Use deny-by-default static PeerId trust for v1 data-plane connection, inbound source, and outbound direct-send admission. |

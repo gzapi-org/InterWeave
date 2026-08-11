@@ -194,12 +194,34 @@
 
 ---
 
-## Phase 10 — Kademlia discovery (conditional)
+## Phase 10 — optional Kademlia peer-routing discovery
 
-**Objective:** add distributed candidate expansion only if static/cache/mDNS are insufficient.
+**Objective:** implement the already-specified Kademlia integration while preserving `enabled: false` as the default and all discovery/trust/connection boundaries.
 
-**Deliverables:** KademliaDiscovery behind DiscoveryProvider, query bounds, diversity/poisoning diagnostics.
+### Phase 10A — backend driver
 
-**Acceptance criteria:** common conformance suite; no channel provider records; failure isolation; acceptable bootstrap convergence/privacy; simulated poisoning/eclipsing tests meet agreed thresholds.
+**Deliverables:** optional Swarm-owned Kademlia behavior slot, custom protocol derivation, explicit client/server mode, manual K-bucket insertion, Identify/address bridge, record filtering/no-record policy, bounded `KadControlHandle`.
 
-**Dependencies:** explicit ADR update after `SPIKE-003`.
+**Acceptance criteria:** disabled config causes zero Kademlia protocol/query activity; unsupported build + enabled config fails; driver never owns trust or emits generic discovery events directly.
+
+### Phase 10B — provider/scheduler
+
+**Deliverables:** `KademliaDiscovery` behind `DiscoveryProvider`, seed-hint ingestion, bootstrap scheduler, targeted trusted server-peer lookup, random exploration, TTL/provenance normalization, health.
+
+**Acceptance criteria:** common provider conformance suite; no ChannelId/application query keys; no direct provider dialing; query concurrency/rate/cooldown limits pass fake-time tests.
+
+### Phase 10C — security/failure hardening
+
+**Deliverables:** disjoint query paths, manual trust-gated routing insertion, routing-table/resource caps, record/provider-write rejection diagnostics, trust-revocation eviction, bootstrap/query failure isolation.
+
+**Acceptance criteria:** poisoning/Sybil/eclipse simulations stay within resource bounds; no untrusted Kademlia routing/query connections; direct/GossipSub remain usable when Kademlia fails.
+
+### Phase 10D — optional support qualification
+
+**Deliverables:** 3/10/20-node integration matrix, protocol/config golden fixtures, operator docs for client/server deployment and seed diversity.
+
+**Acceptance criteria:** all enablement criteria in `docs/architecture/kademlia-integration.md` pass. Shipping configuration and examples still keep `enabled: false`; operators must opt in.
+
+**Dependencies:** SPIKE-003, rust-libp2p version revalidation, existing trust/ConnectionManager/Identify implementation.
+
+**Risks:** trust-bounded DHT may not provide enough wide-area expansion; compromised trusted routers can still bias results; client/server deployment complexity; future request for open discovery-only DHT connectivity would require a new ADR and multiplexed-protocol admission design.

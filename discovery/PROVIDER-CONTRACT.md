@@ -35,3 +35,8 @@ v1 supports:
 - config-time provider composition/order: yes;
 - runtime enable/disable through validated config reload: design-supported, implementation may stage it;
 - dynamic shared-library provider binaries: no.
+
+
+## Libp2p-native provider adapters
+
+A provider whose mechanism is itself a `NetworkBehaviour` still may not own the Swarm. Kademlia demonstrates the intended pattern: the Swarm task owns the concrete behavior and exposes a narrow bounded backend-internal control/event handle to the provider implementation. That handle is not part of the generic discovery contract and must not leak into transport consumers.

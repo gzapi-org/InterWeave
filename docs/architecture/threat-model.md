@@ -19,7 +19,7 @@ Trust boundaries:
 | Rogue peer | remote peer injects prompt content or joins data plane | Noise identity + deny-by-default PeerId allowlist before dialing/retaining ordinary data-plane connection and before message delivery | stolen/incorrectly allowed identity can connect and send untrusted content | signed membership, enterprise policy, richer channel-scoped auth |
 | Discovery poisoning | bogus addresses cause waste/misdirection | discovery is advisory; address/peer bounds; ConnectionManager rate/backoff; **unauthorized candidates are not dialed** | trusted peer's poisoned/stale addresses can still waste dial resources | source reputation, diversity policies |
 | Malicious bootstrap | steers node to hostile topology | bootstrap has no authority/trust; configured candidate requires separate allowlist; multiple independent hints; existing peers survive | eclipse if trusted/bootstrap set is too narrow or incorrectly trusted | diverse bootstrap sets, rendezvous/DHT diversity |
-| Kademlia poisoning | DHT returns hostile peers | Kademlia deferred; future trust separation, query/candidate bounds | Sybil/eclipsing remains hard | peer diversity/scoring, monitored seed diversity |
+| Kademlia poisoning | DHT returns hostile peers | default disabled; optional design uses trust-gated manual routing insertion, disjoint paths, query/candidate bounds, no records | compromised trusted routers can still bias observations; Sybil/eclipsing remains hard | measured diversity/scoring or alternate discovery backends |
 | Sybil attack | many PeerIds exhaust candidate state or future public mesh | trust allowlist, candidate caps, no data-plane connection for unauthorized identities | discovery candidate storage/processing still attackable within bounds | admission credentials, stronger discovery diversity |
 | Eclipse attack | malicious peers dominate usable view | static trust, source diversity, connection limits, multiple bootstrap hints | small/compromised trust sets can still be captured | topology diversity policies, independent discovery |
 | Replay | old messages reappear | signed transport source + exactly-128-bit message IDs + 5-min bounded dedup keyed by mode/source/channel context | replay outside window/restart may deliver | higher-level nonce/session/replay protocol if required |
@@ -51,3 +51,20 @@ This still does not create end-to-end group secrecy. Any trusted peer that forwa
 - Byzantine consensus or membership;
 - durable anti-replay across long offline periods;
 - protection from malicious code running as the same OS user.
+
+
+## Kademlia-specific threat treatment
+
+Kademlia remains disabled by default. When the optional provider is implemented and explicitly enabled:
+
+| Threat | Risk | v1 Kademlia mitigation | Residual risk | Future mitigation |
+|---|---|---|---|---|
+| malicious routing response | hostile/stale PeerIds and addresses | advisory candidates, trust gate, address/candidate caps, manual insertion | compromised trusted router can bias observations | stronger peer diversity/scoring/evidence fusion |
+| Sybil routing population | many attacker PeerIds | first integration admits only data-plane-trusted routing peers | operator may trust attacker-controlled IDs | signed/enterprise membership policy, diversity controls |
+| eclipse | local DHT view surrounded by malicious trusted peers | disjoint query paths, multiple independent bootstrap seeds, random exploration | no Byzantine guarantee | measured diversity policy / additional discovery systems |
+| bootstrap capture | seeds bias initial view | multiple seeds; bootstrap is not authority; trust remains separate | all configured trusted seeds may be compromised | managed seed rotation/diversity monitoring |
+| namespace collision/misconfiguration | unrelated deployment joins same private DHT | protocol derived from explicit `network_id`; custom protocol not public IPFS DHT | network_id is non-secret and can be copied/guessed | authenticated control-plane membership if required |
+| record-store abuse | peers try to turn node into DHT storage | no record APIs; incoming inserts filtered/not persisted | request processing still consumes bounded resources | per-peer Kademlia request rate controls if needed |
+| query traffic analysis | routing peers observe lookups | random exploration keys never encode channel/application names | PeerId/address/query timing still visible | privacy-preserving discovery backend if required |
+
+The first Kademlia integration deliberately does **not** create untrusted discovery-only connections. Such connections would require per-protocol admission on multiplexed libp2p links and a renewed GossipSub confidentiality analysis.

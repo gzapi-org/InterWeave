@@ -1,53 +1,74 @@
-# Required implementation spikes
 
-Spikes are empirical evidence tasks, not production implementation.
+# Architecture/implementation spikes
 
-## SPIKE-001 — Claude Channel packaging and MCP compatibility
+Spikes validate version-sensitive or deployment-sensitive assumptions. They are not production implementation.
 
-**Objective:** prove the exact current Channel/package contract for the target Claude Code release.
+## SPIKE-001 — Claude Channel/package compatibility
 
-**Experiment:** create the smallest throwaway Channel MCP server that declares `claude/channel`, emits one Channel notification, exposes one reply-like tool, and is packaged using the current documented `channels` manifest field and MCP declaration. Compare behavior to the current official Telegram plugin. Test clean stdio shutdown and the supported MCP SDK/spec revision.
+**Objective:** validate the exact Channel manifest/MCP packaging accepted by the target Claude Code release.
 
-**Expected evidence:** exact manifest fields; whether `channels` is required/optional for target packaging; SDK version; event meta constraints; process shutdown behavior; approved development-channel launch command.
+**Experiment:** minimal non-network Channel stub using current official docs and Telegram package patterns.
 
-**Decision unlocked:** implementation packaging and bridge SDK pin.
+**Evidence:** startup capability handshake, notification delivery, tool exposure, shutdown behavior.
 
-## SPIKE-002 — direct protocol codec and request-response semantics
+**Decision unlocked:** exact package manifest/bridge packaging for implementation.
 
-**Objective:** validate rust-libp2p request-response behavior under timeout, disconnect, cancellation, and connection reuse.
+---
 
-**Experiment:** throwaway two-peer harness sends bounded 48 KiB requests with exactly 128-bit message IDs, forces connection drops at several stages, measures substream/connection reuse, and exercises unsupported protocol versions. `sent_at_ms` remains diagnostic only and is not part of replay-window semantics.
+## SPIKE-002 — direct request-response wire behavior
 
-**Expected evidence:** failure event mapping, default/required timeout controls, cancellation race, practical frame limits, whether a custom codec is sufficient without custom behaviour.
+**Objective:** validate selected rust-libp2p request-response primitive under timeout, cancellation, connection reuse, and protocol mismatch.
 
-**Decision unlocked:** final direct codec API and error mapping without changing the selected higher-level direct-vs-GossipSub decision.
+**Experiment:** two local peers with a non-production test codec.
 
-## SPIKE-003 — Kademlia value and poisoning/privacy profile
+**Evidence:** failure events, substream/connection behavior, timeout/cancel semantics.
 
-**Objective:** determine whether v1.x needs Kademlia at all and whether random-key `get_closest_peers` produces useful resilient candidate expansion.
+**Decision unlocked:** implementation codec/task details without changing the direct-vs-GossipSub architectural decision.
 
-**Experiment:** simulated/local multi-peer DHT with multiple bootstrap sets, churn, stale/poisoned routes, and Sybil-like candidate concentration. Measure convergence, unique candidate gain, query traffic, and bootstrap dependence. Do not use channel names/provider records.
+---
 
-**Expected evidence:** time-to-diverse-candidates, failure under malicious seeds, traffic/privacy footprint, operational complexity.
+## SPIKE-003 — Kademlia integration validation
 
-**Decision unlocked:** implement KademliaDiscovery, prefer another discovery provider, or continue to defer.
+**Objective:** validate the complete optional Kademlia blueprint before implementation is promoted or `enabled: true` is supported.
 
-## SPIKE-004 — NAT and relay deployment matrix
+**Experiment:** non-production rust-libp2p harness using the selected crate version and the private project protocol namespace. Exercise explicit client/server mode, Identify -> manual `add_address`, `BucketInserts::Manual`, bootstrap, `get_n_closest_peers`, disjoint query paths, record filtering, and the bounded query scheduler. Run 3-, 10-, and 20-node local topologies plus malicious/stale routing responses.
 
-**Objective:** determine the minimum Internet reachability mechanisms needed by target users.
+**Expected evidence:**
 
-**Experiment:** test direct public, home NAT, symmetric/CGNAT-like environments, configured Circuit Relay v2 paths, and relay outage. Compare without/with AutoNAT/DCUtR prototype support.
+- deterministic custom protocol derivation from `network_id`;
+- no Kademlia activity when disabled;
+- current rust-libp2p Identify/manual-insert hooks behave as designed;
+- client/server semantics match the upstream specification;
+- bootstrap/query event ordering and automatic bootstrap side effects are understood and counted;
+- random exploration produces useful trusted routing/address expansion within the proposed rate/concurrency budgets;
+- targeted PeerId lookup can recover missing addresses for server-mode DHT participants where the DHT knows the target, while client-mode nodes are not misrepresented as generally discoverable;
+- `StoreInserts::FilterBoth`/equivalent prevents record/provider inserts from becoming stored state;
+- disjoint query paths and multi-seed topologies measurably reduce single-path capture, without claiming Byzantine resistance;
+- routing/query peers remain constrained to `PeerTrustPolicy` in the first integration;
+- 20-node convergence/resource behavior is acceptable with default bounds.
 
-**Expected evidence:** success rates, setup requirements, dependency on relays, complexity/diagnostics burden.
+**Decision unlocked:** implement the already-specified `KademliaDiscovery`/driver design, adjust bounded defaults, or keep the provider architecture-only. This spike does not authorize ChannelId/provider records or untrusted discovery-only connections; those require separate ADRs.
 
-**Decision unlocked:** whether relay client, AutoNAT, and DCUtR enter the supported deployment baseline.
+---
 
-## SPIKE-005 — IPC same-user hardening (conditional)
+## SPIKE-004 — NAT/relay deployment matrix
 
-**Objective:** decide whether filesystem/pipe ownership is sufficient for intended deployments.
+**Objective:** determine which AutoNAT/relay/DCUtR mechanisms target deployments actually require.
 
-**Experiment:** assess threat environments where untrusted same-user processes exist; prototype OS peer-credential checks and optional short-lived local capability token.
+**Experiment:** defined home NAT, corporate NAT/firewall, public VM, relay-loss scenarios.
 
-**Expected evidence:** platforms covered, residual attack paths, UX/deployment cost.
+**Evidence:** inbound/outbound reachability and recovery matrix.
 
-**Decision unlocked:** keep ACL-only IPC or add application-level local authentication.
+**Decision unlocked:** Phase 9 connectivity feature set.
+
+---
+
+## SPIKE-005 — same-user IPC hardening (conditional)
+
+**Objective:** determine whether OS ownership/permissions are sufficient for target deployments or whether same-user client authentication is required.
+
+**Experiment:** hostile same-UID local client attempts against daemon capability model.
+
+**Evidence:** threat-model fit and operational cost.
+
+**Decision unlocked:** retain OS-boundary-only IPC trust or add a local credential/token mechanism.

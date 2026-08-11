@@ -1,5 +1,9 @@
+
+# Prepared Kademlia configuration. It intentionally remains disabled.
+# On a build without the optional Kademlia implementation, setting enabled=true
+# is a hard startup/configuration error.
 schema_version: 1
-profile: { name: composite }
+profile: { name: kademlia-ready }
 transport:
   backend: libp2p
   listen:
@@ -7,28 +11,26 @@ transport:
 identity: {}
 trust:
   policy: static-allowlist
-  allowed_peers: ["<PEER_A>", "<PEER_B>", "<BOOTSTRAP>"] # bootstrap separately trusted for v1 dialing
+  allowed_peers: ["<KAD_SERVER_A>", "<KAD_SERVER_B>", "<PEER_C>"]
 discovery:
   providers:
     - type: peer-cache
       enabled: true
       priority: 10
       config: { ttl: 7d, max_entries: 1024 }
-    - type: mdns
-      enabled: true
-      priority: 20
-      config: {}
     - type: static-bootstrap
       enabled: true
-      priority: 30
+      priority: 20
       config:
-        peers: ["/dns4/bootstrap.example.net/tcp/4001/p2p/<BOOTSTRAP>"]
+        peers:
+          - "/dns4/kad-a.example.net/tcp/4001/p2p/<KAD_SERVER_A>"
+          - "/dns4/kad-b.example.net/tcp/4001/p2p/<KAD_SERVER_B>"
     - type: kademlia
       enabled: false
       priority: 40
       config:
         config_version: 1
-        network_id: "composite-example"
+        network_id: "example-private-network"
         mode: client
         routing_peer_policy: data-plane-trusted
         seed_sources: [peer-cache, static-bootstrap]
@@ -49,4 +51,4 @@ discovery:
         bootstrap_refresh_interval: 15m
         record_mode: disabled
 channels:
-  desired: ["project-alpha", "team-x"]
+  desired: ["project-alpha"]

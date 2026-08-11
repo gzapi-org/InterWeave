@@ -17,7 +17,7 @@ For v1 ordinary data-plane operation, ConnectionManager is **trust-gated**:
 - trust revocation of a connected peer triggers data-plane eviction/disconnect;
 - discovery can still observe and retain bounded candidate metadata for unauthorized peers without connecting to them.
 
-Future control-plane protocols that genuinely require limited connectivity to untrusted peers must define an explicit protocol-scoped connection policy rather than weakening this v1 rule implicitly.
+Future control-plane protocols that genuinely require limited connectivity to untrusted peers must define an explicit protocol-scoped connection policy rather than weakening this v1 rule implicitly. **ADR-0009's first Kademlia integration does not take that exception:** Kademlia routing/query peers must already be authorized by `PeerTrustPolicy`. Open discovery-only DHT connections remain a separately reviewable future design.
 
 ## Alternatives considered
 

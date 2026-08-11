@@ -7,7 +7,7 @@ Discovery answers only: **what PeerId may exist, at what candidate addresses, ac
 | Peer cache | local historical | fast restart/reconnect | stale/advisory | yes |
 | mDNS | LAN | zero-config | multicast often blocked; untrusted LAN | optional yes |
 | Static bootstrap | configured | deterministic entry points | operator maintenance / availability | yes |
-| Kademlia | distributed | dynamic Internet-scale candidate graph | bootstrap, poisoning, privacy, convergence | no; designed for later |
+| Kademlia | distributed | trust-bounded peer routing/address expansion in first integration | bootstrap, poisoning, privacy, convergence | optional; fully designed, default disabled |
 | DNS | administrative | simple managed hints | central DNS/control plane | future |
 | Rendezvous | namespace discovery | explicit peer-set rendezvous | rendezvous service dependency | future |
 | HTTP directory | managed | enterprise policy integration | central service | future |
@@ -19,13 +19,8 @@ Providers run as independent tasks and feed normalized events into a `DiscoveryM
 
 Priority is configuration metadata used by the ConnectionManager when equivalent candidates exist. It is not a hard-coded provider sequence. Startup may favor cache/static hints for immediate **authorized** dial attempts while mDNS runs concurrently; unauthorized candidates remain advisory observations. Discovery intensity can back off when sufficient trusted connectivity exists.
 
-## Kademlia future behavior
+## Kademlia integration behavior
 
-If enabled later, `KademliaDiscovery` must not advertise or query channel names as provider records. Its discovery job is network-level candidate expansion:
+`KademliaDiscovery` has a complete optional design in `docs/architecture/kademlia-integration.md`. It uses a private custom Kademlia protocol namespace, explicit client/server mode, manual routing-table insertion, bounded bootstrap/targeted/random peer-routing queries, and no value/provider records. Random exploration keys are independent of ChannelId/application content. The first integration routes only through peers already authorized by `PeerTrustPolicy`, so it does not create discovery-only untrusted multiplexed connections.
 
-1. bootstrap the DHT using candidate peers supplied by other providers;
-2. perform bounded `get_closest_peers` queries against random namespace-independent keys to refresh routing diversity;
-3. normalize learned PeerIds/addresses into discovery events;
-4. expire provenance according to observations and configured TTLs.
-
-This avoids turning DHT provider records into channel membership or exposing raw channel names. A future ADR may revise this after empirical evaluation.
+Kademlia remains `enabled: false` by default and absent from the minimum v1 implementation until the dedicated validation/implementation phase is approved.
