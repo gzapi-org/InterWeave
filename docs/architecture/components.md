@@ -8,17 +8,17 @@
 | Libp2p backend | Swarm, connections, GossipSub, direct protocol, Noise, Identify | Claude MCP, app roles |
 | DiscoveryManager | provider lifecycle, candidate merge/provenance/expiry/health | dialing, trust, pubsub |
 | DiscoveryProvider | source-specific candidate discovery | dialing, trust, messaging |
-| ConnectionManager | dial/reconnect/backoff/limits/address selection | discovery mechanism, payload interpretation |
-| PeerTrustPolicy | admit transport PeerIds / optional channel-scope decision | discovery, network control |
+| ConnectionManager | trust-gated dial/inbound-retain decisions, reconnect/backoff/limits/address selection | discovery mechanism, payload interpretation |
+| PeerTrustPolicy | authorize PeerIds for v1 data-plane connection/message/send decisions | discovery, Swarm execution |
 | IdentityManager | persistent private key, PeerId, rotation workflow | app identity claims |
 | Peer cache writer | persist successful/recent observations as advisory hints | authority/trust |
-| IPC server | local multiplexing, framing, versioning, client auth by OS permissions | Claude semantics |
+| IPC server | local multiplexing, framing, versioning, OS-level client checks, capability grants | Claude semantics |
 | Diagnostics | health/counters/sanitized events | secrets or payload logging by default |
 
 ## Why these abstractions exist
 
 - `Transport`: the Claude-facing consumer must vary independently from networking backends.
 - `DiscoveryProvider`: discovery sources are explicitly required to vary independently and compose.
-- `PeerTrustPolicy`: trust mechanisms are expected to evolve without changing discovery.
+- `PeerTrustPolicy`: trust mechanisms are expected to evolve without changing discovery; v1 consumes the same policy at connection admission, outbound direct dispatch, GossipSub source validation, and local delivery.
 
 `ConnectionPolicy` and `PubSub` are **not public traits in v1**. They are internal modules of the libp2p backend because no second implementation consumer exists yet. Promote them only if a real independent variation point appears.

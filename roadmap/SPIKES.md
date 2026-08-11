@@ -16,7 +16,7 @@ Spikes are empirical evidence tasks, not production implementation.
 
 **Objective:** validate rust-libp2p request-response behavior under timeout, disconnect, cancellation, and connection reuse.
 
-**Experiment:** throwaway two-peer harness sends bounded 48 KiB requests, forces connection drops at several stages, measures substream/connection reuse, and exercises unsupported protocol versions.
+**Experiment:** throwaway two-peer harness sends bounded 48 KiB requests with exactly 128-bit message IDs, forces connection drops at several stages, measures substream/connection reuse, and exercises unsupported protocol versions. `sent_at_ms` remains diagnostic only and is not part of replay-window semantics.
 
 **Expected evidence:** failure event mapping, default/required timeout controls, cancellation race, practical frame limits, whether a custom codec is sufficient without custom behaviour.
 

@@ -24,7 +24,7 @@ The architecture uses a request plus a tiny **transport-accepted** response. Thi
 
 GossipSub provides mesh-based topic dissemination and duplicate handling but **does not discover peers**. Discovery and connection management therefore remain separate.
 
-The v1 blueprint selects signed GossipSub messages with strict validation so a received pub/sub message can be cryptographically associated with the publishing transport identity. That still does not authorize the identity.
+The v1 blueprint selects signed GossipSub messages with strict cryptographic/protocol validation so a received pub/sub message can be associated with its publishing transport identity. Authorization is separate: v1 trust gates ordinary data-plane connections, and explicit GossipSub application validation maps objective invalidity to `Reject`, a valid but locally unauthorized original publisher to `Ignore`, and a valid authorized publisher to `Accept` (ADR-0029).
 
 ## Noise and multiplexing
 

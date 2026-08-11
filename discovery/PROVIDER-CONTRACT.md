@@ -25,6 +25,8 @@ provider.config = provider-specific validated schema
 
 Adding a provider requires registering a new type and schema in the daemon build, not modifying the transport consumer. Unknown provider types fail validation unless explicitly marked optional for forward-compatible fleet rollout.
 
+A **known but unimplemented** provider is not treated as an unknown optional extension. If a minimum-v1 build recognizes `kademlia` in the schema but does not include its implementation, `enabled: true` is a hard validation/startup error. `enabled: false` may be accepted as a reserved disabled entry. The runtime must never silently start while omitting a provider the operator explicitly enabled.
+
 ## Upgradeability levels
 
 v1 supports:

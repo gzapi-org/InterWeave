@@ -53,8 +53,8 @@ No arrows point from `transport-api` to provider/backend crates. No neutral cont
 Within `transport-libp2p`:
 
 - `swarm_task` — exclusive Swarm owner;
-- `connection_manager` — dial/address/backoff/limits;
-- `pubsub_manager` — GossipSub topic/subscription state;
+- `connection_manager` — trust-gated dial/inbound-retain decisions, address/backoff/limits;
+- `pubsub_manager` — GossipSub topic/subscription state plus ADR-0029 validation-result reporting;
 - `direct_manager` — request-response lifecycle;
 - `identity_manager` — key loading/PeerId;
 - `address_book` — normalized discovery observations -> libp2p addresses.
@@ -66,4 +66,4 @@ These remain concrete modules until a second implementation requires independent
 - `discovery-conformance-tests`: reusable behavioral harness;
 - runtime integration tests with in-memory/temp profiles;
 - libp2p multi-peer integration tests;
-- IPC compatibility fixtures shared with bridge implementation.
+- IPC compatibility fixtures shared with bridge implementation, including exact 49,152-byte payload request/event fixtures under the 131,072-byte JSON-body ceiling and client-capability authorization cases.

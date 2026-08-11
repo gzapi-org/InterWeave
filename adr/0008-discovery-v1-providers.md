@@ -20,11 +20,11 @@ Internet-scale autonomous discovery is limited in v1, but the provider contract 
 
 ## Security implications
 
-mDNS and cache candidates are untrusted. Static configuration is not implicit trust. Provider/resource caps apply.
+mDNS, cache, and static-bootstrap candidates are untrusted reachability input. Static configuration is not implicit trust; ConnectionManager does not establish ordinary v1 data-plane connectivity until the PeerId is separately allowlisted. Provider/resource caps apply.
 
 ## Operational implications
 
-Remote deployments need static addresses/relay planning. LAN deployments can operate without infrastructure.
+Remote deployments need static addresses/relay planning plus out-of-band trusted PeerIds. LAN discovery can find peers without infrastructure, but trust still gates connection admission.
 
 ## Implementation implications
 

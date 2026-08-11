@@ -47,10 +47,10 @@ The primary boundaries are:
 - `Transport` and `DiscoveryProvider` are stable contracts. Claude-facing code does not depend on libp2p, GossipSub, mDNS, Kademlia, or multiaddresses.
 - Broadcast is GossipSub. Directed messaging is a dedicated libp2p request-response protocol; directed messages are never emulated by broadcasting and discarding at unrelated peers.
 - v1 discovery is composable: peer cache + optional mDNS + static bootstrap. Kademlia is designed but deferred until an implementation spike establishes a justified Internet-scale discovery need.
-- Discovery only produces **candidate reachability**. It never grants trust. v1 admission is deny-by-default with a static transport PeerId allowlist.
-- Noise secures each libp2p connection. It does not create application authorization or end-to-end secrecy across GossipSub forwarding peers. Group/application encryption is deferred with an explicit extension point.
-- Delivery is realtime/best-effort, no global ordering, no durable mailbox, and no exactly-once claim.
-- Multiple local Claude sessions share a daemon only when explicitly configured to use the same profile/socket; independent profiles never share keys accidentally.
+- Discovery only produces **candidate reachability**. It never grants trust. v1 uses a deny-by-default static PeerId allowlist for ordinary data-plane connection admission, inbound source admission, and outbound direct sends.
+- Noise secures each admitted libp2p connection. GossipSub validation distinguishes objective invalidity (`Reject`) from valid-but-locally-unauthorized publishers (`Ignore`); trusted forwarding peers can still read plaintext, so group/application encryption remains deferred.
+- Delivery is realtime/best-effort, no global ordering, no durable mailbox, and no exactly-once claim. Broadcast requires the calling local client to be joined; direct send requires the destination to be trusted.
+- Multiple local Claude sessions share a daemon only when explicitly configured to use the same profile/socket; independent profiles never share keys accidentally. IPC v1 uses a 128 KiB JSON-body ceiling so every legal 48 KiB transport payload fits after base64url/JSON expansion; Claude Channel clients cannot invoke administrative daemon shutdown.
 
 ## Start here
 
@@ -64,6 +64,7 @@ The primary boundaries are:
 - [Threat model](docs/architecture/threat-model.md)
 - [Rust blueprint](docs/architecture/rust-blueprint.md)
 - [Implementation plan](roadmap/IMPLEMENTATION-PLAN.md)
+- [Amendment review memo](docs/architecture/AMENDMENT-REVIEW-2026-08-11.md)
 - [Final architecture review](docs/architecture/FINAL-REVIEW.md)
 
 ## Source snapshot

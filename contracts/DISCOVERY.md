@@ -50,11 +50,10 @@ CandidatePeer {
   source: ProviderName,
   observed_at: Timestamp,
   expires_at?: Timestamp,
-  confidence?: low | normal | configured,
 }
 ```
 
-`confidence` describes provenance quality only. It is not trust. `configured` means an operator supplied the hint; it does not authorize messages.
+Candidate quality is derived from explicit provenance, freshness/expiry, address observations, and configured provider priority/cost. v1 deliberately has no generic `confidence` field because a mixed `low | normal | configured` scale duplicates provenance and can be misread as trust.
 
 ## Events
 
@@ -69,7 +68,7 @@ Provider event streams are the primary interface. Polling is reserved for health
 
 ## Lifecycle
 
-- `start` is called once per provider instance after validated config is available.
+- `start` is called once per provider instance after validated config is available;
 - a provider must emit no events before successful start;
 - provider failure changes provider health but must not terminate unrelated providers;
 - shutdown is cooperative and bounded; after completion the stream terminates deterministically;

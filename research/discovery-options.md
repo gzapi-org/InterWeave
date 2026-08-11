@@ -17,7 +17,7 @@ Discovery answers only: **what PeerId may exist, at what candidate addresses, ac
 
 Providers run as independent tasks and feed normalized events into a `DiscoveryManager`. The manager merges candidates by PeerId, unions addresses, tracks provenance/expiry, and computes provider/aggregate health. It does not dial.
 
-Priority is configuration metadata used by the ConnectionManager when equivalent candidates exist. It is not a hard-coded provider sequence. Startup may favor cache/static hints for immediate dial attempts while mDNS runs concurrently. Discovery intensity can back off when sufficient trusted connectivity exists.
+Priority is configuration metadata used by the ConnectionManager when equivalent candidates exist. It is not a hard-coded provider sequence. Startup may favor cache/static hints for immediate **authorized** dial attempts while mDNS runs concurrently; unauthorized candidates remain advisory observations. Discovery intensity can back off when sufficient trusted connectivity exists.
 
 ## Kademlia future behavior
 

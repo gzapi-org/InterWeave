@@ -4,7 +4,7 @@
 
 **Objective:** resolve version-sensitive or performance-sensitive questions without shipping production code.
 
-**Deliverables:** reports for `SPIKE-001` through `SPIKE-004` in `roadmap/SPIKES.md`.
+**Deliverables:** reports for `SPIKE-001` through `SPIKE-004` in `roadmap/SPIKES.md`; architecture-fixed GossipSub validation-result semantics are not reopened by a spike.
 
 **Acceptance criteria:** target Claude Code release/channel manifest syntax is proven; MCP SDK choice is known; libp2p direct and GossipSub limits are measured; relay/NAT scope is confirmed.
 
@@ -25,8 +25,11 @@
 - no dependency on libp2p/MCP in neutral crates;
 - ChannelId/payload/error/capability tests pass;
 - discovery conformance harness can run against a fake provider;
-- config rejects unknown required providers and unsafe limits;
-- golden IPC frames exist.
+- config rejects unknown required providers, explicitly enabled known-but-unsupported providers, and unsafe limits;
+- `TransportCapabilities.max_payload_bytes` reports the effective configured profile limit;
+- transport v1 MessageId is exactly 128 bits;
+- golden IPC request/event fixtures carrying exactly 49,152 opaque payload bytes plus maximal bounded metadata fit within the 131,072-byte JSON-body limit;
+- over-limit IPC frames are rejected before dispatch.
 
 **Dependencies:** Phase 0 compatibility choices for version fields.
 
@@ -38,13 +41,15 @@
 
 **Objective:** prove transport semantics with manually supplied peer addresses.
 
-**Deliverables:** persistent identity manager; TCP+Noise+Yamux; signed/strict GossipSub; direct request-response; backend event normalization.
+**Deliverables:** persistent identity manager; TCP+Noise+Yamux; signed/strict GossipSub with explicit `Accept|Ignore|Reject` application validation; direct request-response; backend event normalization.
 
 **Acceptance criteria:**
 
 - two peers directly send and receive with explicit `Accepted` behavior;
-- three peers broadcast via GossipSub;
-- unauthorized source fails admission before normalized message event;
+- three trusted peers broadcast via GossipSub;
+- objectively invalid GossipSub message maps to `Reject`;
+- valid message from a locally unauthorized original publisher maps to `Ignore` with no local delivery/forwarding and no invalidity attribution solely for trust mismatch;
+- authorized valid publisher maps to `Accept`;
 - 48 KiB limit is enforced before large allocation;
 - daemon restart fixture preserves PeerId;
 - no claim of offline/durable delivery appears in API/tests.
@@ -86,8 +91,12 @@
 
 - network partition recovers without restart;
 - repeated poisoned candidates cannot create an unbounded dial storm;
-- known candidates can support direct send dialing within deadline;
-- no-candidate direct send fails clearly without ad hoc global discovery;
+- untrusted candidates are not dialed for ordinary data-plane connectivity;
+- inbound unauthorized PeerIds are closed before direct/GossipSub data-plane participation;
+- outbound direct send to an untrusted PeerId fails locally as `UnauthorizedPeer`;
+- known authorized candidates can support direct send dialing within deadline;
+- no-candidate authorized direct send fails as `PeerUnknown` without ad hoc global discovery;
+- candidate-present dial/protocol failure maps to `PeerUnreachable`;
 - successful address observation reaches cache through the defined hint path.
 
 **Dependencies:** Phase 3.
@@ -109,6 +118,9 @@
 - bridge disconnect does not stop network;
 - slow client does not stall Swarm or other clients;
 - IPC major mismatch is rejected explicitly;
+- exact max-payload request/event fixtures fit the 128 KiB JSON-body ceiling;
+- a `claude-channel` IPC client is denied `admin.shutdown`;
+- an authorized local control client can invoke administrative shutdown;
 - cross-user unauthorized IPC is denied on supported OS test environments.
 
 **Dependencies:** Phases 1–4.
@@ -128,6 +140,9 @@
 - external broadcast/direct event becomes exactly one valid Channel event under normal conditions;
 - content/meta separation matches the Channel reference;
 - reply token routes correctly for both modes;
+- broadcast/reply without a caller-owned join returns `ChannelNotJoined` and never implicitly rejoins;
+- untrusted direct destination returns `UnauthorizedPeer` before dial;
+- transport `media_type` maps explicitly to Claude `content_type`;
 - no Multiaddr/Swarm/connection ID appears in Claude tool schemas;
 - ordinary assistant transcript is never represented as remote delivery;
 - trust administration is absent from Channel tool surface;

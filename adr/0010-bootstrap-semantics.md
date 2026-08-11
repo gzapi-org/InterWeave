@@ -8,7 +8,7 @@ Centralizing meaning in bootstrap nodes would undermine P2P failure independence
 
 ## Decision
 
-Treat every static bootstrap entry as a normal DiscoveryProvider candidate. It may help obtain initial connectivity but has no identity, trust, membership, channel-owner, coordination, storage, or broker authority.
+Treat every static bootstrap entry as a normal DiscoveryProvider candidate. It may help obtain initial connectivity **only when that PeerId is separately authorized by the active trust policy**; configuration alone never grants that authorization. A bootstrap peer has no identity-authority, trust-root, membership, channel-owner, coordination, storage, or broker authority.
 
 ## Alternatives considered
 
@@ -20,11 +20,11 @@ The network may continue after bootstrap disappearance when peers have learned s
 
 ## Security implications
 
-A malicious bootstrap can steer connectivity but cannot by itself authorize payload delivery. Eclipse risk remains if it is the only reachable entry point.
+A malicious/configured bootstrap can steer candidate information but cannot by itself authorize dialing or payload delivery. Eclipse risk remains if the trusted entry set is too narrow or an authorized bootstrap is malicious.
 
 ## Operational implications
 
-Bootstrap health is observable separately. A dead bootstrap degrades discovery but does not kill existing connections.
+Bootstrap candidate/provider health is observable separately. Dial-time DNS/reachability failure belongs to ConnectionManager diagnostics. A dead bootstrap degrades candidate availability but does not kill existing connections.
 
 ## Implementation implications
 

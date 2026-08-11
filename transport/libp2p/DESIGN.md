@@ -19,10 +19,16 @@ One backend event loop owns the libp2p Swarm. Commands enter through a bounded c
 
 `ConnectionManager` is split:
 
-- backend-neutral policy inputs: target peer, reconnect intent, limits, backoff class;
+- backend-neutral policy inputs: target peer, trust decision, reconnect intent, limits, backoff class;
 - libp2p-specific execution: multiaddress selection, Swarm dialing, connection IDs, protocol negotiation.
 
 The concrete manager therefore lives in the libp2p backend but presents only neutral state upstream.
+
+## Trust-gated data-plane connections
+
+Discovery observations populate candidate knowledge independently of trust. Before ConnectionManager dials or retains an inbound ordinary data-plane connection, it queries the active `PeerTrustPolicy`. Unauthorized PeerIds may remain in bounded discovery diagnostics/address state but are not admitted to direct or GossipSub participation.
+
+Trust revocation closes an affected data-plane connection. A future protocol that needs a limited control-plane connection to an untrusted peer must define a separate scoped policy rather than reusing ordinary data-plane admission.
 
 ## Address sources
 

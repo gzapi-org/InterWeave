@@ -28,7 +28,7 @@ Daemon may run as user service or manually. Transport and plugin can update inde
 
 ## Implementation implications
 
-Define IPC before implementation. Bridge contains no private key or Swarm. Daemon supports explicit graceful shutdown and profile locking.
+Define IPC before implementation. Bridge contains no private key or Swarm. Daemon supports explicit graceful shutdown and profile locking, but ordinary `claude-channel` IPC clients are not authorized to invoke daemon shutdown; an administrative client/service manager is required.
 
 ## Revisit conditions
 

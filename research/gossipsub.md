@@ -26,14 +26,16 @@ GossipSub is the v1 broadcast mechanism and maps one logical `ChannelId` to one 
 Architecture target:
 
 - message authenticity: signed;
-- validation mode: strict;
+- cryptographic/protocol validation: strict;
+- explicit application validation reporting: `Reject` objectively invalid, `Ignore` valid-but-locally-unauthorized original source, `Accept` valid+authorized (ADR-0029);
 - application payload cap: 48 KiB before transport envelope;
 - topic string: hash of a versioned/domain-separated `ChannelId`, not the raw identifier;
-- runtime-level admission/rate limits occur before forwarding to local consumers;
-- PeerTrustPolicy determines whether a source is eligible for local Channel delivery.
+- ordinary local data-plane connections are trust-gated;
+- accepted messages then pass bounded runtime admission/rate/dedup limits before local consumers;
+- PeerTrustPolicy determines whether an original publisher is eligible for propagation through this node and local Channel delivery.
 
 GossipSub scoring and advanced anti-Sybil tuning are implementation details to calibrate in a network spike. The architecture requires bounded peer counts, source rate limiting, and observable mesh health without exposing mesh internals to Claude.
 
 ## Confidentiality boundary
 
-For `A -> B -> C`, Noise protects A-B and B-C separately. B can process the plaintext pub/sub payload. v1 therefore assumes every peer allowed to participate in a sensitive channel is an appropriately trusted data-plane peer. This is an explicit limitation, not a claim of end-to-end group secrecy.
+For `A -> B -> C`, Noise protects A-B and B-C separately. B can process the plaintext pub/sub payload. v1 therefore limits ordinary local GossipSub data-plane connectivity to trusted PeerIds and assumes every trusted forwarding peer is inside the plaintext confidentiality boundary. This is an explicit limitation, not a claim of end-to-end group secrecy.

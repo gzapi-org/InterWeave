@@ -19,16 +19,45 @@ Does not provide:
 - end-to-end secrecy across GossipSub forwarding peers;
 - protection after private-key theft against future impersonation until revocation/rotation reaches peers.
 
-## Admission pipeline
+## Connection admission
+
+Noise authentication establishes which PeerId is on the connection; it does not itself authorize that peer. For v1 ordinary data-plane connectivity:
 
 ```text
 Noise-authenticated PeerId
- -> transport protocol validation
- -> PeerTrustPolicy
- -> channel subscription/policy checks
+ -> PeerTrustPolicy connection admission
+ -> retain data-plane connection OR close as unauthorized
+```
+
+ConnectionManager does not dial an unauthorized PeerId and closes an unauthorized inbound connection before direct/GossipSub data-plane participation. Discovery may still retain candidate metadata independently.
+
+## Message admission
+
+Direct path:
+
+```text
+trusted Noise-authenticated connection
+ -> direct protocol validation
+ -> PeerTrustPolicy source check
  -> size/rate/dedup checks
  -> local delivery
 ```
+
+GossipSub path:
+
+```text
+trusted direct neighbor
+ -> signed message decode/source validation
+ -> original-publisher PeerTrustPolicy check
+ -> GossipSub validation result per ADR-0029
+      Reject = objectively invalid
+      Ignore = valid but locally unauthorized source
+      Accept = valid + authorized source
+ -> size/rate/dedup checks for accepted message
+ -> local delivery
+```
+
+The immediate forwarding neighbor and original GossipSub publisher are distinct security facts and must not be conflated.
 
 ## Group encryption
 

@@ -27,12 +27,14 @@ Proposed stable keys:
 | `source` | constant `p2p` |
 | `delivery_mode` | `broadcast` or `direct` |
 | `source_peer` | authenticated transport PeerId string |
-| `message_id` | normalized transport message ID |
+| `message_id` | normalized 128-bit transport message ID |
 | `received_at` | RFC3339 UTC timestamp |
 | `channel` | logical ChannelId; only for broadcast |
 | `reply_token` | opaque, short-lived local bridge routing token |
 | `payload_encoding` | `utf8` or `base64url` |
 | `content_type` | optional safe media type |
+
+At the bridge boundary, transport `Payload.media_type` maps one-for-one to Claude-facing `meta.content_type`; the libp2p and generic transport layers use the name `media_type`, while only the Claude-facing representation uses `content_type`.
 
 `source_peer` proves only a transport cryptographic identity. It must not be described as an employee, agent, host role, or authorization principal unless a higher-level protocol establishes that binding.
 
@@ -44,6 +46,8 @@ A reply token is local, opaque, unguessable, short-lived, and never a libp2p han
 - broadcast inbound -> source ChannelId and broadcast mode.
 
 Default TTL: 30 minutes, bounded maximum entries: 2048 per bridge process. Tokens disappear on bridge restart. Explicit `send`/`broadcast` can be used after token expiry.
+
+A broadcast reply token does **not** confer or recreate a subscription. If the calling bridge has left the mapped channel since receiving the event, `reply` fails with `ChannelNotJoined`; it does not implicitly rejoin or publish on another client's subscription.
 
 ## Sanitization
 

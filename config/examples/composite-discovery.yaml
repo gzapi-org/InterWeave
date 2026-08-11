@@ -7,7 +7,7 @@ transport:
 identity: {}
 trust:
   policy: static-allowlist
-  allowed_peers: ["<PEER_A>", "<PEER_B>"]
+  allowed_peers: ["<PEER_A>", "<PEER_B>", "<BOOTSTRAP>"] # bootstrap separately trusted for v1 dialing
 discovery:
   providers:
     - type: peer-cache

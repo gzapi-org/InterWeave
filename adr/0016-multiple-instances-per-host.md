@@ -20,7 +20,7 @@ Identity semantics are clear: network sees the profile PeerId. Local endpoints s
 
 ## Security implications
 
-Explicit sharing prevents accidental privilege merging. Same-profile local clients share the trust/network authority of that profile, so profile socket access is sensitive.
+Explicit sharing prevents accidental privilege merging. Same-profile local clients share the ordinary transport/trust authority of that profile, so profile socket access is sensitive. Administrative IPC methods such as daemon shutdown are separately capability-scoped and are not granted to Channel clients.
 
 ## Operational implications
 

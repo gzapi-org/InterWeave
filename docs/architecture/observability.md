@@ -24,35 +24,43 @@ Provider health uses the same terms independently.
 - local PeerId and identity epoch;
 - listen addresses (local CLI only by default);
 - connected/trusted peer counts;
+- unauthorized connection refusals / policy disconnects;
+- trust-policy revision and last change timestamp;
 - subscription count and per-channel high-level reachability;
 - messages broadcast/direct in/out;
-- publish/direct failure classes;
+- publish/direct failure classes, including `UnauthorizedPeer` and `ChannelNotJoined`;
+- GossipSub validation outcomes: `validation_accept`, `validation_ignore_unauthorized`, `validation_reject_invalid`;
 - duplicate drops;
 - overload/drop counters by boundary;
-- discovery provider states and last success;
-- candidates/addresses learned/expired by provider;
-- dial attempts/failures/backoff classes;
-- bootstrap candidate reachability;
-- GossipSub mesh peer counts by hashed/redacted channel key;
+- IPC frame-too-large rejects and granted client-capability summaries;
+- discovery provider state/health;
+- candidates learned/expired per provider;
+- configured bootstrap candidates;
+- dial attempts/failures/backoff classes, including DNS/address-resolution failures;
+- GossipSub mesh peer count by locally joined topic (bounded/redacted output);
 - direct protocol negotiation failures;
-- IPC connected client count/version;
-- bridge/daemon connection state.
+- IPC connected client count/kind;
+- Channel bridge connected/degraded state.
 
-## Metrics abstraction
+## Metrics architecture
 
-Metrics are part of the architecture, but no Prometheus dependency is in core contracts. A neutral recorder can emit counters/gauges/histograms to logs, OpenTelemetry, Prometheus adapter, or tests.
+The runtime emits internal counters/gauges/events through an observability facade. No Prometheus dependency belongs in transport/discovery core. A later daemon adapter may expose Prometheus/OpenTelemetry/log-only output.
 
-Suggested names:
+Candidate names include:
 
 ```text
 connected_peers
-discovered_peers_total{provider}
-messages_received_total{mode}
-messages_sent_total{mode}
-messages_dropped_total{reason,boundary}
-dial_failures_total{class}
-provider_failures_total{provider}
-ipc_clients
-queue_depth{boundary}
-direct_latency_ms
+trusted_connected_peers
+discovered_peers_total
+messages_received_total
+messages_published_total
+messages_dropped_total
+dial_failures_total
+provider_failures_total
+validation_ignore_unauthorized_total
+validation_reject_invalid_total
+ipc_frame_too_large_total
+trust_policy_revision
 ```
+
+Labels must be bounded; never put raw payloads, private keys, arbitrary peer-supplied strings, or unbounded ChannelIds into metric label cardinality.

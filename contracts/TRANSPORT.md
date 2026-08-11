@@ -8,7 +8,7 @@ Status: **architecture contract, v1 draft**. This contract is intentionally inde
 TransportIdentity = opaque stable string
 PeerAddressHint   = opaque backend-neutral diagnostics only (not required by consumers)
 ChannelId         = ASCII identifier, 1..128 bytes
-MessageId         = opaque 128-bit-or-stronger identifier, printable form
+MessageId         = opaque exactly-128-bit identifier in v1, printable form
 Payload           = bytes + optional media_type
 ```
 
@@ -22,11 +22,16 @@ Canonical grammar:
 
 Channel IDs are case-sensitive. No Unicode normalization is needed because v1 is ASCII-only. The backend may hide raw names on the wire through a deterministic, domain-separated hash. A ChannelId has no application-defined semantics in this transport.
 
+### MessageId
+
+A v1 `MessageId` is exactly **128 bits**. Backends may choose their printable representation at API boundaries, but the normalized value must round-trip without ambiguity. Increasing the identifier width is a transport/wire version change, not a compatible v1 extension.
+
 ### Payload
 
 - bytes are opaque to the transport;
 - `media_type` is advisory and max 128 ASCII characters;
-- v1 maximum application payload: **49,152 bytes (48 KiB)** for both broadcast and direct operations;
+- v1 hard ceiling for application payload bytes: **49,152 bytes (48 KiB)** for both broadcast and direct operations;
+- each active profile may configure a lower effective `max_payload_bytes`, never a higher one;
 - the payload contract does not require UTF-8.
 
 The Claude bridge may encode non-UTF-8 payloads for Channel `content`; that is a bridge representation concern, not a transport mutation.
@@ -39,12 +44,12 @@ TransportCapabilities {
   direct_delivery: true
   durable_delivery: false
   offline_mailbox: false
-  max_payload_bytes: 49152
+  max_payload_bytes: <effective configured profile limit, <= 49152>
   max_channel_id_bytes: 128
 }
 ```
 
-Consumers must branch on capabilities rather than infer backend behavior.
+Consumers must branch on capabilities rather than infer backend behavior. `max_payload_bytes` reports the **effective configured limit for the active profile**, not merely the implementation ceiling.
 
 ## Lifecycle commands
 
@@ -55,6 +60,8 @@ Starts or attaches to the configured transport runtime. Idempotent only when the
 ### shutdown(grace)
 
 Stops accepting new work, drains in-flight control responses within a bounded grace interval, then terminates. It does not promise network delivery of queued messages.
+
+`shutdown` is an administrative transport operation. A concrete IPC binding must not expose it to ordinary Channel clients; see `contracts/LOCAL-IPC.md`.
 
 ### local_identity()
 
@@ -68,7 +75,7 @@ Returns aggregate health plus component summaries: `healthy | degraded | unavail
 
 ### join(channel)
 
-Acquire a local subscription reference to `channel`. Multiple local clients may independently join. The daemon keeps the backend subscription while at least one local reference exists or while persistent configuration requires it.
+Acquire a local subscription reference to `channel` for the calling local client. Multiple local clients may independently join. The daemon keeps the backend subscription while at least one local reference exists or while persistent configuration requires it.
 
 Success means local subscription state was accepted; it does not prove remote peers exist.
 
@@ -84,9 +91,11 @@ Returns the caller-visible channel set and aggregate local reference state witho
 
 ### broadcast(channel, payload, options?)
 
-Publishes to all reachable peers participating in the mapped broadcast topic.
+Publishes to all reachable trusted peers participating in the mapped broadcast topic.
 
-Success means the local backend accepted the publish. It does **not** guarantee any remote reception. Failure categories include invalid channel, oversized payload, not joined/policy (if configured), overload, backend unavailable, publish rejected.
+The calling local client **must currently hold a join reference for `channel`**. v1 does not implicitly join, publish-and-subscribe, or borrow another local client's subscription. If the caller is not joined, return `ChannelNotJoined` before backend publication.
+
+Success means the local backend accepted the publish. It does **not** guarantee any remote reception. Failure categories include invalid channel, `ChannelNotJoined`, oversized payload, overload, backend unavailable, and publish rejected.
 
 ### send(peer, payload, options?)
 
@@ -94,15 +103,22 @@ Sends one direct transport message to a specified `TransportIdentity` using the 
 
 Default semantics:
 
+- v1 applies the active `PeerTrustPolicy` to outbound **remote** direct destinations; the local profile identity is not an external trust entry;
+- an untrusted destination returns `UnauthorizedPeer` locally **before dialing**;
 - connection reuse is allowed;
-- runtime may dial using already-known candidate addresses;
+- for an authorized peer, runtime may dial using already-known candidate addresses;
 - command deadline default: 10 s, configurable 1..60 s;
 - success requires a remote **transport-accepted** response;
 - no automatic application retry;
 - no ordering guarantee across concurrent sends;
 - no offline queue.
 
-`NotConnected` is not immediately terminal when known addresses exist and dialing policy permits a dial. If no usable candidate exists, return `PeerUnreachable` without inventing discovery side effects.
+Error distinction for authorized targets:
+
+- `PeerUnknown`: no usable candidate reachability information is known for the target, so no dial can be attempted without creating new discovery side effects;
+- `PeerUnreachable`: usable candidate information exists, but connection establishment/protocol negotiation fails or cannot complete within the command deadline.
+
+A direct send never commands discovery providers to perform an ad hoc global search in v1.
 
 ### peers()
 
@@ -122,6 +138,7 @@ MessageReceived {
   received_at,
 }
 SubscriptionChanged { channel, state }
+TrustPolicyChanged { revision, at }
 TransportDegraded { component, reason_class, since }
 TransportRecovered { component, at }
 OverloadObserved { boundary, dropped_count_delta }
@@ -130,12 +147,15 @@ IdentityChanged { previous, current, identity_epoch }   // only explicit rotatio
 
 A `MessageReceived` event is emitted only after transport authentication, PeerTrustPolicy admission, framing/size validation, and local duplicate suppression.
 
+`TrustPolicyChanged` is operational state only. Revoking a connected peer also causes its data-plane connection to be closed and produces `PeerDisconnected { reason_class: policy, ... }` where applicable.
+
 ## Error model
 
 Stable categories, with backend detail hidden in diagnostics:
 
 - `InvalidArgument`
 - `PayloadTooLarge`
+- `ChannelNotJoined`
 - `UnauthorizedPeer`
 - `PeerUnknown`
 - `PeerUnreachable`
@@ -172,7 +192,7 @@ When a local event queue is full, the runtime drops according to policy and incr
 
 v1 intentionally provides:
 
-- realtime, best-effort broadcast;
+- realtime, best-effort broadcast among locally admitted data-plane peers;
 - direct transport acceptance response, not application acknowledgement;
 - local at-most-once presentation after bounded ephemeral deduplication;
 - no global ordering;

@@ -5,9 +5,11 @@
 1. MCP process starts under Claude Code over stdio.
 2. Bridge loads only plugin-facing configuration: profile name/socket locator and safe defaults.
 3. Connect to daemon IPC and negotiate version/capabilities.
-4. Verify transport contract compatibility.
+4. Verify transport contract compatibility, including effective `max_payload_bytes`.
 5. Register session-requested channel subscriptions.
 6. Start event-forwarding task.
+
+The bridge requests ordinary `events`/`commands` IPC capabilities. It does not request and can never be granted `admin.shutdown` under `client.kind = claude-channel`.
 
 If the daemon cannot be reached, the bridge starts in degraded mode if MCP registration can still complete; network tools return daemon-unavailable until reconnect.
 
@@ -21,7 +23,7 @@ On stdio EOF/close or termination signal:
 - close IPC;
 - exit promptly.
 
-Do **not** stop the daemon by default.
+Do **not** stop the daemon. This is enforced by IPC capability policy, not merely by bridge convention.
 
 ## Reconnect
 

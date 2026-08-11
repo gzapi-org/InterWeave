@@ -7,7 +7,10 @@ transport:
 identity: {}
 trust:
   policy: static-allowlist
-  allowed_peers: ["<TRUSTED_REMOTE_PEER_ID>"]
+  allowed_peers:
+    - "<TRUSTED_REMOTE_PEER_ID>"
+    - "<BOOTSTRAP_PEER_ID>"
+    - "<BOOTSTRAP_PEER_ID_2>"
 discovery:
   providers:
     - type: peer-cache
@@ -23,4 +26,6 @@ discovery:
           - "/dns4/bootstrap-b.example.net/tcp/4001/p2p/<BOOTSTRAP_PEER_ID_2>"
 channels:
   desired: ["build-events"]
-# Bootstrap PeerIds above are reachability hints and are NOT automatically trusted.
+# Bootstrap configuration does NOT grant trust. This example separately allowlists the bootstrap
+# PeerIds because v1 ConnectionManager will not dial an unauthorized data-plane peer.
+# Allowlisting them permits data-plane connectivity but still grants no identity/membership authority.

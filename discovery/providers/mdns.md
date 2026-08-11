@@ -12,7 +12,7 @@ Purpose: optional zero-configuration LAN candidate discovery.
 
 ## Security
 
-Any host on the multicast domain can advertise candidates. mDNS therefore grants **zero trust**. PeerTrustPolicy remains required before message delivery. LAN discovery also reveals that a P2P service exists; deployments with privacy requirements disable it.
+Any host on the multicast domain can advertise candidates. mDNS therefore grants **zero trust**. PeerTrustPolicy remains required before ConnectionManager may dial/retain an ordinary v1 data-plane connection and before message source admission. LAN discovery also reveals that a P2P service exists; deployments with privacy requirements disable it.
 
 ## Failure
 

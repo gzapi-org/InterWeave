@@ -8,7 +8,7 @@ GossipSub already deduplicates internally, but a backend-neutral local boundary 
 
 ## Decision
 
-Maintain a runtime-local LRU/TTL cache keyed by `(source_peer,message_id,mode/channel context)` with default 10,000 entries and 5-minute TTL. Direct caller retries reuse message ID. Persistence is prohibited.
+Maintain a runtime-local LRU/TTL cache keyed canonically by `(mode, source_peer, channel_or_none, message_id)` with default 10,000 entries and 5-minute TTL. For direct messages `channel_or_none = None`; for broadcast it is the logical ChannelId. Direct caller retries reuse the same message ID. Persistence is prohibited.
 
 ## Alternatives considered
 
@@ -16,7 +16,7 @@ No runtime dedup; persistent message ledger; unbounded set; content hashing as i
 
 ## Consequences
 
-Duplicates outside the TTL/window can reappear. Memory is predictably bounded. Message IDs remain opaque and payload agnostic.
+Duplicates outside the TTL/window can reappear. Memory is predictably bounded. Message IDs remain opaque, exactly 128 bits in v1, and payload agnostic. The mode/channel context prevents a coincidentally reused ID from collapsing distinct direct and broadcast/channel deliveries.
 
 ## Security implications
 

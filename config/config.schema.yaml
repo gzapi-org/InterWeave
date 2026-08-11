@@ -7,6 +7,7 @@ transport:
   listen:
     addresses: list[string, max=16]
   limits:
+    # Effective profile value is reported by TransportCapabilities.max_payload_bytes.
     max_payload_bytes: integer[1024..49152] = 49152
     max_connected_peers: integer[1..2048] = 256
     max_candidates: integer[1..16384] = 4096
@@ -19,7 +20,10 @@ transport:
   pubsub:
     backend: enum[gossipsub]
     signed_messages: literal[true]
+    # Strict cryptographic/protocol validation plus explicit application
+    # validation-result reporting per ADR-0029 (Accept/Ignore/Reject).
     strict_validation: literal[true]
+    explicit_application_validation: literal[true]
 identity:
   # Private key itself is NOT configuration. This is an optional path override.
   key_file: path?
@@ -46,14 +50,18 @@ discovery:
       config:
         peers: list[multiaddr-with-peer-id, max=64]
     kademlia:
+      # Reserved type. In a minimum-v1 build without KademliaDiscovery,
+      # enabled=true is a hard validation/startup error; false is accepted.
       enabled: bool = false
       priority: int
       config:
-        # deferred provider; schema finalized by future spike
+        # deferred provider; schema finalized by future spike/ADR update
         max_queries_per_minute: int
 channels:
   desired: list[ChannelId, max=128]
 ipc:
+  # IPC JSON-body hard ceiling is fixed at 131072 bytes in v1 and is not
+  # operator configurable. It must carry the max transport payload after base64url.
   max_clients: integer[1..64] = 16
   client_event_queue: integer[16..1024] = 256
 observability:

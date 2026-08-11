@@ -13,7 +13,7 @@ It owns:
 - Channel capability declaration;
 - MCP tools;
 - Channel instructions;
-- daemon connection/reconnect;
+- daemon connection/reconnect and non-administrative IPC capability negotiation;
 - conversion of normalized transport events to `notifications/claude/channel`;
 - safe metadata formatting;
 - short-lived reply-token mapping.
@@ -26,7 +26,8 @@ It does not own:
 - GossipSub;
 - direct stream handling;
 - trust configuration mutation;
-- application payload semantics.
+- application payload semantics;
+- daemon administrative shutdown.
 
 ## Capability declaration
 
@@ -56,7 +57,7 @@ MessageReceived {
 
 becomes Channel notification with `content` and bounded string metadata as specified in `contracts/CHANNEL-EVENT.md`.
 
-Transport admission already occurred in the daemon, but the bridge performs defense-in-depth schema/size checks before notifying Claude.
+Transport admission already occurred in the daemon, but the bridge performs defense-in-depth schema/size checks before notifying Claude. Generic transport `payload.media_type` maps explicitly to Channel metadata `content_type`.
 
 ## Session behavior
 
