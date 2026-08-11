@@ -1,0 +1,11 @@
+# Architecture repository: never commit runtime identities, state, or local overrides.
+*.key
+*.pid
+*.sock
+*.log
+.env
+state/
+cache/
+target/
+.DS_Store
+config/local.yaml
