@@ -37,3 +37,16 @@ No automatic trust continuity is claimed. A higher-level signed rotation certifi
 ## Compromise
 
 Treat stolen key as transport identity compromise: stop/rotate identity, revoke old PeerId in peer allowlists, distribute new trust configuration through an out-of-band trusted path. The transport cannot prove that a new PeerId is the same application entity without a higher-level binding.
+
+## Transport identity is not application identity
+
+`PeerId` answers: "which libp2p cryptographic transport identity authenticated this connection/message?"
+
+It does **not** answer:
+
+- which person or organization controls the peer;
+- which Claude instance/application role it represents;
+- whether it owns a repository/project;
+- whether it may approve permissions or administrative changes.
+
+A higher-level application may bind a logical identity to a PeerId, but that binding is outside the generic transport and must not be inferred here.

@@ -35,3 +35,7 @@ GossipSub's own cache is retained. The normalized runtime adds a bounded `(sourc
 ## Publish result
 
 Local publish acceptance is the only synchronous success claim. Zero mesh peers may still allow a local publish path depending on backend state; diagnostics must expose `mesh_peer_count=0` as degraded channel reachability rather than claiming delivery.
+
+## Ordering and acknowledgements
+
+Messages from a source or topic have no total/global ordering guarantee at the transport contract. The runtime does not generate per-recipient acknowledgements for GossipSub. Publish success means local publish acceptance only; remote peers may be offline, disconnected, unsubscribed, partitioned, overloaded, or may reject the message under their local policy.
