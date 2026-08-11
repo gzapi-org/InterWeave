@@ -1,0 +1,26 @@
+schema_version: 1
+profile: { name: remote }
+transport:
+  backend: libp2p
+  listen:
+    addresses: ["/ip4/0.0.0.0/tcp/4001"]
+identity: {}
+trust:
+  policy: static-allowlist
+  allowed_peers: ["<TRUSTED_REMOTE_PEER_ID>"]
+discovery:
+  providers:
+    - type: peer-cache
+      enabled: true
+      priority: 10
+      config: { ttl: 7d, max_entries: 1024 }
+    - type: static-bootstrap
+      enabled: true
+      priority: 30
+      config:
+        peers:
+          - "/dns4/bootstrap-a.example.net/tcp/4001/p2p/<BOOTSTRAP_PEER_ID>"
+          - "/dns4/bootstrap-b.example.net/tcp/4001/p2p/<BOOTSTRAP_PEER_ID_2>"
+channels:
+  desired: ["build-events"]
+# Bootstrap PeerIds above are reachability hints and are NOT automatically trusted.

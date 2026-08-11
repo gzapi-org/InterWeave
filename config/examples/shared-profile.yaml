@@ -1,0 +1,18 @@
+# Both Claude bridge processes must explicitly select profile "shared" to share this PeerId.
+schema_version: 1
+profile: { name: shared }
+transport:
+  backend: libp2p
+  listen: { addresses: ["/ip4/0.0.0.0/tcp/4001"] }
+identity: {}
+trust:
+  policy: static-allowlist
+  allowed_peers: ["<PEER_A>"]
+discovery:
+  providers:
+    - type: peer-cache
+      enabled: true
+      priority: 10
+      config: { ttl: 7d, max_entries: 1024 }
+channels:
+  desired: []

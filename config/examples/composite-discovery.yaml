@@ -1,0 +1,31 @@
+schema_version: 1
+profile: { name: composite }
+transport:
+  backend: libp2p
+  listen:
+    addresses: ["/ip4/0.0.0.0/tcp/4001"]
+identity: {}
+trust:
+  policy: static-allowlist
+  allowed_peers: ["<PEER_A>", "<PEER_B>"]
+discovery:
+  providers:
+    - type: peer-cache
+      enabled: true
+      priority: 10
+      config: { ttl: 7d, max_entries: 1024 }
+    - type: mdns
+      enabled: true
+      priority: 20
+      config: {}
+    - type: static-bootstrap
+      enabled: true
+      priority: 30
+      config:
+        peers: ["/dns4/bootstrap.example.net/tcp/4001/p2p/<BOOTSTRAP>"]
+    - type: kademlia
+      enabled: false
+      priority: 40
+      config: { max_queries_per_minute: 6 }
+channels:
+  desired: ["project-alpha", "team-x"]

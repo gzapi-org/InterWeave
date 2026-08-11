@@ -1,0 +1,23 @@
+schema_version: 1
+profile: { name: local-lan }
+transport:
+  backend: libp2p
+  listen:
+    addresses: ["/ip4/0.0.0.0/tcp/4001"]
+identity: {}
+trust:
+  policy: static-allowlist
+  allowed_peers:
+    - "<PEER_ID_A>"
+discovery:
+  providers:
+    - type: peer-cache
+      enabled: true
+      priority: 10
+      config: { ttl: 7d, max_entries: 1024 }
+    - type: mdns
+      enabled: true
+      priority: 20
+      config: {}
+channels:
+  desired: ["project-alpha"]

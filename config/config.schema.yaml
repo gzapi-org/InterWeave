@@ -1,0 +1,61 @@
+# Architecture-level schema illustration, not a production validator.
+schema_version: 1
+profile:
+  name: string[1..64]
+transport:
+  backend: enum[libp2p]
+  listen:
+    addresses: list[string, max=16]
+  limits:
+    max_payload_bytes: integer[1024..49152] = 49152
+    max_connected_peers: integer[1..2048] = 256
+    max_candidates: integer[1..16384] = 4096
+    max_addresses_per_peer: integer[1..32] = 16
+    max_subscriptions: integer[1..1024] = 128
+  direct:
+    timeout_ms: integer[1000..60000] = 10000
+    max_inflight_total: integer[1..512] = 128
+    max_inflight_per_peer: integer[1..32] = 8
+  pubsub:
+    backend: enum[gossipsub]
+    signed_messages: literal[true]
+    strict_validation: literal[true]
+identity:
+  # Private key itself is NOT configuration. This is an optional path override.
+  key_file: path?
+trust:
+  policy: enum[static-allowlist]
+  allowed_peers: list[PeerId, max=4096]
+discovery:
+  providers: list[ProviderConfig, max=16]
+  # ProviderConfig is a tagged union; each config namespace is provider-specific.
+  types:
+    peer-cache:
+      enabled: bool
+      priority: int
+      config:
+        ttl: duration
+        max_entries: int
+    mdns:
+      enabled: bool
+      priority: int
+      config: {}
+    static-bootstrap:
+      enabled: bool
+      priority: int
+      config:
+        peers: list[multiaddr-with-peer-id, max=64]
+    kademlia:
+      enabled: bool = false
+      priority: int
+      config:
+        # deferred provider; schema finalized by future spike
+        max_queries_per_minute: int
+channels:
+  desired: list[ChannelId, max=128]
+ipc:
+  max_clients: integer[1..64] = 16
+  client_event_queue: integer[16..1024] = 256
+observability:
+  log_level: enum[error,warn,info,debug] = info
+  payload_logging: literal[false]
