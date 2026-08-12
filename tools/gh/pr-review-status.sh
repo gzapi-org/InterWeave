@@ -161,7 +161,16 @@ probe() {
     author="$(jq -r '.author.login'      <<<"$meta")"
     requested="$(jq '.reviewRequests | length' <<<"$meta")"
 
-    reviews="$(gh api "repos/$REPO/pulls/$PR/reviews" 2>/dev/null)" || reviews='[]'
+    # PAGINATED, and a failure here is UNREADABLE — never empty. This
+    # script's entire job is answering "was this really reviewed", so
+    # converting a rate limit, a permission gap, or a transient 5xx into
+    # `[]` would produce the confident wrong answer "no reviews" and let
+    # a caller conclude a reviewed PR was never looked at. Returning 1
+    # feeds the consecutive-failure counter instead, which is what the
+    # exit-2 contract already promises for an unreadable PR.
+    local reviews_raw
+    reviews_raw="$(gh api --paginate "repos/$REPO/pulls/$PR/reviews" 2>/dev/null)" || return 1
+    reviews="$(jq -s 'add // []' <<<"$reviews_raw" 2>/dev/null)" || return 1
 
     # Independent = not authored by the PR author. The empty-body test is
     # NOT used to classify: a genuine reviewer may leave an empty-bodied

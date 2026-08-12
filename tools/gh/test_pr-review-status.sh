@@ -93,7 +93,10 @@ case "$1 ${2:-}" in
 esac
 
 # gh api repos/o/r/pulls/N/reviews
-if [[ "$1" == "api" && "$2" == *"/reviews" ]]; then
+if [[ "$1" == "api" && "$*" == *"/reviews"* ]]; then
+  # Matched across ALL args, not positionally: the script passes
+  # --paginate, so the URL is no longer $2.
+  if [[ -f "$S/reviews_fail" ]]; then exit 1; fi
   {
     printf '['
     first=1
@@ -125,6 +128,7 @@ chmod +x "$SANDBOX/bin/gh"
 run() {
     : > "$SANDBOX/state/n"
     printf '%s\n' "$1" > "$SANDBOX/state/polls"
+    rm -f "$SANDBOX/state/reviews_fail"
     printf '%s\n' "$2" > "$SANDBOX/state/reviews"
     shift 2
     RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
@@ -242,6 +246,22 @@ run "FAIL
 FAIL
 FAIL" ""
 assert_rc "three failed lookups exit 2" 2
+
+echo "pr-review-status: a failed reviews lookup is UNREADABLE, not empty"
+# The script's whole job is answering "was this really reviewed". A rate
+# limit, permission gap, or transient 5xx converted into [] would produce
+# the confident wrong answer "no reviews" and let a caller conclude that
+# a reviewed PR was never looked at. It must feed the consecutive-failure
+# counter instead, which is what the exit-2 contract already promises.
+run "OPEN:CLEAN:abc123
+OPEN:CLEAN:abc123
+OPEN:CLEAN:abc123" ""
+: > "$SANDBOX/state/reviews_fail"
+RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
+    timeout 20 bash "$UNDER_TEST" 77 o/r 2>&1)"; RUN_RC=$?
+assert_rc    "a failing reviews endpoint exits 2, not 1"  2
+assert_lacks "  and never claims zero coverage"           "independent reviews : 0"
+rm -f "$SANDBOX/state/reviews_fail"
 
 echo
 if (( failures )); then
