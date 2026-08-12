@@ -29,7 +29,7 @@ Before changing behavior, inspect the relevant material rather than inferring it
 Use this order:
 
 1. accepted ADRs, including explicit supersession/amendment language;
-2. normative contracts under `architecture/contracts/` and protocol/backend specifications under `architecture/transport/`, `architecture/discovery/`, and `architecture/clients/`;
+2. normative contracts under `architecture/contracts/` and protocol/backend specifications under `architecture/transport/`, `architecture/discovery/`, and `architecture/clients/`. The prose is normative for **behaviour**; the JSON Schemas under `architecture/contracts/schemas/` are normative for **shape**, and `x-contract.status` says what each is authoritative about — `approved` is an implementation target, never a claim that anything implements it (ADR-0049);
 3. the canonical bottom-up implementation plan and test gates;
 4. architecture explanatory documents/reviews;
 5. examples and research notes.
@@ -93,7 +93,7 @@ Do not replace a real-network/process/platform requirement with mocks merely to 
 
 ### Fixtures vs test data
 
-- `fixtures/` = normative/frozen deterministic vectors. Changes require explicit protocol/spec review.
+- `fixtures/` = normative/frozen deterministic vectors. Changes require explicit protocol/spec review. Every vector file declares its algorithm and is recomputed by `tools/checks/verify_fixture_vectors.py`; a drifted vector is a protocol break, not a test failure.
 - `test-data/` = mutable non-normative scenarios/topologies/input sets.
 - `spikes/` = empirical evidence only. Spike code never becomes a production dependency by accident.
 
@@ -471,7 +471,8 @@ For repository-wide changes, verify at minimum:
 - `tools/checks/validate_adr_index.sh` is clean — every ADR is template-conformant, indexed, and digested, and its amendment record is consistent;
 - `tools/checks/scan_semantic_collisions.sh` is clean — no two branches minted the same ADR number or amendment heading;
 - `tools/checks/check_license_headers.sh` is clean — no missing Apache-2.0 header on first-party source, no foreign licence terms;
-- frozen fixture checks still pass where applicable;
+- `tools/checks/validate_contracts.py` is clean — every wire schema is meta-valid, manifested both ways, and traceable to an ADR and a prose specification;
+- `tools/checks/verify_fixture_vectors.py` is clean — every frozen vector recomputes from its declared algorithm;
 - no forbidden production artifacts were introduced outside the active stage;
 - `git fsck --full` passes before archive handoff when a full repository ZIP is requested.
 
