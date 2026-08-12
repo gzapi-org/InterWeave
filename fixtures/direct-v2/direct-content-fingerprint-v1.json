@@ -1,0 +1,83 @@
+{
+  "fixture": "DirectContentFingerprintV1",
+  "contract": "urn:interweave:schemas:endpoints:message-received",
+  "specification": "architecture/contracts/ENDPOINTS.md",
+  "adr": [
+    "0019",
+    "0047"
+  ],
+  "status": "frozen",
+  "algorithm": {
+    "id": "direct-content-fingerprint-v1",
+    "domain_ascii": "interweave/direct-content-fingerprint/v1",
+    "domain_terminator": "one 0x00 byte follows the ASCII prefix",
+    "domain_hex": "696e74657277656176652f6469726563742d636f6e74656e742d66696e6765727072696e742f763100",
+    "canonicalization": "domain || media_present:u8 || [media_len:u16be || media_ascii] || payload_len:u32be || payload_bytes",
+    "hash": "SHA-256",
+    "notes": [
+      "media_present is exactly 0 or 1. Absent media uses 0 and has NO length field.",
+      "Present media uses 1, must be 1..128 ASCII bytes, and includes its two-byte big-endian length.",
+      "An empty media type is INVALID - it is not an alias for absence, and the two must not collide.",
+      "payload_len is the exact byte length and always precedes the payload, including when it is empty.",
+      "No JSON, no UTF-8 normalization, and no endpoint field, message ID, or timestamp participates."
+    ]
+  },
+  "$comment": "Inputs are hex so no encoding of this file can change what is hashed; payload_utf8 is a reader convenience, never the input. Only the vector carrying frozen_by is a re-frozen golden from an ADR - the rest are derived from the same algorithm to pin the edges an implementation gets wrong. tools/checks/verify_fixture_vectors.py recomputes all of them.",
+  "vectors": [
+    {
+      "name": "golden-text-plain-hello",
+      "frozen_by": "0047",
+      "description": "The re-frozen golden from ADR-0047. Its value changed when the wire namespace became `interweave`, because the domain prefix participates in the hash.",
+      "media_type": "text/plain",
+      "payload_hex": "68656c6c6f",
+      "payload_utf8": "hello",
+      "sha256": "d73342f033f00fca9c4ffcced6f9e6debaeb53e3743049ee9aaf227a55f9bf15"
+    },
+    {
+      "name": "absent-media-same-payload",
+      "description": "Same payload, media type ABSENT. Must not equal the golden — this is exactly what the media_present byte separates.",
+      "media_type": null,
+      "payload_hex": "68656c6c6f",
+      "payload_utf8": "hello",
+      "sha256": "d75d8054e7c0af3c45744e92a0794fa4b18335adf0267965931064c0636bdb86"
+    },
+    {
+      "name": "absent-media-empty-payload",
+      "description": "Empty payload, media absent. The four-byte length still precedes the zero-length payload.",
+      "media_type": null,
+      "payload_hex": "",
+      "payload_utf8": "",
+      "sha256": "d3cc716b8c792e20929d42e35f819eb0ac4411785f91b1be685fe6e102ccbe89"
+    },
+    {
+      "name": "present-media-empty-payload",
+      "description": "Empty payload with a present media type. Distinct from the absent-media empty payload above.",
+      "media_type": "application/octet-stream",
+      "payload_hex": "",
+      "payload_utf8": "",
+      "sha256": "2f3f6931b4bc232b4f94b0931e127bf185ad98a438bbebb1bffdabcb6dfea420"
+    },
+    {
+      "name": "human-chat-envelope-media",
+      "description": "The human chat media type from ADR-0047, exercising a media string containing `+`, `;`, and `=`.",
+      "media_type": "application/vnd.interweave-human-chat+json;v=1",
+      "payload_hex": "7b226b696e64223a2274657874227d",
+      "payload_utf8": "{\"kind\":\"text\"}",
+      "sha256": "b8051712b606a30209f1efc1a37ab24b7c985de6fd510a8f8067637dc2bd3bc1"
+    },
+    {
+      "name": "media-length-boundary-128",
+      "description": "Media type at the 128-byte ceiling. One byte more is invalid input, not a longer hash input.",
+      "media_type": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "payload_hex": "00",
+      "sha256": "3b39ef5241e9a5599f8113dfe13e0df21ae31d3037170bdb47c6b23605bf03d0"
+    },
+    {
+      "name": "payload-high-bytes",
+      "description": "Payload bytes outside ASCII, hashed as raw bytes with no normalization.",
+      "media_type": "application/octet-stream",
+      "payload_hex": "00ff80017f",
+      "sha256": "b676dec241cc401d586b62c0db11914949bf2fefdd9f280284a12b0e9b88d79a"
+    }
+  ]
+}
