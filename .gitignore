@@ -65,6 +65,21 @@ architecture/config/local.yml
 *.secret
 *.seed
 
+# Per-developer coding-agent overrides — host machine details, personal
+# scratch notes, never committed. `.claude/settings.json` IS committed:
+# it is shared project configuration (the git-push gate, worktree base
+# ref). Only the per-developer `*.local.json` overrides stay out.
+CLAUDE.local.md
+**/CLAUDE.local.md
+.claude/settings.local.json
+
+# Subagent worktrees. The harness creates these inside the repository and
+# only auto-removes the ones an agent left unchanged, so a productive
+# fan-out leaves real ones behind. Each holds a `.git` FILE, so a
+# tree-wide `git add -A` would stage it as an embedded git repository and
+# commit a broken gitlink.
+.claude/worktrees/
+
 # Editors / IDEs
 .idea/
 .vscode/*
