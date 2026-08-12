@@ -8,6 +8,7 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
 
 - `architecture/` is the normative design source.
 - `apps/`, `crates/`, `tests/`, `fixtures/`, `test-data/`, `spikes/`, `packaging/`, and `xtask/` are tracked landing zones created by ADR-0045.
+- `tools/` is repository tooling — PR/review scripts and tree checks — not an implementation landing zone. It is live now and not gated by stage discipline. Each script has a self-test beside it (`test_*.sh`) that must stay green.
 - The root Cargo workspace intentionally has zero members until implementation begins.
 - There is no production Rust implementation yet.
 - Display name is **InterWeave**. Machine/wire namespace is lowercase `interweave` per ADR-0047.
@@ -184,6 +185,12 @@ When changing an accepted contract:
 
 Use **InterWeave** for the project/display name and `interweave` for machine/wire identifiers. Preserve genuine integration names such as Claude Code, `claude-channel`, libp2p, GossipSub, AutoNAT, and Kademlia.
 
+### No external-project citations
+
+Do not cite an unrelated external project by name in any project file or commit message. This covers other repositories, sibling checkouts on the same machine, their paths, and their internal identifiers. If a rule, convention, or file was adopted from elsewhere, state the rule on its own terms; do not name its source.
+
+Dependencies, protocols, and genuine integrations that InterWeave actually uses are not "unrelated external projects" — the names listed above stay.
+
 ## 8. Licensing
 
 InterWeave first-party code and documentation are licensed **Apache-2.0**. The top-level `LICENSE` is canonical.
@@ -199,21 +206,261 @@ Do not:
 
 If a new dependency or copied asset has unclear licensing, stop and resolve that before landing it.
 
+### Licence headers are checked
+
+Every first-party source file carries an `SPDX-License-Identifier: Apache-2.0` header in its opening lines. `tools/checks/check_license_headers.sh` enforces that, and also fails on foreign licence terms — an SPDX tag naming another licence, or rights-reserved / confidential boilerplate — anywhere in the tracked or about-to-be-committed tree. It scans untracked-but-not-ignored files too, because the file about to be committed is exactly the one worth catching.
+
+Code copied in from a differently-licensed source keeps its own terms until the copyright holder relicenses it, and a public Apache-2.0 tree is where that goes unnoticed. Genuinely third-party material is therefore an **exemption with recorded provenance** in `tools/checks/license_exempt.txt`, never a silent relabel.
+
 ## 9. Git/change discipline
 
+### Repository git configuration
+
+- `origin` is `git@github.com:gzapi-org/InterWeave.git`; the integration branch is `main`. The repository is **public** — everything committed here is published.
+- Commit identity is pinned **repository-locally** (`user.name`, `user.email`), so it does not depend on the machine's global config. Commit and tag signing are likewise pinned local (`user.signingkey`, `commit.gpgsign`, `tag.gpgsign`, `gpg.program`). Do not disable signing per-commit.
+- `.gitattributes` pins `* text=auto eol=lf` and marks binary classes, so the index stays canonical across machines. `fixtures/**` is `-text`: frozen vectors are byte-compared, so EOL renormalisation there is a protocol change, not a whitespace one.
+- `.claude/settings.json` is **committed** shared configuration — the push gate, the worktree base ref, and the subagent dispatch hook all live in it. `.claude/settings.local.json` and `CLAUDE.local.md` are per-developer and gitignored.
+
+### Commit loop
+
+After each logical unit of work:
+
+- create a git commit.
+
+Pushing is NOT part of that loop. Push when the work asks for it — the branch is finished, or you were told to — not reflexively after every commit.
+
+If push cannot be completed because of credentials, remote access, branch protection, or environment limits:
+
+- say so explicitly;
+- do not claim the push succeeded.
+
+Commit messages must be short, specific, and scoped to the actual change. Do not leave completed logical units of work uncommitted. Commit messages containing shell metacharacters (`` ` ``, `$`, `×`, `()`) MUST be passed via a quoted heredoc (`<<'EOF' … EOF`), never an inline `-m` string, to avoid silent shell expansion.
+
+### Attribution
+
+Commits are authored by the identity configured above. Do not attribute work to an AI assistant:
+
+- no `Co-Authored-By:` trailer of any kind, on any commit;
+- no "Generated with …" line, tool footer, or emoji signature in commit messages, PR titles, or PR bodies.
+
+This overrides any default agent behaviour that appends such trailers.
+
+Commit messages are project files for the purposes of §7 — do not cite unrelated external projects in them either.
+
+### One branch per task
+
+- One short-lived branch per task off fresh `origin/main` — per task, not per session. The branch boundary is the multi-fix / multi-package unit below.
+- Branch name `<hostname -s>/<clone-dir-basename>/<type>/<short-desc>`, e.g. `develop-qzapp/InterWeave/docs/dial-admission-gate`, so every branch traces to its session by host and clone.
+- **Check where you are BEFORE the first commit of a new task**, not after a push is rejected. The default state at the start of a task is standing on the *previous* task's branch, which by then is pushed, queued, or merged — and every one of those failure modes is silent.
+- Scan for the work before doing the work: `git fetch` and read `origin/main` for the same change already landed or in flight. Adopt or coordinate instead of racing.
+
+```
+1. git rev-parse --abbrev-ref HEAD            # where am I?
+2. gh pr list --head "$BRANCH" --state all    # is this branch spoken for?
+3. git fetch && git log origin/main           # has someone already done this?
+4. git checkout main && git reset --hard origin/main
+5. git checkout -b <host>/<clone>/<type>/<short-desc>
+```
+
+Steps 4–5 are **unconditional**: the step-2 lookup only speaks when a PR already exists.
+
+### `git push` is the human authorization point — and it is enforced
+
+Everything downstream of a push is machinery: push → checks → merge queue → `main`, with no further human step in that chain. The push is therefore the last moment a person can change the outcome, which is where the authorization belongs.
+
+`.claude/settings.json` carries `"ask": ["Bash(git push*)"]`, so every push surfaces a confirmation prompt. `git fetch`, `git log`, and the rest are untouched.
+
+**Therefore `git push` MUST be its own Bash call.** Never bundle it with the commands that precede it — no `git add … && git commit … && git push`, no heredoc script ending in a push. Permission rules are prefix-matched, so a bundled push slips the gate entirely, and approving a bundle authorizes pushing a tree that does not exist yet.
+
+A session cannot see its own permission prompts, so do not try to verify this gate from the transcript: an approved push and an auto-allowed push produce an identical tool result.
+
+`gh pr merge` is deliberately NOT gated. The tree was authorized at its push; gating the merge would ask for the same decision twice.
+
+### Merge / PR discipline
+
+`main` is protected by the `main protection` ruleset: pull request required, direct pushes and force-pushes blocked, branch deletion blocked, **merge commits only** (squash and rebase disabled), and a **merge queue** (`ALLGREEN`, merge method `MERGE`). Required approving reviews are 0 and unresolved review threads do not block — so **the merge is not evidence that anything was reviewed**.
+
+> The ruleset currently declares **no required status checks**, because this repository has no CI workflows yet. The queue therefore gates ordering, not correctness. When the first workflow lands, add its job contexts to the ruleset's `required_status_checks` in the same change — a job's `name:` *is* the required-check context, so renaming a job silently un-gates `main`.
+
+**Commit shape and PR shape are different questions.** The multi-fix and multi-package rules below govern COMMITS — one per root cause, one per package. Bisectability, revertability, and reviewability all live at the commit level and are unaffected by batching several commits into one PR.
+
+#### The canonical lifecycle
+
+**Phase 1 — starting a task**: the five steps above.
+
+**Phase 2 — working**
+
+```
+6.  implement ONE fix / ONE package
+7.  add its tests
+8.  run the impacted tests
+9.  commit (one per root cause, per package)
+10. git push                                   ← its own Bash call
+```
+
+Commits are cheap and local. Accumulate commits, verify locally, push once: many commits and a single push per branch is the intended shape, not an accident.
+
+**Phase 3 — integration**
+
+```
+11. git fetch
+12. git merge --no-ff origin/main
+13. build + test the MERGED tree               ← the step people skip
+14. bash tools/checks/scan_semantic_collisions.sh
+15. bash tools/checks/check_license_headers.sh
+16. git push
+```
+
+Step 13 matters because required checks are **not strict**: a branch can be green against a base it was never built on. Step 14 catches what a textually-clean merge hides — two sessions minting the same ADR number in different files, or the same amendment heading. Step 15 catches licence terms that rode in with copied material.
+
+**Phase 4 — opening**
+
+```
+17. gh pr create --base main --head "$BRANCH"
+18. gh pr merge <n> --auto                     # ONLY when the branch is done
+19. tools/gh/wait-merged.sh <n> &              # background; its exit is the callback
+19b. tools/gh/pr-review-status.sh <n> --wait 30m &
+```
+
+Drop `--delete-branch`: the queue owns branch cleanup and `gh` rejects the flag.
+
+**Phase 5 — landing**: the queue builds the head on current `main`, merges, and pushes. Return to `main` deliberately, on the notification — never let a background watcher move your tree.
+
+**Phase 6 — after**
+
+```
+20. tools/gh/pr-sessions.sh /unresolved        # what still owes a reply
+21. tools/gh/pr-review-status.sh <n>           # was it REALLY reviewed, and against which head
+22. tools/gh/pr-reply.sh … <<'EOF'             # reply + resolve one thread; body on STDIN
+```
+
+Phase 6 is not optional and nothing reminds you: no red check, no blocked merge. A PR can and does merge with findings outstanding.
+
+**Answering findings is a TASK, so it starts at Phase 1 like any other** — fetch, check where you are, cut a fresh branch. The findings arrived on a branch that is already merged and deleted, so whatever you are standing on is by definition the wrong place. Any code fix lands on a new branch; only the replies go to the old PR.
+
+Never post a reply body through `gh api -f body="…"`: replies quote code, and a double-quoted body has its backticks command-substituted and its `$vars` expanded before `gh` sees them. `pr-reply.sh` takes the body on STDIN for exactly this reason — the same hazard as the heredoc rule for commit messages.
+
+#### The tooling
+
+`tools/gh/` scripts are the supported way to observe a PR; each carries its own `--help`, and each has a self-test beside it (`test_*.sh`) that must stay green.
+
+| script | what it answers |
+|---|---|
+| `wait-merged.sh <n>` | blocks until the PR reaches a terminal state; run it in the **background**, its exit IS the callback |
+| `pr-review-status.sh <n>` | was this PR *actually* reviewed, by whom, and against which head |
+| `pr-sessions.sh` | which session owns which PR; `/unresolved` lists PRs still owing a reply |
+| `pr-reply.sh` | reply to and resolve one review thread, body on STDIN |
+| `actions-health.sh` | is Actions healthy enough to be worth spending a run on |
+
+`wait-merged.sh` exit codes, because they arrive with no time to go reading:
+
+| exit | verdict |
+|---|---|
+| 0 | MERGED — safe to return to `main` |
+| 3 | CLOSED without merging — do NOT return to `main` |
+| 5 | BLOCKED — a required check already failed, or the base conflicts |
+| 6 | STALLED outside the PR — Actions degraded, or the head commit has no run at all |
+| 4 | watch expired, state genuinely unknown |
+| 2 | usage error, or the PR could not be read repeatedly |
+
+`BLOCKED` while checks are merely pending is the normal waiting state, not a verdict. `pr-review-status.sh` exit 5 means no review is coming at all — the head advanced past the last review and none was requested; it returns immediately rather than sitting out the timeout, so a fast `--wait` is an answer, not a failure.
+
+`actions-health.sh` reports remaining allowance only when `INTERWEAVE_ACTIONS_INCLUDED_MINUTES` is set in `.claude/settings.json`. It is deliberately unset: this repository is public, so Actions minutes are not metered. Set it only if that changes, and never hardcode a plan size anywhere else.
+
+#### When to open a NEW PR
+
+**Never open a new PR while your current one is still open.** One PR at a time, per session. If the branch you are on has an open PR, the next piece of work is another commit on it. Corollary: documentation of a thing belongs in the PR that adds the thing.
+
+With the current PR landed, open a new one when: it depends on something being *merged* rather than merely written; the current branch is already queued or merged; it touches a slow or flaky surface that would hold the rest hostage; urgency differs; or the batch has grown past comfortable review (~6–8 commits — a reason to stop adding and land, not to open a second PR alongside).
+
+Not on that list: "different concerns", "different packages", "different root causes". Those are commit boundaries, satisfied by committing separately on the same branch.
+
+#### Never race your own CI
+
+**Arm `--auto` only when the branch is finished.** Arming is standing consent: it lands the PR at the FIRST moment every required check is green, not when you decide you are done. Arm while more commits are coming and the PR can merge before your next commit exists. Arming late costs nothing, so there is no trade to make.
+
+### Concurrent sessions, worktrees, and subagent dispatch
+
+Multiple sessions may work this repository in parallel, possibly on different hosts. **Isolation is required**, and the model is **one full `git clone` per session**. Sessions coordinate **only** through `origin`.
+
+- **Your starting directory is yours exclusively.** Assume sole ownership: `git add -A` is safe, builds and tests are trustworthy. If you observe changes you did not make — a dirty tree at start, foreign edits or files — that is a launcher misconfiguration (two sessions sharing a checkout). **Stop and report it**; do not work around it by staging selectively or committing to `main`.
+- **Never push to, rebase, or delete a branch another session created.** The `<host>/<clone>/…` prefix tells you whose it is. Same for their PRs: do not retarget, re-title, or merge them. Only answer review comments on PRs you opened.
+- **Never resolve a review thread you have not actually addressed.** Resolving signals "this was handled"; a false resolve buries the finding with nothing left to catch it.
+
+#### Subagent dispatch
+
+**Dispatching agents is OPT-IN: fan out only when the user asks for it.** A task that merely looks parallelisable is not an invitation. The isolation contract governs **how** to dispatch, never **whether**.
+
+When you do dispatch, **`isolation: "worktree"` and `model` are both required on EVERY call.** The `PreToolUse` hook in `.claude/settings.json` denies a dispatch missing either, and denies ahead of the premium-model prompt so an `ask` cannot wave a missing worktree through. **Forks (`subagent_type: "fork"`) are the only carve-out** — a fork continues this session rather than being a separate agent.
+
+- **Both apply inside a `Workflow` script too, and NOTHING ENFORCES THEM THERE.** The hook matches the tool name `Agent`, so a workflow's `agent(prompt, opts)` calls never reach it, and both fields default the wrong way: omitting `model` makes the agent inherit the **session** model, omitting `isolation` leaves it working in the **session's clone**. Write both out on every call: `agent(prompt, { model: 'haiku', isolation: 'worktree' })`.
+- **`opus` and `fable` are FORBIDDEN as subagent models** unless the user's prompt explicitly asks for that tier for that dispatch. "The task looks hard" is not authorisation; neither is "the session is already running that model". Choose the cheapest tier that can do the job: `haiku` for mechanical, well-specified work; `sonnet` for judgement work. Fan-out multiplies cost by the agent count — a large wave is a reason to drop a tier, not to keep the session's.
+- **The agent's side of the contract**: it receives a worktree path, stays inside it, and **runs no git at all** — it does not create, enter, exit, or remove a worktree, and it never commits.
+- **Only the session commits.** Collecting an agent's work is a **copy**, not a merge: read what it produced, apply it in the clone yourself, and commit there. The `worktree-agent-<id>` branch is a by-product of isolation, not a delivery mechanism; merging it would put commits in the history the session did not author.
+- **`worktree.baseRef` is pinned to `"head"`** in `.claude/settings.json`. The default (`fresh`) branches agent worktrees from `origin/<default-branch>`, so the agent sees **none** of the unmerged task branch — exactly when fan-out is worth doing. Do not revert it, and check it before diagnosing a "blind" agent.
+- **`head` is the committed HEAD, not your working tree — so COMMIT BEFORE YOU FAN OUT.** Uncommitted edits and untracked files are invisible to every agent, and an agent asked to extend work you have not committed silently reads the *previous* version and reports success against it.
+- **Partition WRITES by file set, and name that set in each prompt.** Isolation made concurrent mutation safe; it did not make it collectable. Two agents that both rewrite the same file hand the session two divergent versions and no merge. Overlapping reads are free.
+- **The harness opens the worktree; the session closes it whenever the agent did work.** The harness auto-removes only worktrees left unchanged, so every productive dispatch leaves one behind:
+  ```
+  git worktree list
+  git worktree remove --force <path> && git branch -D worktree-agent-<id>
+  git worktree prune
+  ```
+  `.claude/worktrees/` is gitignored because it sits inside the repository and each entry holds a `.git` file — without the ignore, `git add -A` stages it as an embedded repository and commits a broken gitlink.
+
+### Always
+
+- `git fetch` before any push or integrate — your `origin/main` goes stale.
+- Orient before EVERY `fetch` / `checkout` / `pull`, not just at task start. The Phase 1 questions cost one command each and are what stop a reflexive `checkout` from moving you off work you had not committed.
+- **Never move the tree while async work is in flight.** Background agents and watchers outlive the turn that started them; a `checkout` / `pull` / `reset` underneath them is an unguarded race.
+- **Never force-push** unless the user explicitly asks; no history rewrites of published commits.
+- Read `git log` before assuming a commit is yours.
 - Keep commits coherent and reviewable.
 - Preserve repository history when moving files (`git mv` when appropriate).
 - Do not mix unrelated architecture changes into implementation commits.
 - Do not commit generated build outputs, local runtime state, or secrets.
-- Do not push, publish releases, or modify a remote unless explicitly instructed.
-- Before committing, inspect the complete staged diff, not only files you remember editing.
+- Do not publish releases, or change remotes/repository settings, unless explicitly instructed.
+- Before committing, inspect the complete staged diff, not only the files you remember editing.
+
+### Commit shape
+
+These rules shape **what a commit contains**. They are not about git hosting, and they apply whether or not the work ends in a PR.
+
+#### Multi-fix prompts
+
+When a single prompt asks for **more than one unrelated fix** (different files, different bugs, different ADRs, different concerns — not the natural sub-tasks of one feature), do not bundle them into a single commit. For each fix in turn:
+
+1. implement only that one fix;
+2. add or update only the tests directly related to it;
+3. run the impacted tests; verify they pass;
+4. create one commit scoped to that fix, with a message describing only it;
+5. move to the next fix.
+
+A multi-fix prompt produces N commits, not one. Related sub-tasks of the same fix — a change plus its test plus the ADR cross-reference it requires — belong in the same commit; the discriminator is whether they share a single root cause, ADR, or feature.
+
+Do not bundle "while I'm here" cleanups into a fix commit. Note the drift and defer it, or handle it as its own follow-up commit.
+
+#### Multi-package prompts
+
+When a single prompt's work spans more than one package under `apps/` or `crates/`, do not bundle it into a single commit even when it is one coherent feature. One commit per package, each with its own tests run before it lands.
+
+Shared contract or documentation edits that enable **one** package's commit may ride with it. Shared edits that enable **more than one** go into their own preceding commit, so each package commit depends on it cleanly. Order by the authority direction: neutral API contracts before the backends and clients that consume them (§4).
+
+#### Debugging hygiene
+
+When a bug hunt peels back several independent root causes, each gets its own commit — the multi-fix discriminator is root cause, not symptom. Squashing the chain loses bisectability and the diagnostic narrative.
+
+Clean up before committing: diagnostic instrumentation added during the chase, throw-away fixtures, and commented-out hypotheses. Keep what is genuinely production signal — a warning on a real fallback path, a log on a previously silent swallow. Never push noise "to clean up later".
+
+### Repository-wide change verification
 
 For repository-wide changes, verify at minimum:
 
 - `git status` is understood;
 - Markdown relative links still resolve;
 - YAML/config examples still parse;
-- ADR structure/indexing is valid;
+- ADR structure/indexing is valid, and `tools/checks/scan_semantic_collisions.sh` is clean;
+- `tools/checks/check_license_headers.sh` is clean — no missing Apache-2.0 header on first-party source, no foreign licence terms;
 - frozen fixture checks still pass where applicable;
 - no forbidden production artifacts were introduced outside the active stage;
 - `git fsck --full` passes before archive handoff when a full repository ZIP is requested.
