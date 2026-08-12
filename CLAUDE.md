@@ -9,6 +9,7 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
 - `architecture/` is the normative design source.
 - `apps/`, `crates/`, `tests/`, `fixtures/`, `test-data/`, `spikes/`, `packaging/`, and `xtask/` are tracked landing zones created by ADR-0045.
 - `tools/` is repository tooling — PR/review scripts and tree checks — not an implementation landing zone. It is live now and not gated by stage discipline. Each script has a self-test beside it (`test_*.sh`) that must stay green.
+- `.claude/` is committed shared agent configuration: `settings.json` (push gate, worktree base ref, dispatch hook) and `skills/` (task-scoped procedures loaded on demand — see §10). Only `settings.local.json` and `CLAUDE.local.md` are per-developer and gitignored.
 - The root Cargo workspace intentionally has zero members until implementation begins.
 - There is no production Rust implementation yet.
 - Display name is **InterWeave**. Machine/wire namespace is lowercase `interweave` per ADR-0047.
@@ -32,6 +33,8 @@ Use this order:
 3. the canonical bottom-up implementation plan and test gates;
 4. architecture explanatory documents/reviews;
 5. examples and research notes.
+
+**Start at the digest.** `architecture/adr/ADR-DIGEST.md` carries one current-state entry per ADR plus a keyword → ADR lookup table, and is the cheapest correct way to find which decisions govern a change. Every ADR has an entry — a check enforces it — so "not in the digest" means "no such decision", not "someone forgot". It is a navigation aid, not an authority: it sits below everything in the list above, and on any discrepancy the ADR wins and the digest is what gets fixed. Never read a normative constant from it; limits, wire formats, and vectors come from the contracts and `fixtures/`.
 
 If two accepted documents appear to conflict, **do not silently choose one in code**. Identify the conflict and amend/clarify the architecture first.
 
@@ -182,6 +185,12 @@ When changing an accepted contract:
 - update frozen fixtures if and only if the protocol decision intentionally changes;
 - check relative Markdown links after moves/renames;
 - avoid duplicating normative constants in new prose unless there is a drift check or a clear canonical source.
+
+When changing an ADR, propagate in the same commit series: the row in `architecture/adr/README.md`, the entry in `ADR-DIGEST.md` (placed in a cluster, plus a keyword-table row if it introduces a topic someone would search for), and any specification whose text inherits the changed rule. `tools/checks/validate_adr_index.sh` enforces the mechanical part.
+
+Amending an ADR is a three-part record (ADR-0048): the in-place body edit — folded into the section it qualifies, because bodies read **current** — a dated note in `architecture/adr/history/NNNN-amendments.md`, and a row in that ADR's `## Amendments` table carrying the same date and title. A change of substance is not an amendment: it is a new superseding ADR. The test is whether a reader who followed the old text would now be wrong.
+
+New ADRs follow `architecture/adr/ADR-TEMPLATE.md`. Procedures for both reading and authoring live in the `adr-lookup` and `adr-authoring` skills (§10) rather than being restated here.
 
 Use **InterWeave** for the project/display name and `interweave` for machine/wire identifiers. Preserve genuine integration names such as Claude Code, `claude-channel`, libp2p, GossipSub, AutoNAT, and Kademlia.
 
@@ -459,12 +468,23 @@ For repository-wide changes, verify at minimum:
 - `git status` is understood;
 - Markdown relative links still resolve;
 - YAML/config examples still parse;
-- ADR structure/indexing is valid, and `tools/checks/scan_semantic_collisions.sh` is clean;
+- `tools/checks/validate_adr_index.sh` is clean — every ADR is template-conformant, indexed, and digested, and its amendment record is consistent;
+- `tools/checks/scan_semantic_collisions.sh` is clean — no two branches minted the same ADR number or amendment heading;
 - `tools/checks/check_license_headers.sh` is clean — no missing Apache-2.0 header on first-party source, no foreign licence terms;
 - frozen fixture checks still pass where applicable;
 - no forbidden production artifacts were introduced outside the active stage;
 - `git fsck --full` passes before archive handoff when a full repository ZIP is requested.
 
-## 10. Working principle
+## 10. Context loading map
+
+Task-scoped context loads on demand. Do not paste it back into this file.
+
+- **Reading or navigating ADRs** → the `adr-lookup` skill. Digest first: `architecture/adr/ADR-DIGEST.md` keyword table, then the matching entries, then the full ADR only when your change touches its substance.
+- **Writing a new ADR, amending one, or propagating an ADR change** → the `adr-authoring` skill, with `architecture/adr/ADR-TEMPLATE.md` as the structure and ADR-0048 as the model.
+- **Why an ADR changed** → `architecture/adr/history/`. Research only; the body already says what the decision is today.
+- **Why a branch, PR, or merge step exists** → §9, plus `tools/gh/<script>.sh --help`; each script documents its own exit codes.
+- **The construction order and what may be built next** → `architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md` and ADR-0046 (§1, §3).
+
+## 11. Working principle
 
 Implement from the bottom up and make boundaries executable through tests. Do not let convenience at a higher layer weaken a lower-layer invariant.
