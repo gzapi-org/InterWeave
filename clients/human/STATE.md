@@ -35,3 +35,7 @@ It must not label transport acceptance as “read by human” or “processed by
 ## Migrations
 
 Every schema migration is transactional and versioned. Migration failure puts the human app database into recovery/read-only/export mode; it never triggers transport identity regeneration.
+
+## Android platform-backup policy
+
+The human-store database is application-owned durable history, but standard-v1 Android packaging excludes it from Android cloud backup and device-to-device transfer. Local durability after receipt is not permission to create an implicit centralized backup/sync channel. Any future user-selected encrypted history backup/synchronization requires a separate design and explicit consent.

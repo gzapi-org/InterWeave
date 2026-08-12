@@ -10,7 +10,7 @@ The desktop standalone-daemon model maps poorly to Android background/process ru
 
 The Android first-party app embeds the Rust `TransportRuntime` inside an Android foreground service host rather than launching a standalone daemon or exposing local TCP/UDS IPC. The UI talks to the runtime through the neutral `LOCAL-CLIENT` in-process adapter. The service owns the `human` EndpointId lease while active.
 
-Continuous background reachability is explicit user opt-in and uses the current Android `remoteMessaging` foreground-service category subject to SPIKE-008 target-SDK/Play-policy validation. Foreground-only mode is supported. No centralized push wake-up dependency is added.
+Continuous background reachability is explicit user opt-in and uses the current Android `remoteMessaging` foreground-service category subject to SPIKE-008 target-SDK/Play-policy validation. Foreground-only mode is supported. No centralized push wake-up dependency is added. `stay-reachable` may be combined with `user-presence` key unlock, but that combination must expose `background_restart_requires_user_authentication=true` and must not claim automatic reachability after process/service restart.
 
 ## Alternatives considered
 

@@ -1,6 +1,6 @@
 # Resource limits and backpressure
 
-Default values are conservative architecture targets, not performance promises.
+Default values are conservative architecture targets, not performance promises. **Deployment-neutral LocalDataSession/transport rows apply equally to desktop IPC and Android embedded sessions. Rows whose names begin with `IPC` are daemon-IPC binding limits only.** Removing the socket/serialization layer on Android never removes endpoint queues, event queues, command/in-flight, direct-rate, dedup or network-resource bounds.
 
 | Resource | Default | Hard architectural ceiling |
 |---|---:|---:|
@@ -26,8 +26,8 @@ Default values are conservative architecture targets, not performance promises.
 | IPC keepalive missed probes | 3 | 10 |
 | require keepalive for EndpointId lease | true | boolean policy |
 | backend->runtime events | 1024 | 8192 |
-| per-client event queue | 256 | 1024 |
-| outstanding commands/client | 64 | 256 |
+| LocalDataSession event queue | 256 | 1024 |
+| outstanding commands/LocalDataSession | 64 | 256 |
 | direct inflight total | 128 | 512 |
 | direct inflight/peer | 8 | 32 |
 | inbound direct requests/trusted peer/minute | 120, burst 32 | 6000/min, burst 512 |

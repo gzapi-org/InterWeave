@@ -7,6 +7,8 @@ runtime:
     availability_mode: stay-reachable
     foreground_service_type: remoteMessaging
     key_storage: android-keystore-aesgcm-wrap
+    # If set to user-presence while stay-reachable, restart requires local auth
+    # and status exposes background_restart_requires_user_authentication=true.
     key_unlock_policy: background-compatible
 profile: { name: human-android }
 transport:

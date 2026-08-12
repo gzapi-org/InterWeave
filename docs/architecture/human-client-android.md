@@ -132,3 +132,13 @@ Test at minimum:
 - Keystore unlock modes and process restart;
 - no admin access reachable from message callback graph;
 - same wire fixtures as desktop.
+
+## Android backup / transfer boundary
+
+The Android platform backup system is not part of the application's disaster-recovery design. Standard v1 excludes the wrapped identity envelope, transport/trust configuration, recovery temporary state, and human SQLite database from both cloud backup and device-to-device extraction, and packages explicit backup/data-extraction rules rather than relying on platform defaults. A new installation or device transfer that lacks the valid local Keystore-wrapped identity enters unconfigured/recovery-required onboarding; it never manufactures a replacement PeerId for an established profile.
+
+Human message-history backup/synchronization is disabled in standard v1. A future user-selected encrypted history sync is a separate application protocol/service decision and does not relax the transport's no-central-store/no-offline-mailbox claims.
+
+## Availability-policy interaction
+
+`stay-reachable + user-presence` is intentionally allowed but self-limiting. While the unlocked foreground service remains alive it may stay online. After service/process restart it cannot unwrap the identity until the user authenticates; local status must expose `background_restart_requires_user_authentication=true`, and UI/notifications must not claim automatic post-restart reachability.

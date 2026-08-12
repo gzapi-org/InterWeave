@@ -107,6 +107,8 @@ Phase 9 is part of standard v1. Reachability failure is therefore represented ex
 | Android foreground service/process killed | revoke embedded session/endpoint; stop network activity; restart rebuilds ephemeral state; no queued delivery |
 | Android background service start denied | report offline/reachability-disabled to UI; do not fake availability |
 | Android Keystore unwrap fails/invalidated | fail established profile identity unlock; never silently generate new PeerId |
+| Android `stay-reachable + user-presence` restarts without local authentication | keep endpoint/network offline; expose `background_restart_requires_user_authentication=true`; never weaken unlock policy automatically |
+| Android system/device-transfer restore lacks valid local Keystore identity | enter unconfigured/recovery-required onboarding; do not accept a wrapped blob/history/config fragment as identity recovery and do not silently create a replacement PeerId |
 | Android network changes | invalidate direct evidence/affected paths; rebind/reconcile relays/Kademlia; preserve identity/config/history |
 | AutoNAT server request target mismatches observed source IP | reject probe before dial; record bounded policy failure |
 | Identify-learned infrastructure disabled | ignore as candidate; no health failure if static target is satisfied |

@@ -135,7 +135,7 @@ The settings/admin UX may live in the same executable but opens the separate adm
 
 **Deliverables:** Rust/Slint Android app, embedded LocalDataSession adapter, foreground-service runtime host with minimal platform shim, network-change integration, Android Keystore AES-GCM identity wrapping, SQLite store, notifications, Kademlia client-only/mobile resource profile.
 
-**Acceptance:** same wire/session fixtures as desktop; service/process/network lifecycle matrix; background-start/FGS policy gate; Keystore exact-seed/PeerId fixture; no admin handle in network callback graph; no hidden mailbox/push dependency.
+**Acceptance:** same wire/session fixtures as desktop; service/process/network lifecycle matrix; background-start/FGS policy gate; Keystore exact-seed/PeerId fixture; secure/no-clipboard mnemonic flow; backup/device-transfer exclusions for identity/config/history; `stay-reachable + user-presence` restart diagnostic; no admin handle in network callback graph; no hidden mailbox/push dependency.
 
 **Dependencies:** Phase 2-5 runtime plus SPIKE-008/SPIKE-009. The Android platform/UI work may proceed against the frozen connectivity contract/harness, but standard-v1 Android release acceptance is blocked on completion of the mandatory Phase-9 connectivity workstream and SPIKE-004 matrix.
 

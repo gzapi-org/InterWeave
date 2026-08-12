@@ -58,7 +58,7 @@ Network side on both:
 
 ## Human client Model B
 
-The first-party human client uses a shared Rust core and Slint UI. Desktop is an IPC v2 consumer of the shared daemon and can share that PeerId with Claude via a separate EndpointId. Android embeds the same Rust runtime behind the neutral local-session contract rather than launching a standalone daemon. Concurrent physical devices use distinct PeerIds.
+The first-party human client uses a shared Rust core and Slint UI. Desktop is an IPC v2 consumer of the shared daemon and can share that PeerId with Claude via a separate EndpointId. Android embeds the same Rust runtime behind the neutral local-session contract rather than launching a standalone daemon. Android recovery uses a secure-window, in-app mnemonic picker with no clipboard path, and standard-v1 Android system backup/device transfer excludes identity/configuration and human-history state. Concurrent physical devices use distinct PeerIds.
 
 See:
 

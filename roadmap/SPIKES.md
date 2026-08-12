@@ -126,9 +126,9 @@ Instrument the Swarm / behaviour boundary so Kademlia-originated `ToSwarm::Dial`
 
 **Objective:** validate the selected Android foreground-service lifecycle for persistent first-party P2P messaging.
 
-**Experiment:** build a non-production harness on minimum/current target APIs; start the service from allowed user-visible paths; exercise backgrounding, process reclamation, force-stop/relaunch, notification behavior, Wi-Fi/cellular changes, Doze/OEM-like constraints where measurable, and current Google Play foreground-service declaration/review requirements for `remoteMessaging`.
+**Experiment:** build a non-production harness on minimum/current target APIs; start the service from allowed user-visible paths; exercise backgrounding, process reclamation, force-stop/relaunch, notification behavior, Wi-Fi/cellular changes, Doze/OEM-like constraints where measurable, and current Google Play foreground-service declaration/review requirements for `remoteMessaging`. Validate the dedicated non-exported recovery Activity with `android:excludeFromRecents=true` and `FLAG_SECURE`, including screenshot/screen-record/task-snapshot behavior, and validate packaging backup rules on cloud-backup/device-transfer capable devices/emulators. Prove identity/config/history exclusions remain effective on the supported Android backup-rule variants and that a partial system/device-transfer restore cannot manufacture or silently replace a transport identity.
 
-**Evidence:** lifecycle trace, target-SDK/service-type policy matrix, restart/offline behavior, battery/network observations.
+**Evidence:** lifecycle trace, target-SDK/service-type policy matrix, restart/offline behavior, battery/network observations, screenshot/recents behavior, manifest/data-extraction/full-backup rule inspection plus restore matrix for security-sensitive/app-history state.
 
 **Decision unlocked:** production Android stay-reachable packaging. Failure does not authorize hidden FCM/cloud dependency; it requires an Android lifecycle ADR update or foreground-only availability claim.
 
@@ -136,8 +136,8 @@ Instrument the Swarm / behaviour boundary so Kademlia-originated `ToSwarm::Dial`
 
 **Objective:** validate Android Keystore wrapping without changing the Ed25519/PeerId/recovery contract.
 
-**Experiment:** generate AES-256-GCM AndroidKeyStore wrapper; wrap/unwarp the fixed 32-byte recovery fixture; verify identical rust-libp2p PeerId; test TEE/StrongBox reporting, user-presence and background-compatible modes, lock/reboot/process restart, key invalidation, ciphertext tamper.
+**Experiment:** generate AES-256-GCM AndroidKeyStore wrapper; wrap/unwrap the fixed 32-byte recovery fixture; verify identical rust-libp2p PeerId; test TEE/StrongBox reporting, user-presence and background-compatible modes, lock/reboot/process restart, key invalidation and ciphertext tamper. Exercise the in-app 24-word picker, confirm there is no clipboard path or normal free-text mnemonic field, inspect IME/autofill/analytics/crash/state surfaces for phrase leakage, and validate `stay-reachable + user-presence` emits `background_restart_requires_user_authentication=true` after restart until local authentication succeeds.
 
-**Evidence:** exact seed/PeerId round trip and failure matrix.
+**Evidence:** exact seed/PeerId round trip and failure matrix; phrase-UI exfiltration checklist; no mnemonic/seed in clipboard, normal IME path, logs, analytics, saved state or crash artifacts; availability diagnostic/restart trace.
 
 **Decision unlocked:** Android production key-at-rest implementation.

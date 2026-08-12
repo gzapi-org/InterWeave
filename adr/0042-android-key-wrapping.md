@@ -20,7 +20,7 @@ The same PeerId/recovery phrase works across platforms. Android gains materially
 
 ## Security implications
 
-Keystore/ciphertext failure is fail-closed. User-presence mode intentionally sacrifices unattended restart. Phrase theft remains full identity compromise.
+Keystore/ciphertext failure is fail-closed. User-presence mode intentionally sacrifices unattended restart. Phrase theft remains full identity compromise. Android phrase screens use secure-window protection, an in-app BIP-39 picker and no clipboard path. Standard-v1 Android system backup/device-transfer excludes identity/recovery/configuration and human-history state rather than treating platform backup as recovery.
 
 ## Operational implications
 
@@ -28,7 +28,7 @@ Device restore/Keystore invalidation may require mnemonic recovery. Protection l
 
 ## Implementation implications
 
-SPIKE-009 validates Android Keystore AES-GCM wrapping, lifecycle and exact 32-byte seed import. Recovery tooling remains stopped-runtime/offline.
+SPIKE-009 validates Android Keystore AES-GCM wrapping, lifecycle, exact 32-byte seed import, recovery-screen exfiltration controls, backup/device-transfer exclusions and the user-presence/stay-reachable restart diagnostic. Recovery tooling remains stopped-runtime/offline.
 
 ## Revisit conditions
 

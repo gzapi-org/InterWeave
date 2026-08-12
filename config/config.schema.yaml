@@ -12,6 +12,9 @@ runtime:
     availability_mode: enum[foreground-only,stay-reachable] = foreground-only
     foreground_service_type: literal[remoteMessaging] = remoteMessaging
     key_storage: literal[android-keystore-aesgcm-wrap] = android-keystore-aesgcm-wrap
+    # user-presence + stay-reachable is valid but yields the derived status
+    # background_restart_requires_user_authentication=true; automatic reachability
+    # after service/process restart is impossible until local user authentication.
     key_unlock_policy: enum[background-compatible,user-presence] = background-compatible
 transport:
   backend: enum[libp2p]
@@ -265,3 +268,5 @@ observability:
 #   runtime.deployment=embedded-android => runtime.android.endpoint references an enabled configured EndpointId
 #   runtime.deployment=embedded-android => connectivity AutoNAT/relay server roles are false and Kademlia mode is client
 #   runtime.android.availability_mode=stay-reachable => foreground_service_type=remoteMessaging
+#   stay-reachable + key_unlock_policy=user-presence => derived diagnostic background_restart_requires_user_authentication=true
+# Android system backup/device-transfer exclusions are packaging policy, not operator configuration.

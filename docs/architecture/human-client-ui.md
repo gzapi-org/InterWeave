@@ -103,7 +103,7 @@ Standard v1 keeps mnemonic backup/restore in the stopped-runtime `transportctl i
 
 ### Android
 
-There is no standalone CLI requirement. A dedicated local recovery flow stops/locks the TransportRuntime, invokes the identity component directly, and may display/import the 24 words on-device. It is not routed through `LocalDataSession` or `LocalAdminPort`. The screen blocks screenshots where the platform supports the required secure-window behavior and minimizes clipboard use; exact platform behavior is validated in SPIKE-009/release testing.
+There is no standalone CLI requirement. A dedicated local recovery flow stops/locks the TransportRuntime, invokes the identity component directly, and may display/import the 24 words on-device. It is not routed through `LocalDataSession` or `LocalAdminPort`. During the complete recovery flow a dedicated non-exported Android recovery Activity is excluded from Recents and uses `FLAG_SECURE` before any phrase material is rendered. The phrase must not enter screenshots/screen recording/task snapshots, clipboard, autofill, analytics, logs, saved-instance state or normal free-text IME input. Import uses the in-app BIP-39 word-list picker defined by the Android custody design; any temporary IME-assisted filtering requests no suggestions/autocorrect and `IME_FLAG_NO_PERSONALIZED_LEARNING`, but that request is not treated as a guarantee that an arbitrary IME behaves correctly. Exact platform behavior is validated in SPIKE-008/009 and release testing.
 
 Both platforms state prominently: complete profile disaster recovery requires the recovery phrase **and** separately backed-up configuration/trust/endpoint settings.
 
@@ -144,3 +144,11 @@ Raw internal codes remain available in diagnostics.
 - remote text cannot invoke admin/recovery handlers;
 - desktop and Android render the same HumanChatV1 fixture consistently;
 - accessibility tree contains meaningful labels/actions for message, route, trust, and connectivity controls.
+
+## 13. Android availability-policy diagnostic
+
+When Android is configured with both `availability_mode=stay-reachable` and `key_unlock_policy=user-presence`, the configuration is valid but the UI/status model must expose `background_restart_requires_user_authentication=true`. User-facing copy must explain that the endpoint can stay reachable while the currently unlocked service remains alive, but it cannot automatically recover reachability after process/service restart until the user authenticates.
+
+## 14. HumanChat reply rendering
+
+An inbound HumanChatV1 `reply_to` may reference an application message that is not present in local history. The message is still valid and must render normally; the client may show a neutral `Referenced message unavailable` placeholder and preserve the referenced ID for diagnostics/history. It must not auto-fetch, create transport traffic, reject the message, or infer tampering solely because the referenced message is absent locally.

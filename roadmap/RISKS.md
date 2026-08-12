@@ -36,3 +36,7 @@
 - Android Keystore wrapping protects storage, not a compromised running process after seed unwrap.
 - Reusing one recovery seed concurrently on multiple devices would create PeerId collision; ADR-0043 prohibits it.
 - Mobile Kademlia/relay/mDNS battery usage requires tuning inside fixed protocol/security bounds, not disabling validation/trust controls.
+
+- Android recovery UI can expose the full transport private key through screenshots/recents/IME/clipboard if platform bindings regress; secure-window + in-app mnemonic picker + no-clipboard rules are release-tested under SPIKE-008/009.
+- Android system backup/device transfer can create privacy leakage or unusable half-restores if sensitive/app-history state is included; standard v1 disables system backup and explicitly excludes identity/config/history from cloud and D2D extraction.
+- `stay-reachable + user-presence` cannot automatically recover after process death; the mandatory diagnostic/UI copy prevents availability overclaiming.

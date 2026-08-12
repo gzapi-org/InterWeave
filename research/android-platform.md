@@ -37,3 +37,21 @@ Android Wi-Fi may filter multicast; `WifiManager.MulticastLock` enables multicas
 Sources:
 - https://developer.android.com/reference/android/net/wifi/WifiManager.MulticastLock
 - https://developer.android.com/reference/android/net/nsd/NsdManager
+
+## Recovery-screen privacy
+
+Android `FLAG_SECURE` marks a window as secure so screenshots/non-secure-display capture are blocked by the platform policy. A dedicated recovery task can also be excluded from Recents with `android:excludeFromRecents="true"`. For any IME-assisted filtering, `IME_FLAG_NO_PERSONALIZED_LEARNING` requests that the IME not update personalized typing history, but Android explicitly documents that an IME may ignore the request. The architecture therefore avoids normal free-text mnemonic entry and uses an in-app word picker; the IME flag is only defense in depth.
+
+Sources:
+- https://developer.android.com/reference/android/view/WindowManager.LayoutParams#FLAG_SECURE
+- https://developer.android.com/guide/components/activities/recents
+- https://developer.android.com/reference/android/view/inputmethod/EditorInfo#IME_FLAG_NO_PERSONALIZED_LEARNING
+
+## Backup and device transfer
+
+Android Auto Backup is enabled by default for eligible apps unless the manifest changes the posture. Android 12+ uses `data-extraction-rules` with separate cloud-backup and device-transfer sections; Android documentation warns that `allowBackup=false` does not uniformly disable device-to-device transfer on every manufacturer implementation. Sensitive identity/configuration and human-history state therefore receive explicit extraction exclusions in addition to `allowBackup=false`, and supported pre-Android-12 devices retain the older full-backup rules.
+
+Sources:
+- https://developer.android.com/identity/data/autobackup
+- https://developer.android.com/privacy-and-security/risks/backup-best-practices
+- https://developer.android.com/about/versions/12/behavior-changes-12#backup-restore

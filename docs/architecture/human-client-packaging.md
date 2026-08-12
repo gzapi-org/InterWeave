@@ -53,6 +53,19 @@ Stay-reachable packaging must declare and satisfy the Android foreground-service
 
 Supported ABI/minimum/target API choices are release parameters, not architecture constants, but every shipped ABI must run the same wire/crypto conformance fixtures.
 
+### Android backup and device-transfer manifest policy
+
+Standard v1 does not rely on Android system backup for identity, configuration or chat history. The package must:
+
+- set `android:allowBackup="false"` explicitly rather than inheriting the platform default;
+- provide Android 12+ `android:dataExtractionRules` that exclude the wrapped identity envelope, expected PeerId/wrapping metadata, transport/trust configuration, recovery temporary state and human-store database from **both** `<cloud-backup>` and `<device-transfer>`; `allowBackup=false` is not relied on as the only device-transfer control;
+- provide the corresponding Android 11-and-lower `android:fullBackupContent` exclusion rules for supported older devices;
+- declare the dedicated recovery Activity non-exported and `android:excludeFromRecents="true"`; set `FLAG_SECURE` before rendering recovery material;
+- treat the no-backup/cache directories as implementation aids, not the sole policy control;
+- never interpret a system/device-transfer restore without a valid local Keystore key as an identity restore.
+
+The human SQLite history is excluded from system backup/transfer in standard v1. A future opt-in encrypted history backup/sync requires a separate application-security design rather than a packaging toggle.
+
 ## 7. Update compatibility
 
 Before activating an update:
@@ -84,6 +97,7 @@ A release candidate tests at least:
 
 - Windows/macOS/Linux install, upgrade, rollback, daemon start/stop/autostart and IPC ACLs;
 - Android install/upgrade/process death/background/foreground/network change and Keystore behavior;
+- Android secure recovery screens, in-app mnemonic picker/no-clipboard policy, backup/data-extraction exclusions, and device-to-device reinstall/restore behavior;
 - one desktop human + Claude shared profile routing;
 - desktop-to-Android and Android-to-desktop HumanChatV1 over direct and relay paths;
 - distinct-device PeerIds and contact grouping;

@@ -35,3 +35,25 @@ Closed. A successful hole punch does not emit a second logical `PeerConnected` f
 - Android wraps the exact portable Ed25519 seed with an Android-Keystore AES-GCM key;
 - desktop and Android devices use distinct PeerIds when concurrently active;
 - application SQLite/history and HumanChatV1 remain above transport.
+
+## W-review closure
+
+### W1 — Android recovery-phrase UI surface
+
+Closed. Recovery display/import uses secure-window protection for the full sensitive-screen lifetime; standard v1 has no mnemonic clipboard path and no normal free-text 24-word entry. Import uses an in-app BIP-39 word-list picker. Any temporary IME-assisted filtering requests no suggestions/personalized learning but is defense in depth only. Phrase material is prohibited from recents/task snapshots, saved state, logs, analytics, crash artifacts and notifications; SPIKE-008/009 verify the platform binding.
+
+### W2 — Android Auto Backup/device transfer
+
+Closed. Standard-v1 Android packaging does not use system backup as recovery. Application backup is explicitly disabled and Android 12+ data-extraction plus supported pre-12 backup rules explicitly exclude the wrapped identity envelope, transport/trust configuration, recovery temporary state and human SQLite database from cloud backup and device transfer. A future history backup/sync is a separate opt-in application-security design.
+
+### W3 — user-presence + stay-reachable
+
+Closed. The combination remains valid, but status/UI must expose `background_restart_requires_user_authentication=true`; it cannot be described as automatically reachable after process/service restart.
+
+### W4 — resource-limit scoping
+
+Closed. Resource-limit documentation now distinguishes daemon-IPC-only rows from deployment-neutral LocalDataSession/transport limits. Android retains the same bounded queues, commands, direct in-flight/rate/dedup and network ceilings.
+
+### W5 — HumanChatV1 fixture precision
+
+Closed. `app_message_id` and `reply_to` are exactly 16-byte IDs rendered as 32 lowercase hex characters; `sent_at_ms` is bounded to `0..253402300799999` and remains diagnostic only; unknown `reply_to` is valid and renders without network lookup or rejection.

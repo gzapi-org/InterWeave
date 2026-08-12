@@ -243,7 +243,15 @@ Desktop:
 - daemon start/attach, shared profile with Claude, data/admin socket split, UI crash/reconnect, daemon restart, SQLite migration failure isolation.
 
 Android:
-- Activity recreation while service remains; service/process kill/restart; foreground-only vs stay-reachable; background-start denial; persistent-notification lifecycle; Wi-Fi/cellular transition; Kademlia client-only; relay fallback/DCUtR; mDNS multicast/permission lifecycle; Keystore wrap/user-presence/background-compatible modes; message callback graph cannot access LocalAdminPort.
+- Activity recreation while service remains; service/process kill/restart; foreground-only vs stay-reachable; background-start denial; persistent-notification lifecycle; Wi-Fi/cellular transition; Kademlia client-only; relay fallback/DCUtR; mDNS multicast/permission lifecycle; Keystore wrap/user-presence/background-compatible modes; message callback graph cannot access LocalAdminPort;
+- recovery screen uses secure-window/task-snapshot protection, has no clipboard or normal free-text mnemonic path, and phrase material does not enter saved state/log/analytics/crash artifacts;
+- Android system cloud backup and device-transfer exclude identity envelope/recovery/config/trust/human SQLite state; a half-restored install cannot silently recreate/replace an established PeerId;
+- `stay-reachable + user-presence` exposes `background_restart_requires_user_authentication=true` and remains offline after restart until user authentication.
+
+HumanChatV1:
+- `app_message_id`/`reply_to` accept exactly 32 lowercase hexadecimal characters and reject uppercase/prefixed/hyphenated/wrong-length encodings;
+- `sent_at_ms` accepts only `0..253402300799999` and remains diagnostic only;
+- unknown `reply_to` renders the current message without transport lookup or rejection.
 
 Phase-9 V-review additions:
 - authorized AutoNAT probe client requests loopback/private/ULA/link-local/multicast/unrelated-public/DNS targets and server emits no dial; only literal candidate IP equal to observed requester source IP is eligible;

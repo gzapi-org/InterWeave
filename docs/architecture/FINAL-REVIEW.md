@@ -132,11 +132,11 @@ SPIKE-006 must verify that the pinned rust-libp2p Ed25519 identity API/portable 
 
 ### Android execution / platform policy
 
-SPIKE-008 is required before shipping Android stay-reachable mode. It validates the current `remoteMessaging` foreground-service classification, target-SDK/Play-policy requirements, lifecycle/background-start behavior, process/network recovery and honest offline states.
+SPIKE-008 is required before shipping Android stay-reachable mode. It validates the current `remoteMessaging` foreground-service classification, target-SDK/Play-policy requirements, lifecycle/background-start behavior, process/network recovery, secure recovery-window/task-snapshot behavior, Android backup/device-transfer exclusions and honest offline states.
 
 ### Android key custody
 
-SPIKE-009 is required before shipping Android production key storage. It validates AndroidKeyStore AES-GCM wrapping of the exact Ed25519 seed and both unlock policies without changing the PeerId fixture.
+SPIKE-009 is required before shipping Android production key storage. It validates AndroidKeyStore AES-GCM wrapping of the exact Ed25519 seed, both unlock policies, the in-app no-clipboard mnemonic flow and the `background_restart_requires_user_authentication` diagnostic without changing the PeerId fixture.
 
 ## No-production-implementation verification
 
