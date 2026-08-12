@@ -1,151 +1,182 @@
 # InterWeave
 
-Architecture and contracts for a generic peer-to-peer **Claude Code Channel transport**, Model B local endpoint multiplexing, and first-party Rust human clients for desktop and Android.
+**InterWeave** is a generic peer-to-peer transport architecture for Claude Code Channels and first-party human clients. It combines payload-agnostic transport contracts, one-PeerId/many-EndpointId local routing, signed GossipSub broadcast, dedicated directed messaging, replaceable discovery, Kademlia peer routing, and mandatory Internet reachability through AutoNAT v2, Circuit Relay v2, and DCUtR.
 
-> Status: **architecture + implementation/test skeleton**. The accepted specifications live under `architecture/`; root `apps/`, `crates/`, `tests/`, `fixtures/`, `spikes/`, and packaging folders are tracked landing zones only. There is still no production MCP server, libp2p networking, daemon, human client, installer, system service, crate manifest, or Rust source implementation.
+> **Repository status:** architecture and implementation/test skeleton only. The accepted design is under [`architecture/`](./architecture/). The implementation landing zones under `apps/`, `crates/`, `tests/`, `fixtures/`, `spikes/`, and `packaging/` contain no production Rust implementation yet. The root Cargo workspace intentionally has zero members.
 
-## Purpose
+## What InterWeave is
 
-**InterWeave** is a transport plugin, not an application coordination or chat protocol. It gives Claude Code and other local clients a decentralized, payload-agnostic transport. Higher-level systems may carry text, JSON, chat envelopes, or their own protocols, but this project does not define agent roles, task state, repositories, Git semantics, human identity, social graphs, read receipts, or application workflows.
-
-## Repository layout
-
-- [`architecture/`](./architecture/README.md) — normative ADRs/contracts/design/research/roadmap.
-- [`apps/`](./apps/README.md) — future thin executable/platform composition roots.
-- [`crates/`](./crates/README.md) — future reusable Rust package boundaries.
-- [`tests/`](./tests/README.md) — future cross-crate/network/conformance/E2E suites.
-- [`fixtures/`](./fixtures/README.md) — frozen cross-implementation vectors.
-- [`test-data/`](./test-data/README.md) — mutable non-normative scenario data.
-- [`spikes/`](./spikes/README.md) — empirical non-production experiments mapped to architecture SPIKEs.
-- [`packaging/`](./packaging/README.md) — future platform release/service/package material.
-- [`IMPLEMENTATION.md`](./IMPLEMENTATION.md) — implementation landing-zone rules.
-- [`architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md`](./architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md) — **canonical dependency-gated construction order**.
-
-The root `Cargo.toml` is intentionally a **zero-member virtual workspace**. Planned paths are metadata only until their implementation phase starts. See [ADR-0045](./architecture/adr/0045-implementation-repository-layout.md).
-Implementation package activation follows [ADR-0046](./architecture/adr/0046-bottom-up-implementation-order.md): contracts/state/persistence first, then the authenticated libp2p substrate and root dial policy, then higher network behaviours and product integrations.
-
-## Architecture
+InterWeave defines the transport and local-client boundary needed for multiple local applications to share one persistent peer identity without conflating routing with identity.
 
 ```text
 Desktop/server
-  Human Slint -- IPC v2 --\
-  Claude bridge -- IPC v2 ---+--> profile TransportRuntime/daemon --> libp2p
-                              |        one PeerId, many EndpointIds
-                              `-- admin socket (explicit local settings only)
+
+  human-desktop -- data IPC --\
+  claude-channel -- data IPC ---+--> interweave-transportd --> TransportRuntime --> libp2p
+                                |         one PeerId
+  settings/admin -- admin IPC --/         many EndpointIds
 
 Android
-  Slint Activity --> LocalDataSession --> foreground Service host
-                                          |
-                                          `--> same Rust TransportRuntime --> libp2p
-                                               one device PeerId / human EndpointId
 
-Network side on both:
-  GossipSub broadcast
-  DirectMessageV2 PeerId + EndpointId
-  Kademlia (standard v1, configured default-on)
-  AutoNAT v2 + Circuit Relay v2 + DCUtR (mandatory v1)
-  Trust + connectivity-infrastructure classes + root DialAdmissionGate
+  Slint UI --> LocalDataSession --> foreground Service --> TransportRuntime --> libp2p
+                                   (same contracts, embedded deployment)
+
+Network
+
+  broadcast      -> signed GossipSub
+  directed       -> /interweave/direct/2.0.0
+  endpoint query -> /interweave/endpoints/1.0.0
+  peer routing   -> private InterWeave Kademlia namespace
+  reachability   -> AutoNAT v2 + Circuit Relay v2 + DCUtR
 ```
 
-`TransportRuntime` owns the private key and all libp2p state: an external daemon hosts it on desktop/server, while the Android foreground service hosts it in-process. Presentation/application code never becomes an independent network identity unless it uses a separate profile.
+InterWeave is deliberately **not** an agent coordination framework, task protocol, Git workflow, social graph, human-identity system, read-receipt service, or durable transport mailbox. Higher layers may define those concepts without pushing them into the transport.
 
-## Decision summary
+## Core invariants
 
-- Claude integration follows the official Channel pattern: stdio MCP, `claude/channel`, push notifications, explicit outbound tools, and pre-delivery admission.
-- Desktop/server use a **separate, profile-scoped daemon**. Android embeds the same Rust `TransportRuntime` in a user-visible foreground-service host; both preserve the same PeerId/EndpointId/network contracts.
-- One profile owns one persistent PeerId. Model B adds configured **EndpointIds** underneath that PeerId for deterministic local direct routing (`human`, `claude`, `automation.build`, etc.). EndpointId is a routing selector, not cryptographic/human/application identity.
-- Initial software identities are **Ed25519**. An optional offline 24-word recovery record can reproduce the exact same PeerId by encoding the raw 32-byte Ed25519 secret with BIP-39 entropy/checksum/English-word mapping only; wallet PBKDF2/passphrase semantics are not used and recovery material never crosses IPC.
-- Every direct-capable local data-plane session owns one exclusive configured endpoint lease (IPC v2 connection on desktop, embedded service session on Android). Direct messages route to exactly one endpoint; the previous architecture-only all-client fan-out is superseded by ADR-0030.
-- Direct protocol target is `/interweave/direct/2.0.0`, carrying required source endpoint and optional destination endpoint. Omitted destination resolves the receiver's explicit `default_direct_endpoint`; it never means fan-out.
-- Direct `Accepted` means the resolved endpoint's bounded local event queue accepted the message, not that Claude or a human processed it.
-- An optional trust-gated endpoint-directory protocol exposes only active routes explicitly marked `advertise: true`; it returns route names only, never human names/roles/trust claims.
-- Endpoint-specific ACLs may narrow profile trust but can never widen it. Remote endpoint denial is exposed as coarse `no_route` / local `RemoteEndpointUnavailable` to avoid an authorization oracle.
-- Broadcast remains GossipSub and ChannelId-scoped; endpoint addressing does not alter broadcast envelopes or subscription semantics.
-- `Transport`, `DiscoveryProvider`, and trust boundaries remain independent of Claude/libp2p details.
-- Kademlia has a complete peer-routing integration blueprint and, per ADR-0034, configured entries are **`enabled: true` by default** in the standard v1 build. Operators may explicitly opt out. It never grants trust or stores application/channel/endpoint records.
-- Per ADR-0035, standard v1 also includes the **mandatory Internet-reachability stack**: AutoNAT v2 client, Circuit Relay v2 client/reservation management, and DCUtR. Relay/AutoNAT server roles are explicit infrastructure modes. Phase 9 is a release requirement, not conditional hardening.
-- Relay/AutoNAT infrastructure can be authorized through `transport.connectivity.infrastructure.allowed_peers` without entering application `trust.allowed_peers`; ADR-0036 prevents that control-plane connection from gaining GossipSub/direct/endpoint/Kademlia authority.
-- Discovery only produces candidate reachability and bounded protocol observations. Data-plane connection admission remains trust-gated, including behavior-originated Kademlia dials through the root dial admission policy.
-- Noise secures each admitted libp2p connection. GossipSub validation distinguishes objective invalidity (`Reject`) from valid-but-locally-unauthorized publishers (`Ignore`). Group/application E2EE remains outside v1/v2 transport.
-- Delivery remains realtime/best-effort, bounded, with no exactly-once transport claim or offline mailbox. Per ADR-0044, the first-party human app persists only pending outbound, unread inbound, and inbound messages explicitly kept by the receiver after reading; ordinary transport-terminal/read-unkept history evaporates. `TransportRuntime` itself never queues messages for an offline endpoint.
-- IPC v2 retains the 128 KiB JSON-body ceiling so every legal 48 KiB payload fits with endpoint metadata after base64url/JSON expansion. Data-plane and administrative IPC use separate sockets; the data socket can never grant `admin.*` based on a claimed client kind.
-- GossipSub mesh duplicate identity is frozen to a SHA-256 mapping over signed publisher PeerId + GossipSub wire sequence number, preventing cross-publisher suppression without coupling mesh identity to the application envelope ID.
-- Internet listeners bound unauthenticated pre-Noise handshakes and trusted-peer direct ingress; dial failure/backoff is address-scoped where appropriate so a poisoned address cannot suppress a known-good trusted route.
+- One configured transport profile owns one persistent **PeerId**.
+- Model B adds configured **EndpointIds** beneath that PeerId (`human`, `claude`, `automation.build`, ...). EndpointId is routing metadata, not an identity or authorization principal.
+- Broadcast uses **GossipSub only**. Directed traffic uses the dedicated direct protocol and is never tunneled through GossipSub.
+- Direct v2 routes to exactly one endpoint. Omitted destination resolves the receiver's configured default endpoint; it never means fan-out.
+- `AcceptedV2` means the remote endpoint's bounded local queue admitted the message. It does not mean a human or Claude processed/read it.
+- Discovery is advisory and replaceable. It never grants trust.
+- Data-plane trust is deny-by-default and PeerId-scoped; endpoint policy may narrow trust but never widen it.
+- Kademlia is peer-routing only: no endpoint, channel, trust, membership, or application records.
+- Root connection/dial admission exists before autonomous libp2p behaviours are activated.
+- Standard v1 includes AutoNAT v2 client, Circuit Relay v2 client/reservations, and DCUtR.
+- `TransportRuntime` never provides a durable offline mailbox.
+- First-party human-client persistence is intentionally narrow: pending outbound, unread inbound, and inbound messages explicitly kept by the receiver after reading.
 
-## Human client Model B
+The accepted details live in the contracts and ADRs; this README is an orientation document, not a substitute for them.
 
-The first-party human client uses a shared Rust core and Slint UI. Desktop is an IPC v2 consumer of the shared daemon and can share that PeerId with Claude via a separate EndpointId. Android embeds the same Rust runtime behind the neutral local-session contract rather than launching a standalone daemon. Message content is ephemeral by default: pending outbound and unread inbound survive locally, while read inbound survives only after the receiver explicitly chooses Keep. Android recovery uses a secure-window, in-app mnemonic picker with no clipboard path, and standard-v1 Android system backup/device transfer excludes identity/configuration and human-store state. Concurrent physical devices use distinct PeerIds.
+## Repository layout
 
-See:
+| Path | Role |
+|---|---|
+| [`architecture/`](./architecture/README.md) | Normative ADRs, contracts, architecture, research, configuration schema/examples, and roadmap |
+| [`apps/`](./apps/README.md) | Future thin executable/platform composition roots |
+| [`crates/`](./crates/README.md) | Future reusable Rust crate boundaries |
+| [`tests/`](./tests/README.md) | Cross-crate, conformance, real-network, security, desktop E2E, and Android E2E suites |
+| [`fixtures/`](./fixtures/README.md) | Frozen normative protocol/crypto/config vectors |
+| [`test-data/`](./test-data/README.md) | Mutable non-normative scenario data |
+| [`spikes/`](./spikes/README.md) | Empirical implementation investigations; never production dependencies |
+| [`packaging/`](./packaging/README.md) | Future Linux/macOS/Windows/Android packaging |
+| [`xtask/`](./xtask/README.md) | Future repository/test orchestration |
+| [`IMPLEMENTATION.md`](./IMPLEMENTATION.md) | Implementation landing-zone and activation rules |
 
-- [Human client Model B](architecture/docs/architecture/human-client-model-b.md)
-- [Cross-platform human client](architecture/docs/architecture/human-client-cross-platform.md)
-- [Desktop human client](architecture/docs/architecture/human-client-desktop.md)
-- [Android human client](architecture/docs/architecture/human-client-android.md)
-- [Android key custody](architecture/docs/architecture/android-key-custody.md)
-- [Human-client UI/interaction design](architecture/docs/architecture/human-client-ui.md)
-- [Human message retention contract](architecture/clients/human/RETENTION.md)
-- [ADR-0044 human message retention](architecture/adr/0044-human-message-retention.md)
-- [Human-client platform packaging](architecture/docs/architecture/human-client-packaging.md)
-- [Local client session contract](architecture/contracts/LOCAL-CLIENT.md)
-- [Endpoint contract](architecture/contracts/ENDPOINTS.md)
-- [Libp2p endpoint protocols](architecture/transport/libp2p/ENDPOINTS.md)
-- [ADR-0030 local endpoint addressing](architecture/adr/0030-local-endpoint-addressing.md)
-- [ADR-0031 endpoint directory](architecture/adr/0031-endpoint-directory.md)
-- [ADR-0032 human client boundary](architecture/adr/0032-human-client-boundary.md)
-- [Human + Claude profile example](architecture/config/examples/human-and-claude.yaml)
+The root [`Cargo.toml`](./Cargo.toml) is a zero-member virtual workspace. `workspace.metadata.interweave` records intended members without making them buildable. A crate/package is added to `[workspace].members` only when its canonical implementation stage begins.
+
+## Canonical implementation order
+
+The governing construction order is [`architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md`](./architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md), adopted by [ADR-0046](./architecture/adr/0046-bottom-up-implementation-order.md).
+
+The historical numbered phases remain scope/release labels. They are **not** permission to violate dependency order.
+
+```text
+Stage 0   foundation + frozen fixtures
+Stage 1   neutral contracts + config
+Stage 2   pure policies/state machines
+Stage 3   persistence
+Stage 4   minimal authenticated libp2p substrate
+Stage 5   root ConnectionManager/DialAdmissionGate + pre-auth limits
+Stage 6   direct v2
+Stage 7   GossipSub
+Stage 8   endpoint directory
+Stage 9   discovery framework
+Stage 10  Kademlia
+Stage 11  AutoNAT + Relay + DCUtR
+Stage 12  TransportRuntime integration
+Stage 13  daemon + IPC
+Stage 14  human application core/UI
+Stage 15  desktop human client
+Stage 16  Claude Channel bridge
+Stage 17  Android
+Stage 18  adversarial/security gate
+Stage 19  packaging/release
+```
+
+In particular, Kademlia, AutoNAT, Relay, and DCUtR may not be activated before Stage 5's root dial/security funnel is implemented and green.
+
+## Human message retention
+
+The first-party human client is ephemeral by default. The durable store is not a conventional permanent conversation-history database.
+
+| Message state | Durable local state |
+|---|---:|
+| Outgoing, pending/undelivered | Yes |
+| Outgoing, transport-terminal | No |
+| Incoming, unread | Yes |
+| Incoming, read and not kept | No |
+| Incoming, read and explicitly kept by receiver | Yes |
+
+The receiver-only **Keep** action is local application state; a remote sender cannot request or force persistence. See [`architecture/clients/human/RETENTION.md`](./architecture/clients/human/RETENTION.md) and [ADR-0044](./architecture/adr/0044-human-message-retention.md).
+
+## Project and wire namespace
+
+[ADR-0047](./architecture/adr/0047-interweave-project-and-wire-namespace.md) freezes:
+
+```text
+Display name:       InterWeave
+Machine namespace:  interweave
+Direct protocol:    /interweave/direct/2.0.0
+Endpoint protocol:  /interweave/endpoints/1.0.0
+Kademlia prefix:    /interweave/kad/1.0.0/<network-hash>
+HumanChat media:    application/vnd.interweave-human-chat+json;v=1
+```
+
+Claude-specific names such as `claude-channel` remain integration names and are not project branding.
 
 ## Start here
 
-- [Architecture overview](architecture/docs/architecture/overview.md)
-- [Component boundaries](architecture/docs/architecture/components.md)
-- [Data flows](architecture/docs/architecture/data-flows.md)
-- [Transport contract](architecture/contracts/TRANSPORT.md)
-- [Connectivity contract](architecture/contracts/CONNECTIVITY.md)
-- [Endpoint contract](architecture/contracts/ENDPOINTS.md)
-- [Local IPC contract](architecture/contracts/LOCAL-IPC.md)
-- [Discovery contract](architecture/contracts/DISCOVERY.md)
-- [ADR index](architecture/adr/README.md)
-- [Threat model](architecture/docs/architecture/threat-model.md)
-- [Rust blueprint](architecture/docs/architecture/rust-blueprint.md)
-- [Implementation repository layout](architecture/docs/architecture/implementation-repository-layout.md)
-- [ADR-0045 repository/test placement](architecture/adr/0045-implementation-repository-layout.md)
-- [Mandatory Internet reachability design](architecture/transport/libp2p/CONNECTIVITY.md)
-- [Implementation plan](architecture/roadmap/IMPLEMENTATION-PLAN.md)
-- [Final architecture review](architecture/docs/architecture/FINAL-REVIEW.md)
-- [Adversarial security review closure](architecture/docs/architecture/SECURITY-REVIEW-2026-08-12.md)
-- [Human message-retention amendment review](architecture/docs/architecture/MESSAGE-RETENTION-REVIEW-2026-08-12.md)
+For a first architecture pass, read in this order:
 
-## Source snapshot
+1. [`architecture/docs/architecture/overview.md`](./architecture/docs/architecture/overview.md)
+2. [`architecture/docs/architecture/components.md`](./architecture/docs/architecture/components.md)
+3. [`architecture/contracts/TRANSPORT.md`](./architecture/contracts/TRANSPORT.md)
+4. [`architecture/contracts/ENDPOINTS.md`](./architecture/contracts/ENDPOINTS.md)
+5. [`architecture/contracts/LOCAL-CLIENT.md`](./architecture/contracts/LOCAL-CLIENT.md)
+6. [`architecture/contracts/CONNECTIVITY.md`](./architecture/contracts/CONNECTIVITY.md)
+7. [`architecture/contracts/DISCOVERY.md`](./architecture/contracts/DISCOVERY.md)
+8. [`architecture/docs/architecture/threat-model.md`](./architecture/docs/architecture/threat-model.md)
+9. [`architecture/adr/README.md`](./architecture/adr/README.md)
+10. [`architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md`](./architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md)
 
-Claude/Telegram research was refreshed 2026-08-11; libp2p/Kademlia, endpoint-protocol, and mandatory NAT/relay/DCUtR research was extended 2026-08-12. See [research/SOURCES.md](architecture/research/SOURCES.md), [research/endpoint-addressing.md](architecture/research/endpoint-addressing.md), and [research/nat-traversal.md](architecture/research/nat-traversal.md).
+Useful focused documents:
 
-## Project and protocol namespace
+- Human cross-platform design: [`architecture/docs/architecture/human-client-cross-platform.md`](./architecture/docs/architecture/human-client-cross-platform.md)
+- Desktop human client: [`architecture/docs/architecture/human-client-desktop.md`](./architecture/docs/architecture/human-client-desktop.md)
+- Android human client: [`architecture/docs/architecture/human-client-android.md`](./architecture/docs/architecture/human-client-android.md)
+- Android key custody: [`architecture/docs/architecture/android-key-custody.md`](./architecture/docs/architecture/android-key-custody.md)
+- Mandatory Internet reachability: [`architecture/transport/libp2p/CONNECTIVITY.md`](./architecture/transport/libp2p/CONNECTIVITY.md)
+- Kademlia design: [`architecture/discovery/KademliaDiscovery.md`](./architecture/discovery/providers/kademlia.md)
+- Security review: [`architecture/docs/architecture/SECURITY-REVIEW-2026-08-12.md`](./architecture/docs/architecture/SECURITY-REVIEW-2026-08-12.md)
+- Human/mobile review: [`architecture/docs/architecture/HUMAN-CLIENT-REVIEW-2026-08-12.md`](./architecture/docs/architecture/HUMAN-CLIENT-REVIEW-2026-08-12.md)
+- Retention amendment review: [`architecture/docs/architecture/MESSAGE-RETENTION-REVIEW-2026-08-12.md`](./architecture/docs/architecture/MESSAGE-RETENTION-REVIEW-2026-08-12.md)
 
-The canonical project name is **InterWeave**. Machine-facing identifiers use lowercase `interweave`, including the wire protocol root, domain-separation prefixes, XDG profile paths, workspace metadata, and future binary prefix. Claude-specific names such as `claude-channel` remain integration names rather than project branding. See [ADR-0047](./architecture/adr/0047-interweave-project-and-wire-namespace.md).
+## Development policy
 
+Until a bottom-up stage is explicitly opened, this repository remains an architecture/skeleton repository. Contributors and coding agents should follow [`CLAUDE.md`](./CLAUDE.md) and [`IMPLEMENTATION.md`](./IMPLEMENTATION.md).
 
-## Human-readable recovery and application guidance
+When implementation begins:
 
-- Identity recovery: [`contracts/IDENTITY-RECOVERY.md`](./architecture/contracts/IDENTITY-RECOVERY.md), [`docs/architecture/identity-recovery.md`](./architecture/docs/architecture/identity-recovery.md), and [`ADR-0033`](./architecture/adr/0033-identity-recovery-mnemonic.md).
-- Current Kademlia default-on amendment: [`docs/architecture/KAD-DEFAULT-ON-REVIEW-2026-08-12.md`](./architecture/docs/architecture/KAD-DEFAULT-ON-REVIEW-2026-08-12.md) and [`ADR-0034`](./architecture/adr/0034-kademlia-default-enabled.md).
-- Non-normative first-party broadcast author hint: [`docs/architecture/application-envelope-guidance.md`](./architecture/docs/architecture/application-envelope-guidance.md). Transport still treats broadcast authorship as PeerId-only.
+- activate only the package(s) required by the current canonical stage;
+- keep application binaries as thin composition roots;
+- keep neutral API crates free of libp2p, Slint, Android, SQLite, and Claude-specific dependencies;
+- place tests at the lowest layer that completely proves the behavior;
+- use real Swarms/processes/platform tests where the contract depends on real integration behavior rather than replacing them with mocks;
+- keep frozen vectors in `fixtures/` and mutable scenarios in `test-data/`;
+- preserve architecture decisions by amending the relevant ADR/contract before intentionally diverging in code.
 
-## Mandatory Internet reachability
+`Cargo.lock` is intentionally tracked for this application/workspace repository.
 
-- [`ADR-0035`](./architecture/adr/0035-mandatory-internet-reachability.md) makes Phase 9 required for standard v1.
-- [`ADR-0036`](./architecture/adr/0036-connectivity-infrastructure-peer-class.md) separates reachability infrastructure authorization from application trust.
-- [`contracts/CONNECTIVITY.md`](./architecture/contracts/CONNECTIVITY.md) freezes the backend-neutral connectivity states/path semantics.
-- [`transport/libp2p/CONNECTIVITY.md`](./architecture/transport/libp2p/CONNECTIVITY.md) defines the integrated state machine and ownership.
-- [`transport/libp2p/AUTONAT.md`](./architecture/transport/libp2p/AUTONAT.md), [`RELAY.md`](./architecture/transport/libp2p/RELAY.md), and [`DCUTR.md`](./architecture/transport/libp2p/DCUTR.md) are the detailed backend blueprints.
-- [`docs/architecture/connectivity-deployment.md`](./architecture/docs/architecture/connectivity-deployment.md) defines client/infrastructure deployment, redundancy, outage, and rollout topology.
-- [`config/examples/internet-reachability.yaml`](./architecture/config/examples/internet-reachability.yaml) shows a two-relay/probe-server Internet profile.
-- [`config/examples/connectivity-infrastructure.yaml`](./architecture/config/examples/connectivity-infrastructure.yaml) shows explicit AutoNAT/relay server roles with protocol-scoped authorization.
+## Security
 
-## Security freeze addendum
+Do not commit private transport identities, recovery phrases, Android signing material, Keystore exports, local profile state, or real credentials. The `.gitignore` is a guardrail, not a secret-management boundary.
 
-The 2026-08-12 adversarial security pass is recorded in [`docs/architecture/SECURITY-REVIEW-2026-08-12.md`](./architecture/docs/architecture/SECURITY-REVIEW-2026-08-12.md). It freezes source+wire-sequence GossipSub message identity, split data/admin IPC sockets, pre-Noise admission limits, address-scoped identity-mismatch quarantine, hostile remote endpoint-metadata validation, direct trusted-peer token buckets, and 128-bit IPC keepalive nonces. ADR-0038 also records an explicit optional v2.x encrypted software-key path gated by SPIKE-007; standard v1 remains filesystem-only at rest.
+Security-sensitive implementation changes should be checked against the threat model, resource limits, security review, and the permanent `tests/security/` landing zone. Discovery, trust, connection admission, endpoint routing, and connectivity-infrastructure authorization are intentionally separate boundaries.
 
-## Current human/mobile review
+## License
 
-See [`docs/architecture/HUMAN-CLIENT-REVIEW-2026-08-12.md`](architecture/docs/architecture/HUMAN-CLIENT-REVIEW-2026-08-12.md) for closure of AutoNAT/relay/connectivity review V1-V6 and the desktop/Android deployment decisions.
+InterWeave first-party code and documentation are licensed under the **Apache License, Version 2.0** (`Apache-2.0`). See [`LICENSE`](./LICENSE).
+
+Third-party dependencies, copied fixtures, generated artifacts, and externally sourced material retain their own applicable licenses and notices; adding them to this repository does not relicense them as InterWeave code.

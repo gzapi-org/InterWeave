@@ -1,16 +1,106 @@
-# Architecture repository: never commit runtime identities, state, or local overrides.
-*.key
+# InterWeave repository ignore policy
+#
+# Keep normative fixtures, test-data, example configuration, Cargo.lock, and
+# architecture material visible to Git. Ignore only local state, credentials,
+# generated outputs, and developer-machine artifacts.
+
+# Rust / Cargo build outputs
+/target/
+**/target/
+*.profraw
+*.profdata
+/coverage/
+/lcov.info
+
+# Cargo.lock is intentionally tracked for this application/workspace repository.
+!Cargo.lock
+
+# Android / Gradle generated state
+.gradle/
+**/.gradle/
+**/build/
+**/.cxx/
+**/.externalNativeBuild/
+**/captures/
+**/local.properties
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Native/JNI generated outputs
+*.so
+*.dylib
+*.dll
+*.dSYM/
+
+# Local InterWeave runtime/profile state
+/state/
+/cache/
+/run/
+/tmp/
 *.pid
 *.sock
+*.sock.lock
 *.log
-.env
-state/
-cache/
-target/
-.DS_Store
-architecture/config/local.yaml
+*.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal
 
-# Future implementation/build outputs.
-**/target/
-**/build/
-apps/human-android/android/.gradle/
+# Local configuration and environment overrides
+.env
+.env.*
+!.env.example
+architecture/config/local.yaml
+architecture/config/local.yml
+
+# Credentials and private identity material. Test-only key material must use
+# an explicitly documented fixture path/name rather than relying on these
+# generic extensions.
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.secret
+*.seed
+
+# Editors / IDEs
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.example.json
+*.iml
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Generic temporary/generated files
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+
+# Normative/synthetic fixtures may intentionally exercise key container
+# formats. These paths are reviewable test material, not local credentials.
+!fixtures/**/*.pem
+!fixtures/**/*.p12
+!fixtures/**/*.pfx
+!fixtures/**/*.jks
+!fixtures/**/*.keystore
+!fixtures/**/*.seed
+!test-data/**/*.pem
+!test-data/**/*.p12
+!test-data/**/*.pfx
+!test-data/**/*.jks
+!test-data/**/*.keystore
+!test-data/**/*.seed
