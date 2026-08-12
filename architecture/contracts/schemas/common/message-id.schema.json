@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:common:message-id",
+  "title": "Application message identifier",
+  "description": "The sender-chosen idempotency key for one logical message. It participates in the deduplication key (ADR-0019) and is deliberately NOT the GossipSub mesh duplicate key — that is the authenticated publisher plus wire sequence number (ADR-0004). A retry of the same logical message reuses this value.",
+  "type": "string",
+  "minLength": 1,
+  "maxLength": 128,
+  "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+  "x-contract": {
+    "name": "common.message-id",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": ["0019"],
+    "specification": "architecture/contracts/ENDPOINTS.md"
+  }
+}

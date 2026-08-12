@@ -64,6 +64,8 @@ Authority order is unchanged (`CLAUDE.md` §2): accepted ADRs → normative cont
 | naming, wire namespace, `interweave` vs InterWeave, frozen hash vectors | **0047** |
 | writing an ADR, amending one, the template, propagation, what this digest is for | **0048** |
 | supersede vs amend, amendment history, why a rule changed | **0048** (+ `history/`) |
+| wire schemas, JSON Schema, contract families, x-contract status, is this contract implemented | **0049** |
+| frozen vectors, conformance fixtures, golden hashes, fixture drift | **0049** (+ 0047 the re-frozen values, 0019 the fingerprint's purpose) |
 
 ---
 
@@ -113,6 +115,12 @@ Display name **InterWeave**; machine identifiers lowercase `interweave`.
 How this corpus is written, changed, and navigated.
 - Rules: an ADR body reads **current** — amendments are folded into the section they qualify, never appended as end-matter prose; numbered decision items are permanent citable identifiers and a withdrawn one becomes a tombstone; a change of substance is a **superseding ADR**, not an edit (the test: would a reader who followed the old text now be wrong?). Every amendment is recorded three ways in one commit series — the in-place edit, a dated note in `history/NNNN-amendments.md` (`### Amendment YYYY-MM-DD — title`), and a row in the ADR's `## Amendments` end-matter table; the (date, title) pair is the identity, and `(ii)` suffixes exist only to break byte-identical headings. No changelog, no version counter. Propagation — README row, digest entry, dependent specs, fixtures only on intentional vector change — is part of the change, enforced by `tools/checks/validate_adr_index.sh`. The digest is the default entry point and is non-normative.
 - Keywords: adr template, amendment, supersede vs amend, history file, propagation, digest is non-normative, no changelog
+
+### 0049 — Machine-readable wire contracts with lifecycle status (Accepted)
+Wire **shape** gets JSON Schema beside the prose; the prose stays normative for **behaviour**.
+- Rules: schemas live under `architecture/contracts/schemas/<family>/<concept>.schema.json`, Draft 2020-12, one dialect; `$id` is `urn:interweave:schemas:<family>:<concept>` and both halves must match the file's own location; `x-contract.status` says what a contract is authoritative **about** — `active`/`deprecated` describe the current wire, **`approved` is an implementation target and never a claim that anything implements it**, `proposed` must not drive implementation (everything here is `approved` until an implementation exists); provenance (deciding ADRs + prose specification) is mandatory and existence-checked. Frozen vectors declare their algorithm and are **recomputed from the specification** by `verify_fixture_vectors.py` — an unknown algorithm is a failure, not a skip — and all vectors in a file must hash distinctly. `validate_contracts.py` checks meta-conformance, identity-against-location, manifests in both directions, status agreement, and `$ref` resolvability.
+- Security: a schema is a shape check, **never** an authorization boundary — it cannot enforce that a narrowing policy is applied. It does mechanically bound the directory response (≤32 unique, TTL clamped) before a hostile reply reaches a cache or UI.
+- Keywords: json schema, contract families, x-contract status, approved vs active, urn identity, frozen vectors, fixture drift, manifest
 
 ---
 

@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:endpoints:endpoint-config",
+  "title": "Configured endpoint",
+  "description": "One entry in a profile's configured endpoint set. Registration is configured-only: an ordinary local data-plane client cannot create an endpoint by naming it at handshake. Endpoint policy can only NARROW profile trust — no configuration here can authorize a PeerId that PeerTrustPolicy rejects.",
+  "type": "object",
+  "required": ["id", "enabled", "advertise"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "$ref": "urn:interweave:schemas:endpoints:endpoint-id" },
+    "enabled": {
+      "type": "boolean",
+      "description": "A disabled endpoint yields local EndpointDisabled on claim and coarse no_route on the wire."
+    },
+    "advertise": {
+      "type": "boolean",
+      "description": "Controls endpoint-directory listing ONLY. An unadvertised endpoint that is selected explicitly or as the profile default still accepts direct messages, and normal routing metadata may reveal that route to the communicating peer."
+    },
+    "allowed_client_kinds": {
+      "type": "array",
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 64 },
+      "description": "Accidental-misbinding guard, NOT authentication. The same-OS-user residual threat remains governed by the IPC security model (ADR-0017); Android treats this as in-process configuration hygiene."
+    },
+    "inbound": { "$ref": "#/$defs/policy" },
+    "outbound": { "$ref": "#/$defs/policy" }
+  },
+  "$defs": {
+    "policy": {
+      "description": "A narrowing filter over profile trust. `inherit_profile_trust` applies no further restriction; `static_subset` admits only the listed PeerIds, all of which must ALSO be authorized by PeerTrustPolicy.",
+      "oneOf": [
+        { "const": "inherit_profile_trust" },
+        {
+          "type": "object",
+          "required": ["static_subset"],
+          "additionalProperties": false,
+          "properties": {
+            "static_subset": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "$ref": "urn:interweave:schemas:common:peer-id" }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "x-contract": {
+    "name": "endpoints.endpoint-config",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": ["0030", "0028", "0026"],
+    "specification": "architecture/contracts/ENDPOINTS.md"
+  }
+}

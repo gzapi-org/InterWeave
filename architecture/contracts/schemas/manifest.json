@@ -1,0 +1,16 @@
+{
+  "$comment": "Root index of contract families. A family exists here or it does not exist. validate_contracts.py checks this in both directions: every directory has a row, every row has a directory.",
+  "families": [
+    {
+      "name": "common",
+      "path": "common",
+      "description": "Shapes referenced across families. Adding one here rather than duplicating it is what keeps two families from drifting on the same concept."
+    },
+    {
+      "name": "endpoints",
+      "path": "endpoints",
+      "description": "Model B endpoint addressing: the routing selector beneath a PeerId, its configuration, direct destinations, the delivered event, and the endpoint-directory reply.",
+      "specification": "architecture/contracts/ENDPOINTS.md"
+    }
+  ]
+}

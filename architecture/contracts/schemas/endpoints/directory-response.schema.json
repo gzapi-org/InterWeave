@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:endpoints:directory-response",
+  "title": "Endpoint directory response",
+  "description": "The reply to a trust-gated endpoint-directory query. It lists ONLY endpoints that are simultaneously enabled, actively leased, advertise:true, and admissible for the querying peer. Endpoint identifiers only — no display name, avatar, role, prompt, client kind, payload schema, or permission claim (ADR-0031). Results are advisory and short-lived; a caller may send to an out-of-band EndpointId without querying first.",
+  "type": "object",
+  "required": ["endpoints", "ttl_ms", "generated_at_ms"],
+  "additionalProperties": false,
+  "properties": {
+    "endpoints": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": { "$ref": "urn:interweave:schemas:endpoints:endpoint-id" },
+      "description": "At most 32. More than 32 entries, invalid grammar, or duplicates are ProtocolViolation on receipt. A valid but unsorted unique list is sorted locally rather than rejected."
+    },
+    "ttl_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 300000,
+      "description": "Clamped locally to the 5-minute hard ceiling. Freshness starts at LOCAL RECEIPT, not at generated_at_ms."
+    },
+    "generated_at_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Diagnostic only. Never used for freshness — it is remote-controlled."
+    }
+  },
+  "x-contract": {
+    "name": "endpoints.directory-response",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": ["0031"],
+    "specification": "architecture/contracts/ENDPOINTS.md",
+    "wire-protocol": "/interweave/endpoints/1.0.0"
+  }
+}

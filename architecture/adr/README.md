@@ -52,6 +52,7 @@ All ADRs are **Accepted** architecture decisions unless later superseded.
 | [0046](./0046-bottom-up-implementation-order.md) | Implement bottom-up through dependency gates: contracts/state/persistence before networking, root dial admission before autonomous libp2p behaviours, then runtime/clients/platforms. |
 | [0047](./0047-interweave-project-and-wire-namespace.md) | Adopt InterWeave as the canonical project and machine namespace; replace the pre-implementation working identifiers and re-freeze affected hash vectors. |
 | [0048](./0048-adr-authoring-and-propagation.md) | ADR bodies read current and are edited in place with git as the only change record; re-decisions supersede; index and digest propagate in the same commit series. |
+| [0049](./0049-machine-readable-wire-contracts.md) | Define wire shapes as JSON Schema beside the prose contracts, with a URN identity, family manifests, lifecycle status, mandatory provenance, and recomputed frozen vectors. |
 
 ## Navigating this set
 
