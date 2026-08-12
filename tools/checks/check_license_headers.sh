@@ -136,11 +136,18 @@ for f in "${TRACKED[@]}"; do
     # quotes the tag mid-sentence (this repository's own documentation
     # does) would otherwise read as an expression naming everything that
     # followed it.
-    foreign_spdx="$(grep -m1 -oE 'SPDX-License-Identifier:[[:space:]]*[A-Za-z0-9.+_-]+' "$f" 2>/dev/null \
-        | sed 's/SPDX-License-Identifier:[[:space:]]*//' | tr -d '[:space:]')"
-    if [ -n "$foreign_spdx" ] && [ "$foreign_spdx" != "$EXPECTED_SPDX" ]; then
-        report "$f" "declares SPDX '$foreign_spdx', expected '$EXPECTED_SPDX' (exempt it with provenance if genuinely third-party)"
-    fi
+    # EVERY tag, not just the first. Prepending an Apache header to a
+    # copied file leaves its original declaration further down, and a
+    # first-match-only scan then sees Apache and passes — defeating the
+    # check in exactly the mixed-header case it exists to catch, which is
+    # also the shape every real import takes.
+    while IFS= read -r tok; do
+        [ -n "$tok" ] || continue
+        if [ "$tok" != "$EXPECTED_SPDX" ]; then
+            report "$f" "declares SPDX '$tok', expected '$EXPECTED_SPDX' (exempt it with provenance if genuinely third-party)"
+        fi
+    done < <(grep -oE 'SPDX-License-Identifier:[[:space:]]*[A-Za-z0-9.+_-]+' "$f" 2>/dev/null \
+        | sed 's/SPDX-License-Identifier:[[:space:]]*//' | tr -d '[:blank:]')
     if grep -q -i -E "$PROPRIETARY_RE" "$f" 2>/dev/null; then
         report "$f" "carries proprietary licence wording — it is not Apache-2.0 until the copyright holder relicenses it"
     fi

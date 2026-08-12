@@ -36,6 +36,11 @@ make_repo() {
 run_check() { bash "$CHECK" --root "$1" 2>&1; }
 run_code()  { bash "$CHECK" --root "$1" >/dev/null 2>&1; printf '%s' "$?"; }
 
+# Built from parts so this file carries no literal foreign declaration.
+# The checker scans the whole tree, tests included, and a suite that
+# trips its own subject teaches everyone to reach for an exemption.
+TAG="SPDX-License-""Identifier"
+
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -54,7 +59,7 @@ out="$(run_check "$R")"
 
 # ── an SPDX tag naming another licence is a violation ────────────────────
 R="$TMP/foreign"; make_repo "$R"
-printf '#!/usr/bin/env bash\n# SPDX-License-Identifier: GPL-3.0\n' > "$R/gpl.sh"
+printf '#!/usr/bin/env bash\n# %s: GPL-3.0\n' "$TAG" > "$R/gpl.sh"
 out="$(run_check "$R")"
 [[ "$out" == *"GPL-3.0"* ]] && ok "foreign SPDX tag is reported with its licence" || bad "should report GPL-3.0"
 
@@ -71,6 +76,16 @@ R="$TMP/prose"; make_repo "$R"
 printf '# A document\n\nNo licence banner here.\n' > "$R/DOC.md"
 [ "$(run_code "$R")" = "0" ] && ok "markdown needs no SPDX header" || bad "markdown should not require a header"
 
+# ── a foreign tag BELOW an added Apache header is still caught ───────────
+# The shape every real import takes: prepend the Apache header, leave the
+# original declaration further down. A first-match-only scan sees Apache
+# and passes, defeating the check in exactly the case it exists for.
+R="$TMP/mixed"; make_repo "$R"
+printf '#!/usr/bin/env bash\n# SPDX-License-Identifier: Apache-2.0\n#\n# vendored from upstream\n# %s: GPL-3.0\necho hi\n' "$TAG" > "$R/mixed.sh"
+[ "$(run_code "$R")" = "1" ] && ok "a second, foreign tag below an Apache header is caught" || bad "mixed headers should fail"
+out="$(run_check "$R")"
+[[ "$out" == *"GPL-3.0"* ]] && ok "  and names the foreign licence" || bad "should name GPL-3.0"
+
 # ── an SPDX tag quoted mid-sentence in prose is not a foreign licence ────
 R="$TMP/prose-tag"; make_repo "$R"
 printf 'Files carry `SPDX-License-Identifier: Apache-2.0` in their opening lines, and that is checked.\n' > "$R/DOC.md"
@@ -85,11 +100,11 @@ printf 'Apache License\n\nCopyright [yyyy] [name of copyright owner]\nAll %s res
 # ── an exemption silences both checks, and only for the listed path ──────
 R="$TMP/exempt"; make_repo "$R"
 mkdir -p "$R/tools/checks"
-printf '#!/usr/bin/env bash\n# SPDX-License-Identifier: MIT\n' > "$R/vendored.sh"
+printf '#!/usr/bin/env bash\n# %s: MIT\n' "$TAG" > "$R/vendored.sh"
 printf '# provenance: upstream MIT snippet\nvendored.sh\n' > "$R/tools/checks/license_exempt.txt"
 printf '# SPDX-License-Identifier: Apache-2.0\n' >> "$R/tools/checks/license_exempt.txt"
 [ "$(run_code "$R")" = "0" ] && ok "an exempt path is skipped" || bad "exempt path should pass"
-printf '#!/usr/bin/env bash\n# SPDX-License-Identifier: MIT\n' > "$R/other.sh"
+printf '#!/usr/bin/env bash\n# %s: MIT\n' "$TAG" > "$R/other.sh"
 [ "$(run_code "$R")" = "1" ] && ok "  and the exemption does not cover its neighbours" || bad "non-exempt MIT file should fail"
 
 # ── untracked-but-not-ignored files are scanned; ignored ones are not ────
