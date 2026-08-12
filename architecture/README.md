@@ -13,5 +13,6 @@ Key entry points:
 - [`docs/architecture/rust-blueprint.md`](./docs/architecture/rust-blueprint.md)
 - [`docs/architecture/testing.md`](./docs/architecture/testing.md)
 - [`docs/architecture/implementation-repository-layout.md`](./docs/architecture/implementation-repository-layout.md)
+- [`roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md`](./roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md) — canonical construction order
 - [`roadmap/PHASES.md`](./roadmap/PHASES.md)
 - [`roadmap/SPIKES.md`](./roadmap/SPIKES.md)

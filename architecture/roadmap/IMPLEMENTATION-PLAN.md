@@ -1,10 +1,14 @@
 # Implementation plan
 
+> **Scope/release roadmap:** this file groups deliverables by product phase. The normative dependency/construction order is [`BOTTOM-UP-IMPLEMENTATION-PLAN.md`](./BOTTOM-UP-IMPLEMENTATION-PLAN.md), adopted by [ADR-0046](../adr/0046-bottom-up-implementation-order.md). If the two appear to differ in ordering, the bottom-up dependency gates control implementation activation.
+
 No production implementation belongs in this architecture repository. This roadmap is for the subsequent implementation project.
 
 ## Phase 0 — empirical compatibility spikes
 
-**Objective:** resolve version-sensitive/runtime-sensitive details.
+**Scope note:** this phase is the catalogue/accounting bucket for implementation spikes. Under ADR-0046 the spikes are executed just-in-time before the bottom-up stage they unlock; Phase 0 is not a requirement to run every spike before contract work begins.
+
+**Objective:** resolve version-sensitive/runtime-sensitive details before their dependent implementation boundary.
 
 **Deliverables:** SPIKE-001..006 results. SPIKE-002 validates direct v2 endpoint framing/acceptance, endpoint-directory behavior, and concurrent dedup reservation behavior; **SPIKE-003 is the Kademlia release gate; SPIKE-004 is the mandatory Internet-reachability release/tuning gate**; SPIKE-006 validates the exact Ed25519 recovery portability boundary.
 
@@ -201,4 +205,4 @@ Implementation starts in the tracked root skeleton rather than inside `architect
 - frozen vectors -> `fixtures/*`;
 - empirical spike work -> `spikes/spike-NNN`.
 
-Do not implement production code inside `architecture/`. Add each real crate/test package to the zero-member root Cargo workspace only when that phase begins.
+Do not implement production code inside `architecture/`. Add each real crate/test package to the zero-member root Cargo workspace only when its canonical bottom-up stage begins.

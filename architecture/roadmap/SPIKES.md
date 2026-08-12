@@ -3,6 +3,8 @@
 
 Spikes validate version-sensitive or deployment-sensitive assumptions. They are not production implementation.
 
+Under [ADR-0046](../adr/0046-bottom-up-implementation-order.md) and the [`BOTTOM-UP-IMPLEMENTATION-PLAN`](./BOTTOM-UP-IMPLEMENTATION-PLAN.md), spikes are **just-in-time gates**: run each spike immediately before the implementation boundary it unlocks, capture evidence, and promote validated assumptions into permanent regression/conformance tests. Production crates must never depend on spike packages.
+
 ## SPIKE-001 — Claude Channel/package compatibility
 
 **Objective:** validate the exact Channel manifest/MCP packaging accepted by the target Claude Code release.

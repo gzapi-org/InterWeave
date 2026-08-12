@@ -1,5 +1,7 @@
 # Test packages and placement
 
+> Activation and dependency order is governed by [`architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md`](../architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md) and ADR-0046.
+
 Cross-crate/system tests live here. Each suite becomes an independent test package only when implementation starts. Keep a test at the **lowest layer that completely proves the behavior**:
 
 1. pure/local logic -> `#[cfg(test)]` beside future crate source;

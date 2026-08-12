@@ -8,7 +8,9 @@ This repository contains the accepted architecture under `architecture/` plus a 
 - `apps/`, `crates/`, `tests/`, `fixtures/`, `test-data/`, `spikes/`, `packaging/`, and `xtask/` are landing zones defined by ADR-0045.
 - The root Cargo workspace intentionally has zero members.
 - Do not add a production crate manifest/source, Android application build, installer, service unit, or executable test package unless the corresponding implementation phase is explicitly being executed.
-- When a phase begins, add only the crate/package(s) needed for that phase and add them to `[workspace].members` in the same change.
+- When a canonical bottom-up stage begins, add only the crate/package(s) needed for that stage and add them to `[workspace].members` in the same change.
+- The canonical construction sequence is `architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md` / ADR-0046. Historical numbered phases are scope/release labels, not permission to violate dependency order.
+- Do not enable Kademlia, AutoNAT, Relay, or DCUtR before root ConnectionManager/DialAdmissionGate and pre-auth resource admission are implemented and green.
 - Do not implement production code inside `architecture/`.
 
 ## Placement rules

@@ -1,5 +1,7 @@
 # Implementation repository layout
 
+> **Activation order:** this document defines where implementation belongs. [`roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md`](../../roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md) and [ADR-0046](../../adr/0046-bottom-up-implementation-order.md) define the normative order in which those landing zones become buildable.
+
 This document maps the frozen architecture onto physical implementation/test folders. It is a placement/ownership contract, not production code.
 
 ## Top-level rule

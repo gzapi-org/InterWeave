@@ -19,8 +19,10 @@ Architecture and contracts for a generic peer-to-peer **Claude Code Channel tran
 - [`spikes/`](./spikes/README.md) — empirical non-production experiments mapped to architecture SPIKEs.
 - [`packaging/`](./packaging/README.md) — future platform release/service/package material.
 - [`IMPLEMENTATION.md`](./IMPLEMENTATION.md) — implementation landing-zone rules.
+- [`architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md`](./architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md) — **canonical dependency-gated construction order**.
 
 The root `Cargo.toml` is intentionally a **zero-member virtual workspace**. Planned paths are metadata only until their implementation phase starts. See [ADR-0045](./architecture/adr/0045-implementation-repository-layout.md).
+Implementation package activation follows [ADR-0046](./architecture/adr/0046-bottom-up-implementation-order.md): contracts/state/persistence first, then the authenticated libp2p substrate and root dial policy, then higher network behaviours and product integrations.
 
 ## Architecture
 

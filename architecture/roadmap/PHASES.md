@@ -1,5 +1,7 @@
 # Phase summary
 
+> These are **scope/release phases**, not the literal construction sequence. Implementation SHALL follow [`BOTTOM-UP-IMPLEMENTATION-PLAN.md`](./BOTTOM-UP-IMPLEMENTATION-PLAN.md) / [ADR-0046](../adr/0046-bottom-up-implementation-order.md). In particular, bottom-up Stage 5 root connection/dial admission precedes Stage 10 Kademlia and Stage 11 AutoNAT/Relay/DCUtR activation.
+
 | Phase | Focus | Key deliverables | Exit condition |
 |---|---|---|---|
 | 0 | spikes | Claude/direct-v2/Kademlia/connectivity/identity-recovery evidence | blocking runtime unknowns measured; SPIKE-003/004 release gates pass |
@@ -14,3 +16,18 @@
 | 7 | security | endpoint/trust/direct-ingress rate limits, pre-auth abuse, metadata validation/fuzz, infrastructure-class hardening | threat-model regressions and hostile trusted-peer rate tests pass |
 | 8 | operations | packaging/migration/diagnostics/recovery UX | clean update/restart/rollback |
 | 9 | **mandatory Internet reachability** | AutoNAT v2, Relay v2 reservations/server option, DCUtR, address registry/path upgrade | required NAT/relay matrix and resource/security tests pass for standard-v1 release |
+
+
+## Canonical construction stages
+
+The implementation progress view is M1-M5 from the bottom-up plan:
+
+| Milestone | Construction content |
+|---|---|
+| M1 | foundation, neutral contracts, pure state machines, persistence |
+| M2 | minimal authenticated libp2p, root dial policy, direct v2, GossipSub, endpoint routing, basic discovery |
+| M3 | Kademlia, mandatory AutoNAT/Relay/DCUtR, full TransportRuntime conformance |
+| M4 | daemon/IPC, transportctl, desktop human client, Claude bridge |
+| M5 | Android, full adversarial matrix, packaging/migration, standard-v1 release |
+
+The phase table above remains the canonical scope taxonomy; the milestone/stage plan controls dependency order.

@@ -25,6 +25,7 @@
 | backpressure/message loss | bounded best-effort; direct rejects before endpoint acceptance | tune/flow-control, never hidden spool |
 | profile key loss | optional exact Ed25519 mnemonic recovery record; no silent regeneration | offline recovery drill; future threshold/hardware-backed identity |
 | recovery phrase theft | phrase equals full PeerId impersonation capability | offline-only export/import, no IPC/logging, physical backup discipline, revoke/rotate if exposed |
+| implementation sequencing bypass | ADR-0046 bottom-up gates; root dial admission before autonomous behaviours; incremental workspace activation | CI/stage review must block Kademlia/AutoNAT/Relay/DCUtR activation before lower gates pass |
 | over-abstraction | EndpointRegistry concrete internal module | add trait only with real second implementation |
 | software key file at rest | v1 owner-only filesystem; ADR-0038 v2.x encrypted envelope direction | SPIKE-007 selects audited format/library; HSM/keychain later |
 

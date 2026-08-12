@@ -49,3 +49,4 @@ All ADRs are **Accepted** architecture decisions unless later superseded.
 | [0043](./0043-multi-device-peer-identity.md) | Concurrent desktop/Android devices use distinct PeerIds; mnemonic restore is migration/recovery, not cloning. |
 | [0044](./0044-human-message-retention.md) | Human message content is durable only while outbound-pending, inbound-unread, or receiver-kept-after-read; ordinary delivered/read history evaporates. |
 | [0045](./0045-implementation-repository-layout.md) | Separate specifications under `architecture/`, thin applications under `apps/`, reusable crates under grouped `crates/`, and place tests/fixtures/spikes by proof scope. |
+| [0046](./0046-bottom-up-implementation-order.md) | Implement bottom-up through dependency gates: contracts/state/persistence before networking, root dial admission before autonomous libp2p behaviours, then runtime/clients/platforms. |
