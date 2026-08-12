@@ -109,11 +109,11 @@ Implement class-aware root dial admission plus pre-Noise inbound admission, addr
 
 ---
 
-## Phase 6H — human client data plane
+## Phase 6H-D — desktop human client
 
 **Objective:** provide a human-facing consumer without embedding libp2p or weakening transport boundaries.
 
-**Deliverables:** desktop/TUI/CLI client architecture of choice; IPC v2 data-plane adapter; EndpointId claim; contact/routing UI; channel UI; optional application-local history; endpoint-directory route selection.
+**Deliverables:** Rust/Slint desktop client; shared human-core/HumanChatV1/SQLite store; IPC v2 data-plane adapter; separate admin adapter; EndpointId claim; contact/routing/channel UI; application-local history; endpoint-directory route selection.
 
 **Acceptance:**
 
@@ -128,6 +128,16 @@ Implement class-aware root dial admission plus pre-Noise inbound admission, addr
 The settings/admin UX may live in the same executable but opens the separate admin IPC socket; it never upgrades the human data-plane connection.
 
 ---
+
+## Phase 6H-A — Android human client
+
+**Objective:** ship the same human application/network semantics on Android without a standalone daemon.
+
+**Deliverables:** Rust/Slint Android app, embedded LocalDataSession adapter, foreground-service runtime host with minimal platform shim, network-change integration, Android Keystore AES-GCM identity wrapping, SQLite store, notifications, Kademlia client-only/mobile resource profile.
+
+**Acceptance:** same wire/session fixtures as desktop; service/process/network lifecycle matrix; background-start/FGS policy gate; Keystore exact-seed/PeerId fixture; no admin handle in network callback graph; no hidden mailbox/push dependency.
+
+**Dependencies:** Phase 2-5 runtime plus SPIKE-008/SPIKE-009. The Android platform/UI work may proceed against the frozen connectivity contract/harness, but standard-v1 Android release acceptance is blocked on completion of the mandatory Phase-9 connectivity workstream and SPIKE-004 matrix.
 
 ## Phase 7 — security hardening
 

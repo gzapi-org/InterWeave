@@ -33,3 +33,7 @@ Define IPC before implementation. Bridge contains no private key or Swarm. Daemo
 ## Revisit conditions
 
 Revisit only if measured deployment burden of a daemon is unacceptable and requirements for identity/network continuity are relaxed.
+
+## Android amendment
+
+ADR-0041 selects an Android-specific deployment binding: the first-party Android app embeds the same Rust `TransportRuntime` inside a foreground-service host. This is not a second networking architecture: PeerId ownership, trust, discovery, endpoints, Kademlia and connectivity semantics remain identical. The amendment exists because a standalone desktop-style daemon is a poor Android lifecycle/process primitive. Desktop/server and Claude integrations retain the external daemon decision.

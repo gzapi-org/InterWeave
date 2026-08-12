@@ -8,7 +8,7 @@ Network producers can outrun local consumers. Unbounded queues are denial-of-ser
 
 ## Decision
 
-Keep 48 KiB payload and 128 KiB IPC JSON-body ceilings; 128-byte ChannelId; add 64-byte EndpointId, default 16/max64 configured endpoints, default 16/max32 advertised endpoints, one endpoint lease per IPC data-plane connection, short-lived endpoint-directory cache. Direct dedup in-flight reservations are explicitly bounded at 128 global / 8 per source peer by default (ceilings 512 / 32), aligned with direct in-flight admission. Existing queue/client/discovery bounds remain.
+Keep 48 KiB payload and 128 KiB IPC JSON-body ceilings; 128-byte ChannelId; add 64-byte EndpointId, default 16/max64 configured endpoints, default 16/max32 advertised endpoints, one endpoint lease per local data-plane session (IPC connection on desktop, embedded session on Android), short-lived endpoint-directory cache. Direct dedup in-flight reservations are explicitly bounded at 128 global / 8 per source peer by default (ceilings 512 / 32), aligned with direct in-flight admission. Existing queue/client/discovery bounds remain.
 
 Direct inbound messages are rejected as overloaded before `AcceptedV2` when the resolved endpoint queue is full. After Noise/trust admission, every inbound direct request also consumes a per-trusted-PeerId token bucket (default 120/minute, burst 32) and a global bucket (default 1200/minute, burst 256); rate overflow returns coarse `overloaded` before endpoint routing. Broadcast retains bounded best-effort local drop behavior.
 

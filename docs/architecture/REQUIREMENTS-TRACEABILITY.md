@@ -28,7 +28,7 @@ This matrix is an audit aid, not a replacement for the source task.
 | persistent identity/rotation/recovery | `IDENTITY.md`, `contracts/IDENTITY-RECOVERY.md`, ADR-0033, verify-only drill + separate config backup in configuration docs |
 | Noise boundary | ADR-0013, `SECURITY.md` |
 | group encryption decision | ADR-0014 |
-| embedded vs daemon | ADR-0015 |
+| desktop daemon vs Android embedded runtime | ADR-0015 + ADR-0041 + `contracts/LOCAL-CLIENT.md` |
 | multi-instance host model | ADR-0016 historical profile identity + ADR-0030 current endpoint routing |
 | local IPC v2 + endpoint leases + max-payload fit | `contracts/LOCAL-IPC.md`, `contracts/ENDPOINTS.md`, ADR-0017/0026/0030 |
 | IPC admin shutdown scoping | `LOCAL-IPC.md`, `plugin/LIFECYCLE.md`, ADR-0017 |
@@ -53,3 +53,7 @@ This matrix is an audit aid, not a replacement for the source task.
 | provider conformance tests | `contracts/DISCOVERY-CONFORMANCE.md`, `testing.md` |
 | phased roadmap/spikes | `roadmap/*` |
 | final CTO-style review | `FINAL-REVIEW.md` |
+
+| first-party desktop human client | `human-client-cross-platform.md`, `human-client-desktop.md`, ADR-0039/0040, `contracts/LOCAL-CLIENT.md` |
+| first-party Android human client | `human-client-android.md`, `android-key-custody.md`, ADR-0041/0042/0043, SPIKE-008/009 |
+| AutoNAT server SSRF restriction | `transport/libp2p/AUTONAT.md`, `HUMAN-CLIENT-REVIEW-2026-08-12.md` |

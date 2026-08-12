@@ -4,7 +4,7 @@ Status: architecture/design only. No human client implementation is included.
 
 ## Goal
 
-Support a human-facing desktop/TUI/CLI client while preserving one profile-scoped PeerId shared with Claude and other local applications.
+Support first-party desktop and Android human clients while preserving Model B endpoint-addressing semantics. Desktop may share one profile PeerId with Claude/other local apps. Android uses its own device profile/PeerId and embeds the same transport runtime.
 
 ```text
                             remote network
@@ -25,15 +25,15 @@ Support a human-facing desktop/TUI/CLI client while preserving one profile-scope
        Human client UI       Claude bridge
 ```
 
-The daemon remains the only owner of the private transport key, connections, discovery, GossipSub, direct protocols, and trust enforcement.
+On desktop the daemon owns the key/runtime. On Android the foreground-service-owned embedded `TransportRuntime` owns them. In both cases the human UI/domain layer does not own libp2p policy directly.
 
 ## Human-client process boundary
 
-A human client has two conceptual surfaces:
+A human client has two conceptual authority surfaces, with platform-specific bindings:
 
 ### Data-plane session
 
-Uses ordinary IPC v2:
+Desktop uses ordinary IPC v2; Android uses the equivalent in-process `LocalDataSession`:
 
 - claims configured endpoint `human`;
 - receives direct messages addressed to `human` or to a default route that resolves to `human`;
@@ -48,9 +48,9 @@ Uses ordinary IPC v2:
 
 Trust changes, endpoint configuration, key rotation, daemon shutdown, bootstrap/discovery edits, and similarly sensitive actions use the separate administrative IPC socket or an offline `transportctl`-equivalent identity operation. The human data-plane socket connection can never be upgraded to admin authority by changing `client.kind`.
 
-A network message displayed in the human client must never automatically exercise administrative operations. UI actions that mutate trust/configuration require an explicit local user gesture and an admin-socket connection authorized by local policy/OS access.
+A network message displayed in the human client must never automatically exercise administrative operations. UI actions that mutate trust/configuration require an explicit local user gesture and the platform admin binding (desktop admin socket; Android `LocalAdminPort`).
 
-A single executable may host both UI surfaces, but the architecture treats them as separate socket authority domains and separate IPC connections. A human app that keeps both sessions open consumes two of the profile's IPC client slots.
+On desktop, one executable may host both surfaces but uses separate socket authority domains/connections and therefore consumes two IPC slots while both are open. Android uses separate in-process authority objects and no IPC slot accounting.
 
 Identity recovery is intentionally **not** part of the administrative session: recovery words are private-key-equivalent and remain in the offline `transportctl identity backup/restore` path defined by ADR-0033.
 
@@ -267,6 +267,6 @@ endpoints:
 - human endpoint restart does not rotate PeerId;
 - offline endpoint creates no daemon-side backlog;
 - human app can persist local history without changing transport delivery claims;
-- admin actions require the separate admin socket and explicit local action;
+- admin actions require the platform admin binding (desktop admin socket; Android `LocalAdminPort`) and explicit local action;
 - broadcast delivery still follows each client's join state;
 - endpoint names never become asserted person/application identities in transport diagnostics or UI security indicators.

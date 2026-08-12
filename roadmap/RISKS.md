@@ -27,3 +27,12 @@
 | recovery phrase theft | phrase equals full PeerId impersonation capability | offline-only export/import, no IPC/logging, physical backup discipline, revoke/rotate if exposed |
 | over-abstraction | EndpointRegistry concrete internal module | add trait only with real second implementation |
 | software key file at rest | v1 owner-only filesystem; ADR-0038 v2.x encrypted envelope direction | SPIKE-007 selects audited format/library; HSM/keychain later |
+
+## Human desktop/Android risks
+
+- Android foreground-service policy/Play review changes may alter the valid always-reachable packaging; SPIKE-008 is a release gate.
+- Mobile OS process suspension means pure P2P cannot guarantee offline/background reception; UI/marketing must match actual state.
+- Slint platform/accessibility gaps could require a presentation-toolkit ADR change without changing human-core/transport.
+- Android Keystore wrapping protects storage, not a compromised running process after seed unwrap.
+- Reusing one recovery seed concurrently on multiple devices would create PeerId collision; ADR-0043 prohibits it.
+- Mobile Kademlia/relay/mDNS battery usage requires tuning inside fixed protocol/security bounds, not disabling validation/trust controls.

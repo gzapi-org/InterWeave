@@ -132,3 +132,9 @@ The Kademlia schema is fully defined. Per ADR-0034, a configured Kademlia entry 
 When enabled, `network_id` defines the private protocol namespace, `routing_peer_policy: data-plane-trusted` and `record_mode: disabled` remain fixed security invariants, and all documented cross-field/seed-source constraints are hard validation rules.
 
 Endpoint IDs are never stored as Kademlia keys/provider records. Endpoint discovery uses the separate trust-gated endpoint-directory protocol.
+
+## Human platform deployment
+
+`runtime.deployment` selects only the local process binding: `daemon-ipc` (desktop/server default) or `embedded-android`. It does not change network protocols. Android embedded mode disables IPC, requires an enabled configured human EndpointId, uses Kademlia client mode, and disables relay/AutoNAT server roles. `stay-reachable` selects the user-visible Android remote-messaging foreground-service lifecycle; `foreground-only` intentionally permits the route to disappear when the app runtime stops.
+
+Infrastructure Identify auto-candidate flags default **false**. Static configured AutoNAT servers/relays are preferred. Explicit opt-in to Identify-learned authorized infrastructure is a topology convenience, never trust promotion.

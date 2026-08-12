@@ -111,3 +111,9 @@ Minimum structured state/metrics:
 - relay-server reservations/circuits/bytes/rate-limit utilization when the server role is enabled.
 
 Logs must not include private keys, recovery phrases, application payloads, or unredacted endpoint/application metadata by default. Relay/probe PeerIds and addresses may be operationally sensitive and follow the configured diagnostic-redaction policy.
+
+## Human platform observability
+
+Normalized application-visible status may include `local_runtime_mode = daemon-ipc | embedded-android`, `endpoint_online`, and Android `availability_mode/status` without exposing secrets. Android diagnostics may report foreground-service state, current network class, Keystore protection class (`software|tee|strongbox|unknown`), and last network-rebuild reason. They must never log Ed25519 seed/recovery words/Keystore plaintext.
+
+Connectivity metrics additionally distinguish `peer_path_changes_total{from,to,reason}`. AutoNAT server diagnostics count target-policy rejections without logging arbitrary attacker-supplied internal addresses. Relayed pre-auth accounting attributes buckets to relay PeerId/connection when original source IP is unavailable.

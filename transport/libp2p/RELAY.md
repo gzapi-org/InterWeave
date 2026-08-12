@@ -24,7 +24,7 @@ A relay PeerId's authorization never authorizes the application peer at the othe
 Initial sources:
 
 1. statically configured relay multiaddrs with PeerId;
-2. fresh Identify protocol observations from already authorized connected peers when `use_authorized_identify_relays=true`.
+2. fresh Identify protocol observations from already authorized connected peers only when the operator explicitly sets `use_authorized_identify_relays=true`. This flag defaults **false**. Static configured relays have selection precedence; Identify-learned candidates are considered only when static candidates cannot satisfy the reservation target.
 
 Kademlia provider/value records are not used for relay service advertisement in v1. Kademlia may help reach an already trusted application/router peer, but it does not become a relay directory.
 
@@ -102,7 +102,7 @@ max_pending_control            64
 
 Architecture ceilings are defined in config/resource-limits. Rate limiters should be used where supported by the pinned rust-libp2p API.
 
-Server authorization is an explicit deployment policy. A project relay service does not grant clients application membership merely because it accepts a reservation/circuit.
+Standard project relay service admission is explicit: only peers classified `DataPlaneTrusted` or `ConnectivityInfrastructureOnly` may obtain reservations/circuits. Open anonymous relay service is not a standard-v1 deployment mode and would require a separate service-policy ADR plus stronger abuse controls. A project relay service does not grant clients application membership merely because it accepts a reservation/circuit.
 
 ## 9. Security/privacy
 

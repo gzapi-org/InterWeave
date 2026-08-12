@@ -81,3 +81,9 @@ Broadcast local delivery may drop according to per-client bounded policy under o
 | DCUtR attempts per peer | 1 | 4 | defer/cooldown |
 
 These limits share the root connection/dial budget; reachability behaviours do not receive an unbounded side channel around `DialAdmissionGate`.
+
+## Human/mobile resource profile
+
+Human application SQLite/history has application-level retention limits and is not part of transport resource ceilings. Android uses the same network hard ceilings; server roles are disabled, Kademlia is client-only, and mobile timer/query defaults may be lower-power within the frozen ranges. Android mDNS multicast resources are acquired only while the provider is active.
+
+The embedded Android LocalDataSession uses the same default local event queue (256) and endpoint/direct admission limits as a desktop IPC data client; removing serialization does not justify an unbounded in-process queue.

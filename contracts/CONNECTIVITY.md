@@ -67,12 +67,13 @@ Administrative/raw details—specific infrastructure PeerIds, addresses, probe t
 ```text
 ConnectivityChanged { summary }
 PeerConnected { peer, path, observed_at }
+PeerPathChanged { peer, previous: direct | relayed, current: direct | relayed, reason, observed_at }
 PeerDisconnected { peer, reason_class, observed_at }
 ```
 
 `ConnectivityChanged` is edge/state notification, not an append-only history. Slow IPC clients may receive a coalesced latest state rather than every intermediate transition.
 
-A path change is operational metadata. It does not create a new transport message, reset EndpointId identity, or imply stream migration.
+`PeerConnected` is emitted only when a logical application peer transitions from no usable application connection to at least one usable connection. A successful DCUtR hole punch for an already-connected relayed peer therefore **does not emit a second `PeerConnected`**. After the direct connection satisfies the configured stability gate, emit `PeerPathChanged { previous: relayed, current: direct, reason: dcutr }`; a coalesced `ConnectivityChanged` may accompany it. Existing streams are not claimed to migrate.
 
 ## 6. Path-selection semantics
 
@@ -124,6 +125,12 @@ Connectivity status may reveal that a profile uses relays or lacks direct inboun
 
 Relays are availability/metadata infrastructure, not anonymity infrastructure or trust authorities. End-to-end peer authentication/encryption must remain intact across relayed paths.
 
-## 10. No durability
+## 10. Relayed inbound pre-auth accounting
+
+Before the end-peer Noise handshake completes, no authenticated application PeerId exists. Direct-listener handshakes use the transport source-address bucket from the pre-auth admission policy. For an inbound Circuit Relay path where the original client IP is unavailable, the destination MUST charge pending/rate admission to the **authenticated relay transport connection / relay PeerId** plus the global pre-auth caps. It MUST NOT create unbounded pseudo-source buckets from circuit metadata. This intentionally lets one abusive relay exhaust its own bucket. Relay-server `max_circuits_per_source_peer` is complementary infrastructure-side protection, not a substitute for destination-side admission.
+
+The rule is part of `TransportRuntime` and applies equally to desktop daemon and Android embedded deployment modes.
+
+## 11. No durability
 
 AutoNAT state, relay reservations, relay-derived addresses, DCUtR attempts and path preference are runtime state. They are rebuilt after restart/network change. None is a message queue, mailbox, delivery receipt, or durable membership record.

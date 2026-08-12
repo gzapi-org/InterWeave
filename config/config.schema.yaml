@@ -2,6 +2,17 @@
 schema_version: 2
 profile:
   name: string[1..64]
+runtime:
+  # Deployment binding for the same transport/runtime contracts.
+  deployment: enum[daemon-ipc,embedded-android] = daemon-ipc
+  android:
+    # Used only when deployment=embedded-android. The Android foreground service
+    # hosts TransportRuntime in-process and owns this configured EndpointId lease.
+    endpoint: EndpointId? = human
+    availability_mode: enum[foreground-only,stay-reachable] = foreground-only
+    foreground_service_type: literal[remoteMessaging] = remoteMessaging
+    key_storage: literal[android-keystore-aesgcm-wrap] = android-keystore-aesgcm-wrap
+    key_unlock_policy: enum[background-compatible,user-presence] = background-compatible
 transport:
   backend: enum[libp2p]
   listen:
@@ -64,7 +75,7 @@ transport:
       client:
         enabled: literal[true] = true
         static_servers: list[multiaddr-with-peer-id, max=16]
-        use_authorized_identify_servers: bool = true
+        use_authorized_identify_servers: bool = false
         required_distinct_successes: integer[1..4] = 2
         success_evidence_ttl: duration[1m..1h] = 15m
         retry_interval: duration[10s..5m] = 30s
@@ -82,7 +93,7 @@ transport:
       client:
         enabled: literal[true] = true
         static_relays: list[multiaddr-with-peer-id, max=16]
-        use_authorized_identify_relays: bool = true
+        use_authorized_identify_relays: bool = false
         target_reservations_private_or_unknown: integer[1..4] = 2
         target_reservations_public: integer[0..4] = 1
         max_reservations: integer[1..8] = 4
@@ -113,6 +124,8 @@ transport:
     #   relay.server.max_reservations_per_peer <= relay.server.max_reservations
     #   relay.server.max_circuits_per_peer <= relay.server.max_circuits
     #   dcutr.max_inflight_per_peer <= dcutr.max_inflight
+    #   Identify-learned relay/AutoNAT candidates are disabled by default; when explicitly enabled,
+    #   static configured candidates have selection precedence until their target cannot be met.
     #   every static relay/AutoNAT server PeerId is in either trust.allowed_peers
     #   or transport.connectivity.infrastructure.allowed_peers
     #   a PeerId in both sets is treated as DataPlaneTrusted for protocol admission
@@ -221,6 +234,8 @@ discovery:
 channels:
   desired: list[ChannelId, max=128]
 ipc:
+  # Android embedded mode sets this false; daemon-ipc sets it true.
+  enabled: bool = true
   # IPC protocol version is negotiated in hello and is deliberately not an
   # operator profile setting. The body ceiling is likewise a v2 protocol constant.
   socket_layout: literal[split-data-admin] = split-data-admin
@@ -243,3 +258,10 @@ ipc:
 observability:
   log_level: enum[error,warn,info,debug] = info
   payload_logging: literal[false]
+
+# Runtime cross-field validation:
+#   runtime.deployment=daemon-ipc => ipc.enabled=true
+#   runtime.deployment=embedded-android => ipc.enabled=false
+#   runtime.deployment=embedded-android => runtime.android.endpoint references an enabled configured EndpointId
+#   runtime.deployment=embedded-android => connectivity AutoNAT/relay server roles are false and Kademlia mode is client
+#   runtime.android.availability_mode=stay-reachable => foreground_service_type=remoteMessaging

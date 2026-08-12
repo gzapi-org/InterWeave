@@ -87,7 +87,7 @@ Endpoint lease is exclusive and connection-bound. Client cannot change EndpointI
 ### Capabilities
 
 - `events`: receive eligible runtime events;
-- `commands`: ordinary non-administrative transport commands;
+- `commands`: ordinary non-administrative transport commands, including `connectivity()` / normalized `server_state.connectivity`;
 - `endpoints.query`: query a trusted remote peer's advertised endpoint directory;
 - `admin.endpoints`: inspect/revoke local endpoint leases or mutate endpoint config through an administrative adapter;
 - `admin.shutdown`: invoke transport `shutdown(grace)`.

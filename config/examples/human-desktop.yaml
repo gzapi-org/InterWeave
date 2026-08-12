@@ -1,0 +1,45 @@
+# First-party desktop human client sharing a daemon profile with optional Claude endpoint.
+schema_version: 2
+runtime:
+  deployment: daemon-ipc
+profile: { name: human-desktop }
+transport:
+  backend: libp2p
+  listen: { addresses: ["/ip4/0.0.0.0/tcp/4001"] }
+  connectivity:
+    required: true
+    infrastructure: { allowed_peers: ["<INFRA_A>", "<INFRA_B>"] }
+    autonat:
+      version: 2
+      client:
+        enabled: true
+        static_servers: ["/dns4/infra-a.example/tcp/4001/p2p/<INFRA_A>", "/dns4/infra-b.example/tcp/4001/p2p/<INFRA_B>"]
+        use_authorized_identify_servers: false
+      server: { enabled: false }
+    relay:
+      client:
+        enabled: true
+        static_relays: ["/dns4/infra-a.example/tcp/4001/p2p/<INFRA_A>", "/dns4/infra-b.example/tcp/4001/p2p/<INFRA_B>"]
+        use_authorized_identify_relays: false
+      server: { enabled: false }
+    dcutr: { enabled: true }
+identity: { algorithm: ed25519 }
+trust: { policy: static-allowlist, allowed_peers: ["<PEER_A>"] }
+endpoints:
+  registration_policy: configured-only
+  default_direct_endpoint: human
+  directory: { enabled: true }
+  entries:
+    - { id: human, enabled: true, advertise: true, allowed_client_kinds: [human-client], inbound: {policy: inherit-profile-trust}, outbound: {policy: inherit-profile-trust} }
+    - { id: claude, enabled: true, advertise: true, allowed_client_kinds: [claude-channel], inbound: {policy: inherit-profile-trust}, outbound: {policy: inherit-profile-trust} }
+discovery:
+  providers:
+    - { type: peer-cache, enabled: true, priority: 10, config: { ttl: 7d, max_entries: 1024 } }
+    - { type: kademlia, enabled: true, priority: 40, config: { config_version: 1, network_id: human-network, mode: client, routing_peer_policy: data-plane-trusted, seed_sources: [peer-cache], record_mode: disabled } }
+ipc:
+  enabled: true
+  socket_layout: split-data-admin
+  max_clients: 16
+  max_admin_clients: 4
+  keepalive: { enabled: true, require_for_endpoint_lease: true, interval: 30s, response_timeout: 10s, max_missed: 3 }
+channels: { desired: [] }

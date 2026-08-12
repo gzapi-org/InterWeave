@@ -3,8 +3,10 @@
 | Component | Owns | Must not own |
 |---|---|---|
 | Claude Channel bridge | MCP Channel capability, tools, event translation, instructions, one local EndpointId lease, reply tokens | discovery, dialing, keys, GossipSub mesh, endpoint/trust administration |
-| Human client data plane | human UI transport operations, one local EndpointId lease, application-local history/rendering | libp2p Swarm, transport private key, implicit trust mutation |
-| Human/admin settings path | explicit local trust/config/endpoint administration over the admin socket | automatic actions triggered by network payloads |
+| Human client shared core | Rust contacts/conversations/HumanChatV1/local history/Slint view model | trust grants, transport key, discovery/connectivity policy |
+| Desktop human binding | IPC v2 data session + optional separate admin connection | libp2p Swarm, transport private key |
+| Android human binding | embedded LocalDataSession in foreground-service-owned Rust runtime; platform lifecycle bridge | independent second Swarm, hidden durable mailbox |
+| Human/admin settings path | explicit local trust/config/endpoint administration (desktop admin socket; Android LocalAdminPort) | automatic actions triggered by network payloads |
 | IPC server | separate data/admin socket acceptors, authority-domain tagging, local handshake/capability grants, endpoint lease lifecycle on data socket, bounded per-client queues | peer discovery, application semantics |
 | EndpointRegistry (runtime) | configured endpoint set, exclusive leases, default route, endpoint policy intersection, local route admission | human/application identity, libp2p protocol mechanics |
 | Transport runtime | neutral command/event semantics, orchestration, endpoint-aware direct admission, health | Claude-specific prompts/tools |

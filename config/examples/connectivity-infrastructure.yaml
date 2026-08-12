@@ -23,7 +23,7 @@ transport:
       client:
         enabled: true
         static_servers: []
-        use_authorized_identify_servers: true
+        use_authorized_identify_servers: false  # static-only by default; opt in deliberately
         required_distinct_successes: 2
         success_evidence_ttl: 15m
         retry_interval: 30s
@@ -41,7 +41,7 @@ transport:
       client:
         enabled: true
         static_relays: []
-        use_authorized_identify_relays: true
+        use_authorized_identify_relays: false  # static-only by default; opt in deliberately
         target_reservations_private_or_unknown: 2
         target_reservations_public: 1
         max_reservations: 4

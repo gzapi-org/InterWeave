@@ -6,7 +6,7 @@ A transport profile owns one persistent PeerId, configuration namespace, socket 
 
 ## Local endpoint lifecycle
 
-Configured EndpointIds exist independently of client processes. A route becomes **available** only while one IPC v2 connection owns its exclusive lease.
+Configured EndpointIds exist independently of client processes. A route becomes **available** only while one local data-plane session owns its exclusive lease (IPC v2 connection on desktop; embedded service session on Android).
 
 ```text
 configured+enabled
@@ -34,11 +34,15 @@ No messages are retained while unavailable.
 
 A second bridge cannot claim the same EndpointId. It must have another configured route if simultaneous direct addressability is desired.
 
-## Human client lifecycle
+## Desktop human client lifecycle
 
-Human data-plane client follows the same lease model. UI restart releases then reacquires `human` without changing PeerId. Its optional local application message/history database is independent from daemon state.
+Desktop follows IPC v2. UI startup opens its application database, connects/starts the profile daemon as needed, negotiates keepalive, and acquires `human`. UI exit releases the endpoint while the daemon may remain alive for Claude/other endpoints. Settings open the separate admin socket only on explicit user action.
 
-Administrative settings use a separately capability-authorized IPC connection; network messages do not automatically exercise that authority.
+## Android human client lifecycle
+
+Android foreground-service host owns the embedded Rust runtime and `human` local session. Activity recreation does not release the lease while the service remains alive. Service/process stop releases the lease and all peers see the normal offline/unreachable semantics. Stay-reachable mode is explicit user-visible foreground-service operation; foreground-only mode intentionally goes offline when the runtime stops. Android network change invalidates/rebuilds AutoNAT/relay/address state without changing PeerId.
+
+Administrative settings use a distinct in-process `LocalAdminPort`; message/event callbacks do not receive it.
 
 ## Daemon lifecycle
 
@@ -61,9 +65,9 @@ Administrative settings use a separately capability-authorized IPC connection; n
 - trust reload: disconnect unauthorized peers and recompute endpoint policy intersections;
 - endpoint config reload: revoke now-invalid lease; never auto-rebind.
 
-## Optional Kademlia lifecycle
+## Kademlia lifecycle
 
-Unchanged by Model B. Kademlia remains disabled unless explicitly enabled on a supporting build. Endpoint records are never placed in the DHT.
+Kademlia is standard-v1/default-enabled per ADR-0034. Android runs it in client mode only. Endpoint records are never placed in the DHT. When the Android runtime is stopped, Kademlia activity stops with it and rebuilds from normal seeds/cache after restart.
 
 
 ## Mandatory reachability lifecycle

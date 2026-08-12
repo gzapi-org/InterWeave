@@ -92,3 +92,12 @@ This repository records architectural conclusions, not copied implementation. So
 - libp2p Circuit Relay concept/security model: https://docs.libp2p.io/concepts/circuit-relay/
 
 Material design consequences are summarized in `research/nat-traversal.md`.
+
+## Android human-client architecture (checked 2026-08-12)
+
+- Android foreground-service types / remoteMessaging / start restrictions / timeouts: Android Developers (`developer.android.com/develop/background-work/services/fgs/...`).
+- Android Keystore security model: Android Developers (`developer.android.com/privacy-and-security/keystore`).
+- Android Wi-Fi multicast/mDNS lifecycle: Android Developers `WifiManager.MulticastLock` / `NsdManager`.
+- Slint desktop + Android Rust platform support and accessibility properties: current Slint documentation.
+
+These sources inform platform binding only; transport/network contracts remain project-owned.

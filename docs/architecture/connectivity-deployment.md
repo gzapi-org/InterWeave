@@ -110,7 +110,7 @@ Laptop/mobile network changes are expected. On change:
 4. reconcile relay target;
 5. update advertised addresses;
 6. re-evaluate direct-vs-relay paths;
-7. preserve profile PeerId, trust config, EndpointId configuration and active local IPC leases unless the daemon itself restarts.
+7. preserve profile PeerId, trust config and EndpointId configuration; preserve active local-session leases when their owning host remains alive (desktop daemon IPC session or Android foreground-service session).
 
 ## 9. Outage behavior
 
@@ -148,3 +148,11 @@ Before declaring standard-v1 Internet-ready:
 - verify relay path still authenticates the intended end PeerId;
 - verify successful and failed DCUtR do not change message/EndpointId semantics;
 - record measured reservation/probe/circuit resource use.
+
+## Infrastructure candidate consent/defaults
+
+Client discovery of relay/AutoNAT service through Identify is **off by default**. Production/default profiles list infrastructure PeerIds/multiaddrs explicitly. If an operator enables Identify-learned authorized infrastructure, static candidates retain selection precedence until the configured observer/reservation target cannot be met. This avoids silently using a trusted contact's laptop as relay/probe infrastructure.
+
+## Android deployment note
+
+The Android first-party client uses the same mandatory AutoNAT-v2/Relay-v2/DCUtR client stack while its embedded foreground-service runtime is active. It never enables relay/AutoNAT server roles and runs Kademlia client mode only. Mobile OS process absence is honest offline state; Phase 9 does not imply a hidden cloud push service.

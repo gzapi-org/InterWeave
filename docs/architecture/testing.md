@@ -43,7 +43,7 @@ Every provider runs `contracts/DISCOVERY-CONFORMANCE.md` tests. Endpoint routing
 4. omitted destination endpoint reaches exactly configured remote default;
 5. missing/offline default returns coarse no_route / local RemoteEndpointUnavailable;
 6. explicit unknown/offline/endpoint-policy-denied routes are indistinguishable remotely as no_route;
-7. sender source endpoint is daemon-derived from IPC lease and cannot be spoofed in command params;
+7. sender source endpoint is runtime-derived from the local-session lease (desktop IPC or Android embedded) and cannot be spoofed in command params;
 8. AcceptedV2 is not emitted until target endpoint queue admission succeeds;
 9. full target endpoint queue -> overloaded rejection, no false acceptance;
 10. retry of an accepted default-routed message with matching content fingerprint returns the originally stored resolved endpoint even after default changes, with no second local delivery;
@@ -231,3 +231,24 @@ Phase 4/7 security tests additionally assert:
 - a poisoned never-successful address for trusted PeerId A that authenticates as B is quarantined as an address failure and does not suppress a concurrently known-good A address or advance A's peer punitive tier solely from the mismatch;
 - trusted-peer direct ingress token buckets enforce 120/minute burst-32 per PeerId and 1200/minute burst-256 global defaults with coarse `overloaded` response;
 - all `no_route` causes have identical wire code/shape; exact timing equivalence is not asserted and remains a documented residual side channel.
+
+## Desktop and Android human-client architecture tests
+
+Shared conformance:
+- desktop IPC and Android embedded adapters run the same LOCAL-CLIENT session/lease/source-endpoint/queue tests;
+- HumanChatV1 parser rejects oversize/invalid JSON and treats direct transport metadata as authoritative;
+- desktop and Android exchange the same transport/direct/GossipSub golden fixtures.
+
+Desktop:
+- daemon start/attach, shared profile with Claude, data/admin socket split, UI crash/reconnect, daemon restart, SQLite migration failure isolation.
+
+Android:
+- Activity recreation while service remains; service/process kill/restart; foreground-only vs stay-reachable; background-start denial; persistent-notification lifecycle; Wi-Fi/cellular transition; Kademlia client-only; relay fallback/DCUtR; mDNS multicast/permission lifecycle; Keystore wrap/user-presence/background-compatible modes; message callback graph cannot access LocalAdminPort.
+
+Phase-9 V-review additions:
+- authorized AutoNAT probe client requests loopback/private/ULA/link-local/multicast/unrelated-public/DNS targets and server emits no dial; only literal candidate IP equal to observed requester source IP is eligible;
+- Identify infrastructure auto-candidate flags default false; when enabled static candidates win until target cannot be met;
+- relayed inbound handshakes with no source IP consume the relay-connection/PeerId pre-auth bucket plus global cap;
+- relay service refuses unauthorized/open-anonymous reservations under standard policy;
+- `connectivity()` succeeds with ordinary `commands`;
+- stable DCUtR upgrade yields one PeerConnected followed by PeerPathChanged, never a second logical connect event.

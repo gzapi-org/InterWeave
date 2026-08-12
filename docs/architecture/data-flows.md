@@ -152,3 +152,20 @@ DCUtRManager --bounded/cooldown--> simultaneous direct attempt
 ```
 
 There is no claim that existing streams migrate. New work prefers the stable direct path.
+
+## Desktop human local flow
+
+```text
+Slint UI -> human-core -> IPC v2 data client -> LocalDataSession semantics -> EndpointRegistry -> transport
+Settings gesture -> admin IPC -> LocalAdminPort semantics
+```
+
+## Android human local flow
+
+```text
+Slint Activity -> human-core -> embedded LocalDataSession -> EndpointRegistry -> TransportRuntime -> libp2p
+Explicit settings gesture ---------------------------> LocalAdminPort
+Android Service/Connectivity/Keystore callbacks -> platform adapter -> normalized runtime lifecycle events
+```
+
+Remote network messages never flow into the Android `LocalAdminPort`. Activity lifecycle is not network identity lifecycle while the foreground service remains active.

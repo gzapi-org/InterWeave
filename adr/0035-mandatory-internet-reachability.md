@@ -22,7 +22,7 @@ The **standard v1 build and release include the complete Internet-reachability s
 2. Circuit Relay **v2 client transport** and reservation management are mandatory and active for every standard profile.
 3. DCUtR is mandatory and is attempted for eligible trusted relayed peer connections.
 4. Identify remains mandatory and is explicitly wired to the reachability/address manager; rust-libp2p components are not assumed to integrate themselves implicitly.
-5. AutoNAT-server and relay-server roles are supported by the standard build but are explicit infrastructure roles, disabled unless configured.
+5. AutoNAT-server and relay-server roles are supported by the standard build but are explicit infrastructure roles, disabled unless configured. Android first-party profiles are client-only for these roles.
 6. `SPIKE-004` becomes a **release gate that validates/tunes this fixed architecture**. It no longer decides whether Phase 9 exists.
 7. Phase 9 is required for the standard-v1 release. A build that omits AutoNAT v2, relay-client support, or DCUtR is a non-standard/reduced build and must advertise that limitation explicitly.
 
@@ -49,7 +49,7 @@ Default reservation targets are:
 - direct reachability `VerifiedPublic`: **1** warm relay reservation;
 - maximum active reservations: **4**.
 
-Relays are selected from static configured relay addresses and fresh authorized Identify capability observations. Relay service discovery never uses Kademlia provider/value records.
+Relays are selected from static configured relay addresses by default. Identify-learned relay/probe candidates require explicit opt-in (`use_authorized_identify_* = true`), and static candidates have selection precedence until they cannot meet the configured target. Relay service discovery never uses Kademlia provider/value records.
 
 ### Path selection
 

@@ -70,7 +70,7 @@ DCUtR does not authenticate a human/application endpoint. The PeerId security se
 - timeout or simultaneous-open failure -> keep relay, record failure class, enter cooldown;
 - generated direct dial denied by root policy/resource limit -> keep relay, do not reset punitive backoff;
 - relay disappears during punch -> normal connectivity recovery may establish another relay/direct path; no durability guarantee;
-- success -> wait for direct stability before redundant relay retirement.
+- success -> wait for direct stability, then emit `PeerPathChanged{relayed->direct, reason=dcutr}` for the existing logical peer before redundant relay retirement; do not emit a second `PeerConnected`.
 
 ## 8. Observability
 
@@ -87,4 +87,4 @@ Diagnostics attribute resulting dials to `dcutr-hole-punch`.
 
 ## 9. Tests
 
-Required tests include success, NAT-induced failure, unsupported peer, concurrent-limit exhaustion, cooldown enforcement, root dial denial, relay survival after failed punch, direct stability rollback, network change, and no change to Model-B EndpointId routing semantics.
+Required tests include success, NAT-induced failure, unsupported peer, concurrent-limit exhaustion, cooldown enforcement, root dial denial, relay survival after failed punch, direct stability rollback, network change, exactly one logical `PeerConnected` plus `PeerPathChanged` on stable upgrade, and no change to Model-B EndpointId routing semantics.

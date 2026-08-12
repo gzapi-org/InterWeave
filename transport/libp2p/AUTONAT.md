@@ -31,7 +31,7 @@ AutoNAT must not modify trust, discovery membership, EndpointId state, or applic
 A server is eligible only when all are true:
 
 - its PeerId is `DataPlaneTrusted` or `ConnectivityInfrastructureOnly`;
-- it is configured statically or learned through an already-authorized Identify/control connection according to policy;
+- it is configured statically, or (only when `use_authorized_identify_servers=true`) learned through an already-authorized Identify/control connection; this flag defaults false and static servers have selection precedence until they cannot meet the observer target;
 - it advertises/negotiates the required AutoNAT-v2 server protocol on fresh evidence;
 - it is not in per-server cooldown/backoff;
 - global probe/resource budgets permit work.
@@ -104,7 +104,16 @@ Default limits:
 
 The server accepts probe service only from peers admitted by its configured service policy; standard project deployments use `DataPlaneTrusted` or `ConnectivityInfrastructureOnly` rather than an open anonymous service.
 
-Server events/requests must share global connection/dial limits. A probe-created dial uses origin `autonat-probe` and passes `DialAdmissionGate`.
+**Dial-back target restriction is mandatory.** The probe server compares every requested candidate against the requester's observed transport source address before any dial is admitted:
+
+- candidate must contain a literal IP address; the probe server does not resolve requester-supplied DNS names;
+- candidate IP must equal the observed source IP of the authenticated probing connection; only the candidate port/transport may vary within protocol policy;
+- loopback, unspecified, multicast, link-local, RFC1918 private IPv4, IPv6 ULA, and other non-global/special-use destinations are rejected under the standard Internet-service policy even if supplied by an authorized peer;
+- mismatch/rejection is a probe failure and never becomes a generic dial request.
+
+This is an SSRF/network-scanning boundary for the server role. Phase-9 conformance must attempt internal, loopback, and unrelated-public-IP targets from an otherwise authorized client and prove no dial is emitted.
+
+Server events/requests must share global connection/dial limits. A permitted probe-created dial uses origin `autonat-probe` and passes `DialAdmissionGate`.
 
 ## 8. Security
 
@@ -113,7 +122,8 @@ Threats and responses:
 - lying probe server -> multi-observer evidence + TTL + relay fallback;
 - colluding servers -> operational independence recommendation; no claim of Byzantine proof;
 - probe flood -> server rate/concurrency/timeout budgets;
-- address amplification/SSRF -> bounded local candidate set only;
+- client-side address amplification -> bounded local candidate set only;
+- probe-server SSRF/scanning -> observed-source-IP equality + literal/global-address filter before dial admission;
 - infrastructure privilege escalation -> ADR-0036 protocol matrix;
 - stale public classification -> evidence expiry/network-change invalidation.
 
@@ -135,4 +145,4 @@ Raw probe payloads are not application data and should not be logged verbatim wh
 
 ## 10. Conformance tests
 
-At minimum test distinct-observer counting, TTL expiry, conflicting evidence, network change invalidation, unauthorized server exclusion, behavior-originated dial admission, global/per-peer bounds, server-role quotas, and no data-plane authority leakage.
+At minimum test distinct-observer counting, TTL expiry, conflicting evidence, network change invalidation, unauthorized server exclusion, behavior-originated dial admission, global/per-peer bounds, server-role quotas, observed-source-IP dial-back restriction (including loopback/private/unrelated-public/DNS rejection), and no data-plane authority leakage.

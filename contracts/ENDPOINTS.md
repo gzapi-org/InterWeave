@@ -40,7 +40,7 @@ Suggested endpoint IDs such as `human` and `claude` are conventions, not reserve
 
 ## Configured endpoint set
 
-A profile may configure at most 64 endpoints. Registration is **configured-only** in transport v2: an ordinary IPC client cannot create a new endpoint by choosing an arbitrary name at handshake time.
+A profile may configure at most 64 endpoints. Registration is **configured-only** in transport v2: an ordinary local data-plane client cannot create a new endpoint by choosing an arbitrary name at session/handshake establishment.
 
 Conceptually:
 
@@ -57,7 +57,7 @@ EndpointConfig {
 
 Endpoint policy can only narrow profile trust; it can never authorize a PeerId rejected by `PeerTrustPolicy`.
 
-`allowed_client_kinds` is an accidental-misbinding guard, not authentication. The same-OS-user residual threat remains governed by the IPC security model.
+`allowed_client_kinds` is an accidental-misbinding guard, not authentication. On desktop the same-OS-user residual threat remains governed by the IPC security model. Android embedded mode treats this field only as in-process configuration hygiene.
 
 ## Default direct endpoint
 
@@ -75,11 +75,11 @@ The default must reference an enabled configured endpoint. If no default exists,
 
 ## Local endpoint lease
 
-Every data-plane IPC client that sends or receives direct messages owns at most one exclusive endpoint lease.
+Every direct-capable `LocalDataSession` that sends or receives direct messages owns at most one exclusive endpoint lease. Desktop binds that session to one IPC connection; Android embedded mode binds it to the foreground-service/runtime session.
 
 Properties:
 
-- lease is bound to one IPC connection;
+- lease is bound to one local data-plane session (one IPC connection on desktop; one embedded session generation on Android);
 - malformed EndpointId -> local `InvalidArgument`;
 - configured endpoint absent -> local `EndpointUnknown`;
 - configured endpoint disabled -> local `EndpointDisabled`;
@@ -87,12 +87,12 @@ Properties:
 - ungranted capability/connection authorization -> local `CapabilityDenied`;
 - at most one live connection owns an EndpointId at a time;
 - duplicate claim -> `EndpointInUse`;
-- lease disappears immediately on IPC disconnect or bounded negotiated IPC keepalive expiry;
+- lease disappears immediately on local-session teardown/revocation; desktop additionally uses IPC disconnect or bounded negotiated keepalive expiry; Android uses foreground-service/process session lifetime;
 - no message buffering is created while an endpoint is unleased;
-- reconnect performs a new handshake and obtains a fresh opaque 128-bit local lease epoch; the value must not repeat across daemon restart/reconnect within any practical stale-route lifetime;
+- reconnect/recreate performs a new local-session establishment and obtains a fresh opaque 128-bit local lease epoch; the value must not repeat across daemon restart/reconnect within any practical stale-route lifetime;
 - ordinary remote messages can never create, steal, transfer, or enable an endpoint lease.
 
-An administrative client connected through the separate admin IPC socket and granted `admin.endpoints` may inspect or revoke a local lease. The data socket, including Claude Channel clients, can never grant that administrative capability.
+Desktop administration uses the separate admin IPC socket and `admin.endpoints`; Android embedded mode uses a distinct in-process `LocalAdminPort` that is never handed to remote-event/message handlers. In neither mode can a data-plane session grant itself administrative authority.
 
 ## Direct destination
 
@@ -105,7 +105,7 @@ DirectDestination {
 }
 ```
 
-The sending IPC connection's active endpoint lease supplies the required `source_endpoint`; callers cannot spoof another local endpoint.
+The sending local data-plane session's active endpoint lease supplies the required `source_endpoint`; callers cannot spoof another local endpoint.
 
 ## Inbound routing order
 
@@ -118,8 +118,8 @@ For an authenticated direct request:
 5. reservation owner resolves destination endpoint: explicit endpoint or configured default;
 6. apply endpoint inbound policy as a narrowing filter over profile trust;
 7. require an active exclusive local lease for that endpoint;
-8. require capacity in that endpoint's bounded IPC event queue;
-9. enqueue exactly one normalized `MessageReceived` event to the owning IPC client;
+8. require capacity in that endpoint owner's bounded local event queue;
+9. enqueue exactly one normalized `MessageReceived` event to the owning local data-plane session;
 10. store the positive dedup entry with resolved endpoint;
 11. only then send transport `Accepted`.
 
@@ -218,7 +218,7 @@ remote_endpoint = source_endpoint
 local_endpoint = destination_endpoint
 ```
 
-A reply is allowed only while the replying client still owns the same `local_endpoint` lease. The reply uses that leased endpoint as the source and sends to the original remote source endpoint.
+A reply is allowed only while the replying local data-plane session still owns the same `local_endpoint` lease. The reply uses that leased endpoint as the source and sends to the original remote source endpoint.
 
 A stale token or route must never silently fall back to the profile default endpoint or another local endpoint.
 
@@ -287,11 +287,11 @@ Defaults / ceilings:
 | endpoint-directory cache TTL | 60 s | 5 min |
 | endpoint-directory queries/peer/minute | 12 | 60 |
 | endpoint-directory inflight/profile | 16 | 64 |
-| one endpoint lease per IPC client | 1 | 1 |
+| one endpoint lease per local data-plane session | 1 | 1 |
 | direct dedup reservation/global | 128 | 512 |
 | direct dedup reservation/source peer | 8 | 32 |
 
-Existing per-client event-queue and direct-send concurrency limits continue to apply.
+Existing per-session event-queue and direct-send concurrency limits continue to apply. Desktop maps these to IPC-client limits; Android maps them to the embedded local-session adapter.
 
 ## Versioning
 
@@ -309,7 +309,7 @@ Endpoint-directory protocol versioning is independent from direct protocol versi
 - peer-only destination resolves exactly one configured default endpoint;
 - no default -> coarse remote `no_route`;
 - endpoint-specific allowlist can narrow but never widen profile trust;
-- source endpoint is taken from IPC lease, not caller-controlled payload/params;
+- source endpoint is taken from the local-session lease, not caller-controlled payload/params;
 - reply routes back to the original remote source endpoint;
 - stale reply token never falls back to another local route;
 - directory lists only active advertised endpoints and respects trust;

@@ -113,7 +113,7 @@ This exposes reachability state without exposing AutoNAT server identities, rela
 
 ## Local endpoint context
 
-Direct-capable local clients operate under an exclusive configured EndpointId lease established by the IPC binding. The generic command dispatcher receives that EndpointId as trusted local caller context; callers do not provide an arbitrary `source_endpoint` argument.
+Direct-capable local clients operate under an exclusive configured EndpointId lease established by the platform's `LOCAL-CLIENT` binding. Desktop obtains it through IPC v2; Android embedded mode obtains it through the in-process local-session adapter. The generic command dispatcher receives that EndpointId as trusted local session context; callers do not provide an arbitrary `source_endpoint` argument.
 
 A client without an endpoint lease may use diagnostics and broadcast operations if otherwise authorized, but direct `send` fails `EndpointNotRegistered`.
 
@@ -205,6 +205,7 @@ Returns normalized peer diagnostics: identity, trust state, connection state, pr
 
 ```text
 PeerConnected { peer, path: direct | relayed, observed_at }
+PeerPathChanged { peer, previous: direct | relayed, current: direct | relayed, reason_class, observed_at }
 PeerDisconnected { peer, reason_class, observed_at }
 ConnectivityChanged { summary: ConnectivitySummary }
 MessageReceived {
@@ -225,6 +226,8 @@ TransportRecovered { component, at }
 OverloadObserved { boundary, dropped_count_delta }
 IdentityChanged { previous, current, identity_epoch }
 ```
+
+`PeerConnected` represents logical peer availability, not every underlying libp2p connection. A DCUtR-created direct connection for an already-usable relayed peer is surfaced as `PeerPathChanged`, after the stability gate, rather than a false reconnect.
 
 A direct `MessageReceived` event is emitted only after transport authentication, profile trust admission, endpoint route/policy admission, framing/size validation, deduplication, and successful enqueue to exactly one owning local endpoint client.
 

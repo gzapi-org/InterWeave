@@ -30,7 +30,7 @@ Success is stronger than a local socket write but weaker than application proces
 
 ## Security implications
 
-Noise-authenticated PeerId is checked by PeerTrustPolicy. Endpoint policy may narrow profile trust. Source endpoint is derived from the sender's local IPC lease and cannot be spoofed by a local command argument; remote source endpoint remains peer-asserted routing metadata, not a sub-identity.
+Noise-authenticated PeerId is checked by PeerTrustPolicy. Endpoint policy may narrow profile trust. Source endpoint is derived from the sender's local data-session lease and cannot be spoofed by a local command argument; remote source endpoint remains peer-asserted routing metadata, not a sub-identity.
 
 ## Operational implications
 

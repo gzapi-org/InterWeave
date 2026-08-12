@@ -107,3 +107,7 @@ A runtime class change is reconciled atomically inside the Swarm owner. Infrastr
 ## Revisit conditions
 
 Revisit if rust-libp2p gains a stronger generic protocol-gating abstraction, if infrastructure is moved to a physically separate daemon/Swarm, or if the project adopts signed role/membership credentials that can replace local static infrastructure authorization.
+
+## Standard service admission
+
+AutoNAT-server and Circuit Relay-server roles use the same standard admission classes: only `DataPlaneTrusted` or `ConnectivityInfrastructureOnly` peers receive project service. Open anonymous relay/probe service is not implied by enabling a server role and would require a separate deployment/security policy. AutoNAT dial-back additionally applies the observed-source-IP/special-address restriction in `transport/libp2p/AUTONAT.md`.

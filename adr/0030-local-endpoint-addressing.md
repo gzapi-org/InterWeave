@@ -38,7 +38,7 @@ The transport contract, direct wire format, IPC handshake, message events, reply
 
 ## Security implications
 
-Endpoint admission is subordinate to profile trust. Endpoint policy cannot authorize an untrusted PeerId. The sender cannot spoof a different local source endpoint because the daemon derives it from the IPC lease. A remote source endpoint remains peer-asserted metadata and is not cryptographic identity.
+Endpoint admission is subordinate to profile trust. Endpoint policy cannot authorize an untrusted PeerId. The sender cannot spoof a different local source endpoint because `TransportRuntime` derives it from the active local-session lease (IPC-bound on desktop, embedded on Android). A remote source endpoint remains peer-asserted metadata and is not cryptographic identity.
 
 Endpoint claim conflicts fail closed. Same-user local compromise remains residual because the OS-user IPC boundary is not a full sandbox.
 

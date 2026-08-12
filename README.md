@@ -1,6 +1,6 @@
 # claude-p2p-channel
 
-Architecture and contracts for a generic peer-to-peer **Claude Code Channel transport**, including Model B local endpoint multiplexing and a human-client architecture.
+Architecture and contracts for a generic peer-to-peer **Claude Code Channel transport**, Model B local endpoint multiplexing, and first-party Rust human clients for desktop and Android.
 
 > Status: architecture only. This repository intentionally contains no production MCP server, libp2p networking, daemon, human client, installer, system service, or Rust crate implementation.
 
@@ -11,41 +11,35 @@ Architecture and contracts for a generic peer-to-peer **Claude Code Channel tran
 ## Architecture
 
 ```text
-                         one transport profile / one PeerId
-                                      |
-                        +-------------+-------------+
-                        |  P2P transport daemon     |
-                        |  EndpointRegistry          |
-                        +------+--------------+------+
-                               |              |
-                      IPC v2   |              | IPC v2
-                    endpoint   |              | endpoint
-                    = human    |              | = claude
-                               |              |
-                               v              v
-                         Human client   Claude Channel bridge
-                                             |
-                                             v
-                                         Claude Code
+Desktop/server
+  Human Slint -- IPC v2 --\
+  Claude bridge -- IPC v2 ---+--> profile TransportRuntime/daemon --> libp2p
+                              |        one PeerId, many EndpointIds
+                              `-- admin socket (explicit local settings only)
 
-Network side:
-  GossipSub = broadcast by ChannelId
-  request-response direct v2 = PeerId + EndpointId routing
-  endpoint-directory = optional trusted route discovery
-  DiscoveryManager / Kademlia(default-enabled when configured; explicit opt-out)
-  mandatory AutoNAT v2 / Circuit Relay v2 / DCUtR reachability
-  PeerTrustPolicy / connectivity-infrastructure policy / ConnectionManager / Noise
+Android
+  Slint Activity --> LocalDataSession --> foreground Service host
+                                          |
+                                          `--> same Rust TransportRuntime --> libp2p
+                                               one device PeerId / human EndpointId
+
+Network side on both:
+  GossipSub broadcast
+  DirectMessageV2 PeerId + EndpointId
+  Kademlia (standard v1, configured default-on)
+  AutoNAT v2 + Circuit Relay v2 + DCUtR (mandatory v1)
+  Trust + connectivity-infrastructure classes + root DialAdmissionGate
 ```
 
-The daemon owns the private key and all libp2p state. Local applications never become independent network identities unless they use separate profiles.
+`TransportRuntime` owns the private key and all libp2p state: an external daemon hosts it on desktop/server, while the Android foreground service hosts it in-process. Presentation/application code never becomes an independent network identity unless it uses a separate profile.
 
 ## Decision summary
 
 - Claude integration follows the official Channel pattern: stdio MCP, `claude/channel`, push notifications, explicit outbound tools, and pre-delivery admission.
-- The network runtime is a **separate, profile-scoped daemon** so Claude/human-client restarts do not redefine transport identity or tear down P2P connectivity.
+- Desktop/server use a **separate, profile-scoped daemon**. Android embeds the same Rust `TransportRuntime` in a user-visible foreground-service host; both preserve the same PeerId/EndpointId/network contracts.
 - One profile owns one persistent PeerId. Model B adds configured **EndpointIds** underneath that PeerId for deterministic local direct routing (`human`, `claude`, `automation.build`, etc.). EndpointId is a routing selector, not cryptographic/human/application identity.
 - Initial software identities are **Ed25519**. An optional offline 24-word recovery record can reproduce the exact same PeerId by encoding the raw 32-byte Ed25519 secret with BIP-39 entropy/checksum/English-word mapping only; wallet PBKDF2/passphrase semantics are not used and recovery material never crosses IPC.
-- Every direct-capable IPC v2 client owns one exclusive configured endpoint lease. Direct messages route to exactly one endpoint; the previous architecture-only all-client fan-out is superseded by ADR-0030.
+- Every direct-capable local data-plane session owns one exclusive configured endpoint lease (IPC v2 connection on desktop, embedded service session on Android). Direct messages route to exactly one endpoint; the previous architecture-only all-client fan-out is superseded by ADR-0030.
 - Direct protocol target is `/claude-p2p-channel/direct/2.0.0`, carrying required source endpoint and optional destination endpoint. Omitted destination resolves the receiver's explicit `default_direct_endpoint`; it never means fan-out.
 - Direct `Accepted` means the resolved endpoint's bounded local event queue accepted the message, not that Claude or a human processed it.
 - An optional trust-gated endpoint-directory protocol exposes only active routes explicitly marked `advertise: true`; it returns route names only, never human names/roles/trust claims.
@@ -57,18 +51,25 @@ The daemon owns the private key and all libp2p state. Local applications never b
 - Relay/AutoNAT infrastructure can be authorized through `transport.connectivity.infrastructure.allowed_peers` without entering application `trust.allowed_peers`; ADR-0036 prevents that control-plane connection from gaining GossipSub/direct/endpoint/Kademlia authority.
 - Discovery only produces candidate reachability and bounded protocol observations. Data-plane connection admission remains trust-gated, including behavior-originated Kademlia dials through the root dial admission policy.
 - Noise secures each admitted libp2p connection. GossipSub validation distinguishes objective invalidity (`Reject`) from valid-but-locally-unauthorized publishers (`Ignore`). Group/application E2EE remains outside v1/v2 transport.
-- Delivery remains realtime/best-effort, bounded, non-durable, with no exactly-once claim or offline mailbox. A human client may persist its own local history above the transport, but the daemon never queues messages for an offline endpoint.
+- Delivery remains realtime/best-effort, bounded, non-durable, with no exactly-once claim or offline mailbox. A human client may persist its own local history above the transport, but `TransportRuntime` never queues messages for an offline endpoint.
 - IPC v2 retains the 128 KiB JSON-body ceiling so every legal 48 KiB payload fits with endpoint metadata after base64url/JSON expansion. Data-plane and administrative IPC use separate sockets; the data socket can never grant `admin.*` based on a claimed client kind.
 - GossipSub mesh duplicate identity is frozen to a SHA-256 mapping over signed publisher PeerId + GossipSub wire sequence number, preventing cross-publisher suppression without coupling mesh identity to the application envelope ID.
 - Internet listeners bound unauthenticated pre-Noise handshakes and trusted-peer direct ingress; dial failure/backoff is address-scoped where appropriate so a poisoned address cannot suppress a known-good trusted route.
 
 ## Human client Model B
 
-The human client is another IPC v2 consumer, not a second libp2p implementation. It can share the same PeerId as Claude while owning a separate EndpointId.
+The first-party human client uses a shared Rust core and Slint UI. Desktop is an IPC v2 consumer of the shared daemon and can share that PeerId with Claude via a separate EndpointId. Android embeds the same Rust runtime behind the neutral local-session contract rather than launching a standalone daemon. Concurrent physical devices use distinct PeerIds.
 
 See:
 
 - [Human client Model B](docs/architecture/human-client-model-b.md)
+- [Cross-platform human client](docs/architecture/human-client-cross-platform.md)
+- [Desktop human client](docs/architecture/human-client-desktop.md)
+- [Android human client](docs/architecture/human-client-android.md)
+- [Android key custody](docs/architecture/android-key-custody.md)
+- [Human-client UI/interaction design](docs/architecture/human-client-ui.md)
+- [Human-client platform packaging](docs/architecture/human-client-packaging.md)
+- [Local client session contract](contracts/LOCAL-CLIENT.md)
 - [Endpoint contract](contracts/ENDPOINTS.md)
 - [Libp2p endpoint protocols](transport/libp2p/ENDPOINTS.md)
 - [ADR-0030 local endpoint addressing](adr/0030-local-endpoint-addressing.md)
@@ -123,3 +124,7 @@ The working name **claude-p2p-channel** is retained because it describes the Cla
 ## Security freeze addendum
 
 The 2026-08-12 adversarial security pass is recorded in [`docs/architecture/SECURITY-REVIEW-2026-08-12.md`](./docs/architecture/SECURITY-REVIEW-2026-08-12.md). It freezes source+wire-sequence GossipSub message identity, split data/admin IPC sockets, pre-Noise admission limits, address-scoped identity-mismatch quarantine, hostile remote endpoint-metadata validation, direct trusted-peer token buckets, and 128-bit IPC keepalive nonces. ADR-0038 also records an explicit optional v2.x encrypted software-key path gated by SPIKE-007; standard v1 remains filesystem-only at rest.
+
+## Current human/mobile review
+
+See [`docs/architecture/HUMAN-CLIENT-REVIEW-2026-08-12.md`](docs/architecture/HUMAN-CLIENT-REVIEW-2026-08-12.md) for closure of AutoNAT/relay/connectivity review V1-V6 and the desktop/Android deployment decisions.

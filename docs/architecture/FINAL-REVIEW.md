@@ -18,7 +18,7 @@ The major evolution since the original prompt is deliberate and transport-generi
 | direct message can hit multiple local clients accidentally? | **No in v2** | exact endpoint/default resolution, one queue, no fan-out |
 | peer-only direct behavior ambiguous? | **No** | explicit configured default endpoint or no_route |
 | endpoint ACL can widen profile trust? | **No** | intersection invariant in contract/config/tests |
-| source endpoint locally spoofable? | **No by API** | daemon derives source from IPC lease |
+| source endpoint locally spoofable? | **No by API** | runtime derives source from local-session lease (desktop IPC / Android embedded) |
 | remote source endpoint over-trusted? | **No by contract** | peer-asserted routing metadata only |
 | direct Accepted overclaims application processing? | **No** | sent only after local endpoint queue admission, still transport-only |
 | offline endpoint creates mailbox? | **No** | no_route; ADR-0020 persists |
@@ -37,8 +37,8 @@ The major evolution since the original prompt is deliberate and transport-generi
 | endpoint handshake/capability errors deterministic? | **Yes** | exact local error map in LOCAL-IPC/Phase-1 fixtures |
 | direct retry race bounded/canonical? | **Yes on paper; spike required** | fixed DirectContentFingerprintV1 + 128/8 reservation limits + SPIKE-002 race test |
 | recovery changes PeerId? | **No** | ADR-0033 encodes exact 32-byte Ed25519 secret and verifies expected PeerId |
-| daemon/Claude/human lifecycle coupled? | **No** | endpoint leases are runtime; PeerId survives client restart |
-| human admin actions can be triggered by network payload automatically? | **No by architecture** | admin methods exist only on separate admin socket; explicit local action required |
+| daemon/Claude/human lifecycle coupled? | **No** | desktop endpoint leases are daemon/IPC runtime; Android endpoint lease follows foreground-service session; PeerId survives ordinary UI restart |
+| human admin actions can be triggered by network payload automatically? | **No by architecture** | admin authority is exposed only through the platform admin binding (desktop admin socket; Android LocalAdminPort); explicit local action required |
 | hidden persistent message state? | **No** | app-local human history is outside transport and only stores observed content |
 | mandatory Internet reachability complete? | **Yes on paper; spike required** | ADR-0035 + AutoNAT-v2/Relay-v2/DCUtR state machine, path policy, limits and release tests |
 | relay/probe infrastructure accidentally gains application trust? | **No by architecture** | ADR-0036 protocol-scoped connection class; data-plane protocols explicitly denied |
@@ -46,31 +46,31 @@ The major evolution since the original prompt is deliberate and transport-generi
 ## Confirmed current decisions
 
 1. Official Claude Channel architecture remains the Claude integration model.
-2. Separate profile-scoped daemon owns the network identity and Swarm.
+2. Desktop/server use a separate profile-scoped daemon; Android embeds the same Rust TransportRuntime in the app foreground-service host. In both modes the runtime layer—not the UI—owns the PeerId/Swarm.
 3. rust-libp2p remains first backend behind neutral contracts.
 4. GossipSub remains broadcast-only with ADR-0029 validation semantics.
 5. Direct remains request-response, now endpoint-aware `/direct/2.0.0`.
 6. One persistent PeerId belongs to a profile.
 7. Model B adds configured `EndpointId` routes beneath that PeerId.
-8. One direct-capable IPC v2 connection owns one exclusive endpoint lease.
+8. One direct-capable local data-plane session owns one exclusive endpoint lease (IPC connection on desktop; embedded session on Android).
 9. Direct destination is `{peer, endpoint?}`; absent endpoint means receiver default, never fan-out.
 10. Receiver sends AcceptedV2 only after exact endpoint queue admission.
 11. Endpoint-specific policy can only narrow profile trust.
 12. Direct dedup key uses source endpoint + wire destination selector + message ID; positive entries retain the first resolved route and content fingerprint, with an in-flight reservation closing concurrent retry races.
 13. Direct reply binds exact remote source endpoint and local lease epoch.
 14. Endpoint directory is optional, trust-gated, active/opt-in, identity-agnostic, and bounded.
-15. Human client is another IPC v2 application endpoint with separately authorized administration (ADR-0032); it does not embed libp2p/private key.
+15. Human client remains above transport semantics: desktop is an IPC v2 endpoint consumer; Android embeds the same Rust TransportRuntime behind LOCAL-CLIENT rather than a second/independent libp2p stack (ADR-0032/0040/0041).
 16. Human contacts/display/history are application state above transport.
 17. Broadcast remains per-client join state; desired channels are mesh pre-warm only.
 18. No persistent offline network/endpoint/Claude/human delivery store exists.
 19. Static PeerId trust still gates ordinary data-plane connections, direct peers, and source admission.
 20. Noise remains per-link security; trusted GossipSub forwarders can see plaintext.
 21. Per ADR-0034, the standard v1 build includes Kademlia and configured entries default `enabled: true`; explicit opt-out remains supported, and Kademlia stores no app/channel/endpoint records.
-22. IPC v2 remains owner-protected length-prefixed JSON with 128 KiB body, split data/admin sockets, and socket-domain-scoped admin methods; version is negotiated, human data/admin connections count separately, and endpoint leases require negotiated keepalive by default.
+22. Desktop IPC v2 remains owner-protected length-prefixed JSON with 128 KiB body and split data/admin sockets; Android bypasses fake IPC and implements the same LOCAL-CLIENT session semantics in-process. Desktop endpoint leases require negotiated keepalive by default; Android leases follow service/session lifetime.
 23. Claude Channel is not granted `endpoints.query` by default; `peer_endpoints` is explicitly deferred pending a security/tool-surface revisit.
 24. DirectContentFingerprintV1 is fixed byte-for-byte and direct in-flight reservation state is capped at 128 global / 8 per source peer by default.
 25. Initial software identity is Ed25519 with optional offline 24-word exact-key recovery (ADR-0033); mnemonic material never crosses IPC. Verify-only drills are read-only, and full profile disaster recovery also needs a separate config.yaml backup.
-26. EndpointId leases require negotiated IPC keepalive by default; an explicit compatibility policy may relax this without changing lease ownership semantics.
+26. Desktop IPC EndpointId leases require negotiated keepalive by default; Android embedded leases are revoked by service/session teardown rather than synthetic IPC keepalive.
 27. Standard v1 requires AutoNAT v2 client, Circuit Relay v2 client/reservations, and DCUtR (ADR-0035); Phase 9 is a release requirement, not optional hardening.
 28. Relay/AutoNAT service peers may use the ADR-0036 connectivity-infrastructure class, which permits only control-plane protocols and never grants GossipSub/direct/endpoint/Kademlia application authority.
 29. Reachability uses multi-observer AutoNAT evidence, redundant relay reservations, direct-first path selection and bounded DCUtR upgrades with relay fallback.
@@ -79,13 +79,19 @@ The major evolution since the original prompt is deliberate and transport-generi
 32. Internet listeners apply pre-Noise pending/rate/time bounds before PeerId exists, while trusted direct peers also face per-peer/global ingress token buckets.
 33. Dial failure state distinguishes address failures/identity mismatches from peer punitive backoff; a poisoned address cannot suppress a known-good trusted route by itself.
 34. Remote AcceptedV2/endpoint-directory metadata is grammar/bound/TTL validated before cache/tool/UI exposure.
+35. First-party human UI/application logic is Rust with Slint as the reference desktop/Android presentation layer (ADR-0039).
+36. Concurrent desktop/Android human devices use distinct PeerIds; mnemonic restore is recovery/migration, not cloning (ADR-0043).
+37. Android wraps the exact portable Ed25519 seed with Android Keystore AES-GCM and exposes explicit background-compatible/user-presence unlock policies (ADR-0042).
+38. AutoNAT server dial-back is source-IP restricted; Identify infrastructure candidates default off; DCUtR upgrades emit PeerPathChanged rather than duplicate PeerConnected.
+39. First-party human UI never upgrades transport acceptance into read/seen semantics and never treats display names, EndpointIds, or contact grouping as authenticated human identity.
+40. Desktop packaging preserves three roles (`human-desktop`, `transport-daemon`, `transportctl`); Android bundles UI/runtime in one application/service lifecycle while preserving the same network and local-session contracts.
 
 ## Accepted limitations
 
 - no network offline mailbox;
 - no exactly-once/global order;
 - EndpointId does not prove person/application identity;
-- same-user malicious local process that can open the admin socket remains partly inside IPC residual boundary even though data/admin domains are split;
+- same-user malicious desktop process that can open the admin socket remains partly inside the IPC residual boundary; Android same-process compromise remains inside the embedded application trust boundary;
 - endpoint-directory advertisement leaks selected presence to trusted peers;
 - endpoint directory can be stale;
 - static trust does not scale to public networks;
@@ -93,9 +99,10 @@ The major evolution since the original prompt is deliberate and transport-generi
 - no guarantee that every NAT permits a direct DCUtR path; standard v1 nevertheless requires relay fallback, and loss of all authorized relays can still isolate an inbound-private peer;
 - relay/probe operators can observe connectivity metadata and deny service; the system is not an anonymity network;
 - default-on Kademlia increases ordinary metadata/topology/privacy exposure and therefore makes SPIKE-003/conformance/security a standard-v1 release gate;
-- a human client can persist local history but cannot recover messages never accepted while it was offline;
+- a human client can persist local history but cannot recover messages never accepted while it was offline; Android process/service absence is therefore real offline state;
 - the BIP-39-derived recovery UX has only an 8-bit mnemonic checksum, so expected-PeerId backup metadata is the stronger restore check;
 - recovery phrase theft is full PeerId private-key compromise.
+- v1 has no authenticated human-account identity or cross-device history synchronization; contacts may group several device PeerIds only as local application metadata.
 
 ## Remaining implementation risks / spikes
 
@@ -122,6 +129,14 @@ SPIKE-005 remains conditional. Model B endpoint leases improve routing/isolation
 ### Identity-recovery portability
 
 SPIKE-006 must verify that the pinned rust-libp2p Ed25519 identity API/portable serialization boundary round-trips the exact 32-byte secret assumed by `cp2p-ed25519-bip39-entropy-v1` and reproduces the same PeerId. Failure keeps production mnemonic backup/restore disabled; it does not authorize silently changing the recovery format.
+
+### Android execution / platform policy
+
+SPIKE-008 is required before shipping Android stay-reachable mode. It validates the current `remoteMessaging` foreground-service classification, target-SDK/Play-policy requirements, lifecycle/background-start behavior, process/network recovery and honest offline states.
+
+### Android key custody
+
+SPIKE-009 is required before shipping Android production key storage. It validates AndroidKeyStore AES-GCM wrapping of the exact Ed25519 seed and both unlock policies without changing the PeerId fixture.
 
 ## No-production-implementation verification
 

@@ -23,7 +23,16 @@ crates/
   transportctl/           # local admin/diagnostics
   claude-channel-core/    # Channel-event/tool mapping, NO libp2p
   claude-channel-bridge/  # MCP SDK + IPC v2 client
-  # human-client is application/UI technology choice and need not be Rust.
+  local-client-api/       # INTERNAL neutral local-session semantics; NO libp2p
+  ipc-client/             # desktop LOCAL-CLIENT binding
+  human-core/             # NO libp2p; contacts/conversations/application logic
+  human-chat-protocol/    # first-party HumanChatV1 envelope
+  human-store/            # SQLite application store
+  human-ui-model/         # presentation model
+  human-ui-slint/         # shared first-party Rust/Slint components
+  human-desktop/          # desktop executable; IPC adapter only
+  human-android/          # Android Rust cdylib/Slint app + embedded adapter
+  android-platform-bridge/# minimal OS/JNI glue only; no transport/domain policy
 ```
 
 A TypeScript bridge/human UI remains viable. The boundary matters more than language.
@@ -31,11 +40,13 @@ A TypeScript bridge/human UI remains viable. The boundary matters more than lang
 ## Dependency direction
 
 ```text
-Claude bridge --------\
-Human client -----------> ipc-protocol
-Admin UI/transportctl --/       |
-                                v
-                          transport-api
+Claude bridge --------------------> ipc-protocol
+Desktop human -> ipc-client --------> local-client-api
+Android human -> embedded adapter --> local-client-api
+Admin UI/transportctl --------------> platform admin binding
+                                          |
+                                          v
+                                    transport-api
                                 ^
                                 |
                          transport-runtime
@@ -113,9 +124,9 @@ A small in-memory runtime/backend cache stores remote advertised EndpointIds wit
 
 ## Human client architecture
 
-The human client is intentionally outside transport-runtime. It uses IPC v2 exactly like Claude for data-plane operations.
+First-party human clients remain outside transport policy but share a Rust application core. Desktop uses IPC v2 exactly like Claude. Android uses an in-process `local-client-api` adapter because the foreground service embeds `TransportRuntime`; it does **not** create a second libp2p stack.
 
-A human UI may have an admin/settings adapter that opens the separate profile admin socket. The application can store contacts/history locally; no transport crate depends on those models.
+`human-core`, `human-store`, `human-ui-model`, and `human-ui-slint` never depend on `transport-libp2p`. Desktop admin/settings opens the separate admin socket. Android settings receives a distinct in-process `LocalAdminPort` only from explicit local UI composition. Contacts/history remain application state.
 
 ## Testing packages
 

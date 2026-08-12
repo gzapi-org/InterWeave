@@ -44,6 +44,7 @@ transport:
         static_servers:
           - "/dns4/relay-a.example.net/tcp/4001/p2p/<INFRA_A>"
           - "/dns4/relay-b.example.net/tcp/4001/p2p/<INFRA_B>"
+        use_authorized_identify_servers: false
       server: { enabled: false }
     relay:
       client:
@@ -51,6 +52,7 @@ transport:
         static_relays:
           - "/dns4/relay-a.example.net/tcp/4001/p2p/<INFRA_A>"
           - "/dns4/relay-b.example.net/tcp/4001/p2p/<INFRA_B>"
+        use_authorized_identify_relays: false
         target_reservations_private_or_unknown: 2
         target_reservations_public: 1
         max_reservations: 4

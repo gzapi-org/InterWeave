@@ -224,7 +224,9 @@ AutoNAT-v2 traffic itself is connectivity control traffic and is separately acco
 Relay candidates come from two sources only:
 
 1. `transport.connectivity.relay.client.static_relays` — operator-configured multiaddrs containing relay PeerId;
-2. fresh Identify capability observations for already known/authorized peers advertising the relay HOP/server protocol.
+2. only when explicitly enabled, fresh Identify capability observations for already known/authorized peers advertising the relay HOP/server protocol.
+
+`use_authorized_identify_relays` defaults **false**. Static candidates have strict selection precedence until they cannot satisfy the configured active-reservation target; Identify-learned candidates are fallback topology hints, never automatic promotion of trusted contacts into infrastructure use.
 
 Kademlia provider/value records, ChannelIds, EndpointIds, and application payloads are **never** used as relay service advertisements.
 
@@ -236,7 +238,7 @@ A candidate is eligible only when:
 - it is not in relay retry backoff;
 - adding it does not exceed reservation/connection/resource limits.
 
-Fresh Identify evidence supersedes cached capability observations. Advisory capability observations may be cached with bounded freshness using the existing peer-cache capability mechanism, but capability does not imply availability.
+Fresh Identify evidence supersedes cached capability observations. `use_authorized_identify_servers` likewise defaults **false**; static AutoNAT observer configuration is preferred and Identify-learned authorized servers are considered only after explicit opt-in and only when static observer targets cannot be met. Advisory capability observations may be cached with bounded freshness using the existing peer-cache capability mechanism, but capability does not imply availability or infrastructure consent.
 
 ## 8. Relay reservation lifecycle
 
@@ -339,6 +341,8 @@ relay circuit arrives
 
 The relay PeerId and remote application PeerId are separate principals in diagnostics and policy.
 
+When a relayed inbound transport does not expose the original source IP before the end-peer Noise handshake, the destination pre-auth layer accounts pending/rate limits against the **authenticated relay transport connection / relay PeerId** plus the global pre-auth caps. It must not mint unbounded pseudo-source buckets from circuit metadata. Relay-server `max_circuits_per_source_peer` is complementary at the infrastructure node.
+
 ## 11. Dial ownership and origins
 
 All outbound attempts are tagged conceptually with one origin:
@@ -427,7 +431,7 @@ DirectPreferred
    `- retire redundant relayed peer connection when safe
 ```
 
-Success yields a new direct libp2p connection. Existing streams are not modeled as migrated. New direct requests/pubsub streams prefer the stable direct connection. The relay reservation itself may remain warm for inbound failover according to reservation target policy.
+Success yields a new direct libp2p connection. Existing streams are not modeled as migrated. After the configured stability gate, runtime emits `PeerPathChanged { previous: relayed, current: direct, reason: dcutr }` for an already-logically-connected peer; it does **not** emit a second `PeerConnected`. New direct requests/pubsub streams prefer the stable direct connection. The relay reservation itself may remain warm for inbound failover according to reservation target policy.
 
 DCUtR-originated dials are attributed `dcutr-hole-punch` and must pass the root gate for the actual remote data-plane PeerId.
 

@@ -67,7 +67,7 @@ Instrument the Swarm / behaviour boundary so Kademlia-originated `ToSwarm::Dial`
 
 **Objective:** validate and tune the already-selected mandatory Internet-reachability architecture on the exact rust-libp2p version. This spike does **not** decide whether Phase 9 ships.
 
-**Experiment:** build a non-production harness covering public VM, home NAT, symmetric/restrictive NAT where available, corporate firewall/proxy-like restrictions, two independent relay/probe services, relay loss/capacity denial, network-interface changes, and trusted vs infrastructure-only peers. Instrument behaviour-originated dials and connection classes. Exercise AutoNAT v2 client/server, Circuit Relay v2 reservations/circuits, DCUtR success/failure, direct-vs-relay racing, address advertisement, and all configured limits.
+**Experiment:** build a non-production harness covering public VM, home NAT, symmetric/restrictive NAT where available, corporate firewall/proxy-like restrictions, Android/mobile carrier-NAT conditions where available, two independent relay/probe services, relay loss/capacity denial, network-interface changes, and trusted vs infrastructure-only peers. Instrument behaviour-originated dials and connection classes. Exercise AutoNAT v2 client/server, Circuit Relay v2 reservations/circuits, DCUtR success/failure, direct-vs-relay racing, address advertisement, and all configured limits.
 
 **Expected evidence:**
 
@@ -80,6 +80,11 @@ Instrument the Swarm / behaviour boundary so Kademlia-originated `ToSwarm::Dial`
 - DCUtR attempts are measurable, bounded, cooled down, preserve relay fallback on failure, and create stable direct paths on success where NATs permit;
 - every AutoNAT/relay/DCUtR behaviour-originated dial is attributable and crosses `DialAdmissionGate`, backoff and total/per-peer limits;
 - relay/AutoNAT server quotas and abuse limits behave as specified when those roles are enabled;
+- AutoNAT server refuses requester-supplied DNS, loopback/private/link-local/special-use, and unrelated-public addresses; only a literal globally routable candidate whose IP equals the requester observed source IP can reach dial admission;
+- Identify-learned AutoNAT/relay infrastructure candidates are disabled by default and, when explicitly enabled, never displace usable static candidates merely because they advertise the protocol;
+- relayed inbound handshakes with no original source IP consume the relay-connection/PeerId pre-auth bucket plus global caps;
+- relay service admission accepts only configured `DataPlaneTrusted`/`ConnectivityInfrastructureOnly` classes in standard deployment;
+- a stable DCUtR upgrade emits `PeerPathChanged` without a duplicate logical `PeerConnected`;
 - network change invalidation/recovery converges without changing PeerId or EndpointId routing;
 - measured relay bandwidth/connection/probe costs fit default resource budgets.
 
@@ -116,3 +121,23 @@ Instrument the Swarm / behaviour boundary so Kademlia-originated `ToSwarm::Dial`
 **Evidence:** pinned external format/library and parameters, interoperability fixture, failure/recovery behavior, explicit unlock UX/credential source, and proof that passphrases/plaintext private keys never enter normal config/logs/IPC/network traffic.
 
 **Decision unlocked:** add a versioned `identity.key_protection=passphrase-envelope` v2.x option. Until this spike/ADR follow-up lands, standard v1 remains `filesystem-only`.
+
+## SPIKE-008 — Android execution / store-policy viability
+
+**Objective:** validate the selected Android foreground-service lifecycle for persistent first-party P2P messaging.
+
+**Experiment:** build a non-production harness on minimum/current target APIs; start the service from allowed user-visible paths; exercise backgrounding, process reclamation, force-stop/relaunch, notification behavior, Wi-Fi/cellular changes, Doze/OEM-like constraints where measurable, and current Google Play foreground-service declaration/review requirements for `remoteMessaging`.
+
+**Evidence:** lifecycle trace, target-SDK/service-type policy matrix, restart/offline behavior, battery/network observations.
+
+**Decision unlocked:** production Android stay-reachable packaging. Failure does not authorize hidden FCM/cloud dependency; it requires an Android lifecycle ADR update or foreground-only availability claim.
+
+## SPIKE-009 — Android exact-key custody
+
+**Objective:** validate Android Keystore wrapping without changing the Ed25519/PeerId/recovery contract.
+
+**Experiment:** generate AES-256-GCM AndroidKeyStore wrapper; wrap/unwarp the fixed 32-byte recovery fixture; verify identical rust-libp2p PeerId; test TEE/StrongBox reporting, user-presence and background-compatible modes, lock/reboot/process restart, key invalidation, ciphertext tamper.
+
+**Evidence:** exact seed/PeerId round trip and failure matrix.
+
+**Decision unlocked:** Android production key-at-rest implementation.

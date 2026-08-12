@@ -96,3 +96,18 @@ Phase 9 is part of standard v1. Reachability failure is therefore represented ex
 - Failed DCUtR retains the working relay connection and enters per-peer cooldown. Successful DCUtR waits for direct-path stability before redundant relay retirement.
 - A connectivity-infrastructure-only peer that negotiates an application protocol is rejected; such a violation does not upgrade its connection class.
 - No failure path creates a durable message queue or changes direct-message acceptance semantics.
+
+## Human platform failures
+
+| Failure | Required behavior |
+|---|---|
+| Desktop UI crash | release IPC endpoint lease; daemon/other endpoints continue |
+| Desktop admin socket unavailable | messaging continues; settings/admin unavailable |
+| Android Activity destroyed | if foreground service lives, runtime/endpoint continue; UI rebinds |
+| Android foreground service/process killed | revoke embedded session/endpoint; stop network activity; restart rebuilds ephemeral state; no queued delivery |
+| Android background service start denied | report offline/reachability-disabled to UI; do not fake availability |
+| Android Keystore unwrap fails/invalidated | fail established profile identity unlock; never silently generate new PeerId |
+| Android network changes | invalidate direct evidence/affected paths; rebind/reconcile relays/Kademlia; preserve identity/config/history |
+| AutoNAT server request target mismatches observed source IP | reject probe before dial; record bounded policy failure |
+| Identify-learned infrastructure disabled | ignore as candidate; no health failure if static target is satisfied |
+| DCUtR adds stable direct path | emit PeerPathChanged, not a duplicate logical PeerConnected |

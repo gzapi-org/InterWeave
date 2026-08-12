@@ -37,3 +37,7 @@ Data/admin socket permissions, client kinds, endpoint leases/epochs, capability 
 ## Revisit conditions
 
 Revisit if stronger same-user client identity, shared endpoint leases, binary payload framing, or cross-host daemon access becomes required.
+
+## Platform scope
+
+IPC v2 is mandatory for daemon-attached desktop/server clients, including Claude. ADR-0041 does not tunnel Android embedded-runtime calls through fake loopback IPC; Android instead implements the same local-session semantics in-process. Network protocol and EndpointId semantics do not differ.

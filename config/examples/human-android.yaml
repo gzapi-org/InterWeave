@@ -1,0 +1,50 @@
+# First-party Android human client; TransportRuntime is embedded in the app foreground service.
+schema_version: 2
+runtime:
+  deployment: embedded-android
+  android:
+    endpoint: human
+    availability_mode: stay-reachable
+    foreground_service_type: remoteMessaging
+    key_storage: android-keystore-aesgcm-wrap
+    key_unlock_policy: background-compatible
+profile: { name: human-android }
+transport:
+  backend: libp2p
+  listen: { addresses: ["/ip4/0.0.0.0/tcp/0"] }
+  connectivity:
+    required: true
+    infrastructure: { allowed_peers: ["<INFRA_A>", "<INFRA_B>"] }
+    autonat:
+      version: 2
+      client:
+        enabled: true
+        static_servers: ["/dns4/infra-a.example/tcp/4001/p2p/<INFRA_A>", "/dns4/infra-b.example/tcp/4001/p2p/<INFRA_B>"]
+        use_authorized_identify_servers: false
+      server: { enabled: false }
+    relay:
+      client:
+        enabled: true
+        static_relays: ["/dns4/infra-a.example/tcp/4001/p2p/<INFRA_A>", "/dns4/infra-b.example/tcp/4001/p2p/<INFRA_B>"]
+        use_authorized_identify_relays: false
+        target_reservations_private_or_unknown: 2
+        target_reservations_public: 1
+        max_reservations: 4
+      server: { enabled: false }
+    dcutr: { enabled: true, max_inflight: 2, max_inflight_per_peer: 1, retry_cooldown: 5m, direct_stability_period: 10s }
+identity: { algorithm: ed25519 }
+trust: { policy: static-allowlist, allowed_peers: ["<PEER_A>"] }
+endpoints:
+  registration_policy: configured-only
+  default_direct_endpoint: human
+  directory: { enabled: true }
+  entries:
+    - { id: human, enabled: true, advertise: true, allowed_client_kinds: [human-client], inbound: {policy: inherit-profile-trust}, outbound: {policy: inherit-profile-trust} }
+discovery:
+  providers:
+    - { type: peer-cache, enabled: true, priority: 10, config: { ttl: 7d, max_entries: 1024 } }
+    - { type: mdns, enabled: false, priority: 20, config: {} }
+    - { type: kademlia, enabled: true, priority: 40, config: { config_version: 1, network_id: human-network, mode: client, routing_peer_policy: data-plane-trusted, seed_sources: [peer-cache], record_mode: disabled } }
+ipc:
+  enabled: false
+channels: { desired: [] }

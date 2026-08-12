@@ -35,3 +35,7 @@ The IPC acceptor tags every connection with its socket authority domain before p
 ## Revisit conditions
 
 Revisit only to add stronger authentication within the admin domain or platform-specific privilege brokers. Do not merge sockets merely because stronger authentication is later added.
+
+## Android amendment
+
+The split-socket mechanism is a desktop/daemon binding. Android embedded mode has no admin socket; ADR-0041 and `contracts/LOCAL-CLIENT.md` preserve the authority split as distinct in-process `LocalDataSession` and `LocalAdminPort` interfaces, and remote event handlers are never constructed with the latter. This is a confused-deputy boundary, not a sandbox against arbitrary same-process compromise.
