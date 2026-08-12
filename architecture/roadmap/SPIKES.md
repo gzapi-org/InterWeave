@@ -106,7 +106,7 @@ Instrument the Swarm / behaviour boundary so Kademlia-originated `ToSwarm::Dial`
 
 ## SPIKE-006 — identity-recovery portability
 
-**Objective:** verify that the pinned rust-libp2p identity API can export/import the exact Ed25519 32-byte secret boundary assumed by `cp2p-ed25519-bip39-entropy-v1` and reproduce the same PeerId across backup/restore.
+**Objective:** verify that the pinned rust-libp2p identity API can export/import the exact Ed25519 32-byte secret boundary assumed by `interweave-ed25519-bip39-entropy-v1` and reproduce the same PeerId across backup/restore.
 
 **Experiment:** non-production local harness only. Starting from the test-only zero-secret fixture and multiple CSPRNG-generated Ed25519 identities, obtain the portable secret bytes using the supported identity API/serialization boundary, encode/decode the 24-word BIP-39 entropy form, reconstruct the key, and compare public keys and PeerIds. Exercise process restart and the exact dependency versions selected for implementation. Also prove that the BIP-39 PBKDF2 seed output is never accepted as the transport secret. Explicitly verify which rust-libp2p API exposes the exact 32-byte Ed25519 secret seed used by the recovery format; do **not** derive mnemonic entropy from an opaque/private-key protobuf blob or any 64-byte expanded `secret || public` representation. Exercise the read-only `identity verify` path separately from restore.
 

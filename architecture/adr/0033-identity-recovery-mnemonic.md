@@ -13,7 +13,7 @@ rust-libp2p intentionally treats fixed identity keys through its own identity AP
 ## Decision
 
 1. Initial software profile identities use **Ed25519**.
-2. Define optional recovery format `cp2p-ed25519-bip39-entropy-v1`.
+2. Define optional recovery format `interweave-ed25519-bip39-entropy-v1`.
 3. The format encodes the **exact 32-byte Ed25519 secret seed** as 256-bit BIP-39 entropy using the English wordlist/checksum, yielding exactly 24 words.
 4. **Do not use BIP-39 PBKDF2 mnemonic-to-seed derivation and do not support a BIP-39 passphrase** for this format.
 5. Backup records pair the secret 24 words with public `expected_peer_id` and format/algorithm labels. The PeerId is mandatory verification metadata when available because the 24-word BIP-39 checksum is only 8 bits.

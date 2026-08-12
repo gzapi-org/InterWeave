@@ -129,7 +129,7 @@ SPIKE-005 remains conditional. Model B endpoint leases improve routing/isolation
 
 ### Identity-recovery portability
 
-SPIKE-006 must verify that the pinned rust-libp2p Ed25519 identity API/portable serialization boundary round-trips the exact 32-byte secret assumed by `cp2p-ed25519-bip39-entropy-v1` and reproduces the same PeerId. Failure keeps production mnemonic backup/restore disabled; it does not authorize silently changing the recovery format.
+SPIKE-006 must verify that the pinned rust-libp2p Ed25519 identity API/portable serialization boundary round-trips the exact 32-byte secret assumed by `interweave-ed25519-bip39-entropy-v1` and reproduces the same PeerId. Failure keeps production mnemonic backup/restore disabled; it does not authorize silently changing the recovery format.
 
 ### Android execution / platform policy
 
@@ -150,7 +150,7 @@ With endpoint-aware contracts and ADR-0035/0036 in place, a team can scaffold Ph
 
 ## Identity recovery addendum
 
-Software v1 identities are Ed25519 and may be backed up through the optional offline `cp2p-ed25519-bip39-entropy-v1` recovery format. The 24 words encode the exact 256-bit Ed25519 secret bytes using BIP-39 entropy/checksum/English-wordlist mapping only; Bitcoin BIP-39 PBKDF2 seed derivation is not used. Recovery is never a Channel/IPC operation.
+Software v1 identities are Ed25519 and may be backed up through the optional offline `interweave-ed25519-bip39-entropy-v1` recovery format. The 24 words encode the exact 256-bit Ed25519 secret bytes using BIP-39 entropy/checksum/English-wordlist mapping only; Bitcoin BIP-39 PBKDF2 seed derivation is not used. Recovery is never a Channel/IPC operation.
 
 ### Optional encrypted software-key-at-rest path
 

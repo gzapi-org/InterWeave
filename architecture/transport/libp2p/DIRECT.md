@@ -5,7 +5,7 @@
 `libp2p::request_response` with a custom bounded codec remains the selected primitive. ADR-0030 upgrades the initial implementation target to endpoint-aware protocol v2:
 
 ```text
-/claude-p2p-channel/direct/2.0.0
+/interweave/direct/2.0.0
 ```
 
 The old architecture-only `/direct/1.0.0` frame is superseded before production implementation. Because there is no deployed v1 compatibility obligation, implementation should target v2 directly.

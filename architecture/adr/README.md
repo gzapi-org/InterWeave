@@ -8,7 +8,7 @@ All ADRs are **Accepted** architecture decisions unless later superseded.
 | [0002](./0002-claude-channel-integration.md) | Use the current Claude Code Channel contract: stdio MCP server, `claude/channel`, push notifications, ordinary outbound tools, explicit instructions, and pre-delivery admission. |
 | [0003](./0003-libp2p-backend.md) | Select rust-libp2p as the first transport backend behind neutral contracts. |
 | [0004](./0004-gossipsub-broadcast.md) | Use signed GossipSub for broadcast with explicit application validation-result mapping from ADR-0029. |
-| [0005](./0005-directed-messaging.md) | Use rust-libp2p `request_response`; endpoint-aware implementation target is `/claude-p2p-channel/direct/2.0.0` per ADR-0030. |
+| [0005](./0005-directed-messaging.md) | Use rust-libp2p `request_response`; endpoint-aware implementation target is `/interweave/direct/2.0.0` per ADR-0030. |
 | [0006](./0006-discovery-provider-abstraction.md) | Define an event-stream-oriented `DiscoveryProvider` contract consumed only by DiscoveryManager. |
 | [0007](./0007-discovery-composition.md) | Run enabled providers concurrently under DiscoveryManager and merge by PeerId/address provenance. |
 | [0008](./0008-discovery-v1-providers.md) | Historical minimum provider-set rollout; superseded in part by ADR-0034, while cache/mDNS/static roles remain accepted. |
@@ -50,3 +50,4 @@ All ADRs are **Accepted** architecture decisions unless later superseded.
 | [0044](./0044-human-message-retention.md) | Human message content is durable only while outbound-pending, inbound-unread, or receiver-kept-after-read; ordinary delivered/read history evaporates. |
 | [0045](./0045-implementation-repository-layout.md) | Separate specifications under `architecture/`, thin applications under `apps/`, reusable crates under grouped `crates/`, and place tests/fixtures/spikes by proof scope. |
 | [0046](./0046-bottom-up-implementation-order.md) | Implement bottom-up through dependency gates: contracts/state/persistence before networking, root dial admission before autonomous libp2p behaviours, then runtime/clients/platforms. |
+| [0047](./0047-interweave-project-and-wire-namespace.md) | Adopt InterWeave as the canonical project and machine namespace; replace the pre-implementation working identifiers and re-freeze affected hash vectors. |

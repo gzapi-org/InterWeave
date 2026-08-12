@@ -7,7 +7,7 @@ The desktop and Android human clients need an interoperable text-message envelop
 ## Media type
 
 ```text
-application/vnd.claude-p2p-human-chat+json;v=1
+application/vnd.interweave-human-chat+json;v=1
 ```
 
 ## Envelope

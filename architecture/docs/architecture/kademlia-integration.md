@@ -3,7 +3,7 @@
 
 Status: **architecture-complete; standard-v1 implementation required by ADR-0034; configured entries default enabled with explicit opt-out**.
 
-This document specifies how Kademlia integrates into `claude-p2p-channel` without changing the generic `DiscoveryProvider` or `Transport` contracts. It is an implementation blueprint, not production code.
+This document specifies how Kademlia integrates into `interweave` without changing the generic `DiscoveryProvider` or `Transport` contracts. It is an implementation blueprint, not production code.
 
 ## 1. Goal and rollout posture
 
@@ -105,7 +105,7 @@ Both directions use bounded Tokio channels. The provider may schedule work; the 
 Do not use the public IPFS Kademlia protocol identifier. A supported build constructs a custom stream protocol from:
 
 ```text
-wire family:  claude-p2p-channel/kad
+wire family:  interweave/kad
 wire major:   1.0.0
 network_id:   operator-defined, non-secret deployment namespace
 ```
@@ -113,13 +113,13 @@ network_id:   operator-defined, non-secret deployment namespace
 Conceptual derived protocol:
 
 ```text
-/claude-p2p-channel/kad/1.0.0/<network-hash>
+/interweave/kad/1.0.0/<network-hash>
 ```
 
 `network_id` is restricted to lower-case ASCII matching `^[a-z0-9][a-z0-9._-]{0,63}$`. Derive `network-hash` exactly as follows:
 
 ```text
-digest = SHA-256("claude-p2p-channel/kad-network/v1\0" || ASCII(network_id))
+digest = SHA-256("interweave/kad-network/v1\0" || ASCII(network_id))
 network-hash = lowercase RFC4648-base32(digest[0..16]), without '=' padding
 ```
 
@@ -127,8 +127,8 @@ The 16-byte truncation produces a 26-character base32 tag. Golden fixture:
 
 ```text
 network_id: example-private-network
-network-hash: cfrtdnvch5ozdvziz6esfgbs44
-protocol: /claude-p2p-channel/kad/1.0.0/cfrtdnvch5ozdvziz6esfgbs44
+network-hash: ssbtblqj7mexczivog5qfbfjvi
+protocol: /interweave/kad/1.0.0/ssbtblqj7mexczivog5qfbfjvi
 ```
 
 Properties:
@@ -226,7 +226,7 @@ Kademlia addresses are normalized as fully-qualified peer addresses where requir
 Remote Kademlia server mode is not locally knowable from a bare allowlisted PeerId. It becomes observable only after an authenticated connection exposes supported protocols through Identify. To make targeted lookup implementable after restart, the existing advisory peer cache persists a bounded capability observation:
 
 ```text
-protocol_family = claude-p2p-channel/kad
+protocol_family = interweave/kad
 wire_major = 1
 network_hash = current network hash
 role = server

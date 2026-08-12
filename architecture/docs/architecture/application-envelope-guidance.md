@@ -6,7 +6,7 @@ First-party human/Claude applications that want a consistent display hint may us
 
 ```json
 {
-  "schema": "claude-p2p-channel.app-message/1",
+  "schema": "interweave.app-message/1",
   "from_endpoint": "human",
   "content_type": "text/plain",
   "content": "hello"

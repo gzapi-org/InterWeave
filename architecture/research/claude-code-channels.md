@@ -18,7 +18,7 @@ Claude Code
    |
    | stdio MCP (Channel capability)
    v
-P2P Channel bridge
+InterWeave bridge
    |
    | versioned local IPC
    v

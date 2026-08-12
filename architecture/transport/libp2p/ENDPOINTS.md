@@ -7,7 +7,7 @@ This document specifies the libp2p realization of `contracts/ENDPOINTS.md`.
 Endpoint-addressed direct traffic uses the existing request-response architecture with a new protocol ID:
 
 ```text
-/claude-p2p-channel/direct/2.0.0
+/interweave/direct/2.0.0
 ```
 
 rust-libp2p request-response supports protocol families and per-protocol support, so protocol-version negotiation remains at the libp2p substream boundary rather than inside application payload bytes.
@@ -76,7 +76,7 @@ LocalRouteRejected { local_reason_class }
 Optional protocol:
 
 ```text
-/claude-p2p-channel/endpoints/1.0.0
+/interweave/endpoints/1.0.0
 ```
 
 It is a separate request-response behavior/control protocol, not a GossipSub topic and not application payload.

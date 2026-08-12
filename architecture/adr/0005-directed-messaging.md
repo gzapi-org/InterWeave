@@ -6,14 +6,14 @@
 
 A dedicated direct protocol is mandatory. Request-response provides failure/timeout surfaces and protocol negotiation while avoiding directed-over-GossipSub. A small acceptance response makes the remote transport admission boundary explicit.
 
-The earlier architecture draft named `/claude-p2p-channel/direct/1.0.0` before local endpoint addressing existed. ADR-0030 introduces one PeerId with multiple addressable local endpoints and therefore requires a wire-major change before production implementation.
+The earlier architecture draft used direct-protocol major version 1 before local endpoint addressing existed. Under the canonical InterWeave namespace that superseded architecture-only target is `/interweave/direct/1.0.0`. ADR-0030 introduces one PeerId with multiple addressable local endpoints and therefore requires a wire-major change before production implementation.
 
 ## Decision
 
 Use rust-libp2p `request_response` with the endpoint-aware implementation target:
 
 ```text
-/claude-p2p-channel/direct/2.0.0
+/interweave/direct/2.0.0
 ```
 
 Each message is a bounded request carrying source EndpointId and optional destination EndpointId, and receives `AcceptedV2` with the resolved endpoint or a coarse `RejectedV2`. Underlying connections are reused; logical exchanges use independent substreams. No automatic retry.

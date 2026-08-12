@@ -19,8 +19,8 @@ Bridge configuration must identify both transport profile and local EndpointId t
 ## Future transport component
 
 ```text
-bin/claude-p2p-transportd
-bin/claude-p2p-transportctl
+bin/interweave-transportd
+bin/interweave-transportctl
 config schema v2/docs
 optional platform service integration
 ```

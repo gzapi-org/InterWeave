@@ -11,11 +11,11 @@ Multiple local applications may intentionally share that PeerId through Endpoint
 Conceptual platform paths:
 
 ```text
-config:   $XDG_CONFIG_HOME/claude-p2p-channel/profiles/<profile>/config.yaml
-identity: $XDG_DATA_HOME/claude-p2p-channel/profiles/<profile>/identity.key
-state:    $XDG_STATE_HOME/claude-p2p-channel/profiles/<profile>/...
-cache:    $XDG_CACHE_HOME/claude-p2p-channel/profiles/<profile>/peers.json
-run:      $XDG_RUNTIME_DIR/claude-p2p-channel/<profile>.sock
+config:   $XDG_CONFIG_HOME/interweave/profiles/<profile>/config.yaml
+identity: $XDG_DATA_HOME/interweave/profiles/<profile>/identity.key
+state:    $XDG_STATE_HOME/interweave/profiles/<profile>/...
+cache:    $XDG_CACHE_HOME/interweave/profiles/<profile>/peers.json
+run:      $XDG_RUNTIME_DIR/interweave/<profile>.sock
 ```
 
 Endpoint definitions live in normal profile config. Endpoint leases/presence are runtime-only and are not identity key state.
@@ -26,7 +26,7 @@ Endpoint definitions live in normal profile config. Endpoint leases/presence are
 
 Initial software profile creation generates an Ed25519 secret using a local CSPRNG. Established profiles never silently regenerate a missing/corrupt key.
 
-A profile may create a human backup of that exact key through `cp2p-ed25519-bip39-entropy-v1`; see `contracts/IDENTITY-RECOVERY.md`. Recovery is an offline identity-file operation, not daemon IPC.
+A profile may create a human backup of that exact key through `interweave-ed25519-bip39-entropy-v1`; see `contracts/IDENTITY-RECOVERY.md`. Recovery is an offline identity-file operation, not daemon IPC.
 
 ## Recovery
 

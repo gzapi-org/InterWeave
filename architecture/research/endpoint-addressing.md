@@ -6,7 +6,7 @@ Research refresh: 2026-08-12.
 
 Current rust-libp2p `request_response` supports protocol families: one behavior can be constructed with multiple protocol identifiers that share request/response types, and each protocol can be marked inbound/outbound/full support. Requests use a new substream while the underlying peer connection can be reused.
 
-That supports a clean direct-protocol major version boundary. The architecture therefore uses `/claude-p2p-channel/direct/2.0.0` for endpoint-addressed frames instead of embedding a second ad-hoc version negotiation inside payload content.
+That supports a clean direct-protocol major version boundary. The architecture therefore uses `/interweave/direct/2.0.0` for endpoint-addressed frames instead of embedding a second ad-hoc version negotiation inside payload content.
 
 Primary sources:
 

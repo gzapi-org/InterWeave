@@ -24,7 +24,7 @@ local app owns EndpointId lease
  -> endpoint outbound narrowing policy
  -> profile PeerTrustPolicy
  -> ConnectionManager / dial-admission policy
- -> request-response /claude-p2p-channel/direct/2.0.0
+ -> request-response /interweave/direct/2.0.0
        source_endpoint = caller lease
        destination_endpoint = explicit or absent(default request)
  -> remote route admission
@@ -75,7 +75,7 @@ channel project-alpha
 human client -> peer_endpoints(P)
  -> profile trust check
  -> ConnectionManager
- -> /claude-p2p-channel/endpoints/1.0.0
+ -> /interweave/endpoints/1.0.0
  -> remote snapshot of active advertise=true routes allowed for requester
  -> bounded in-memory cache / UI result
 ```

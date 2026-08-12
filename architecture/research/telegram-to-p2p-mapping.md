@@ -2,7 +2,7 @@
 
 | Telegram plugin concept | General pattern | P2P equivalent | Treatment |
 |---|---|---|---|
-| Telegram MCP server | Channel bridge | P2P Channel MCP bridge | Adopt, split transport out |
+| Telegram MCP server | Channel bridge | InterWeave Claude Code Channel bridge | Adopt, split transport out |
 | `StdioServerTransport` | local Claude integration | stdio MCP | Adopt |
 | `experimental['claude/channel']` | Channel capability | same capability | Adopt |
 | Bot API polling | external transport runtime | local IPC client to daemon | Replace |

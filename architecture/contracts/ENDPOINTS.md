@@ -159,7 +159,7 @@ The normalized direct accepted-message dedup key is based on the **wire destinat
 A successful cache entry stores the first `resolved_destination_endpoint` plus **DirectContentFingerprintV1**; `sent_at_ms` is excluded. The fingerprint is fixed for cross-implementation fixtures:
 
 ```text
-domain = UTF8("claude-p2p-channel/direct-content-fingerprint/v1\0")
+domain = UTF8("interweave/direct-content-fingerprint/v1\0")
 
 canonical =
   domain ||
@@ -178,7 +178,7 @@ Golden fixture:
 ```text
 media_type = "text/plain"
 payload    = UTF8("hello")
-SHA-256    = 3dad2f134909e51812e261b56c84b5ab040de681a9e900c9180b2e88a4b47efe
+SHA-256    = d73342f033f00fca9c4ffcced6f9e6debaeb53e3743049ee9aaf227a55f9bf15
 ```
 
 After the request passes current trust/structural/direct-ingress rate admission, a duplicate accepted request within TTL is handled as follows:
@@ -297,7 +297,7 @@ Existing per-session event-queue and direct-send concurrency limits continue to 
 
 Endpoint addressing is a **transport contract major-version change** from v1 to v2 and a local IPC major-version change from v1 to v2.
 
-The direct wire protocol is `/claude-p2p-channel/direct/2.0.0`. Because this repository still has no production v1 implementation or deployed compatibility obligation, the first production implementation should target v2 directly. Implementing `/direct/1.0.0` compatibility is optional and must not be used as an implicit fan-out escape hatch.
+The direct wire protocol is `/interweave/direct/2.0.0`. Because this repository still has no production v1 implementation or deployed compatibility obligation, the first production implementation should target v2 directly. Implementing `/direct/1.0.0` compatibility is optional and must not be used as an implicit fan-out escape hatch.
 
 Endpoint-directory protocol versioning is independent from direct protocol versioning.
 

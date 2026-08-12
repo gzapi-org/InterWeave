@@ -17,7 +17,7 @@ A protocol capability observation is advisory metadata such as:
 
 ```text
 ProtocolCapabilityObservation {
-  protocol_family: "claude-p2p-channel/kad",
+  protocol_family: "interweave/kad",
   wire_major: 1,
   network_hash: "...",
   role: "server",

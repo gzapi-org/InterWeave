@@ -1,4 +1,4 @@
-# claude-p2p-channel
+# InterWeave
 
 Architecture and contracts for a generic peer-to-peer **Claude Code Channel transport**, Model B local endpoint multiplexing, and first-party Rust human clients for desktop and Android.
 
@@ -6,7 +6,7 @@ Architecture and contracts for a generic peer-to-peer **Claude Code Channel tran
 
 ## Purpose
 
-`claude-p2p-channel` is a transport plugin, not an application coordination or chat protocol. It gives Claude Code and other local clients a decentralized, payload-agnostic transport. Higher-level systems may carry text, JSON, chat envelopes, or their own protocols, but this project does not define agent roles, task state, repositories, Git semantics, human identity, social graphs, read receipts, or application workflows.
+**InterWeave** is a transport plugin, not an application coordination or chat protocol. It gives Claude Code and other local clients a decentralized, payload-agnostic transport. Higher-level systems may carry text, JSON, chat envelopes, or their own protocols, but this project does not define agent roles, task state, repositories, Git semantics, human identity, social graphs, read receipts, or application workflows.
 
 ## Repository layout
 
@@ -56,7 +56,7 @@ Network side on both:
 - One profile owns one persistent PeerId. Model B adds configured **EndpointIds** underneath that PeerId for deterministic local direct routing (`human`, `claude`, `automation.build`, etc.). EndpointId is a routing selector, not cryptographic/human/application identity.
 - Initial software identities are **Ed25519**. An optional offline 24-word recovery record can reproduce the exact same PeerId by encoding the raw 32-byte Ed25519 secret with BIP-39 entropy/checksum/English-word mapping only; wallet PBKDF2/passphrase semantics are not used and recovery material never crosses IPC.
 - Every direct-capable local data-plane session owns one exclusive configured endpoint lease (IPC v2 connection on desktop, embedded service session on Android). Direct messages route to exactly one endpoint; the previous architecture-only all-client fan-out is superseded by ADR-0030.
-- Direct protocol target is `/claude-p2p-channel/direct/2.0.0`, carrying required source endpoint and optional destination endpoint. Omitted destination resolves the receiver's explicit `default_direct_endpoint`; it never means fan-out.
+- Direct protocol target is `/interweave/direct/2.0.0`, carrying required source endpoint and optional destination endpoint. Omitted destination resolves the receiver's explicit `default_direct_endpoint`; it never means fan-out.
 - Direct `Accepted` means the resolved endpoint's bounded local event queue accepted the message, not that Claude or a human processed it.
 - An optional trust-gated endpoint-directory protocol exposes only active routes explicitly marked `advertise: true`; it returns route names only, never human names/roles/trust claims.
 - Endpoint-specific ACLs may narrow profile trust but can never widen it. Remote endpoint denial is exposed as coarse `no_route` / local `RemoteEndpointUnavailable` to avoid an authorization oracle.
@@ -120,9 +120,9 @@ See:
 
 Claude/Telegram research was refreshed 2026-08-11; libp2p/Kademlia, endpoint-protocol, and mandatory NAT/relay/DCUtR research was extended 2026-08-12. See [research/SOURCES.md](architecture/research/SOURCES.md), [research/endpoint-addressing.md](architecture/research/endpoint-addressing.md), and [research/nat-traversal.md](architecture/research/nat-traversal.md).
 
-## Repository name
+## Project and protocol namespace
 
-The working name **claude-p2p-channel** is retained because it describes the Claude integration boundary and transport class without implying an application protocol, project, team, human identity system, or coordination model.
+The canonical project name is **InterWeave**. Machine-facing identifiers use lowercase `interweave`, including the wire protocol root, domain-separation prefixes, XDG profile paths, workspace metadata, and future binary prefix. Claude-specific names such as `claude-channel` remain integration names rather than project branding. See [ADR-0047](./architecture/adr/0047-interweave-project-and-wire-namespace.md).
 
 
 ## Human-readable recovery and application guidance

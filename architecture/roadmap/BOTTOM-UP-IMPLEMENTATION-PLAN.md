@@ -97,6 +97,7 @@ The root workspace starts with only the packages needed by this stage. Do not ac
 - create `xtask` commands for architecture checks, fixture checks, unit/conformance groups, and CI orchestration;
 - create the test-only `tests/support` package;
 - convert all frozen vectors to machine-readable fixtures where not already represented;
+- treat ADR-0047 InterWeave machine/wire identifiers as final inputs to every Stage-0 fixture; no former working-namespace compatibility aliases are materialized;
 - create fixture-loader tests that fail on accidental vector drift;
 - establish CI for format, clippy, unit tests, fixture tests, architecture links/YAML, and dependency-boundary checks.
 
@@ -442,7 +443,7 @@ Run and close **SPIKE-002** first.
 ### Implement
 
 ```text
-/claude-p2p-channel/direct/2.0.0
+/interweave/direct/2.0.0
 DirectMessageV2 codec
 AcceptedV2 / rejected status mapping
 source/destination EndpointId handling
@@ -505,7 +506,7 @@ Broadcast and direct semantics are independently functional and do not substitut
 ### Implement
 
 ```text
-/claude-p2p-channel/endpoints/1.0.0
+/interweave/endpoints/1.0.0
 ```
 
 Requirements:

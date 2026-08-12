@@ -13,7 +13,7 @@ Scope: complete design for a human client and other local applications sharing o
 | local direct addressing | configured lowercase ASCII EndpointId, 1..64 bytes |
 | local ownership | one exclusive endpoint lease per direct-capable IPC v2 connection |
 | endpoint creation | configured-only; ordinary client cannot invent a route at handshake |
-| direct wire | `/claude-p2p-channel/direct/2.0.0` with source + optional destination endpoint |
+| direct wire | `/interweave/direct/2.0.0` with source + optional destination endpoint |
 | omitted destination | receiver's explicit `default_direct_endpoint`, never fan-out |
 | direct acceptance | only after resolved endpoint queue admission |
 | endpoint ACL | can narrow profile PeerTrustPolicy, never widen |

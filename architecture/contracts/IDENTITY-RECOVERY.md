@@ -15,7 +15,7 @@ Hardware-backed/non-exportable identity keys are a separate future identity back
 ## Recovery format identifier
 
 ```text
-cp2p-ed25519-bip39-entropy-v1
+interweave-ed25519-bip39-entropy-v1
 ```
 
 The format uses only the **entropy-to-mnemonic** portion of BIP-39:
@@ -38,7 +38,7 @@ PBKDF2-HMAC-SHA512(mnemonic, "mnemonic" + passphrase, 2048)
 
 There is no BIP-39 recovery passphrase in this transport format. Feeding these 24 words into a cryptocurrency wallet produces unrelated wallet material and is not a valid transport restore procedure.
 
-The backup UI/CLI must label the phrase as a **P2P transport identity recovery phrase — not a cryptocurrency wallet seed**.
+The backup UI/CLI must label the phrase as an **InterWeave transport identity recovery phrase — not a cryptocurrency wallet seed**.
 
 ## Recovery record
 
@@ -46,7 +46,7 @@ A human backup should retain both the secret phrase and non-secret expected iden
 
 ```text
 RecoveryRecordV1 {
-  format: "cp2p-ed25519-bip39-entropy-v1",
+  format: "interweave-ed25519-bip39-entropy-v1",
   identity_algorithm: "ed25519",
   expected_peer_id: PeerId,
   words: exactly 24 English BIP-39 words,
@@ -95,7 +95,7 @@ Recovery import is likewise offline/local, never IPC/Channel.
 
 A future `transportctl identity restore`-equivalent operation must:
 
-1. require format `cp2p-ed25519-bip39-entropy-v1`;
+1. require format `interweave-ed25519-bip39-entropy-v1`;
 2. accept exactly 24 English BIP-39 words after whitespace/NFKD normalization;
 3. verify word membership and the BIP-39 8-bit checksum;
 4. recover exactly 32 entropy bytes;

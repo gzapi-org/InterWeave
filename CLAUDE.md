@@ -1,4 +1,4 @@
-# Repository instructions
+# InterWeave repository instructions
 
 This repository contains the accepted architecture under `architecture/` plus a tracked implementation/test **skeleton** at repository root.
 
@@ -7,6 +7,7 @@ This repository contains the accepted architecture under `architecture/` plus a 
 - `architecture/` is the normative source of truth.
 - `apps/`, `crates/`, `tests/`, `fixtures/`, `test-data/`, `spikes/`, `packaging/`, and `xtask/` are landing zones defined by ADR-0045.
 - The root Cargo workspace intentionally has zero members.
+- The canonical project/display name is **InterWeave**; machine-facing project identifiers use lowercase `interweave` per ADR-0047. Do not reintroduce the former pre-InterWeave namespace into production constants, fixtures, paths, or packaging.
 - Do not add a production crate manifest/source, Android application build, installer, service unit, or executable test package unless the corresponding implementation phase is explicitly being executed.
 - When a canonical bottom-up stage begins, add only the crate/package(s) needed for that stage and add them to `[workspace].members` in the same change.
 - The canonical construction sequence is `architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md` / ADR-0046. Historical numbered phases are scope/release labels, not permission to violate dependency order.

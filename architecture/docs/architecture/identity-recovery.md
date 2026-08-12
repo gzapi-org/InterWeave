@@ -54,7 +54,7 @@ A first-party human client may guide the operator to the local recovery command,
 
 The display must include:
 
-- `P2P transport identity recovery phrase — not a cryptocurrency wallet seed`;
+- `InterWeave transport identity recovery phrase — not a cryptocurrency wallet seed`;
 - format identifier;
 - PeerId;
 - 24 numbered words;

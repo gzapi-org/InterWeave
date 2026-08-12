@@ -22,7 +22,7 @@ Adopt Model B as transport contract v2:
 - endpoint leases are runtime-only and disappear on IPC disconnect;
 - endpoint identifiers are routing labels, not human/application identity proof or an authorization principal; endpoint ACLs remain PeerId-based;
 - no daemon-side buffering exists for an unavailable endpoint;
-- implementation target becomes `/claude-p2p-channel/direct/2.0.0` and IPC major version 2.
+- implementation target becomes `/interweave/direct/2.0.0` and IPC major version 2.
 
 ADR-0016 is superseded for current direct-routing semantics; its profile identity and explicit-sharing decisions remain historical rationale.
 

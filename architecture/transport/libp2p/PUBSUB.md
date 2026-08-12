@@ -5,10 +5,17 @@
 Logical `ChannelId` is mapped to an internal topic key:
 
 ```text
-sha256("claude-p2p-channel/topic/v1\0" || channel_id_ascii)
+sha256("interweave/topic/v1\0" || channel_id_ascii)
 ```
 
 Wire topic representation is a lowercase/base32 or hex encoding chosen by the implementation. The hash prevents casual raw-topic disclosure but does not resist dictionary guessing of low-entropy channel names.
+
+Golden topic-key fixture:
+
+```text
+ChannelId = "general"
+SHA-256   = 82695daad230a8a8ddb6e43aae1063e4f611ded53d710f48b2ed3d206211c3bc
+```
 
 ## Envelope
 
@@ -49,21 +56,21 @@ The GossipSub `MessageIdFn` is frozen for valid v1 broadcasts and MUST bind the 
 For a signed v1 GossipSub message:
 
 ```text
-domain = UTF8("claude-p2p-channel/gossipsub-message-id/v1\0")
+domain = UTF8("interweave/gossipsub-message-id/v1\0")
 source = PeerId::to_bytes()          # canonical raw multihash bytes
 sequence_number = GossipSub wire sequence number interpreted as u64
 canonical = domain || u16be(len(source)) || source || u64be(sequence_number)
 GossipSubMessageIdV1 = SHA-256(canonical)    # full 32 bytes
 ```
 
-The message-ID function operates only on GossipSub transport metadata. It never parses the P2P-channel broadcast envelope and therefore cannot make mesh duplicate suppression depend on application serialization. The source and sequence number are covered by the signed GossipSub message profile; strict protocol/signature validation remains mandatory. An implementation MUST verify during SPIKE-002/Phase 2 that the target rust-libp2p receive path rejects invalid signed-source/sequence messages before they can create a lasting valid-message duplicate-cache entry. If a future rust-libp2p version changes that ordering, the implementation must add an equivalent pre-cache authenticity gate or revisit this compatibility decision before release.
+The message-ID function operates only on GossipSub transport metadata. It never parses the InterWeave broadcast envelope and therefore cannot make mesh duplicate suppression depend on application serialization. The source and sequence number are covered by the signed GossipSub message profile; strict protocol/signature validation remains mandatory. An implementation MUST verify during SPIKE-002/Phase 2 that the target rust-libp2p receive path rejects invalid signed-source/sequence messages before they can create a lasting valid-message duplicate-cache entry. If a future rust-libp2p version changes that ordering, the implementation must add an equivalent pre-cache authenticity gate or revisit this compatibility decision before release.
 
 Golden fixture using the repository zero-seed PeerId and sequence number `0`:
 
 ```text
 PeerId = 12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN
 sequence_number = 0
-GossipSubMessageIdV1 = 5af81518cf57fb5dadfbba75a31500d18f548825f5f4a5d05393076ffaf7ae3b
+GossipSubMessageIdV1 = 7f037dd538d9cccfb1949ca26b875c469173e6b248f1b68553ccaeb16bf9cf89
 ```
 
 This mapping is network-compatibility behavior. Changing it requires a GossipSub compatibility/version decision, not a local cache tuning change. Two different authenticated source PeerIds using the same application-envelope `message_id` MUST remain distinct at the GossipSub duplicate-cache layer and both reach normal validation/runtime admission. Reuse of an envelope ID by the same source is still governed independently by the runtime dedup contract after GossipSub admission.

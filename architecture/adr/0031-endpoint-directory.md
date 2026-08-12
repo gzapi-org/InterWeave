@@ -8,7 +8,7 @@ Endpoint-addressed direct delivery is usable with out-of-band endpoint names, bu
 
 ## Decision
 
-Add an optional request-response endpoint-directory protocol `/claude-p2p-channel/endpoints/1.0.0`.
+Add an optional request-response endpoint-directory protocol `/interweave/endpoints/1.0.0`.
 
 A query is accepted only from a profile-trusted peer. The response contains at most 32 lexicographically sorted EndpointIds that are simultaneously:
 

@@ -42,7 +42,7 @@ transport:
     address_backoff_max: duration[30s..30m] = 5m
     identity_mismatch_quarantine: duration[1m..24h] = 30m
   direct:
-    protocol: literal[/claude-p2p-channel/direct/2.0.0]
+    protocol: literal[/interweave/direct/2.0.0]
     timeout_ms: integer[1000..60000] = 10000
     max_inflight_total: integer[1..512] = 128
     max_inflight_per_peer: integer[1..32] = 8

@@ -18,7 +18,7 @@ Frozen fixtures must not be hidden only inside a Rust test module; they are prot
 
 ## Unit
 
-- ChannelId validation/topic hashing fixtures;
+- ChannelId validation/topic hashing fixtures (`general` -> `82695daad230a8a8ddb6e43aae1063e4f611ded53d710f48b2ed3d206211c3bc` under the InterWeave v1 topic domain);
 - EndpointId grammar/length fixtures;
 - endpoint config uniqueness/default/subset/advertisement cross-field validation;
 - IPC keepalive config validation (`response_timeout < interval`, `require_for_endpoint_lease => keepalive.enabled`) and fixed v2 version-not-in-config rule;
@@ -39,7 +39,7 @@ Frozen fixtures must not be hidden only inside a Rust test module; they are prot
 - broadcast dedup key `(mode, source_peer, channel, message_id)`;
 - direct dedup key `(mode, source_peer, source_endpoint, destination_selector, message_id)` plus stored first resolved endpoint/DirectContentFingerprintV1;
 - Direct v2 `media_type_len=0` decodes as **absent**, never empty string, and maps to `media_present=0` in DirectContentFingerprintV1;
-- DirectContentFingerprintV1 binary canonicalization and golden SHA-256 fixture (`text/plain`, `hello` -> `3dad2f134909e51812e261b56c84b5ab040de681a9e900c9180b2e88a4b47efe`);
+- DirectContentFingerprintV1 binary canonicalization and golden SHA-256 fixture (`text/plain`, `hello` -> `d73342f033f00fca9c4ffcced6f9e6debaeb53e3743049ee9aaf227a55f9bf15`);
 - direct in-flight reservation global/per-source-peer bounds and overload rejection; rate-limited duplicate retries do not re-enqueue or erase an existing positive dedup record;
 - backoff/cancellation state machines;
 - direct reply-token exact endpoint route + lease-epoch invalidation;

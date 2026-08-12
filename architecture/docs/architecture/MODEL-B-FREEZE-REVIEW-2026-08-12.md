@@ -19,7 +19,7 @@ Scope: closure of the final non-blocking review findings plus optional human-rec
 
 ## Identity recovery decision
 
-ADR-0033 fixes the initial software identity algorithm to Ed25519 and defines `cp2p-ed25519-bip39-entropy-v1`:
+ADR-0033 fixes the initial software identity algorithm to Ed25519 and defines `interweave-ed25519-bip39-entropy-v1`:
 
 - 24 English words encode the exact 32-byte Ed25519 secret seed using BIP-39 entropy/checksum mapping;
 - BIP-39 PBKDF2 wallet seed derivation and passphrase semantics are not used;

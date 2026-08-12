@@ -1,4 +1,4 @@
-# Architecture/specification tree
+# InterWeave architecture/specification tree
 
 This directory is the architectural source of truth for the implementation workspace at repository root.
 

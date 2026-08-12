@@ -7,7 +7,7 @@ This document maps the frozen architecture onto physical implementation/test fol
 ## Top-level rule
 
 ```text
-claude-p2p-channel/
+interweave/
 ├── architecture/    # specifications, ADRs, contracts, research, roadmap
 ├── apps/            # executable/platform composition roots
 ├── crates/          # reusable Rust package landing zones

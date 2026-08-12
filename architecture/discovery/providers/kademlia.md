@@ -61,7 +61,7 @@ All classes share global rate/concurrency budgets. Iterative Kademlia queries ma
 The provider does not infer remote server mode from trust or from the mere presence of a PeerId. Eligibility requires a freshness-bounded observation learned on a prior authenticated connection that the peer advertised:
 
 ```text
-/claude-p2p-channel/kad/1.0.0/<current-network-hash>
+/interweave/kad/1.0.0/<current-network-hash>
 ```
 
 The observation may be persisted by `PeerCacheDiscovery` with its timestamp and positive/negative support state. It is advisory, expires with the peer-cache record, and is superseded by fresh Identify evidence.

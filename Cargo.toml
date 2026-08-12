@@ -4,7 +4,7 @@
 resolver = "2"
 members = []
 
-[workspace.metadata.claude-p2p-channel]
+[workspace.metadata.interweave]
 status = "skeleton-only"
 architecture_root = "architecture"
 
