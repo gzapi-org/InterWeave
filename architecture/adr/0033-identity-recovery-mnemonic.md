@@ -1,4 +1,4 @@
-# ADR-0033 — Recover software PeerId with an optional 24-word Ed25519 mnemonic backup
+# Recover software PeerId with an optional 24-word Ed25519 mnemonic backup
 
 **Status:** Accepted
 

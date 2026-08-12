@@ -1,6 +1,6 @@
 # Implementation repository layout and test placement
 
-**Status:** Accepted.
+**Status:** Accepted
 
 ## Context
 

@@ -10,6 +10,8 @@ Persistent PeerId, multiple Claude sessions, independent upgrades, crash isolati
 
 Select Architecture B: Claude MCP Channel bridge connects over local IPC to a separate Rust transport daemon. The daemon owns identity/network lifecycle and can survive Claude Code restarts.
 
+Android is the one deployment binding that differs. Per ADR-0041 the first-party Android app embeds the same Rust `TransportRuntime` inside a foreground-service host rather than launching a standalone daemon, because a desktop-style daemon is a poor Android lifecycle/process primitive. This is **not** a second networking architecture: PeerId ownership, trust, discovery, endpoints, Kademlia, and connectivity semantics are identical. Desktop, server, and Claude integrations use the external daemon.
+
 ## Alternatives considered
 
 Embedded Swarm per Channel process; hybrid helper process that exits with each bridge; system-wide single daemon without profiles.
@@ -34,6 +36,10 @@ Define IPC before implementation. Bridge contains no private key or Swarm. Daemo
 
 Revisit only if measured deployment burden of a daemon is unacceptable and requirements for identity/network continuity are relaxed.
 
-## Android amendment
+## Amendments
 
-ADR-0041 selects an Android-specific deployment binding: the first-party Android app embeds the same Rust `TransportRuntime` inside a foreground-service host. This is not a second networking architecture: PeerId ownership, trust, discovery, endpoints, Kademlia and connectivity semantics remain identical. The amendment exists because a standalone desktop-style daemon is a poor Android lifecycle/process primitive. Desktop/server and Claude integrations retain the external daemon decision.
+Full notes: [`history/0015-amendments.md`](./history/0015-amendments.md).
+
+| Date | Amendment | Effect |
+|---|---|---|
+| 2026-08-12 | Android embeds the runtime instead of running a daemon | Decision states the ADR-0041 foreground-service binding; networking semantics unchanged |

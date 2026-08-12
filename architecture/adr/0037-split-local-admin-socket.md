@@ -12,6 +12,8 @@ IPC v2 uses two distinct local authority domains: `<profile>.sock` for data-plan
 
 `client.kind` remains endpoint-binding/configuration hygiene only. It is never the selector that turns a data connection into an administrator.
 
+The split-socket mechanism is a desktop/daemon binding. Android embedded mode has no admin socket: ADR-0041 and `contracts/LOCAL-CLIENT.md` preserve the same authority split as distinct in-process `LocalDataSession` and `LocalAdminPort` interfaces, and remote event handlers are never constructed with the latter. That is a confused-deputy boundary, not a sandbox against arbitrary same-process compromise.
+
 ## Alternatives considered
 
 One socket with capability names only; trust `client.kind=transportctl`; bearer token in normal config; require a second daemon; defer all separation to SPIKE-005.
@@ -36,6 +38,10 @@ The IPC acceptor tags every connection with its socket authority domain before p
 
 Revisit only to add stronger authentication within the admin domain or platform-specific privilege brokers. Do not merge sockets merely because stronger authentication is later added.
 
-## Android amendment
+## Amendments
 
-The split-socket mechanism is a desktop/daemon binding. Android embedded mode has no admin socket; ADR-0041 and `contracts/LOCAL-CLIENT.md` preserve the authority split as distinct in-process `LocalDataSession` and `LocalAdminPort` interfaces, and remote event handlers are never constructed with the latter. This is a confused-deputy boundary, not a sandbox against arbitrary same-process compromise.
+Full notes: [`history/0037-amendments.md`](./history/0037-amendments.md).
+
+| Date | Amendment | Effect |
+|---|---|---|
+| 2026-08-12 | The authority split holds on Android without a second socket | Decision states the in-process `LocalDataSession` / `LocalAdminPort` split; confused-deputy boundary, not a sandbox |
