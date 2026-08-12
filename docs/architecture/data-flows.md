@@ -30,10 +30,14 @@ trusted direct neighbor connection
       Accept: valid + authorized -> continue
  -> payload + rate + normalized duplicate limits
  -> MessageReceived{mode=broadcast,...}
- -> bounded IPC client queue
- -> bridge
+ -> local-interest routing
+      joined clients for this channel -> independent bounded IPC queues
+      no joined clients -> local drop diagnostic (no buffer/replay)
+ -> bridge(s)
  -> notifications/claude/channel {content, meta}
 ```
+
+A profile-level `channels.desired` subscription may keep the GossipSub mesh warm when no bridge is joined; it does not create a local consumer or offline mailbox.
 
 The immediate propagation peer and the original publisher are different identities and remain distinct in backend diagnostics.
 
@@ -60,6 +64,8 @@ If candidate addresses exist but the authorized peer cannot be connected/protoco
 
 Inbound connection retention is trust-gated. The direct request receives the same source trust/resource pipeline before delivery. A request can be rejected without producing a Channel event. No automatic retry occurs at the direct-protocol layer.
 
+After admission, direct `MessageReceived` is duplicated to every currently connected IPC client with message-event capability. With two bridges sharing one profile, both may therefore produce Channel events and independent reply tokens for the same network message. There is no hidden local-primary selection. If no local client is connected, the event is dropped after transport handling and is not buffered for later delivery.
+
 ## Reply
 
 Inbound Channel metadata carries an opaque short-lived `reply_token` created by the bridge:
@@ -75,18 +81,19 @@ Inbound Channel metadata carries an opaque short-lived `reply_token` created by 
 Kademlia remains disabled by default. When a supporting build is explicitly enabled:
 
 ```text
-peer-cache/static/mDNS candidate hint
+peer-cache/static/mDNS candidate + protocol-capability hints
  -> DiscoveryManager / KademliaDiscovery seed eligibility
- -> PeerTrustPolicy + address/protocol checks
- -> bounded KadControlHandle
+ -> PeerTrustPolicy + address/exact-protocol checks
+ -> neutral bounded kademlia-control-api port
  -> Swarm-owned Kademlia driver
  -> manual Behaviour::add_address
  -> bootstrap / get_n_closest_peers query
- -> QueryResult::GetClosestPeers { PeerInfo... }
+ -> any behaviour-originated dial request
+      -> DialAdmissionGate(ConnectionManager trust/backoff/limits)
+ -> query progress / PeerInfo results
  -> KademliaDiscovery normalization + TTL
  -> CandidatePeer{source=kademlia}
  -> DiscoveryManager merge
- -> ConnectionManager (still trust-gated)
 ```
 
-Kademlia results do not trigger an automatic dial from the provider and do not grant trust. Client-mode DHT peers are not treated as generally discoverable through peer routing; targeted lookup is opportunistic for server-mode DHT participants only.
+The provider does not own dial policy and Kademlia results never grant trust. The underlying Kademlia behavior may request dials while driving an iterative query, but those attempts are subject to the same root admission gate as ordinary dials. Client-mode DHT peers are not treated as generally discoverable through peer routing; targeted lookup requires fresh advisory evidence that the trusted target advertised the exact current Kademlia server protocol.

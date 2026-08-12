@@ -47,6 +47,8 @@ A reply token is local, opaque, unguessable, short-lived, and never a libp2p han
 
 Default TTL: 30 minutes, bounded maximum entries: 2048 per bridge process. Tokens disappear on bridge restart. Explicit `send`/`broadcast` can be used after token expiry.
 
+When multiple bridges share one profile, each bridge that receives the same admitted direct transport event creates its **own** reply token resolving to the same source PeerId. A token identifies a route, not an exclusive claim on that network message.
+
 A broadcast reply token does **not** confer or recreate a subscription. If the calling bridge has left the mapped channel since receiving the event, `reply` fails with `ChannelNotJoined`; it does not implicitly rejoin or publish on another client's subscription.
 
 ## Sanitization

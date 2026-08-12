@@ -10,7 +10,7 @@ Names are conceptual; final packaging may namespace them to avoid collisions.
 | `join` | `channel` | acquire local subscription |
 | `leave` | `channel` | release local subscription |
 | `identity` | none | show local transport PeerId/profile identity |
-| `status` | none | high-level bridge/daemon/discovery/network health |
+| `status` | none | high-level bridge/daemon/discovery/network health plus this bridge's joined channels |
 
 `content_type` is the Claude-facing name only. The bridge maps it to/from generic transport `Payload.media_type`; libp2p envelopes also use `media_type`.
 
@@ -35,6 +35,10 @@ Those are local administrative/diagnostic actions. This follows the Telegram pat
 For a broadcast inbound message it publishes back to the same channel. The calling bridge must still hold its join reference. If it has left since receiving the message, `reply` fails as `ChannelNotJoined`; the reply token never implicitly rejoins.
 
 Claude can choose explicit `send` if it wants a private response to a broadcast source, subject to the same trust policy.
+
+## Status subscription visibility
+
+`status` includes the caller bridge's current `joined_channels` (derived from `subscriptions()`) so a restarted/reconnected Claude can see what it has actually re-established. It may also report `profile_desired_channels` separately for operator context. The two fields must not be conflated: a profile-desired backend subscription does not authorize `broadcast` for a bridge and does not make that bridge an inbound broadcast consumer.
 
 ## Tool results
 

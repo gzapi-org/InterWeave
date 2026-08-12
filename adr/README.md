@@ -14,7 +14,7 @@ All ADRs are **Accepted** architecture decisions unless later superseded.
 | [0008](./0008-discovery-v1-providers.md) | Minimum v1 discovery is PeerCacheDiscovery, optional MdnsDiscovery, and StaticBootstrapDiscovery. |
 | [0009](./0009-kademlia-role.md) | Kademlia is fully designed as optional peer-routing discovery, remains disabled by default, and never bypasses trust or stores channel/application records. |
 | [0010](./0010-bootstrap-semantics.md) | Treat static bootstrap entries as reachability candidates only, never authority or implicit trust. |
-| [0011](./0011-discovery-connection-ownership.md) | Discovery owns candidates; ConnectionManager alone owns trust-gated dialing/retention/reconnect. |
+| [0011](./0011-discovery-connection-ownership.md) | Discovery owns candidates; ConnectionManager owns connection policy, enforced for explicit and behaviour-originated Swarm dials. |
 | [0012](./0012-trust-vs-discovery.md) | Use deny-by-default static PeerId trust for v1 data-plane connection, inbound source, and outbound direct-send admission. |
 | [0013](./0013-transport-security.md) | Use rust-libp2p Noise XX to authenticate PeerIds and encrypt TCP connections. |
 | [0014](./0014-group-encryption.md) | Defer group E2EE; plaintext broadcast confidentiality is bounded by the trusted data-plane peer set, and trusted forwarding peers can read payloads. |

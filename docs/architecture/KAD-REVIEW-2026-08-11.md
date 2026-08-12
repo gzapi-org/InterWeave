@@ -73,7 +73,7 @@ Because libp2p Kademlia client-mode nodes are not routing-table servers, the pee
 - generic `DiscoveryProvider` contract is unchanged;
 - generic `Transport` contract is unchanged;
 - Kademlia does not grant trust;
-- ConnectionManager still owns dialing/retention policy;
+- ConnectionManager owns connection admission/backoff/retention policy; a later review clarified that Kademlia behaviour can request Swarm dials, all of which must pass the root dial-admission gate;
 - GossipSub/direct transport semantics are unchanged;
 - bootstrap peers remain non-authoritative;
 - `enabled: false` remains the default;

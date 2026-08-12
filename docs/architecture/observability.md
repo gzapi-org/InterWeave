@@ -40,6 +40,8 @@ Provider health uses the same terms independently.
 - GossipSub mesh peer count by locally joined topic (bounded/redacted output);
 - direct protocol negotiation failures;
 - IPC connected client count/kind;
+- direct-message local fan-out count and no-local-consumer drops;
+- broadcast no-local-consumer drops for profile-desired channels;
 - Channel bridge connected/degraded state.
 
 ## Metrics architecture
@@ -61,6 +63,8 @@ validation_ignore_unauthorized_total
 validation_reject_invalid_total
 ipc_frame_too_large_total
 trust_policy_revision
+direct_local_fanout_deliveries_total
+message_no_local_consumer_total{mode}
 ```
 
 Labels must be bounded; never put raw payloads, private keys, arbitrary peer-supplied strings, or unbounded ChannelIds into metric label cardinality.
@@ -86,6 +90,12 @@ kademlia_candidates_expired_total
 kademlia_routing_insert_denied_total{reason}
 kademlia_record_write_attempts_total{kind}
 kademlia_driver_channel_overflow_total
+kademlia_effective_routing_target
+kademlia_saturation_state
+kademlia_behaviour_dial_requests_total
+kademlia_behaviour_dial_denied_total{reason}
+kademlia_behaviour_dial_connected_total
+kademlia_targeted_lookup_skipped_total{reason}
 ```
 
 Do not expose random lookup keys as ordinary metric labels/log fields. `network_id` and protocol hash are local diagnostics, not secrets or trust proof.

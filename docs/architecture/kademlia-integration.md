@@ -37,16 +37,17 @@ DiscoveryManager ------------+-----------------------------
        |
 KademliaDiscovery
   - scheduler
-  - query budgets
+  - query budgets / saturation
   - TTL/provenance
   - health
        |
-       | bounded KadControlHandle (internal, not public API)
+       | neutral bounded kademlia-control-api port
        v
 transport-libp2p / Swarm task
   - Identify adapter
   - Kademlia driver: libp2p::kad::Behaviour
-  - ConnectionManager
+  - ConnectionManager policy state
+  - Swarm-wide DialAdmissionGate
        |
        v
 Noise + Yamux/TCP libp2p connections
@@ -54,7 +55,7 @@ Noise + Yamux/TCP libp2p connections
 
 `KademliaDiscovery` implements the generic discovery contract but does **not** own the Swarm and does not dial peers directly. The existing single Swarm task remains the only owner of `libp2p::kad::Behaviour`.
 
-The control handle is deliberately Kademlia-specific and internal to the Rust backend. It is not added to `transport-api`, `discovery-api`, IPC, or Claude-facing tools.
+The port is deliberately Kademlia-specific and internal to the Rust workspace. It lives in a tiny `kademlia-control-api` crate with backend-neutral opaque identifiers/addresses; it is not added to `transport-api`, `discovery-api`, IPC, or Claude-facing tools. `discovery-kademlia` and `transport-libp2p` both depend on this tiny crate, not on each other.
 
 ## 3. Internal driver port
 
@@ -69,7 +70,7 @@ KadCommand
   LookupTrustedPeer { peer_id }
   Explore { random_key, max_results }
   SetMode { client | server }
-  Snapshot
+  Snapshot { request_id }
 ```
 
 Conceptual driver events:
@@ -82,8 +83,20 @@ KadDriverEvent
   QueryProgress { query_id, kind, step, result, stats }
   ModeChanged { mode }
   InboundRecordWriteAttempt { peer_id, kind }
+  SnapshotResult {
+    request_id,
+    mode,
+    protocol_hash,
+    routing_peer_count,
+    nonempty_bucket_count,
+    active_queries_by_class,
+    pending_behaviour_dials,
+    last_query_progress_at?
+  }
   DriverError { class }
 ```
+
+`SnapshotResult` is bounded diagnostic state only: no payloads, private keys, unbounded peer lists, or raw routing-table dumps. A request ID correlates the asynchronous response; missing response within the local control deadline is a driver-health failure.
 
 Both directions use bounded Tokio channels. The provider may schedule work; the Swarm task serializes all libp2p behavior mutation.
 
@@ -156,18 +169,37 @@ A remote deployment needs at least one reachable trusted server-mode node in the
 
 Kademlia does not weaken ADR-0011/0012.
 
-For the **first integration**, a peer is eligible to become a Kademlia routing/query peer only when `PeerTrustPolicy` authorizes that PeerId for ordinary data-plane connectivity. Discovery can observe unauthorized candidates, but they are not inserted into the local Kademlia routing table and are not dialed for DHT queries.
+For the **first integration**, a peer is eligible to become a Kademlia routing/query peer only when `PeerTrustPolicy` authorizes that PeerId for ordinary data-plane connectivity. Discovery can observe unauthorized candidates, but they are not manually admitted to the local Kademlia routing table.
 
-Why this constraint exists: libp2p connections are multiplexed. Allowing an untrusted peer onto a connection solely for Kademlia would require explicit per-connection/per-protocol admission so that GossipSub/direct protocols could not use the same connection and reopen the confidentiality problem resolved by ADR-0012/0029. That is a valid future architecture, but not an implicit side effect of adding Kademlia.
+### Behaviour-originated dial requests
+
+The Kademlia provider itself still does not call the ordinary dial scheduler. However, an iterative `kad::Behaviour` query is a `NetworkBehaviour` and may request dials from the Swarm while walking toward a key. That execution path must not bypass ConnectionManager policy.
+
+The backend therefore applies ADR-0011's **Swarm-wide `DialAdmissionGate`** to every outbound connection attempt, including dials requested by Kademlia. The gate consumes an atomically readable ConnectionManager policy snapshot and enforces:
+
+- current trust authorization for the target PeerId;
+- per-peer punitive/retry backoff;
+- pending-dial and connected-peer limits;
+- shutdown/drain state;
+- address policy available at dial admission.
+
+This rule also covers peers learned *inside* iterative query responses before the provider receives a final normalized result. A malicious trusted router cannot cause a successful connection to an unauthorized returned PeerId simply by placing it in a Kademlia response.
+
+Kademlia dial requests are counted separately where attribution is possible (`origin=kademlia-query`) but consume the same global connection budget. A policy denial is reported to the behavior as a dial failure and must not reset ConnectionManager backoff.
+
+Why the trust constraint exists: libp2p connections are multiplexed. Allowing an untrusted peer onto a connection solely for Kademlia would require explicit per-connection/per-protocol admission so GossipSub/direct protocols could not reuse the same connection and reopen the confidentiality problem resolved by ADR-0012/0029. That is a future architecture, not an implicit side effect.
 
 Consequences:
 
 - Kademlia is a **trust-bounded distributed routing overlay** in its first integration;
-- an asymmetric allowlist can limit DHT reachability just as it can limit GossipSub propagation;
-- a bootstrap peer still requires separate trust authorization before it can be used as a Kademlia route peer;
-- trust revocation removes the peer from Kademlia routing state and the ordinary connection set.
+- asymmetric/small allowlists constrain DHT reachability;
+- bootstrap still requires separate trust authorization;
+- trust revocation removes the peer from Kademlia routing state and ordinary connections;
+- Kademlia cannot bypass ConnectionManager backoff merely because a query needs a routing hop.
 
-## 7. Address and Identify integration
+SPIKE-003 must instrument/measure behaviour-originated dial volume and prove the gate works under backoff and global-limit pressure.
+
+## 7. Address, Identify, and capability-cache integration
 
 Rust-libp2p does not automatically connect Identify observations to Kademlia routing. The backend must bridge them deliberately.
 
@@ -178,15 +210,40 @@ candidate observation
   -> PeerId syntax/self check
   -> address normalization and global address limits
   -> PeerTrustPolicy authorization
-  -> connection/Identify observation where required
-  -> confirm expected Kademlia protocol support for routing-table service peers
+  -> connection permitted by DialAdmissionGate
+  -> authenticated Identify observation
+  -> exact current Kademlia server protocol advertised
   -> KadCommand::AddRoutingAddress
   -> Behaviour::add_address
 ```
 
 Use `BucketInserts::Manual`. Merely connecting to a peer must not automatically put it in the DHT routing table.
 
-Kademlia addresses are normalized as fully-qualified peer addresses where required by the current rust-libp2p API. DNS multiaddrs remain unresolved until the normal connection/dial layer resolves them; Kademlia does not create a second DNS resolver.
+Kademlia addresses are normalized as fully-qualified peer addresses where required by the selected rust-libp2p API. DNS multiaddrs remain unresolved until the normal connection/dial layer resolves them; Kademlia does not create a second DNS resolver.
+
+### Persisted server-capability observation
+
+Remote Kademlia server mode is not locally knowable from a bare allowlisted PeerId. It becomes observable only after an authenticated connection exposes supported protocols through Identify. To make targeted lookup implementable after restart, the existing advisory peer cache persists a bounded capability observation:
+
+```text
+protocol_family = claude-p2p-channel/kad
+wire_major = 1
+network_hash = current network hash
+role = server
+supported = true | false
+observed_at
+```
+
+Rules:
+
+- the observation is advisory and never grants trust;
+- positive evidence is valid only for the exact wire major + `network_hash`;
+- freshness cannot exceed the enclosing peer-cache TTL;
+- a fresh Identify response supersedes cached evidence;
+- if a peer no longer advertises the exact server protocol, stale positive evidence is removed/replaced;
+- deleting the peer cache merely disables cold-start targeted eligibility until evidence is learned again.
+
+This capability field belongs to `PeerCacheDiscovery` because it is historical transport observation, not Kademlia authoritative state.
 
 ## 8. Seeding
 
@@ -220,24 +277,52 @@ The implementation explicitly configures periodic bootstrap behavior rather than
 
 ### 9.2 Trusted-peer targeted lookup
 
-When an allowlisted **server-mode Kademlia participant** has no usable current addresses (or all addresses are in backoff), the provider may issue a rate-limited lookup using the PeerId bytes as the Kademlia lookup key. Results are advisory `PeerInfo` observations. This operation does not prove that the target is trusted; trust was already determined independently from the local policy.
+A targeted lookup is eligible only when **all** are true:
 
-This is not a general directory for client-mode nodes. Under the libp2p Kademlia client/server model, client nodes are not routing-table servers and therefore should not be assumed discoverable by PeerId through `FIND_NODE`. Other discovery providers or direct configured hints remain necessary for those nodes.
+1. target is a remote PeerId authorized by current `PeerTrustPolicy`;
+2. a fresh peer-cache/Identify capability observation says the target advertised the exact current Kademlia **server** protocol/network namespace;
+3. no usable current target address exists, or all normal candidate addresses are in backoff/unusable;
+4. the per-target targeted-lookup cooldown has elapsed;
+5. global Kademlia query budget permits work.
 
-Targeted lookup uses a per-target cooldown to avoid repeated misses becoming query floods.
+The provider may then issue a lookup using the PeerId bytes as the Kademlia lookup key. Results are advisory `PeerInfo` observations. The cached server-capability observation only answers "was this peer recently observed serving this DHT namespace?"; it does not prove current reachability, trust, or continued server mode.
 
-### 9.3 Random exploration
+This is not a general directory for client-mode nodes. Client nodes are not assumed discoverable by PeerId through `FIND_NODE`; other discovery providers/configured hints remain necessary.
 
-When the routing/candidate view is below the configured target, generate 32 cryptographically random bytes and call `get_n_closest_peers(random_key, max_results)`.
+If capability evidence is absent/expired/negative, skip targeted lookup and record a bounded reason diagnostic instead of guessing remote mode.
 
-Random exploration keys:
+### 9.3 Random exploration, effective target, and saturation
 
-- are generated independently for each query;
-- are not hashes of ChannelId, repository name, application role, payload, or local profile name;
-- are not persisted;
-- are diagnostics-redacted by default.
+Define:
 
-Exploration backs off when sufficient trusted routing/connectivity exists.
+```text
+remote_trusted_population = count(distinct trust.allowed_peers excluding local PeerId)
+effective_target = min(
+  target_routing_peers,
+  max_routing_peers,
+  remote_trusted_population
+)
+```
+
+This prevents the default target of 64 from making a two- or three-peer private overlay permanently degraded solely because the trust domain is intentionally small.
+
+While the routing view is neither target-satisfied nor saturated, generate 32 cryptographically random bytes and call `get_n_closest_peers(random_key, max_results)` subject to global budgets.
+
+Random exploration keys are independent per query, never hashes of ChannelId/repository/application identity, never persisted, and diagnostics-redacted by default.
+
+#### No-progress backoff
+
+An exploration round makes **progress** only if it yields at least one new trust-admitted routing peer or a new usable address for an eligible routing peer. Otherwise it increments `consecutive_no_progress_rounds` and doubles the next exploration delay from the configured `exploration_interval`, capped at **15 minutes**. Progress resets the delay to the base interval.
+
+Initial saturation rule: after **3 consecutive successful no-progress exploration rounds**, the provider may mark the routing view `saturated` when:
+
+- at least one usable routing peer exists;
+- there is no fresh targetable server-capability observation outside the current routing set that is immediately eligible for targeted lookup; and
+- recent query health is otherwise good.
+
+Saturation is invalidated by trust-policy revision, a new/updated external seed or capability observation, routing-peer loss, network namespace/mode change, or provider restart. A saturated view still performs the much lower-frequency bootstrap/refresh work; it does not claim that every allowlisted peer was discovered.
+
+Health treats either `routing_peers >= effective_target` **or** valid saturation as sufficient routing-population health. Query failures, no peers, or server-reachability problems may still degrade it independently.
 
 ## 10. Result normalization
 
@@ -275,7 +360,7 @@ Initial implementation policy:
 - address expiry/removal is propagated to the driver;
 - routing-table state is ephemeral and never serialized as authoritative state.
 
-The peer cache remains the only advisory persistence mechanism for previously successful peer addresses.
+The peer cache remains the only advisory persistence mechanism for previously successful peer reachability and bounded authenticated protocol observations; Kademlia routing state itself remains ephemeral.
 
 ### Planned rust-libp2p configuration mapping
 
@@ -318,16 +403,16 @@ Write-back caching for record lookup is disabled because record lookup itself is
 
 A future requirement for DHT records requires a new ADR and a separate schema/security review.
 
-## 13. Initial configuration defaults
+## 13. Initial configuration defaults and validation
 
-These are **implementation defaults, not protocol guarantees**. They are deliberately conservative and remain bounded/configurable:
+These are **implementation defaults, not protocol guarantees**. They remain bounded/configurable:
 
 | Setting | Initial default | Rationale |
 |---|---:|---|
 | `enabled` | `false` | opt-in rollout |
 | `mode` | `client` | no accidental DHT server |
 | `routing_peer_policy` | `data-plane-trusted` | preserve established trust boundary |
-| `kbucket_size` | `20` | standard libp2p Kademlia K value |
+| `kbucket_size` | `20` | initial K value/profile bound |
 | `max_routing_peers` | `256` | project-level memory/topology bound |
 | `candidate_ttl` | `30m` | advisory freshness window |
 | `query_timeout` | `30s` | WAN-tolerant but bounded |
@@ -335,46 +420,67 @@ These are **implementation defaults, not protocol guarantees**. They are deliber
 | `disjoint_query_paths` | `true` | resilience against adversarial routing |
 | `max_concurrent_queries` | `2` | bounded network/work amplification |
 | `max_queries_per_minute` | `6` | global query-rate ceiling |
-| `exploration_interval` | `60s` | low background rate |
+| `exploration_interval` | `60s` | base background rate; no-progress backoff increases it |
 | `exploration_jitter_percent` | `20` | avoid synchronized fleets |
-| `max_results_per_query` | `20` | at/below Kademlia K |
-| `target_routing_peers` | `64` | stop active exploration when sufficiently seeded |
+| `max_results_per_query` | `20` | bounded closest-peer result count |
+| `target_routing_peers` | `64` | desired routing population before effective-target cap |
 | `targeted_lookup_cooldown` | `5m` | bound repeated missing-peer lookup |
 | `bootstrap_min_interval` | `5m` | avoid bootstrap storms |
 | `bootstrap_refresh_interval` | `15m` | periodic routing refresh |
 
-SPIKE-003 must measure these before code is promoted beyond experimental status. Configuration ranges are defined in `config/config.schema.yaml`.
+Hard cross-field rules when Kademlia is enabled:
 
-## 14. Health model
+1. `target_routing_peers <= max_routing_peers`;
+2. `bootstrap_refresh_interval >= bootstrap_min_interval`;
+3. `max_results_per_query <= kbucket_size`;
+4. every name in `seed_sources` resolves to a provider entry that is present **and `enabled: true`** in the same profile.
+
+Violation is a configuration validation/startup error, not a warning or silent clamp. When Kademlia itself is disabled, the reserved config may remain present without requiring its seed providers to be enabled because no Kademlia work will execute.
+
+SPIKE-003 must measure the defaults before support promotion. Phase 1 config tests freeze these cross-field rules.
+
+## 14. Health model and server reachability evidence
 
 Kademlia uses the generic provider states.
 
+### Routing-population health
+
+Compute the `effective_target` from section 9.3. The population dimension is sufficient when either:
+
+- `routing_peer_count >= effective_target` and `effective_target > 0`; or
+- the provider is in the valid `saturated` state defined above.
+
+A small trust overlay can therefore be fully healthy without pretending it contains 64 routers.
+
+### Server-mode reachability evidence in v1
+
+AutoNAT is deferred, so server reachability is **not cryptographically or actively verified** in this phase. The provider classifies evidence only:
+
+- **declared external evidence:** operator config contains at least one non-wildcard, non-loopback listen/advertised address that is plausibly externally routable (public IP or DNS form); this is operator intent, not proof;
+- **peer-observed evidence:** one or more authenticated trusted peers report a non-loopback/non-private `Identify.observed_addr` for this node; this is stronger observational evidence but still not an inbound probe;
+- **none:** no such evidence.
+
+Server mode with `none` is `degraded` with reason `server_reachability_unverified`. One of the evidence classes removes that specific degradation only if normal routing/query health is otherwise sufficient. The UI/docs must not label either class "AutoNAT verified" or "publicly reachable".
+
+SPIKE-004 compares these evidence classes with actual NAT/relay reachability and decides whether later AutoNAT changes the health model.
+
 ### healthy
 
-- driver is running;
-- at least one eligible routing peer exists;
-- a bootstrap/closest-peer query has succeeded recently enough for the configured refresh window;
-- timeout/error rate is below the degraded threshold.
+- driver running;
+- routing population target-satisfied or saturated;
+- bootstrap/closest-peer query succeeded within refresh expectations;
+- timeout/error rate below threshold;
+- if configured server mode, at least declared-external or peer-observed reachability evidence exists.
 
 ### degraded
 
-Examples:
-
-- enabled but still warming with eligible seeds;
-- routing table below the target but queries still make progress;
-- recent query failures/timeouts with some successful routing activity;
-- server mode selected but no confirmed reachable address is observed.
+Examples: warming toward effective target; successful but not-yet-saturated under-target exploration; intermittent query failure; server mode with no reachability evidence.
 
 ### unavailable
 
-Examples:
+Examples: `effective_target == 0` / no eligible route peer after startup grace; repeated bounded query failure; driver unavailable; invalid protocol configuration.
 
-- no eligible routing peers after startup grace;
-- repeated bootstrap/query failure beyond bounded retry threshold;
-- Kademlia driver/behavior unavailable;
-- protocol configuration cannot be constructed.
-
-A Kademlia provider failure never kills unrelated discovery providers or established transport connections.
+Provider failure never kills unrelated discovery providers or established transport connections.
 
 ## 15. Backpressure and scheduling
 
@@ -406,6 +512,12 @@ kademlia_candidates_expired_total
 kademlia_routing_insert_denied_total{reason}
 kademlia_record_write_attempts_total{kind}
 kademlia_driver_channel_overflow_total
+kademlia_effective_routing_target
+kademlia_saturation_state
+kademlia_behaviour_dial_requests_total
+kademlia_behaviour_dial_denied_total{reason}
+kademlia_behaviour_dial_connected_total
+kademlia_targeted_lookup_skipped_total{reason}
 ```
 
 Do not log random lookup keys at normal levels. Do not log payloads or private keys.
@@ -420,6 +532,9 @@ Do not log random lookup keys at normal levels. Do not log payloads or private k
 | protocol namespace mismatch | peer never becomes usable Kademlia route; diagnostic only |
 | bootstrap timeout | provider degraded; bounded retry/backoff |
 | query timeout | query fails; other queries/providers continue |
+| Kademlia behaviour requests dial to unauthorized/backed-off/over-limit peer | root dial gate denies; query sees dial failure; ConnectionManager policy unchanged |
+| routing table below configured target but small trust overlay saturated | health may be healthy using effective-target/saturation rule; exploration backs off |
+| targeted peer has no fresh server-capability evidence | skip targeted lookup; other discovery continues |
 | routing table emptied by trust revocation | remove peers, cancel/suppress exploration until reseeded |
 | server mode but unreachable | provider degraded; node can still use other transport capabilities |
 | inbound record/provider write | discard/not-store; counter + debug diagnostic |
@@ -466,22 +581,32 @@ Planned shape:
 ```text
 crates/
   discovery-api/
+  kademlia-control-api/   # INTERNAL, tiny, neutral; no libp2p types
   discovery-kademlia/
-    provider       # DiscoveryProvider implementation
-    scheduler      # bootstrap / lookup / exploration decisions
-    budgets        # concurrency/rate/cooldown
-    normalize      # Kad result -> CandidatePeer
+    provider
+    scheduler
+    budgets
+    normalize
     health
   transport-libp2p/
     swarm_task
-    kademlia_driver # owns kad::Behaviour inside the Swarm
+    dial_admission_gate
+    kademlia_driver       # owns kad::Behaviour inside Swarm
     identify_adapter
     connection_manager
 ```
 
-`transport-libp2p` exposes a narrow backend-internal `KadControlHandle` used by `discovery-kademlia`. It does not depend on `discovery-kademlia`, avoiding a cycle. The composition root constructs the Swarm/backend first, obtains the handle, then constructs the optional provider.
+`kademlia-control-api` contains only the narrow command/event port and neutral bounded DTOs. It may depend on neutral transport identifier/address types but not on `libp2p`. Both concrete sides depend on it:
 
-This handle is not a new generic trait. It exists only because a libp2p-native discovery mechanism must mutate a `NetworkBehaviour` owned by the single Swarm task.
+```text
+discovery-kademlia ---> kademlia-control-api <--- transport-libp2p
+        |                                         |
+        +--> discovery-api                        +--> rust-libp2p
+```
+
+This corrects the dependency ambiguity that would occur if the handle type lived in `transport-libp2p`: the provider stays libp2p-free and the backend does not depend on the provider crate. The composition root obtains the backend implementation of the port and injects it into the optional provider.
+
+The port remains internal and Kademlia-specific; it does not become another generic `DiscoveryProvider`-like abstraction.
 
 ## 21. Test plan
 
@@ -492,8 +617,12 @@ This handle is not a new generic trait. It exists only because a libp2p-native d
 - unsupported build + `enabled: true` fails;
 - deterministic protocol-name derivation fixtures;
 - random exploration keys never depend on ChannelId/application input;
-- query budget, concurrency, jitter, and targeted cooldown;
+- query budget, concurrency, jitter, targeted cooldown, no-progress backoff, effective-target/saturation state;
 - manual routing insertion policy and trust rejection;
+- root dial-admission behavior for Kademlia-originated dials under backoff/global limits;
+- peer-cache positive/negative server-capability observation freshness/supersession;
+- Kademlia cross-field config and enabled seed-source validation;
+- bounded `SnapshotResult` correlation/shape;
 - `PeerInfo` normalization/address caps/self filtering;
 - Kademlia provenance TTL/expiry;
 - inbound record/provider write attempts are not stored.
@@ -506,14 +635,17 @@ Run the standard `DISCOVERY-CONFORMANCE.md` suite, including deterministic shutd
 
 - 3 trusted nodes: one server seed + two clients bootstrap and discover routing candidates;
 - 10-20 node private DHT: random exploration converges without channel/provider records;
-- targeted lookup locates an allowlisted **server-mode DHT participant** whose address is not locally cached;
+- targeted lookup locates an allowlisted peer with fresh cached exact-server-protocol evidence whose address is not locally cached;
 - a client-mode peer is not falsely promised to be discoverable through Kademlia peer routing alone;
 - client-mode node is not advertised as a Kademlia server;
 - server-mode node serves `FIND_NODE` but stores no application/provider records;
 - trust revocation removes a routing peer and prevents further query use;
 - asymmetric trust does not create untrusted Kademlia connections;
 - mDNS/static/cache seeds merge without duplicate CandidatePeers;
-- Kademlia failure leaves GossipSub/direct traffic on existing peers intact.
+- Kademlia failure leaves GossipSub/direct traffic on existing peers intact;
+- 2-3 peer allowlist reaches effective-target/saturated healthy state without 60-second perpetual exploration;
+- Kademlia query engine attempts to dial a returned unauthorized or backed-off peer -> root dial gate denies establishment;
+- server-mode `none` vs declared-external vs peer-observed reachability evidence produces the documented health reason without claiming AutoNAT verification.
 
 ### Adversarial/integration
 
@@ -538,4 +670,7 @@ Kademlia remains `enabled: false` by default even after implementation exists. P
 4. poisoning/eclipse simulation produces bounded resource use and documented residual risk;
 5. no record/provider-record persistence occurs;
 6. disabled-mode test proves no Kademlia network activity;
-7. final implementation ADR/review confirms no change to discovery/trust/connection boundaries.
+7. behaviour-originated dial measurement proves ConnectionManager policy/backoff/global limits apply to Kademlia query dials;
+8. targeted lookup capability-cache semantics and small-overlay saturation tests pass;
+9. Phase 1 cross-field/seed-source config fixtures are frozen and passing;
+10. final implementation ADR/review confirms no change to discovery/trust/connection boundaries.

@@ -15,7 +15,7 @@ The strongest design property remains preserved: discovery is an independently r
 | Review issue | Resolution | Evidence |
 |---|---|---|
 | 48 KiB payload cannot fit 64 KiB IPC JSON | **Closed** | IPC JSON body is 128 KiB; bounded metadata + exact 49,152-byte golden fixtures are normative |
-| untrusted connected peer could join/read GossipSub overlay | **Closed for v1** | ConnectionManager does not dial/retain unauthorized ordinary data-plane PeerIds; trust revocation evicts them |
+| untrusted connected peer could join/read GossipSub overlay | **Closed for v1** | unauthorized peers are not admitted/retained; explicit and behaviour-originated outbound dials pass trust admission; revocation evicts them |
 | outbound `send` trust ambiguous | **Closed** | non-allowlisted target -> local `UnauthorizedPeer` before dial |
 | GossipSub trust failure validation mapping absent | **Closed** | ADR-0029: objective invalid -> `Reject`; valid unauthorized original source -> `Ignore`; valid authorized -> `Accept` |
 | `NotConnected` missing from error model | **Closed** | removed; `PeerUnknown` = no usable candidate, `PeerUnreachable` = candidate exists but dial/protocol cannot complete |
@@ -41,11 +41,11 @@ The strongest design property remains preserved: discovery is an independently r
 | Kademlia mandatory? | **No** | fully designed optional peer-routing provider; default disabled; unsupported build rejects enablement |
 | bootstrap becomes authority/trust? | **No** | static provider is reachability only and data-plane dial still requires allowlist |
 | discovery becomes trust? | **No** | deny-by-default static trust remains independent |
-| discovery manages connections? | **No** | ConnectionManager alone owns dial/reconnect decisions |
+| discovery manages connections? | **No** | ConnectionManager owns connection policy; backend protocol dial requests still pass the root admission gate |
 | untrusted peers enter ordinary data-plane overlay? | **No in v1** | outbound/inbound retention is trust-gated |
 | unbounded queues? | **No** | every named queue/client/concurrency pool has a bound |
 | IPC can carry transport-max payload? | **Yes** | fixed 128 KiB JSON body + max-boundary fixtures |
-| hidden persistent message state? | **No** | cache is reachability only; payload spool prohibited |
+| hidden persistent message state? | **No** | cache stores advisory reachability/protocol observations only; payload spool prohibited |
 | incorrect delivery guarantees? | **No** | best effort/no offline/no exactly-once; direct acceptance precisely scoped |
 | GossipSub local trust rejection mis-scored as invalid? | **No by contract** | ADR-0029 requires `Ignore` for valid unauthorized original publishers |
 | trait over-abstraction? | **Controlled** | only Transport, DiscoveryProvider, TrustPolicy are public substitution boundaries |
@@ -81,6 +81,11 @@ The strongest design property remains preserved: discovery is an independently r
 13. every legal 48 KiB transport payload must fit through IPC in either direction.
 14. Claude tool surface is transport-only and contains no trust/key/discovery/shutdown administration.
 15. broadcast requires a caller-owned join reference; reply tokens do not grant/recreate subscriptions.
+16. profile `channels.desired` exists only for backend subscription/mesh pre-warm; with no joined client, inbound traffic is not buffered or replayed.
+17. direct inbound messages to a shared profile fan out independently to every connected message-event IPC client; no hidden local primary exists.
+18. `send` to the local PeerId is `InvalidArgument`; no self-dial occurs.
+19. Kademlia behaviour-originated dials pass the same trust/backoff/global-limit admission policy as ordinary scheduler dials.
+20. Kademlia targeted lookup requires fresh observed exact-server-protocol capability; small overlays use effective-target/saturation health.
 
 ## Accepted v1 limitations
 
@@ -94,7 +99,8 @@ The strongest design property remains preserved: discovery is an independently r
 - static trust administration does not scale to large public networks;
 - same-user malicious local processes remain partly inside the IPC residual threat boundary;
 - channel/topic hashing does not defeat dictionary guessing;
-- messages arriving while no local Channel client is connected may be dropped.
+- messages arriving while no local Channel client is connected may be dropped; profile-desired subscriptions deliberately do not create a hidden queue;
+- same-profile direct messages may be presented to multiple local Claude bridges, each of which may reply.
 
 ## Remaining architectural risks
 
@@ -122,7 +128,7 @@ New metadata fields or larger diagnostics must preserve the 128 KiB max-payload 
 
 1. Exact current Claude `channels` manifest and MCP SDK compatibility? -> SPIKE-001.
 2. Precise rust-libp2p request-response failure/cancellation behavior and codec ergonomics? -> SPIKE-002.
-3. Do the proposed Kademlia defaults and trust-bounded topology materially improve target discovery without unacceptable poisoning/privacy cost? -> SPIKE-003 before optional implementation/support.
+3. Do the proposed Kademlia defaults and trust-bounded topology materially improve target discovery without unacceptable poisoning/privacy cost, and can behaviour-originated dials/capability targeting/saturation be enforced exactly as specified? -> SPIKE-003 before optional implementation/support.
 4. Which relay/NAT protocols are truly required for target deployments? -> SPIKE-004.
 5. Is same-user local-process isolation needed beyond OS socket ACLs/capability scoping? -> SPIKE-005 if deployment requires.
 
@@ -134,4 +140,4 @@ Expected repository content is Markdown/YAML architecture material plus Git meta
 
 ## Implementation-readiness verdict
 
-With these amendments, a Rust team can begin Phase 1 contract scaffolding without reopening whether max payloads fit IPC, whether trust controls outbound/data-plane connections, or how GossipSub maps authorization to validation results. Those are now contract decisions with executable boundary tests.
+With these amendments, a Rust team can begin Phase 1 contract scaffolding without reopening IPC payload fit, trust/data-plane admission, GossipSub authorization mapping, shared-profile local fan-out, desired-subscription buffering semantics, Kademlia config invariants, or Kademlia connection-policy ownership. Kademlia remains implementation-gated by SPIKE-003 and disabled by default.

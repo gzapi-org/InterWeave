@@ -50,10 +50,19 @@ CandidatePeer {
   source: ProviderName,
   observed_at: Timestamp,
   expires_at?: Timestamp,
+  protocol_observations?: Set<ProtocolObservation>,
+}
+
+ProtocolObservation {
+  protocol_id: OpaqueTransportProtocolId,
+  supported: bool,
+  observed_at: Timestamp,
 }
 ```
 
 Candidate quality is derived from explicit provenance, freshness/expiry, address observations, and configured provider priority/cost. v1 deliberately has no generic `confidence` field because a mixed `low | normal | configured` scale duplicates provenance and can be misread as trust.
+
+`protocol_observations` are bounded advisory transport facts learned on authenticated connections (for example, an exact Identify protocol string seen on a peer). They are **not** trust, application roles, or capability authorization. A provider may omit them. The global initial cap is **16 observations per peer** and each opaque protocol identifier is capped at **256 ASCII bytes**; freshness must not outlive the candidate/cache source that supplied them.
 
 ## Events
 
@@ -77,7 +86,15 @@ Provider event streams are the primary interface. Polling is reserved for health
 
 ## add_hint
 
-Optional ingress for observations that are meaningful to that provider (for example, the peer-cache provider can persist a successful address observation). Providers must reject unsupported hints explicitly rather than silently taking ownership of connection policy.
+Optional ingress for observations that are meaningful to that provider. Conceptual v1 hint classes include:
+
+```text
+ObservedReachable { peer_id, address, observed_at }
+ObservedProtocol { peer_id, protocol_id, supported, observed_at }
+CandidateHint { candidate }
+```
+
+For example, PeerCacheDiscovery persists successful address and authenticated protocol observations; KademliaDiscovery consumes seed/capability hints routed by DiscoveryManager. Providers must reject unsupported hints explicitly rather than silently taking ownership of connection policy. Hints never grant trust.
 
 ## Health
 

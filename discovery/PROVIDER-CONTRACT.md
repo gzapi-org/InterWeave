@@ -39,4 +39,4 @@ v1 supports:
 
 ## Libp2p-native provider adapters
 
-A provider whose mechanism is itself a `NetworkBehaviour` still may not own the Swarm. Kademlia demonstrates the intended pattern: the Swarm task owns the concrete behavior and exposes a narrow bounded backend-internal control/event handle to the provider implementation. That handle is not part of the generic discovery contract and must not leak into transport consumers.
+A provider whose mechanism is itself a `NetworkBehaviour` still may not own the Swarm. Kademlia demonstrates the intended pattern: the Swarm task owns the concrete behavior and both sides communicate through the tiny neutral internal `kademlia-control-api` port. That port is not part of the generic discovery contract and must not leak into transport consumers. Behaviour-originated network dials remain subject to the backend's ConnectionManager policy gate.

@@ -28,6 +28,8 @@ payload = opaque bytes <= effective profile max_payload_bytes <= 49152
 
 The calling local IPC client must hold an active join reference for the logical ChannelId before `broadcast`. Publishing without a caller-owned join fails locally with `ChannelNotJoined`; the runtime does not implicitly subscribe and does not borrow another local client's subscription reference.
 
+Profile configuration `channels.desired` may keep the backend topic subscription/mesh warm even when zero IPC clients hold a join reference. That daemon-level subscription is **not** a client join: inbound messages with no joined local consumer are not buffered/replayed, and no bridge may publish merely because the profile desires the topic.
+
 ## Authenticity, trust, and validation results
 
 Use signed GossipSub messages and strict cryptographic/protocol validation. Data-plane connections are trust-gated by ADR-0011/0012, but a trusted forwarding neighbor can still relay a message whose authenticated original publisher is not locally allowlisted.

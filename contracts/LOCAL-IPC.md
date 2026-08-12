@@ -85,6 +85,17 @@ A request whose method requires an ungranted capability fails locally with a sta
 
 The daemon supports up to **16 local clients** by default. Each client has independent bounded command/event queues and subscription references. One slow client cannot backpressure the entire network event loop.
 
+### Message-event fan-out
+
+Local interest is mode-specific and normative:
+
+- **broadcast `MessageReceived`:** enqueue only to connected IPC clients with the `events` capability that currently hold a local join reference for that ChannelId; a daemon-level `channels.desired` backend subscription does not create a client interest reference;
+- **direct `MessageReceived`:** enqueue one independent copy to **every** connected IPC client with the `events` capability. v1 has no network-visible local endpoint identifier and performs no first-client/round-robin election.
+
+Therefore two Claude bridges intentionally sharing one profile may both receive and reply to the same direct message. Each bridge creates its own local `reply_token` pointing to the same source PeerId. This duplicate local delivery is an explicit v1 semantic, not an exactly-once claim. Finer routing must be defined by a future endpoint/application protocol or by using separate profiles/PeerIds.
+
+If no eligible local client exists, the daemon does not buffer the message for later IPC delivery. It records a bounded no-local-consumer/drop diagnostic and continues; ADR-0020 still forbids a hidden offline queue.
+
 ## Push events and overload
 
 Each client event queue defaults to 256. When full:

@@ -32,7 +32,7 @@ main / daemon supervisor
 
 ## Reconnection
 
-ConnectionManager maintains peer-scoped exponential backoff with jitter and a maximum retry interval **for authorized peers**. Discovery updates can add addresses but do not reset a punitive backoff endlessly; a successful connection resets it. Unauthorized candidates remain bounded observations and are not dialed.
+ConnectionManager maintains peer-scoped exponential backoff with jitter and a maximum retry interval **for authorized peers**. Discovery updates can add addresses but do not reset a punitive backoff endlessly; a successful connection resets it. Unauthorized candidates remain bounded observations. Explicit scheduler dials are not issued for them, and behaviour-originated dial attempts are denied by the root admission gate.
 
 ## Provider restart
 
@@ -40,11 +40,11 @@ Transient provider failure transitions health to degraded/unavailable, waits pro
 
 ## IPC event fan-out
 
-Runtime emits one normalized message event. IPC server fans out only to interested local clients and copies/retains payload under bounded memory accounting. Slow clients drop their own events rather than blocking other clients. Serialized frames are checked against the fixed 131,072-byte JSON-body ceiling before write.
+Runtime emits one normalized message event. IPC interest is mode-specific: broadcast goes only to clients holding that ChannelId join reference; direct goes independently to every connected message-event client. A profile-desired backend subscription is not local interest. If no eligible client exists, the event is not retained for replay. Slow clients drop their own queued events rather than blocking other clients. Serialized frames are checked against the fixed 131,072-byte JSON-body ceiling before write.
 
 
 ## Kademlia task interaction
 
-The optional Kademlia provider task never polls the Swarm. It sends bounded commands to the Swarm-owned Kademlia driver and consumes normalized driver events. Query rate/concurrency permits are acquired before commands are sent. Driver-event overflow must not block the Swarm; it marks the provider degraded and coalesces/drops noncritical diagnostics under explicit counters.
+The optional Kademlia provider task never polls the Swarm. It sends bounded commands through `kademlia-control-api` to the Swarm-owned Kademlia driver and consumes normalized driver events. Query rate/concurrency permits are acquired before commands are sent. Kademlia's behaviour may request outbound dials during query execution; those attempts pass the root `DialAdmissionGate` backed by ConnectionManager state. Driver-event overflow must not block the Swarm; it marks the provider degraded and coalesces/drops noncritical diagnostics under explicit counters.
 
 `enabled: false` means no provider task, no Kademlia query scheduling, and no project Kademlia protocol participation.

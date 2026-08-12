@@ -29,9 +29,11 @@ Spikes validate version-sensitive or deployment-sensitive assumptions. They are 
 
 ## SPIKE-003 — Kademlia integration validation
 
-**Objective:** validate the complete optional Kademlia blueprint before implementation is promoted or `enabled: true` is supported.
+**Objective:** validate the complete optional Kademlia blueprint before implementation is promoted or `enabled: true` is supported, including behaviour-originated dial policy.
 
-**Experiment:** non-production rust-libp2p harness using the selected crate version and the private project protocol namespace. Exercise explicit client/server mode, Identify -> manual `add_address`, `BucketInserts::Manual`, bootstrap, `get_n_closest_peers`, disjoint query paths, record filtering, and the bounded query scheduler. Run 3-, 10-, and 20-node local topologies plus malicious/stale routing responses.
+**Experiment:** non-production rust-libp2p harness using the selected crate version and private project protocol namespace. Exercise explicit client/server mode, Identify -> manual `add_address`, `BucketInserts::Manual`, bootstrap, `get_n_closest_peers`, disjoint query paths, record filtering, cached protocol-capability observations, effective-target/saturation logic, and the bounded query scheduler. Run 3-, 10-, and 20-node local topologies plus malicious/stale routing responses.
+
+Instrument the Swarm / behaviour boundary so Kademlia-originated `ToSwarm::Dial` activity is measurable. If the public API cannot attribute dial origin precisely, an instrumented wrapper or throwaway spike-only patch is acceptable evidence; do not infer zero dial activity from the absence of ordinary ConnectionManager scheduler calls.
 
 **Expected evidence:**
 
@@ -40,11 +42,17 @@ Spikes validate version-sensitive or deployment-sensitive assumptions. They are 
 - current rust-libp2p Identify/manual-insert hooks behave as designed;
 - client/server semantics match the upstream specification;
 - bootstrap/query event ordering and automatic bootstrap side effects are understood and counted;
-- random exploration produces useful trusted routing/address expansion within the proposed rate/concurrency budgets;
-- targeted PeerId lookup can recover missing addresses for server-mode DHT participants where the DHT knows the target, while client-mode nodes are not misrepresented as generally discoverable;
-- `StoreInserts::FilterBoth`/equivalent prevents record/provider inserts from becoming stored state;
+- **behaviour-originated dial volume is measured** by query class, and every such dial is subject to trust, punitive per-peer backoff, shutdown state, and global pending/connection limits through the root dial-admission gate;
+- remote peers returned during iterative queries cannot establish a connection when current trust policy denies them;
+- random exploration produces useful trusted routing/address expansion within the proposed budgets;
+- small allowlists use the effective routing target and can reach a healthy saturated state instead of exploring every minute forever;
+- consecutive no-new-peer exploration rounds back off as designed and resume after topology/trust/capability change;
+- targeted PeerId lookup is scheduled only with fresh advisory evidence that the target previously advertised the exact project Kademlia **server** protocol; it can recover missing addresses where the DHT knows the target, while client-mode nodes are not misrepresented as generally discoverable;
+- cached positive/negative Kademlia protocol observations are superseded by fresh Identify evidence and never grant trust;
+- `Snapshot` command/response returns the specified bounded driver state;
+- server-mode reachability evidence is classified exactly as designed and does not claim AutoNAT verification;
+- record filtering/equivalent prevents value/provider inserts from becoming stored application state;
 - disjoint query paths and multi-seed topologies measurably reduce single-path capture, without claiming Byzantine resistance;
-- routing/query peers remain constrained to `PeerTrustPolicy` in the first integration;
 - 20-node convergence/resource behavior is acceptable with default bounds.
 
 **Decision unlocked:** implement the already-specified `KademliaDiscovery`/driver design, adjust bounded defaults, or keep the provider architecture-only. This spike does not authorize ChannelId/provider records or untrusted discovery-only connections; those require separate ADRs.

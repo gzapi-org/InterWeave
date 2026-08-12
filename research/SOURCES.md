@@ -48,6 +48,9 @@ MCP changed substantially in 2026. The Claude Channel reference remains authorit
 - Kademlia BucketInserts: https://docs.rs/libp2p/latest/libp2p/kad/enum.BucketInserts.html
 - Kademlia StoreInserts: https://docs.rs/libp2p/latest/libp2p/kad/enum.StoreInserts.html
 - Kademlia PeerInfo: https://docs.rs/libp2p/latest/libp2p/kad/struct.PeerInfo.html
+- Swarm NetworkBehaviour: https://docs.rs/libp2p/latest/libp2p/swarm/trait.NetworkBehaviour.html
+- Swarm ToSwarm: https://docs.rs/libp2p/latest/libp2p/swarm/enum.ToSwarm.html
+- Identify Info: https://docs.rs/libp2p/latest/libp2p/identify/struct.Info.html
 - Noise: https://docs.rs/libp2p/latest/libp2p/noise/
 - Identify: https://docs.rs/libp2p/latest/libp2p/identify/
 - AutoNAT: https://docs.rs/libp2p/latest/libp2p/autonat/

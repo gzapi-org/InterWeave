@@ -10,6 +10,7 @@ Default values are conservative architecture targets, not performance promises.
 | connected peers | 256 | 2048 |
 | discovery candidates | 4096 | 16384 |
 | addresses/peer | 16 | 32 |
+| advisory protocol observations/peer | 16 | 16 |
 | IPC clients | 16 | 64 |
 | IPC JSON body | 128 KiB | 128 KiB v1 IPC |
 | backend->runtime events | 1024 | 8192 |
@@ -27,6 +28,6 @@ Every legal maximum-size transport payload must fit in both an outbound IPC comm
 
 ## Drop policy
 
-Network ingress is validated before queue admission. When the normalized runtime queue is full, reject new direct requests where a rejection can be returned and drop/record broadcast messages. Per-IPC-client queue overflow drops oldest ordinary message events while preserving reserved control-health capacity.
+Network ingress is validated before queue admission. When the normalized runtime queue is full, reject new direct requests where a rejection can be returned and drop/record broadcast messages. Per-IPC-client queue overflow drops oldest ordinary message events while preserving reserved control-health capacity. Shared-profile direct fan-out duplicates one normalized event into each eligible client queue, so its memory amplification remains bounded by `max_clients` and the per-client queue/frame ceilings rather than an unbounded broadcast list.
 
 There is no disk spill and no unbounded memory fallback.

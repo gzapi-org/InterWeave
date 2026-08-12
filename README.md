@@ -46,11 +46,11 @@ The primary boundaries are:
 - The network runtime is a **separate, profile-scoped daemon** so Claude session restarts do not redefine transport identity or tear down P2P connectivity.
 - `Transport` and `DiscoveryProvider` are stable contracts. Claude-facing code does not depend on libp2p, GossipSub, mDNS, Kademlia, or multiaddresses.
 - Broadcast is GossipSub. Directed messaging is a dedicated libp2p request-response protocol; directed messages are never emulated by broadcasting and discarding at unrelated peers.
-- v1 discovery is composable: peer cache + optional mDNS + static bootstrap. Kademlia now has a complete integration blueprint but remains optional and `enabled: false` by default; it is peer-routing-only and never grants trust or stores channel/application records.
-- Discovery only produces **candidate reachability**. It never grants trust. v1 uses a deny-by-default static PeerId allowlist for ordinary data-plane connection admission, inbound source admission, and outbound direct sends.
+- v1 discovery is composable: peer cache + optional mDNS + static bootstrap. Kademlia has a complete integration blueprint but remains optional and `enabled: false` by default; it is peer-routing-only, uses capability-aware targeting/effective-target saturation, and never grants trust or stores channel/application records.
+- Discovery only produces **candidate reachability and bounded transport protocol observations**. It never grants trust. v1 uses a deny-by-default static PeerId allowlist for connection admission, inbound source admission, and outbound direct sends; all Swarm dials, including Kademlia behaviour-originated requests, pass the same ConnectionManager policy gate.
 - Noise secures each admitted libp2p connection. GossipSub validation distinguishes objective invalidity (`Reject`) from valid-but-locally-unauthorized publishers (`Ignore`); trusted forwarding peers can still read plaintext, so group/application encryption remains deferred.
 - Delivery is realtime/best-effort, no global ordering, no durable mailbox, and no exactly-once claim. Broadcast requires the calling local client to be joined; direct send requires the destination to be trusted.
-- Multiple local Claude sessions share a daemon only when explicitly configured to use the same profile/socket; independent profiles never share keys accidentally. IPC v1 uses a 128 KiB JSON-body ceiling so every legal 48 KiB transport payload fits after base64url/JSON expansion; Claude Channel clients cannot invoke administrative daemon shutdown.
+- Multiple local Claude sessions share a daemon only when explicitly configured to use the same profile/socket; independent profiles never share keys accidentally. Same-profile direct inbound messages fan out to every connected event-capable local client, while broadcast delivery is filtered by per-client join references. IPC v1 uses a 128 KiB JSON-body ceiling so every legal 48 KiB transport payload fits after base64url/JSON expansion; Claude Channel clients cannot invoke administrative daemon shutdown.
 
 ## Start here
 
@@ -66,11 +66,12 @@ The primary boundaries are:
 - [Implementation plan](roadmap/IMPLEMENTATION-PLAN.md)
 - [Amendment review memo](docs/architecture/AMENDMENT-REVIEW-2026-08-11.md)
 - [Kademlia design review memo](docs/architecture/KAD-REVIEW-2026-08-11.md)
+- [Kademlia/shared-profile second review closure](docs/architecture/KAD-REVIEW-2026-08-12.md)
 - [Final architecture review](docs/architecture/FINAL-REVIEW.md)
 
 ## Source snapshot
 
-Research was refreshed 2026-08-11. The inspected `anthropics/claude-plugins-official` `main` commit was `920824c3e9509890fbec03ba6097014222393022` (2026-08-10). See [research/SOURCES.md](research/SOURCES.md).
+Claude/Telegram research was refreshed 2026-08-11; the Kademlia/Swarm/Identify source pass was extended 2026-08-12. The inspected `anthropics/claude-plugins-official` `main` commit was `920824c3e9509890fbec03ba6097014222393022` (2026-08-10). See [research/SOURCES.md](research/SOURCES.md).
 
 ## Repository name
 

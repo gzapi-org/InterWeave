@@ -5,8 +5,8 @@ Every provider implementation must pass a common behavioral suite before it can 
 ## Mandatory guarantees
 
 1. **Advisory only.** Discovering a peer does not make it trusted.
-2. **Normalized identity.** Events contain one normalized transport PeerId and zero or more validated candidate addresses.
-3. **No dialing.** The provider never establishes or tears down transport connections as a policy decision.
+2. **Normalized identity.** Events contain one normalized transport PeerId, zero or more validated candidate addresses, and at most the global bounded count of advisory protocol observations.
+3. **No connection-policy ownership.** The provider never establishes or tears down transport connections as a policy decision. A libp2p behaviour used by a provider mechanism may request Swarm dials, but those are backend execution and must pass ConnectionManager policy independently of the provider.
 4. **No application messaging.** Provider code does not publish, subscribe, or send application payloads.
 5. **Boundedness.** Provider internal state and emitted batches are bounded/configurable.
 6. **Deterministic shutdown.** Cooperative cancellation stops provider tasks and closes event streams within the provider shutdown deadline.
@@ -31,11 +31,11 @@ provider_survives_malformed_provider_input
 provider_respects_state_bounds
 provider_shutdown_is_idempotent_and_bounded
 provider_event_stream_closes_after_shutdown
-provider_does_not_dial
+provider_does_not_own_connection_policy
 provider_does_not_grant_trust
 provider_failure_does_not_panic
 ```
 
 ## Provider-specific tests
 
-The common suite is necessary but not sufficient. mDNS adds multicast/expiry tests; cache adds corrupt-file/TTL/eviction tests; static adds config reload/address validation; Kademlia, if implemented, adds bootstrap/query/poisoning limits.
+The common suite is necessary but not sufficient. mDNS adds multicast/expiry tests; cache adds corrupt-file/TTL/eviction tests; static adds config reload/address validation; Kademlia, if implemented, adds bootstrap/query/poisoning limits, capability-cache targeting, effective-target saturation, and proof that behaviour-originated dials obey root admission policy.

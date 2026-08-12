@@ -1,7 +1,7 @@
 
 # Kademlia integration research snapshot
 
-Snapshot date: **2026-08-11**.
+Snapshot date: **2026-08-12**.
 
 This note records primary-source facts used by ADR-0009 and `docs/architecture/kademlia-integration.md`. These are version-sensitive implementation facts and must be revalidated against the selected crate version before coding.
 
@@ -15,6 +15,9 @@ This note records primary-source facts used by ADR-0009 and `docs/architecture/k
 - rust-libp2p `BucketInserts`: https://docs.rs/libp2p/latest/libp2p/kad/enum.BucketInserts.html
 - rust-libp2p `StoreInserts`: https://docs.rs/libp2p/latest/libp2p/kad/enum.StoreInserts.html
 - rust-libp2p `PeerInfo`: https://docs.rs/libp2p/latest/libp2p/kad/struct.PeerInfo.html
+- rust-libp2p `NetworkBehaviour`: https://docs.rs/libp2p/latest/libp2p/swarm/trait.NetworkBehaviour.html
+- rust-libp2p `ToSwarm`: https://docs.rs/libp2p/latest/libp2p/swarm/enum.ToSwarm.html
+- rust-libp2p Identify `Info`: https://docs.rs/libp2p/latest/libp2p/identify/struct.Info.html
 
 The docs snapshot inspected the `libp2p` 0.56.0 line / `libp2p-kad` 0.48.0 line.
 
@@ -51,6 +54,14 @@ Current Kademlia config exposes `disjoint_query_paths`, documented as improving 
 ### Records can be filtered
 
 `StoreInserts::FilterBoth` causes inbound value/provider record insertions to be surfaced rather than automatically written to the record store. The project uses peer routing only and specifies that these writes are not persisted. Kademlia record lookup/write/provider APIs are not invoked by the provider.
+
+### NetworkBehaviour can request Swarm dials
+
+Rust-libp2p `NetworkBehaviour` controls which nodes a protocol tries to connect to, and `ToSwarm::Dial` instructs the Swarm to start a dial. Kademlia queries are iterative state machines that contact selected peers; therefore the architecture must not assume all network dials originate through the project's ordinary explicit dial scheduler. ADR-0011 resolves this with a root Swarm dial-admission policy that applies trust/backoff/limits to behaviour-originated dials too. SPIKE-003 must measure these dials rather than infer them from ConnectionManager scheduler calls.
+
+### Identify protocol observations
+
+Identify `Info` exposes the remote protocol list plus an `observed_addr`. The Kademlia targeted-lookup scheduler uses the exact advertised project Kademlia protocol as advisory evidence that a peer was operating as a server participant. Because this fact is unavailable before a first connection and may be needed after restart, the design persists a freshness-bounded protocol observation in PeerCacheDiscovery. It remains advisory and is superseded by fresh Identify evidence.
 
 ### Routing-table events
 

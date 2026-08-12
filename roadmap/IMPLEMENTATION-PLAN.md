@@ -25,7 +25,8 @@
 - no dependency on libp2p/MCP in neutral crates;
 - ChannelId/payload/error/capability tests pass;
 - discovery conformance harness can run against a fake provider;
-- config rejects unknown required providers, explicitly enabled known-but-unsupported providers, and unsafe limits;
+- config rejects unknown required providers, explicitly enabled known-but-unsupported providers, unsafe limits, and Kademlia cross-field contradictions (`target_routing_peers > max_routing_peers`, `bootstrap_refresh_interval < bootstrap_min_interval`, `max_results_per_query > kbucket_size`);
+- when Kademlia is enabled, every `seed_sources` entry resolves to a configured **enabled** provider;
 - `TransportCapabilities.max_payload_bytes` reports the effective configured profile limit;
 - transport v1 MessageId is exactly 128 bits;
 - golden IPC request/event fixtures carrying exactly 49,152 opaque payload bytes plus maximal bounded metadata fit within the 131,072-byte JSON-body limit;
@@ -73,6 +74,7 @@
 - a provider can fail/restart without transport shutdown;
 - no provider dials or mutates trust;
 - corrupt cache is quarantined and transport continues;
+- bounded authenticated protocol observations persist/reload as advisory metadata and never alter trust;
 - mDNS can be disabled entirely.
 
 **Dependencies:** Phases 1–2.
@@ -97,7 +99,8 @@
 - known authorized candidates can support direct send dialing within deadline;
 - no-candidate authorized direct send fails as `PeerUnknown` without ad hoc global discovery;
 - candidate-present dial/protocol failure maps to `PeerUnreachable`;
-- successful address observation reaches cache through the defined hint path.
+- successful address observation reaches cache through the defined hint path;
+- the root Swarm dial-admission gate applies the same trust/backoff/global-limit policy to explicit scheduler dials and behaviour-originated dials.
 
 **Dependencies:** Phase 3.
 
@@ -114,6 +117,9 @@
 **Acceptance criteria:**
 
 - two local bridge-like test clients can attach to one explicit profile;
+- one admitted direct message is independently delivered to both same-profile event clients;
+- one broadcast message is delivered only to clients holding that ChannelId join reference;
+- a profile-desired channel with no joined client buffers/replays nothing;
 - independent profiles have independent PeerIds/sockets;
 - bridge disconnect does not stop network;
 - slow client does not stall Swarm or other clients;
@@ -137,7 +143,7 @@
 
 **Acceptance criteria:**
 
-- external broadcast/direct event becomes exactly one valid Channel event under normal conditions;
+- each eligible bridge maps one received IPC message event to one valid Channel event; broadcast eligibility is join-reference filtered, while shared-profile direct events may be delivered to multiple bridges by design;
 - content/meta separation matches the Channel reference;
 - reply token routes correctly for both modes;
 - broadcast/reply without a caller-owned join returns `ChannelNotJoined` and never implicitly rejoins;
@@ -146,7 +152,9 @@
 - no Multiaddr/Swarm/connection ID appears in Claude tool schemas;
 - ordinary assistant transcript is never represented as remote delivery;
 - trust administration is absent from Channel tool surface;
-- bridge restart leaves PeerId/network unchanged.
+- bridge restart leaves PeerId/network unchanged;
+- `status` reports the calling bridge's joined channels distinctly from profile-desired channels;
+- `send` to the local profile PeerId returns `InvalidArgument`.
 
 **Dependencies:** Phase 5 and current Claude compatibility result.
 
@@ -200,15 +208,15 @@
 
 ### Phase 10A — backend driver
 
-**Deliverables:** optional Swarm-owned Kademlia behavior slot, custom protocol derivation, explicit client/server mode, manual K-bucket insertion, Identify/address bridge, record filtering/no-record policy, bounded `KadControlHandle`.
+**Deliverables:** optional Swarm-owned Kademlia behavior slot, custom protocol derivation, explicit client/server mode, manual K-bucket insertion, Identify/address bridge, record filtering/no-record policy, neutral `kademlia-control-api` port, and Swarm-wide behaviour-dial admission/attribution hooks.
 
 **Acceptance criteria:** disabled config causes zero Kademlia protocol/query activity; unsupported build + enabled config fails; driver never owns trust or emits generic discovery events directly.
 
 ### Phase 10B — provider/scheduler
 
-**Deliverables:** `KademliaDiscovery` behind `DiscoveryProvider`, seed-hint ingestion, bootstrap scheduler, targeted trusted server-peer lookup, random exploration, TTL/provenance normalization, health.
+**Deliverables:** `KademliaDiscovery` behind `DiscoveryProvider`, seed-hint ingestion, bootstrap scheduler, capability-gated targeted trusted server-peer lookup, effective-target/saturation logic, no-progress exploration backoff, TTL/provenance normalization, health.
 
-**Acceptance criteria:** common provider conformance suite; no ChannelId/application query keys; no direct provider dialing; query concurrency/rate/cooldown limits pass fake-time tests.
+**Acceptance criteria:** common provider conformance suite; no ChannelId/application query keys; no provider-owned dial policy; behaviour-originated query dials obey root admission; query concurrency/rate/cooldown limits pass fake-time tests; small trust overlays can reach healthy saturation.
 
 ### Phase 10C — security/failure hardening
 

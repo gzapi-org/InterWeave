@@ -61,6 +61,8 @@ discovery:
         mode: enum[client,server] = client
         # First integration deliberately reuses data-plane trust for DHT routers.
         routing_peer_policy: literal[data-plane-trusted]
+        # If Kademlia is enabled, every named source must have a configured
+        # provider entry in this profile and that provider must itself be enabled.
         seed_sources: list[enum[peer-cache,mdns,static-bootstrap], max=3]
         candidate_ttl: duration = 30m
         kbucket_size: integer[8..20] = 20
@@ -77,6 +79,14 @@ discovery:
         targeted_lookup_cooldown: duration[30s..1h] = 5m
         bootstrap_min_interval: duration[1m..1h] = 5m
         bootstrap_refresh_interval: duration[5m..24h] = 15m
+        # Hard cross-field validation when Kademlia enabled=true:
+        #   target_routing_peers <= max_routing_peers
+        #   bootstrap_refresh_interval >= bootstrap_min_interval
+        #   max_results_per_query <= kbucket_size
+        #   every seed_sources entry resolves to a configured enabled provider
+        # Effective runtime routing target additionally caps target_routing_peers
+        # by the remote trust.allowlist population; no-progress exploration can
+        # enter a bounded saturated state and backs off instead of polling forever.
         # Peer-routing-only design: value/provider records are not used.
         record_mode: literal[disabled]
 channels:

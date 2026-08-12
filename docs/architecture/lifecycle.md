@@ -40,6 +40,6 @@ The bridge is never granted `admin.shutdown`; the daemon-lifetime invariant is e
 
 ## Optional Kademlia lifecycle
 
-If the active build supports Kademlia and configuration remains `enabled: false`, no Kademlia provider task or protocol behavior is active. If explicitly enabled, the daemon starts the Swarm-owned driver first, injects its bounded control handle into `KademliaDiscovery`, admits only trusted routing peers, then begins bootstrap/query scheduling after an eligible server seed exists.
+If the active build supports Kademlia and configuration remains `enabled: false`, no Kademlia provider task or protocol behavior is active. If explicitly enabled, the daemon starts the Swarm-owned driver first, injects its neutral bounded `kademlia-control-api` port into `KademliaDiscovery`, admits only trusted routing peers, and begins bootstrap/query scheduling after an eligible server seed exists. Behaviour-originated DHT dials remain subject to ConnectionManager's root dial-admission policy.
 
 Disabling at runtime is provider-scoped: stop new queries, settle/cancel bounded in-flight work, deactivate the Kademlia behavior/protocol, expire Kademlia-only discovery provenance, and leave all other discovery providers/data-plane connections intact. Changing the Kademlia `network_id` requires a provider/behavior restart because it changes the private DHT protocol namespace.

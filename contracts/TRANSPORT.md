@@ -85,7 +85,11 @@ Release the caller's subscription reference. Idempotent if the caller has no ref
 
 ### subscriptions()
 
-Returns the caller-visible channel set and aggregate local reference state without exposing backend mesh peers.
+Returns the caller-visible channel set and aggregate local reference state without exposing backend mesh peers. The caller-visible set is distinct from profile-level `channels.desired`, which can keep backend subscriptions warm without granting any IPC client a join reference.
+
+### Profile-desired subscriptions
+
+`channels.desired` is a daemon/profile configuration mechanism, not an implicit local-client join. A desired channel may keep the backend GossipSub subscription/mesh warm while zero IPC clients are attached or joined. Inbound messages for such a channel are still validated and may participate in normal GossipSub propagation, but with no interested local IPC client they are dropped at local dispatch: **no buffering, replay, or future delivery is created**.
 
 ## Messaging commands
 
@@ -104,6 +108,7 @@ Sends one direct transport message to a specified `TransportIdentity` using the 
 Default semantics:
 
 - v1 applies the active `PeerTrustPolicy` to outbound **remote** direct destinations; the local profile identity is not an external trust entry;
+- `send(local_identity(), ...)` is invalid and returns `InvalidArgument` locally; libp2p self-dial is never attempted;
 - an untrusted destination returns `UnauthorizedPeer` locally **before dialing**;
 - connection reuse is allowed;
 - for an authorized peer, runtime may dial using already-known candidate addresses;

@@ -16,6 +16,8 @@ Peer X
 
 Expiry removes a source observation. An address disappears only when no active source supports it. A peer candidate disappears when no addresses/provenance remain, except a transient connected-peer observation maintained by ConnectionManager outside discovery.
 
+Bounded `protocol_observations` are merged separately by `(peer_id, protocol_id, source)` with their own observation timestamp/freshness inherited from the source. A fresh authenticated observation supersedes an older positive/negative observation from the same source. Protocol observations never change trust and do not keep an otherwise expired peer candidate alive beyond the source's TTL.
+
 ## Priority
 
 Providers can have an integer priority/cost hint used when selecting among candidate addresses. Priority does not suppress concurrent providers and is not trust.
@@ -41,6 +43,6 @@ This is adaptive scheduling, not a mandatory sequential discovery pipeline.
 
 ## Kademlia seed flow
 
-Configured seed-source observations (`peer-cache`, `static-bootstrap`, optionally `mdns`) may be forwarded as hints to Kademlia. They remain advisory and must pass trust/address/protocol eligibility before manual Kademlia routing insertion. Kademlia-derived observations are not recursively fed back into Kademlia as external seed hints.
+Configured seed-source observations (`peer-cache`, `static-bootstrap`, optionally `mdns`) may be forwarded as hints to Kademlia. Peer-cache hints may include freshness-bounded exact protocol observations from prior authenticated Identify exchanges. They remain advisory and must pass current trust/address/protocol eligibility before manual Kademlia routing insertion. Kademlia-derived observations are not recursively fed back into Kademlia as external seed hints.
 
 The first integration does not use unauthorized peers as DHT routing intermediaries; this preserves the existing connection and GossipSub trust boundary.

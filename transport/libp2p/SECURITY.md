@@ -29,7 +29,7 @@ Noise-authenticated PeerId
  -> retain data-plane connection OR close as unauthorized
 ```
 
-ConnectionManager does not dial an unauthorized PeerId and closes an unauthorized inbound connection before direct/GossipSub data-plane participation. Discovery may still retain candidate metadata independently.
+ConnectionManager does not intentionally schedule an unauthorized PeerId; the root Swarm dial gate denies any behaviour-originated attempt for one, and unauthorized inbound connections are closed before direct/GossipSub/Kademlia data-plane participation. Discovery may still retain candidate metadata independently.
 
 ## Message admission
 

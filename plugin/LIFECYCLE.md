@@ -27,4 +27,4 @@ Do **not** stop the daemon. This is enforced by IPC capability policy, not merel
 
 ## Reconnect
 
-Reconnect uses exponential backoff with jitter, capped at 15 seconds. After reconnect the bridge performs a fresh handshake and re-establishes desired subscriptions. No missed network events are replayed.
+Reconnect uses exponential backoff with jitter, capped at 15 seconds. After reconnect the bridge performs a fresh handshake and re-establishes its **bridge/session-owned joined channels**. These are distinct from daemon profile `channels.desired`. No missed network events are replayed.

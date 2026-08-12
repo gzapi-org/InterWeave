@@ -45,7 +45,7 @@ remote trusted data-plane peer(s)
 
 1. Claude receives no libp2p internal type.
 2. A discovery event cannot authorize a peer.
-3. Only ConnectionManager decides whether/when to dial, and v1 ordinary data-plane dialing/retention requires PeerTrustPolicy authorization.
+3. ConnectionManager owns connection policy (trust, backoff, limits, retention). The libp2p backend/Swarm executes dials; protocol behaviours such as Kademlia may request dials only through the same Swarm-wide admission policy.
 4. Broadcast and direct traffic are distinct protocol paths.
 5. Trust authorization applies before outbound direct dial, ordinary data-plane connection retention, GossipSub source propagation/delivery, and local Claude Channel delivery.
 6. GossipSub objective invalidity (`Reject`) is distinct from local authorization failure (`Ignore`).

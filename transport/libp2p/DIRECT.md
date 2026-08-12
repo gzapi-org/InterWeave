@@ -43,7 +43,8 @@ Reason codes are coarse: unauthorized, overloaded, malformed, too_large, shuttin
 - one request-response exchange per direct message;
 - a new substream may be opened per exchange while the underlying peer connection is reused;
 - default total deadline: 10 seconds;
-- sender applies local PeerTrustPolicy before dialing; an unauthorized target fails locally as `UnauthorizedPeer`;
+- sending to the local profile PeerId is invalid and fails locally as `InvalidArgument`; self-dial is never attempted;
+- sender applies local PeerTrustPolicy before dialing; an unauthorized remote target fails locally as `UnauthorizedPeer`;
 - receiver authenticates via libp2p connection PeerId, then applies PeerTrustPolicy and resource limits;
 - `Accepted` means accepted into the receiver's bounded local event path, not processed by Claude;
 - sender performs no automatic retry after timeout/connection failure;

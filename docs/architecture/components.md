@@ -8,7 +8,7 @@
 | Libp2p backend | Swarm, connections, GossipSub, direct protocol, Noise, Identify, optional Kademlia driver/behavior slot | Claude MCP, app roles |
 | DiscoveryManager | provider lifecycle, candidate merge/provenance/expiry/health | dialing, trust, pubsub |
 | DiscoveryProvider | source-specific candidate discovery; optional Kademlia provider owns only scheduling/normalization/health | dialing, trust, messaging, Swarm ownership |
-| ConnectionManager | trust-gated dial/inbound-retain decisions, reconnect/backoff/limits/address selection | discovery mechanism, payload interpretation |
+| ConnectionManager | connection policy: trust admission, reconnect/backoff, limits, retention, address-policy state | discovery mechanism, payload interpretation; assumption that every low-level dial request originates from its ordinary scheduler |
 | PeerTrustPolicy | authorize PeerIds for v1 data-plane connection/message/send decisions | discovery, Swarm execution |
 | IdentityManager | persistent private key, PeerId, rotation workflow | app identity claims |
 | Peer cache writer | persist successful/recent observations as advisory hints | authority/trust |
@@ -26,4 +26,4 @@
 
 ## Optional Kademlia split
 
-Kademlia spans two components without collapsing their ownership boundary: `KademliaDiscovery` is a `DiscoveryProvider`, while `transport-libp2p` owns the concrete `libp2p::kad::Behaviour` inside the single Swarm task. A bounded backend-internal `KadControlHandle` connects them. This is a mechanism-specific adapter, not a new generic API.
+Kademlia spans two components without collapsing their ownership boundary: `KademliaDiscovery` is a `DiscoveryProvider`, while `transport-libp2p` owns the concrete `libp2p::kad::Behaviour` inside the single Swarm task. Both depend on a tiny neutral internal `kademlia-control-api` port; neither concrete crate depends on the other. Kademlia behaviour-originated dials are executed by the Swarm but admitted through ConnectionManager policy via the backend-wide dial gate. This is a mechanism-specific adapter, not a new generic transport/discovery API.

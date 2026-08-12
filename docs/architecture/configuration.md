@@ -7,7 +7,7 @@
 | normal config | listen addresses, providers, channel subscriptions | yes | generally no | no |
 | identity data | libp2p private key | yes, securely | **yes** | no, changes PeerId |
 | mutable state | profile lock metadata, runtime state | usually no | no | usually |
-| peer cache | observed peers/addresses | optional | no | **yes** |
+| peer cache | observed peers/addresses + bounded transport protocol observations | optional | no | **yes** |
 | runtime endpoint | socket/pipe | no | no | recreated |
 | logs | structured diagnostics | policy-dependent | must be sanitized | yes |
 
@@ -26,6 +26,12 @@ The configuration layer distinguishes:
 - known/reserved but not implemented in this build.
 
 A provider explicitly configured `enabled: true` must be implemented by the active daemon build. If `kademlia` is known by the schema but absent from the minimum-v1 build, enabling it is a **hard validation/startup failure**. `enabled: false` may remain in config for forward-compatible rollout. The daemon never silently ignores an explicitly enabled unsupported provider.
+
+## Desired channel subscriptions
+
+`channels.desired` exists to keep selected backend broadcast subscriptions/mesh state **pre-warmed across bridge disconnects/restarts**. It is profile-level daemon state, not a local IPC-client join reference.
+
+A desired channel with zero interested local clients may receive and validate network traffic, but that traffic is dropped at the IPC dispatch boundary. The daemon never buffers it for a future bridge, never replays it after reconnect, and never treats `channels.desired` as permission for a bridge to call `broadcast`. This is intentionally compatible with ADR-0020's no-offline-store decision.
 
 ## Effective limits and capabilities
 
@@ -46,4 +52,8 @@ Restart-required classes: identity key path/rotation, IPC endpoint, core listen 
 
 The Kademlia schema is fully defined even though the provider remains optional. `enabled: false` is the shipped/default value. A supporting build may start Kademlia only after explicit opt-in; an unsupported build treats `enabled: true` as a hard validation/startup error.
 
-When enabled in a future supporting build, `network_id` is required and derives a private Kademlia protocol namespace. The first integration fixes `routing_peer_policy: data-plane-trusted` and `record_mode: disabled`; these are deliberate security invariants, not convenience defaults. See `kademlia-integration.md`.
+When enabled in a future supporting build, `network_id` is required and derives a private Kademlia protocol namespace. The first integration fixes `routing_peer_policy: data-plane-trusted` and `record_mode: disabled`; these are deliberate security invariants, not convenience defaults.
+
+Kademlia enablement also applies hard cross-field validation: `target_routing_peers <= max_routing_peers`, `bootstrap_refresh_interval >= bootstrap_min_interval`, `max_results_per_query <= kbucket_size`, and every `seed_sources` name must resolve to a configured enabled provider in the same profile. These are Phase 1 contract/config tests.
+
+See `kademlia-integration.md`.

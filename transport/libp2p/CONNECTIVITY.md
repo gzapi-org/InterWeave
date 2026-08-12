@@ -30,4 +30,4 @@ Initial deployments may require directly reachable peers or explicitly configure
 
 ## Trust interaction
 
-Reachability information is not authorization. mDNS/cache/static providers may learn candidates, but ConnectionManager dials/retains ordinary v1 data-plane connections only for PeerIds separately authorized by `PeerTrustPolicy`. A bootstrap address therefore is usable as an entry path only when its PeerId is also trusted; bootstrap configuration itself never changes trust.
+Reachability information is not authorization. mDNS/cache/static providers may learn candidates, but ordinary v1 connections are admitted/retained only for PeerIds separately authorized by `PeerTrustPolicy`; protocol-behaviour dial attempts are subject to the same root gate. A bootstrap address therefore is usable as an entry path only when its PeerId is also trusted; bootstrap configuration itself never changes trust.

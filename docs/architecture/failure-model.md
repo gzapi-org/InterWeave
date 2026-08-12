@@ -21,7 +21,7 @@
 | identity key missing on established profile | fail closed | daemon unavailable, explicit identity error | restore key or explicit reinitialize/rotate |
 | corrupt identity key | fail closed; never auto-rotate | fatal profile error | restore/rotate by local admin |
 | duplicate addresses | merge by PeerId/address | optional dedup counter | normal aggregation |
-| connection storm | bounded dial concurrency/backoff; unauthorized candidates are not dialed | overload/dial-limit counters | drain under limits |
+| connection storm | bounded dial concurrency/backoff; unauthorized candidates cannot pass dial admission | overload/dial-limit counters | drain under limits |
 | unauthorized inbound connection | authenticate PeerId then close before data-plane participation | policy disconnect/reject counter | explicit local trust change if intended |
 | unauthorized outbound direct send | fail locally before dialing | `UnauthorizedPeer` | add trust out of band or choose authorized peer |
 | GossipSub message objectively invalid | report validation `Reject`; no local delivery/forwarding | `validation_reject_invalid` | peer/network continues; scoring policy applies |
@@ -30,6 +30,9 @@
 | GossipSub mesh empty | publish may be locally accepted but no delivery claim | channel reachability degraded | discovery/connectivity recovery |
 | broadcast without caller join | fail locally; no implicit join/publish | `ChannelNotJoined` | caller joins channel then retries |
 | broadcast reply after caller leaves channel | reply token remains syntactically valid but operation fails; no implicit rejoin | `ChannelNotJoined` | explicit join then explicit broadcast/reply as appropriate |
+| inbound broadcast on profile-desired channel with no joined local client | network message may be validated/propagated, then dropped at local dispatch; never buffered | no-local-consumer/drop counter | bridge joins for future realtime delivery |
+| inbound direct with two same-profile bridges | both local clients receive independent copies; both may reply | direct local fan-out diagnostic | use separate profiles or application endpoint routing if single-consumer behavior is required |
+| direct send to own PeerId | fail locally; no dial | `InvalidArgument` | choose a remote PeerId or communicate locally outside transport |
 | bridge/plugin restart | daemon/network stay up | IPC client disconnect/reconnect | fresh handshake/resubscribe; no replay |
 | daemon restart | PeerId persists; network reconnects | daemon unavailable then recovering | cache/providers reconnect |
 | Claude Code restart | same as bridge restart | Channel unavailable while closed | daemon stays up; no offline Channel queue |
