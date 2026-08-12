@@ -5,18 +5,28 @@ Names are conceptual; final packaging may namespace them to avoid collisions.
 | Tool | Input | Meaning |
 |---|---|---|
 | `broadcast` | `channel`, `content`, optional `content_type` | publish realtime to a logical channel; caller must already be joined |
-| `send` | `peer`, `content`, optional `content_type` | direct 1:1 send over dedicated protocol to a trusted peer |
-| `reply` | `reply_token`, `content`, optional `content_type` | follow the route of a prior inbound event subject to current trust/subscription state |
+| `send` | `peer`, optional `endpoint`, `content`, optional `content_type` | direct send to a trusted PeerId and optional remote EndpointId; omitted endpoint requests remote default route |
+| `reply` | `reply_token`, `content`, optional `content_type` | follow the exact route of a prior inbound event subject to current trust/subscription/endpoint-lease state |
 | `join` | `channel` | acquire local subscription |
 | `leave` | `channel` | release local subscription |
-| `identity` | none | show local transport PeerId/profile identity |
-| `status` | none | high-level bridge/daemon/discovery/network health plus this bridge's joined channels |
+| `identity` | none | show local profile PeerId and this bridge's local EndpointId |
+| `status` | none | high-level bridge/daemon/discovery/network health, endpoint lease, and this bridge's joined channels |
 
-`content_type` is the Claude-facing name only. The bridge maps it to/from generic transport `Payload.media_type`; libp2p envelopes also use `media_type`.
+`content_type` is the Claude-facing name only. The bridge maps it to/from generic transport `Payload.media_type`.
+
+## Bridge endpoint
+
+Every direct-capable Claude bridge is configured with one local EndpointId and claims it during IPC v2 handshake. Common values such as `claude` are conventions only.
+
+The bridge never accepts a `source_endpoint` tool argument. Its active IPC endpoint lease is the source of every direct send/reply.
+
+If the configured endpoint is already leased by another process, direct operations fail clearly; the bridge must not silently choose a different route.
 
 ## What is not a Claude tool
 
 - approve/trust/revoke peer;
+- create/enable/rename/rebind local endpoints;
+- mutate endpoint ACLs/advertisement/default route;
 - rotate key;
 - edit private configuration;
 - add bootstrap infrastructure;
@@ -26,26 +36,69 @@ Names are conceptual; final packaging may namespace them to avoid collisions.
 - stop/shutdown the shared transport daemon;
 - execute arbitrary network protocol operations.
 
-Those are local administrative/diagnostic actions. This follows the Telegram pattern where a channel message cannot authorize access-policy mutation. The Channel IPC client is not granted the daemon's `admin.shutdown` capability.
+Those are local administrative/diagnostic actions. The Channel IPC client is not granted `admin.endpoints` or `admin.shutdown`.
+
+## Direct send semantics
+
+Examples:
+
+```text
+send(peer=P, endpoint="human", content="hello")
+```
+
+targets exactly `P/human`.
+
+```text
+send(peer=P, content="hello")
+```
+
+asks `P` to resolve its configured `default_direct_endpoint`. It does not request broadcast/fan-out.
+
+Result wording includes the endpoint that actually accepted the message when transport v2 returns it. `RemoteEndpointUnavailable` is intentionally coarse and does not claim whether the endpoint was unknown, offline, disabled, default-missing, or endpoint-policy denied.
 
 ## Reply semantics
 
-`reply` uses an opaque token from Channel metadata. For a direct inbound message it sends directly to the source peer and therefore applies current outbound `PeerTrustPolicy`; if that peer has since been revoked, the operation fails as `UnauthorizedPeer` before dialing.
+For direct inbound messages, `reply_token` captures:
 
-For a broadcast inbound message it publishes back to the same channel. The calling bridge must still hold its join reference. If it has left since receiving the message, `reply` fails as `ChannelNotJoined`; the reply token never implicitly rejoins.
+```text
+remote_peer
+remote_source_endpoint
+local_destination_endpoint
+local_endpoint_lease_epoch
+```
 
-Claude can choose explicit `send` if it wants a private response to a broadcast source, subject to the same trust policy.
+Reply sends from the bridge's same currently leased local endpoint to the original remote source endpoint. If the bridge lost/reacquired the endpoint and the lease epoch changed, the stale token fails rather than switching routes.
 
-## Status subscription visibility
+Current outbound endpoint/profile trust policy still applies. A revoked peer fails `UnauthorizedPeer` before dialing.
 
-`status` includes the caller bridge's current `joined_channels` (derived from `subscriptions()`) so a restarted/reconnected Claude can see what it has actually re-established. It may also report `profile_desired_channels` separately for operator context. The two fields must not be conflated: a profile-desired backend subscription does not authorize `broadcast` for a bridge and does not make that bridge an inbound broadcast consumer.
+For broadcast inbound, reply publishes to the same channel. The bridge must still hold its join reference; otherwise `ChannelNotJoined`.
+
+Claude can choose explicit `send(peer, endpoint?, ...)` if it wants a private response to a broadcast source, subject to trust and endpoint routing.
+
+## Status visibility
+
+`status` includes:
+
+```text
+local_peer_id
+local_endpoint
+endpoint_lease_state
+endpoint_lease_epoch
+joined_channels
+profile_desired_channels
+transport_health
+```
+
+`joined_channels` and `profile_desired_channels` remain distinct. A profile-desired backend subscription does not authorize bridge broadcast or make it an inbound consumer.
 
 ## Tool results
 
 Wording must be exact:
 
 - broadcast: "accepted for local publish" — never "delivered to all peers";
-- direct: "remote transport accepted" — never "remote Claude processed";
-- unauthorized destination: explicit `UnauthorizedPeer`, not a connectivity failure;
-- not joined: explicit `ChannelNotJoined`, not an implicit join;
-- overload/drop: explicit error or degraded status, not a false success.
+- direct: "remote transport accepted at endpoint <id>" — never "remote human/Claude processed";
+- remote route failure: `RemoteEndpointUnavailable` without endpoint-existence claims;
+- unauthorized destination: explicit `UnauthorizedPeer`;
+- not joined: explicit `ChannelNotJoined`;
+- endpoint lease absent/conflict: explicit local endpoint error;
+- overload/drop: explicit error or degraded status, not false success.

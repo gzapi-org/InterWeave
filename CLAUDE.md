@@ -4,16 +4,23 @@ This is an architecture/specification repository.
 
 ## Hard boundaries
 
-- Do not add production networking code, MCP server code, Rust crates, installers, or service units in the architecture phase.
-- Broadcast means GossipSub. Directed traffic means a dedicated direct libp2p protocol. Do not route directed messages through GossipSub.
-- Keep Claude Code isolated from libp2p concepts. Multiaddr, Swarm, ConnectionId, GossipSub mesh internals, Noise sessions, and Kademlia routing tables stop below the transport boundary.
-- Discovery is replaceable and advisory. It does not dial, grant trust, manage pub/sub, or interpret payloads.
-- Trust, discovery, connection management, broadcast, and direct messaging are separate responsibilities. v1 ordinary data-plane connections and outbound direct sends are deny-by-default trust-gated.
-- GossipSub validation must follow ADR-0029: objective invalidity = `Reject`, valid-but-locally-unauthorized original publisher = `Ignore`, valid+authorized = `Accept`.
-- A caller must be joined before broadcast; reply tokens do not recreate a left subscription.
-- IPC v1 JSON bodies are capped at 128 KiB and must carry every legal 48 KiB transport payload after base64url/JSON expansion. Claude Channel IPC clients never receive administrative daemon-shutdown capability.
-- No application semantics: no agent roles, Git workflow, task state, issue state, repository ownership, or project-management schema.
-- Do not claim durable, ordered, exactly-once, or guaranteed delivery unless a future ADR changes the contract and an implementation actually provides it.
+- Do not add production networking code, MCP server code, Rust crates, human-client executables, installers, or service units in the architecture phase.
+- Broadcast means GossipSub. Directed traffic means the dedicated direct libp2p protocol. Do not route directed messages through GossipSub.
+- One transport profile owns one persistent PeerId. Model B EndpointIds are local routes under that PeerId, not new identities.
+- Direct-capable IPC v2 clients own one exclusive configured EndpointId lease. Direct v2 routes to exactly one endpoint; no undocumented all-client fan-out.
+- A remote source EndpointId is peer-asserted routing metadata, not proof of a human, Claude instance, role, or authorization.
+- Endpoint-specific policy may narrow but never widen profile PeerTrustPolicy.
+- Endpoint directory is optional/trust-gated/opt-in/bounded and must never become DiscoveryProvider, GossipSub, or Kademlia state.
+- Keep Claude Code and human UI isolated from libp2p concepts. Multiaddr, Swarm, ConnectionId, GossipSub mesh internals, Noise sessions, and Kademlia routing tables stop below transport/IPC boundaries.
+- Discovery is replaceable and advisory. It does not dial, grant trust, manage pub/sub, route endpoints, or interpret payloads.
+- Trust, discovery, connection management, endpoint routing, broadcast, and direct messaging are separate responsibilities.
+- GossipSub validation follows ADR-0029: objective invalidity = Reject, valid-but-locally-unauthorized original publisher = Ignore, valid+authorized = Accept.
+- Caller must be joined before broadcast; reply tokens do not recreate subscriptions.
+- IPC v2 JSON bodies are capped at 128 KiB and must carry every legal 48 KiB payload plus max endpoint metadata. Data-plane clients never receive endpoint/shutdown admin capability.
+- No application semantics: no human identity, social graph, agent roles, Git workflow, task state, issue state, repository ownership, read receipts, or project-management schema in transport contracts.
+- No durable, ordered, exactly-once, guaranteed, or offline endpoint delivery claim unless a future ADR explicitly adds it.
+- Human applications may persist messages they actually receive above transport; the daemon never uses that as an offline mailbox.
 - Secrets and persistent PeerId keys are local state, never repository configuration.
+- Kademlia remains optional and `enabled: false` by default; no EndpointId/channel/application records in DHT.
 
 When implementation begins, update ADR status rather than silently contradicting accepted decisions.

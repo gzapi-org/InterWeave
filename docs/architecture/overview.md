@@ -1,72 +1,39 @@
 # Architecture overview
 
-## Scope
-
-The system is a local Claude Code Channel bridge plus a generic P2P transport runtime. It transports payloads and routing metadata. It does not interpret application semantics.
-
-## Context
+## System shape
 
 ```text
-remote trusted data-plane peer(s)
-     ^
-     | Noise-authenticated + PeerTrustPolicy-admitted connections
-     v
-+------------------------------------------+
-| profile-scoped transport daemon          |
-|                                          |
-|  Libp2pBackend                           |
-|   |- GossipSub broadcast                 |
-|   |- Direct request-response             |
-|   |- ConnectionManager                   |
-|   |- IdentityManager                     |
-|                                          |
-|  DiscoveryManager                        |
-|   |- PeerCacheDiscovery                  |
-|   |- MdnsDiscovery (optional)            |
-|   |- StaticBootstrapDiscovery            |
-|   `- KademliaDiscovery (optional/default-off)        |
-|                                          |
-|  PeerTrustPolicy                         |
-+--------------------+---------------------+
-                     | owner-protected, capability-scoped local IPC
-                     v
-+------------------------------------------+
-| Claude P2P Channel bridge                |
-| Channel notifications + MCP tools        |
-+--------------------+---------------------+
-                     | stdio MCP
-                     v
-+------------------------------------------+
-| Claude Code                              |
-+------------------------------------------+
+Claude Code <--stdio--> Claude bridge --IPC v2/EndpointId--\
+                                                         \
+Human client -------------------IPC v2/EndpointId---------> profile daemon / one PeerId
+                                                          |
+                                                          +-- EndpointRegistry
+                                                          +-- PeerTrustPolicy
+                                                          +-- DiscoveryManager
+                                                          +-- ConnectionManager
+                                                          +-- GossipSub (broadcast)
+                                                          +-- Direct v2 (peer + endpoint)
+                                                          +-- Endpoint directory
+                                                          +-- IdentityManager
+                                                          |
+                                                          v
+                                                       libp2p
 ```
 
-## Invariants
+## Architectural invariants
 
-1. Claude receives no libp2p internal type.
-2. A discovery event cannot authorize a peer.
-3. ConnectionManager owns connection policy (trust, backoff, limits, retention). The libp2p backend/Swarm executes dials; protocol behaviours such as Kademlia may request dials only through the same Swarm-wide admission policy.
-4. Broadcast and direct traffic are distinct protocol paths.
-5. Trust authorization applies before outbound direct dial, ordinary data-plane connection retention, GossipSub source propagation/delivery, and local Claude Channel delivery.
-6. GossipSub objective invalidity (`Reject`) is distinct from local authorization failure (`Ignore`).
-7. Every queue is bounded, and every legal max-size transport payload fits the fixed v1 IPC frame.
-8. No persistent message mailbox exists in v1.
-9. Network identity belongs to a profile/daemon, not a Claude conversation.
-10. A bootstrap peer is only a reachability hint and is never implicit trust.
-11. The bridge may restart without rotating PeerId or restarting the network.
-12. A Claude Channel IPC client cannot invoke administrative daemon shutdown.
-
-## Capability statement
-
-v1 capabilities exposed through the transport contract:
-
-- `broadcast`: yes, realtime/best-effort, caller must be locally joined;
-- `direct_delivery`: yes, trusted target only, realtime/best-effort with transport-level acceptance response;
-- `durable_delivery`: no;
-- `offline_mailbox`: no;
-- `max_payload_bytes`: effective active-profile value, hard ceiling 49,152 bytes.
-
-
-## Optional Kademlia integration
-
-Kademlia remains disabled by default but is now fully specified as a private, trust-bounded, peer-routing-only DiscoveryProvider. The Swarm owns the concrete Kademlia behavior; the provider owns scheduling/normalization through a bounded internal handle. See [kademlia-integration.md](kademlia-integration.md) and ADR-0009.
+1. Claude-facing code never depends directly on libp2p/discovery implementation details.
+2. Discovery yields candidate reachability; it never grants trust.
+3. Connection policy is centrally enforced, including behavior-originated dials.
+4. Broadcast and direct communication use separate network mechanisms.
+5. One profile owns one persistent PeerId; local EndpointIds route within it and are not identities.
+6. Every direct-capable local IPC client owns at most one exclusive configured EndpointId lease.
+7. Direct v2 resolves exactly one local endpoint; no hidden primary, round-robin, or all-client fan-out exists.
+8. Endpoint policy may narrow but never widen profile trust.
+9. `AcceptedV2` means enqueue into the resolved local endpoint queue, not application processing.
+10. Offline endpoints have no daemon message queue.
+11. Broadcast remains ChannelId/join-reference scoped and does not carry transport EndpointId routing.
+12. Endpoint directory is optional, trust-gated, bounded, opt-in, and identity-agnostic.
+13. Every queue is bounded, and every legal max-size payload fits IPC v2.
+14. Kademlia remains optional/default-disabled and stores no channel/endpoint/application records.
+15. Human/chat semantics stay above the transport boundary.

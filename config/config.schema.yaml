@@ -1,5 +1,5 @@
 # Architecture-level schema illustration, not a production validator.
-schema_version: 1
+schema_version: 2
 profile:
   name: string[1..64]
 transport:
@@ -14,6 +14,7 @@ transport:
     max_addresses_per_peer: integer[1..32] = 16
     max_subscriptions: integer[1..1024] = 128
   direct:
+    protocol: literal[/claude-p2p-channel/direct/2.0.0]
     timeout_ms: integer[1000..60000] = 10000
     max_inflight_total: integer[1..512] = 128
     max_inflight_per_peer: integer[1..32] = 8
@@ -30,6 +31,36 @@ identity:
 trust:
   policy: enum[static-allowlist]
   allowed_peers: list[PeerId, max=4096]
+
+endpoints:
+  # Model B: one profile PeerId, multiple configured local routes.
+  registration_policy: literal[configured-only]
+  default_direct_endpoint: EndpointId?
+  directory:
+    enabled: bool = true
+    cache_ttl: duration[10s..5m] = 60s
+    max_advertised: integer[1..32] = 16
+    max_queries_per_minute_per_peer: integer[1..60] = 12
+    max_inflight_queries: integer[1..64] = 16
+  entries: list[EndpointConfig, max=64]
+  EndpointConfig:
+    id: string[regex=^[a-z][a-z0-9._-]{0,63}$]
+    enabled: bool = true
+    advertise: bool = false
+    # Hygiene guard only; client.kind is not cryptographic authentication.
+    allowed_client_kinds: list[string, max=8]
+    inbound:
+      policy: enum[inherit-profile-trust,static-subset] = inherit-profile-trust
+      allowed_peers: list[PeerId, max=4096]
+    outbound:
+      policy: enum[inherit-profile-trust,static-subset] = inherit-profile-trust
+      allowed_peers: list[PeerId, max=4096]
+  # Cross-field validation:
+  #   endpoint IDs are unique
+  #   default_direct_endpoint, when set, references an enabled endpoint
+  #   static-subset allowed_peers are subsets of trust.allowed_peers
+  #   endpoint policy can narrow but never widen profile trust
+  #   number of advertise=true enabled entries <= directory.max_advertised
 discovery:
   providers: list[ProviderConfig, max=16]
   # ProviderConfig is a tagged union; each config namespace is provider-specific.
@@ -92,7 +123,8 @@ discovery:
 channels:
   desired: list[ChannelId, max=128]
 ipc:
-  # IPC JSON-body hard ceiling is fixed at 131072 bytes in v1 and is not
+  version: literal[2.0]
+  # IPC JSON-body hard ceiling is fixed at 131072 bytes in v2 and is not
   # operator configurable. It must carry the max transport payload after base64url.
   max_clients: integer[1..64] = 16
   client_event_queue: integer[16..1024] = 256

@@ -1,44 +1,45 @@
-# Profile-scoped identities with explicit daemon sharing
+# Profile-scoped identities with explicit endpoint multiplexing
 
-**Status:** Accepted
+**Status:** Superseded by ADR-0030 for direct-message routing; profile identity decision remains accepted historical rationale.
 
 ## Context
 
-Several Claude instances on one host must coexist without accidental key sharing. At the same time, explicit connection reuse among intentionally shared sessions is valuable. If several bridges intentionally share one profile/PeerId, inbound direct traffic has no network-level field that identifies one local Claude process.
+Several Claude/human/application instances on one host must coexist without accidental key sharing. The original v1 design allowed explicit daemon/profile sharing but had no network-visible local route selector, so admitted direct messages were duplicated to every event-capable same-profile IPC client.
+
+That was an honest safe default before endpoint addressing existed, but it does not satisfy deterministic routing for a human client and Claude sharing one PeerId.
 
 ## Decision
 
-Default to one network identity per named transport profile, not per Claude conversation and not one implicit host identity. Multiple Claude bridges may share a profile/daemon only by explicitly selecting the same profile/socket. Independent profiles have independent keys/state/sockets.
+Retain the original identity boundary:
 
-Local message fan-out is explicit:
+- one persistent network identity per named transport profile;
+- not one PeerId per Claude conversation;
+- not one implicit host-global PeerId;
+- multiple local applications share a profile only by explicitly selecting the same profile/socket;
+- independent profiles have independent keys/state/sockets.
 
-- **broadcast:** only IPC clients that currently hold a local join reference for the ChannelId receive that broadcast event;
-- **direct:** every currently connected local IPC client granted message-event delivery receives its own copy of an admitted direct `MessageReceived` event.
-
-v1 does not elect one local direct-message consumer, hide an implicit primary bridge, or add a local endpoint identifier to the network protocol. Two Claude bridges sharing a profile may therefore both observe and reply to the same direct message. Finer local routing belongs to a future explicit endpoint/application protocol, not an accidental daemon heuristic.
+For current direct-routing semantics, ADR-0030 supersedes v1 fan-out with explicit `EndpointId` leases under the shared PeerId. Broadcast remains per-client join-reference filtered.
 
 ## Alternatives considered
 
-PeerId per Claude process; one mandatory host-global PeerId; daemon multiplexes hidden per-client PeerIds inside one Swarm; first-connected bridge wins direct traffic; round-robin direct delivery; require application endpoint IDs in the transport envelope.
+PeerId per local process; one mandatory host-global PeerId; daemon multiplexes hidden per-client PeerIds; v1 all-client direct fan-out; first-connected/round-robin direct selection; explicit EndpointId routing.
 
 ## Consequences
 
-Identity semantics are clear: the network sees the profile PeerId. Local endpoints sharing it are not distinguishable as separate network identities unless a higher-level payload protocol says so. Direct inbound duplicate delivery to multiple local clients is intentional and documented.
+The network still sees one profile PeerId, while direct v2 can distinguish local application routes under that PeerId. EndpointId does not become a second transport identity.
 
 ## Security implications
 
-Explicit sharing prevents accidental privilege merging. Same-profile local clients share the ordinary transport/trust authority of that profile, so profile socket access is sensitive. Administrative IPC methods such as daemon shutdown are separately capability-scoped and are not granted to Channel clients.
-
-A direct remote sender cannot select or authorize one same-profile Claude client through transport metadata in v1.
+Explicit profile sharing prevents accidental key sharing. Endpoint policy and leases add routing isolation but do not change the same-user IPC residual threat. Remote endpoints cannot alter profile trust or local endpoint configuration.
 
 ## Operational implications
 
-Operators can run `default`, `project-a`, `project-b` profiles. Resource usage scales by number of profiles rather than number of Claude sessions. If duplicate direct handling is undesirable, use separate profiles/PeerIds or a higher-level application routing convention.
+Operators can run separate profiles when they want independent trust/identity, or configure one profile with endpoints such as `human`, `claude`, and `automation.build` when connection/identity sharing is intentional.
 
 ## Implementation implications
 
-Profile path resolution is deterministic. Daemon lock prevents two owners. Local subscription refs are per IPC client. Direct event fan-out creates independent bounded queue entries and independent bridge-local reply tokens for each receiving client; one slow client does not block another.
+Profile path/key/socket ownership stays unchanged. Current implementation target adds EndpointRegistry/leases per ADR-0030 instead of v1 direct event duplication.
 
 ## Revisit conditions
 
-Revisit if a real requirement emerges for multiple cryptographic PeerIds inside one daemon process or network-addressable local endpoints. Either is a larger identity/routing design.
+Revisit if cryptographically independent sub-identities inside one daemon are required, or if endpoint leases must become shared/multicast.

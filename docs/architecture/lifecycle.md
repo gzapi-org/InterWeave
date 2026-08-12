@@ -2,44 +2,65 @@
 
 ## Profile lifecycle
 
-A transport profile owns one persistent PeerId, configuration namespace, socket endpoint, mutable daemon state, and replaceable peer cache. Starting a daemon acquires a profile lock; a second daemon for the same profile fails fast and reports the existing socket/owner.
+A transport profile owns one persistent PeerId, configuration namespace, socket endpoint, endpoint configuration, mutable daemon state, and replaceable peer cache. Starting a daemon acquires a profile lock; a second daemon for the same profile fails fast.
 
-## Bridge lifecycle
+## Local endpoint lifecycle
 
-1. Claude Code starts the MCP bridge over stdio.
-2. Bridge resolves the configured profile/socket.
-3. Bridge performs IPC version/capability handshake and receives effective transport capabilities.
-4. Bridge requests subscriptions required by its configuration/session.
-5. Daemon pushes normalized events while the client remains connected.
-6. MCP stdin close/shutdown stops only the bridge and releases its subscription handles.
-7. Daemon remains alive unless explicitly configured for ephemeral service mode or stopped by the local operator/service manager.
+Configured EndpointIds exist independently of client processes. A route becomes **available** only while one IPC v2 connection owns its exclusive lease.
 
-The bridge is never granted `admin.shutdown`; the daemon-lifetime invariant is enforced by IPC authorization, not convention alone.
+```text
+configured+enabled
+   |
+   | IPC hello claim
+   v
+leased / routable / optionally advertised
+   |
+   | disconnect, config disable, admin revoke, daemon stop
+   v
+configured but unavailable
+```
+
+No messages are retained while unavailable.
+
+## Claude bridge lifecycle
+
+1. Claude Code starts MCP bridge over stdio.
+2. Bridge resolves profile/socket and its configured EndpointId.
+3. Bridge performs IPC v2 handshake, requests EndpointId lease, capabilities, and receives profile identity/effective limits.
+4. Bridge requests its channel subscriptions.
+5. Daemon pushes broadcasts matching joins and direct events addressed to that EndpointId.
+6. MCP stdin close stops bridge, releases endpoint lease and joins.
+7. Daemon remains alive.
+
+A second bridge cannot claim the same EndpointId. It must have another configured route if simultaneous direct addressability is desired.
+
+## Human client lifecycle
+
+Human data-plane client follows the same lease model. UI restart releases then reacquires `human` without changing PeerId. Its optional local application message/history database is independent from daemon state.
+
+Administrative settings use a separately capability-authorized IPC connection; network messages do not automatically exercise that authority.
 
 ## Daemon lifecycle
 
-1. load validated normal configuration; explicitly enabled unsupported providers are fatal;
+1. load config schema v2; validate endpoints/trust/providers;
 2. acquire profile lock;
 3. securely load/generate identity key;
-4. bind IPC endpoint with owner-only permissions;
-5. start libp2p backend/listeners;
-6. start DiscoveryManager providers independently;
+4. bind owner-protected IPC endpoint;
+5. start libp2p backend/listeners including direct v2 and optional endpoint-directory behavior;
+6. start discovery providers independently;
 7. begin trust-gated ConnectionManager reconciliation;
-8. accept local clients and grant only client-kind-appropriate capabilities;
-9. on authorized administrative shutdown: stop accepting commands, cancel providers, close direct requests, flush advisory cache best-effort, close swarm, remove socket/lock.
+8. accept IPC clients, grant capabilities, and establish exclusive endpoint leases;
+9. on authorized shutdown: stop new claims/commands, stop directory exposure, revoke endpoint leases, cancel providers/new dials, settle bounded direct responses, close Swarm, remove socket/lock.
 
 ## Recovery
 
-- bridge reconnect: resubscribe; no message replay;
-- daemon restart: same PeerId if key is intact, cached candidates accelerate reconnect subject to trust;
-- identity key missing: generate only if profile is explicitly uninitialized; otherwise fail safe if config expects an existing identity;
-- corrupt key: fail closed, never silently rotate;
-- provider restart: provider-local backoff and health transitions; unrelated providers remain alive;
-- trust reload: emit `TrustPolicyChanged`; disconnect peers no longer authorized for ordinary data-plane connectivity.
-
+- local client reconnect: fresh handshake, fresh non-repeating 128-bit endpoint lease epoch, and joins; no replay;
+- daemon restart: same PeerId if key intact; all endpoint leases start offline until clients reconnect;
+- remote endpoint directory cache: discarded on daemon restart and naturally expires;
+- corrupt/missing identity: existing fail-closed rules apply;
+- trust reload: disconnect unauthorized peers and recompute endpoint policy intersections;
+- endpoint config reload: revoke now-invalid lease; never auto-rebind.
 
 ## Optional Kademlia lifecycle
 
-If the active build supports Kademlia and configuration remains `enabled: false`, no Kademlia provider task or protocol behavior is active. If explicitly enabled, the daemon starts the Swarm-owned driver first, injects its neutral bounded `kademlia-control-api` port into `KademliaDiscovery`, admits only trusted routing peers, and begins bootstrap/query scheduling after an eligible server seed exists. Behaviour-originated DHT dials remain subject to ConnectionManager's root dial-admission policy.
-
-Disabling at runtime is provider-scoped: stop new queries, settle/cancel bounded in-flight work, deactivate the Kademlia behavior/protocol, expire Kademlia-only discovery provenance, and leave all other discovery providers/data-plane connections intact. Changing the Kademlia `network_id` requires a provider/behavior restart because it changes the private DHT protocol namespace.
+Unchanged by Model B. Kademlia remains disabled unless explicitly enabled on a supporting build. Endpoint records are never placed in the DHT.

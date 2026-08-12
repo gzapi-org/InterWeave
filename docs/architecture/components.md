@@ -2,28 +2,39 @@
 
 | Component | Owns | Must not own |
 |---|---|---|
-| Claude Channel bridge | MCP Channel capability, tools, event translation, instructions, reply tokens | discovery, dialing, keys, GossipSub mesh |
-| Transport API | neutral commands/events/errors/capabilities | libp2p types, Claude types |
-| Transport runtime | command/event orchestration, admission pipeline, bounded queues | application meaning |
-| Libp2p backend | Swarm, connections, GossipSub, direct protocol, Noise, Identify, optional Kademlia driver/behavior slot | Claude MCP, app roles |
-| DiscoveryManager | provider lifecycle, candidate merge/provenance/expiry/health | dialing, trust, pubsub |
-| DiscoveryProvider | source-specific candidate discovery; optional Kademlia provider owns only scheduling/normalization/health | dialing, trust, messaging, Swarm ownership |
-| ConnectionManager | connection policy: trust admission, reconnect/backoff, limits, retention, address-policy state | discovery mechanism, payload interpretation; assumption that every low-level dial request originates from its ordinary scheduler |
-| PeerTrustPolicy | authorize PeerIds for v1 data-plane connection/message/send decisions | discovery, Swarm execution |
-| IdentityManager | persistent private key, PeerId, rotation workflow | app identity claims |
-| Peer cache writer | persist successful/recent observations as advisory hints | authority/trust |
-| IPC server | local multiplexing, framing, versioning, OS-level client checks, capability grants | Claude semantics |
-| Diagnostics | health/counters/sanitized events | secrets or payload logging by default |
+| Claude Channel bridge | MCP Channel capability, tools, event translation, instructions, one local EndpointId lease, reply tokens | discovery, dialing, keys, GossipSub mesh, endpoint/trust administration |
+| Human client data plane | human UI transport operations, one local EndpointId lease, application-local history/rendering | libp2p Swarm, transport private key, implicit trust mutation |
+| Human/admin settings path | explicit local trust/config/endpoint administration with granted admin capability | automatic actions triggered by network payloads |
+| IPC server | local connection auth/handshake, capability grants, endpoint lease connection lifecycle, bounded per-client queues | peer discovery, application semantics |
+| EndpointRegistry (runtime) | configured endpoint set, exclusive leases, default route, endpoint policy intersection, local route admission | human/application identity, libp2p protocol mechanics |
+| Transport runtime | neutral command/event semantics, orchestration, endpoint-aware direct admission, health | Claude-specific prompts/tools |
+| DiscoveryManager | provider lifecycle, candidate aggregation/provenance/expiry | trust grants, dialing, endpoint discovery |
+| ConnectionManager | candidate addresses, dial/backoff/connection limits/retention | peer discovery, application payloads |
+| PeerTrustPolicy | profile peer admission decision | discovery, endpoint naming, human identity |
+| PubSubManager | ChannelId/topic mapping, GossipSub publish/validation/subscriptions | directed endpoint routing |
+| DirectManager | request-response v2 lifecycle, codec, transport acceptance | local endpoint ownership policy, application acknowledgement |
+| Endpoint directory manager | trust-gated advertised route snapshot/query/cache | app labels, human identity, DHT records |
+| IdentityManager | persistent profile key, PeerId, rotation | endpoint identities, application identity |
+| rust-libp2p backend | Swarm, TCP/Noise/Yamux, Identify, GossipSub, direct/endpoints protocols | Claude semantics |
 
-## Why these abstractions exist
+## Endpoint ownership split
 
-- `Transport`: the Claude-facing consumer must vary independently from networking backends.
-- `DiscoveryProvider`: discovery sources are explicitly required to vary independently and compose.
-- `PeerTrustPolicy`: trust mechanisms are expected to evolve without changing discovery; v1 consumes the same policy at connection admission, outbound direct dispatch, GossipSub source validation, and local delivery.
+Endpoint routing crosses three internal layers deliberately:
 
-`ConnectionPolicy` and `PubSub` are **not public traits in v1**. They are internal modules of the libp2p backend because no second implementation consumer exists yet. Promote them only if a real independent variation point appears.
+```text
+IPC connection
+   |
+   | claims configured EndpointId
+   v
+EndpointRegistry / transport-runtime
+   |
+   | local route admission
+   v
+DirectManager <----> direct v2 network protocol
+```
 
+The libp2p backend carries EndpointIds on direct frames but does not decide which local process owns them. IPC server owns socket connections but does not decide remote endpoint policy. EndpointRegistry is the single local routing authority.
 
-## Optional Kademlia split
+## Human client boundary
 
-Kademlia spans two components without collapsing their ownership boundary: `KademliaDiscovery` is a `DiscoveryProvider`, while `transport-libp2p` owns the concrete `libp2p::kad::Behaviour` inside the single Swarm task. Both depend on a tiny neutral internal `kademlia-control-api` port; neither concrete crate depends on the other. Kademlia behaviour-originated dials are executed by the Swarm but admitted through ConnectionManager policy via the backend-wide dial gate. This is a mechanism-specific adapter, not a new generic transport/discovery API.
+A human client may implement application-level contacts, display names, avatars, local message history, unread state, reactions, or a richer chat payload protocol. None of those concepts belongs in `transport-api` or EndpointId.

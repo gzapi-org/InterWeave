@@ -1,6 +1,6 @@
 # Local IPC contract
 
-Applies only because ADR-0015 selects a separate daemon.
+Applies because ADR-0015 selects a separate daemon. Model B endpoint addressing makes this **IPC major version 2**.
 
 ## Transport choice
 
@@ -23,7 +23,7 @@ Each frame:
 N bytes UTF-8 JSON object
 ```
 
-- `N` maximum: **131,072 bytes (128 KiB)**; the 4-byte length prefix is outside `N`;
+- `N` maximum: **131,072 bytes (128 KiB)**; the 4-byte prefix is outside `N`;
 - zero length is invalid;
 - invalid UTF-8/JSON/version closes the offending client after a structured protocol error when possible;
 - application payload bytes are base64url in JSON frames;
@@ -31,43 +31,63 @@ N bytes UTF-8 JSON object
 
 ### Payload-fit invariant
 
-Every payload that is legal under the transport contract must be representable in both an IPC command and an IPC `MessageReceived` event without exceeding the IPC frame ceiling. In particular, the v1 transport hard ceiling of 49,152 payload bytes expands to 65,536 base64url characters before JSON envelope overhead; therefore a 64 KiB IPC frame is insufficient and is explicitly not permitted in v1.
+Every payload legal under the transport contract must be representable in both an IPC command and IPC `MessageReceived` event without exceeding the frame ceiling. 49,152 payload bytes expand to 65,536 base64url characters before JSON envelope overhead, so the 128 KiB body remains mandatory.
 
-Phase 1 compatibility fixtures must include both directions with exactly 49,152 opaque payload bytes and maximal bounded metadata fields. Serialization must reject an object before transmission if its full encoded JSON length would exceed 131,072 bytes.
+Phase 1 compatibility fixtures include both directions with exactly 49,152 opaque bytes and maximal bounded v2 metadata, including 64-byte source/destination EndpointIds.
 
-To preserve headroom, v1 IPC envelope limits are:
+Envelope limits:
 
-- `media_type`: 128 ASCII bytes at the transport layer;
+- `media_type`: 128 ASCII bytes;
 - `ChannelId`: 128 ASCII bytes;
+- `EndpointId`: 64 ASCII bytes;
 - normalized PeerId / transport identity string: 256 UTF-8 bytes;
 - request/error diagnostic code: 128 ASCII bytes;
 - human-readable diagnostic message: 2,048 UTF-8 bytes;
 - client version string: 128 UTF-8 bytes.
 
-The simplicity favors a future TypeScript/JavaScript Channel bridge talking to Rust without code generation. If profiling shows JSON encoding to be a bottleneck, a future IPC major version may use CBOR or a binary side section; the transport contract is unaffected.
-
-## Handshake and client capabilities
+## Handshake, endpoint claim, and client capabilities
 
 Client first frame:
 
 ```json
 {
   "type": "hello",
-  "ipc_version": {"major": 1, "minor": 0},
-  "client": {"kind": "claude-channel", "version": "..."},
+  "ipc_version": {"major": 2, "minor": 0},
+  "client": {"kind": "human-client", "version": "..."},
+  "endpoint": {"id": "human"},
   "requested_capabilities": ["events", "commands"]
 }
 ```
 
-Server replies with selected compatible version, transport contract version, profile identity, and **granted** capabilities. Major mismatch is fatal. Minor negotiation selects the lower supported compatible feature set.
+`endpoint` may be omitted only for a client that does not need direct send/receive, such as diagnostics/admin tooling.
 
-Capabilities are authorization-relevant, not merely feature advertisements:
+Server validates endpoint claim before completing handshake:
 
-- `events`: receive subscribed runtime events;
+1. EndpointId grammar;
+2. configured endpoint exists, enabled, and registration policy allows it;
+3. optional `allowed_client_kinds` matches for configuration hygiene;
+4. no live lease already owns it;
+5. connection is otherwise authorized for requested capabilities.
+
+Server reply includes selected compatible IPC version, transport contract version, profile PeerId, caller endpoint (if any), a fresh local `endpoint_lease_epoch`, and granted capabilities. `endpoint_lease_epoch` is an opaque **128-bit lease-generation value** unique to that grant across reconnects and daemon restarts (for example random, or daemon-instance nonce + counter). It is not a bearer credential; it exists only to invalidate stale local route/reply state.
+
+Endpoint lease is exclusive and connection-bound. Client cannot change EndpointId on an established IPC connection. Rebinding requires reconnect/new handshake.
+
+### Client-kind warning
+
+`client.kind` is not cryptographic authentication. It can prevent accidental configuration mistakes but cannot defend against malicious same-user code. Endpoint security still relies on profile configuration, owner-only IPC, exclusive leases, and any future stronger same-user authentication.
+
+### Capabilities
+
+- `events`: receive eligible runtime events;
 - `commands`: ordinary non-administrative transport commands;
+- `endpoints.query`: query a trusted remote peer's advertised endpoint directory;
+- `admin.endpoints`: inspect/revoke local endpoint leases or mutate endpoint config through an administrative adapter;
 - `admin.shutdown`: invoke transport `shutdown(grace)`.
 
-A client with `kind = claude-channel` is never granted `admin.shutdown`, even if it requests it. Local service-management or `transportctl` clients may receive the capability according to local administrative policy. Unknown/unauthorized capability requests are not silently elevated.
+`claude-channel` is never granted `admin.endpoints` or `admin.shutdown`. A human UI data-plane connection should likewise remain non-admin; its settings/control surface opens a separately authorized administrative connection.
+
+Unknown/unauthorized capability requests are not silently elevated.
 
 ## Message classes
 
@@ -85,32 +105,65 @@ A request whose method requires an ungranted capability fails locally with a sta
 
 The daemon supports up to **16 local clients** by default. Each client has independent bounded command/event queues and subscription references. One slow client cannot backpressure the entire network event loop.
 
-### Message-event fan-out
+Each direct-capable client owns at most one EndpointId lease. Multiple local clients intentionally sharing a profile therefore use distinct endpoint IDs.
 
-Local interest is mode-specific and normative:
+### Message-event routing
 
-- **broadcast `MessageReceived`:** enqueue only to connected IPC clients with the `events` capability that currently hold a local join reference for that ChannelId; a daemon-level `channels.desired` backend subscription does not create a client interest reference;
-- **direct `MessageReceived`:** enqueue one independent copy to **every** connected IPC client with the `events` capability. v1 has no network-visible local endpoint identifier and performs no first-client/round-robin election.
+Local routing is normative:
 
-Therefore two Claude bridges intentionally sharing one profile may both receive and reply to the same direct message. Each bridge creates its own local `reply_token` pointing to the same source PeerId. This duplicate local delivery is an explicit v1 semantic, not an exactly-once claim. Finer routing must be defined by a future endpoint/application protocol or by using separate profiles/PeerIds.
+- **broadcast `MessageReceived`:** enqueue only to connected IPC clients with `events` that currently hold a join reference for that ChannelId; `channels.desired` does not create local interest;
+- **direct `MessageReceived`:** enqueue exactly one copy to the connected IPC client that owns the resolved `destination_endpoint` lease.
 
-If no eligible local client exists, the daemon does not buffer the message for later IPC delivery. It records a bounded no-local-consumer/drop diagnostic and continues; ADR-0020 still forbids a hidden offline queue.
+There is no first-client, round-robin, or all-client direct fan-out in IPC v2.
+
+If the resolved endpoint is not leased, the daemon rejects the inbound direct request with coarse remote `no_route`. It does not acknowledge then drop, and it does not buffer for a future client.
+
+## Local endpoint lease lifecycle
+
+- lease grant produces local `EndpointLeaseChanged{registered}`;
+- normal disconnect releases lease and all ephemeral join references;
+- administrative revocation produces `EndpointLeaseChanged{revoked}` and stops direct routing immediately;
+- endpoint configuration disable/reload revokes an active lease;
+- a second live claim returns `EndpointInUse`;
+- a reconnect receives a new lease epoch;
+- no stale local reply route may authorize a new connection merely because it later claims the same EndpointId.
+
+Bridge-local reply tokens disappear on bridge restart, so the Claude path naturally satisfies the stale-route rule. Other local apps must bind stored ephemeral reply routes to their current lease epoch.
+
+## Direct command caller context
+
+IPC `send` params contain remote destination and payload only:
+
+```json
+{
+  "peer": "...",
+  "endpoint": "human",
+  "payload": "..."
+}
+```
+
+`endpoint` here is the **remote destination endpoint** and may be omitted to request the remote default endpoint. There is no `source_endpoint` parameter. The daemon derives source from the caller's active lease.
+
+A client without an endpoint lease receives `EndpointNotRegistered` for direct send.
 
 ## Push events and overload
 
 Each client event queue defaults to 256. When full:
 
-1. drop oldest ordinary message events for that client;
-2. preserve a small reserved lane for `OverloadObserved`, health, trust-policy, shutdown, and identity-change events;
-3. increment drop counters;
-4. never spill into an unbounded disk queue.
-
-The bridge surfaces overload diagnostics but does not synthesize missing content.
+1. drop oldest ordinary broadcast events for that client as configured;
+2. for an inbound direct message targeted at this endpoint, reject before transport `Accepted` if the event cannot be admitted;
+3. preserve a reserved lane for overload, health, trust, endpoint-lease, shutdown, and identity events;
+4. increment drop/rejection counters;
+5. never spill into an unbounded disk queue.
 
 ## Disconnect/reconnect
 
-A client disconnect releases ephemeral subscription references and outstanding response waiters. Reconnect performs a fresh handshake and resubscription. There is no event replay. A late response to a disconnected client is discarded after internal cleanup.
+A client disconnect releases its EndpointId lease, ephemeral subscription references, and outstanding response waiters. Reconnect performs a fresh handshake and resubscription. There is no event replay. A late response to a disconnected client is discarded after internal cleanup.
 
 ## Cancellation
 
 Cancel is advisory. If an operation has crossed an irreversible network boundary, completion may race cancellation. Responses distinguish `CancelledBeforeDispatch` from `CancellationRaced` where observable.
+
+## IPC v1 compatibility
+
+There is no production v1 deployment requirement. The first production implementation targets IPC v2. If a future v1 adapter is added, it must be explicit and cannot reintroduce undocumented direct all-client fan-out into the v2 routing model.

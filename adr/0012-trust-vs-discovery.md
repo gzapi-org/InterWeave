@@ -1,4 +1,4 @@
-# Deny-by-default static PeerId trust policy in v1
+# Deny-by-default static PeerId trust policy
 
 **Status:** Accepted
 
@@ -8,13 +8,13 @@ Authenticated PeerId is necessary but not sufficient authorization. A small stat
 
 ## Decision
 
-Use a `PeerTrustPolicy` abstraction. v1 uses a static allowlist of transport PeerIds, deny by default. Discovery never mutates it. Trust administration is a local privileged path, not a Claude Channel tool triggered by remote content.
+Use a `PeerTrustPolicy` abstraction. The initial implementation uses a static allowlist of transport PeerIds, deny by default. Discovery never mutates it. Trust administration is a local privileged path, not a Claude Channel tool triggered by remote content.
 
-For v1, authorization applies consistently to the data plane:
+Authorization applies consistently to the data plane:
 
 - **connection admission:** only allowlisted PeerIds may be dialed/retained for ordinary direct/GossipSub data-plane connectivity;
-- **inbound message admission:** only allowlisted original message sources may reach normalized `MessageReceived` delivery;
-- **outbound direct send:** `send(peer, ...)` to a non-allowlisted PeerId returns `UnauthorizedPeer` locally before dialing;
+- **inbound message admission:** only allowlisted original message sources may reach normalized `MessageReceived` delivery; direct endpoint policy may then narrow admission further;
+- **outbound direct send:** `send({peer, endpoint?}, ...)` to a non-allowlisted PeerId returns `UnauthorizedPeer` locally before dialing; endpoint-specific outbound policy may only narrow that set;
 - **broadcast propagation:** GossipSub messages whose authenticated original source is not locally trusted are handled as `Ignore`, not `Reject`, per ADR-0029;
 - **revocation:** removing a PeerId from the allowlist evicts active data-plane connectivity and emits operational trust/connection events.
 
@@ -40,7 +40,7 @@ Trust changes can be reloaded locally and audited. Removing a peer disconnects i
 
 ## Implementation implications
 
-Define trust-core without discovery dependencies. Query policy at connection admission, outbound direct dispatch, GossipSub source validation, and local MessageReceived admission. Emit `TrustPolicyChanged { revision, at }`; when revocation affects a connection also emit `PeerDisconnected { reason_class: policy, ... }`.
+Define trust-core without discovery/endpoint dependencies. Query profile trust at connection admission, outbound direct dispatch, GossipSub source validation, and local MessageReceived admission. EndpointRegistry applies only an additional narrowing filter and must never widen PeerTrustPolicy. Emit `TrustPolicyChanged { revision, at }`; when revocation affects a connection also emit `PeerDisconnected { reason_class: policy, ... }`.
 
 ## Revisit conditions
 

@@ -51,7 +51,7 @@ P2P mapping:
 
 - `reply` -> `reply(reply_token, payload)`
 - Telegram group send -> `broadcast(channel, payload)`
-- Telegram DM -> `send(peer, payload)`
+- Telegram DM -> `send({peer, endpoint?}, payload)` in transport v2 (endpoint is a P2P-specific extension)
 - `react`, `edit_message`, `download_attachment` -> not generic transport operations
 
 ## Configuration and state

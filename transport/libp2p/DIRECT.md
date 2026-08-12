@@ -2,24 +2,26 @@
 
 ## Selected primitive
 
-`libp2p::request_response` with a custom small codec.
-
-Protocol ID:
+`libp2p::request_response` with a custom bounded codec remains the selected primitive. ADR-0030 upgrades the initial implementation target to endpoint-aware protocol v2:
 
 ```text
-/claude-p2p-channel/direct/1.0.0
+/claude-p2p-channel/direct/2.0.0
 ```
 
-A future compatible minor may negotiate an additional protocol ID. Major incompatibility is explicit; do not silently reinterpret payloads.
+The old architecture-only `/direct/1.0.0` frame is superseded before production implementation. Because there is no deployed v1 compatibility obligation, implementation should target v2 directly.
 
 ## Request
 
 Conceptual frame:
 
 ```text
-DirectMessageV1 {
-  message_id: 16 bytes,         // exactly 128 bits in transport v1
-  sent_at_ms: u64,              // diagnostic only
+DirectMessageV2 {
+  message_id: 16 bytes,          // exactly 128 bits
+  sent_at_ms: u64,               // diagnostic only
+  source_endpoint_len: u8,       // 1..64
+  source_endpoint: bytes,
+  destination_endpoint_len: u8,  // 0 => receiver default endpoint
+  destination_endpoint: bytes,
   media_type_len: u8,
   media_type: bytes,
   payload_len: u32,
@@ -27,49 +29,73 @@ DirectMessageV1 {
 }
 ```
 
-Codec must reject frames whose declared size exceeds limits before allocation. `sent_at_ms` is not an authorization, ordering, freshness, replay-window, or dedup input in v1.
+Endpoint strings must satisfy `EndpointId` grammar before routing. Codec rejects invalid/oversized declared lengths before allocation. `sent_at_ms` is not authorization, ordering, freshness, replay-window, or dedup input.
+
+The local sender cannot choose `source_endpoint` arbitrarily: transport runtime obtains it from the calling IPC endpoint lease and passes it to the backend.
 
 ## Response
 
 ```text
-Accepted { message_id }
-Rejected { message_id, reason_code }
+AcceptedV2 {
+  message_id,
+  resolved_destination_endpoint
+}
+
+RejectedV2 {
+  message_id,
+  reason_code
+}
 ```
 
-Reason codes are coarse: unauthorized, overloaded, malformed, too_large, shutting_down, unsupported. Do not return sensitive policy details.
+Coarse reason codes: `no_route`, `unauthorized_peer`, `overloaded`, `malformed`, `too_large`, `shutting_down`, `unsupported`.
+
+`no_route` deliberately collapses endpoint unknown, endpoint disabled, no active lease, missing default endpoint, and endpoint-specific policy denial.
 
 ## Semantics
 
 - one request-response exchange per direct message;
 - a new substream may be opened per exchange while the underlying peer connection is reused;
 - default total deadline: 10 seconds;
-- sending to the local profile PeerId is invalid and fails locally as `InvalidArgument`; self-dial is never attempted;
-- sender applies local PeerTrustPolicy before dialing; an unauthorized remote target fails locally as `UnauthorizedPeer`;
-- receiver authenticates via libp2p connection PeerId, then applies PeerTrustPolicy and resource limits;
-- `Accepted` means accepted into the receiver's bounded local event path, not processed by Claude;
+- sending to the local profile PeerId is `InvalidArgument`; self-dial never occurs;
+- sender applies endpoint outbound narrowing policy, then profile PeerTrustPolicy, before dialing;
+- receiver authenticates PeerId, applies profile trust, validates frame, resolves endpoint/default route, applies endpoint inbound narrowing policy, checks active lease/queue capacity, and deduplicates;
+- `AcceptedV2` is sent **only after** the resolved endpoint's bounded local event queue accepted the normalized direct event;
+- `AcceptedV2` does not mean the human/Claude/application processed it;
 - sender performs no automatic retry after timeout/connection failure;
-- caller may retry with the **same message_id** if it wants deduplication to suppress duplicate local delivery;
-- duplicate requests within TTL receive `Accepted`/duplicate-equivalent without re-emitting to local consumer;
+- caller may retry with the same message ID;
 - concurrent messages are unordered;
 - one connection failure may fail all in-flight exchanges; each reports independently;
-- cancellation only stops local waiting when the request is already in flight.
+- cancellation only stops local waiting when already in flight.
 
 The normalized direct dedup key is:
 
 ```text
-(mode=direct, source_peer, channel=None, message_id)
+(mode=direct, source_peer, source_endpoint, destination_selector[Explicit(id)|Default], message_id)
 ```
+
+A positive duplicate entry stores the first `resolved_destination_endpoint` plus a fingerprint of canonical `(media_type,payload)`. A retry with the same key and matching fingerprint returns `AcceptedV2` for that stored route without local re-delivery, even if the profile default subsequently changes. The same key with different content is rejected as malformed/duplicate conflict. `sent_at_ms` may differ on retry and is not part of the fingerprint.
+
+Before route resolution, the runtime atomically acquires a bounded in-flight reservation for a cache miss. Only the owner executes route/queue admission. Matching concurrent duplicates attach as waiters and receive the same eventual response; content-fingerprint conflicts fail. This is required to uphold local at-most-once presentation under concurrent retransmission, not only sequential retry.
 
 ## Peer not connected
 
 For an authorized target:
 
-- if no usable candidate addresses are known, return `PeerUnknown` without triggering ad hoc discovery;
-- if usable candidates exist, ConnectionManager may dial under the command deadline;
-- if dialing/protocol negotiation fails or cannot complete within the deadline, return `PeerUnreachable`.
+- no usable candidate addresses -> `PeerUnknown` without ad hoc discovery;
+- usable candidates -> ConnectionManager may dial under command deadline;
+- connection/protocol negotiation failure -> `PeerUnreachable`;
+- successful v2 exchange but remote `no_route` -> `RemoteEndpointUnavailable` locally.
 
-The direct operation does not command discovery providers to perform an ad hoc global search in v1.
+The direct operation does not command discovery providers to perform an ad hoc global search.
+
+## Endpoint omission
+
+`destination_endpoint_len = 0` requests the receiver's explicit `default_direct_endpoint`. It never means all local clients. The `AcceptedV2` response reports the resolved endpoint so the caller can expose exact transport routing in diagnostics/result metadata.
 
 ## Graceful shutdown
 
-Stop accepting new direct requests, respond `shutting_down` to newly arrived requests where possible, allow existing exchanges a short bounded grace, then close.
+Stop accepting new direct requests, respond `shutting_down` where possible, allow existing exchanges a short bounded grace, then close. Endpoint leases are revoked as part of daemon shutdown.
+
+## Protocol family / future compatibility
+
+A future compatible implementation may advertise multiple request-response protocol IDs where safe. Endpoint-addressed sends must never silently downgrade to a protocol that cannot preserve endpoint routing.

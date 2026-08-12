@@ -1,35 +1,37 @@
 # Realtime best-effort delivery only
 
-**Status:** Accepted
+**Status:** Accepted; direct acceptance clarified for endpoint routing.
 
 ## Context
 
-GossipSub and direct streams cannot honestly provide stronger end-to-end guarantees without durable state/ack protocols that are explicitly absent.
+GossipSub and direct streams cannot honestly provide stronger end-to-end guarantees without durable state/ack protocols that are absent.
 
 ## Decision
 
-Define v1 as best effort. After local deduplication, a runtime tries to present each accepted message at most once to each local consumer. There is no global ordering, exactly-once, durable queue, or offline mailbox. Direct `Accepted` is transport acceptance only.
+Define realtime best-effort transport with bounded local at-most-once presentation after deduplication. There is no global ordering, exactly-once, durable queue, or offline mailbox.
+
+For direct v2, `AcceptedV2` means the remote transport resolved one EndpointId and successfully enqueued the event into that endpoint's bounded local event queue. It does not mean the human/Claude/application processed or persisted it.
 
 ## Alternatives considered
 
-Guaranteed delivery claim; exactly-once; total order; durable acknowledgement workflow.
+Guaranteed delivery; exactly-once; total order; durable acknowledgement workflow; acknowledge before endpoint queue admission.
 
 ## Consequences
 
-Applications needing durability implement it above this transport or use a future backend with explicit capabilities.
+Offline/unavailable endpoints produce `no_route` instead of hidden buffering. Applications requiring durable delivery implement it above transport or use a future explicit capability.
 
 ## Security implications
 
-Replay/duplicates are mitigated only within bounded windows. Security-sensitive applications cannot treat message absence as proof that no event occurred.
+Replay/duplicates are mitigated only within bounded windows. Endpoint acceptance must not be mistaken for application authorization or user receipt.
 
 ## Operational implications
 
-Diagnostics expose failures/drops/empty meshes; operators must not read success counters as recipient acknowledgements.
+Diagnostics expose failures/drops/no-route/empty meshes. Human UI may persist messages it actually receives without changing network guarantees.
 
 ## Implementation implications
 
-Tool/result wording and docs use precise acceptance language. Capability flags report no durability.
+Direct backend must await local endpoint queue admission before `AcceptedV2`. Tool/UI wording remains precise.
 
 ## Revisit conditions
 
-Revisit only with a designed durable backend/protocol and capability negotiation that does not misrepresent other backends.
+Only with a designed durable backend/protocol and explicit retention/ack semantics.

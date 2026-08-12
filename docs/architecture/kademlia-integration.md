@@ -401,6 +401,8 @@ get_providers
 
 Write-back caching for record lookup is disabled because record lookup itself is outside scope. Inbound `PUT_VALUE` / `ADD_PROVIDER` attempts are dropped and counted. Read requests for application records must not expose project-specific data because the local store contains no project records.
 
+`EndpointId`, endpoint-directory listings, default endpoint state, endpoint leases, ChannelIds, human contacts, and other application/local-routing metadata are also forbidden as Kademlia keys, values, or provider records. Endpoint lookup uses the separately trust-gated endpoint-directory protocol after peer reachability is established.
+
 A future requirement for DHT records requires a new ADR and a separate schema/security review.
 
 ## 13. Initial configuration defaults and validation

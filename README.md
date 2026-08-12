@@ -1,56 +1,74 @@
 # claude-p2p-channel
 
-Architecture and contracts for a generic peer-to-peer **Claude Code Channel transport**.
+Architecture and contracts for a generic peer-to-peer **Claude Code Channel transport**, including Model B local endpoint multiplexing and a human-client architecture.
 
-> Status: architecture only. This repository intentionally contains no production MCP server, libp2p networking, daemon, installer, system service, or Rust crate implementation.
+> Status: architecture only. This repository intentionally contains no production MCP server, libp2p networking, daemon, human client, installer, system service, or Rust crate implementation.
 
 ## Purpose
 
-`claude-p2p-channel` is a transport plugin, not an application coordination protocol. It gives Claude Code a message channel whose network backend is decentralized and payload-agnostic. Higher-level systems may carry text, JSON, or their own application protocols, but this project does not define agent roles, task state, repositories, Git semantics, issue tracking, branch ownership, or merge policy.
+`claude-p2p-channel` is a transport plugin, not an application coordination or chat protocol. It gives Claude Code and other local clients a decentralized, payload-agnostic transport. Higher-level systems may carry text, JSON, chat envelopes, or their own protocols, but this project does not define agent roles, task state, repositories, Git semantics, human identity, social graphs, read receipts, or application workflows.
 
-The primary boundaries are:
+## Architecture
 
 ```text
-+-----------------------------+
-|         Claude Code         |
-| Channel / MCP integration   |
-+-------------+---------------+
-              | stdio MCP
-              v
-+-----------------------------+
-| P2P Channel MCP bridge      |
-| events / tools / guidance   |
-+-------------+---------------+
-              | local IPC
-              v
-+-----------------------------+
-| P2P transport daemon        |
-| transport-neutral runtime   |
-+-------+-----------+---------+
-        |           |
-        |           +---- direct request/response protocol (1:1)
-        +---------------- GossipSub (1:many)
-        |           +---- DiscoveryManager -> DiscoveryProvider(s)
-        |           +---- PeerTrustPolicy
-        |           +---- ConnectionManager
-        v
-+-----------------------------+
-| rust-libp2p backend         |
-| TCP + Noise + Yamux         |
-+-----------------------------+
+                         one transport profile / one PeerId
+                                      |
+                        +-------------+-------------+
+                        |  P2P transport daemon     |
+                        |  EndpointRegistry          |
+                        +------+--------------+------+
+                               |              |
+                      IPC v2   |              | IPC v2
+                    endpoint   |              | endpoint
+                    = human    |              | = claude
+                               |              |
+                               v              v
+                         Human client   Claude Channel bridge
+                                             |
+                                             v
+                                         Claude Code
+
+Network side:
+  GossipSub = broadcast by ChannelId
+  request-response direct v2 = PeerId + EndpointId routing
+  endpoint-directory = optional trusted route discovery
+  DiscoveryManager / Kademlia(optional, disabled by default)
+  PeerTrustPolicy / ConnectionManager / Noise
 ```
+
+The daemon owns the private key and all libp2p state. Local applications never become independent network identities unless they use separate profiles.
 
 ## Decision summary
 
-- Claude integration follows the official Channel contract: stdio MCP, `claude/channel`, push notifications, explicit reply tools, and a pre-delivery admission gate.
-- The network runtime is a **separate, profile-scoped daemon** so Claude session restarts do not redefine transport identity or tear down P2P connectivity.
-- `Transport` and `DiscoveryProvider` are stable contracts. Claude-facing code does not depend on libp2p, GossipSub, mDNS, Kademlia, or multiaddresses.
-- Broadcast is GossipSub. Directed messaging is a dedicated libp2p request-response protocol; directed messages are never emulated by broadcasting and discarding at unrelated peers.
-- v1 discovery is composable: peer cache + optional mDNS + static bootstrap. Kademlia has a complete integration blueprint but remains optional and `enabled: false` by default; it is peer-routing-only, uses capability-aware targeting/effective-target saturation, and never grants trust or stores channel/application records.
-- Discovery only produces **candidate reachability and bounded transport protocol observations**. It never grants trust. v1 uses a deny-by-default static PeerId allowlist for connection admission, inbound source admission, and outbound direct sends; all Swarm dials, including Kademlia behaviour-originated requests, pass the same ConnectionManager policy gate.
-- Noise secures each admitted libp2p connection. GossipSub validation distinguishes objective invalidity (`Reject`) from valid-but-locally-unauthorized publishers (`Ignore`); trusted forwarding peers can still read plaintext, so group/application encryption remains deferred.
-- Delivery is realtime/best-effort, no global ordering, no durable mailbox, and no exactly-once claim. Broadcast requires the calling local client to be joined; direct send requires the destination to be trusted.
-- Multiple local Claude sessions share a daemon only when explicitly configured to use the same profile/socket; independent profiles never share keys accidentally. Same-profile direct inbound messages fan out to every connected event-capable local client, while broadcast delivery is filtered by per-client join references. IPC v1 uses a 128 KiB JSON-body ceiling so every legal 48 KiB transport payload fits after base64url/JSON expansion; Claude Channel clients cannot invoke administrative daemon shutdown.
+- Claude integration follows the official Channel pattern: stdio MCP, `claude/channel`, push notifications, explicit outbound tools, and pre-delivery admission.
+- The network runtime is a **separate, profile-scoped daemon** so Claude/human-client restarts do not redefine transport identity or tear down P2P connectivity.
+- One profile owns one persistent PeerId. Model B adds configured **EndpointIds** underneath that PeerId for deterministic local direct routing (`human`, `claude`, `automation.build`, etc.). EndpointId is a routing selector, not cryptographic/human/application identity.
+- Every direct-capable IPC v2 client owns one exclusive configured endpoint lease. Direct messages route to exactly one endpoint; the previous architecture-only all-client fan-out is superseded by ADR-0030.
+- Direct protocol target is `/claude-p2p-channel/direct/2.0.0`, carrying required source endpoint and optional destination endpoint. Omitted destination resolves the receiver's explicit `default_direct_endpoint`; it never means fan-out.
+- Direct `Accepted` means the resolved endpoint's bounded local event queue accepted the message, not that Claude or a human processed it.
+- An optional trust-gated endpoint-directory protocol exposes only active routes explicitly marked `advertise: true`; it returns route names only, never human names/roles/trust claims.
+- Endpoint-specific ACLs may narrow profile trust but can never widen it. Remote endpoint denial is exposed as coarse `no_route` / local `RemoteEndpointUnavailable` to avoid an authorization oracle.
+- Broadcast remains GossipSub and ChannelId-scoped; endpoint addressing does not alter broadcast envelopes or subscription semantics.
+- `Transport`, `DiscoveryProvider`, and trust boundaries remain independent of Claude/libp2p details.
+- Kademlia has a complete optional peer-routing integration blueprint but remains **`enabled: false` by default**. It never grants trust or stores application/channel/endpoint records.
+- Discovery only produces candidate reachability and bounded protocol observations. Data-plane connection admission remains trust-gated, including behavior-originated Kademlia dials through the root dial admission policy.
+- Noise secures each admitted libp2p connection. GossipSub validation distinguishes objective invalidity (`Reject`) from valid-but-locally-unauthorized publishers (`Ignore`). Group/application E2EE remains outside v1/v2 transport.
+- Delivery remains realtime/best-effort, bounded, non-durable, with no exactly-once claim or offline mailbox. A human client may persist its own local history above the transport, but the daemon never queues messages for an offline endpoint.
+- IPC v2 retains the 128 KiB JSON-body ceiling so every legal 48 KiB payload fits with endpoint metadata after base64url/JSON expansion. Claude Channel clients cannot invoke endpoint administration or daemon shutdown.
+
+## Human client Model B
+
+The human client is another IPC v2 consumer, not a second libp2p implementation. It can share the same PeerId as Claude while owning a separate EndpointId.
+
+See:
+
+- [Human client Model B](docs/architecture/human-client-model-b.md)
+- [Endpoint contract](contracts/ENDPOINTS.md)
+- [Libp2p endpoint protocols](transport/libp2p/ENDPOINTS.md)
+- [ADR-0030 local endpoint addressing](adr/0030-local-endpoint-addressing.md)
+- [ADR-0031 endpoint directory](adr/0031-endpoint-directory.md)
+- [ADR-0032 human client boundary](adr/0032-human-client-boundary.md)
+- [Human + Claude profile example](config/examples/human-and-claude.yaml)
 
 ## Start here
 
@@ -58,26 +76,19 @@ The primary boundaries are:
 - [Component boundaries](docs/architecture/components.md)
 - [Data flows](docs/architecture/data-flows.md)
 - [Transport contract](contracts/TRANSPORT.md)
+- [Endpoint contract](contracts/ENDPOINTS.md)
+- [Local IPC contract](contracts/LOCAL-IPC.md)
 - [Discovery contract](contracts/DISCOVERY.md)
 - [ADR index](adr/README.md)
-- [Telegram implementation research](research/telegram-plugin-implementation.md)
 - [Threat model](docs/architecture/threat-model.md)
 - [Rust blueprint](docs/architecture/rust-blueprint.md)
 - [Implementation plan](roadmap/IMPLEMENTATION-PLAN.md)
-- [Amendment review memo](docs/architecture/AMENDMENT-REVIEW-2026-08-11.md)
-- [Kademlia design review memo](docs/architecture/KAD-REVIEW-2026-08-11.md)
-- [Kademlia/shared-profile second review closure](docs/architecture/KAD-REVIEW-2026-08-12.md)
 - [Final architecture review](docs/architecture/FINAL-REVIEW.md)
 
 ## Source snapshot
 
-Claude/Telegram research was refreshed 2026-08-11; the Kademlia/Swarm/Identify source pass was extended 2026-08-12. The inspected `anthropics/claude-plugins-official` `main` commit was `920824c3e9509890fbec03ba6097014222393022` (2026-08-10). See [research/SOURCES.md](research/SOURCES.md).
+Claude/Telegram research was refreshed 2026-08-11; libp2p/Kademlia and endpoint-protocol research was extended 2026-08-12. See [research/SOURCES.md](research/SOURCES.md) and [research/endpoint-addressing.md](research/endpoint-addressing.md).
 
 ## Repository name
 
-The working name **claude-p2p-channel** is retained because it describes the Claude integration boundary and transport class without implying an application protocol, project, team, or coordination model.
-
-
-## Optional Kademlia blueprint
-
-The repository includes a complete, implementation-ready Kademlia integration design while deliberately leaving it disabled. See [docs/architecture/kademlia-integration.md](docs/architecture/kademlia-integration.md), [discovery/providers/kademlia.md](discovery/providers/kademlia.md), and [ADR-0009](adr/0009-kademlia-role.md). The first integration is a private/trust-bounded peer-routing overlay, not the public IPFS DHT.
+The working name **claude-p2p-channel** is retained because it describes the Claude integration boundary and transport class without implying an application protocol, project, team, human identity system, or coordination model.

@@ -1,6 +1,6 @@
 # Claude Channel event contract
 
-This document specifies bridge output, not the generic network transport.
+This document specifies bridge output, not the generic network transport. It is updated for transport v2 endpoint addressing.
 
 ## Notification
 
@@ -27,6 +27,8 @@ Proposed stable keys:
 | `source` | constant `p2p` |
 | `delivery_mode` | `broadcast` or `direct` |
 | `source_peer` | authenticated transport PeerId string |
+| `source_endpoint` | direct only: remote peer-asserted EndpointId route |
+| `destination_endpoint` | direct only: this bridge's resolved local EndpointId |
 | `message_id` | normalized 128-bit transport message ID |
 | `received_at` | RFC3339 UTC timestamp |
 | `channel` | logical ChannelId; only for broadcast |
@@ -34,22 +36,37 @@ Proposed stable keys:
 | `payload_encoding` | `utf8` or `base64url` |
 | `content_type` | optional safe media type |
 
-At the bridge boundary, transport `Payload.media_type` maps one-for-one to Claude-facing `meta.content_type`; the libp2p and generic transport layers use the name `media_type`, while only the Claude-facing representation uses `content_type`.
+At the bridge boundary, transport `Payload.media_type` maps one-for-one to Claude-facing `meta.content_type`.
 
-`source_peer` proves only a transport cryptographic identity. It must not be described as an employee, agent, host role, or authorization principal unless a higher-level protocol establishes that binding.
+`source_peer` proves only a transport cryptographic identity. `source_endpoint` is a routing label asserted by that authenticated peer. Neither may be described as an employee, human, agent role, host role, or application authorization principal unless a higher-level protocol separately establishes that binding.
+
+## Bridge endpoint identity
+
+Each Claude bridge that needs direct messaging connects to IPC v2 under one configured EndpointId, commonly `claude` or another operator-selected route.
+
+The bridge does not choose a source endpoint per message. Its IPC lease defines the source route for all direct sends/replies during that connection.
+
+If the endpoint lease cannot be obtained (for example another live bridge already owns `claude`), direct operations are unavailable and `status` reports the conflict. The bridge must not silently claim another endpoint.
 
 ## Reply token
 
-A reply token is local, opaque, unguessable, short-lived, and never a libp2p handle. It maps:
+A reply token is local, opaque, unguessable, short-lived, and never a libp2p handle.
 
-- direct inbound -> source PeerId;
-- broadcast inbound -> source ChannelId and broadcast mode.
+It maps:
 
-Default TTL: 30 minutes, bounded maximum entries: 2048 per bridge process. Tokens disappear on bridge restart. Explicit `send`/`broadcast` can be used after token expiry.
+- direct inbound -> `{remote_peer=source_peer, remote_endpoint=source_endpoint, local_endpoint=destination_endpoint, local_lease_epoch}`;
+- broadcast inbound -> `{channel, mode=broadcast}`.
 
-When multiple bridges share one profile, each bridge that receives the same admitted direct transport event creates its **own** reply token resolving to the same source PeerId. A token identifies a route, not an exclusive claim on that network message.
+Default TTL: 30 minutes, bounded maximum entries: 2048 per bridge process. Tokens disappear on bridge restart.
 
-A broadcast reply token does **not** confer or recreate a subscription. If the calling bridge has left the mapped channel since receiving the event, `reply` fails with `ChannelNotJoined`; it does not implicitly rejoin or publish on another client's subscription.
+For direct reply:
+
+- bridge must still own the same `local_endpoint` lease epoch;
+- destination is the original remote `source_endpoint`;
+- current profile and endpoint outbound trust/policy still apply;
+- token never falls back to remote default endpoint or a different local endpoint.
+
+A broadcast reply token does **not** confer or recreate a subscription. If the bridge has left the mapped channel, `reply` fails `ChannelNotJoined`.
 
 ## Sanitization
 

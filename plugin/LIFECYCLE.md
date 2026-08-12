@@ -1,30 +1,29 @@
-# Channel bridge lifecycle
+# Plugin/bridge lifecycle
 
 ## Startup
 
-1. MCP process starts under Claude Code over stdio.
-2. Bridge loads only plugin-facing configuration: profile name/socket locator and safe defaults.
-3. Connect to daemon IPC and negotiate version/capabilities.
-4. Verify transport contract compatibility, including effective `max_payload_bytes`.
-5. Register session-requested channel subscriptions.
-6. Start event-forwarding task.
+1. Claude Code launches the Channel bridge over stdio.
+2. Bridge loads plugin-local non-secret routing config: profile name/socket + configured local EndpointId.
+3. Bridge connects to daemon IPC v2.
+4. Hello requests non-admin capabilities and claims the configured EndpointId.
+5. Daemon grants endpoint lease/epoch or returns a clear conflict/configuration error.
+6. Bridge obtains profile PeerId/effective limits and establishes its channel joins.
+7. Inbound Channel notifications begin.
 
-The bridge requests ordinary `events`/`commands` IPC capabilities. It does not request and can never be granted `admin.shutdown` under `client.kind = claude-channel`.
+The bridge never receives the profile private key and never becomes daemon owner merely because it started first.
 
-If the daemon cannot be reached, the bridge starts in degraded mode if MCP registration can still complete; network tools return daemon-unavailable until reconnect.
+## Endpoint conflict
 
-## Shutdown
-
-On stdio EOF/close or termination signal:
-
-- stop accepting new tool calls;
-- cancel IPC read/write tasks;
-- release local subscription references best-effort;
-- close IPC;
-- exit promptly.
-
-Do **not** stop the daemon. This is enforced by IPC capability policy, not merely by bridge convention.
+If another live IPC client owns the configured EndpointId, startup reports `EndpointInUse` for direct routing. The bridge does not generate a random substitute or steal the route. Operator must stop the owner or configure another endpoint.
 
 ## Reconnect
 
-Reconnect uses exponential backoff with jitter, capped at 15 seconds. After reconnect the bridge performs a fresh handshake and re-establishes its **bridge/session-owned joined channels**. These are distinct from daemon profile `channels.desired`. No missed network events are replayed.
+Reconnect uses bounded exponential backoff. Each reconnect performs a **new** endpoint claim and receives a new lease epoch, then re-establishes bridge-owned joined channels. No missed network events are replayed.
+
+Any pre-disconnect direct reply tokens are discarded/invalid because their local lease epoch is stale.
+
+## Shutdown
+
+MCP stdin close/SIGTERM stops only the bridge. Its IPC connection closes, releasing EndpointId lease and bridge joins. Daemon and PeerId remain alive.
+
+The bridge is never granted `admin.shutdown` or `admin.endpoints`.

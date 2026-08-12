@@ -1,37 +1,37 @@
-# Owner-protected UDS/named-pipe with length-prefixed JSON
+# Owner-protected UDS/named-pipe with endpoint-aware length-prefixed JSON
 
-**Status:** Accepted
+**Status:** Accepted; IPC major version advanced by ADR-0030.
 
 ## Context
 
-The bridge may be TypeScript/JavaScript while the daemon is Rust. A simple generated-code-free local protocol eases debugging and keeps TCP exposure unnecessary. The IPC frame must be able to represent every transport-legal payload after base64url and JSON expansion.
+The bridge/human client may be TypeScript/JavaScript while the daemon is Rust. A generated-code-free local protocol eases debugging. Model B additionally requires an exclusive configured EndpointId lease per direct-capable client and must still represent the maximum payload with endpoint metadata.
 
 ## Decision
 
-Use Unix domain sockets on Unix-like systems and named pipes on Windows, owner-restricted. Frame UTF-8 JSON with a 4-byte big-endian length. Payload bytes use base64url. Negotiate IPC major/minor and client capabilities in an initial hello.
+Use Unix domain sockets / Windows named pipes with owner restrictions. Frame UTF-8 JSON with a four-byte big-endian length; payload bytes use base64url.
 
-Set the v1 JSON body ceiling to **131,072 bytes (128 KiB)**, excluding the four-byte length prefix. Keep the transport payload hard ceiling at 49,152 bytes. Define a contract invariant that a maximum-size legal payload plus maximum bounded v1 metadata must fit in both request and event frames. Ordinary `claude-channel` clients are never granted the administrative `admin.shutdown` IPC capability.
+Keep the JSON body ceiling at **131,072 bytes (128 KiB)**. Advance implementation target to **IPC v2**. The hello handshake optionally claims one configured EndpointId; direct-capable clients require a successful exclusive lease. Capabilities remain authorization-relevant, including `admin.endpoints` and `admin.shutdown`, neither of which is granted to Claude Channel data-plane clients.
 
 ## Alternatives considered
 
-loopback TCP; gRPC; stdio child daemon; CBOR-only custom protocol; shared memory; retain a 64 KiB JSON frame; binary payload side section in v1.
+Loopback TCP; gRPC; stdio child daemon; CBOR-only protocol; shared memory; 64 KiB JSON; binary side section; separate socket per EndpointId; dynamic arbitrary endpoint registration.
 
 ## Consequences
 
-JSON/base64 adds overhead, but 128 KiB provides explicit headroom for a 48 KiB payload whose base64url form alone is 65,536 characters. Clear framing/versioning avoids newline ambiguity and enables push events. The ceiling is intentionally not derived from payload size at runtime; it is a separately tested protocol bound.
+One profile socket multiplexes multiple local applications while exact endpoint ownership is explicit. JSON overhead remains acceptable under the tested 128 KiB frame invariant.
 
 ## Security implications
 
-Filesystem/pipe ACLs provide cross-user isolation but not same-user process isolation. No key material crosses IPC. Loopback is disabled by default. Capability negotiation prevents ordinary Channel clients from stopping the shared daemon merely because they can issue non-administrative commands.
+ACLs provide cross-user isolation but not full same-user isolation. Configured-only exclusive endpoint leases prevent accidental route collisions. Client kind is hygiene, not authentication. Admin endpoint/shutdown authority is capability-separated from data plane.
 
 ## Operational implications
 
-Socket path/permissions, granted client capabilities, frame rejects, and client counts are inspectable. Bridge reconnect is straightforward; no replay cursor exists.
+Socket permissions, client kinds, endpoint leases/epochs, capability grants, conflicts, frame rejects, and client counts are inspectable. Reconnect receives a fresh lease epoch; no replay exists.
 
 ## Implementation implications
 
-Maximum JSON body 128 KiB; 16 clients; bounded per-client queues; reserved control-event capacity. Phase 1 golden fixtures include exact 49,152-byte opaque payloads in outbound commands and inbound events and maximal bounded metadata to prove the fit invariant.
+16 default clients, one endpoint lease/client, bounded per-client queues, reserved control events. Golden fixtures include max payload plus 64-byte source/destination EndpointIds. Direct queue overload rejects before network acceptance.
 
 ## Revisit conditions
 
-Revisit if profiling shows encoding overhead material, if metadata growth threatens the frame invariant, or if cross-host daemon access becomes a real requirement (which needs a different auth model).
+Revisit if stronger same-user client identity, shared endpoint leases, binary payload framing, or cross-host daemon access becomes required.

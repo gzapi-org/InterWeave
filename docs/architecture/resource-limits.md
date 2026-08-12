@@ -4,15 +4,22 @@ Default values are conservative architecture targets, not performance promises.
 
 | Resource | Default | Hard architectural ceiling |
 |---|---:|---:|
-| application payload | 48 KiB | 48 KiB v1 transport contract |
-| ChannelId | 128 bytes | 128 bytes v1 contract |
+| application payload | 48 KiB | 48 KiB transport contract |
+| ChannelId | 128 bytes | 128 bytes |
+| EndpointId | 64 bytes | 64 bytes |
+| configured endpoints/profile | 16 | 64 |
+| advertised endpoints/profile | 16 | 32 |
+| endpoint directory cache TTL | 60 s | 5 min |
+| endpoint directory queries/peer/minute | 12 | 60 |
+| endpoint directory inflight/profile | 16 | 64 |
+| endpoint leases/client | 1 | 1 |
 | subscriptions/profile | 128 | 1024 |
 | connected peers | 256 | 2048 |
 | discovery candidates | 4096 | 16384 |
 | addresses/peer | 16 | 32 |
 | advisory protocol observations/peer | 16 | 16 |
 | IPC clients | 16 | 64 |
-| IPC JSON body | 128 KiB | 128 KiB v1 IPC |
+| IPC JSON body | 128 KiB | 128 KiB IPC v2 |
 | backend->runtime events | 1024 | 8192 |
 | per-client event queue | 256 | 1024 |
 | outstanding commands/client | 64 | 256 |
@@ -22,12 +29,16 @@ Default values are conservative architecture targets, not performance promises.
 
 ## Payload/IPC sizing invariant
 
-The transport hard ceiling is 49,152 payload bytes. Base64url representation of that exact byte count is 65,536 characters before JSON syntax and metadata. Therefore v1 IPC uses a 131,072-byte JSON-body ceiling; a 64 KiB frame is not contract-compliant.
+49,152 payload bytes expand to 65,536 base64url characters before JSON syntax. IPC v2 therefore keeps the 131,072-byte body ceiling. Golden fixtures include maximum source/destination EndpointIds plus other bounded metadata.
 
-Every legal maximum-size transport payload must fit in both an outbound IPC command and inbound IPC event together with maximum bounded v1 metadata. Golden fixtures test this exact boundary. Profiles may lower `max_payload_bytes`; `TransportCapabilities.max_payload_bytes` reports that effective value.
+## Endpoint routing backpressure
+
+Direct inbound acceptance is endpoint-queue-aware. If the resolved endpoint queue cannot admit the event, the transport sends `RejectedV2(overloaded)` rather than `AcceptedV2` followed by a local drop.
+
+This removes the v1 architecture's shared-profile direct fan-out memory multiplier. Each direct message enters at most one local endpoint queue. Broadcast can still fan out to multiple joined local clients, bounded by `max_clients` and per-client queues.
+
+Endpoint-directory responses are bounded to 32 route IDs, 12 queries/minute/peer by default, 16 in-flight/profile by default, and short-lived cache state; no unbounded presence catalog exists.
 
 ## Drop policy
 
-Network ingress is validated before queue admission. When the normalized runtime queue is full, reject new direct requests where a rejection can be returned and drop/record broadcast messages. Per-IPC-client queue overflow drops oldest ordinary message events while preserving reserved control-health capacity. Shared-profile direct fan-out duplicates one normalized event into each eligible client queue, so its memory amplification remains bounded by `max_clients` and the per-client queue/frame ceilings rather than an unbounded broadcast list.
-
-There is no disk spill and no unbounded memory fallback.
+Broadcast local delivery may drop according to per-client bounded policy under overload. Direct delivery must reject before acceptance when target queue admission fails. There is no disk spill or hidden unbounded fallback.

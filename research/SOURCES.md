@@ -1,6 +1,6 @@
 # Research sources
 
-Snapshot date: **2026-08-11**. Primary sources are preferred. URLs are recorded for implementation-time revalidation; unstable details must be checked again before coding.
+Snapshot date: **2026-08-12**. Primary sources are preferred. URLs are recorded for implementation-time revalidation; unstable details must be checked again before coding.
 
 ## Claude Code / Anthropic
 
@@ -38,6 +38,7 @@ MCP changed substantially in 2026. The Claude Channel reference remains authorit
 - rust-libp2p repository: https://github.com/libp2p/rust-libp2p
 - rust-libp2p docs: https://docs.rs/libp2p/latest/libp2p/
 - request-response: https://docs.rs/libp2p/latest/libp2p/request_response/
+- request-response ProtocolSupport: https://docs.rs/libp2p/latest/libp2p/request_response/enum.ProtocolSupport.html
 - GossipSub: https://docs.rs/libp2p/latest/libp2p/gossipsub/
 - mDNS: https://docs.rs/libp2p/latest/libp2p/mdns/
 - Kademlia: https://docs.rs/libp2p/latest/libp2p/kad/

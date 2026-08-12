@@ -1,235 +1,140 @@
 # Implementation plan
 
+No production implementation belongs in this architecture repository. This roadmap is for the subsequent implementation project.
+
 ## Phase 0 — empirical compatibility spikes
 
-**Objective:** resolve version-sensitive or performance-sensitive questions without shipping production code.
+**Objective:** resolve version-sensitive/runtime-sensitive details.
 
-**Deliverables:** reports for `SPIKE-001` through `SPIKE-004` in `roadmap/SPIKES.md`; architecture-fixed GossipSub validation-result semantics are not reopened by a spike.
+**Deliverables:** SPIKE-001..005 results. SPIKE-002 now validates direct v2 endpoint framing/acceptance and endpoint-directory behavior in addition to request-response failures.
 
-**Acceptance criteria:** target Claude Code release/channel manifest syntax is proven; MCP SDK choice is known; libp2p direct and GossipSub limits are measured; relay/NAT scope is confirmed.
-
-**Dependencies:** none beyond isolated prototypes.
-
-**Risks:** prototypes accidentally become production code. Keep them throwaway/outside shipping crates.
+**Acceptance:** exact Claude Channel package contract known; rust-libp2p direct v2 failure/negotiation semantics measured; Kademlia/NAT assumptions measured as separately specified.
 
 ---
 
-## Phase 1 — contracts and pure models
+## Phase 1 — neutral contracts and configuration v2
 
-**Objective:** make semantic boundaries compile before networking exists.
+**Deliverables:** `transport-api`, `discovery-api`, `trust-api`, `ipc-protocol`, schema-v2 config/event/error models.
 
-**Deliverables:** `transport-api`, `discovery-api`, `trust-api`, `ipc-protocol`, typed configuration and pure event/error models.
+**Acceptance:**
 
-**Acceptance criteria:**
-
-- no dependency on libp2p/MCP in neutral crates;
-- ChannelId/payload/error/capability tests pass;
-- discovery conformance harness can run against a fake provider;
-- config rejects unknown required providers, explicitly enabled known-but-unsupported providers, unsafe limits, and Kademlia cross-field contradictions (`target_routing_peers > max_routing_peers`, `bootstrap_refresh_interval < bootstrap_min_interval`, `max_results_per_query > kbucket_size`);
-- when Kademlia is enabled, every `seed_sources` entry resolves to a configured **enabled** provider;
-- `TransportCapabilities.max_payload_bytes` reports the effective configured profile limit;
-- transport v1 MessageId is exactly 128 bits;
-- golden IPC request/event fixtures carrying exactly 49,152 opaque payload bytes plus maximal bounded metadata fit within the 131,072-byte JSON-body limit;
-- over-limit IPC frames are rejected before dispatch.
-
-**Dependencies:** Phase 0 compatibility choices for version fields.
-
-**Risks:** over-designing traits. Keep only Transport, DiscoveryProvider, and TrustPolicy as independently variable boundaries.
+- neutral crates import no libp2p/MCP;
+- EndpointId and DirectDestination models compile;
+- endpoint config uniqueness/default/subset/advertisement invariants pass;
+- endpoint policy provably cannot widen profile trust;
+- MessageId remains exactly 128 bits;
+- effective max payload capability is correct;
+- IPC v2 max-payload fixtures with maximum endpoint metadata fit 131072-byte body;
+- Kademlia cross-field/seed-source validation still passes;
+- enabled unsupported providers fail startup/config.
 
 ---
 
-## Phase 2 — minimal libp2p transport
+## Phase 2 — minimal libp2p transport v2
 
-**Objective:** prove transport semantics with manually supplied peer addresses.
+**Deliverables:** persistent identity, TCP+Noise+Yamux, signed GossipSub, `/direct/2.0.0`, `/endpoints/1.0.0`, backend event normalization.
 
-**Deliverables:** persistent identity manager; TCP+Noise+Yamux; signed/strict GossipSub with explicit `Accept|Ignore|Reject` application validation; direct request-response; backend event normalization.
+**Acceptance:**
 
-**Acceptance criteria:**
-
-- two peers directly send and receive with explicit `Accepted` behavior;
-- three trusted peers broadcast via GossipSub;
-- objectively invalid GossipSub message maps to `Reject`;
-- valid message from a locally unauthorized original publisher maps to `Ignore` with no local delivery/forwarding and no invalidity attribution solely for trust mismatch;
-- authorized valid publisher maps to `Accept`;
-- 48 KiB limit is enforced before large allocation;
-- daemon restart fixture preserves PeerId;
-- no claim of offline/durable delivery appears in API/tests.
-
-**Dependencies:** Phase 1.
-
-**Risks:** protocol ID/codec or GossipSub tuning invalidates assumptions; use Phase 0 evidence.
+- two peers exchange DirectMessageV2 with explicit endpoint;
+- omitted endpoint resolves receiver default;
+- direct AcceptedV2 includes resolved endpoint;
+- no_route is coarse across unknown/offline/policy-denied routes;
+- 48 KiB and endpoint field limits enforce pre-allocation;
+- endpoint directory is trust-gated/bounded/optional;
+- three trusted peers broadcast through GossipSub with ADR-0029 validation mapping;
+- no offline/durable claim.
 
 ---
 
 ## Phase 3 — discovery framework
 
-**Objective:** make candidate sources independently replaceable.
-
-**Deliverables:** DiscoveryManager, PeerCacheDiscovery, MdnsDiscovery, StaticBootstrapDiscovery, common conformance suite.
-
-**Acceptance criteria:**
-
-- duplicate PeerId/address observations merge with provenance;
-- expiry removes only the contributing source;
-- a provider can fail/restart without transport shutdown;
-- no provider dials or mutates trust;
-- corrupt cache is quarantined and transport continues;
-- bounded authenticated protocol observations persist/reload as advisory metadata and never alter trust;
-- mDNS can be disabled entirely.
-
-**Dependencies:** Phases 1–2.
-
-**Risks:** rust-libp2p behavior tempting provider->Swarm ownership leakage; enforce adapter boundary in tests/review.
+Unchanged core objective: DiscoveryManager + cache/mDNS/static, provider conformance, no trust/dial ownership. Endpoint directory is **not** a DiscoveryProvider and never enters this layer.
 
 ---
 
 ## Phase 4 — connection management
 
-**Objective:** turn candidate information into bounded, recoverable connectivity.
-
-**Deliverables:** backend address book, dial scheduler, exponential backoff+jitter, reconnect policy, connection/global limits, successful-address observations to peer cache.
-
-**Acceptance criteria:**
-
-- network partition recovers without restart;
-- repeated poisoned candidates cannot create an unbounded dial storm;
-- untrusted candidates are not dialed for ordinary data-plane connectivity;
-- inbound unauthorized PeerIds are closed before direct/GossipSub data-plane participation;
-- outbound direct send to an untrusted PeerId fails locally as `UnauthorizedPeer`;
-- known authorized candidates can support direct send dialing within deadline;
-- no-candidate authorized direct send fails as `PeerUnknown` without ad hoc global discovery;
-- candidate-present dial/protocol failure maps to `PeerUnreachable`;
-- successful address observation reaches cache through the defined hint path;
-- the root Swarm dial-admission gate applies the same trust/backoff/global-limit policy to explicit scheduler dials and behaviour-originated dials.
-
-**Dependencies:** Phase 3.
-
-**Risks:** connection-manager scope expands into discovery or trust. Reject such coupling in code review.
+Unchanged trust/backoff/dial ownership. Direct and endpoint-directory dials both use the same ConnectionManager/root admission policy. Kademlia behavior-originated dial handling remains as designed.
 
 ---
 
-## Phase 5 — local daemon and IPC
+## Phase 5 — daemon, EndpointRegistry, and IPC v2
 
-**Objective:** separate network/identity lifetime from Claude session lifetime.
+**Deliverables:** profile lock/service, EndpointRegistry, endpoint policy/default route, owner-protected IPC v2, endpoint lease handshake, per-client joins/queues, admin capability separation, transportctl skeleton.
 
-**Deliverables:** profile lock, daemon supervisor, owner-protected UDS/named pipe, IPC handshake/framing, multi-client command/event fan-out, local control CLI skeleton.
+**Acceptance:**
 
-**Acceptance criteria:**
-
-- two local bridge-like test clients can attach to one explicit profile;
-- one admitted direct message is independently delivered to both same-profile event clients;
-- one broadcast message is delivered only to clients holding that ChannelId join reference;
-- a profile-desired channel with no joined client buffers/replays nothing;
-- independent profiles have independent PeerIds/sockets;
-- bridge disconnect does not stop network;
-- slow client does not stall Swarm or other clients;
-- IPC major mismatch is rejected explicitly;
-- exact max-payload request/event fixtures fit the 128 KiB JSON-body ceiling;
-- a `claude-channel` IPC client is denied `admin.shutdown`;
-- an authorized local control client can invoke administrative shutdown;
-- cross-user unauthorized IPC is denied on supported OS test environments.
-
-**Dependencies:** Phases 1–4.
-
-**Risks:** same-user IPC attack remains residual; document and consider capability-token hardening if deployment requires it.
+- one profile/PeerId supports simultaneous `human` and `claude` endpoint leases;
+- same EndpointId double-claim -> EndpointInUse;
+- direct event routes to exactly one resolved endpoint client;
+- no local direct all-client fan-out;
+- endpoint queue overload rejects before AcceptedV2;
+- endpoint disconnect makes route unavailable immediately with no buffer;
+- config disable revokes lease with no auto-rebind;
+- remote directory snapshot reflects active advertise=true endpoints only;
+- broadcast remains join-filtered and `channels.desired` remains no-buffer prewarm;
+- slow client does not stall Swarm/other endpoints;
+- IPC major mismatch clear;
+- Claude/human data-plane clients lack admin.endpoints/admin.shutdown.
 
 ---
 
-## Phase 6 — Claude Code Channel bridge
+## Phase 6A — Claude Code Channel bridge
 
-**Objective:** implement the official Channel integration without leaking networking internals.
+**Deliverables:** MCP bridge, configured EndpointId IPC claim, Channel notifications with endpoint metadata, endpoint-aware `send`, exact-route `reply`, other tools/instructions.
 
-**Deliverables:** MCP Channel bridge, push notification mapping, `broadcast/send/reply/join/leave/identity/status`, instructions, package metadata validated by SPIKE-001.
+**Acceptance:**
 
-**Acceptance criteria:**
+- direct Channel event includes source_endpoint/destination_endpoint;
+- `send(peer, endpoint?)` routes correctly;
+- source endpoint never comes from Claude tool input;
+- reply token binds remote source endpoint + local lease epoch;
+- stale token after reconnect fails without fallback;
+- status reports local endpoint/lease + joined channels;
+- no endpoint/trust/admin mutation tools;
+- broadcast semantics unchanged.
 
-- each eligible bridge maps one received IPC message event to one valid Channel event; broadcast eligibility is join-reference filtered, while shared-profile direct events may be delivered to multiple bridges by design;
-- content/meta separation matches the Channel reference;
-- reply token routes correctly for both modes;
-- broadcast/reply without a caller-owned join returns `ChannelNotJoined` and never implicitly rejoins;
-- untrusted direct destination returns `UnauthorizedPeer` before dial;
-- transport `media_type` maps explicitly to Claude `content_type`;
-- no Multiaddr/Swarm/connection ID appears in Claude tool schemas;
-- ordinary assistant transcript is never represented as remote delivery;
-- trust administration is absent from Channel tool surface;
-- bridge restart leaves PeerId/network unchanged;
-- `status` reports the calling bridge's joined channels distinctly from profile-desired channels;
-- `send` to the local profile PeerId returns `InvalidArgument`.
+---
 
-**Dependencies:** Phase 5 and current Claude compatibility result.
+## Phase 6H — human client data plane
 
-**Risks:** research-preview Channel API may change; isolate adaptation in bridge crate/package.
+**Objective:** provide a human-facing consumer without embedding libp2p or weakening transport boundaries.
+
+**Deliverables:** desktop/TUI/CLI client architecture of choice; IPC v2 data-plane adapter; EndpointId claim; contact/routing UI; channel UI; optional application-local history; endpoint-directory route selection.
+
+**Acceptance:**
+
+- human and Claude can share one PeerId without duplicate direct delivery;
+- UI distinguishes PeerId trust from EndpointId route label;
+- direct send can target explicit route or remote default;
+- offline human endpoint creates no daemon backlog;
+- local history stores only app-observed messages and never claims network durability;
+- network content cannot automatically invoke trust/endpoint/daemon administration;
+- endpoint-directory labels are displayed as unverified routes unless separately app-verified.
+
+The settings/admin UX may live in the same executable but uses a separately authorized IPC connection/capability path.
 
 ---
 
 ## Phase 7 — security hardening
 
-**Objective:** make abuse/resource/identity failure behavior deliberate.
-
-**Deliverables:** static allowlist administration, key initialization/rotation, per-peer rate limits, fuzz targets for IPC/direct codecs, log redaction, security regression suite.
-
-**Acceptance criteria:** threat-model v1 mitigations have executable tests where practical; malformed input never panics daemon; private key never appears in logs/IPC; identity corruption fails closed.
-
-**Dependencies:** end-to-end stack.
-
-**Risks:** usability pressure to weaken trust defaults. Keep deny-by-default unless an ADR supersedes it.
+Add rate limits/fuzzing and endpoint-specific regressions: route probing, directory enumeration, local lease squatting/conflicts, stale route tokens, admin confused-deputy behavior, and same-user residual boundary.
 
 ---
 
 ## Phase 8 — operational packaging
 
-**Objective:** support reliable install/update/diagnosis without changing architecture.
-
-**Deliverables:** platform installers/service integration, status/diagnostics CLI, config migrations, documentation, update compatibility matrix.
-
-**Acceptance criteria:** restart/update preserves identity; old/new compatible bridge-daemon combinations behave according to IPC matrix; rollback does not corrupt config/cache.
-
-**Dependencies:** security-stable daemon/bridge.
-
-**Risks:** service manager differences, Windows ACL/path behavior.
+Add service integration, config-v2 migrations, endpoint diagnostics, human/Claude client compatibility matrix, and reliable identity-preserving update/rollback.
 
 ---
 
 ## Phase 9 — connectivity hardening (conditional)
 
-**Objective:** meet actual remote deployment reachability targets.
-
-**Deliverables:** Circuit Relay v2 client and/or AutoNAT/DCUtR only if approved after evidence.
-
-**Acceptance criteria:** defined NAT matrix passes; relay unavailability degrades predictably; bootstrap and relay roles remain separate.
-
-**Dependencies:** `SPIKE-004` and production deployment needs.
+Relay/AutoNAT/DCUtR only as deployment evidence requires.
 
 ---
 
 ## Phase 10 — optional Kademlia peer-routing discovery
 
-**Objective:** implement the already-specified Kademlia integration while preserving `enabled: false` as the default and all discovery/trust/connection boundaries.
-
-### Phase 10A — backend driver
-
-**Deliverables:** optional Swarm-owned Kademlia behavior slot, custom protocol derivation, explicit client/server mode, manual K-bucket insertion, Identify/address bridge, record filtering/no-record policy, neutral `kademlia-control-api` port, and Swarm-wide behaviour-dial admission/attribution hooks.
-
-**Acceptance criteria:** disabled config causes zero Kademlia protocol/query activity; unsupported build + enabled config fails; driver never owns trust or emits generic discovery events directly.
-
-### Phase 10B — provider/scheduler
-
-**Deliverables:** `KademliaDiscovery` behind `DiscoveryProvider`, seed-hint ingestion, bootstrap scheduler, capability-gated targeted trusted server-peer lookup, effective-target/saturation logic, no-progress exploration backoff, TTL/provenance normalization, health.
-
-**Acceptance criteria:** common provider conformance suite; no ChannelId/application query keys; no provider-owned dial policy; behaviour-originated query dials obey root admission; query concurrency/rate/cooldown limits pass fake-time tests; small trust overlays can reach healthy saturation.
-
-### Phase 10C — security/failure hardening
-
-**Deliverables:** disjoint query paths, manual trust-gated routing insertion, routing-table/resource caps, record/provider-write rejection diagnostics, trust-revocation eviction, bootstrap/query failure isolation.
-
-**Acceptance criteria:** poisoning/Sybil/eclipse simulations stay within resource bounds; no untrusted Kademlia routing/query connections; direct/GossipSub remain usable when Kademlia fails.
-
-### Phase 10D — optional support qualification
-
-**Deliverables:** 3/10/20-node integration matrix, protocol/config golden fixtures, operator docs for client/server deployment and seed diversity.
-
-**Acceptance criteria:** all enablement criteria in `docs/architecture/kademlia-integration.md` pass. Shipping configuration and examples still keep `enabled: false`; operators must opt in.
-
-**Dependencies:** SPIKE-003, rust-libp2p version revalidation, existing trust/ConnectionManager/Identify implementation.
-
-**Risks:** trust-bounded DHT may not provide enough wide-area expansion; compromised trusted routers can still bias results; client/server deployment complexity; future request for open discovery-only DHT connectivity would require a new ADR and multiplexed-protocol admission design.
+Implement the existing optional Kademlia blueprint only after SPIKE-003. Default remains `enabled: false`. EndpointId/presence must never be stored in Kademlia records.

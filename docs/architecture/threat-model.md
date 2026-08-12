@@ -1,70 +1,76 @@
 # Threat model
 
-Scope: generic transport, local daemon/bridge boundary, and network participation. Application-level authorization is outside this transport.
+Scope: generic transport, profile daemon/local clients, endpoint routing, and network participation. Application-level human identity/authorization remains outside transport.
 
-Assumption: every remote payload is untrusted input even after the transport PeerId is allowlisted.
+Assumption: every remote payload is untrusted even after PeerId is allowlisted.
 
 Trust boundaries:
 
 1. remote network -> Noise/libp2p parser;
-2. Noise-authenticated PeerId -> `PeerTrustPolicy` connection admission;
-3. GossipSub original publisher / direct source -> message trust validation;
-4. admitted payload -> resource/dedup pipeline;
-5. daemon -> owner-protected, capability-scoped IPC;
-6. bridge -> Claude Channel notification;
-7. local administrator -> trust/key/config mutation.
+2. Noise-authenticated PeerId -> profile PeerTrustPolicy;
+3. trusted direct source -> EndpointId route/policy admission;
+4. admitted payload -> limits/dedup/local queue;
+5. daemon -> owner-protected capability-scoped IPC + endpoint lease;
+6. bridge/human app -> application handling;
+7. local administrator -> trust/key/endpoint/config mutation.
 
-| Threat | Risk | v1 mitigation | Residual risk | Future mitigation |
+| Threat | Risk | Mitigation | Residual risk | Future mitigation |
 |---|---|---|---|---|
-| Rogue peer | remote peer injects prompt content or joins data plane | Noise identity + deny-by-default PeerId allowlist before dialing/retaining ordinary data-plane connection and before message delivery | stolen/incorrectly allowed identity can connect and send untrusted content | signed membership, enterprise policy, richer channel-scoped auth |
-| Discovery poisoning | bogus addresses cause waste/misdirection | discovery is advisory; address/peer bounds; ConnectionManager rate/backoff; **unauthorized candidates cannot pass outbound dial admission** | trusted peer's poisoned/stale addresses can still waste dial resources | source reputation, diversity policies |
-| Malicious bootstrap | steers node to hostile topology | bootstrap has no authority/trust; configured candidate requires separate allowlist; multiple independent hints; existing peers survive | eclipse if trusted/bootstrap set is too narrow or incorrectly trusted | diverse bootstrap sets, rendezvous/DHT diversity |
-| Kademlia poisoning | DHT returns hostile peers | default disabled; optional design uses trust-gated manual routing insertion, disjoint paths, query/candidate bounds, no records | compromised trusted routers can still bias observations; Sybil/eclipsing remains hard | measured diversity/scoring or alternate discovery backends |
-| Sybil attack | many PeerIds exhaust candidate state or future public mesh | trust allowlist, candidate caps, no data-plane connection for unauthorized identities | discovery candidate storage/processing still attackable within bounds | admission credentials, stronger discovery diversity |
-| Eclipse attack | malicious peers dominate usable view | static trust, source diversity, connection limits, multiple bootstrap hints | small/compromised trust sets can still be captured | topology diversity policies, independent discovery |
-| Replay | old messages reappear | signed transport source + exactly-128-bit message IDs + 5-min bounded dedup keyed by mode/source/channel context | replay outside window/restart may deliver | higher-level nonce/session/replay protocol if required |
-| Flooding | trusted peer overwhelms runtime/Claude | per-peer/global limits, bounded queues, drop counters, direct concurrency caps | allowed peer can cause message loss/degradation | configurable token buckets, peer scoring |
-| Oversized payload | memory/CPU exhaustion | 48 KiB app cap, declared lengths checked before large allocation, 128 KiB IPC JSON-body cap with proven max-payload fit | many valid-size frames can still flood | rate limits/load shedding |
-| Slow-consumer attack | Claude/IPC client stalls | independent bounded client queues; drop oldest ordinary events; reserved health lane | message loss | optional consumer flow-control/capability negotiation |
-| Local IPC attack | another local process controls daemon | UDS/named-pipe owner ACL, peer credentials where supported, no loopback default, capability-scoped administrative methods | same-OS-user malicious process can still invoke ordinary commands if it can connect | local capability token/keychain binding, sandboxing |
-| IPC daemon shutdown abuse | ordinary bridge kills shared network daemon | `shutdown` requires `admin.shutdown`; `claude-channel` kind never receives it | authorized local admin client can still stop daemon by design | stronger local operator identity if required |
-| Private-key theft | attacker impersonates PeerId | owner-only key storage, no key over IPC/logs, explicit rotation/revocation guidance | compromise persists until trust lists updated | hardware-backed keys, signed rotation/revocation |
-| Topic enumeration | channel names reveal context | hashed domain-separated topic IDs; untrusted peers are not admitted to ordinary local data-plane mesh | low-entropy names remain dictionary-guessable; a trusted peer can enumerate its visible topic hashes | keyed topic derivation with managed group secret |
-| Message confidentiality | GossipSub forwarding participant reads payload | Noise per hop + trust-gated data-plane connections + explicit no-E2EE claim | **any trusted forwarding peer can read plaintext**; trust is not group encryption | standardized group E2EE/higher-layer encryption |
-| Trust asymmetry in GossipSub | local allowlists differ; invalid mapping partitions or penalizes honest relay | ADR-0029: valid-but-unauthorized original source -> `Ignore`, objectively invalid -> `Reject`, authorized valid -> `Accept` | an `Ignore` node stops propagation, so a downstream peer may need another path | channel-scoped membership/policy or compatible overlay design |
-| Prompt injection via network payload | remote text asks Claude to perform unsafe local actions | Channel instructions label remote content untrusted; normal Claude permissions; no trust-admin tool | model/user may still choose actions | application policy, stronger sandbox/approval controls |
-| Trust-policy prompt injection | remote asks to approve itself | trust mutation absent from Channel tool surface; local-user-only admin rule | same-user local compromise bypasses | signed admin policy / managed config |
-| Address SSRF-like abuse | malicious multiaddr makes dials to sensitive endpoints | address validation, allowed transport families, ConnectionManager policy, candidate limits, root trust gate before connection admission | trusted peer/private-network addresses may still be intended/ambiguous | deployment egress policy/deny ranges |
-| Log leakage | payload/key/secret written to logs | payload logging false; secret redaction; structured classes | peer/channel identifiers can be sensitive | configurable pseudonymization, audit review |
+| Rogue peer | injects traffic/data-plane | Noise + deny-by-default profile allowlist before ordinary data-plane/directory | stolen/incorrectly trusted PeerId | signed membership/enterprise policy |
+| Discovery poisoning | bogus addresses waste dials | advisory discovery, caps, trusted dial admission | trusted stale/poisoned address | source reputation/diversity |
+| Malicious bootstrap/Kademlia | topology bias | no authority/trust; Kademlia default-off/trust-bounded/no records | compromised trusted routers | stronger diversity/membership |
+| Replay | old messages reappear | 128-bit IDs + bounded endpoint-aware/broadcast dedup | outside TTL/restart | app nonce/session protocol |
+| Flood/oversized | resource exhaustion | 48 KiB cap, pre-allocation checks, bounded queues/concurrency | valid-size flood | token buckets/scoring |
+| Slow endpoint consumer | false acceptance/message loss | direct Accepted only after target endpoint queue admission; overload rejects | sender retries/load churn | flow control |
+| Slow broadcast consumer | queue saturation | independent bounded queues/drop diagnostics | broadcast message loss | flow control |
+| Local IPC attack | same-user process impersonates client | owner ACL, peer creds where available, configured-only exclusive endpoint leases, capability grants | malicious same-user process remains powerful | capability token/keychain/sandbox |
+| Endpoint squatting | local process steals `human`/`claude` route | configured-only claim + exclusive lease + client-kind hygiene | same-user attacker can spoof kind | stronger local app identity |
+| Endpoint source spoof by ordinary local caller | local app claims another source route | source endpoint derived from IPC lease; not command input | compromised daemon/runtime | process isolation |
+| Endpoint label used as authorization principal | implementer trusts remote `source_endpoint` such as `human`/`admin` | endpoint ACLs authorize by PeerId only; remote source EndpointId is non-authoritative routing metadata | application may misuse labels | cryptographic application/sub-identity protocol above transport |
+| Remote source-endpoint spoof | peer claims `source_endpoint=human` | treat as peer-asserted route metadata only, never identity proof | applications may display misleading name | signed app/service identity above transport |
+| Endpoint enumeration | remote learns local app presence | optional directory, trust-gated, advertise opt-in, active-only, max32, per-peer/global query budgets, no labels | trusted peer learns selected route names/presence | privacy-preserving presence/opaque capability IDs |
+| Endpoint probing oracle | trusted peer probes route/ACL existence | unknown/offline/disabled/policy-denied collapse to coarse `no_route` | timing differences may leak | constant-work/rate policy if needed |
+| Default-route confusion | messages unexpectedly hit wrong app | explicit configured default, never connection-order inference/fan-out; Accepted returns resolved route | operator misconfiguration | UI warnings/policy validation |
+| Endpoint ACL widens trust | endpoint config bypasses profile allowlist | schema/runtime enforce intersection only | config bugs | invariant/property tests |
+| Offline mailbox creep | implementation stores messages for absent endpoint | contract forbids daemon buffering; no Accepted without active queue | human app may separately store received history | capability-explicit durable backend only |
+| Admin confused deputy | network message causes trust/endpoint mutation | admin.endpoints/admin.shutdown separated from data-plane clients; explicit local gesture | same-process GUI bug/social engineering | process split/OS auth |
+| Private-key theft | attacker impersonates whole PeerId/all endpoints | owner-only key, never over IPC/logs, rotation guidance | compromise persists until revoked | hardware-backed keys |
+| Topic enumeration/confidentiality | channel info/plaintext via trusted peers | hashed topics + trust-gated overlay + explicit no-E2EE claim | trusted forwarding peer reads payload | group E2EE |
+| GossipSub trust asymmetry | mesh propagation partition | ADR-0029 Ignore vs Reject mapping | downstream route loss | shared membership policy |
+| Prompt injection | remote content asks unsafe actions | Channel instructions/normal permissions/no admin tools | model/user can choose action | sandbox/app policy |
+| Address SSRF-like abuse | hostile multiaddr dials sensitive network | validation, allowed transports, trust/dial policy | trusted peer can point private ranges | egress policy |
+| Log leakage | route/peer/content secrets logged | payload logging false, redaction, bounded diagnostics | endpoint names may be sensitive | pseudonymization |
+
+## Endpoint identity boundary
+
+The authenticated principal is the PeerId. EndpointId is subordinate routing metadata:
+
+```text
+Noise proves:        remote PeerId controls this connection
+Direct v2 claims:    source_endpoint = "human"
+Transport does NOT prove: a particular human/application/role owns that endpoint
+```
+
+A human client must keep display identity/contact verification above this boundary.
+
+## Endpoint directory privacy boundary
+
+Directory results are authenticated as statements from the trusted remote PeerId but are not signed sub-identities. Only active, opt-in routes are returned. Directory cache is short-lived and non-persistent.
 
 ## Broadcast confidentiality boundary
 
-v1 does **not** rely on topic-name secrecy. The confidentiality boundary is the local profile's trusted data-plane peer set plus the fact that Noise protects each individual link. A PeerId that is merely discovered, cached, returned by future Kademlia, or configured as bootstrap is not admitted to ordinary GossipSub/direct connectivity unless separately trusted.
+Transport does not rely on topic-name secrecy. Trusted forwarding peers can read plaintext unless a higher layer encrypts payloads. Endpoint addressing does not change this because EndpointId is absent from transport GossipSub envelopes.
 
-This still does not create end-to-end group secrecy. Any trusted peer that forwards a plaintext GossipSub message can inspect it.
+## Security non-goals
 
-## Security non-goals in v1
-
-- proving application/person identity from PeerId;
-- group end-to-end encryption;
+- proving person/application identity from PeerId or EndpointId;
+- group E2EE;
 - anonymous routing/metadata privacy;
-- Byzantine consensus or membership;
-- durable anti-replay across long offline periods;
-- protection from malicious code running as the same OS user.
-
+- Byzantine consensus/membership;
+- durable replay prevention;
+- protecting against fully malicious same-OS-user code;
+- offline endpoint delivery.
 
 ## Kademlia-specific threat treatment
 
-Kademlia remains disabled by default. When the optional provider is implemented and explicitly enabled:
-
-| Threat | Risk | v1 Kademlia mitigation | Residual risk | Future mitigation |
-|---|---|---|---|---|
-| malicious routing response | hostile/stale PeerIds and addresses | advisory candidates, trust gate, address/candidate caps, manual insertion | compromised trusted router can bias observations | stronger peer diversity/scoring/evidence fusion |
-| Sybil routing population | many attacker PeerIds | first integration admits only data-plane-trusted routing peers | operator may trust attacker-controlled IDs | signed/enterprise membership policy, diversity controls |
-| eclipse | local DHT view surrounded by malicious trusted peers | disjoint query paths, multiple independent bootstrap seeds, random exploration | no Byzantine guarantee | measured diversity policy / additional discovery systems |
-| bootstrap capture | seeds bias initial view | multiple seeds; bootstrap is not authority; trust remains separate | all configured trusted seeds may be compromised | managed seed rotation/diversity monitoring |
-| namespace collision/misconfiguration | unrelated deployment joins same private DHT | protocol derived from explicit `network_id`; custom protocol not public IPFS DHT | network_id is non-secret and can be copied/guessed | authenticated control-plane membership if required |
-| record-store abuse | peers try to turn node into DHT storage | no record APIs; incoming inserts filtered/not persisted | request processing still consumes bounded resources | per-peer Kademlia request rate controls if needed |
-| query traffic analysis | routing peers observe lookups | random exploration keys never encode channel/application names | PeerId/address/query timing still visible | privacy-preserving discovery backend if required |
-
-The first Kademlia integration deliberately does **not** create untrusted discovery-only connections. Such connections would require per-protocol admission on multiplexed libp2p links and a renewed GossipSub confidentiality analysis.
+Kademlia remains disabled by default. When explicitly enabled on a supporting build, existing poisoning/Sybil/eclipse/bootstrap/namespace/record-store/query-privacy mitigations continue. Endpoint IDs and endpoint presence are never written into Kademlia provider/value records; endpoint discovery stays on the separate trust-gated direct endpoint-directory protocol.

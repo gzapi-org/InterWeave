@@ -10,8 +10,11 @@ This matrix is an audit aid, not a replacement for the source task.
 | current Channel capability/notifications | `research/claude-code-channels.md`, `plugin/CLAUDE-CODE-CHANNEL.md` |
 | broadcast = GossipSub | ADR-0004, `transport/libp2p/PUBSUB.md` |
 | GossipSub validation result mapping | ADR-0029, `PUBSUB.md`, threat model/testing |
-| directed = dedicated direct protocol | ADR-0005, `transport/libp2p/DIRECT.md` |
+| directed = dedicated direct protocol | ADR-0005/0030, `transport/libp2p/DIRECT.md` |
 | transport-neutral interface | `contracts/TRANSPORT.md` |
+| Model B local endpoints | `contracts/ENDPOINTS.md`, ADR-0030, `human-client-model-b.md` |
+| endpoint directory | ADR-0031, `transport/libp2p/ENDPOINTS.md` |
+| human client boundary | `human-client-model-b.md`, `components.md` |
 | effective payload capability | `TRANSPORT.md`, `configuration.md`, ADR-0026 |
 | DiscoveryProvider | `contracts/DISCOVERY.md`, ADR-0006 |
 | discovery composition/priority | `discovery/COMPOSITION.md`, ADR-0007 |
@@ -26,12 +29,12 @@ This matrix is an audit aid, not a replacement for the source task.
 | Noise boundary | ADR-0013, `SECURITY.md` |
 | group encryption decision | ADR-0014 |
 | embedded vs daemon | ADR-0015 |
-| multi-instance host model | ADR-0016 |
-| local IPC + max-payload fit | `contracts/LOCAL-IPC.md`, ADR-0017/0026, `resource-limits.md` |
+| multi-instance host model | ADR-0016 historical profile identity + ADR-0030 current endpoint routing |
+| local IPC v2 + endpoint leases + max-payload fit | `contracts/LOCAL-IPC.md`, `contracts/ENDPOINTS.md`, ADR-0017/0026/0030 |
 | IPC admin shutdown scoping | `LOCAL-IPC.md`, `plugin/LIFECYCLE.md`, ADR-0017 |
 | delivery guarantees | ADR-0018/0019/0020 |
 | normalized dedup key | ADR-0019, `PUBSUB.md`, `DIRECT.md` |
-| exact 128-bit MessageId v1 | `TRANSPORT.md`, `DIRECT.md` |
+| exact 128-bit MessageId | `TRANSPORT.md`, `DIRECT.md` |
 | Rust workspace | `rust-blueprint.md`, ADR-0021 |
 | discovery upgradeability | ADR-0022 |
 | Channel plugin surface | ADR-0023, `plugin/TOOL-SURFACE.md` |

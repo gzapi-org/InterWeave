@@ -2,7 +2,7 @@
 
 Status: **architecture contract, v1 draft**.
 
-Discovery is advisory reachability information. It never grants trust, sends application messages, or owns connections.
+Discovery is advisory reachability information. It never grants trust, sends application messages, or owns connections. It discovers **network peers/reachability only**: `EndpointId` and the endpoint-directory protocol are explicitly outside `DiscoveryProvider` and must never become discovery candidate metadata.
 
 ## Conceptual interface
 

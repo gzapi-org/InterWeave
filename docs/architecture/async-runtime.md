@@ -7,44 +7,68 @@ Tokio is the expected Rust runtime unless implementation research disproves the 
 ```text
 main / daemon supervisor
   |- IPC accept task
-  |    `- per-client read/write tasks + capability enforcement
+  |    `- per-client read/write tasks + capability + endpoint-lease lifecycle
   |- transport runtime coordinator
+  |    `- EndpointRegistry / endpoint policy / default-route state
   |- libp2p Swarm task (single owner)
+  |    |- GossipSub
+  |    |- direct request-response v2
+  |    `- endpoint-directory request-response
   |- DiscoveryManager supervisor
-  |    |- provider task: cache
-  |    |- provider task: mDNS
-  |    |- provider task: static
-  |    `- provider task: Kademlia (optional; only when supported + enabled)
-  |- cache writer/debounce task
+  |    |- cache
+  |    |- mDNS
+  |    |- static
+  |    `- Kademlia optional/default-off
+  |- cache writer/debounce
   `- observability sink
 ```
 
 ## Rules
 
-- The Swarm is owned by one task; other components communicate through bounded channels.
-- Provider tasks cannot block the Swarm loop.
-- No network callback calls Claude/MCP synchronously.
-- Bounded channels use explicit overflow behavior.
-- A root cancellation token fans out to child tasks; provider-local tokens permit independent restart.
-- Connection commands and inbound connection retention consult `PeerTrustPolicy` before ordinary data-plane participation.
-- GossipSub manual validation reports `Accept | Ignore | Reject` per ADR-0029 before accepted messages enter normalized delivery queues.
-- Shutdown has phases: stop ingress -> cancel discovery/new dials -> settle bounded in-flight direct responses -> close Swarm/IPC -> flush advisory cache -> exit, and can be initiated over IPC only by an authorized administrative client.
+- Swarm has one task owner; bounded channels connect it to runtime.
+- Provider tasks cannot block Swarm.
+- No network callback invokes Claude/human UI synchronously.
+- EndpointRegistry is runtime-owned; libp2p codec does not own local process routing policy.
+- IPC connection establishes at most one direct EndpointId lease.
+- Direct inbound response is withheld until runtime confirms exact endpoint queue admission.
+- Root cancellation and provider-local cancellation stay explicit.
+- Connection/trust and GossipSub validation rules remain unchanged.
+
+## Inbound direct asynchronous admission
+
+```text
+Swarm/direct_manager receives DirectMessageV2
+   |
+   v
+bounded InboundDirectCandidate -> transport runtime
+   |
+   +-- trust/endpoint/default/policy/dedup/queue admission
+   |
+   v
+LocalRouteAccepted(endpoint) | LocalRouteRejected(reason)
+   |
+   v
+Swarm sends AcceptedV2 | RejectedV2
+```
+
+The admission response has a bounded internal deadline shorter than the overall direct request deadline. If runtime cannot answer due to overload/shutdown, remote receives coarse failure rather than false acceptance.
+
+## IPC event routing
+
+Broadcast: runtime sends to each joined local client independently.
+
+Direct: runtime sends to exactly the IPC connection holding the resolved destination EndpointId lease. There is no fan-out. If that endpoint queue cannot accept the message, direct admission fails before `AcceptedV2`.
+
+## Endpoint directory snapshot
+
+Directory behavior requests a bounded immutable snapshot from EndpointRegistry containing only currently leased, `advertise: true`, requester-admissible EndpointIds. Snapshot generation must not block Swarm on slow IPC/application code.
+
+Remote directory cache is bounded in-memory state maintained outside discovery; it never enters peer-cache persistence or Kademlia.
 
 ## Reconnection
 
-ConnectionManager maintains peer-scoped exponential backoff with jitter and a maximum retry interval **for authorized peers**. Discovery updates can add addresses but do not reset a punitive backoff endlessly; a successful connection resets it. Unauthorized candidates remain bounded observations. Explicit scheduler dials are not issued for them, and behaviour-originated dial attempts are denied by the root admission gate.
-
-## Provider restart
-
-Transient provider failure transitions health to degraded/unavailable, waits provider-scoped backoff, then restarts if configured. Repeated failure does not restart the whole runtime. A provider configured enabled but unsupported by the active build is a configuration/startup failure, not a restartable provider outage.
-
-## IPC event fan-out
-
-Runtime emits one normalized message event. IPC interest is mode-specific: broadcast goes only to clients holding that ChannelId join reference; direct goes independently to every connected message-event client. A profile-desired backend subscription is not local interest. If no eligible client exists, the event is not retained for replay. Slow clients drop their own queued events rather than blocking other clients. Serialized frames are checked against the fixed 131,072-byte JSON-body ceiling before write.
-
+ConnectionManager peer backoff rules remain unchanged. Local endpoint reconnect is independent: a new IPC lease does not reset remote peer backoff or transport identity.
 
 ## Kademlia task interaction
 
-The optional Kademlia provider task never polls the Swarm. It sends bounded commands through `kademlia-control-api` to the Swarm-owned Kademlia driver and consumes normalized driver events. Query rate/concurrency permits are acquired before commands are sent. Kademlia's behaviour may request outbound dials during query execution; those attempts pass the root `DialAdmissionGate` backed by ConnectionManager state. Driver-event overflow must not block the Swarm; it marks the provider degraded and coalesces/drops noncritical diagnostics under explicit counters.
-
-`enabled: false` means no provider task, no Kademlia query scheduling, and no project Kademlia protocol participation.
+Unchanged: optional Kademlia driver/provider interaction uses bounded control channels and all behavior-originated dials pass root dial admission. Endpoint addressing is not a Kademlia responsibility.

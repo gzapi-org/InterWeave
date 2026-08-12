@@ -2,63 +2,55 @@
 
 ## Noise
 
-v1 selects the rust-libp2p Noise integration (Noise XX interoperability profile) for TCP connection security.
-
-Provides:
-
-- encryption of each peer connection;
-- authentication of the libp2p transport identity participating in the handshake;
-- session key establishment with the forward-secrecy properties of the selected Noise handshake/session construction.
-
-Does not provide:
-
-- application authorization;
-- channel membership semantics;
-- organizational role identity;
-- trust just because a PeerId was authenticated;
-- end-to-end secrecy across GossipSub forwarding peers;
-- protection after private-key theft against future impersonation until revocation/rotation reaches peers.
+rust-libp2p Noise authenticates the connection PeerId and encrypts each peer link. It does not authenticate human/application EndpointIds, authorize application actions, define channel membership, or provide GossipSub end-to-end secrecy.
 
 ## Connection admission
 
-Noise authentication establishes which PeerId is on the connection; it does not itself authorize that peer. For v1 ordinary data-plane connectivity:
-
 ```text
 Noise-authenticated PeerId
- -> PeerTrustPolicy connection admission
- -> retain data-plane connection OR close as unauthorized
+ -> PeerTrustPolicy
+ -> retain ordinary data-plane connection OR close
 ```
 
-ConnectionManager does not intentionally schedule an unauthorized PeerId; the root Swarm dial gate denies any behaviour-originated attempt for one, and unauthorized inbound connections are closed before direct/GossipSub/Kademlia data-plane participation. Discovery may still retain candidate metadata independently.
+All ordinary direct, endpoint-directory, GossipSub, and optional first-generation Kademlia participation stays under this profile trust boundary.
 
-## Message admission
-
-Direct path:
+## Direct endpoint admission
 
 ```text
-trusted Noise-authenticated connection
- -> direct protocol validation
- -> PeerTrustPolicy source check
- -> size/rate/dedup checks
- -> local delivery
+trusted Noise-authenticated PeerId
+ -> DirectMessageV2 structural validation
+ -> source EndpointId grammar (peer-asserted route label)
+ -> explicit/default destination resolution
+ -> endpoint inbound policy intersection
+ -> active local endpoint lease
+ -> size/rate/dedup/queue admission
+ -> exactly one local direct event
+ -> AcceptedV2
 ```
 
-GossipSub path:
+EndpointId does not add a cryptographic authentication layer. `source_endpoint=human` means only that the authenticated PeerId sent that route string.
+
+Endpoint policy cannot widen PeerTrustPolicy.
+
+## Endpoint directory admission
+
+Only trusted peers may query. Response contains only active, opt-in, requester-admissible EndpointIds and no application labels/roles. Directory results are short-lived advisory metadata.
+
+## GossipSub path
+
+Unchanged ADR-0029 mapping:
 
 ```text
-trusted direct neighbor
- -> signed message decode/source validation
- -> original-publisher PeerTrustPolicy check
- -> GossipSub validation result per ADR-0029
-      Reject = objectively invalid
-      Ignore = valid but locally unauthorized source
-      Accept = valid + authorized source
- -> size/rate/dedup checks for accepted message
- -> local delivery
+trusted neighbor
+ -> signed message/source validation
+ -> original publisher trust
+ -> Reject objectively invalid
+ -> Ignore valid but locally unauthorized
+ -> Accept valid + authorized
 ```
 
-The immediate forwarding neighbor and original GossipSub publisher are distinct security facts and must not be conflated.
+EndpointId is not inserted into transport GossipSub messages.
 
 ## Group encryption
 
-Deferred in v1. Designing a secure group key lifecycle, membership change protocol, replay protection, and key rotation is out of scope for a generic transport architecture unless a concrete threat model requires it. The payload envelope retains room for a future end-to-end encrypted application payload; the transport will continue to treat ciphertext as opaque bytes.
+Still deferred. Human-client availability does not change the per-hop Noise / trusted-forwarder plaintext boundary.

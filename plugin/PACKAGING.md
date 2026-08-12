@@ -1,41 +1,47 @@
-# Plugin packaging blueprint
+# Packaging blueprint
 
-No production plugin package is created in this architecture repository.
+No production plugin, daemon, or human client is created in this architecture repository.
 
 ## Future Claude plugin component
 
-Conceptual distribution contents:
+Conceptual contents:
 
 ```text
-.claude-plugin/plugin.json   # identity + current Channel declaration
-.mcp.json                    # MCP bridge launch command
-skills/                      # optional local configure/status helpers
-bridge/                      # packaged bridge runtime
+.claude-plugin/plugin.json
+.mcp.json
+skills/
+bridge/
 README.md
 ```
 
-The current Claude plugin reference documents a `channels` manifest field that binds a Channel to an MCP server. The inspected Telegram plugin source snapshot has a minimal manifest without that field. `SPIKE-001` resolves the exact target syntax against the Claude Code release used for implementation.
+Bridge configuration must identify both transport profile and local EndpointId to claim over IPC v2. Exact Claude manifest syntax remains SPIKE-001.
 
-## Future Rust transport component
-
-Conceptual distribution contents:
+## Future transport component
 
 ```text
 bin/claude-p2p-transportd
 bin/claude-p2p-transportctl
-platform service integration (optional packaging layer)
-config schema/docs
+config schema v2/docs
+optional platform service integration
 ```
 
-The daemon and bridge may ship in one installer/archive, but they remain separately versioned architectural components and communicate only through the local IPC contract.
+Daemon and bridge may ship together but remain independently versioned behind IPC v2.
 
-## Skills
+## Future human client
 
-If configuration skills are included, they may:
+The human client is a separate application package that consumes IPC v2; it does not bundle a second libp2p identity/runtime by default.
 
-- initialize a profile;
-- display status;
-- edit non-secret config with explicit local user intent;
-- guide allowlist changes.
+Conceptual pieces:
 
-A skill that changes trust must enforce the same rule as Telegram's access skill: a remote Channel message is never sufficient authority to approve/revoke peers.
+```text
+human UI/TUI/CLI
+IPC v2 data-plane adapter
+application-local contacts/history store (optional)
+separate admin/settings adapter or privileged connection
+```
+
+The data-plane session claims a configured EndpointId such as `human`. Admin settings require separate capabilities and explicit local action.
+
+## Skills / local configuration helpers
+
+Helpers may initialize profiles/endpoints, display status, edit non-secret config, and guide allowlist changes. Remote Channel/network content is never sufficient authority for trust or endpoint-administration mutation.

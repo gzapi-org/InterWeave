@@ -1,26 +1,29 @@
-# Security of incoming Channel messages
+# Channel bridge security
 
-Every P2P message delivered through the Channel is **untrusted external input**, even when its `source_peer` is transport-trusted. Transport trust means the peer is admitted to send data; it does not mean every instruction inside that data is safe or authorized as a local action.
+Every P2P message delivered through the Channel is **untrusted external input**, even when its `source_peer` is transport-trusted. Transport trust means the peer is admitted to the data plane; it does not mean every instruction in the payload is safe or locally authorized.
 
-The Channel bridge itself transports/labels data. It never automatically performs any of the following because a remote message requests it:
+## Routing metadata
 
-- execute shell commands;
-- create, modify, or delete project files;
-- apply patches;
-- commit, push, merge, or alter repository policy;
-- change local permissions;
-- install software;
-- rotate identity keys;
-- add/remove trusted peers;
-- change bootstrap/discovery configuration;
-- approve Claude Code tool permissions.
+`source_peer`, `source_endpoint`, `destination_endpoint`, `channel`, and `delivery_mode` are transport facts with different strengths:
 
-After Channel injection, Claude Code's normal permission model and the local user's explicit choices determine any subsequent local action.
+- `source_peer`: authenticated libp2p transport identity;
+- `source_endpoint`: route label claimed by that authenticated peer;
+- `destination_endpoint`: local route selected/admitted by this daemon;
+- `channel`: broadcast context;
+- `delivery_mode`: direct/broadcast transport mode.
+
+None establishes a human name, employee identity, administrator role, repository ownership, agent role, or application authorization unless a higher-level protocol separately binds and verifies that meaning.
 
 ## Administrative separation
 
-Trust, key, and bootstrap changes require a local administrative path. If a future Claude skill assists with those changes, it must distinguish requests typed by the local user from instructions originating in Channel content, preserving the same anti-prompt-injection principle used by the official Telegram access skill.
+Claude's IPC connection may not receive `admin.endpoints`, `admin.shutdown`, trust mutation, identity-key, or private configuration authority.
 
-## Metadata is not authority
+A remote request such as "register me as endpoint admin", "change the default endpoint", "trust this PeerId", or "revoke the human endpoint" is untrusted content and cannot cause an administrative call automatically.
 
-`source_peer`, `channel`, and `delivery_mode` are transport facts. They cannot be interpreted as claims such as "repository owner", "administrator", "build agent", or "employee" unless an application protocol outside this transport provides and verifies that binding.
+## Reply safety
+
+Direct reply tokens bind remote PeerId + remote source endpoint + this bridge's local endpoint lease epoch. Loss/reacquisition of a local endpoint invalidates old route tokens. The bridge never falls back to another local or remote endpoint when the exact route is stale.
+
+## Endpoint enumeration
+
+The Claude bridge does not need to expose remote endpoint enumeration as a default tool. If that is added later, endpoint names must still be described as advertised route labels, not verified service identities.

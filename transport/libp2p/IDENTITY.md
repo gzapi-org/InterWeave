@@ -2,7 +2,9 @@
 
 ## Ownership
 
-One transport profile owns one persistent libp2p private key and derived PeerId. The key is not tied to a Claude conversation and is never sent through MCP/IPC/network messages.
+One transport profile owns one persistent libp2p private key and derived PeerId. The key is not tied to Claude, a human client, or any one local endpoint.
+
+Multiple local applications may intentionally share that PeerId through EndpointIds. EndpointId does not derive from the private key and does not become a second cryptographic principal.
 
 ## Storage
 
@@ -16,37 +18,25 @@ cache:    $XDG_CACHE_HOME/claude-p2p-channel/profiles/<profile>/peers.json
 run:      $XDG_RUNTIME_DIR/claude-p2p-channel/<profile>.sock
 ```
 
-Platform equivalents apply on macOS/Windows. Identity file permissions must be owner-only; parent data directory must not be group/world writable.
+Endpoint definitions live in normal profile config. Endpoint leases/presence are runtime-only and are not identity key state.
 
-## Generation
+## Generation/rotation/compromise
 
-Generate locally from an OS CSPRNG on explicit profile initialization. A missing key on a previously initialized profile is an error, not permission to silently create a new identity.
+Existing rules remain: local CSPRNG explicit initialization, no silent regeneration for established profile, explicit atomic rotation with PeerId/trust impact, and out-of-band revocation after compromise.
 
-## Rotation
+Rotating PeerId affects **all** local EndpointIds because they share the profile identity. Renaming/restarting an EndpointId does not rotate PeerId.
 
-Rotation is an explicit local administrative operation:
+## Identity layers
 
-1. generate new key atomically;
-2. show old/new PeerId and trust impact;
-3. require explicit confirmation/approved maintenance path;
-4. replace key atomically and increment identity epoch;
-5. peers will see a new identity and existing allowlists will not automatically transfer.
+```text
+PeerId
+  = authenticated network transport identity
 
-No automatic trust continuity is claimed. A higher-level signed rotation certificate is a future extension.
+EndpointId
+  = route selector inside that PeerId
 
-## Compromise
+Human/application identity
+  = higher-layer binding outside this transport
+```
 
-Treat stolen key as transport identity compromise: stop/rotate identity, revoke old PeerId in peer allowlists, distribute new trust configuration through an out-of-band trusted path. The transport cannot prove that a new PeerId is the same application entity without a higher-level binding.
-
-## Transport identity is not application identity
-
-`PeerId` answers: "which libp2p cryptographic transport identity authenticated this connection/message?"
-
-It does **not** answer:
-
-- which person or organization controls the peer;
-- which Claude instance/application role it represents;
-- whether it owns a repository/project;
-- whether it may approve permissions or administrative changes.
-
-A higher-level application may bind a logical identity to a PeerId, but that binding is outside the generic transport and must not be inferred here.
+Neither `PeerId` alone nor `PeerId + EndpointId` proves a person's name, organization, repository role, Claude instance type, administrator privilege, or other application semantics.

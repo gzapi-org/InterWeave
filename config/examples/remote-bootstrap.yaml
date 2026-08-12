@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 profile: { name: remote }
 transport:
   backend: libp2p
@@ -11,6 +11,18 @@ trust:
     - "<TRUSTED_REMOTE_PEER_ID>"
     - "<BOOTSTRAP_PEER_ID>"
     - "<BOOTSTRAP_PEER_ID_2>"
+endpoints:
+  registration_policy: configured-only
+  default_direct_endpoint: claude
+  directory: { enabled: true, cache_ttl: 60s, max_advertised: 16 }
+  entries:
+    - id: claude
+      enabled: true
+      advertise: true
+      allowed_client_kinds: [claude-channel]
+      inbound: { policy: inherit-profile-trust, allowed_peers: [] }
+      outbound: { policy: inherit-profile-trust, allowed_peers: [] }
+
 discovery:
   providers:
     - type: peer-cache

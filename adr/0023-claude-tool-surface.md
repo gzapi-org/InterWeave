@@ -1,37 +1,51 @@
-# Minimal Claude-facing Channel surface
+# Minimal Claude-facing transport tool surface
 
-**Status:** Accepted
+**Status:** Accepted; direct send extended by ADR-0030.
 
 ## Context
 
-Claude needs explicit outbound route choices while normal inbound communication must be push-based. A small surface reduces prompt/tool complexity and prevents administrative controls from being remotely induced.
+Claude needs enough operations to participate in the Channel without being exposed to libp2p internals or local administration. Endpoint-addressed profiles add one necessary direct-routing parameter but do not justify exposing endpoint configuration/trust administration through the Channel.
 
 ## Decision
 
-Expose `broadcast`, `send`, `reply`, `join`, `leave`, `identity`, and `status` as the minimal conceptual MCP tools. Inbound data arrives only through Channel notifications. Detailed peers/discovery diagnostics belong primarily to local CLI/config UX; a bounded read-only diagnostic tool may be added only if justified.
+Expose conceptual tools:
 
-`broadcast` requires the calling bridge to hold an active join reference for the channel. `send` is subject to the same v1 PeerTrustPolicy as inbound/data-plane admission and fails locally with `UnauthorizedPeer` for an untrusted destination. A broadcast `reply` after the bridge has left that channel fails with `ChannelNotJoined`; it never silently rejoins.
+- `broadcast(channel, content, content_type?)`;
+- `send(peer, endpoint?, content, content_type?)`;
+- `reply(reply_token, content, content_type?)`;
+- `join(channel)`;
+- `leave(channel)`;
+- `identity()`;
+- `status()`.
+
+The bridge itself owns one configured EndpointId lease over IPC v2. `send.endpoint` selects the **remote** endpoint; source endpoint always comes from the bridge lease. Omitting remote endpoint asks the remote profile to use its configured default endpoint.
+
+`reply` uses route metadata captured from the inbound event, including direct remote source endpoint and this bridge's local lease epoch.
+
+`status` includes local profile PeerId, this bridge's EndpointId/lease health, bridge-owned joined channels, profile desired channels, and high-level transport health.
+
+Do not expose trust approval/revocation, endpoint creation/rebinding, identity rotation, daemon shutdown, forced discovery/Kademlia queries, private keys, or raw Swarm/multiaddr internals as Channel tools.
 
 ## Alternatives considered
 
-poll tool for inbound messages; expose Swarm/multiaddr controls; trust-edit tools; mirror Telegram react/edit/file tools; permit outbound sends to arbitrary discovered PeerIds.
+Expose every daemon operation; hide endpoint destination inside payload conventions; add an endpoint-administration tool to Claude; require explicit endpoint on every direct send with no remote default.
 
 ## Consequences
 
-Some operational troubleshooting remains outside Claude and uses local CLI. Reply tokens simplify safe routing but do not confer membership/subscription authority.
+Claude can address a human or another local service under one PeerId without learning libp2p internals. The seven-tool surface remains compact; endpoint is an optional parameter rather than a new tool.
 
 ## Security implications
 
-No trust/key/config mutation tool is exposed to remote-triggered Claude flows. Outbound direct sends cannot bypass the profile's peer trust boundary. Broadcast cannot silently expand local subscription state.
+Remote content cannot mutate local endpoint/trust configuration. Source endpoint cannot be spoofed by tool input. `source_endpoint` metadata from a remote peer is routing metadata, not application/human identity proof.
 
 ## Operational implications
 
-Operators use daemon diagnostics for detailed network state. Channel tools remain stable even if backend changes. `UnauthorizedPeer` and `ChannelNotJoined` are user-visible policy/state outcomes rather than generic network failures.
+A bridge that cannot obtain its configured EndpointId lease remains usable for non-direct diagnostics/broadcast as policy allows, but direct send/reply reports endpoint lease failure clearly.
 
 ## Implementation implications
 
-Bridge maps tools to generic IPC/transport commands. Tool names may receive a namespace prefix at implementation packaging time to avoid collisions. Claude-facing `content_type` maps explicitly to transport `media_type` at the bridge boundary.
+Bridge handshake includes configured endpoint claim. Tool schemas add optional remote `endpoint` to `send`. Reply-token storage includes remote source endpoint, local destination endpoint, and lease epoch.
 
 ## Revisit conditions
 
-Revisit if user studies show a required operation cannot be expressed via these primitives; keep admin mutations separate.
+Revisit if Claude must enumerate remote endpoint directories directly, or if richer application-specific service discovery is intentionally added above transport.

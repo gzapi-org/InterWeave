@@ -1,35 +1,37 @@
 # Separate config, identity, mutable state, cache, and runtime endpoints
 
-**Status:** Accepted
+**Status:** Accepted; endpoint state classes clarified by ADR-0030.
 
 ## Context
 
-The Telegram reference separates plugin files and state; P2P identities are more security-sensitive and multiple local profiles must never share them accidentally.
+P2P identities are security-sensitive and multiple local profiles must never share them accidentally. Model B also distinguishes persistent endpoint configuration from ephemeral endpoint leases/presence.
 
 ## Decision
 
-Use profile-specific platform directories for normal configuration, private identity key, mutable daemon state/logs, replaceable peer cache, and runtime socket/lock. Repository config examples never contain secrets or private keys.
+Use profile-specific platform directories for normal configuration (including endpoint definitions/default/ACLs), private identity key, mutable daemon state/logs, replaceable peer cache, and runtime socket/lock.
+
+Endpoint leases and remote endpoint-directory results are runtime state only and are not persisted as authoritative configuration. Repository examples contain no private keys/secrets.
 
 ## Alternatives considered
 
-single state directory with loose permissions; key embedded in YAML; environment-only identities; project repository identity file.
+Single loose state directory; key in YAML; environment-only identities; project repo key; persist endpoint leases/presence across restart.
 
 ## Consequences
 
-More paths require clear diagnostics and migration tooling. The separation makes deletion/backup/permission rules explicit.
+Backup/deletion rules stay clear: endpoint config may be backed up; leases/directory cache are recreated. Daemon restart preserves PeerId but all local endpoint routes start offline until clients reconnect.
 
 ## Security implications
 
-Private keys get owner-only data storage. Cache can be deleted without key loss. Logs are sanitized and never include secret configuration.
+Private key remains owner-only. Endpoint cache/leases cannot masquerade as durable authorization. Logs sanitize peer/endpoint identifiers as configured.
 
 ## Operational implications
 
-Profiles can be backed up/migrated intentionally. Runtime sockets can be recreated freely. Config can be version controlled only after removing machine-local secrets.
+Profiles migrate intentionally. Runtime sockets/leases/cache are disposable. Config schema v2 is the source of configured endpoint names/policies.
 
 ## Implementation implications
 
-Use OS-specific directory APIs; atomic writes; explicit profile initialization. Never auto-regenerate a missing key for an existing profile.
+Atomic config writes, OS-specific directories, explicit profile initialization. Never auto-regenerate existing profile key; never restore old endpoint lease ownership from disk.
 
 ## Revisit conditions
 
-Revisit storage integration if OS keychain/HSM-backed identities become necessary; preserve logical separation.
+Revisit for HSM/keychain identities or stronger local endpoint-client authentication while preserving logical separation.

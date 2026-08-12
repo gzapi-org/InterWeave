@@ -2,7 +2,7 @@
 # Prepared Kademlia configuration. It intentionally remains disabled.
 # On a build without the optional Kademlia implementation, setting enabled=true
 # is a hard startup/configuration error.
-schema_version: 1
+schema_version: 2
 profile: { name: kademlia-ready }
 transport:
   backend: libp2p
@@ -12,6 +12,18 @@ identity: {}
 trust:
   policy: static-allowlist
   allowed_peers: ["<KAD_SERVER_A>", "<KAD_SERVER_B>", "<PEER_C>"]
+endpoints:
+  registration_policy: configured-only
+  default_direct_endpoint: claude
+  directory: { enabled: true, cache_ttl: 60s, max_advertised: 16 }
+  entries:
+    - id: claude
+      enabled: true
+      advertise: true
+      allowed_client_kinds: [claude-channel]
+      inbound: { policy: inherit-profile-trust, allowed_peers: [] }
+      outbound: { policy: inherit-profile-trust, allowed_peers: [] }
+
 discovery:
   providers:
     - type: peer-cache

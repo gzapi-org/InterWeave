@@ -1,6 +1,6 @@
 # One PeerId shared intentionally by a human client and Claude bridge.
 schema_version: 2
-profile: { name: shared }
+profile: { name: human-and-claude }
 transport:
   backend: libp2p
   listen: { addresses: ["/ip4/0.0.0.0/tcp/4001"] }

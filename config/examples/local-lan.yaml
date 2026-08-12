@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 profile: { name: local-lan }
 transport:
   backend: libp2p
@@ -9,6 +9,18 @@ trust:
   policy: static-allowlist
   allowed_peers:
     - "<PEER_ID_A>"
+endpoints:
+  registration_policy: configured-only
+  default_direct_endpoint: claude
+  directory: { enabled: true, cache_ttl: 60s, max_advertised: 16 }
+  entries:
+    - id: claude
+      enabled: true
+      advertise: true
+      allowed_client_kinds: [claude-channel]
+      inbound: { policy: inherit-profile-trust, allowed_peers: [] }
+      outbound: { policy: inherit-profile-trust, allowed_peers: [] }
+
 discovery:
   providers:
     - type: peer-cache

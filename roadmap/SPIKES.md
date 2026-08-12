@@ -15,15 +15,15 @@ Spikes validate version-sensitive or deployment-sensitive assumptions. They are 
 
 ---
 
-## SPIKE-002 — direct request-response wire behavior
+## SPIKE-002 — direct v2 and endpoint-directory wire behavior
 
-**Objective:** validate selected rust-libp2p request-response primitive under timeout, cancellation, connection reuse, and protocol mismatch.
+**Objective:** validate rust-libp2p request-response for direct v2 endpoint framing/acceptance and the separate endpoint-directory protocol under timeout, cancellation, connection reuse, and protocol mismatch.
 
-**Experiment:** two local peers with a non-production test codec.
+**Experiment:** two local peers with non-production `/direct/2.0.0` and `/endpoints/1.0.0` codecs. Exercise explicit destination, omitted/default destination, resolved endpoint response, no_route privacy class, queue-admission delay/overload, multiple protocol IDs, and unsupported-major negotiation.
 
-**Evidence:** failure events, substream/connection behavior, timeout/cancel semantics.
+**Evidence:** failure events, substream/connection reuse, timeout/cancel semantics, exact protocol-family negotiation behavior, and proof that AcceptedV2 can be withheld until bounded local route admission without pathological Swarm blocking.
 
-**Decision unlocked:** implementation codec/task details without changing the direct-vs-GossipSub architectural decision.
+**Decision unlocked:** implementation codec/task/channel details without reopening endpoint routing or the direct-vs-GossipSub decision.
 
 ---
 

@@ -25,7 +25,7 @@ Kademlia -----/ (optional; default disabled)
 - accept successful connection observations for peer-cache persistence;
 - support configuration-time composition and controlled reload.
 
-It must not dial peers, alter trust, manage GossipSub, or interpret payloads.
+It must not dial peers, alter trust, manage GossipSub, interpret payloads, or discover/aggregate `EndpointId` routes. Remote endpoint-directory results belong to the direct-routing/application-facing transport layer, not peer discovery.
 
 ## Candidate bounds
 
