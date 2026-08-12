@@ -33,7 +33,9 @@
         "bytes": {
           "type": "string",
           "contentEncoding": "base64url",
-          "description": "Application payload, base64url over IPC. Ceiling is 48 KiB decoded (ADR-0026)."
+          "pattern": "^[A-Za-z0-9_-]*$",
+          "maxLength": 65536,
+          "description": "Application payload, base64url over IPC, unpadded. The 48 KiB (49,152-byte) decoded ceiling of ADR-0026 is asserted here as maxLength 65536 encoded characters, and the character set is asserted by pattern: `contentEncoding` is an ANNOTATION in Draft 2020-12 and constrains nothing on its own, so a schema relying on it alone would admit an arbitrarily large or malformed payload and lose the pre-allocation bound this limit exists to provide."
         }
       }
     },

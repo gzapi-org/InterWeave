@@ -17,8 +17,8 @@
     "ttl_ms": {
       "type": "integer",
       "minimum": 0,
-      "maximum": 300000,
-      "description": "Clamped locally to the 5-minute hard ceiling. Freshness starts at LOCAL RECEIPT, not at generated_at_ms."
+      "maximum": 4294967295,
+      "description": "The full wire u32 range is VALID here on purpose. ENDPOINTS.md clamps the effective TTL to min(remote_ttl, local_cache_ttl, 300000) after receipt, and lists only entry count, EndpointId grammar, and duplicates as protocol violations — so an oversized TTL is a tolerated hostile value to be clamped, not a reason to reject the whole response. Asserting the 5-minute ceiling here would turn that into an interoperability failure. Freshness starts at LOCAL RECEIPT, never at generated_at_ms."
     },
     "generated_at_ms": {
       "type": "integer",

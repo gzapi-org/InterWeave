@@ -39,7 +39,9 @@ Channel IDs are case-sensitive. No Unicode normalization is needed because v1/v2
 
 ### MessageId
 
-A v2 `MessageId` remains exactly **128 bits**. Backends may choose their printable representation at API boundaries, but the normalized value must round-trip without ambiguity. Increasing the identifier width is a transport/wire version change.
+A v2 `MessageId` remains exactly **128 bits**. Increasing the identifier width is a transport/wire version change.
+
+The canonical printable form at every **JSON boundary** — local IPC, Channel events, and the schemas under `contracts/schemas/` — is **32 lowercase hexadecimal characters**. Backends may still choose a different printable representation at a non-JSON API boundary, but the normalized value must round-trip without ambiguity, and "unambiguous round-trip" is not achievable across independent implementations if each picks its own form for the same boundary. Pinning the JSON form is what makes the identifier comparable between a Rust daemon, an Android binding, and a third-party client reading the same event.
 
 ### Payload
 
