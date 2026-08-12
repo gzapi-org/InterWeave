@@ -126,7 +126,8 @@ A small in-memory runtime/backend cache stores remote advertised EndpointIds wit
 
 First-party human clients remain outside transport policy but share a Rust application core. Desktop uses IPC v2 exactly like Claude. Android uses an in-process `local-client-api` adapter because the foreground service embeds `TransportRuntime`; it does **not** create a second libp2p stack.
 
-`human-core`, `human-store`, `human-ui-model`, and `human-ui-slint` never depend on `transport-libp2p`. Desktop admin/settings opens the separate admin socket. Android settings receives a distinct in-process `LocalAdminPort` only from explicit local UI composition. Contacts/history remain application state.
+`human-core`, `human-store`, `human-ui-model`, and `human-ui-slint` never depend on `transport-libp2p`. Desktop admin/settings opens the separate admin socket. Android settings receives a distinct in-process `LocalAdminPort` only from explicit local UI composition. Contacts and ADR-0044 pending/unread/receiver-kept retention remain application state.
+`human-store` implements ADR-0044 state transitions (`pending_outbound`, `unread_inbound`, `kept_inbound`) and must not expose a general durable conversation-history repository to first-party UI code.
 
 ## Testing packages
 

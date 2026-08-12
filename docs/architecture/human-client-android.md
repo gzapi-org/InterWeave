@@ -86,7 +86,7 @@ On a material network change the Rust runtime:
 4. restarts/rebinds mDNS as applicable;
 5. marks old address candidates stale without changing PeerId;
 6. reconnects trusted peers through the normal DialAdmissionGate;
-7. leaves EndpointId/config/application history unchanged.
+7. leaves EndpointId/config and ADR-0044 retention state unchanged.
 
 ## Android discovery/resource profile
 
@@ -104,13 +104,13 @@ Android can kill application/service processes. The architecture therefore promi
 - no guaranteed reception while the service is absent;
 - clean reconstruction of PeerId/runtime state when the app can restart;
 - remote direct send to absent `human` -> `no_route` once peer route state reflects absence/unreachability;
-- local human database still contains only previously accepted/sent messages.
+- local human database contains message content only in ADR-0044 states: pending outbound, unread inbound, and receiver-kept-after-read inbound.
 
 A future centralized push wake-up service (for example FCM) would introduce a new infrastructure/privacy dependency and requires a separate ADR. It is not part of standard v1.
 
 ## Notifications
 
-When a message is accepted while the foreground service is active but Activity is not visible, the first-party app may post a local Android notification. Notification previews are user-configurable because application payloads may be sensitive. Tapping the notification is a local user action that opens the conversation; notification content never executes transport/admin commands.
+When the human application consumes an inbound message while the foreground service is active but Activity is not visible, it first commits the message as `unread_inbound` under ADR-0044, then may post a local Android notification. Notification previews are user-configurable because application payloads may be sensitive. Tapping the notification opens the local conversation but does not by itself force Keep; notification content never executes transport/admin commands. A notification must not become a shadow durable message archive after the application deletes content.
 
 ## UI
 
@@ -137,7 +137,7 @@ Test at minimum:
 
 The Android platform backup system is not part of the application's disaster-recovery design. Standard v1 excludes the wrapped identity envelope, transport/trust configuration, recovery temporary state, and human SQLite database from both cloud backup and device-to-device extraction, and packages explicit backup/data-extraction rules rather than relying on platform defaults. A new installation or device transfer that lacks the valid local Keystore-wrapped identity enters unconfigured/recovery-required onboarding; it never manufactures a replacement PeerId for an established profile.
 
-Human message-history backup/synchronization is disabled in standard v1. A future user-selected encrypted history sync is a separate application protocol/service decision and does not relax the transport's no-central-store/no-offline-mailbox claims.
+Human message backup/synchronization is disabled in standard v1 system backup. A future user-selected encrypted application backup may include message content only from `unread_inbound` and `kept_inbound`; `pending_outbound`, transport-terminal outbound, and read-unkept inbound are excluded. Cross-device history/sync remains a separate application protocol/service decision and does not relax the transport's no-central-store/no-offline-mailbox claims.
 
 ## Availability-policy interaction
 

@@ -273,7 +273,7 @@ That mapping is outside this transport contract. The transport never asserts tha
 
 Transport-owned persistent endpoint state is configuration only. Active leases, remote directory results, reply routes, and endpoint availability are runtime state.
 
-The daemon does not persist application messages for an offline endpoint. A human client may keep its own local conversation history above the transport boundary; that is not an offline network mailbox.
+The daemon does not persist application messages for an offline endpoint. ADR-0044 permits the first-party human application to retain only pending outbound, unread inbound, and receiver-kept-after-read inbound content above the transport boundary; that application state is not an offline network mailbox.
 
 ## Resource limits
 

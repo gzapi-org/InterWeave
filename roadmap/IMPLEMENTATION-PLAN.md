@@ -113,7 +113,7 @@ Implement class-aware root dial admission plus pre-Noise inbound admission, addr
 
 **Objective:** provide a human-facing consumer without embedding libp2p or weakening transport boundaries.
 
-**Deliverables:** Rust/Slint desktop client; shared human-core/HumanChatV1/SQLite store; IPC v2 data-plane adapter; separate admin adapter; EndpointId claim; contact/routing/channel UI; application-local history; endpoint-directory route selection.
+**Deliverables:** Rust/Slint desktop client; shared human-core/HumanChatV1/SQLite retention store; IPC v2 data-plane adapter; separate admin adapter; EndpointId claim; contact/routing/channel UI; ADR-0044 pending/unread/kept retention state; endpoint-directory route selection.
 
 **Acceptance:**
 
@@ -121,7 +121,7 @@ Implement class-aware root dial admission plus pre-Noise inbound admission, addr
 - UI distinguishes PeerId trust from EndpointId route label;
 - direct send can target explicit route or remote default;
 - offline human endpoint creates no daemon backlog;
-- local history stores only app-observed messages and never claims network durability;
+- durable message content is limited to pending outbound, unread inbound, and receiver-kept-after-read inbound; terminal/read-unkept content evaporates across restart and never claims network durability;
 - network content cannot automatically invoke trust/endpoint/daemon administration;
 - endpoint-directory labels are displayed as unverified routes unless separately app-verified.
 
@@ -133,9 +133,9 @@ The settings/admin UX may live in the same executable but opens the separate adm
 
 **Objective:** ship the same human application/network semantics on Android without a standalone daemon.
 
-**Deliverables:** Rust/Slint Android app, embedded LocalDataSession adapter, foreground-service runtime host with minimal platform shim, network-change integration, Android Keystore AES-GCM identity wrapping, SQLite store, notifications, Kademlia client-only/mobile resource profile.
+**Deliverables:** Rust/Slint Android app, embedded LocalDataSession adapter, foreground-service runtime host with minimal platform shim, network-change integration, Android Keystore AES-GCM identity wrapping, SQLite ADR-0044 retention store, notifications, Kademlia client-only/mobile resource profile.
 
-**Acceptance:** same wire/session fixtures as desktop; service/process/network lifecycle matrix; background-start/FGS policy gate; Keystore exact-seed/PeerId fixture; secure/no-clipboard mnemonic flow; backup/device-transfer exclusions for identity/config/history; `stay-reachable + user-presence` restart diagnostic; no admin handle in network callback graph; no hidden mailbox/push dependency.
+**Acceptance:** same wire/session fixtures as desktop; service/process/network lifecycle matrix; background-start/FGS policy gate; Keystore exact-seed/PeerId fixture; secure/no-clipboard mnemonic flow; backup/device-transfer exclusions for identity/config/human-store plus explicit future-backup eligibility limited to unread/kept inbound; `stay-reachable + user-presence` restart diagnostic; no admin handle in network callback graph; no hidden mailbox/push dependency.
 
 **Dependencies:** Phase 2-5 runtime plus SPIKE-008/SPIKE-009. The Android platform/UI work may proceed against the frozen connectivity contract/harness, but standard-v1 Android release acceptance is blocked on completion of the mandatory Phase-9 connectivity workstream and SPIKE-004 matrix.
 

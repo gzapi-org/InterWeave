@@ -53,12 +53,12 @@ Restoring a phrase on a second device is migration/disaster recovery, not permis
 
 ### Android backup and device-transfer policy
 
-Standard v1 does **not** use Android Auto Backup, cloud backup, or device-to-device transfer as an identity or message-history recovery mechanism. Packaging must set an explicit backup posture and explicit extraction rules rather than relying on platform defaults:
+Standard v1 does **not** use Android Auto Backup, cloud backup, or device-to-device transfer as an identity or human-message recovery mechanism. Packaging must set an explicit backup posture and explicit extraction rules rather than relying on platform defaults:
 
 - the wrapped identity envelope, expected PeerId record, wrapping metadata, recovery-flow temporary state, transport configuration/trust material, and human SQLite database are excluded from both cloud backup and device-transfer extraction;
-- standard-v1 packaging sets `android:allowBackup="false"` and also supplies explicit Android 12+ `android:dataExtractionRules` plus Android 11-and-lower `android:fullBackupContent` rules as defense in depth. The Android 12+ rules explicitly exclude the sensitive/app-history domains from both `cloud-backup` and `device-transfer`, because `allowBackup=false` alone is not treated as a portable guarantee that every manufacturer disables device-to-device transfer;
+- standard-v1 packaging sets `android:allowBackup="false"` and also supplies explicit Android 12+ `android:dataExtractionRules` plus Android 11-and-lower `android:fullBackupContent` rules as defense in depth. The Android 12+ rules explicitly exclude the sensitive/human-store domains from both `cloud-backup` and `device-transfer`, because `allowBackup=false` alone is not treated as a portable guarantee that every manufacturer disables device-to-device transfer;
 - restoring/reinstalling the APK without a valid local Keystore wrapping key and identity envelope never creates a partial identity restore or silently generates a replacement for an established profile; onboarding reports the profile as unconfigured/recovery-required;
-- HumanChat history is not uploaded or transferred by Android system backup in standard v1. Any future user-selected cloud backup/synchronization is a separate application feature with its own encryption, privacy, retention and threat-model ADR; it is not enabled by relaxing these platform backup exclusions.
+- The human-store is not uploaded or transferred by Android system backup in standard v1. A future explicit encrypted application backup may include message content only from inbound unread/receiver-kept records under ADR-0044; pending outbound is excluded from portable backup. Any broader cloud backup/synchronization is a separate application feature with its own encryption, privacy, replay and threat-model ADR.
 
 ## Failure behavior
 

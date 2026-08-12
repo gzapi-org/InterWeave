@@ -70,9 +70,23 @@ Received locally
 
 Do not label `AcceptedV2` as `Read`, `Seen`, `Processed by person`, or even stronger application delivery unless a future application-level receipt protocol supplies that evidence.
 
-For broadcast, local history may record that publication was accepted by the local transport; it cannot claim every subscriber received the message.
+For broadcast, current-session UI may show that publication was accepted by the local transport; it cannot claim every subscriber received the message. Durable pending content is removed on successful publication per ADR-0044.
 
-## 6. Connectivity display
+## 6. Message retention interaction
+
+The human UI implements [`clients/human/RETENTION.md`](../../clients/human/RETENTION.md):
+
+- outbound pending messages survive restart until direct `AcceptedV2`, successful broadcast publication, explicit cancel/delete, or a future separately designed terminal policy;
+- inbound unread messages survive restart;
+- when an inbound message enters local read state, its durable unread copy is removed unless the receiver explicitly chooses **Keep**;
+- **Keep** is available only after local read state and is always a receiver-local action;
+- read-but-unkept inbound and transport-terminal outbound messages may remain visible in RAM for the current session, but they disappear across app/process restart;
+- removing Keep deletes the durable kept copy;
+- no remote payload, EndpointId, sender label, notification action, or application extension may force Keep.
+
+The UI should distinguish `Unread` from `Kept`. Unread is temporary durability for user availability; Kept is an explicit post-read retention choice. Neither state is transmitted to the sender in v1.
+
+## 7. Connectivity display
 
 Ordinary users see normalized status only:
 
@@ -87,7 +101,7 @@ An established peer route may optionally show `direct` or `relayed`. A DCUtR `Pe
 
 Infrastructure PeerIds, AutoNAT probe details, relay multiaddrs, Kademlia buckets, and raw failure traces belong to advanced diagnostics/admin surfaces.
 
-## 7. Trust/settings interaction
+## 8. Trust/settings interaction
 
 Trust mutation is always an explicit local settings action. A message may contain a PeerId as text, but clicking/copying it cannot auto-allowlist it.
 
@@ -95,7 +109,7 @@ Desktop settings use the admin IPC binding. Android settings use `LocalAdminPort
 
 High-impact changes require a confirmation view that shows the exact PeerId and scope. Removing trust should warn that active application connectivity to that peer will be evicted.
 
-## 8. Recovery UX
+## 9. Recovery UX
 
 ### Desktop
 
@@ -107,7 +121,7 @@ There is no standalone CLI requirement. A dedicated local recovery flow stops/lo
 
 Both platforms state prominently: complete profile disaster recovery requires the recovery phrase **and** separately backed-up configuration/trust/endpoint settings.
 
-## 9. Notifications
+## 10. Notifications
 
 Notification content is generated only from messages already accepted into the human application/session.
 
@@ -119,11 +133,11 @@ Notification content is generated only from messages already accepted into the h
 
 Desktop notification integration is optional per OS packaging. Android stay-reachable mode uses its foreground-service notification independently from per-message notifications.
 
-## 10. Accessibility and localization
+## 11. Accessibility and localization
 
 First-party UI must provide semantic labels/actions, keyboard navigation on desktop, screen-reader-friendly controls, scalable text, sufficient touch targets on Android, and localization-safe layouts. PeerIds and cryptographic identifiers must remain copyable in exact canonical form even when surrounding UI is localized.
 
-## 11. Error presentation
+## 12. Error presentation
 
 Map stable transport/local errors to user-actionable messages without exposing hidden route-policy distinctions. Examples:
 
@@ -135,7 +149,7 @@ Map stable transport/local errors to user-actionable messages without exposing h
 
 Raw internal codes remain available in diagnostics.
 
-## 12. Shared UI acceptance tests
+## 13. Shared UI acceptance tests
 
 - no UI label promotes EndpointId/display name to authenticated identity;
 - AcceptedV2 never renders as read/seen;
@@ -143,12 +157,14 @@ Raw internal codes remain available in diagnostics.
 - explicit trust mutation shows exact target PeerId;
 - remote text cannot invoke admin/recovery handlers;
 - desktop and Android render the same HumanChatV1 fixture consistently;
+- pending outbound and unread inbound survive restart; read-unkept/transport-terminal messages do not;
+- receiver Keep can be set only after read and cannot be forced by remote content;
 - accessibility tree contains meaningful labels/actions for message, route, trust, and connectivity controls.
 
-## 13. Android availability-policy diagnostic
+## 14. Android availability-policy diagnostic
 
 When Android is configured with both `availability_mode=stay-reachable` and `key_unlock_policy=user-presence`, the configuration is valid but the UI/status model must expose `background_restart_requires_user_authentication=true`. User-facing copy must explain that the endpoint can stay reachable while the currently unlocked service remains alive, but it cannot automatically recover reachability after process/service restart until the user authenticates.
 
-## 14. HumanChat reply rendering
+## 15. HumanChat reply rendering
 
-An inbound HumanChatV1 `reply_to` may reference an application message that is not present in local history. The message is still valid and must render normally; the client may show a neutral `Referenced message unavailable` placeholder and preserve the referenced ID for diagnostics/history. It must not auto-fetch, create transport traffic, reject the message, or infer tampering solely because the referenced message is absent locally.
+An inbound HumanChatV1 `reply_to` may reference an application message that is not present in the current retention/session store. The message is still valid and must render normally; the client may show a neutral `Referenced message unavailable` placeholder and preserve the referenced ID for bounded diagnostics/retention metadata. It must not auto-fetch, create transport traffic, reject the message, or infer tampering solely because the referenced message is absent locally.

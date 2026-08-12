@@ -20,7 +20,7 @@ leased / routable / optionally advertised
 configured but unavailable
 ```
 
-No messages are retained while unavailable.
+TransportRuntime retains no messages while an endpoint/network path is unavailable. Separately, the first-party human application may retain its own pending outbound, unread inbound, and receiver-kept inbound state under ADR-0044; that state does not make an offline endpoint remotely deliverable.
 
 ## Claude bridge lifecycle
 
@@ -36,11 +36,11 @@ A second bridge cannot claim the same EndpointId. It must have another configure
 
 ## Desktop human client lifecycle
 
-Desktop follows IPC v2. UI startup opens its application database, connects/starts the profile daemon as needed, negotiates keepalive, and acquires `human`. UI exit releases the endpoint while the daemon may remain alive for Claude/other endpoints. Settings open the separate admin socket only on explicit user action.
+Desktop follows IPC v2. UI startup opens its ADR-0044 retention database, reconnects pending/unread/kept application state, connects/starts the profile daemon as needed, negotiates keepalive, and acquires `human`. UI exit releases the endpoint while the daemon may remain alive for Claude/other endpoints; terminal/read-unkept RAM content evaporates. Settings open the separate admin socket only on explicit user action.
 
 ## Android human client lifecycle
 
-Android foreground-service host owns the embedded Rust runtime and `human` local session. Activity recreation does not release the lease while the service remains alive. Service/process stop releases the lease and all peers see the normal offline/unreachable semantics. Stay-reachable mode is explicit user-visible foreground-service operation; foreground-only mode intentionally goes offline when the runtime stops. Android network change invalidates/rebuilds AutoNAT/relay/address state without changing PeerId.
+Android foreground-service host owns the embedded Rust runtime and `human` local session. Activity recreation does not release the lease while the service remains alive. Service/process stop releases the lease and all peers see the normal offline/unreachable semantics; already committed pending-outbound/unread/receiver-kept application state survives, while terminal/read-unkept RAM content evaporates. Stay-reachable mode is explicit user-visible foreground-service operation; foreground-only mode intentionally goes offline when the runtime stops. Android network change invalidates/rebuilds AutoNAT/relay/address state without changing PeerId.
 
 Administrative settings use a distinct in-process `LocalAdminPort`; message/event callbacks do not receive it.
 

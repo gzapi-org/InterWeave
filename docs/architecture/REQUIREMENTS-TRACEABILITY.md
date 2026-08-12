@@ -53,7 +53,7 @@ This matrix is an audit aid, not a replacement for the source task.
 | provider conformance tests | `contracts/DISCOVERY-CONFORMANCE.md`, `testing.md` |
 | phased roadmap/spikes | `roadmap/*` |
 | final CTO-style review | `FINAL-REVIEW.md` |
-
 | first-party desktop human client | `human-client-cross-platform.md`, `human-client-desktop.md`, ADR-0039/0040, `contracts/LOCAL-CLIENT.md` |
 | first-party Android human client | `human-client-android.md`, `android-key-custody.md`, ADR-0041/0042/0043, SPIKE-008/009 |
 | AutoNAT server SSRF restriction | `transport/libp2p/AUTONAT.md`, `HUMAN-CLIENT-REVIEW-2026-08-12.md` |
+| first-party human message retention | `clients/human/RETENTION.md`, ADR-0044, human state/UI/platform docs, shared desktop/Android conformance tests |

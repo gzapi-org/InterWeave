@@ -55,7 +55,7 @@ Supported ABI/minimum/target API choices are release parameters, not architectur
 
 ### Android backup and device-transfer manifest policy
 
-Standard v1 does not rely on Android system backup for identity, configuration or chat history. The package must:
+Standard v1 does not rely on Android system backup for identity, configuration or human message state. The package must:
 
 - set `android:allowBackup="false"` explicitly rather than inheriting the platform default;
 - provide Android 12+ `android:dataExtractionRules` that exclude the wrapped identity envelope, expected PeerId/wrapping metadata, transport/trust configuration, recovery temporary state and human-store database from **both** `<cloud-backup>` and `<device-transfer>`; `allowBackup=false` is not relied on as the only device-transfer control;
@@ -64,7 +64,7 @@ Standard v1 does not rely on Android system backup for identity, configuration o
 - treat the no-backup/cache directories as implementation aids, not the sole policy control;
 - never interpret a system/device-transfer restore without a valid local Keystore key as an identity restore.
 
-The human SQLite history is excluded from system backup/transfer in standard v1. A future opt-in encrypted history backup/sync requires a separate application-security design rather than a packaging toggle.
+The entire human-store database is excluded from Android system backup/transfer in standard v1. A future explicit encrypted application backup may include **message content only from inbound unread and receiver-kept records**. Pending outbound is deliberately excluded from portable backup to avoid restored/second-device replay; transport-terminal outbound and read-unkept inbound are not durable to begin with. Any broader history/sync requires a separate application-security/replay design rather than a packaging toggle.
 
 ## 7. Update compatibility
 
@@ -83,13 +83,13 @@ Rollback must never silently generate a new PeerId.
 
 Desktop GUI crash -> daemon may remain online, human EndpointId lease is released when IPC death is detected.
 
-Desktop daemon crash -> all profile endpoints go offline until daemon restart; app history remains intact.
+Desktop daemon crash -> all profile endpoints go offline until daemon restart; the separate human app retains only pending outbound, unread inbound, and receiver-kept inbound per ADR-0044.
 
 Android Activity crash/recreation -> service/runtime may remain online.
 
 Android service/process death -> transport endpoint is offline; restart reconstructs ephemeral network state with the same unlocked PeerId when policy permits.
 
-No platform converts crashes into a durable transport inbox.
+No platform converts crashes into a durable **transport** inbox. Human application survival is limited to the ADR-0044 retention sets and never creates remote offline acceptance.
 
 ## 9. Release matrix
 

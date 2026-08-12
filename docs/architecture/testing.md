@@ -106,12 +106,19 @@ Every provider runs `contracts/DISCOVERY-CONFORMANCE.md` tests. Endpoint routing
 ## Human-client architecture tests
 
 - human endpoint and Claude endpoint share one PeerId without duplicate direct delivery;
-- human client local history survives its own restart if its application store chooses, while daemon provides no missed-message replay;
+- human retention state follows ADR-0044: pending outbound + unread inbound + receiver-kept inbound survive restart; transport-terminal outbound and read-unkept inbound do not; daemon provides no missed-message replay;
 - network send while human endpoint offline returns no_route and produces no daemon backlog;
 - contact display name/avatar never changes transport identity/trust decision;
 - endpoint-directory route label is displayed as unverified routing metadata unless app-level identity verifies it;
 - explicit local user gesture/admin capability is required for trust or endpoint-config mutation;
 - multiple UI windows share one application endpoint owner or use explicitly separate EndpointIds.
+- outbound content is committed before first send; direct `AcceptedV2` / successful broadcast publication deletes the durable pending copy;
+- failed/no-route/timeout outbound remains pending unless explicitly cancelled;
+- inbound content is committed unread before normal presentation/notification; unread survives restart;
+- read without Keep deletes durable content; Keep is allowed only after read and remote payload cannot force it;
+- removing Keep deletes durable content;
+- explicit backup eligibility contains only unread/kept inbound content and excludes pending outbound;
+- human-store unavailable/full degrades/releases the human direct endpoint **and suspends local human broadcast joins/delivery** rather than silently pretending unread persistence still works; profile desired channels may remain mesh-warm with no local replay/buffer.
 
 ## Security/load
 
@@ -245,7 +252,7 @@ Desktop:
 Android:
 - Activity recreation while service remains; service/process kill/restart; foreground-only vs stay-reachable; background-start denial; persistent-notification lifecycle; Wi-Fi/cellular transition; Kademlia client-only; relay fallback/DCUtR; mDNS multicast/permission lifecycle; Keystore wrap/user-presence/background-compatible modes; message callback graph cannot access LocalAdminPort;
 - recovery screen uses secure-window/task-snapshot protection, has no clipboard or normal free-text mnemonic path, and phrase material does not enter saved state/log/analytics/crash artifacts;
-- Android system cloud backup and device-transfer exclude identity envelope/recovery/config/trust/human SQLite state; a half-restored install cannot silently recreate/replace an established PeerId;
+- Android system cloud backup and device-transfer exclude identity envelope/recovery/config/trust/human SQLite state; a half-restored install cannot silently recreate/replace an established PeerId; future explicit message backup fixtures include only unread/kept inbound content and exclude pending outbound;
 - `stay-reachable + user-presence` exposes `background_restart_requires_user_authentication=true` and remains offline after restart until user authentication.
 
 HumanChatV1:

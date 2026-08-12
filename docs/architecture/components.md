@@ -3,7 +3,7 @@
 | Component | Owns | Must not own |
 |---|---|---|
 | Claude Channel bridge | MCP Channel capability, tools, event translation, instructions, one local EndpointId lease, reply tokens | discovery, dialing, keys, GossipSub mesh, endpoint/trust administration |
-| Human client shared core | Rust contacts/conversations/HumanChatV1/local history/Slint view model | trust grants, transport key, discovery/connectivity policy |
+| Human client shared core | Rust contacts/conversations/HumanChatV1/ADR-0044 retention/Slint view model | trust grants, transport key, discovery/connectivity policy |
 | Desktop human binding | IPC v2 data session + optional separate admin connection | libp2p Swarm, transport private key |
 | Android human binding | embedded LocalDataSession in foreground-service-owned Rust runtime; platform lifecycle bridge | independent second Swarm, hidden durable mailbox |
 | Human/admin settings path | explicit local trust/config/endpoint administration (desktop admin socket; Android LocalAdminPort) | automatic actions triggered by network payloads |
@@ -43,7 +43,7 @@ The libp2p backend carries EndpointIds on direct frames but does not decide whic
 
 ## Human client boundary
 
-A human client may implement application-level contacts, display names, avatars, local message history, unread state, reactions, or a richer chat payload protocol. None of those concepts belongs in `transport-api` or EndpointId.
+A human client may implement application-level contacts, display names, avatars, pending/unread/receiver-kept application retention, read state, reactions, or a richer chat payload protocol. None of those concepts belongs in `transport-api` or EndpointId.
 
 ## Reachability ownership split
 

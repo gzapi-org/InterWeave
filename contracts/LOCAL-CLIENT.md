@@ -98,4 +98,4 @@ A platform binding must prove:
 7. data-plane callbacks cannot invoke administrative methods without a distinct local authority object;
 8. no platform binding adds durable transport delivery.
 
-These are shared conformance tests for desktop IPC and Android embedded-session adapters.
+These are shared conformance tests for desktop IPC and Android embedded-session adapters. A first-party human application may persist content **after crossing this local-session boundary** only under ADR-0044; that application retention never changes queue admission, `AcceptedV2`, or transport durability semantics.

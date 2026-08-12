@@ -47,3 +47,4 @@ All ADRs are **Accepted** architecture decisions unless later superseded.
 | [0041](./0041-android-embedded-runtime.md) | Android embeds TransportRuntime in a foreground-service host and uses the in-process local-session binding. |
 | [0042](./0042-android-key-wrapping.md) | Android Keystore AES-GCM wraps the exact portable Ed25519 seed without changing PeerId recovery. |
 | [0043](./0043-multi-device-peer-identity.md) | Concurrent desktop/Android devices use distinct PeerIds; mnemonic restore is migration/recovery, not cloning. |
+| [0044](./0044-human-message-retention.md) | Human message content is durable only while outbound-pending, inbound-unread, or receiver-kept-after-read; ordinary delivered/read history evaporates. |

@@ -11,6 +11,7 @@
 | peer cache | observed peers/addresses + bounded transport protocol observations | optional | no | **yes** |
 | remote endpoint cache | short-lived advertised EndpointIds | no | no | **yes** |
 | runtime IPC endpoints | data socket/pipe + admin socket/pipe | no | no | recreated |
+| human app retention store | pending outbound, unread inbound, receiver-kept inbound | separate app policy; not transport profile backup | **yes, message content** | no for surviving states |
 | logs | structured diagnostics | policy-dependent | must be sanitized | yes |
 
 
@@ -104,7 +105,7 @@ Safe reloadable classes: supported provider config, rate/queue limits within cei
 
 Trust reload can close data-plane connections, affect endpoint ACL intersections, and emits `TrustPolicyChanged`. Invalid reload leaves previous good config active.
 
-Restart-required: identity key path/rotation/restore, profile IPC socket identity, and core listen transport changes when backend cannot apply atomically. Identity recovery words are never configuration values; see `contracts/IDENTITY-RECOVERY.md`. A complete disaster-recovery plan backs up the phrase and `config.yaml` separately: the phrase restores the PeerId, while config restores trust/endpoints/discovery policy. Runtime cache/leases/messages are deliberately excluded.
+Restart-required: identity key path/rotation/restore, profile IPC socket identity, and core listen transport changes when backend cannot apply atomically. Identity recovery words are never configuration values; see `contracts/IDENTITY-RECOVERY.md`. A complete disaster-recovery plan backs up the phrase and `config.yaml` separately: the phrase restores the PeerId, while config restores trust/endpoints/discovery policy. Runtime cache/leases/transport messages are deliberately excluded. Human application retention is separately governed by ADR-0044 and is not part of transport profile recovery.
 
 ## Mandatory Internet reachability configuration
 
@@ -132,6 +133,12 @@ The Kademlia schema is fully defined. Per ADR-0034, a configured Kademlia entry 
 When enabled, `network_id` defines the private protocol namespace, `routing_peer_policy: data-plane-trusted` and `record_mode: disabled` remain fixed security invariants, and all documented cross-field/seed-source constraints are hard validation rules.
 
 Endpoint IDs are never stored as Kademlia keys/provider records. Endpoint discovery uses the separate trust-gated endpoint-directory protocol.
+
+## Human message retention is not operator configuration
+
+ADR-0044 retention semantics are first-party application invariants, not profile toggles: pending outbound is durable until transport-terminal, inbound unread is durable until read, and read inbound is durable only after the receiver explicitly chooses Keep. Standard v1 does not provide a configuration flag that silently turns permanent chat history back on. Any broader retention/history mode requires a new ADR/application policy.
+
+Android system backup remains disabled for the entire human-store. Any future explicit encrypted message backup may include only inbound unread and receiver-kept content; pending outbound is local restart state and not portable backup state.
 
 ## Human platform deployment
 

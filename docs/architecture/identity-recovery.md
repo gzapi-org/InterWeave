@@ -83,7 +83,7 @@ A stolen phrase is equivalent to a stolen private key. Recovery itself cannot re
 
 The 24 words recover the transport identity only. Complete profile recovery requires a **separate backup of `config.yaml`** containing trust allowlists, configured EndpointIds/default route, discovery/bootstrap/Kademlia configuration, desired channels, and policy/limit choices.
 
-Phrase without config = same PeerId but a bare profile. Config without phrase = policy/topology without the private identity. Runtime peer cache, leases, directory cache, dedup state, undelivered messages, and human-client contacts/history are outside transport recovery and must not be reconstructed implicitly.
+Phrase without config = same PeerId but a bare profile. Config without phrase = policy/topology without the private identity. Runtime peer cache, leases, directory cache, dedup state, transport messages, and human-client contacts/ADR-0044 retention state are outside transport identity recovery and must not be reconstructed implicitly. A future explicit human-message backup may include only unread/receiver-kept inbound content; pending outbound is not portable recovery state.
 
 ## Future threshold backup
 

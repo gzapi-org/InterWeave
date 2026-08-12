@@ -36,7 +36,7 @@ Conceptual pieces:
 ```text
 human UI/TUI/CLI
 IPC v2 data-plane adapter
-application-local contacts/history store (optional)
+application-local contacts + ADR-0044 retention store (pending outbound, unread inbound, receiver-kept inbound)
 separate admin/settings adapter or privileged connection
 ```
 

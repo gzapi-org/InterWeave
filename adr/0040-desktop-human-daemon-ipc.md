@@ -8,7 +8,7 @@ Desktop can keep a long-lived profile daemon independently of a UI window and ca
 
 ## Decision
 
-Windows/macOS/Linux first-party human clients use the external Rust transport daemon. Messaging uses IPC v2 data socket and an exclusive configured EndpointId lease. Settings administration uses the separate admin socket. Human application history lives in the human client, never the daemon. Closing the UI releases its endpoint but does not stop the daemon by default.
+Windows/macOS/Linux first-party human clients use the external Rust transport daemon. Messaging uses IPC v2 data socket and an exclusive configured EndpointId lease. Settings administration uses the separate admin socket. ADR-0044 human retention state lives in the human client, never the daemon: pending outbound, unread inbound, and receiver-kept-after-read inbound only. Closing the UI releases its endpoint but does not stop the daemon by default.
 
 ## Alternatives considered
 

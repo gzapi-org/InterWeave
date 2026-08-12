@@ -66,7 +66,14 @@ Autostart of the daemon is user/operator policy. The human UI can be closed whil
 
 ## Local persistence
 
-Use a versioned SQLite application database accessed by Rust. At minimum persist contacts, route preferences, messages actually sent/received, read state, drafts, and UI preferences. No database row is interpreted as proof of transport delivery to a remote human.
+Use a versioned SQLite application database accessed by Rust. Message content follows the frozen [`clients/human/RETENTION.md`](../../clients/human/RETENTION.md) state machine rather than a conventional permanent history:
+
+- `pending_outbound` survives until transport-terminal success/cancel;
+- `unread_inbound` survives until local read state;
+- `kept_inbound` exists only after the receiver explicitly chooses Keep after reading;
+- transport-terminal outbound and read-unkept inbound are RAM-only current-session content and evaporate across restart.
+
+Persist contacts, route preferences, the three permitted retention sets, and separately allowed UI preferences. No database row is interpreted as proof of remote human read/processing.
 
 Database corruption must not damage transport identity/config: human application storage and profile identity/config remain separate files/namespaces.
 
@@ -74,9 +81,9 @@ Database corruption must not damage transport identity/config: human application
 
 - OS owner ACLs protect profile sockets; admin socket may use stricter ACL/group/service-account policy.
 - normal UI never obtains daemon private key bytes.
-- local message history may contain sensitive plaintext and should follow platform storage protections; optional application-database encryption is a separate application hardening choice.
+- pending/unread/kept message content contains sensitive plaintext and should follow platform storage protections; optional application-database encryption is a separate application hardening choice. Deleted read-unkept/terminal content must not be intentionally copied into shadow history tables/search indexes/logs.
 - passphrase-encrypted transport identity storage remains ADR-0038/v2.x rather than being invented inside the human app.
 
 ## Testing
 
-Required desktop integration tests include daemon absent/start, daemon already shared with Claude, exact endpoint lease conflict, admin/data socket separation, slow UI queue, UI crash/reconnect, daemon restart, human+Claude different endpoint routing, database unavailable/corrupt without identity corruption, and network path changes direct<->relay without conversation-route mutation.
+Required desktop integration tests include daemon absent/start, daemon already shared with Claude, exact endpoint lease conflict, admin/data socket separation, slow UI queue, UI crash/reconnect, daemon restart, human+Claude different endpoint routing, database unavailable/corrupt without identity corruption, retention-state restart cases from ADR-0044, and network path changes direct<->relay without conversation-route mutation.

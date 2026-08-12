@@ -125,7 +125,7 @@ The mnemonic restores **transport identity only**. Complete recovery of an opera
 1. the 24-word recovery phrase (or future threshold shares) for the exact Ed25519 identity; and
 2. a separate backup of the profile's non-secret `config.yaml`, especially `trust.allowed_peers`, endpoint definitions/default route, discovery/bootstrap/Kademlia settings, desired channels, and policy/limit choices.
 
-The phrase alone intentionally restores a **bare identity**: the same PeerId with no reconstructed trust allowlist, EndpointIds, bootstrap policy, application contacts, or message history. Runtime cache, endpoint leases, directory cache, dedup state, and messages are never part of the disaster-recovery bundle. Applications such as a human client back up their own contacts/history separately.
+The phrase alone intentionally restores a **bare identity**: the same PeerId with no reconstructed trust allowlist, EndpointIds, bootstrap policy, application contacts, or human message-retention state. Runtime cache, endpoint leases, directory cache, dedup state, and transport messages are never part of the disaster-recovery bundle. Any future human-application backup follows ADR-0044 and may include message content only from unread/receiver-kept inbound records; pending outbound is not portable backup state.
 
 ## Backup redundancy and future threshold recovery
 

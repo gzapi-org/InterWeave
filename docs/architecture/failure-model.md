@@ -95,21 +95,26 @@ Phase 9 is part of standard v1. Reachability failure is therefore represented ex
 - Relay denial/capacity/exhaustion is retried only against authorized relay candidates and never broadens trust automatically.
 - Failed DCUtR retains the working relay connection and enters per-peer cooldown. Successful DCUtR waits for direct-path stability before redundant relay retirement.
 - A connectivity-infrastructure-only peer that negotiates an application protocol is rejected; such a violation does not upgrade its connection class.
-- No failure path creates a durable message queue or changes direct-message acceptance semantics.
+- No failure path creates a durable **transport/runtime** message queue or changes direct-message acceptance semantics. ADR-0044 human application retention is separate and explicit.
 
 ## Human platform failures
 
 | Failure | Required behavior |
 |---|---|
-| Desktop UI crash | release IPC endpoint lease; daemon/other endpoints continue |
+| Desktop UI crash | release IPC endpoint lease; daemon/other endpoints continue; pending-outbound/unread/kept state already committed remains |
+| human-store unavailable/full | report storage degraded; release/disable human direct EndpointId and suspend local human broadcast joins/delivery until durable ingestion resumes; profile desired channels may stay warm without local delivery |
+| inbound read without Keep | delete durable unread copy; message may remain RAM-only until session exit |
+| inbound receiver chooses Keep after read | persist kept copy locally; no network receipt/authority change |
+| outbound direct receives AcceptedV2 | delete durable pending copy; current-session display may remain RAM-only |
+| outbound broadcast publish succeeds | delete durable pending copy; do not claim remote recipient delivery |
 | Desktop admin socket unavailable | messaging continues; settings/admin unavailable |
 | Android Activity destroyed | if foreground service lives, runtime/endpoint continue; UI rebinds |
-| Android foreground service/process killed | revoke embedded session/endpoint; stop network activity; restart rebuilds ephemeral state; no queued delivery |
+| Android foreground service/process killed | revoke embedded session/endpoint; stop network activity; restart rebuilds ephemeral network state plus already committed ADR-0044 app retention; no transport queued delivery |
 | Android background service start denied | report offline/reachability-disabled to UI; do not fake availability |
 | Android Keystore unwrap fails/invalidated | fail established profile identity unlock; never silently generate new PeerId |
 | Android `stay-reachable + user-presence` restarts without local authentication | keep endpoint/network offline; expose `background_restart_requires_user_authentication=true`; never weaken unlock policy automatically |
-| Android system/device-transfer restore lacks valid local Keystore identity | enter unconfigured/recovery-required onboarding; do not accept a wrapped blob/history/config fragment as identity recovery and do not silently create a replacement PeerId |
-| Android network changes | invalidate direct evidence/affected paths; rebind/reconcile relays/Kademlia; preserve identity/config/history |
+| Android system/device-transfer restore lacks valid local Keystore identity | enter unconfigured/recovery-required onboarding; do not accept a wrapped blob/human-store/config fragment as identity recovery and do not silently create a replacement PeerId |
+| Android network changes | invalidate direct evidence/affected paths; rebind/reconcile relays/Kademlia; preserve identity/config and ADR-0044 retention state |
 | AutoNAT server request target mismatches observed source IP | reject probe before dial; record bounded policy failure |
 | Identify-learned infrastructure disabled | ignore as candidate; no health failure if static target is satisfied |
 | DCUtR adds stable direct path | emit PeerPathChanged, not a duplicate logical PeerConnected |

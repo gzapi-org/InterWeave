@@ -20,7 +20,7 @@ The same PeerId/recovery phrase works across platforms. Android gains materially
 
 ## Security implications
 
-Keystore/ciphertext failure is fail-closed. User-presence mode intentionally sacrifices unattended restart. Phrase theft remains full identity compromise. Android phrase screens use secure-window protection, an in-app BIP-39 picker and no clipboard path. Standard-v1 Android system backup/device-transfer excludes identity/recovery/configuration and human-history state rather than treating platform backup as recovery.
+Keystore/ciphertext failure is fail-closed. User-presence mode intentionally sacrifices unattended restart. Phrase theft remains full identity compromise. Android phrase screens use secure-window protection, an in-app BIP-39 picker and no clipboard path. Standard-v1 Android system backup/device-transfer excludes identity/recovery/configuration and the entire human-store rather than treating platform backup as recovery. Any future explicit message backup follows ADR-0044 and includes only inbound unread/receiver-kept content.
 
 ## Operational implications
 

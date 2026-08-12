@@ -28,7 +28,7 @@ Normative details and fixtures are in `contracts/IDENTITY-RECOVERY.md`.
 
 `transportctl identity verify` is a read-only offline drill: decode phrase, derive PeerId, compare to expected public metadata, discard secret material, and perform no private-key write/profile mutation/network activity.
 
-The phrase recovers **identity only**. Complete profile disaster recovery additionally requires a backup of `config.yaml` for trust allowlists, endpoints/default route, discovery/Kademlia/bootstrap settings, desired channels, and local policy. Runtime caches, leases, dedup state, messages, and human-application history are not restored by the transport phrase.
+The phrase recovers **identity only**. Complete profile disaster recovery additionally requires a backup of `config.yaml` for trust allowlists, endpoints/default route, discovery/Kademlia/bootstrap settings, desired channels, and local policy. Runtime caches, leases, dedup state, transport messages, and human-application retention state are not restored by the transport phrase. Human message backup, if later implemented, follows ADR-0044 separately.
 
 ## Alternatives considered
 

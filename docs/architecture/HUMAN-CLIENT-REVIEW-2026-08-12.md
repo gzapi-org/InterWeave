@@ -34,7 +34,7 @@ Closed. A successful hole punch does not emit a second logical `PeerConnected` f
 - Android stay-reachable mode is user-visible/user-opt-in; no hidden FCM/cloud wake-up dependency;
 - Android wraps the exact portable Ed25519 seed with an Android-Keystore AES-GCM key;
 - desktop and Android devices use distinct PeerIds when concurrently active;
-- application SQLite/history and HumanChatV1 remain above transport.
+- application HumanChatV1 and ADR-0044 retention state remain above transport; there is no conventional permanent message history.
 
 ## W-review closure
 
@@ -44,7 +44,7 @@ Closed. Recovery display/import uses secure-window protection for the full sensi
 
 ### W2 — Android Auto Backup/device transfer
 
-Closed. Standard-v1 Android packaging does not use system backup as recovery. Application backup is explicitly disabled and Android 12+ data-extraction plus supported pre-12 backup rules explicitly exclude the wrapped identity envelope, transport/trust configuration, recovery temporary state and human SQLite database from cloud backup and device transfer. A future history backup/sync is a separate opt-in application-security design.
+Closed. Standard-v1 Android packaging does not use system backup as recovery. Application backup is explicitly disabled and Android 12+ data-extraction plus supported pre-12 backup rules explicitly exclude the wrapped identity envelope, transport/trust configuration, recovery temporary state and human SQLite database from cloud backup and device transfer. A future explicit encrypted message backup is a separate opt-in application-security design and, per ADR-0044, may include only unread/receiver-kept inbound content; pending outbound is excluded.
 
 ### W3 — user-presence + stay-reachable
 
@@ -57,3 +57,8 @@ Closed. Resource-limit documentation now distinguishes daemon-IPC-only rows from
 ### W5 — HumanChatV1 fixture precision
 
 Closed. `app_message_id` and `reply_to` are exactly 16-byte IDs rendered as 32 lowercase hex characters; `sent_at_ms` is bounded to `0..253402300799999` and remains diagnostic only; unknown `reply_to` is valid and renders without network lookup or rejection.
+
+
+## Post-review retention amendment — ADR-0044
+
+The first-party human store no longer persists general chat history. Durable message content is limited to pending outbound, unread inbound, and inbound messages the receiver explicitly keeps after reading. Direct `AcceptedV2` / successful broadcast publication removes pending outbound durability; local read without Keep removes inbound durability. Android system backup still excludes the complete human-store. A future explicit encrypted message backup may include only unread/receiver-kept inbound content and excludes pending outbound to avoid restored-device replay.

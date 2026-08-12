@@ -13,8 +13,8 @@ A human-facing client is an **application above transport**. Desktop/TUI/CLI use
 - its local data-plane session claims/owns one configured EndpointId such as `human` (IPC connection on desktop; embedded service session on Android);
 - it uses the same generic `join`, `leave`, `broadcast`, `send`, endpoint-directory query, identity/status, and event contracts as other local consumers; its data-plane kind receives `endpoints.query` by default when directory support is enabled, while Claude Channel does not;
 - the human **UI/domain layer** does not own libp2p policy or private-key handling. Desktop delegates those to the daemon; Android packages the same Rust runtime/key owner in the foreground-service host below the UI;
-- contacts, display names, avatars, verification state, conversation models, unread state, reactions, attachment UX, and persisted local history are application-level data above transport;
-- application-local history may persist messages actually sent/received by the client, but does not create transport offline delivery or a daemon mailbox;
+- contacts, display names, avatars, verification state, conversation models, unread state, reactions, attachment UX, and the narrowly scoped message-retention state from ADR-0044 are application-level data above transport;
+- the human app does **not** keep a conventional permanent chat history: durable message content is limited to pending outbound, unread inbound, and inbound messages explicitly kept by the receiver after reading; this does not create transport offline delivery or a daemon mailbox;
 - trust mutation, endpoint configuration, discovery/bootstrap administration, and shutdown require the platform admin binding (desktop admin socket; Android `LocalAdminPort`); identity backup/restore remains a stopped-runtime/offline identity path. A data-plane session can never self-upgrade to admin authority;
 - network message content can never automatically invoke those administrative capabilities;
 - the human UI must display EndpointId as a remote peer-controlled route label unless a higher-level application identity system separately verifies a stronger binding.
@@ -29,7 +29,7 @@ Embed a separate independent rust-libp2p stack in the human UI; give the human c
 
 On desktop, human and Claude clients can share connections, discovery state, trust policy, and one persistent network identity while receiving deterministic direct traffic through different EndpointIds. On Android, the human app owns its device profile/runtime; concurrently active devices use distinct PeerIds per ADR-0043. Activity restart does not rotate PeerId; service/process restart rebuilds network state using the same profile key. A human application may evolve its presentation/data model independently from the transport protocol.
 
-The transport does not provide human-specific durable history, social identity, read receipts, typing indicators, group membership, or attachment storage. Those features require an application protocol/storage layer if later desired.
+The transport does not provide human-specific durable history, social identity, read receipts, typing indicators, group membership, or attachment storage. ADR-0044 defines only application-side survival states, not a durable network/history service. Any broader history feature requires a new application protocol/storage decision.
 
 ## Security implications
 

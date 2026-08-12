@@ -11,7 +11,7 @@
 | endpoint directory leaks presence | trust-gated, opt-in, active-only, max32, no labels | disable directory or add privacy scheme |
 | default endpoint misroutes traffic | explicit config, validation, Accepted returns resolved endpoint | operator UI warnings/audit |
 | endpoint route offline usability | no mailbox, no_route | higher-layer durable protocol only if intentionally designed |
-| human app history confused with transport durability | explicit application-layer boundary | UI/docs/tests must distinguish |
+| human app retention confused with transport durability | ADR-0044 application-only pending/unread/kept states | UI/docs/tests distinguish app survival from network acceptance/replay |
 | IPC max-payload regression | fixed 128 KiB + max endpoint fixtures | compatibility review on metadata growth |
 | GossipSub cross-publisher message-ID suppression | frozen source+wire-sequence `GossipSubMessageIdV1`; verify authenticity-before-valid-cache ordering | Phase-2 fixture; compatibility ADR if mapping ever changes |
 | GossipSub plaintext/trust asymmetry | existing boundaries/ADR-0029 | group security/membership project if required |
@@ -38,5 +38,5 @@
 - Mobile Kademlia/relay/mDNS battery usage requires tuning inside fixed protocol/security bounds, not disabling validation/trust controls.
 
 - Android recovery UI can expose the full transport private key through screenshots/recents/IME/clipboard if platform bindings regress; secure-window + in-app mnemonic picker + no-clipboard rules are release-tested under SPIKE-008/009.
-- Android system backup/device transfer can create privacy leakage or unusable half-restores if sensitive/app-history state is included; standard v1 disables system backup and explicitly excludes identity/config/history from cloud and D2D extraction.
+- Android system backup/device transfer can create privacy leakage or unusable half-restores if sensitive/app state is included; standard v1 disables system backup and excludes identity/config/human-store from cloud and D2D extraction. Any future explicit message backup includes only unread/receiver-kept inbound content, never pending outbound.
 - `stay-reachable + user-presence` cannot automatically recover after process death; the mandatory diagnostic/UI copy prevents availability overclaiming.

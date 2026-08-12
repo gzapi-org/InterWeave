@@ -169,3 +169,32 @@ Android Service/Connectivity/Keystore callbacks -> platform adapter -> normalize
 ```
 
 Remote network messages never flow into the Android `LocalAdminPort`. Activity lifecycle is not network identity lifecycle while the foreground service remains active.
+
+
+## Human application retention flow (ADR-0044)
+
+This flow is above `LocalDataSession`; it does not change `AcceptedV2`.
+
+### Outbound
+
+```text
+Human UI Send
+  -> human-store commit pending_outbound
+  -> LocalDataSession send/broadcast
+       direct AcceptedV2 ---------> delete durable pending copy
+       broadcast publish success -> delete durable pending copy
+       failure/timeout/no_route --> keep pending for local retry/cancel policy
+```
+
+### Inbound
+
+```text
+LocalDataSession MessageReceived
+  -> human-store commit unread_inbound
+  -> normal UI/notification presentation
+  -> local read
+       +-- receiver Keep --> kept_inbound remains durable
+       `-- no Keep -------> durable message content deleted; RAM-only until session exit
+```
+
+`Keep` is local receiver authority only. No network payload or endpoint label can request it. Transport-terminal outbound and read-unkept inbound are never reconstructed on restart.

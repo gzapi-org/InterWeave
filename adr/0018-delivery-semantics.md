@@ -26,7 +26,7 @@ Replay/duplicates are mitigated only within bounded windows. Endpoint acceptance
 
 ## Operational implications
 
-Diagnostics expose failures/drops/no-route/empty meshes. Human UI may persist messages it actually receives without changing network guarantees.
+Diagnostics expose failures/drops/no-route/empty meshes. ADR-0044 permits narrowly scoped human-application retention without changing network guarantees: pending outbound, unread inbound, and receiver-kept inbound only.
 
 ## Implementation implications
 

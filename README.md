@@ -51,14 +51,14 @@ Network side on both:
 - Relay/AutoNAT infrastructure can be authorized through `transport.connectivity.infrastructure.allowed_peers` without entering application `trust.allowed_peers`; ADR-0036 prevents that control-plane connection from gaining GossipSub/direct/endpoint/Kademlia authority.
 - Discovery only produces candidate reachability and bounded protocol observations. Data-plane connection admission remains trust-gated, including behavior-originated Kademlia dials through the root dial admission policy.
 - Noise secures each admitted libp2p connection. GossipSub validation distinguishes objective invalidity (`Reject`) from valid-but-locally-unauthorized publishers (`Ignore`). Group/application E2EE remains outside v1/v2 transport.
-- Delivery remains realtime/best-effort, bounded, non-durable, with no exactly-once claim or offline mailbox. A human client may persist its own local history above the transport, but `TransportRuntime` never queues messages for an offline endpoint.
+- Delivery remains realtime/best-effort, bounded, with no exactly-once transport claim or offline mailbox. Per ADR-0044, the first-party human app persists only pending outbound, unread inbound, and inbound messages explicitly kept by the receiver after reading; ordinary transport-terminal/read-unkept history evaporates. `TransportRuntime` itself never queues messages for an offline endpoint.
 - IPC v2 retains the 128 KiB JSON-body ceiling so every legal 48 KiB payload fits with endpoint metadata after base64url/JSON expansion. Data-plane and administrative IPC use separate sockets; the data socket can never grant `admin.*` based on a claimed client kind.
 - GossipSub mesh duplicate identity is frozen to a SHA-256 mapping over signed publisher PeerId + GossipSub wire sequence number, preventing cross-publisher suppression without coupling mesh identity to the application envelope ID.
 - Internet listeners bound unauthenticated pre-Noise handshakes and trusted-peer direct ingress; dial failure/backoff is address-scoped where appropriate so a poisoned address cannot suppress a known-good trusted route.
 
 ## Human client Model B
 
-The first-party human client uses a shared Rust core and Slint UI. Desktop is an IPC v2 consumer of the shared daemon and can share that PeerId with Claude via a separate EndpointId. Android embeds the same Rust runtime behind the neutral local-session contract rather than launching a standalone daemon. Android recovery uses a secure-window, in-app mnemonic picker with no clipboard path, and standard-v1 Android system backup/device transfer excludes identity/configuration and human-history state. Concurrent physical devices use distinct PeerIds.
+The first-party human client uses a shared Rust core and Slint UI. Desktop is an IPC v2 consumer of the shared daemon and can share that PeerId with Claude via a separate EndpointId. Android embeds the same Rust runtime behind the neutral local-session contract rather than launching a standalone daemon. Message content is ephemeral by default: pending outbound and unread inbound survive locally, while read inbound survives only after the receiver explicitly chooses Keep. Android recovery uses a secure-window, in-app mnemonic picker with no clipboard path, and standard-v1 Android system backup/device transfer excludes identity/configuration and human-store state. Concurrent physical devices use distinct PeerIds.
 
 See:
 
@@ -68,6 +68,8 @@ See:
 - [Android human client](docs/architecture/human-client-android.md)
 - [Android key custody](docs/architecture/android-key-custody.md)
 - [Human-client UI/interaction design](docs/architecture/human-client-ui.md)
+- [Human message retention contract](clients/human/RETENTION.md)
+- [ADR-0044 human message retention](adr/0044-human-message-retention.md)
 - [Human-client platform packaging](docs/architecture/human-client-packaging.md)
 - [Local client session contract](contracts/LOCAL-CLIENT.md)
 - [Endpoint contract](contracts/ENDPOINTS.md)
@@ -94,6 +96,7 @@ See:
 - [Implementation plan](roadmap/IMPLEMENTATION-PLAN.md)
 - [Final architecture review](docs/architecture/FINAL-REVIEW.md)
 - [Adversarial security review closure](docs/architecture/SECURITY-REVIEW-2026-08-12.md)
+- [Human message-retention amendment review](docs/architecture/MESSAGE-RETENTION-REVIEW-2026-08-12.md)
 
 ## Source snapshot
 

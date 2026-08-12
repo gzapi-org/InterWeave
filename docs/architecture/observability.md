@@ -117,3 +117,19 @@ Logs must not include private keys, recovery phrases, application payloads, or u
 Normalized application-visible status may include `local_runtime_mode = daemon-ipc | embedded-android`, `endpoint_online`, and Android `availability_mode/status` without exposing secrets. Android diagnostics may report foreground-service state, current network class, Keystore protection class (`software|tee|strongbox|unknown`), and last network-rebuild reason. They must never log Ed25519 seed/recovery words/Keystore plaintext.
 
 Connectivity metrics additionally distinguish `peer_path_changes_total{from,to,reason}`. AutoNAT server diagnostics count target-policy rejections without logging arbitrary attacker-supplied internal addresses. Relayed pre-auth accounting attributes buckets to relay PeerId/connection when original source IP is unavailable.
+
+
+## Human retention observability
+
+First-party human-client diagnostics may expose **counts/bytes/state only**, never message bodies:
+
+```text
+human_store_health{healthy|degraded|unavailable}
+pending_outbound_count
+unread_inbound_count
+kept_inbound_count
+human_store_bytes
+human_retention_delete_total{terminal_outbound|read_unkept|keep_removed}
+```
+
+A storage-full/corrupt condition is application health, not transport delivery success. If unread durability cannot be maintained, the human client reports degraded/unavailable, releases/disables its direct EndpointId, and suspends local human broadcast joins/delivery until the store is writable again. Profile-level desired channels may remain subscribed without a human local consumer. Logs/metrics must not contain HumanChat payload text or receiver Keep choices tied to content beyond bounded aggregate counters.

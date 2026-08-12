@@ -71,12 +71,12 @@ Contact {
 Conversation {
   peer_id,
   endpoint_id,
-  local history,
+  local retention state,
   unread/read UI state,
 }
 ```
 
-The human client may persist conversation history it actually receives/sends. That database is application state and must not be confused with transport durability: peers sending while endpoint `human` is offline receive `no_route`; the daemon provides no offline mailbox.
+The human client persists message content only under ADR-0044: pending outbound, unread inbound, and inbound messages explicitly kept by the receiver after reading. Transport-terminal outbound and read-unkept inbound are RAM-only current-session content. This database is application state and must not be confused with transport durability: peers sending while endpoint `human` is offline receive `no_route`; the daemon provides no offline mailbox.
 
 ## Direct conversation flow
 
@@ -266,7 +266,7 @@ endpoints:
 - endpoint directory shows only active advertised routes;
 - human endpoint restart does not rotate PeerId;
 - offline endpoint creates no daemon-side backlog;
-- human app can persist local history without changing transport delivery claims;
+- human app can persist local retention state without changing transport delivery claims;
 - admin actions require the platform admin binding (desktop admin socket; Android `LocalAdminPort`) and explicit local action;
 - broadcast delivery still follows each client's join state;
 - endpoint names never become asserted person/application identities in transport diagnostics or UI security indicators.

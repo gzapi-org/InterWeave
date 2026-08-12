@@ -84,6 +84,6 @@ These limits share the root connection/dial budget; reachability behaviours do n
 
 ## Human/mobile resource profile
 
-Human application SQLite/history has application-level retention limits and is not part of transport resource ceilings. Android uses the same network hard ceilings; server roles are disabled, Kademlia is client-only, and mobile timer/query defaults may be lower-power within the frozen ranges. Android mDNS multicast resources are acquired only while the provider is active.
+Human application SQLite retention (`pending_outbound`, `unread_inbound`, `kept_inbound`) is application-level state and is not part of transport resource ceilings. It must still be bounded by application storage quotas; exhaustion is surfaced as human-store degradation rather than silently violating unread durability. Android uses the same network hard ceilings; server roles are disabled, Kademlia is client-only, and mobile timer/query defaults may be lower-power within the frozen ranges. Android mDNS multicast resources are acquired only while the provider is active.
 
 The embedded Android LocalDataSession uses the same default local event queue (256) and endpoint/direct admission limits as a desktop IPC data client; removing serialization does not justify an unbounded in-process queue.

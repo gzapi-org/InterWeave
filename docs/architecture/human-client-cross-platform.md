@@ -50,7 +50,7 @@ android-platform-bridge/    # tiny OS glue surface only; no domain/network logic
 
 ## Human application state
 
-The human client owns application state independently from transport:
+The human client owns application state independently from transport. Message content follows ADR-0044 rather than a permanent history model:
 
 ```text
 Contact
@@ -58,24 +58,20 @@ Contact
   local display name/avatar
   device routes[] -> {peer_id, endpoint_id, local label, verification notes}
 
-Conversation
+ConversationIndex
   conversation_id
   route -> {peer_id, endpoint_id}
-  local message history
-  unread/read state
-  draft state
+  unread count / last activity
 
-ObservedMessage
-  application message id
-  transport message id
-  remote peer
-  remote endpoint when direct
-  channel when broadcast
-  received/sent time
-  application payload/render state
+PendingOutbound        # durable until transport-terminal
+UnreadInbound          # durable until read
+KeptInbound            # durable only after receiver Keep post-read
+CurrentSessionMessage  # RAM-only terminal/read-unkept rendering
 ```
 
 Transport keys, trust configuration, Kademlia state, relay reservations, EndpointId leases, and remote endpoint-directory caches never live in the human application database.
+
+The same retention state machine is implemented on desktop and Android: pending outbound and unread inbound survive restart; inbound read without receiver Keep and transport-terminal outbound evaporate. A future portable message backup may contain only unread/kept inbound content, never pending outbound.
 
 ## First-party chat envelope
 
@@ -104,11 +100,11 @@ The human contact model may locally group several device routes under one person
 
 ## Cross-platform acceptance criteria
 
-- same `human-core` validation/storage semantics on desktop and Android;
+- same `human-core` validation/storage/ADR-0044 retention semantics on desktop and Android;
 - same network wire fixtures on both platforms;
 - direct source endpoint is session-derived in both deployment modes;
 - human UI can send/receive direct and broadcast traffic without libp2p concepts;
-- platform process/lifecycle loss never creates hidden transport durability;
+- platform process/lifecycle loss never creates hidden transport durability; only ADR-0044 application retention survives;
 - recovery/config separation remains unchanged;
 - desktop and Android can exchange `HumanChatV1` text using ordinary DirectMessageV2/GossipSub payloads.
 
@@ -120,3 +116,4 @@ The human contact model may locally group several device routes under one person
 - Android binding: [`human-client-android.md`](./human-client-android.md)
 - human application state: [`../../clients/human/STATE.md`](../../clients/human/STATE.md)
 - HumanChatV1: [`../../clients/human/HUMAN-CHAT.md`](../../clients/human/HUMAN-CHAT.md)
+- message retention: [`../../clients/human/RETENTION.md`](../../clients/human/RETENTION.md)

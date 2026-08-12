@@ -39,7 +39,7 @@ The major evolution since the original prompt is deliberate and transport-generi
 | recovery changes PeerId? | **No** | ADR-0033 encodes exact 32-byte Ed25519 secret and verifies expected PeerId |
 | daemon/Claude/human lifecycle coupled? | **No** | desktop endpoint leases are daemon/IPC runtime; Android endpoint lease follows foreground-service session; PeerId survives ordinary UI restart |
 | human admin actions can be triggered by network payload automatically? | **No by architecture** | admin authority is exposed only through the platform admin binding (desktop admin socket; Android LocalAdminPort); explicit local action required |
-| hidden persistent message state? | **No** | app-local human history is outside transport and only stores observed content |
+| hidden persistent message state? | **Closed/explicit** | transport has none; ADR-0044 limits first-party human durable content to pending outbound, unread inbound, and receiver-kept-after-read inbound |
 | mandatory Internet reachability complete? | **Yes on paper; spike required** | ADR-0035 + AutoNAT-v2/Relay-v2/DCUtR state machine, path policy, limits and release tests |
 | relay/probe infrastructure accidentally gains application trust? | **No by architecture** | ADR-0036 protocol-scoped connection class; data-plane protocols explicitly denied |
 
@@ -60,7 +60,7 @@ The major evolution since the original prompt is deliberate and transport-generi
 13. Direct reply binds exact remote source endpoint and local lease epoch.
 14. Endpoint directory is optional, trust-gated, active/opt-in, identity-agnostic, and bounded.
 15. Human client remains above transport semantics: desktop is an IPC v2 endpoint consumer; Android embeds the same Rust TransportRuntime behind LOCAL-CLIENT rather than a second/independent libp2p stack (ADR-0032/0040/0041).
-16. Human contacts/display/history are application state above transport.
+16. Human contacts/display/retention are application state above transport; message content is durable only in ADR-0044 pending-outbound, unread-inbound, or receiver-kept-after-read states.
 17. Broadcast remains per-client join state; desired channels are mesh pre-warm only.
 18. No persistent offline network/endpoint/Claude/human delivery store exists.
 19. Static PeerId trust still gates ordinary data-plane connections, direct peers, and source admission.
@@ -85,6 +85,7 @@ The major evolution since the original prompt is deliberate and transport-generi
 38. AutoNAT server dial-back is source-IP restricted; Identify infrastructure candidates default off; DCUtR upgrades emit PeerPathChanged rather than duplicate PeerConnected.
 39. First-party human UI never upgrades transport acceptance into read/seen semantics and never treats display names, EndpointIds, or contact grouping as authenticated human identity.
 40. Desktop packaging preserves three roles (`human-desktop`, `transport-daemon`, `transportctl`); Android bundles UI/runtime in one application/service lifecycle while preserving the same network and local-session contracts.
+41. Human message retention is application-scoped and ephemeral-by-default: pending outbound + unread inbound survive locally; inbound survives after read only when the receiver explicitly chooses Keep; transport-terminal outbound/read-unkept content evaporates (ADR-0044).
 
 ## Accepted limitations
 
@@ -99,7 +100,7 @@ The major evolution since the original prompt is deliberate and transport-generi
 - no guarantee that every NAT permits a direct DCUtR path; standard v1 nevertheless requires relay fallback, and loss of all authorized relays can still isolate an inbound-private peer;
 - relay/probe operators can observe connectivity metadata and deny service; the system is not an anonymity network;
 - default-on Kademlia increases ordinary metadata/topology/privacy exposure and therefore makes SPIKE-003/conformance/security a standard-v1 release gate;
-- a human client can persist local history but cannot recover messages never accepted while it was offline; Android process/service absence is therefore real offline state;
+- a human client persists only pending outbound, unread inbound, and receiver-kept inbound; it cannot recover messages never accepted while it was offline, so Android process/service absence remains real offline state;
 - the BIP-39-derived recovery UX has only an 8-bit mnemonic checksum, so expected-PeerId backup metadata is the stronger restore check;
 - recovery phrase theft is full PeerId private-key compromise.
 - v1 has no authenticated human-account identity or cross-device history synchronization; contacts may group several device PeerIds only as local application metadata.
