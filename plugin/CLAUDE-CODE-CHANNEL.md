@@ -99,3 +99,8 @@ If daemon is unavailable, bridge remains a functioning MCP server where possible
 On reconnect it performs a fresh endpoint claim and fresh channel joins. Endpoint lease loss means no direct-message replay and no stale reply-token recovery.
 
 It never silently starts a second identity/daemon unless explicit launch policy says it owns that profile service.
+
+
+## Connectivity status
+
+The bridge may expose the daemon's backend-neutral `ConnectivitySummary` through its existing `status` tool. It does not expose AutoNAT probes, relay reservations, hole-punch commands, or infrastructure authorization as Claude tools. Those are daemon connectivity/administrative concerns.

@@ -44,3 +44,8 @@ On overflow, evict expired then least-recently-observed untrusted candidates; co
 Kademlia is unusual because the actual `libp2p::kad::Behaviour` must live inside the single Swarm owner. `KademliaDiscovery` therefore owns only scheduling/normalization/health and communicates with a Kademlia driver inside `transport-libp2p` through a bounded internal handle. This does not change the generic DiscoveryProvider contract and does not give the provider Swarm ownership.
 
 See [../docs/architecture/kademlia-integration.md](../docs/architecture/kademlia-integration.md).
+
+
+## Connectivity-infrastructure boundary
+
+Phase-9 relay/AutoNAT service authorization is **not peer discovery and not application trust**. Discovery providers may contribute ordinary address/protocol observations, but they do not add PeerIds to `transport.connectivity.infrastructure.allowed_peers`, create relay reservations, run AutoNAT probes, or initiate DCUtR. Those responsibilities stay in the libp2p connectivity/connection layer.

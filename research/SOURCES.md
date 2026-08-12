@@ -78,3 +78,14 @@ The 2026-08 research snapshot observed the `libp2p` crate documentation at the 0
 ## Source interpretation rule
 
 This repository records architectural conclusions, not copied implementation. Source-specific behavior is paraphrased. Where behavior is version-sensitive, the document labels it as a research snapshot or creates a spike/revisit condition.
+
+
+### Mandatory Internet reachability / Phase 9
+
+- rust-libp2p AutoNAT module and v2 client/server API: https://docs.rs/libp2p/latest/libp2p/autonat/ and https://docs.rs/libp2p/latest/libp2p/autonat/v2/
+- rust-libp2p Circuit Relay v2 client/server API: https://docs.rs/libp2p/latest/libp2p/relay/
+- rust-libp2p DCUtR behaviour: https://docs.rs/libp2p/latest/libp2p/dcutr/
+- rust-libp2p Identify behavior/integration note: https://docs.rs/libp2p/latest/libp2p/identify/
+- libp2p Circuit Relay concept/security model: https://docs.libp2p.io/concepts/circuit-relay/
+
+Material design consequences are summarized in `research/nat-traversal.md`.

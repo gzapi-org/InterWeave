@@ -77,7 +77,26 @@ Do not use raw EndpointIds as unbounded metric labels. Per-endpoint detail belon
 
 ## Kademlia diagnostics
 
-Existing optional Kademlia diagnostics remain. Endpoint IDs and endpoint-directory data are not DHT diagnostics and must not be inserted into Kademlia records/labels.
+Kademlia diagnostics are part of the standard configured v1 posture when the default-enabled provider is present. Endpoint IDs and endpoint-directory data are not DHT diagnostics and must not be inserted into Kademlia records/labels.
 
 
 Identity observability may expose algorithm, PeerId, key-file health, and whether an offline backup has been operator-acknowledged **only if that acknowledgement is non-secret state**. It must never expose recovery words, raw secret bytes, or phrase-derived material.
+
+
+## Mandatory reachability observability
+
+Expose backend-neutral connectivity state through `Transport::connectivity()`, ordinary status IPC, and `ConnectivityChanged`. Raw infrastructure details remain admin/diagnostic data.
+
+Minimum structured state/metrics:
+
+- `direct_inbound_state{unknown|verified_public|not_verified}`;
+- `autonat_probes_total{outcome}` and distinct current successful observers;
+- `relay_reservations_active` and `relay_reservation_target`;
+- `relay_reservation_events_total{outcome}`;
+- `relayed_peer_paths_active`;
+- `dcutr_attempts_total{outcome}` and `dcutr_inflight`;
+- `dial_attempts_total{origin}` including `autonat-probe`, `relay-reservation`, `relay-circuit`, `dcutr-hole-punch`;
+- `connectivity_protocol_denied_total{protocol,class}`;
+- relay-server reservations/circuits/bytes/rate-limit utilization when the server role is enabled.
+
+Logs must not include private keys, recovery phrases, application payloads, or unredacted endpoint/application metadata by default. Relay/probe PeerIds and addresses may be operationally sensitive and follow the configured diagnostic-redaction policy.

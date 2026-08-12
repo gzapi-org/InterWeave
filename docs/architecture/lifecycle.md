@@ -46,7 +46,7 @@ Administrative settings use a separately capability-authorized IPC connection; n
 2. acquire profile lock;
 3. securely load/generate identity key;
 4. bind owner-protected IPC endpoint;
-5. start libp2p backend/listeners including direct v2 and optional endpoint-directory behavior;
+5. start libp2p backend/listeners including direct v2, optional endpoint-directory behavior, mandatory AutoNAT-v2 client, Circuit Relay-v2 client, and DCUtR;
 6. start discovery providers independently;
 7. begin trust-gated ConnectionManager reconciliation;
 8. accept IPC clients, grant capabilities, and establish exclusive endpoint leases;
@@ -64,3 +64,19 @@ Administrative settings use a separately capability-authorized IPC connection; n
 ## Optional Kademlia lifecycle
 
 Unchanged by Model B. Kademlia remains disabled unless explicitly enabled on a supporting build. Endpoint records are never placed in the DHT.
+
+
+## Mandatory reachability lifecycle
+
+At daemon startup, after identity/listeners and authorization policy are loaded:
+
+1. initialize Identify and the address registry;
+2. start AutoNAT v2 client and schedule bounded probes against authorized service peers;
+3. start relay client and acquire the configured reservation target;
+4. publish only verified direct and active relay-derived listen addresses;
+5. start DCUtR manager for trusted peers that currently use relayed paths;
+6. emit `ConnectivityChanged` whenever the normalized state changes.
+
+A network-interface change invalidates affected direct evidence and relay-derived address assumptions, then re-enters bounded probe/reservation reconciliation without changing PeerId or EndpointId leases.
+
+Shutdown stops new probes/reservations/hole punches, withdraws relay-derived addresses, drains bounded active work according to the global grace policy, and then closes Swarm/listeners. No reachability state is treated as durable truth across restart.

@@ -76,3 +76,19 @@ Transport does not rely on topic-name secrecy. Trusted forwarding peers can read
 ## Kademlia-specific threat treatment
 
 Kademlia is enabled by default for configured entries in the standard v1 build. Therefore poisoning/Sybil/eclipse/bootstrap/namespace/record-store/query-privacy mitigations are part of the normal threat posture, not an optional-feature posture. Explicit `enabled: false` remains available for profiles that opt out. Endpoint IDs and endpoint presence are never written into Kademlia provider/value records; endpoint discovery stays on the separate trust-gated direct endpoint-directory protocol.
+
+
+## Mandatory Internet reachability threat boundary
+
+Phase 9 introduces infrastructure that affects availability and metadata but does not become application trust. ADR-0036 defines a separate connectivity-infrastructure class.
+
+| Threat | Attack | Mitigation | Residual risk |
+|---|---|---|---|
+| malicious/compromised relay | drop/delay circuits; correlate PeerIds, timing, relay use | Noise-authenticated end-to-end peer connection through relay; redundant authorized relays; relay never grants application trust | relay still observes connection metadata and can deny service |
+| malicious AutoNAT observer | lie about reachability or selectively fail probes | require recent successful evidence from multiple distinct authorized probe servers; evidence expires; retain relay fallback | colluding observers can bias reachability classification |
+| infrastructure privilege escalation | relay/probe PeerId tries GossipSub/direct/endpoint/Kademlia | protocol-scoped connection class; root dial admission; GossipSub exclusion; direct/endpoint/Kademlia admission checks | implementation bug in shared Swarm policy remains security-critical |
+| relay exhaustion / abusive reservations | consume relay capacity/circuit bandwidth | bounded reservations/circuits, per-peer/global quotas, duration/byte caps and rate limits | sufficiently large distributed abuse can still cause denial of service |
+| hole-punch abuse | trigger repeated dials/address probing | trusted application destination only, global/per-peer DCUtR bounds, cooldown, root dial admission | peers learn candidate network addresses required for connectivity |
+| stale relay address advertisement | peers dial expired reservation | advertise only active reservations; remove immediately on reservation loss; normal retry/address merge | distributed caches may retain stale addresses temporarily |
+
+The system does **not** promise anonymous routing, universal direct hole-punch success, or availability when every authorized relay/probe service is unreachable. Relay transport preserves authenticated encrypted peer sessions but does not hide PeerIds or traffic timing from relay operators.

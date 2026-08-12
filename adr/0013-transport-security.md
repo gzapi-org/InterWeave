@@ -33,3 +33,6 @@ Use library defaults compatible with the libp2p spec; do not design a custom Noi
 ## Revisit conditions
 
 Revisit if transport support changes to QUIC/TLS or interoperability requirements demand a different libp2p security protocol.
+
+
+Phase-9 relay paths do not change the authenticated application-peer boundary: the end peers still establish the project's Noise-secured libp2p session across the relayed path. Relay authorization is infrastructure authorization only (ADR-0036), not application trust. Relay operators remain availability/metadata observers and are not anonymity infrastructure.

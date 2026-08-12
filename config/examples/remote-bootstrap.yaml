@@ -2,6 +2,17 @@ schema_version: 2
 profile: { name: remote }
 transport:
   backend: libp2p
+  connectivity:
+    required: true
+    infrastructure: { allowed_peers: [] }
+    autonat:
+      version: 2
+      client: { enabled: true, static_servers: [] }
+      server: { enabled: false }
+    relay:
+      client: { enabled: true, static_relays: [] }
+      server: { enabled: false }
+    dcutr: { enabled: true }
   listen:
     addresses: ["/ip4/0.0.0.0/tcp/4001"]
 identity: {}

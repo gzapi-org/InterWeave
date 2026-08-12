@@ -168,7 +168,7 @@ These tests are a standard-v1 release gate before shipping configured Kademlia e
 5. server-mode peer routing without value/provider records;
 6. behavior-originated dials obey ConnectionManager policy;
 7. small allowlist reaches effective target/saturation and backs off;
-8. server reachability evidence reports documented health without claiming AutoNAT proof;
+8. server-mode health consumes mandatory Phase-9 evidence: AutoNAT-verified direct or active relay reservation is strong; configured/Identify hints remain weak;
 9. trust revocation removes Kademlia routing peer;
 10. unauthorized returned peer cannot pass routing/dial admission;
 11. provider provenance merges without duplicate identity;
@@ -184,3 +184,28 @@ These tests are a standard-v1 release gate before shipping configured Kademlia e
 - PUT_VALUE/ADD_PROVIDER flood creates no record growth;
 - driver event flood preserves Swarm responsiveness;
 - repeated bootstrap failure degrades without restart storm.
+
+
+## Mandatory Phase 9 connectivity tests
+
+These tests are standard-v1 release tests, not optional hardening tests.
+
+1. AutoNAT v2 successful probes from the configured number of distinct authorized servers produce `verified_public`; one stale/expired observer is insufficient.
+2. conflicting/failed evidence cannot advertise an unverified direct public address as verified.
+3. private/not-verified node reaches two active relay reservations by default; verified-public node retains one warm reservation.
+4. reservation loss triggers bounded replacement and removes the expired relay-derived advertised address immediately.
+5. all authorized relays unavailable produces explicit degraded/unavailable relay state without widening authorization.
+6. infrastructure-only peer can carry Identify/AutoNAT/relay control traffic but cannot join GossipSub, direct v2, endpoint directory, or Kademlia routing.
+7. a relayed inbound application connection is accepted/rejected using the end application's PeerId trust, not relay trust.
+8. direct dial wins when available; relay may race only after the configured head-start and remains fallback.
+9. successful DCUtR creates a direct path, observes the stability interval, then retires only redundant relay path; existing streams are not asserted to migrate.
+10. failed DCUtR leaves the relayed path working and enters per-peer cooldown.
+11. global/per-peer dial and connection ceilings apply to AutoNAT/relay/DCUtR behaviour-originated work.
+12. relay server role enforces reservation/circuit/per-peer/duration/byte/pending-control limits when enabled.
+13. AutoNAT server role enforces authorization, concurrency and rate limits when enabled.
+14. network-interface change invalidates affected evidence, refreshes reservations/advertisement and preserves PeerId/EndpointId leases.
+15. Kademlia never inserts connectivity-infrastructure-only peers into routing tables.
+16. Model B direct routing remains identical over direct vs relayed peer paths.
+17. GossipSub delivery remains application-trust-gated over direct and relayed connections.
+18. `ConnectivitySummary` and `ConnectivityChanged` expose normalized state without leaking application payloads or granting control authority.
+19. runtime class changes reconcile GossipSub/Kademlia/application state before privilege change; close/reopen fallback is safe if in-place transition cannot be atomic.

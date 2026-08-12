@@ -456,15 +456,19 @@ A small trust overlay can therefore be fully healthy without pretending it conta
 
 ### Server-mode reachability evidence in v1
 
-AutoNAT is deferred, so server reachability is **not cryptographically or actively verified** in this phase. The provider classifies evidence only:
+Phase 9 is mandatory, so Kademlia server-mode health consumes the backend-neutral reachability state from ADR-0035 rather than inventing a second reachability model. Evidence classes are:
 
-- **declared external evidence:** operator config contains at least one non-wildcard, non-loopback listen/advertised address that is plausibly externally routable (public IP or DNS form); this is operator intent, not proof;
-- **peer-observed evidence:** one or more authenticated trusted peers report a non-loopback/non-private `Identify.observed_addr` for this node; this is stronger observational evidence but still not an inbound probe;
-- **none:** no such evidence.
+- **`autonat_verified_direct`:** `ConnectivitySummary.direct_inbound == verified_public` based on fresh successes from the configured number of distinct authorized AutoNAT-v2 observers; strong evidence;
+- **`active_relay_reservation`:** at least one active advertised Circuit Relay v2 reservation for this profile; strong relayed reachability evidence;
+- **`declared_external`:** operator config contains a plausible externally routable direct address; weak intent/hint only;
+- **`peer_observed`:** authenticated trusted Identify observations suggest an externally routable direct address; weak observational hint only;
+- **`none`:** no evidence.
 
-Server mode with `none` is `degraded` with reason `server_reachability_unverified`. One of the evidence classes removes that specific degradation only if normal routing/query health is otherwise sufficient. The UI/docs must not label either class "AutoNAT verified" or "publicly reachable".
+Server mode with neither strong class is `degraded` with reason `server_reachability_unverified`, even when weak hints exist. Weak hints remain useful diagnostics/candidates but are not promoted to proof. Strong reachability removes only this specific degradation; routing/query health must still be sufficient.
 
-SPIKE-004 compares these evidence classes with actual NAT/relay reachability and decides whether later AutoNAT changes the health model.
+A relay-derived Kademlia address is usable only while its reservation is active and advertised by the shared address registry. Kademlia does not create relay records, discover relays through provider records, or bypass ADR-0036 authorization.
+
+SPIKE-004 validates the exact AutoNAT/relay evidence transition and relay-address usability on the pinned rust-libp2p version.
 
 ### healthy
 
@@ -472,11 +476,11 @@ SPIKE-004 compares these evidence classes with actual NAT/relay reachability and
 - routing population target-satisfied or saturated;
 - bootstrap/closest-peer query succeeded within refresh expectations;
 - timeout/error rate below threshold;
-- if configured server mode, at least declared-external or peer-observed reachability evidence exists.
+- if configured server mode, at least one strong reachability class (`autonat_verified_direct` or `active_relay_reservation`) exists.
 
 ### degraded
 
-Examples: warming toward effective target; successful but not-yet-saturated under-target exploration; intermittent query failure; server mode with no reachability evidence.
+Examples: warming toward effective target; successful but not-yet-saturated under-target exploration; intermittent query failure; server mode without a strong Phase-9 reachability class.
 
 ### unavailable
 

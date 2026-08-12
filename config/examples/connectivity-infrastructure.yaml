@@ -1,0 +1,113 @@
+schema_version: 2
+profile: connectivity-infra-1
+
+transport:
+  listen:
+    - /ip4/0.0.0.0/tcp/4001
+  limits:
+    max_payload_bytes: 49152
+    max_connections_total: 384
+    max_connections_per_peer: 3
+  connectivity:
+    required: true
+    infrastructure:
+      # Clients served by this project-scoped relay/probe deployment are
+      # explicitly authorized; this is illustrative placeholder data.
+      allowed_peers:
+        - 12D3KooWCLIENTPLACEHOLDER111111111111111111111111
+    address_advertisement:
+      advertise_unverified_public_direct: false
+      advertise_active_relay_addresses: true
+    autonat:
+      version: 2
+      client:
+        enabled: true
+        static_servers: []
+        use_authorized_identify_servers: true
+        required_distinct_successes: 2
+        success_evidence_ttl: 15m
+        retry_interval: 30s
+        refresh_interval: 5m
+        max_inflight_probes: 2
+        max_candidate_addresses_per_cycle: 4
+        timeout: 15s
+      server:
+        enabled: true
+        max_concurrent_probes: 8
+        max_probes_per_peer_per_minute: 2
+        max_probes_global_per_minute: 60
+        timeout: 15s
+    relay:
+      client:
+        enabled: true
+        static_relays: []
+        use_authorized_identify_relays: true
+        target_reservations_private_or_unknown: 2
+        target_reservations_public: 1
+        max_reservations: 4
+        retry_min: 5s
+        retry_max: 5m
+        direct_head_start: 750ms
+      server:
+        enabled: true
+        max_reservations: 64
+        max_reservations_per_peer: 1
+        reservation_duration: 1h
+        max_circuits: 128
+        max_circuits_per_peer: 4
+        max_circuit_duration: 1h
+        max_circuit_bytes: 64MiB
+        max_pending_control: 64
+    dcutr:
+      enabled: true
+      max_inflight: 4
+      max_inflight_per_peer: 1
+      retry_cooldown: 5m
+      direct_stability_period: 10s
+
+identity:
+  algorithm: ed25519
+
+trust:
+  policy: static-allowlist
+  allowed_peers: []
+
+endpoints:
+  registration_policy: configured-only
+  directory:
+    enabled: false
+    cache_ttl: 60s
+    max_advertised: 16
+    max_queries_per_minute_per_peer: 12
+    max_inflight_queries: 16
+  entries: []
+
+discovery:
+  providers:
+    - type: peer-cache
+      enabled: true
+      priority: 10
+      config:
+        ttl: 24h
+        max_entries: 4096
+    - type: kademlia
+      enabled: true
+      priority: 40
+      config:
+        network_id: example-private-network
+        mode: client
+        routing_peer_policy: data-plane-trusted
+        record_mode: disabled
+        seed_sources: []
+        kbucket_size: 20
+        target_routing_peers: 64
+        max_routing_peers: 256
+        max_concurrent_queries: 4
+        max_results_per_query: 20
+        random_walk_interval: 60s
+        target_lookup_cooldown: 5m
+        bootstrap_min_interval: 5m
+        bootstrap_refresh_interval: 15m
+
+channels:
+  desired: []

@@ -50,7 +50,7 @@ Instrument the Swarm / behaviour boundary so Kademlia-originated `ToSwarm::Dial`
 - targeted PeerId lookup is scheduled only with fresh advisory evidence that the target previously advertised the exact project Kademlia **server** protocol; it can recover missing addresses where the DHT knows the target, while client-mode nodes are not misrepresented as generally discoverable;
 - cached positive/negative Kademlia protocol observations are superseded by fresh Identify evidence and never grant trust;
 - `Snapshot` command/response returns the specified bounded driver state;
-- server-mode reachability evidence is classified exactly as designed and does not claim AutoNAT verification;
+- server-mode reachability consumes the mandatory normalized Phase-9 evidence: AutoNAT-verified direct or active relay reservation as strong evidence; configured/Identify hints remain weak;
 - record filtering/equivalent prevents value/provider inserts from becoming stored application state;
 - disjoint query paths and multi-seed topologies measurably reduce single-path capture, without claiming Byzantine resistance;
 - 20-node convergence/resource behavior is acceptable with default bounds.
@@ -59,15 +59,27 @@ Instrument the Swarm / behaviour boundary so Kademlia-originated `ToSwarm::Dial`
 
 ---
 
-## SPIKE-004 — NAT/relay deployment matrix
+## SPIKE-004 — mandatory AutoNAT/relay/DCUtR validation
 
-**Objective:** determine which AutoNAT/relay/DCUtR mechanisms target deployments actually require.
+**Objective:** validate and tune the already-selected mandatory Internet-reachability architecture on the exact rust-libp2p version. This spike does **not** decide whether Phase 9 ships.
 
-**Experiment:** defined home NAT, corporate NAT/firewall, public VM, relay-loss scenarios.
+**Experiment:** build a non-production harness covering public VM, home NAT, symmetric/restrictive NAT where available, corporate firewall/proxy-like restrictions, two independent relay/probe services, relay loss/capacity denial, network-interface changes, and trusted vs infrastructure-only peers. Instrument behaviour-originated dials and connection classes. Exercise AutoNAT v2 client/server, Circuit Relay v2 reservations/circuits, DCUtR success/failure, direct-vs-relay racing, address advertisement, and all configured limits.
 
-**Evidence:** inbound/outbound reachability and recovery matrix.
+**Expected evidence:**
 
-**Decision unlocked:** Phase 9 connectivity feature set.
+- AutoNAT-v2 event/address semantics match the pinned crate and multi-observer aggregation yields stable `unknown`/`verified_public`/`not_verified`;
+- probe servers cannot become application data-plane peers merely through infrastructure authorization;
+- private/not-verified peers obtain and refresh the target redundant relay reservations;
+- relay-derived addresses are usable while reservations are active and withdrawn promptly after loss;
+- end application PeerId authentication/trust survives relayed transport and is independent of relay PeerId;
+- direct connection preference and the configured relay race head-start avoid unnecessary relay use without causing unacceptable latency;
+- DCUtR attempts are measurable, bounded, cooled down, preserve relay fallback on failure, and create stable direct paths on success where NATs permit;
+- every AutoNAT/relay/DCUtR behaviour-originated dial is attributable and crosses `DialAdmissionGate`, backoff and total/per-peer limits;
+- relay/AutoNAT server quotas and abuse limits behave as specified when those roles are enabled;
+- network change invalidation/recovery converges without changing PeerId or EndpointId routing;
+- measured relay bandwidth/connection/probe costs fit default resource budgets.
+
+**Decision unlocked:** pin/tune bounded defaults and implementation adapters for the mandatory design. If the selected rust-libp2p release cannot enforce ADR-0035/0036 safely, **block standard-v1 release and supersede the ADRs explicitly**; do not silently make Phase 9 optional.
 
 ---
 

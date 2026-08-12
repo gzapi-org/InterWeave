@@ -24,3 +24,8 @@ This is an architecture/specification repository.
 - Standard v1 includes Kademlia support; configured Kademlia entries default `enabled: true` with explicit opt-out. No EndpointId/channel/application/trust records enter the DHT.
 
 When implementation begins, update ADR status rather than silently contradicting accepted decisions.
+
+
+## Mandatory Internet reachability
+
+Standard v1 includes the ADR-0035 AutoNAT-v2/Circuit-Relay-v2/DCUtR stack. Treat Phase 9 as required release scope. Keep connectivity-infrastructure authorization distinct from application trust per ADR-0036, and do not route application data to infrastructure-only peers.

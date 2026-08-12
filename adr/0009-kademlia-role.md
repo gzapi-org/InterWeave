@@ -53,7 +53,7 @@ Operators need at least one reachable, trusted Kademlia server-mode seed to boot
 
 `enabled: false` remains an explicit opt-out and produces no Kademlia queries or protocol participation. Standard v1 supports Kademlia; a reduced unsupported build fails before transport startup if a Kademlia entry is enabled/default-enabled. When enabled, every named `seed_source` must resolve to a configured enabled provider or configuration fails.
 
-Server-mode reachability health is evidence-based but not AutoNAT-verified in this phase: explicit externally routable configured addresses and peer-observed addresses are diagnostics, not proof of inbound reachability.
+Server-mode reachability health consumes the mandatory Phase-9 connectivity state. `autonat_verified_direct` and an `active_relay_reservation` are strong evidence classes; configured external and trusted-peer Identify-observed addresses remain weak hints, not proof. Server mode degrades when neither strong evidence class is available.
 
 ## Implementation implications
 

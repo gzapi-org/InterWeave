@@ -40,7 +40,7 @@ This matrix is an audit aid, not a replacement for the source task.
 | Channel plugin surface | ADR-0023, `plugin/TOOL-SURFACE.md` |
 | broadcast requires caller join / reply after leave | `TRANSPORT.md`, `CHANNEL-EVENT.md`, ADR-0023 |
 | transport `media_type` -> Claude `content_type` | `CHANNEL-EVENT.md`, `plugin/TOOL-SURFACE.md` |
-| NAT/reachability | ADR-0024, `CONNECTIVITY.md` |
+| Internet reachability / NAT traversal | `contracts/CONNECTIVITY.md`, ADR-0035, ADR-0036, `transport/libp2p/CONNECTIVITY.md`, `AUTONAT.md`, `RELAY.md`, `DCUTR.md`, `research/nat-traversal.md` |
 | ChannelId/topic model | ADR-0025 |
 | backpressure/limits | ADR-0026, `resource-limits.md` |
 | config/state/key/cache separation | ADR-0028, `configuration.md` |

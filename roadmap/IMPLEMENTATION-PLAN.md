@@ -6,9 +6,9 @@ No production implementation belongs in this architecture repository. This roadm
 
 **Objective:** resolve version-sensitive/runtime-sensitive details.
 
-**Deliverables:** SPIKE-001..006 results. SPIKE-002 validates direct v2 endpoint framing/acceptance, endpoint-directory behavior, and concurrent dedup reservation behavior; **SPIKE-003 is a standard-v1 Kademlia release gate**; SPIKE-006 validates the exact Ed25519 recovery portability boundary.
+**Deliverables:** SPIKE-001..006 results. SPIKE-002 validates direct v2 endpoint framing/acceptance, endpoint-directory behavior, and concurrent dedup reservation behavior; **SPIKE-003 is the Kademlia release gate; SPIKE-004 is the mandatory Internet-reachability release/tuning gate**; SPIKE-006 validates the exact Ed25519 recovery portability boundary.
 
-**Acceptance:** exact Claude Channel package contract known; rust-libp2p direct v2 failure/negotiation semantics measured; Kademlia/NAT assumptions measured as separately specified; the exact-key mnemonic recovery boundary is empirically verified before production backup/restore is enabled.
+**Acceptance:** exact Claude Channel package contract known; rust-libp2p direct v2 failure/negotiation semantics measured; Kademlia assumptions measured; mandatory AutoNAT-v2/Relay-v2/DCUtR behavior, dial-origin admission and deployment matrix validated by SPIKE-004; the exact-key mnemonic recovery boundary is empirically verified before production backup/restore is enabled.
 
 ---
 
@@ -30,6 +30,7 @@ No production implementation belongs in this architecture repository. This roadm
 - effective max payload capability is correct;
 - IPC v2 max-payload fixtures with maximum endpoint metadata fit 131072-byte body;
 - Kademlia default-on parsing plus cross-field/seed-source validation passes;
+- mandatory connectivity config parses with AutoNAT-v2/relay-v2/DCUtR fixed on for standard v1; relay target/rate/concurrency cross-field constraints pass; every static probe/relay PeerId is authorized by data-plane trust or connectivity-infrastructure policy;
 - enabled unsupported providers fail startup/config.
 
 ---
@@ -136,8 +137,38 @@ Add service integration, config-v2 migrations, endpoint diagnostics, human/Claud
 
 ---
 
-## Phase 9 — connectivity hardening (conditional)
+## Phase 9 — mandatory Internet reachability
 
-Relay/AutoNAT/DCUtR only as deployment evidence requires.
+**Objective:** make standard v1 usable across consumer/enterprise NATs without weakening PeerId/application trust boundaries.
+
+**Deliverables:**
+
+- AutoNAT v2 client with multi-observer evidence aggregation and optional explicitly configured server role;
+- Circuit Relay v2 client with redundant reservation manager, ephemeral relay-derived listen addresses and optional bounded server role;
+- DCUtR manager with global/per-peer bounds, cooldown and direct-path stability handoff;
+- address registry and normalized `ConnectivitySummary`;
+- root `DialAdmissionGate` coverage for `autonat-probe`, `relay-reservation`, `relay-circuit`, and `dcutr-hole-punch`;
+- connectivity-infrastructure peer authorization from ADR-0036;
+- direct-first/relay-fallback path selection and network-change reconciliation;
+- required diagnostics, metrics, resource limits, security regressions and deployment matrix.
+
+**Acceptance:**
+
+- SPIKE-004 evidence passes on the pinned rust-libp2p version;
+- verified-public classification requires the configured distinct authorized AutoNAT observers and expires correctly;
+- private/not-verified profiles maintain redundant relay reservations and advertise only active relay addresses;
+- loss of one relay fails over; loss of all relays is surfaced without trust widening or hidden broker/storage fallback;
+- relayed application peers are authenticated/authorized by their own PeerId, independent of relay authorization;
+- infrastructure-only peers cannot participate in GossipSub/direct/endpoint/Kademlia data plane;
+- direct-first path racing and DCUtR success/failure behavior match `CONNECTIVITY.md`;
+- behaviour-originated dials obey global/per-peer backoff and connection ceilings;
+- optional relay/AutoNAT server roles enforce all quotas;
+- Model B endpoint/direct semantics are path-independent;
+- standard-v1 release is blocked if these tests fail unless ADR-0035 is explicitly superseded.
+
+**Dependencies:** Phases 1-8 contracts/runtime/security/operations plus SPIKE-004.
+
+**Risks:** relay/provider availability and metadata exposure, NAT diversity, library-version behavior, hole-punch success variability, and extra Swarm resource pressure.
+
 
 ---

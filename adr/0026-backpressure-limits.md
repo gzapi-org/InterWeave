@@ -35,3 +35,6 @@ Use bounded channels/semaphores, fixed directory caps, and bounded direct reserv
 ## Revisit conditions
 
 Only with measured evidence and compatibility/security review.
+
+
+ADR-0035 extends the same bounded-resource rule to AutoNAT probes, relay reservations/circuits/control requests, DCUtR attempts, and total/per-peer connections. Reachability behaviours share the root dial/connection budget and cannot create unbounded work outside it.

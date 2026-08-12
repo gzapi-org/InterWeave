@@ -37,3 +37,10 @@ Human client -------------------IPC v2/EndpointId---------> profile daemon / one
 13. Every queue is bounded, and every legal max-size payload fits IPC v2.
 14. Standard v1 includes Kademlia support; configured entries default enabled but remain opt-out, and Kademlia stores no channel/endpoint/application records.
 15. Human/chat semantics stay above the transport boundary.
+
+
+## Mandatory Internet reachability
+
+Standard v1 includes AutoNAT v2 client, Circuit Relay v2 client/reservations, and DCUtR. Direct reachability evidence and relay readiness are normalized behind the generic transport status; Model B endpoints and Claude/human clients do not depend on libp2p-specific NAT APIs.
+
+Connectivity infrastructure uses a protocol-scoped authorization class distinct from application `PeerTrustPolicy`. Relay/probe authorization never grants GossipSub, direct-message, endpoint-directory, Kademlia, Channel, or EndpointId authority.

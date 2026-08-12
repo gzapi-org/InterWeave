@@ -102,3 +102,6 @@ Wording must be exact:
 - not joined: explicit `ChannelNotJoined`;
 - endpoint lease absent/conflict: explicit local endpoint error;
 - overload/drop: explicit error or degraded status, not false success.
+
+
+`status` includes the normalized `ConnectivitySummary` (direct-inbound classification, relay readiness/targets, relayed-path count, hole-punch activity). It does not expose raw relay/probe control operations to Claude.

@@ -1,0 +1,78 @@
+# Standard-v1 Internet profile with mandatory reachability mechanisms.
+schema_version: 2
+profile: { name: internet }
+transport:
+  backend: libp2p
+  listen:
+    addresses: ["/ip4/0.0.0.0/tcp/4001"]
+  connectivity:
+    required: true
+    infrastructure:
+      allowed_peers: ["<INFRA_A>", "<INFRA_B>"]
+    autonat:
+      version: 2
+      client:
+        enabled: true
+        static_servers:
+          - "/dns4/relay-a.example.net/tcp/4001/p2p/<INFRA_A>"
+          - "/dns4/relay-b.example.net/tcp/4001/p2p/<INFRA_B>"
+      server: { enabled: false }
+    relay:
+      client:
+        enabled: true
+        static_relays:
+          - "/dns4/relay-a.example.net/tcp/4001/p2p/<INFRA_A>"
+          - "/dns4/relay-b.example.net/tcp/4001/p2p/<INFRA_B>"
+        target_reservations_private_or_unknown: 2
+        target_reservations_public: 1
+        max_reservations: 4
+      server: { enabled: false }
+    dcutr:
+      enabled: true
+identity: {}
+trust:
+  policy: static-allowlist
+  allowed_peers: ["<APPLICATION_PEER_A>"]
+endpoints:
+  registration_policy: configured-only
+  default_direct_endpoint: human
+  directory: { enabled: true, cache_ttl: 60s, max_advertised: 16 }
+  entries:
+    - id: human
+      enabled: true
+      advertise: true
+      allowed_client_kinds: [human-client]
+      inbound: { policy: inherit-profile-trust, allowed_peers: [] }
+      outbound: { policy: inherit-profile-trust, allowed_peers: [] }
+discovery:
+  providers:
+    - type: peer-cache
+      enabled: true
+      priority: 10
+      config: { ttl: 7d, max_entries: 1024 }
+    - type: static-bootstrap
+      enabled: true
+      priority: 30
+      config:
+        peers: ["/dns4/peer-a.example.net/tcp/4001/p2p/<APPLICATION_PEER_A>"]
+    - type: kademlia
+      enabled: true
+      priority: 40
+      config:
+        config_version: 1
+        network_id: "internet-example"
+        mode: client
+        routing_peer_policy: data-plane-trusted
+        seed_sources: [peer-cache, static-bootstrap]
+        record_mode: disabled
+ipc:
+  max_clients: 16
+  client_event_queue: 256
+  keepalive:
+    enabled: true
+    require_for_endpoint_lease: true
+    interval: 30s
+    response_timeout: 10s
+    max_missed: 3
+channels:
+  desired: []

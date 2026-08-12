@@ -59,6 +59,9 @@ TransportCapabilities {
   direct_delivery: true
   direct_endpoint_addressing: true
   endpoint_directory: true | false
+  internet_reachability: true
+  relayed_connectivity: true
+  direct_path_upgrade: true
   durable_delivery: false
   offline_mailbox: false
   max_payload_bytes: <effective configured profile limit, <= 49152>
@@ -88,6 +91,25 @@ Returns the stable transport identity for the active profile and an explicit `id
 ### health()
 
 Returns aggregate health plus component summaries: `healthy | degraded | unavailable`. Health is operational, not an application workflow state.
+
+### connectivity()
+
+Returns a backend-neutral operational summary:
+
+```text
+ConnectivitySummary {
+  direct_inbound: unknown | verified_public | not_verified,
+  relay_inbound: unavailable | partial | ready,
+  active_relay_reservations: u16,
+  target_relay_reservations: u16,
+  active_relayed_peer_paths: u16,
+  hole_punch_inflight: u16,
+  preferred_path_policy: direct_first,
+  updated_at,
+}
+```
+
+This exposes reachability state without exposing AutoNAT server identities, relay PeerIds, raw addresses, or backend protocol internals to ordinary consumers. Detailed infrastructure diagnostics remain local-admin data. Reachability state never grants trust.
 
 ## Local endpoint context
 
@@ -159,7 +181,7 @@ Default semantics:
 - `send({peer: local_identity(), ...}, ...)` returns `InvalidArgument`; self-dial is never attempted;
 - an untrusted destination returns `UnauthorizedPeer` locally **before dialing**;
 - connection reuse is allowed;
-- for an authorized peer, runtime may dial using already-known candidate addresses;
+- for an authorized peer, runtime may dial using already-known direct or relay reachability paths; path selection is transparent to EndpointId/direct semantics;
 - command deadline default: 10 s, configurable 1..60 s;
 - success requires a remote **transport-accepted** response and returns the endpoint that actually accepted the message;
 - a retry using the same message ID and destination selector is deduplicated against the first accepted route; a later default-endpoint change must not reroute that retry;
@@ -177,13 +199,14 @@ A direct send never commands discovery providers to perform an ad hoc global sea
 
 ### peers()
 
-Returns normalized peer diagnostics: identity, trust state, connection state, last-observed time, and high-level discovery provenance names. Multiaddresses are omitted from the Claude default view but may be available to a local diagnostics CLI.
+Returns normalized peer diagnostics: identity, trust state, connection state, preferred path class (`direct | relayed | none`), last-observed time, and high-level discovery provenance names. Multiaddresses and relay infrastructure identities are omitted from the Claude default view but may be available to a local diagnostics CLI.
 
 ## Events
 
 ```text
-PeerConnected { peer, observed_at }
+PeerConnected { peer, path: direct | relayed, observed_at }
 PeerDisconnected { peer, reason_class, observed_at }
+ConnectivityChanged { summary: ConnectivitySummary }
 MessageReceived {
   message_id,
   mode: broadcast | direct,
@@ -274,3 +297,6 @@ v2 intentionally provides:
 The **transport contract version** is a semantic major/minor pair. Endpoint addressing changes caller context, direct destination, and direct event semantics and therefore starts transport contract major **v2**.
 
 Backend protocol versions and IPC versions are negotiated separately. Because no production v1 plugin/daemon exists, the implementation roadmap targets v2 directly rather than requiring a legacy fan-out compatibility layer.
+
+
+See [`CONNECTIVITY.md`](./CONNECTIVITY.md) for normalized Internet reachability semantics.

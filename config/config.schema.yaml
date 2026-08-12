@@ -10,6 +10,8 @@ transport:
     # Effective profile value is reported by TransportCapabilities.max_payload_bytes.
     max_payload_bytes: integer[1024..49152] = 49152
     max_connected_peers: integer[1..2048] = 256
+    max_connections_total: integer[1..4096] = 384
+    max_connections_per_peer: integer[1..8] = 3
     max_candidates: integer[1..16384] = 4096
     max_addresses_per_peer: integer[1..32] = 16
     max_subscriptions: integer[1..1024] = 128
@@ -25,6 +27,74 @@ transport:
     # validation-result reporting per ADR-0029 (Accept/Ignore/Reject).
     strict_validation: literal[true]
     explicit_application_validation: literal[true]
+  connectivity:
+    # Mandatory standard-v1 reachability stack. Reduced builds that omit any
+    # required client mechanism are non-standard and must declare that limitation.
+    required: literal[true] = true
+    infrastructure:
+      # Protocol-scoped connectivity authorization only. This does NOT grant
+      # GossipSub/direct/endpoint-directory/Kademlia data-plane trust.
+      allowed_peers: list[PeerId, max=256]
+    address_advertisement:
+      advertise_unverified_public_direct: literal[false] = false
+      advertise_active_relay_addresses: literal[true] = true
+    autonat:
+      version: literal[2] = 2
+      client:
+        enabled: literal[true] = true
+        static_servers: list[multiaddr-with-peer-id, max=16]
+        use_authorized_identify_servers: bool = true
+        required_distinct_successes: integer[1..4] = 2
+        success_evidence_ttl: duration[1m..1h] = 15m
+        retry_interval: duration[10s..5m] = 30s
+        refresh_interval: duration[1m..30m] = 5m
+        max_inflight_probes: integer[1..8] = 2
+        max_candidate_addresses_per_cycle: integer[1..16] = 4
+        timeout: duration[5s..60s] = 15s
+      server:
+        enabled: bool = false
+        max_concurrent_probes: integer[1..64] = 8
+        max_probes_per_peer_per_minute: integer[1..30] = 2
+        max_probes_global_per_minute: integer[1..600] = 60
+        timeout: duration[5s..60s] = 15s
+    relay:
+      client:
+        enabled: literal[true] = true
+        static_relays: list[multiaddr-with-peer-id, max=16]
+        use_authorized_identify_relays: bool = true
+        target_reservations_private_or_unknown: integer[1..4] = 2
+        target_reservations_public: integer[0..4] = 1
+        max_reservations: integer[1..8] = 4
+        retry_min: duration[1s..1m] = 5s
+        retry_max: duration[30s..30m] = 5m
+        direct_head_start: duration[0ms..5s] = 750ms
+      server:
+        enabled: bool = false
+        max_reservations: integer[1..512] = 64
+        max_reservations_per_peer: integer[1..4] = 1
+        reservation_duration: duration[5m..24h] = 1h
+        max_circuits: integer[1..1024] = 128
+        max_circuits_per_peer: integer[1..16] = 4
+        max_circuit_duration: duration[1m..24h] = 1h
+        max_circuit_bytes: bytes[1MiB..1GiB] = 64MiB
+        max_pending_control: integer[1..512] = 64
+    dcutr:
+      enabled: literal[true] = true
+      max_inflight: integer[1..32] = 4
+      max_inflight_per_peer: literal[1] = 1
+      retry_cooldown: duration[30s..1h] = 5m
+      direct_stability_period: duration[1s..2m] = 10s
+    # Cross-field validation:
+    #   relay.client.target_reservations_private_or_unknown <= relay.client.max_reservations
+    #   relay.client.target_reservations_public <= relay.client.max_reservations
+    #   relay.client.target_reservations_public <= target_reservations_private_or_unknown
+    #   relay.client.retry_min <= relay.client.retry_max
+    #   relay.server.max_reservations_per_peer <= relay.server.max_reservations
+    #   relay.server.max_circuits_per_peer <= relay.server.max_circuits
+    #   dcutr.max_inflight_per_peer <= dcutr.max_inflight
+    #   every static relay/AutoNAT server PeerId is in either trust.allowed_peers
+    #   or transport.connectivity.infrastructure.allowed_peers
+    #   a PeerId in both sets is treated as DataPlaneTrusted for protocol admission
 identity:
   # Initial software identity algorithm is fixed so portable backup/restore is exact.
   algorithm: literal[ed25519] = ed25519

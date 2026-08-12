@@ -11,9 +11,15 @@ main / daemon supervisor
   |- transport runtime coordinator
   |    `- EndpointRegistry / endpoint policy / default-route state
   |- libp2p Swarm task (single owner)
+  |    |- Identify + address registry adapter
+  |    |- AutoNAT v2 client (+ optional configured server role)
+  |    |- Circuit Relay v2 client (+ optional configured server role)
+  |    |- DCUtR
   |    |- GossipSub
   |    |- direct request-response v2
-  |    `- endpoint-directory request-response
+  |    |- endpoint-directory request-response
+  |    `- Kademlia driver when configured
+  |- ReachabilityManager / RelayManager / DCUtRManager
   |- DiscoveryManager supervisor
   |    |- cache
   |    |- mDNS
@@ -32,7 +38,7 @@ main / daemon supervisor
 - IPC connection establishes at most one direct EndpointId lease.
 - Direct inbound response is withheld until runtime confirms exact endpoint queue admission.
 - Root cancellation and provider-local cancellation stay explicit.
-- Connection/trust and GossipSub validation rules remain unchanged.
+- Connection/data-plane trust, connectivity-infrastructure admission, and GossipSub validation rules remain explicit and separate.
 
 ## Inbound direct asynchronous admission
 
@@ -72,3 +78,13 @@ ConnectionManager peer backoff rules remain unchanged. Local endpoint reconnect 
 ## Kademlia task interaction
 
 Kademlia driver/provider interaction uses bounded control channels and all behavior-originated dials pass root dial admission. Configured entries default enabled in standard v1; explicit opt-out instantiates neither side. Endpoint addressing is not a Kademlia responsibility.
+
+## Mandatory reachability task interaction
+
+AutoNAT-v2, Circuit Relay v2, and DCUtR behaviours are standard-v1 Swarm components. Their events are normalized into bounded manager inputs; no behaviour callback mutates trust, endpoint leases, or application state directly.
+
+All behaviour-originated dials cross `DialAdmissionGate` with an origin (`autonat-probe`, `relay-reservation`, `relay-circuit`, `dcutr-hole-punch`). Infrastructure-only PeerIds are admitted only for their control-plane origins.
+
+Relay reservation events update the address registry synchronously inside the Swarm ownership domain, then emit bounded reachability-state changes upward. A reservation close removes its relay-derived listen address immediately.
+
+DCUtR success creates a new direct connection. ConnectionManager waits for the configured direct stability period before retiring a redundant relayed peer path; existing streams are not modeled as migrated.

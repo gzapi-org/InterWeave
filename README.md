@@ -33,7 +33,8 @@ Network side:
   request-response direct v2 = PeerId + EndpointId routing
   endpoint-directory = optional trusted route discovery
   DiscoveryManager / Kademlia(default-enabled when configured; explicit opt-out)
-  PeerTrustPolicy / ConnectionManager / Noise
+  mandatory AutoNAT v2 / Circuit Relay v2 / DCUtR reachability
+  PeerTrustPolicy / connectivity-infrastructure policy / ConnectionManager / Noise
 ```
 
 The daemon owns the private key and all libp2p state. Local applications never become independent network identities unless they use separate profiles.
@@ -52,6 +53,8 @@ The daemon owns the private key and all libp2p state. Local applications never b
 - Broadcast remains GossipSub and ChannelId-scoped; endpoint addressing does not alter broadcast envelopes or subscription semantics.
 - `Transport`, `DiscoveryProvider`, and trust boundaries remain independent of Claude/libp2p details.
 - Kademlia has a complete peer-routing integration blueprint and, per ADR-0034, configured entries are **`enabled: true` by default** in the standard v1 build. Operators may explicitly opt out. It never grants trust or stores application/channel/endpoint records.
+- Per ADR-0035, standard v1 also includes the **mandatory Internet-reachability stack**: AutoNAT v2 client, Circuit Relay v2 client/reservation management, and DCUtR. Relay/AutoNAT server roles are explicit infrastructure modes. Phase 9 is a release requirement, not conditional hardening.
+- Relay/AutoNAT infrastructure can be authorized through `transport.connectivity.infrastructure.allowed_peers` without entering application `trust.allowed_peers`; ADR-0036 prevents that control-plane connection from gaining GossipSub/direct/endpoint/Kademlia authority.
 - Discovery only produces candidate reachability and bounded protocol observations. Data-plane connection admission remains trust-gated, including behavior-originated Kademlia dials through the root dial admission policy.
 - Noise secures each admitted libp2p connection. GossipSub validation distinguishes objective invalidity (`Reject`) from valid-but-locally-unauthorized publishers (`Ignore`). Group/application E2EE remains outside v1/v2 transport.
 - Delivery remains realtime/best-effort, bounded, non-durable, with no exactly-once claim or offline mailbox. A human client may persist its own local history above the transport, but the daemon never queues messages for an offline endpoint.
@@ -77,18 +80,20 @@ See:
 - [Component boundaries](docs/architecture/components.md)
 - [Data flows](docs/architecture/data-flows.md)
 - [Transport contract](contracts/TRANSPORT.md)
+- [Connectivity contract](contracts/CONNECTIVITY.md)
 - [Endpoint contract](contracts/ENDPOINTS.md)
 - [Local IPC contract](contracts/LOCAL-IPC.md)
 - [Discovery contract](contracts/DISCOVERY.md)
 - [ADR index](adr/README.md)
 - [Threat model](docs/architecture/threat-model.md)
 - [Rust blueprint](docs/architecture/rust-blueprint.md)
+- [Mandatory Internet reachability design](transport/libp2p/CONNECTIVITY.md)
 - [Implementation plan](roadmap/IMPLEMENTATION-PLAN.md)
 - [Final architecture review](docs/architecture/FINAL-REVIEW.md)
 
 ## Source snapshot
 
-Claude/Telegram research was refreshed 2026-08-11; libp2p/Kademlia and endpoint-protocol research was extended 2026-08-12. See [research/SOURCES.md](research/SOURCES.md) and [research/endpoint-addressing.md](research/endpoint-addressing.md).
+Claude/Telegram research was refreshed 2026-08-11; libp2p/Kademlia, endpoint-protocol, and mandatory NAT/relay/DCUtR research was extended 2026-08-12. See [research/SOURCES.md](research/SOURCES.md), [research/endpoint-addressing.md](research/endpoint-addressing.md), and [research/nat-traversal.md](research/nat-traversal.md).
 
 ## Repository name
 
@@ -100,3 +105,14 @@ The working name **claude-p2p-channel** is retained because it describes the Cla
 - Identity recovery: [`contracts/IDENTITY-RECOVERY.md`](./contracts/IDENTITY-RECOVERY.md), [`docs/architecture/identity-recovery.md`](./docs/architecture/identity-recovery.md), and [`ADR-0033`](./adr/0033-identity-recovery-mnemonic.md).
 - Current Kademlia default-on amendment: [`docs/architecture/KAD-DEFAULT-ON-REVIEW-2026-08-12.md`](./docs/architecture/KAD-DEFAULT-ON-REVIEW-2026-08-12.md) and [`ADR-0034`](./adr/0034-kademlia-default-enabled.md).
 - Non-normative first-party broadcast author hint: [`docs/architecture/application-envelope-guidance.md`](./docs/architecture/application-envelope-guidance.md). Transport still treats broadcast authorship as PeerId-only.
+
+## Mandatory Internet reachability
+
+- [`ADR-0035`](./adr/0035-mandatory-internet-reachability.md) makes Phase 9 required for standard v1.
+- [`ADR-0036`](./adr/0036-connectivity-infrastructure-peer-class.md) separates reachability infrastructure authorization from application trust.
+- [`contracts/CONNECTIVITY.md`](./contracts/CONNECTIVITY.md) freezes the backend-neutral connectivity states/path semantics.
+- [`transport/libp2p/CONNECTIVITY.md`](./transport/libp2p/CONNECTIVITY.md) defines the integrated state machine and ownership.
+- [`transport/libp2p/AUTONAT.md`](./transport/libp2p/AUTONAT.md), [`RELAY.md`](./transport/libp2p/RELAY.md), and [`DCUTR.md`](./transport/libp2p/DCUTR.md) are the detailed backend blueprints.
+- [`docs/architecture/connectivity-deployment.md`](./docs/architecture/connectivity-deployment.md) defines client/infrastructure deployment, redundancy, outage, and rollout topology.
+- [`config/examples/internet-reachability.yaml`](./config/examples/internet-reachability.yaml) shows a two-relay/probe-server Internet profile.
+- [`config/examples/connectivity-infrastructure.yaml`](./config/examples/connectivity-infrastructure.yaml) shows explicit AutoNAT/relay server roles with protocol-scoped authorization.

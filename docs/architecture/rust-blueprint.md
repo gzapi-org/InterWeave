@@ -101,7 +101,7 @@ It does not decide network endpoint admission policy itself.
 - `endpoint_directory_manager` — `/endpoints/1.0.0`, trust-gated bounded directory query/response;
 - `identity_manager` — Ed25519 key/PeerId, portable key serialization boundary, rotation; offline mnemonic backup/restore remains a transportctl/identity-file workflow, not daemon IPC;
 - `address_book`;
-- `kademlia_driver` — optional Swarm-owned adapter.
+- `kademlia_driver` — standard Swarm-owned adapter when the configured default-enabled Kademlia provider is present.
 
 `direct_manager` does not own local endpoint leases. It carries fields and awaits runtime route-admission decision before `AcceptedV2`.
 
@@ -130,3 +130,17 @@ A human UI may have an admin/settings adapter that opens a separately authorized
 ## Kademlia construction order
 
 Per ADR-0034 the standard v1 build includes Kademlia support and configured entries default enabled. `enabled: false` remains an explicit opt-out meaning no Kademlia behavior/task/protocol. Kademlia never stores EndpointIds or endpoint-directory state.
+
+
+## Mandatory connectivity modules inside `transport-libp2p`
+
+Keep these concrete/backend-owned rather than adding unnecessary public traits:
+
+- `address_registry` — merges verified direct and active relay-derived advertised addresses;
+- `reachability_manager` — AutoNAT-v2 evidence aggregation and normalized `ConnectivitySummary`;
+- `relay_manager` — authorized candidate selection, redundant reservations, failover and server-role quotas;
+- `dcutr_manager` — bounded relayed-to-direct upgrade attempts, cooldown and stability handoff;
+- `dial_admission` — root origin/class/backoff/resource gate shared by all Swarm behaviours;
+- `connectivity_infrastructure_policy` — computes protocol-scoped infrastructure authorization from neutral config.
+
+No new public `ConnectivityProvider` abstraction is required in v1: unlike discovery, these mechanisms jointly own one libp2p Swarm's path/reachability state and do not need independent backend replacement behind the Claude/human contracts. Neutral consumers see only `ConnectivitySummary` and path metadata through `transport-api`.

@@ -27,7 +27,7 @@ All ADRs are **Accepted** architecture decisions unless later superseded.
 | [0021](./0021-rust-workspace.md) | Separate neutral endpoint-aware contracts, runtime/EndpointRegistry, libp2p, IPC, daemon/CLI, and application adapters. |
 | [0022](./0022-discovery-upgradeability.md) | Use compile-time provider registration plus typed namespaced configuration; no dynamic shared-library loading in v1. |
 | [0023](./0023-claude-tool-surface.md) | Keep seven Claude tools; `send` gains optional remote EndpointId and bridge source route comes from IPC lease. |
-| [0024](./0024-reachability-scope.md) | Guarantee directly reachable TCP/configured/cache paths and optional LAN mDNS; defer universal NAT traversal. |
+| [0024](./0024-reachability-scope.md) | Historical conservative reachability scope; superseded by ADR-0035 mandatory Internet reachability. |
 | [0025](./0025-channel-id-topic-mapping.md) | Use 1..128-byte ASCII ChannelIds and deterministic domain-separated SHA-256 topic mapping. |
 | [0026](./0026-backpressure-limits.md) | Bound payloads, endpoint/directory state, IPC frames/queues/clients, discovery state, and direct concurrency. |
 | [0027](./0027-peer-cache-ownership.md) | Persist reachability observations only through PeerCacheDiscovery. |
@@ -38,3 +38,5 @@ All ADRs are **Accepted** architecture decisions unless later superseded.
 | [0032](./0032-human-client-boundary.md) | Keep the human client above transport as an IPC v2 endpoint consumer with separate administrative authority and application-owned human/chat state. |
 | [0033](./0033-identity-recovery-mnemonic.md) | Use Ed25519 software identities with optional offline 24-word BIP-39 entropy encoding of the exact secret seed for same-PeerId recovery; no wallet PBKDF2 or IPC exposure. |
 | [0034](./0034-kademlia-default-enabled.md) | Standard v1 includes Kademlia support and configured Kademlia entries default enabled; operators may explicitly opt out. |
+| [0035](./0035-mandatory-internet-reachability.md) | Standard v1 requires AutoNAT v2 client, Circuit Relay v2 client/reservations, and DCUtR; Phase 9 is a release requirement. |
+| [0036](./0036-connectivity-infrastructure-peer-class.md) | Authorize relay/AutoNAT infrastructure through a protocol-scoped connection class that does not grant application data-plane trust. |

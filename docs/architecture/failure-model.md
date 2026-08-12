@@ -60,8 +60,14 @@
 | IPC JSON body >128 KiB | reject before dispatch | frame-too-large | fix serializer/input |
 | unsupported direct v2 | direct send fails | protocol mismatch | upgrade peer |
 | IPC v2 mismatch | client refused | incompatibility | update client/daemon |
-| NAT blocks inbound | reachability limited | dial/listen diagnostics | public addr/relay/later NAT features |
-| relay unavailable | relayed paths fail | relay diagnostics | alternate path |
+| AutoNAT cannot verify direct inbound reachability | keep daemon up; classify `unknown`/`not_verified` | normalized connectivity + probe diagnostics | maintain required relay target; bounded probe retry |
+| one relay reservation lost | existing other paths continue | `relay_inbound=partial` until replaced | acquire alternate authorized relay with backoff |
+| all relay reservations unavailable while not verified-public | inbound Internet reachability unavailable/degraded | `relay_inbound=unavailable` + reservation diagnostics | retry only authorized relays; existing direct/outbound sessions may survive |
+| relay service at capacity/denies reservation | candidate unavailable | reservation outcome/rate diagnostics | try alternate authorized relay; bounded retry |
+| DCUtR hole punch fails | working relay path remains | hole-punch failure + cooldown | retry later after cooldown; no message-level retry |
+| DCUtR succeeds | direct path established | path-change diagnostic | hold relay until direct stability interval then retire redundant path |
+| network interface/address changes | prior evidence/routes may be stale | connectivity state transitions | invalidate affected evidence, rebuild reservations/advertisement |
+| connectivity-infrastructure peer attempts application protocol | deny that protocol; connection class unchanged | protocol-denied diagnostic | configuration change only if operator intentionally grants data-plane trust |
 | trust revoked while connected | close data-plane connection and remove endpoint directory/query access | trust + disconnect events | explicit re-allow |
 | daemon event queue saturated | bounded drop/reject | overload | load reduction/tuning |
 
@@ -70,3 +76,15 @@
 Fatal profile startup includes invalid schema-v2 endpoint configuration, enabled unsupported provider, private-key corruption/unsafe permissions, profile lock conflict, incompatible persisted schema, and IPC bind security failure.
 
 Recoverable includes endpoint client downtime, route staleness, trusted-peer failures, provider failures, partitions, bridge/human disconnects, empty mesh, and relay loss.
+
+
+## Mandatory reachability failures
+
+Phase 9 is part of standard v1. Reachability failure is therefore represented explicitly rather than deferred to a future feature phase.
+
+- Loss or disagreement of AutoNAT observers changes direct-inbound evidence; it does not revoke PeerId trust.
+- A private/not-verified node targets redundant relay reservations. Partial reservation coverage is `degraded`; zero usable reservations is `unavailable` for relay inbound.
+- Relay denial/capacity/exhaustion is retried only against authorized relay candidates and never broadens trust automatically.
+- Failed DCUtR retains the working relay connection and enters per-peer cooldown. Successful DCUtR waits for direct-path stability before redundant relay retirement.
+- A connectivity-infrastructure-only peer that negotiates an application protocol is rejected; such a violation does not upgrade its connection class.
+- No failure path creates a durable message queue or changes direct-message acceptance semantics.

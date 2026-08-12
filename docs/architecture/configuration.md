@@ -100,6 +100,25 @@ Trust reload can close data-plane connections, affect endpoint ACL intersections
 
 Restart-required: identity key path/rotation/restore, profile IPC socket identity, and core listen transport changes when backend cannot apply atomically. Identity recovery words are never configuration values; see `contracts/IDENTITY-RECOVERY.md`. A complete disaster-recovery plan backs up the phrase and `config.yaml` separately: the phrase restores the PeerId, while config restores trust/endpoints/discovery policy. Runtime cache/leases/messages are deliberately excluded.
 
+## Mandatory Internet reachability configuration
+
+Standard-v1 profiles use the Phase-9 connectivity stack from ADR-0035. The schema therefore treats the client roles as required capabilities rather than optional feature toggles:
+
+- `transport.connectivity.required` is fixed `true`;
+- AutoNAT v2 client is enabled;
+- Circuit Relay v2 client/reservation management is enabled;
+- DCUtR is enabled;
+- server roles for AutoNAT and relay remain explicit opt-in infrastructure roles;
+- `transport.connectivity.infrastructure.allowed_peers` authorizes control-plane infrastructure without granting application data-plane trust.
+
+Static AutoNAT server and relay PeerIds must be members of either `trust.allowed_peers` or the infrastructure allowlist. A peer present in both sets is treated as data-plane trusted. Discovery or Identify observations never edit either authorization set.
+
+Cross-field validation includes relay target ordering/caps, probe/reservation retry ordering, server per-peer limits not exceeding global limits, DCUtR per-peer concurrency not exceeding global concurrency, and authorization of every statically configured service PeerId. Invalid combinations fail configuration before network startup.
+
+Connectivity configuration is reloadable only where the runtime can make the transition atomically. Changing infrastructure authorization may close control connections and cancel associated probes/reservations. Lowering relay targets retires surplus reservations only after a replacement/direct path is stable; raising targets schedules bounded acquisition. Enabling an AutoNAT/relay server role may require listener/service restart if the backend cannot safely add the role live.
+
+`ConnectivitySummary` is runtime state, not persisted configuration. AutoNAT observations, relay reservations, DCUtR attempts, and relay-derived listen addresses expire/rebuild after restart or network change.
+
 ## Kademlia configuration rule
 
 The Kademlia schema is fully defined. Per ADR-0034, a configured Kademlia entry defaults to `enabled: true` in the standard v1 build; `enabled: false` is an explicit operator opt-out. Profiles may deliberately omit the provider entry entirely.

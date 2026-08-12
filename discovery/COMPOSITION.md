@@ -46,3 +46,8 @@ This is adaptive scheduling, not a mandatory sequential discovery pipeline.
 Configured seed-source observations (`peer-cache`, `static-bootstrap`, optionally `mdns`) may be forwarded as hints to Kademlia. Peer-cache hints may include freshness-bounded exact protocol observations from prior authenticated Identify exchanges. They remain advisory and must pass current trust/address/protocol eligibility before manual Kademlia routing insertion. Kademlia-derived observations are not recursively fed back into Kademlia as external seed hints.
 
 The first integration does not use unauthorized peers as DHT routing intermediaries; this preserves the existing connection and GossipSub trust boundary.
+
+
+## Connectivity-infrastructure boundary
+
+Phase-9 relay/AutoNAT service authorization is **not peer discovery and not application trust**. Discovery providers may contribute ordinary address/protocol observations, but they do not add PeerIds to `transport.connectivity.infrastructure.allowed_peers`, create relay reservations, run AutoNAT probes, or initiate DCUtR. Those responsibilities stay in the libp2p connectivity/connection layer.

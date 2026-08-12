@@ -118,3 +118,8 @@ A provider must not:
 - expose application roles/business metadata;
 - mutate Claude sessions;
 - become a bootstrap authority or membership server.
+
+
+## Connectivity-infrastructure boundary
+
+Phase-9 relay/AutoNAT service authorization is **not peer discovery and not application trust**. Discovery providers may contribute ordinary address/protocol observations, but they do not add PeerIds to `transport.connectivity.infrastructure.allowed_peers`, create relay reservations, run AutoNAT probes, or initiate DCUtR. Those responsibilities stay in the libp2p connectivity/connection layer.

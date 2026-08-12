@@ -12,22 +12,25 @@ A libp2p-specific complication is that a `NetworkBehaviour` can request a dial f
 
 DiscoveryManager owns candidate knowledge. **ConnectionManager owns connection policy**, including trust admission, reconnect policy, per-peer backoff, retention, and connection/dial limits. Libp2p-specific execution lives in the backend; normalized connection state is reported upward.
 
-For v1 ordinary data-plane operation, connection policy is trust-gated:
+For v1 ordinary data-plane operation, connection policy is trust-gated. Mandatory Phase 9 adds one explicit, narrower connection class from ADR-0036:
 
-- a candidate PeerId is not intentionally dialed unless the active `PeerTrustPolicy` authorizes that peer for data-plane connectivity;
-- an inbound connection that authenticates to an unauthorized PeerId is closed before that peer participates in direct, GossipSub, or configured Kademlia protocol activity;
-- trust revocation of a connected peer triggers data-plane eviction/disconnect;
-- discovery can still observe and retain bounded candidate metadata for unauthorized peers without connecting to them.
+- a data-plane candidate PeerId is not intentionally dialed unless the active `PeerTrustPolicy` authorizes that peer for data-plane connectivity;
+- a PeerId in `transport.connectivity.infrastructure.allowed_peers` may be dialed/retained **only** for the protocol-scoped Identify/AutoNAT/relay control purposes defined by ADR-0036;
+- an authenticated PeerId in neither authorization set is closed/rejected;
+- infrastructure-only connectivity never grants direct, GossipSub, endpoint-directory, or Kademlia data-plane participation;
+- trust/infrastructure revocation of a connected peer triggers appropriate protocol eviction/disconnect;
+- discovery can still observe bounded candidate metadata for unauthorized peers without authorizing a connection.
 
 ### Swarm-wide dial admission
 
 ConnectionManager policy applies to **every outbound Swarm dial**, not only calls initiated by the ordinary candidate dial scheduler. `transport-libp2p` therefore includes an internal, synchronous **DialAdmissionGate** (or equivalent root-behaviour hook) fed from ConnectionManager state. Before a Swarm dial is allowed, the gate enforces at least:
 
-1. current `PeerTrustPolicy` authorization when the PeerId is known;
-2. per-peer punitive/retry backoff;
-3. global pending-dial and connection limits;
-4. profile shutdown/drain state;
-5. address-policy checks available at that boundary.
+1. destination connection class (`DataPlaneTrusted`, `ConnectivityInfrastructureOnly`, or unauthorized) and the requested dial origin/purpose;
+2. current `PeerTrustPolicy` / connectivity-infrastructure authorization when the PeerId is known;
+3. per-peer punitive/retry backoff;
+4. global pending-dial and connection limits;
+5. profile shutdown/drain state;
+6. address/path policy checks available at that boundary.
 
 A protocol behaviour such as Kademlia may *request* a dial as part of an iterative query, but it does not own the decision to permit that connection. A denied behaviour-originated dial is observable as policy/backoff/limit denial and must not silently reset ConnectionManager retry state.
 
@@ -35,7 +38,7 @@ This preserves the architectural invariant while acknowledging libp2p execution 
 
 > ConnectionManager owns connection policy; the Swarm/backend executes dials. Protocol behaviours may generate dial requests only through the same Swarm-wide admission policy.
 
-Future control-plane protocols that genuinely require limited connectivity to untrusted peers must define an explicit protocol-scoped connection class rather than weakening this v1 rule implicitly. **ADR-0009's first Kademlia integration does not take that exception.**
+ADR-0036 is the first explicit protocol-scoped exception: connectivity-infrastructure-only peers may carry Identify/AutoNAT/Circuit-Relay control traffic but remain excluded from the application data plane. **ADR-0009's Kademlia integration does not use this exception** and still requires data-plane trust for routing peers.
 
 ## Alternatives considered
 
@@ -45,7 +48,7 @@ Providers dial directly; DiscoveryManager owns Swarm; Transport core implements 
 
 There is an explicit handoff and policy-snapshot synchronization cost, but failure ownership is clear and testable. Small/asymmetric trust sets can constrain overlay connectivity; that is an accepted consequence of the v1 deny-by-default model.
 
-Kademlia query progress may cause dial requests that were not scheduled by the ordinary candidate dial loop. Those attempts still consume global connection resources and obey backoff through `DialAdmissionGate`. Diagnostics therefore distinguish **dial origin** (`connection-manager`, `kademlia-query`, other future protocol) where the backend can attribute it.
+Kademlia query progress may cause dial requests that were not scheduled by the ordinary candidate dial loop. Those attempts still consume global connection resources and obey backoff through `DialAdmissionGate`. Diagnostics therefore distinguish **dial origin** (`connection-manager`, `kademlia-query`, `relay-reservation`, `relay-circuit`, `autonat-probe`, `dcutr-hole-punch`) where the backend can attribute it.
 
 ## Security implications
 
@@ -55,7 +58,7 @@ Untrusted discovery cannot force successful connections merely by being discover
 
 Backoff and global limits are consistent across explicit candidate dials and protocol-generated dials. Provider outages do not tear down good trusted connections. Trust reload may intentionally disconnect peers and change mesh/routing topology; this is observable via `TrustPolicyChanged` and peer-disconnect diagnostics.
 
-SPIKE-003 must measure Kademlia-originated dial attempts, denials, and successful connections under active backoff and connection-limit pressure because these attempts originate below the ordinary scheduler API.
+SPIKE-003 must measure Kademlia-originated dial attempts under this gate. Mandatory `SPIKE-004` must do the same for AutoNAT/relay/DCUtR behaviour-originated dials and prove that infrastructure-only authorization cannot leak into GossipSub/direct/endpoint/Kademlia participation.
 
 ## Implementation implications
 

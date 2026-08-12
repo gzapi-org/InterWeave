@@ -48,3 +48,27 @@ Endpoint-directory responses are bounded to 32 route IDs, 12 queries/minute/peer
 ## Drop policy
 
 Broadcast local delivery may drop according to per-client bounded policy under overload. Direct delivery must reject before acceptance when target queue admission fails. There is no disk spill or hidden unbounded fallback.
+
+
+## Mandatory Internet reachability limits
+
+| Resource | Default | Hard/config ceiling | Overflow behavior |
+|---|---:|---:|---|
+| total established/pending network connections | 384 | 4096 | root dial admission refuses/defer new work |
+| connections per PeerId | 3 | 8 | refuse redundant new connection unless policy replaces one |
+| AutoNAT v2 client probes in flight | 2 | 8 | defer next probe cycle |
+| AutoNAT addresses tested per cycle | 4 | 16 | deterministic bounded selection |
+| AutoNAT server concurrent probes | 8 | 64 | reject/defer probe |
+| AutoNAT server probes per peer/min | 2 | 60 | rate-limit |
+| AutoNAT server probes global/min | 60 | 600 | rate-limit |
+| active relay reservations (client) | target 2 private/unknown, 1 public | 4 | do not acquire beyond cap |
+| relay-server reservations total | 64 | 512 | deny new reservation |
+| relay-server reservations per peer | 1 | 4 | deny new reservation |
+| relay-server circuits total | 128 | 1024 | deny new circuit |
+| relay-server circuits per source peer | 4 | 16 | deny new circuit |
+| relay-server circuit bytes | 64 MiB | 1 GiB | close circuit at cap |
+| relay-server pending control requests | 64 | 512 | reject/defer |
+| DCUtR attempts in flight | 4 | 32 | defer |
+| DCUtR attempts per peer | 1 | 4 | defer/cooldown |
+
+These limits share the root connection/dial budget; reachability behaviours do not receive an unbounded side channel around `DialAdmissionGate`.

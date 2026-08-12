@@ -12,7 +12,7 @@ Noise-authenticated PeerId
  -> retain ordinary data-plane connection OR close
 ```
 
-All ordinary direct, endpoint-directory, GossipSub, and optional first-generation Kademlia participation stays under this profile trust boundary.
+All ordinary direct, endpoint-directory, GossipSub, and Kademlia participation stays under this profile data-plane trust boundary.
 
 ## Direct endpoint admission
 
@@ -54,3 +54,22 @@ EndpointId is not inserted into transport GossipSub messages.
 ## Group encryption
 
 Still deferred. Human-client availability does not change the per-hop Noise / trusted-forwarder plaintext boundary.
+
+
+## Connectivity infrastructure admission
+
+Mandatory Phase 9 adds a narrower connection class:
+
+```text
+Noise-authenticated PeerId
+ -> connection-class policy
+    -> DataPlaneTrusted: ordinary application protocols + eligible control protocols
+    -> ConnectivityInfrastructureOnly: Identify/AutoNAT/Relay control only
+    -> Unauthorized: close/deny
+```
+
+Infrastructure-only peers are excluded from GossipSub peer participation, direct v2, endpoint directory, Kademlia routing, and DCUtR as an application destination. Every behaviour-originated dial still passes the root origin/class gate.
+
+For a relayed application connection, authenticate and authorize the **end PeerId** independently from the relay PeerId. A relay's infrastructure authorization is not transitive.
+
+Relay paths preserve the secure end-peer transport but do not provide anonymity: relay operators remain metadata/availability observers. AutoNAT probe results are reachability evidence only and never feed trust.

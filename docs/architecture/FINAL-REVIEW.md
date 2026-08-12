@@ -1,6 +1,6 @@
 # Final architecture review
 
-Review posture: external CTO / implementation-readiness review. Original review 2026-08-11; amended through **Model B Phase-1 freeze precision + identity-recovery design on 2026-08-12**.
+Review posture: external CTO / implementation-readiness review. Original review 2026-08-11; amended through **mandatory Phase-9 Internet reachability design on 2026-08-12**.
 
 ## Executive assessment
 
@@ -27,7 +27,7 @@ The major evolution since the original prompt is deliberate and transport-generi
 | broadcast semantics changed by endpoints? | **No** | GossipSub/ChannelId/join refs unchanged |
 | Kademlia stores endpoint presence? | **No** | records remain prohibited; endpoint directory is separate |
 | Discovery grants trust? | **No** | unchanged deny-default trust boundary |
-| ConnectionManager policy bypass? | **No** | root dial admission including Kademlia/direct/directory |
+| ConnectionManager policy bypass? | **No** | root dial admission including Kademlia/direct/directory/AutoNAT/relay/DCUtR origins |
 | GossipSub trust mapping explicit? | **Yes** | ADR-0029 Accept/Ignore/Reject |
 | IPC can carry max payload + endpoint metadata? | **By contract/test requirement** | 128 KiB IPC v2 golden fixtures |
 | endpoint handshake/capability errors deterministic? | **Yes** | exact local error map in LOCAL-IPC/Phase-1 fixtures |
@@ -36,6 +36,8 @@ The major evolution since the original prompt is deliberate and transport-generi
 | daemon/Claude/human lifecycle coupled? | **No** | endpoint leases are runtime; PeerId survives client restart |
 | human admin actions can be triggered by network payload automatically? | **No by architecture** | admin capability path separated from data plane |
 | hidden persistent message state? | **No** | app-local human history is outside transport and only stores observed content |
+| mandatory Internet reachability complete? | **Yes on paper; spike required** | ADR-0035 + AutoNAT-v2/Relay-v2/DCUtR state machine, path policy, limits and release tests |
+| relay/probe infrastructure accidentally gains application trust? | **No by architecture** | ADR-0036 protocol-scoped connection class; data-plane protocols explicitly denied |
 
 ## Confirmed current decisions
 
@@ -60,11 +62,14 @@ The major evolution since the original prompt is deliberate and transport-generi
 19. Static PeerId trust still gates ordinary data-plane connections, direct peers, and source admission.
 20. Noise remains per-link security; trusted GossipSub forwarders can see plaintext.
 21. Per ADR-0034, the standard v1 build includes Kademlia and configured entries default `enabled: true`; explicit opt-out remains supported, and Kademlia stores no app/channel/endpoint records.
-22. IPC v2 remains owner-protected length-prefixed JSON with 128 KiB body and capability-scoped admin methods; version is negotiated, human data/admin sessions count separately, and optional keepalive can release wedged leases.
+22. IPC v2 remains owner-protected length-prefixed JSON with 128 KiB body and capability-scoped admin methods; version is negotiated, human data/admin sessions count separately, and endpoint leases require negotiated keepalive by default.
 23. Claude Channel is not granted `endpoints.query` by default; `peer_endpoints` is explicitly deferred pending a security/tool-surface revisit.
 24. DirectContentFingerprintV1 is fixed byte-for-byte and direct in-flight reservation state is capped at 128 global / 8 per source peer by default.
 25. Initial software identity is Ed25519 with optional offline 24-word exact-key recovery (ADR-0033); mnemonic material never crosses IPC. Verify-only drills are read-only, and full profile disaster recovery also needs a separate config.yaml backup.
 26. EndpointId leases require negotiated IPC keepalive by default; an explicit compatibility policy may relax this without changing lease ownership semantics.
+27. Standard v1 requires AutoNAT v2 client, Circuit Relay v2 client/reservations, and DCUtR (ADR-0035); Phase 9 is a release requirement, not optional hardening.
+28. Relay/AutoNAT service peers may use the ADR-0036 connectivity-infrastructure class, which permits only control-plane protocols and never grants GossipSub/direct/endpoint/Kademlia application authority.
+29. Reachability uses multi-observer AutoNAT evidence, redundant relay reservations, direct-first path selection and bounded DCUtR upgrades with relay fallback.
 
 ## Accepted limitations
 
@@ -76,7 +81,8 @@ The major evolution since the original prompt is deliberate and transport-generi
 - endpoint directory can be stale;
 - static trust does not scale to public networks;
 - no group E2EE;
-- no universal NAT traversal guarantee;
+- no guarantee that every NAT permits a direct DCUtR path; standard v1 nevertheless requires relay fallback, and loss of all authorized relays can still isolate an inbound-private peer;
+- relay/probe operators can observe connectivity metadata and deny service; the system is not an anonymity network;
 - default-on Kademlia increases ordinary metadata/topology/privacy exposure and therefore makes SPIKE-003/conformance/security a standard-v1 release gate;
 - a human client can persist local history but cannot recover messages never accepted while it was offline;
 - the BIP-39-derived recovery UX has only an 8-bit mnemonic checksum, so expected-PeerId backup metadata is the stronger restore check;
@@ -96,9 +102,9 @@ SPIKE-002 must verify request-response protocol-family negotiation/failure behav
 
 SPIKE-003 is required before the standard v1 build ships configured Kademlia entries default-enabled. Failure blocks/revisits ADR-0034 rather than silently shipping an unsupported default.
 
-### NAT/relay
+### Mandatory Internet reachability
 
-SPIKE-004 determines real deployment requirements.
+SPIKE-004 is a **standard-v1 release/tuning gate** for the already-selected AutoNAT-v2/Relay-v2/DCUtR architecture. It must validate behaviour-originated dial admission, infrastructure-only protocol isolation, redundant reservations, address advertisement, direct-first racing, hole-punch fallback, server-role quotas, network-change recovery and resource budgets on the pinned rust-libp2p release. Failure blocks standard-v1 release or requires ADR-0035/0036 to be superseded; it does not silently make Phase 9 optional.
 
 ### Same-user local client authentication
 
@@ -114,7 +120,7 @@ Expected content remains Markdown/YAML architecture + Git metadata. No Cargo wor
 
 ## Implementation-readiness verdict
 
-With ADR-0030/0031 and endpoint-aware contracts in place, a team can scaffold Phase 1 without reopening whether one PeerId can serve human + Claude, how direct traffic selects a local consumer, how replies return to the correct remote/local route, whether endpoint discovery implies identity/trust, or what happens while an endpoint is offline.
+With endpoint-aware contracts and ADR-0035/0036 in place, a team can scaffold Phase 1 without reopening Model-B routing or the Internet-reachability architecture. The remaining empirical work is library integration/tuning: the standard-v1 requirement is already fixed as AutoNAT-v2 evidence + Relay-v2 fallback + bounded DCUtR direct upgrades under class-aware root dial admission.
 
 
 ## Identity recovery addendum

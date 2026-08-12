@@ -1,5 +1,8 @@
 # Kademlia / shared-profile second architecture review closure — 2026-08-12
 
+> Historical note: the K6 "no AutoNAT proof" closure below was correct for that revision but is superseded by ADR-0035. Current Kademlia server-mode health consumes mandatory Phase-9 AutoNAT-verified direct / active-relay evidence; see `kademlia-integration.md`.
+
+
 > **Historical note:** this memo records the then-current default-disabled rollout. ADR-0034 (2026-08-12) supersedes that rollout posture: the standard v1 build supports Kademlia and configured entries now default `enabled: true`, with explicit opt-out.
 
 

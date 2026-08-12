@@ -106,7 +106,7 @@ A future Claude `peer_endpoints` tool therefore requires an explicit capability-
 - `response {id, ok, result? | error?}`
 - `cancel {id}`
 - `event {sequence, event_type, data}`
-- `server_state {health,...}`
+- `server_state {health, connectivity?, ...}`
 
 Request IDs are unique per connection. Event sequence is per IPC connection for diagnostics/gap detection only; it is not a durable replay cursor.
 
@@ -189,3 +189,9 @@ Cancel is advisory. If an operation has crossed an irreversible network boundary
 ## IPC v1 compatibility
 
 There is no production v1 deployment requirement. The first production implementation targets IPC v2. If a future v1 adapter is added, it must be explicit and cannot reintroduce undocumented direct all-client fan-out into the v2 routing model.
+
+## Connectivity status over IPC
+
+When a client has ordinary read/status capability, `server_state` may include the backend-neutral `ConnectivitySummary` from the transport contract. Ordinary Claude/human data-plane clients receive only normalized direct/relay state and counts. Raw AutoNAT probe-server identities, relay PeerIds, relay multiaddrs, and server-capacity detail require a local diagnostics/admin capability and are never inferred as trust.
+
+`ConnectivityChanged` is an operational event and may be coalesced on IPC to avoid state-flap event floods. It is not a durable replay stream and does not change endpoint lease semantics.

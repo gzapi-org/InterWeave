@@ -33,3 +33,6 @@ No libp2p dependency in transport API, discovery API, IPC contract, or Claude br
 ## Revisit conditions
 
 Revisit if operational complexity outweighs decentralization benefits or another backend demonstrably satisfies both direct and broadcast semantics with lower cost.
+
+
+ADR-0035 makes the Internet-reachability subset of the libp2p backend (AutoNAT v2 client, Circuit Relay v2 client, DCUtR) mandatory for the standard v1 build. ADR-0036 keeps relay/probe infrastructure authorization separate from application trust.

@@ -99,3 +99,56 @@ Reply succeeds only while the bridge still owns `claude` at epoch `E`. It never 
 ## Broadcast reply route
 
 Broadcast reply token maps only to ChannelId/mode. The caller must still be joined; otherwise `ChannelNotJoined`.
+
+
+## Mandatory Internet reachability flows
+
+### Reachability classification and relay readiness
+
+```text
+configured/Identify-authorized probe servers
+        |
+        v
+AutoNAT v2 probes --bounded evidence--> ReachabilityManager
+        |                                  |
+        |                                  +--> direct_inbound state
+        |                                  |
+        v                                  v
+authorized relay candidates ----------> RelayManager
+                                           |
+                                           +--> maintain target reservations
+                                           +--> add/remove active relay addresses
+                                           +--> ConnectivityChanged
+```
+
+### Outbound application connection
+
+```text
+trusted target PeerId
+      |
+      v
+ConnectionManager / DialAdmissionGate
+      |
+      +--> direct candidate first -------------------+
+      |                                              |
+      +-- after bounded head start --> relay route --+--> authenticated peer connection
+                                                     |
+                                                     +--> direct v2 / endpoint directory / GossipSub
+```
+
+Relay PeerId authorization is checked separately from the authenticated application target. A permitted relay never authorizes the remote application peer.
+
+### DCUtR upgrade
+
+```text
+working relayed connection
+       |
+       v
+DCUtRManager --bounded/cooldown--> simultaneous direct attempt
+       |
+       +-- failure --> retain relay path
+       |
+       `-- success --> direct path --stability timer--> retire redundant relay path
+```
+
+There is no claim that existing streams migrate. New work prefers the stable direct path.

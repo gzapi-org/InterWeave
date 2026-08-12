@@ -9,13 +9,17 @@
 | EndpointRegistry (runtime) | configured endpoint set, exclusive leases, default route, endpoint policy intersection, local route admission | human/application identity, libp2p protocol mechanics |
 | Transport runtime | neutral command/event semantics, orchestration, endpoint-aware direct admission, health | Claude-specific prompts/tools |
 | DiscoveryManager | provider lifecycle, candidate aggregation/provenance/expiry | trust grants, dialing, endpoint discovery |
-| ConnectionManager | candidate addresses, dial/backoff/connection limits/retention | peer discovery, application payloads |
-| PeerTrustPolicy | profile peer admission decision | discovery, endpoint naming, human identity |
+| ConnectionManager | candidate/path selection, connection class, dial-origin admission, backoff/connection limits/retention, direct-vs-relay preference | peer discovery, application payloads |
+| PeerTrustPolicy | application data-plane PeerId admission decision | discovery, connectivity-infrastructure roles, endpoint naming, human identity |
 | PubSubManager | ChannelId/topic mapping, GossipSub publish/validation/subscriptions | directed endpoint routing |
 | DirectManager | request-response v2 lifecycle, codec, transport acceptance | local endpoint ownership policy, application acknowledgement |
 | Endpoint directory manager | trust-gated advertised route snapshot/query/cache | app labels, human identity, DHT records |
+| ReachabilityManager | AutoNAT-v2 evidence aggregation, direct/relay reachability status, reservation target | peer trust, discovery, endpoint routing |
+| RelayManager | authorized relay candidates, reservations/failover, ephemeral relay addresses, optional server-role capacity | trust grants, discovery, application routing |
+| DCUtRManager | bounded relayed-to-direct upgrade attempts/cooldown and success handoff | application retry, trust grants |
+| ConnectivityInfrastructurePolicy | protocol-scoped relay/AutoNAT infrastructure authorization | GossipSub/direct/endpoint/Kademlia application trust |
 | IdentityManager | persistent Ed25519 profile key, PeerId, rotation, exact-key recovery boundary | endpoint identities, application identity, online mnemonic export |
-| rust-libp2p backend | Swarm, TCP/Noise/Yamux, Identify, GossipSub, direct/endpoints protocols | Claude semantics |
+| rust-libp2p backend | Swarm, TCP/Noise/Yamux, Identify, mandatory AutoNAT-v2/relay-v2/DCUtR, GossipSub, direct/endpoints protocols, Kademlia driver | Claude semantics |
 
 ## Endpoint ownership split
 
@@ -38,3 +42,25 @@ The libp2p backend carries EndpointIds on direct frames but does not decide whic
 ## Human client boundary
 
 A human client may implement application-level contacts, display names, avatars, local message history, unread state, reactions, or a richer chat payload protocol. None of those concepts belongs in `transport-api` or EndpointId.
+
+## Reachability ownership split
+
+```text
+Discovery candidates / Identify observations
+              |
+              v
+       AddressRegistry
+              |
+   +----------+-----------+
+   |          |           |
+AutoNAT   RelayManager  ConnectionManager
+   |          |           |
+   +------ Reachability ---+
+              |
+            DCUtR
+              |
+              v
+          Swarm paths
+```
+
+Relay/AutoNAT service authorization is a control-plane policy, not a DiscoveryProvider capability and not application `PeerTrustPolicy`.
