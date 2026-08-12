@@ -186,9 +186,21 @@ actions_degraded() {
 # own — the fix is to re-trigger, and (per CLAUDE.md) to RE-ARM after,
 # because close/reopen silently drops auto-merge.
 head_sha_has_no_run() {
-    local sha runs
+    local sha runs workflows
     sha="$(gh pr view "$PR" --json headRefOid -q .headRefOid 2>/dev/null)" || return 1
     [[ -n "$sha" ]] || return 1
+
+    # ZERO RUNS ONLY MEANS A LOST WEBHOOK IF A RUN WAS EVER EXPECTED. A
+    # repository with no workflow files produces no runs BY DESIGN — this
+    # one has none today, and CLAUDE.md says so — and a path-filtered
+    # workflow legitimately skips a push. Without this guard every watch
+    # on such a repository ends at exit 6 with re-trigger instructions
+    # for a run that was never coming, which inverts the signal exit 6
+    # exists to give.
+    workflows="$(gh api "repos/{owner}/{repo}/actions/workflows?per_page=1"         -q '.total_count' 2>/dev/null)" || return 1
+    [[ "$workflows" =~ ^[0-9]+$ ]] || return 1
+    (( workflows > 0 )) || return 1
+
     runs="$(gh api "repos/{owner}/{repo}/actions/runs?head_sha=$sha&per_page=1"         -q '.total_count' 2>/dev/null)" || return 1
     [[ "$runs" == "0" ]]
 }
@@ -351,6 +363,19 @@ while true; do
         # there is a legitimate window right after a push where GitHub
         # has not yet registered the run, and firing on the first empty
         # poll would misreport every healthy watch.
+        # A TERMINAL STATE OUTRANKS ANY DIAGNOSIS. A PR can merge on the
+        # very poll where checks still read empty, and diagnose_stall
+        # exits 6 without returning — so diagnosing first would report a
+        # successfully merged PR as stalled and tell the caller not to
+        # return to main. The state is what actually happened; the
+        # diagnosis is only ever an explanation for why nothing has.
+        case "$state" in
+            MERGED)
+                verdict 0 "MERGED — safe to return to main" ;;
+            CLOSED)
+                verdict 3 "CLOSED WITHOUT MERGING — do not return to main" ;;
+        esac
+
         if [[ "$(printf '%s' "$checks_json" | jq -r 'length' 2>/dev/null || echo 1)" == "0" ]]; then
             empty_polls=$(( empty_polls + 1 ))
             if (( empty_polls >= EMPTY_POLLS_BEFORE_DIAGNOSIS )); then
@@ -360,13 +385,6 @@ while true; do
         else
             empty_polls=0
         fi
-
-        case "$state" in
-            MERGED)
-                verdict 0 "MERGED — safe to return to main" ;;
-            CLOSED)
-                verdict 3 "CLOSED WITHOUT MERGING — do not return to main" ;;
-        esac
 
         # BLOCKED is the NORMAL state while checks run, so it is not by
         # itself a reason to stop. What ends the watch is a PR that will

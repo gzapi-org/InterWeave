@@ -68,6 +68,11 @@ if [[ "${1:-}" == "api" ]]; then
   # keeps its old behaviour.
   case "${2:-}" in
     *actions/runs*)     cat "$GH_MOCK_STATE/runs_count" 2>/dev/null || echo 1; exit 0 ;;
+    # How many workflow FILES the repo has. Zero runs only means a lost
+    # webhook if a run was ever expected, so the missing-run probe asks
+    # this first. Defaults to 1 so every pre-existing case still
+    # describes a repository that has CI.
+    *actions/workflows*) cat "$GH_MOCK_STATE/workflows_count" 2>/dev/null || echo 1; exit 0 ;;
     # Serves the real JSON shape now, not a pre-reduced number: the
     # script reads netAmount AND minute quantity from one response, so a
     # mock that answers with a bare figure could not exercise the
@@ -148,12 +153,14 @@ states() { printf '%s\n' "$@" > "$SANDBOX/state/states"; : > "$SANDBOX/state/cal
            rm -f "$SANDBOX/state/checks_empty"
            printf 'operational\n' > "$SANDBOX/state/actions_status"
            printf '1\n' > "$SANDBOX/state/runs_count"
+           printf '1\n' > "$SANDBOX/state/workflows_count"
            printf '0\n' > "$SANDBOX/state/billing_net"
            printf '0\n' > "$SANDBOX/state/billing_mins"
            unset INTERWEAVE_ACTIONS_INCLUDED_MINUTES; }
 no_checks()       { : > "$SANDBOX/state/checks_empty"; }
 actions_status()  { printf '%s\n' "$1" > "$SANDBOX/state/actions_status"; }
 runs_count()      { printf '%s\n' "$1" > "$SANDBOX/state/runs_count"; }
+workflows_count() { printf '%s\n' "$1" > "$SANDBOX/state/workflows_count"; }
 billing_net()     { printf '%s\n' "$1" > "$SANDBOX/state/billing_net"; }
 billing_mins()    { printf '%s\n' "$1" > "$SANDBOX/state/billing_mins"; }
 arming() { printf '%s\n' "$1" > "$SANDBOX/state/arming"; }
@@ -532,6 +539,31 @@ runs_count 0
 invoke 431 --interval 1 --timeout 3
 assert_rc       "exits 4, not 6"            4
 assert_contains "no missing-run claim"      "watch expired"
+
+echo "wait-merged: a repo with NO workflows is not a lost webhook"
+# This repository has no workflow files today. Without the guard every
+# watch here reaches three empty polls, concludes the push webhook was
+# lost, and exits 6 with re-trigger instructions for a run that was
+# never coming — inverting the signal exit 6 exists to give.
+states "OPEN:BLOCKED"
+no_checks
+runs_count 0
+workflows_count 0
+invoke 431 --interval 1 --timeout 3
+assert_rc       "exits 4, not 6"              4
+assert_lacks    "makes no missing-run claim"  "no workflow run exists"
+
+echo "wait-merged: a merge on the empty-checks poll still reports MERGED"
+# A PR can merge on the very poll where checks still read empty. The
+# terminal state must be honoured BEFORE the stall diagnosis, or a
+# successful merge exits 6 and the caller is told not to return to main
+# — the one thing this script must never get wrong.
+states "OPEN:BLOCKED" "OPEN:BLOCKED" "MERGED:CLEAN"
+no_checks
+runs_count 0
+invoke 431 --interval 1 --timeout 9
+assert_rc       "exits 0, not 6"              0
+assert_contains "reports the merge"           "MERGED — safe to return to main"
 
 echo
 if [[ "$failures" -eq 0 ]]; then
