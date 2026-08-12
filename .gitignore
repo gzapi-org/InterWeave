@@ -8,4 +8,9 @@ state/
 cache/
 target/
 .DS_Store
-config/local.yaml
+architecture/config/local.yaml
+
+# Future implementation/build outputs.
+**/target/
+**/build/
+apps/human-android/android/.gradle/

@@ -2,11 +2,25 @@
 
 Architecture and contracts for a generic peer-to-peer **Claude Code Channel transport**, Model B local endpoint multiplexing, and first-party Rust human clients for desktop and Android.
 
-> Status: architecture only. This repository intentionally contains no production MCP server, libp2p networking, daemon, human client, installer, system service, or Rust crate implementation.
+> Status: **architecture + implementation/test skeleton**. The accepted specifications live under `architecture/`; root `apps/`, `crates/`, `tests/`, `fixtures/`, `spikes/`, and packaging folders are tracked landing zones only. There is still no production MCP server, libp2p networking, daemon, human client, installer, system service, crate manifest, or Rust source implementation.
 
 ## Purpose
 
 `claude-p2p-channel` is a transport plugin, not an application coordination or chat protocol. It gives Claude Code and other local clients a decentralized, payload-agnostic transport. Higher-level systems may carry text, JSON, chat envelopes, or their own protocols, but this project does not define agent roles, task state, repositories, Git semantics, human identity, social graphs, read receipts, or application workflows.
+
+## Repository layout
+
+- [`architecture/`](./architecture/README.md) — normative ADRs/contracts/design/research/roadmap.
+- [`apps/`](./apps/README.md) — future thin executable/platform composition roots.
+- [`crates/`](./crates/README.md) — future reusable Rust package boundaries.
+- [`tests/`](./tests/README.md) — future cross-crate/network/conformance/E2E suites.
+- [`fixtures/`](./fixtures/README.md) — frozen cross-implementation vectors.
+- [`test-data/`](./test-data/README.md) — mutable non-normative scenario data.
+- [`spikes/`](./spikes/README.md) — empirical non-production experiments mapped to architecture SPIKEs.
+- [`packaging/`](./packaging/README.md) — future platform release/service/package material.
+- [`IMPLEMENTATION.md`](./IMPLEMENTATION.md) — implementation landing-zone rules.
+
+The root `Cargo.toml` is intentionally a **zero-member virtual workspace**. Planned paths are metadata only until their implementation phase starts. See [ADR-0045](./architecture/adr/0045-implementation-repository-layout.md).
 
 ## Architecture
 
@@ -62,45 +76,47 @@ The first-party human client uses a shared Rust core and Slint UI. Desktop is an
 
 See:
 
-- [Human client Model B](docs/architecture/human-client-model-b.md)
-- [Cross-platform human client](docs/architecture/human-client-cross-platform.md)
-- [Desktop human client](docs/architecture/human-client-desktop.md)
-- [Android human client](docs/architecture/human-client-android.md)
-- [Android key custody](docs/architecture/android-key-custody.md)
-- [Human-client UI/interaction design](docs/architecture/human-client-ui.md)
-- [Human message retention contract](clients/human/RETENTION.md)
-- [ADR-0044 human message retention](adr/0044-human-message-retention.md)
-- [Human-client platform packaging](docs/architecture/human-client-packaging.md)
-- [Local client session contract](contracts/LOCAL-CLIENT.md)
-- [Endpoint contract](contracts/ENDPOINTS.md)
-- [Libp2p endpoint protocols](transport/libp2p/ENDPOINTS.md)
-- [ADR-0030 local endpoint addressing](adr/0030-local-endpoint-addressing.md)
-- [ADR-0031 endpoint directory](adr/0031-endpoint-directory.md)
-- [ADR-0032 human client boundary](adr/0032-human-client-boundary.md)
-- [Human + Claude profile example](config/examples/human-and-claude.yaml)
+- [Human client Model B](architecture/docs/architecture/human-client-model-b.md)
+- [Cross-platform human client](architecture/docs/architecture/human-client-cross-platform.md)
+- [Desktop human client](architecture/docs/architecture/human-client-desktop.md)
+- [Android human client](architecture/docs/architecture/human-client-android.md)
+- [Android key custody](architecture/docs/architecture/android-key-custody.md)
+- [Human-client UI/interaction design](architecture/docs/architecture/human-client-ui.md)
+- [Human message retention contract](architecture/clients/human/RETENTION.md)
+- [ADR-0044 human message retention](architecture/adr/0044-human-message-retention.md)
+- [Human-client platform packaging](architecture/docs/architecture/human-client-packaging.md)
+- [Local client session contract](architecture/contracts/LOCAL-CLIENT.md)
+- [Endpoint contract](architecture/contracts/ENDPOINTS.md)
+- [Libp2p endpoint protocols](architecture/transport/libp2p/ENDPOINTS.md)
+- [ADR-0030 local endpoint addressing](architecture/adr/0030-local-endpoint-addressing.md)
+- [ADR-0031 endpoint directory](architecture/adr/0031-endpoint-directory.md)
+- [ADR-0032 human client boundary](architecture/adr/0032-human-client-boundary.md)
+- [Human + Claude profile example](architecture/config/examples/human-and-claude.yaml)
 
 ## Start here
 
-- [Architecture overview](docs/architecture/overview.md)
-- [Component boundaries](docs/architecture/components.md)
-- [Data flows](docs/architecture/data-flows.md)
-- [Transport contract](contracts/TRANSPORT.md)
-- [Connectivity contract](contracts/CONNECTIVITY.md)
-- [Endpoint contract](contracts/ENDPOINTS.md)
-- [Local IPC contract](contracts/LOCAL-IPC.md)
-- [Discovery contract](contracts/DISCOVERY.md)
-- [ADR index](adr/README.md)
-- [Threat model](docs/architecture/threat-model.md)
-- [Rust blueprint](docs/architecture/rust-blueprint.md)
-- [Mandatory Internet reachability design](transport/libp2p/CONNECTIVITY.md)
-- [Implementation plan](roadmap/IMPLEMENTATION-PLAN.md)
-- [Final architecture review](docs/architecture/FINAL-REVIEW.md)
-- [Adversarial security review closure](docs/architecture/SECURITY-REVIEW-2026-08-12.md)
-- [Human message-retention amendment review](docs/architecture/MESSAGE-RETENTION-REVIEW-2026-08-12.md)
+- [Architecture overview](architecture/docs/architecture/overview.md)
+- [Component boundaries](architecture/docs/architecture/components.md)
+- [Data flows](architecture/docs/architecture/data-flows.md)
+- [Transport contract](architecture/contracts/TRANSPORT.md)
+- [Connectivity contract](architecture/contracts/CONNECTIVITY.md)
+- [Endpoint contract](architecture/contracts/ENDPOINTS.md)
+- [Local IPC contract](architecture/contracts/LOCAL-IPC.md)
+- [Discovery contract](architecture/contracts/DISCOVERY.md)
+- [ADR index](architecture/adr/README.md)
+- [Threat model](architecture/docs/architecture/threat-model.md)
+- [Rust blueprint](architecture/docs/architecture/rust-blueprint.md)
+- [Implementation repository layout](architecture/docs/architecture/implementation-repository-layout.md)
+- [ADR-0045 repository/test placement](architecture/adr/0045-implementation-repository-layout.md)
+- [Mandatory Internet reachability design](architecture/transport/libp2p/CONNECTIVITY.md)
+- [Implementation plan](architecture/roadmap/IMPLEMENTATION-PLAN.md)
+- [Final architecture review](architecture/docs/architecture/FINAL-REVIEW.md)
+- [Adversarial security review closure](architecture/docs/architecture/SECURITY-REVIEW-2026-08-12.md)
+- [Human message-retention amendment review](architecture/docs/architecture/MESSAGE-RETENTION-REVIEW-2026-08-12.md)
 
 ## Source snapshot
 
-Claude/Telegram research was refreshed 2026-08-11; libp2p/Kademlia, endpoint-protocol, and mandatory NAT/relay/DCUtR research was extended 2026-08-12. See [research/SOURCES.md](research/SOURCES.md), [research/endpoint-addressing.md](research/endpoint-addressing.md), and [research/nat-traversal.md](research/nat-traversal.md).
+Claude/Telegram research was refreshed 2026-08-11; libp2p/Kademlia, endpoint-protocol, and mandatory NAT/relay/DCUtR research was extended 2026-08-12. See [research/SOURCES.md](architecture/research/SOURCES.md), [research/endpoint-addressing.md](architecture/research/endpoint-addressing.md), and [research/nat-traversal.md](architecture/research/nat-traversal.md).
 
 ## Repository name
 
@@ -109,25 +125,25 @@ The working name **claude-p2p-channel** is retained because it describes the Cla
 
 ## Human-readable recovery and application guidance
 
-- Identity recovery: [`contracts/IDENTITY-RECOVERY.md`](./contracts/IDENTITY-RECOVERY.md), [`docs/architecture/identity-recovery.md`](./docs/architecture/identity-recovery.md), and [`ADR-0033`](./adr/0033-identity-recovery-mnemonic.md).
-- Current Kademlia default-on amendment: [`docs/architecture/KAD-DEFAULT-ON-REVIEW-2026-08-12.md`](./docs/architecture/KAD-DEFAULT-ON-REVIEW-2026-08-12.md) and [`ADR-0034`](./adr/0034-kademlia-default-enabled.md).
-- Non-normative first-party broadcast author hint: [`docs/architecture/application-envelope-guidance.md`](./docs/architecture/application-envelope-guidance.md). Transport still treats broadcast authorship as PeerId-only.
+- Identity recovery: [`contracts/IDENTITY-RECOVERY.md`](./architecture/contracts/IDENTITY-RECOVERY.md), [`docs/architecture/identity-recovery.md`](./architecture/docs/architecture/identity-recovery.md), and [`ADR-0033`](./architecture/adr/0033-identity-recovery-mnemonic.md).
+- Current Kademlia default-on amendment: [`docs/architecture/KAD-DEFAULT-ON-REVIEW-2026-08-12.md`](./architecture/docs/architecture/KAD-DEFAULT-ON-REVIEW-2026-08-12.md) and [`ADR-0034`](./architecture/adr/0034-kademlia-default-enabled.md).
+- Non-normative first-party broadcast author hint: [`docs/architecture/application-envelope-guidance.md`](./architecture/docs/architecture/application-envelope-guidance.md). Transport still treats broadcast authorship as PeerId-only.
 
 ## Mandatory Internet reachability
 
-- [`ADR-0035`](./adr/0035-mandatory-internet-reachability.md) makes Phase 9 required for standard v1.
-- [`ADR-0036`](./adr/0036-connectivity-infrastructure-peer-class.md) separates reachability infrastructure authorization from application trust.
-- [`contracts/CONNECTIVITY.md`](./contracts/CONNECTIVITY.md) freezes the backend-neutral connectivity states/path semantics.
-- [`transport/libp2p/CONNECTIVITY.md`](./transport/libp2p/CONNECTIVITY.md) defines the integrated state machine and ownership.
-- [`transport/libp2p/AUTONAT.md`](./transport/libp2p/AUTONAT.md), [`RELAY.md`](./transport/libp2p/RELAY.md), and [`DCUTR.md`](./transport/libp2p/DCUTR.md) are the detailed backend blueprints.
-- [`docs/architecture/connectivity-deployment.md`](./docs/architecture/connectivity-deployment.md) defines client/infrastructure deployment, redundancy, outage, and rollout topology.
-- [`config/examples/internet-reachability.yaml`](./config/examples/internet-reachability.yaml) shows a two-relay/probe-server Internet profile.
-- [`config/examples/connectivity-infrastructure.yaml`](./config/examples/connectivity-infrastructure.yaml) shows explicit AutoNAT/relay server roles with protocol-scoped authorization.
+- [`ADR-0035`](./architecture/adr/0035-mandatory-internet-reachability.md) makes Phase 9 required for standard v1.
+- [`ADR-0036`](./architecture/adr/0036-connectivity-infrastructure-peer-class.md) separates reachability infrastructure authorization from application trust.
+- [`contracts/CONNECTIVITY.md`](./architecture/contracts/CONNECTIVITY.md) freezes the backend-neutral connectivity states/path semantics.
+- [`transport/libp2p/CONNECTIVITY.md`](./architecture/transport/libp2p/CONNECTIVITY.md) defines the integrated state machine and ownership.
+- [`transport/libp2p/AUTONAT.md`](./architecture/transport/libp2p/AUTONAT.md), [`RELAY.md`](./architecture/transport/libp2p/RELAY.md), and [`DCUTR.md`](./architecture/transport/libp2p/DCUTR.md) are the detailed backend blueprints.
+- [`docs/architecture/connectivity-deployment.md`](./architecture/docs/architecture/connectivity-deployment.md) defines client/infrastructure deployment, redundancy, outage, and rollout topology.
+- [`config/examples/internet-reachability.yaml`](./architecture/config/examples/internet-reachability.yaml) shows a two-relay/probe-server Internet profile.
+- [`config/examples/connectivity-infrastructure.yaml`](./architecture/config/examples/connectivity-infrastructure.yaml) shows explicit AutoNAT/relay server roles with protocol-scoped authorization.
 
 ## Security freeze addendum
 
-The 2026-08-12 adversarial security pass is recorded in [`docs/architecture/SECURITY-REVIEW-2026-08-12.md`](./docs/architecture/SECURITY-REVIEW-2026-08-12.md). It freezes source+wire-sequence GossipSub message identity, split data/admin IPC sockets, pre-Noise admission limits, address-scoped identity-mismatch quarantine, hostile remote endpoint-metadata validation, direct trusted-peer token buckets, and 128-bit IPC keepalive nonces. ADR-0038 also records an explicit optional v2.x encrypted software-key path gated by SPIKE-007; standard v1 remains filesystem-only at rest.
+The 2026-08-12 adversarial security pass is recorded in [`docs/architecture/SECURITY-REVIEW-2026-08-12.md`](./architecture/docs/architecture/SECURITY-REVIEW-2026-08-12.md). It freezes source+wire-sequence GossipSub message identity, split data/admin IPC sockets, pre-Noise admission limits, address-scoped identity-mismatch quarantine, hostile remote endpoint-metadata validation, direct trusted-peer token buckets, and 128-bit IPC keepalive nonces. ADR-0038 also records an explicit optional v2.x encrypted software-key path gated by SPIKE-007; standard v1 remains filesystem-only at rest.
 
 ## Current human/mobile review
 
-See [`docs/architecture/HUMAN-CLIENT-REVIEW-2026-08-12.md`](docs/architecture/HUMAN-CLIENT-REVIEW-2026-08-12.md) for closure of AutoNAT/relay/connectivity review V1-V6 and the desktop/Android deployment decisions.
+See [`docs/architecture/HUMAN-CLIENT-REVIEW-2026-08-12.md`](architecture/docs/architecture/HUMAN-CLIENT-REVIEW-2026-08-12.md) for closure of AutoNAT/relay/connectivity review V1-V6 and the desktop/Android deployment decisions.

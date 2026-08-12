@@ -1,0 +1,59 @@
+# Implementation workspace skeleton only.
+# No production crate is a workspace member until its implementation phase begins.
+[workspace]
+resolver = "2"
+members = []
+
+[workspace.metadata.claude-p2p-channel]
+status = "skeleton-only"
+architecture_root = "architecture"
+
+planned_members = [
+  "apps/transport-daemon",
+  "apps/transportctl",
+  "apps/claude-channel",
+  "apps/human-desktop",
+  "apps/human-android",
+  "crates/api/transport-api",
+  "crates/api/discovery-api",
+  "crates/api/trust-api",
+  "crates/api/local-client-api",
+  "crates/api/ipc-protocol",
+  "crates/api/kademlia-control-api",
+  "crates/config/profile-config",
+  "crates/transport/runtime",
+  "crates/transport/libp2p",
+  "crates/discovery/cache",
+  "crates/discovery/static",
+  "crates/discovery/mdns",
+  "crates/discovery/kademlia",
+  "crates/local/ipc-client",
+  "crates/local/ipc-server",
+  "crates/claude/channel-core",
+  "crates/human/core",
+  "crates/human/chat-protocol",
+  "crates/human/store",
+  "crates/human/ui-model",
+  "crates/human/ui-slint",
+  "crates/human/android-platform",
+  "xtask",
+]
+
+planned_test_packages = [
+  "tests/support",
+  "tests/transport-contract",
+  "tests/discovery-conformance",
+  "tests/local-client-conformance",
+  "tests/ipc-v2",
+  "tests/direct-v2",
+  "tests/pubsub",
+  "tests/kademlia",
+  "tests/connectivity",
+  "tests/endpoint-routing",
+  "tests/human-chat",
+  "tests/human-retention",
+  "tests/security",
+  "tests/desktop-e2e",
+  "tests/android-e2e",
+  "tests/interoperability",
+]
