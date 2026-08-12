@@ -1,7 +1,6 @@
 
-# Prepared Kademlia configuration. It intentionally remains disabled.
-# On a build without the optional Kademlia implementation, setting enabled=true
-# is a hard startup/configuration error.
+# Standard-v1 Kademlia configuration. Kademlia is enabled by default/on purpose.
+# A reduced/custom build without Kademlia support must reject this profile.
 schema_version: 2
 profile: { name: kademlia-ready }
 transport:
@@ -38,7 +37,7 @@ discovery:
           - "/dns4/kad-a.example.net/tcp/4001/p2p/<KAD_SERVER_A>"
           - "/dns4/kad-b.example.net/tcp/4001/p2p/<KAD_SERVER_B>"
     - type: kademlia
-      enabled: false
+      enabled: true
       priority: 40
       config:
         config_version: 1

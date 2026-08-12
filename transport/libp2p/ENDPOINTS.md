@@ -29,6 +29,8 @@ DirectMessageV2 {
 }
 ```
 
+`media_type_len = 0` encodes **absence**. No empty media-type string exists on the wire. A non-zero length encodes a present ASCII media type and maps to `media_present = 1`; zero maps to `media_present = 0` in `DirectContentFingerprintV1`.
+
 The codec rejects invalid endpoint grammar, invalid lengths, or oversized declarations before allocating based on peer-controlled sizes.
 
 Conceptual response:

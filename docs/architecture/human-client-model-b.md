@@ -201,7 +201,7 @@ That application protocol must remain above this project. In particular, this tr
 2. human UI connects to IPC v2 and requests endpoint `human`;
 3. daemon validates configured/enabled endpoint and grants exclusive lease;
 4. `human` becomes locally routable and, if configured, remotely advertised;
-5. UI disconnect/restart removes lease immediately; a negotiated IPC keepalive also releases a half-open/wedged lease after bounded missed probes;
+5. UI disconnect/restart removes lease immediately; EndpointId leases require negotiated IPC keepalive by default, so a half-open/wedged first-party client is closed and its lease released after bounded missed probes;
 6. remote directory stops listing `human` after fresh query/cache expiry;
 7. direct requests during downtime receive `no_route`;
 8. reconnect obtains a new lease and routing resumes without changing PeerId.

@@ -1,5 +1,8 @@
 # Kademlia design amendment review — 2026-08-11
 
+> **Historical note:** this memo records the then-current default-disabled rollout. ADR-0034 (2026-08-12) supersedes that rollout posture: the standard v1 build supports Kademlia and configured entries now default `enabled: true`, with explicit opt-out.
+
+
 This memo is the review entry point for the Kademlia expansion requested after the contract-amendment review.
 
 ## Requested constraint
@@ -33,7 +36,7 @@ ADR-0009 now specifies Kademlia as a complete optional peer-routing design rathe
 
 ### Configuration
 
-`config/config.schema.yaml` contains the complete reserved Kademlia config shape. `config/examples/kademlia-ready-disabled.yaml` provides a reviewable full example while remaining disabled.
+`config/config.schema.yaml` contains the complete reserved Kademlia config shape. Historical file `config/examples/kademlia-ready-disabled.yaml` provided the then-disabled example; ADR-0034 replaces it with current `config/examples/kademlia-enabled.yaml`.
 
 ### Security boundary
 
@@ -61,7 +64,7 @@ Because libp2p Kademlia client-mode nodes are not routing-table servers, the pee
 2. `docs/architecture/kademlia-integration.md`
 3. `discovery/providers/kademlia.md`
 4. `config/config.schema.yaml`
-5. `config/examples/kademlia-ready-disabled.yaml`
+5. historical `config/examples/kademlia-ready-disabled.yaml` (current successor: `config/examples/kademlia-enabled.yaml`)
 6. `research/kademlia-integration.md`
 7. `roadmap/SPIKES.md`
 8. `roadmap/IMPLEMENTATION-PLAN.md`

@@ -84,9 +84,9 @@ discovery:
       config:
         peers: list[multiaddr-with-peer-id, max=64]
     kademlia:
-      # Fully specified optional provider; default remains disabled.
-      # A build without KademliaDiscovery rejects enabled=true at startup.
-      enabled: bool = false
+      # Standard v1 supports this provider; configured entries default enabled.
+      # A reduced/custom build without KademliaDiscovery rejects enabled=true.
+      enabled: bool = true
       priority: int
       config:
         config_version: literal[1] = 1
@@ -132,10 +132,15 @@ ipc:
   client_event_queue: integer[16..1024] = 256
   keepalive:
     enabled: bool = true
+    # When true, any IPC client claiming a data-plane EndpointId lease MUST
+    # negotiate the keepalive feature in hello. Admin/diagnostic sessions that
+    # claim no endpoint are unaffected.
+    require_for_endpoint_lease: bool = true
     interval: duration[10s..5m] = 30s
     response_timeout: duration[2s..1m] = 10s
     max_missed: integer[1..10] = 3
     # Cross-field when enabled=true: response_timeout < interval.
+    # If require_for_endpoint_lease=true, keepalive.enabled must also be true.
 observability:
   log_level: enum[error,warn,info,debug] = info
   payload_logging: literal[false]

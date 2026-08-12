@@ -24,6 +24,12 @@ rust-libp2p intentionally treats fixed identity keys through its own identity AP
 
 Normative details and fixtures are in `contracts/IDENTITY-RECOVERY.md`.
 
+### Verify-only drill and recovery scope
+
+`transportctl identity verify` is a read-only offline drill: decode phrase, derive PeerId, compare to expected public metadata, discard secret material, and perform no private-key write/profile mutation/network activity.
+
+The phrase recovers **identity only**. Complete profile disaster recovery additionally requires a backup of `config.yaml` for trust allowlists, endpoints/default route, discovery/Kademlia/bootstrap settings, desired channels, and local policy. Runtime caches, leases, dedup state, messages, and human-application history are not restored by the transport phrase.
+
 ## Alternatives considered
 
 No recovery; raw hex/base64 private-key backup only; use the complete BIP-39 mnemonic-to-seed PBKDF2 process; derive a new libp2p key from a separate mnemonic root with HKDF; invent a custom wordlist/checksum; make SLIP-0039 mandatory in v1; transmit recovery material through admin IPC; auto-store recovery words in profile config.

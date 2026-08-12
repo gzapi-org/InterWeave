@@ -25,7 +25,7 @@ This matrix is an audit aid, not a replacement for the source task.
 | bootstrap non-authority | ADR-0010, static provider doc |
 | static bootstrap DNS ownership | `discovery/providers/static-bootstrap.md`, failure model |
 | trust != discovery / outbound trust | ADR-0012, `TRANSPORT.md`, threat model |
-| persistent identity/rotation/recovery | `IDENTITY.md`, `contracts/IDENTITY-RECOVERY.md`, ADR-0033, configuration docs |
+| persistent identity/rotation/recovery | `IDENTITY.md`, `contracts/IDENTITY-RECOVERY.md`, ADR-0033, verify-only drill + separate config backup in configuration docs |
 | Noise boundary | ADR-0013, `SECURITY.md` |
 | group encryption decision | ADR-0014 |
 | embedded vs daemon | ADR-0015 |

@@ -18,7 +18,7 @@ main / daemon supervisor
   |    |- cache
   |    |- mDNS
   |    |- static
-  |    `- Kademlia optional/default-off
+  |    `- Kademlia when configured (default enabled; explicit opt-out)
   |- cache writer/debounce
   `- observability sink
 ```
@@ -71,4 +71,4 @@ ConnectionManager peer backoff rules remain unchanged. Local endpoint reconnect 
 
 ## Kademlia task interaction
 
-Unchanged: optional Kademlia driver/provider interaction uses bounded control channels and all behavior-originated dials pass root dial admission. Endpoint addressing is not a Kademlia responsibility.
+Kademlia driver/provider interaction uses bounded control channels and all behavior-originated dials pass root dial admission. Configured entries default enabled in standard v1; explicit opt-out instantiates neither side. Endpoint addressing is not a Kademlia responsibility.

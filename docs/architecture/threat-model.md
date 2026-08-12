@@ -18,12 +18,12 @@ Trust boundaries:
 |---|---|---|---|---|
 | Rogue peer | injects traffic/data-plane | Noise + deny-by-default profile allowlist before ordinary data-plane/directory | stolen/incorrectly trusted PeerId | signed membership/enterprise policy |
 | Discovery poisoning | bogus addresses waste dials | advisory discovery, caps, trusted dial admission | trusted stale/poisoned address | source reputation/diversity |
-| Malicious bootstrap/Kademlia | topology bias | no authority/trust; Kademlia default-off/trust-bounded/no records | compromised trusted routers | stronger diversity/membership |
+| Malicious bootstrap/Kademlia | topology bias | no authority/trust; Kademlia trust-bounded/no records/disjoint paths/budgets | compromised trusted routers | stronger diversity/membership |
 | Replay | old messages reappear | 128-bit IDs + bounded endpoint-aware/broadcast dedup | outside TTL/restart | app nonce/session protocol |
 | Flood/oversized | resource exhaustion | 48 KiB cap, pre-allocation checks, bounded queues/concurrency | valid-size flood | token buckets/scoring |
 | Slow endpoint consumer | false acceptance/message loss | direct Accepted only after target endpoint queue admission; overload rejects | sender retries/load churn | flow control |
 | Slow broadcast consumer | queue saturation | independent bounded queues/drop diagnostics | broadcast message loss | flow control |
-| Local IPC attack | same-user process impersonates client | owner ACL, peer creds where available, configured-only exclusive endpoint leases, capability grants | malicious same-user process remains powerful | capability token/keychain/sandbox |
+| Local IPC attack | same-user process impersonates client | owner ACL, peer creds where available, configured-only exclusive endpoint leases, capability grants, keepalive required by default for leased endpoints | malicious same-user process remains powerful; keepalive is not authentication | capability token/keychain/sandbox |
 | Endpoint squatting | local process steals `human`/`claude` route | configured-only claim + exclusive lease + client-kind hygiene | same-user attacker can spoof kind | stronger local app identity |
 | Endpoint source spoof by ordinary local caller | local app claims another source route | source endpoint derived from IPC lease; not command input | compromised daemon/runtime | process isolation |
 | Endpoint label used as authorization principal | implementer trusts remote `source_endpoint` such as `human`/`admin` | endpoint ACLs authorize by PeerId only; remote source EndpointId is non-authoritative routing metadata | application may misuse labels | cryptographic application/sub-identity protocol above transport |
@@ -75,4 +75,4 @@ Transport does not rely on topic-name secrecy. Trusted forwarding peers can read
 
 ## Kademlia-specific threat treatment
 
-Kademlia remains disabled by default. When explicitly enabled on a supporting build, existing poisoning/Sybil/eclipse/bootstrap/namespace/record-store/query-privacy mitigations continue. Endpoint IDs and endpoint presence are never written into Kademlia provider/value records; endpoint discovery stays on the separate trust-gated direct endpoint-directory protocol.
+Kademlia is enabled by default for configured entries in the standard v1 build. Therefore poisoning/Sybil/eclipse/bootstrap/namespace/record-store/query-privacy mitigations are part of the normal threat posture, not an optional-feature posture. Explicit `enabled: false` remains available for profiles that opt out. Endpoint IDs and endpoint presence are never written into Kademlia provider/value records; endpoint discovery stays on the separate trust-gated direct endpoint-directory protocol.

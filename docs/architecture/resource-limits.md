@@ -23,6 +23,7 @@ Default values are conservative architecture targets, not performance promises.
 | IPC keepalive interval | 30 s | 5 min |
 | IPC keepalive response timeout | 10 s | < interval, max 1 min |
 | IPC keepalive missed probes | 3 | 10 |
+| require keepalive for EndpointId lease | true | boolean policy |
 | backend->runtime events | 1024 | 8192 |
 | per-client event queue | 256 | 1024 |
 | outstanding commands/client | 64 | 256 |

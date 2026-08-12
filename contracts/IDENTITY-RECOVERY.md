@@ -75,6 +75,20 @@ A future `transportctl identity backup`-equivalent operation must:
 
 Default export must not write a recovery file automatically. An explicit file-output option, if later provided, creates a new owner-only file and refuses broad permissions.
 
+## Verify-only recovery drill
+
+A future `transportctl identity verify` operation is the preferred routine recovery drill. It is offline/local and read-only:
+
+1. accept a `RecoveryRecordV1` or phrase plus expected PeerId;
+2. decode/NFKD-normalize and verify the 24-word BIP-39 entropy checksum;
+3. recover the exact 32-byte Ed25519 secret seed in memory;
+4. derive the public key and PeerId through the same identity adapter used by restore;
+5. compare with `expected_peer_id` (or an explicitly supplied public PeerId);
+6. report match/mismatch and discard secret buffers;
+7. perform **no private-key write, no profile mutation, no daemon start, and no network activity**.
+
+The verify operation does not require the live private-key file to be exclusively locked because it never reads or writes that key. If a profile name is supplied only to obtain surviving public expected-PeerId metadata, the tool must not enter the restore/replace path. Verification output never prints the recovered secret or normalized phrase.
+
 ## Restore semantics
 
 Recovery import is likewise offline/local, never IPC/Channel.
@@ -103,6 +117,15 @@ If only a phrase survives and no expected PeerId exists, it may initialize a **n
 - The old phrase continues to recover the old compromised/retired PeerId; it does not follow rotation.
 - Suspected phrase disclosure is private-key compromise and requires the same out-of-band trust revocation/replacement procedure as key-file theft.
 - EndpointIds are unaffected as configuration labels, but all endpoints move under the new PeerId after intentional rotation.
+
+## Complete profile disaster-recovery bundle
+
+The mnemonic restores **transport identity only**. Complete recovery of an operational profile requires both:
+
+1. the 24-word recovery phrase (or future threshold shares) for the exact Ed25519 identity; and
+2. a separate backup of the profile's non-secret `config.yaml`, especially `trust.allowed_peers`, endpoint definitions/default route, discovery/bootstrap/Kademlia settings, desired channels, and policy/limit choices.
+
+The phrase alone intentionally restores a **bare identity**: the same PeerId with no reconstructed trust allowlist, EndpointIds, bootstrap policy, application contacts, or message history. Runtime cache, endpoint leases, directory cache, dedup state, and messages are never part of the disaster-recovery bundle. Applications such as a human client back up their own contacts/history separately.
 
 ## Backup redundancy and future threshold recovery
 
@@ -152,4 +175,6 @@ The phrase is the standard 256-bit-zero BIP-39 entropy encoding. The expected Pe
 - export/import unavailable through IPC and Claude tools;
 - recovery phrase absent from logs/crash reports/config fixtures;
 - established-key overwrite is fail-closed without explicit matching restore flow;
-- rotation produces a distinct PeerId and distinct phrase.
+- rotation produces a distinct PeerId and distinct phrase;
+- verify-only drill derives/compares the expected PeerId without key-file write, profile mutation, IPC, or network activity;
+- a restored phrase without backed-up config yields only a bare identity, never reconstructed trust/endpoints.

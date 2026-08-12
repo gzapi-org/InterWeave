@@ -5,7 +5,8 @@
 - ChannelId validation/topic hashing fixtures;
 - EndpointId grammar/length fixtures;
 - endpoint config uniqueness/default/subset/advertisement cross-field validation;
-- IPC keepalive config validation (`response_timeout < interval`) and fixed v2 version-not-in-config rule;
+- IPC keepalive config validation (`response_timeout < interval`, `require_for_endpoint_lease => keepalive.enabled`) and fixed v2 version-not-in-config rule;
+- EndpointId claim without negotiated keepalive is `CapabilityDenied` when `require_for_endpoint_lease=true`, while endpoint-less admin/diagnostics sessions remain eligible;
 - endpoint lease grant/conflict/release/revoke/epoch state machine;
 - endpoint inbound/outbound policy is intersection with profile trust and cannot widen it;
 - default-route resolution is deterministic and never connection-order-based;
@@ -20,6 +21,7 @@
 - GossipSub Accept|Ignore|Reject mapping;
 - broadcast dedup key `(mode, source_peer, channel, message_id)`;
 - direct dedup key `(mode, source_peer, source_endpoint, destination_selector, message_id)` plus stored first resolved endpoint/DirectContentFingerprintV1;
+- Direct v2 `media_type_len=0` decodes as **absent**, never empty string, and maps to `media_present=0` in DirectContentFingerprintV1;
 - DirectContentFingerprintV1 binary canonicalization and golden SHA-256 fixture (`text/plain`, `hello` -> `3dad2f134909e51812e261b56c84b5ab040de681a9e900c9180b2e88a4b47efe`);
 - direct in-flight reservation global/per-source-peer bounds and overload rejection;
 - backoff/cancellation state machines;
@@ -117,6 +119,7 @@ Every provider runs `contracts/DISCOVERY-CONFORMANCE.md` tests. Endpoint routing
 - flood cannot create unbounded endpoint/directory/cache/queue state;
 - corrupt cache/config/identity behavior remains fail-safe;
 - recovery export fixture decodes exact Ed25519 secret bytes; restore reproduces expected PeerId; wrong checksum/mismatched expected PeerId fails closed;
+- `identity verify` derives/compares expected PeerId with no key-file write/profile mutation/network activity;
 - recovery phrase never appears in logs, config, IPC fixtures, crash reports, or Channel events.
 
 ## Compatibility fixtures
@@ -127,6 +130,7 @@ Required endpoint-v2 fixtures:
 
 - DirectMessageV2 with 64-byte source and destination EndpointIds and 49,152-byte payload;
 - DirectMessageV2 with destination length zero (remote default route);
+- DirectMessageV2 with `media_type_len=0` round-trips to absent media type and the `media_present=0` fingerprint branch;
 - AcceptedV2 resolved-endpoint response;
 - RejectedV2 no_route response;
 - IPC v2 hello with endpoint claim and granted lease epoch;
@@ -138,9 +142,9 @@ Required endpoint-v2 fixtures:
 
 Because no production v1 exists, Phase 1 does not require a v1 fan-out compatibility fixture. Unsupported major versions fail clearly.
 
-## Kademlia optional-provider test suite
+## Kademlia standard-v1 provider test suite
 
-These tests remain required before a build may advertise Kademlia as supported. `enabled: false` remains shipped default.
+These tests are a standard-v1 release gate before shipping configured Kademlia entries default-enabled. Tests also verify explicit `enabled: false` produces zero Kademlia activity.
 
 ### Configuration/unit
 

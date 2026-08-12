@@ -14,7 +14,7 @@ crates/
   discovery-cache/
   discovery-static/
   discovery-mdns/
-  discovery-kademlia/     # optional/default-off; discovery-api + kademlia-control-api
+  discovery-kademlia/     # standard-v1; discovery-api + kademlia-control-api
   transport-libp2p/       # Swarm, direct-v2 codec, endpoint-directory protocol, GossipSub, identity
   transport-runtime/      # generic orchestration + EndpointRegistry/policies/route admission
   ipc-protocol/           # IPC v2 endpoint-aware frames; NO libp2p, NO Claude
@@ -125,8 +125,8 @@ A human UI may have an admin/settings adapter that opens a separately authorized
 - IPC v2 compatibility fixtures;
 - human+Claude same-profile endpoint-routing integration harness;
 - security tests for endpoint probing/squatting/admin separation;
-- optional Kademlia tests.
+- standard-v1 Kademlia conformance/integration tests, including explicit opt-out zero-activity tests.
 
 ## Kademlia construction order
 
-Unchanged from prior design. `enabled: false` means no Kademlia behavior/task/protocol. Kademlia never stores EndpointIds or endpoint-directory state.
+Per ADR-0034 the standard v1 build includes Kademlia support and configured entries default enabled. `enabled: false` remains an explicit opt-out meaning no Kademlia behavior/task/protocol. Kademlia never stores EndpointIds or endpoint-directory state.

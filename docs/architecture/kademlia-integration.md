@@ -1,13 +1,13 @@
 
 # Kademlia integration blueprint
 
-Status: **architecture-complete, implementation deferred, default disabled**.
+Status: **architecture-complete; standard-v1 implementation required by ADR-0034; configured entries default enabled with explicit opt-out**.
 
 This document specifies how Kademlia integrates into `claude-p2p-channel` without changing the generic `DiscoveryProvider` or `Transport` contracts. It is an implementation blueprint, not production code.
 
 ## 1. Goal and rollout posture
 
-Kademlia provides optional distributed **peer routing and address discovery**. It does not provide channel membership, trust, application storage, durable messaging, or application identity.
+Kademlia provides configurable distributed **peer routing and address discovery** and is default-enabled for configured entries in standard v1. It does not provide channel membership, trust, application storage, durable messaging, or application identity.
 
 The configuration remains:
 
@@ -15,15 +15,15 @@ The configuration remains:
 discovery:
   providers:
     - type: kademlia
-      enabled: false
+      enabled: true
 ```
 
 Two independent gates must be satisfied before it can run:
 
 1. the daemon build contains the approved Kademlia implementation; and
-2. the operator explicitly sets `enabled: true`.
+2. the provider entry resolves to `enabled: true` (the configured-entry default, or explicit `true`) and passes full configuration validation.
 
-If gate 1 is false and gate 2 is true, profile startup fails with an explicit unsupported-provider configuration error. If the build supports Kademlia but `enabled: false`, no Kademlia provider task is started and the Swarm must not advertise or initiate the project Kademlia protocol.
+The standard v1 build satisfies the implementation-support gate. A reduced/custom build without Kademlia support fails profile startup when a configured entry is enabled/default-enabled. If an operator explicitly sets `enabled: false`, no Kademlia provider task is started and the Swarm must not advertise or initiate the project Kademlia protocol.
 
 ## 2. Architectural boundary
 
@@ -437,7 +437,7 @@ Hard cross-field rules when Kademlia is enabled:
 3. `max_results_per_query <= kbucket_size`;
 4. every name in `seed_sources` resolves to a provider entry that is present **and `enabled: true`** in the same profile.
 
-Violation is a configuration validation/startup error, not a warning or silent clamp. When Kademlia itself is disabled, the reserved config may remain present without requiring its seed providers to be enabled because no Kademlia work will execute.
+Violation is a configuration validation/startup error, not a warning or silent clamp. When Kademlia is explicitly disabled, its reserved config may remain present without requiring its seed providers to be enabled because no Kademlia work will execute.
 
 SPIKE-003 must measure the defaults before support promotion. Phase 1 config tests freeze these cross-field rules.
 
@@ -529,7 +529,8 @@ Do not log random lookup keys at normal levels. Do not log payloads or private k
 | Failure | Behavior |
 |---|---|
 | `enabled: true` but build lacks implementation | hard configuration/startup failure |
-| `enabled: false` | no provider task/protocol/query activity |
+| `enabled: true` (default for configured entry) | validate and start provider/protocol/query scheduler |
+| `enabled: false` | explicit opt-out; no provider task/protocol/query activity |
 | no eligible seed/routing peer | Kademlia unavailable/degraded; other providers continue |
 | protocol namespace mismatch | peer never becomes usable Kademlia route; diagnostic only |
 | bootstrap timeout | provider degraded; bounded retry/backoff |
@@ -568,7 +569,7 @@ Value/provider record APIs are not used; inbound writes are filtered/dropped. Th
 
 Changing Kademlia configuration is classified:
 
-- `enabled: false -> true`: provider start only on a build that supports it; perform full validation first;
+- `enabled: false -> true`: provider start only on a supporting build (standard v1 supports it); perform full validation first;
 - `true -> false`: stop new queries, cancel/finish bounded in-flight work, remove Kademlia routing state/protocol participation, expire Kademlia provenance, leave other discovery providers untouched;
 - `network_id` or wire-major change: restart Kademlia provider/behavior; do not migrate routing state across namespaces;
 - mode change: bounded provider restart or explicit `set_mode`, depending on implementation evidence;
@@ -606,7 +607,7 @@ discovery-kademlia ---> kademlia-control-api <--- transport-libp2p
         +--> discovery-api                        +--> rust-libp2p
 ```
 
-This corrects the dependency ambiguity that would occur if the handle type lived in `transport-libp2p`: the provider stays libp2p-free and the backend does not depend on the provider crate. The composition root obtains the backend implementation of the port and injects it into the optional provider.
+This corrects the dependency ambiguity that would occur if the handle type lived in `transport-libp2p`: the provider stays libp2p-free and the backend does not depend on the provider crate. The composition root obtains the backend implementation of the port and injects it into the configured provider.
 
 The port remains internal and Kademlia-specific; it does not become another generic `DiscoveryProvider`-like abstraction.
 
@@ -615,7 +616,7 @@ The port remains internal and Kademlia-specific; it does not become another gene
 ### Unit
 
 - config defaults/ranges and conditional `network_id` requirement;
-- `enabled: false` creates no provider activity;
+- explicit `enabled: false` creates no provider activity;
 - unsupported build + `enabled: true` fails;
 - deterministic protocol-name derivation fixtures;
 - random exploration keys never depend on ChannelId/application input;
@@ -664,7 +665,7 @@ Before implementation freeze, run a rust-libp2p-only test using the exact target
 
 ## 22. Enablement criteria
 
-Kademlia remains `enabled: false` by default even after implementation exists. Promotion from architecture-only to supported optional capability requires:
+ADR-0034 changes rollout: configured Kademlia entries are `enabled: true` by default in the standard v1 build. Shipping that default requires:
 
 1. SPIKE-003 validates current rust-libp2p hooks and the Identify/manual-insert behavior;
 2. provider conformance suite passes;

@@ -15,7 +15,7 @@
 | IPC max-payload regression | fixed 128 KiB + max endpoint fixtures | compatibility review on metadata growth |
 | GossipSub plaintext/trust asymmetry | existing boundaries/ADR-0029 | group security/membership project if required |
 | static trust scale | deliberate deny-default initial policy | signed/enterprise membership design later |
-| Kademlia complexity/poisoning | optional/default-off fully specified | SPIKE-003 before support |
+| Kademlia complexity/poisoning/privacy | trust-bounded/no-record design + opt-out | SPIKE-003/conformance/security before standard-v1 release |
 | NAT limitations | conservative scope | SPIKE-004 |
 | backpressure/message loss | bounded best-effort; direct rejects before endpoint acceptance | tune/flow-control, never hidden spool |
 | profile key loss | optional exact Ed25519 mnemonic recovery record; no silent regeneration | offline recovery drill; future threshold/hardware-backed identity |

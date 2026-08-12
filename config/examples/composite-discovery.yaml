@@ -36,7 +36,7 @@ discovery:
       config:
         peers: ["/dns4/bootstrap.example.net/tcp/4001/p2p/<BOOTSTRAP>"]
     - type: kademlia
-      enabled: false
+      enabled: true
       priority: 40
       config:
         config_version: 1

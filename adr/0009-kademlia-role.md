@@ -1,16 +1,16 @@
-# Integrate Kademlia as an optional peer-routing discovery provider, disabled by default
+# Integrate Kademlia as a trust-bounded peer-routing discovery provider
 
-**Status:** Accepted
+**Status:** Accepted integration/security design; rollout/default-disabled clauses superseded by ADR-0034.
 
 ## Context
 
 Kademlia can add distributed peer-routing and address discovery beyond peer cache, mDNS, and configured bootstrap hints. It also adds routing-table state, bootstrap/convergence behavior, behaviour-originated dial requests, privacy exposure, and poisoning/Sybil/eclipse risk. The project already requires that discovery remain advisory, that discovery never grant trust, and that ConnectionManager own connection policy.
 
-The architecture previously deferred Kademlia from the minimum v1 build. This ADR keeps that rollout posture while fully specifying how Kademlia integrates when the optional implementation is added.
+The architecture originally deferred Kademlia from the minimum v1 build. This ADR fully specifies how Kademlia integrates. **ADR-0034 later supersedes only the rollout/default posture and makes configured Kademlia entries default-on in the standard v1 build.**
 
 ## Decision
 
-Kademlia is a **fully designed but optional `DiscoveryProvider`**. It remains `enabled: false` by default and in shipped examples. A build that does not contain the approved Kademlia implementation MUST reject `enabled: true` as a hard configuration/startup error. A future build that contains the implementation still starts it only after an operator explicitly sets `enabled: true`.
+Kademlia is a fully designed `DiscoveryProvider`. Its integration/security semantics are defined here. **Per ADR-0034, the standard v1 build includes the implementation and a configured Kademlia entry defaults to `enabled: true`; operators may explicitly opt out with `enabled: false`.** A reduced/custom build without the implementation MUST reject any configured/defaulted `enabled: true` entry as a hard startup/configuration error.
 
 The first Kademlia integration has these fixed semantics:
 
@@ -29,11 +29,11 @@ The first Kademlia integration has these fixed semantics:
 
 ## Alternatives considered
 
-Mandatory Kademlia in minimum v1; joining the public IPFS DHT; DHT provider records keyed by ChannelId; DHT value records for membership/trust; open discovery-only connectivity to non-trusted DHT peers; Kademlia-generated dials exempt from ConnectionManager backoff; targeting any allowlisted peer without server-capability evidence; storing server role as authoritative membership; Kademlia as a trust/membership database; omitting Kademlia permanently.
+Historical default-off rollout; making Kademlia impossible to disable; joining the public IPFS DHT; DHT provider records keyed by ChannelId; DHT value records for membership/trust; open discovery-only connectivity to non-trusted DHT peers; Kademlia-generated dials exempt from ConnectionManager backoff; targeting any allowlisted peer without server-capability evidence; storing server role as authoritative membership; Kademlia as a trust/membership database; omitting Kademlia permanently.
 
 ## Consequences
 
-The minimum v1 remains simpler and Kademlia remains opt-in. When implemented, it can expand reachability knowledge and locate trusted server-capable peers without changing the generic discovery/transport contracts. The first integration intentionally constrains the DHT topology to peers admitted by local trust policy; it is therefore a private/trust-bounded routing overlay rather than an open public peer directory.
+ADR-0034 makes Kademlia support part of the standard v1 build and configured entries opt-out rather than opt-in. It expands reachability knowledge and can locate trusted server-capable peers without changing the generic discovery/transport contracts. The first integration intentionally constrains the DHT topology to peers admitted by local trust policy; it is therefore a private/trust-bounded routing overlay rather than an open public peer directory.
 
 The same PeerId may be learned from Kademlia and another provider; DiscoveryManager merges provenance normally. Kademlia does not bypass static bootstrap semantics or ConnectionManager policy. Behaviour-originated dials are an acknowledged backend execution path and must be measured/attributed in SPIKE-003.
 
@@ -51,7 +51,7 @@ Cached Kademlia server capability is advisory and freshness-bounded. It cannot g
 
 Operators need at least one reachable, trusted Kademlia server-mode seed to bootstrap a remote DHT. Client-mode nodes can query but do not serve as routing-table nodes under the selected model. Deployments therefore need an explicit server-role plan; bootstrap servers remain entry points, not authorities.
 
-`enabled: false` produces no Kademlia queries and no Kademlia protocol participation. Enabling Kademlia on an unsupported build fails before transport startup. When enabled, every named `seed_source` must resolve to a configured enabled provider or configuration fails.
+`enabled: false` remains an explicit opt-out and produces no Kademlia queries or protocol participation. Standard v1 supports Kademlia; a reduced unsupported build fails before transport startup if a Kademlia entry is enabled/default-enabled. When enabled, every named `seed_source` must resolve to a configured enabled provider or configuration fails.
 
 Server-mode reachability health is evidence-based but not AutoNAT-verified in this phase: explicit externally routable configured addresses and peer-observed addresses are diagnostics, not proof of inbound reachability.
 

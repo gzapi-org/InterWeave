@@ -8,7 +8,7 @@ Make discovery independently replaceable without turning the runtime into a gene
 PeerCache ----\
 mDNS ----------> DiscoveryManager -> CandidatePeerSet -> ConnectionManager
 Static --------/
-Kademlia -----/ (optional; default disabled)
+Kademlia -----/ (standard-v1 supported; configured entries default enabled)
 ```
 
 ## DiscoveryManager responsibilities
@@ -41,6 +41,6 @@ On overflow, evict expired then least-recently-observed untrusted candidates; co
 
 ## Kademlia-specific integration
 
-Kademlia is unusual because the actual `libp2p::kad::Behaviour` must live inside the single Swarm owner. The optional `KademliaDiscovery` provider therefore owns only scheduling/normalization/health and communicates with a Kademlia driver inside `transport-libp2p` through a bounded internal handle. This does not change the generic DiscoveryProvider contract and does not give the provider Swarm ownership.
+Kademlia is unusual because the actual `libp2p::kad::Behaviour` must live inside the single Swarm owner. `KademliaDiscovery` therefore owns only scheduling/normalization/health and communicates with a Kademlia driver inside `transport-libp2p` through a bounded internal handle. This does not change the generic DiscoveryProvider contract and does not give the provider Swarm ownership.
 
 See [../docs/architecture/kademlia-integration.md](../docs/architecture/kademlia-integration.md).

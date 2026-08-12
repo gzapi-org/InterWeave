@@ -1,5 +1,8 @@
 # Model B architecture review — 2026-08-12
 
+> **Historical note:** this memo records the then-current default-disabled rollout. ADR-0034 (2026-08-12) supersedes that rollout posture: the standard v1 build supports Kademlia and configured entries now default `enabled: true`, with explicit opt-out.
+
+
 Scope: complete design for a human client and other local applications sharing one profile PeerId through explicit network-addressable local endpoints.
 
 ## Decision summary

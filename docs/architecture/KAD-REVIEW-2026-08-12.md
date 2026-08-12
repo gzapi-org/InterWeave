@@ -1,5 +1,8 @@
 # Kademlia / shared-profile second architecture review closure — 2026-08-12
 
+> **Historical note:** this memo records the then-current default-disabled rollout. ADR-0034 (2026-08-12) supersedes that rollout posture: the standard v1 build supports Kademlia and configured entries now default `enabled: true`, with explicit opt-out.
+
+
 Status: **review findings incorporated; architecture only; Kademlia remains default-disabled**.
 
 This memo records the disposition of the second full-set review after the Kademlia blueprint was added. It is a delta/review aid; normative behavior lives in the referenced contracts/ADRs.

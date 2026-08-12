@@ -1,6 +1,6 @@
 # KademliaDiscovery
 
-Status: **fully specified optional provider; implementation deferred; `enabled: false` by default**.
+Status: **fully specified standard-v1 provider design; configured entries default `enabled: true` per ADR-0034; implementation remains for the subsequent implementation repository**.
 
 The end-to-end design is [../../docs/architecture/kademlia-integration.md](../../docs/architecture/kademlia-integration.md). ADR-0009 is normative for role/security; ADR-0011 is normative for dial-policy ownership.
 
@@ -29,7 +29,7 @@ It does not provide trust/authorization, channel membership, value/provider stor
 ### start
 
 1. Validate build support, cross-field configuration, and enabled `seed_sources` references.
-2. If disabled, do not instantiate the provider or advertise the Kademlia protocol.
+2. If explicitly disabled, do not instantiate the provider or advertise the Kademlia protocol.
 3. Obtain the neutral bounded Kademlia driver port from `kademlia-control-api`.
 4. Set explicit client/server mode.
 5. Accept eligible seed hints and fresh peer-cache protocol-capability observations.
@@ -107,11 +107,10 @@ Kademlia is peer routing only. The future driver never invokes value/provider re
 
 ## Configuration compatibility
 
-A daemon may recognize this schema without containing the provider implementation:
+The standard v1 daemon build contains the provider implementation and configured Kademlia entries default to `enabled: true`:
 
-- `enabled: false` -> valid reserved configuration;
-- `enabled: true` -> hard configuration/startup failure if implementation absent;
+- `enabled: true` (explicit or defaulted) -> start after full validation;
+- `enabled: false` -> explicit opt-out with no provider/protocol/query activity;
+- a reduced/custom build without implementation -> hard configuration/startup failure for an enabled/default-enabled entry;
 - when enabled, every configured `seed_source` must name a provider present in the profile and itself `enabled: true`;
 - cross-field invariants in `config/config.schema.yaml` are hard validation errors, not warnings.
-
-A supported build still defaults to `enabled: false` and requires explicit opt-in.

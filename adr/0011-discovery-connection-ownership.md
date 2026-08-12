@@ -15,7 +15,7 @@ DiscoveryManager owns candidate knowledge. **ConnectionManager owns connection p
 For v1 ordinary data-plane operation, connection policy is trust-gated:
 
 - a candidate PeerId is not intentionally dialed unless the active `PeerTrustPolicy` authorizes that peer for data-plane connectivity;
-- an inbound connection that authenticates to an unauthorized PeerId is closed before that peer participates in direct, GossipSub, or optional Kademlia protocol activity;
+- an inbound connection that authenticates to an unauthorized PeerId is closed before that peer participates in direct, GossipSub, or configured Kademlia protocol activity;
 - trust revocation of a connected peer triggers data-plane eviction/disconnect;
 - discovery can still observe and retain bounded candidate metadata for unauthorized peers without connecting to them.
 

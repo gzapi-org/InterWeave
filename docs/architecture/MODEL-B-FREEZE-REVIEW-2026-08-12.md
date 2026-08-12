@@ -12,7 +12,7 @@ Scope: closure of the final non-blocking review findings plus optional human-rec
 | fingerprint canonicalization | DirectContentFingerprintV1 fixed binary framing + SHA-256 golden fixture |
 | IPC version in config | removed; IPC major/minor is hello negotiation, not operator profile config |
 | client slot accounting | every IPC connection counts; human data + admin sessions consume two slots |
-| wedged lease liveness | optional negotiated ping/pong keepalive; defaults 30s/10s/3 misses |
+| wedged lease liveness | negotiated ping/pong keepalive; defaults 30s/10s/3 misses; EndpointId leases require negotiation by default |
 | broadcast endpoint authorship | remains transport PeerId-only; non-normative first-party app envelope guidance added |
 | Claude `peer_endpoints` | explicitly deferred; no v2 tool and no default `endpoints.query` grant |
 | request-response dedup race | SPIKE-002 must exercise concurrent same-key retransmissions on real rust-libp2p scheduler |
@@ -30,4 +30,4 @@ ADR-0033 fixes the initial software identity algorithm to Ed25519 and defines `c
 
 ## Freeze posture
 
-These changes do not alter the established transport boundaries, Kademlia default-off posture, endpoint routing model, or delivery semantics. They tighten Phase 1 fixture/error behavior and add an optional identity backup boundary.
+These historical freeze changes did not alter the then-current Kademlia default-off posture. **ADR-0034 subsequently supersedes only that rollout/default posture by making Kademlia enabled by default in the standard v1 build/profile composition.** Endpoint-routing and identity-recovery boundaries remain unchanged.

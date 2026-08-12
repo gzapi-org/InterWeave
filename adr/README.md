@@ -11,8 +11,8 @@ All ADRs are **Accepted** architecture decisions unless later superseded.
 | [0005](./0005-directed-messaging.md) | Use rust-libp2p `request_response`; endpoint-aware implementation target is `/claude-p2p-channel/direct/2.0.0` per ADR-0030. |
 | [0006](./0006-discovery-provider-abstraction.md) | Define an event-stream-oriented `DiscoveryProvider` contract consumed only by DiscoveryManager. |
 | [0007](./0007-discovery-composition.md) | Run enabled providers concurrently under DiscoveryManager and merge by PeerId/address provenance. |
-| [0008](./0008-discovery-v1-providers.md) | Minimum v1 discovery is PeerCacheDiscovery, optional MdnsDiscovery, and StaticBootstrapDiscovery. |
-| [0009](./0009-kademlia-role.md) | Kademlia is fully designed as optional peer-routing discovery, remains disabled by default, and never bypasses trust or stores channel/application records. |
+| [0008](./0008-discovery-v1-providers.md) | Historical minimum provider-set rollout; superseded in part by ADR-0034, while cache/mDNS/static roles remain accepted. |
+| [0009](./0009-kademlia-role.md) | Kademlia integration/security: private trust-bounded peer routing, no records, no trust bypass; default rollout superseded by ADR-0034. |
 | [0010](./0010-bootstrap-semantics.md) | Treat static bootstrap entries as reachability candidates only, never authority or implicit trust. |
 | [0011](./0011-discovery-connection-ownership.md) | Discovery owns candidates; ConnectionManager owns connection policy, enforced for explicit and behaviour-originated Swarm dials. |
 | [0012](./0012-trust-vs-discovery.md) | Use deny-by-default static PeerId trust for data-plane connection/source/outbound admission; endpoint policy may only narrow it. |
@@ -37,3 +37,4 @@ All ADRs are **Accepted** architecture decisions unless later superseded.
 | [0031](./0031-endpoint-directory.md) | Add an optional trust-gated, opt-in remote directory of currently active advertised EndpointIds. |
 | [0032](./0032-human-client-boundary.md) | Keep the human client above transport as an IPC v2 endpoint consumer with separate administrative authority and application-owned human/chat state. |
 | [0033](./0033-identity-recovery-mnemonic.md) | Use Ed25519 software identities with optional offline 24-word BIP-39 entropy encoding of the exact secret seed for same-PeerId recovery; no wallet PBKDF2 or IPC exposure. |
+| [0034](./0034-kademlia-default-enabled.md) | Standard v1 includes Kademlia support and configured Kademlia entries default enabled; operators may explicitly opt out. |

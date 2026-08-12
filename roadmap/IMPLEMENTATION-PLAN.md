@@ -6,7 +6,7 @@ No production implementation belongs in this architecture repository. This roadm
 
 **Objective:** resolve version-sensitive/runtime-sensitive details.
 
-**Deliverables:** SPIKE-001..006 results. SPIKE-002 validates direct v2 endpoint framing/acceptance, endpoint-directory behavior, and concurrent dedup reservation behavior; SPIKE-006 validates the exact Ed25519 recovery portability boundary.
+**Deliverables:** SPIKE-001..006 results. SPIKE-002 validates direct v2 endpoint framing/acceptance, endpoint-directory behavior, and concurrent dedup reservation behavior; **SPIKE-003 is a standard-v1 Kademlia release gate**; SPIKE-006 validates the exact Ed25519 recovery portability boundary.
 
 **Acceptance:** exact Claude Channel package contract known; rust-libp2p direct v2 failure/negotiation semantics measured; Kademlia/NAT assumptions measured as separately specified; the exact-key mnemonic recovery boundary is empirically verified before production backup/restore is enabled.
 
@@ -24,11 +24,12 @@ No production implementation belongs in this architecture repository. This roadm
 - endpoint policy provably cannot widen profile trust;
 - MessageId remains exactly 128 bits;
 - DirectContentFingerprintV1 canonicalization/golden fixture and bounded reservation limits are frozen;
+- Direct v2 `media_type_len=0` is frozen as absent media type / `media_present=0`;
 - IPC endpoint-claim errors are exact (`EndpointUnknown`, `EndpointDisabled`, `EndpointClientKindDenied`, `EndpointInUse`, `CapabilityDenied`);
 - identity types fix software v1 to Ed25519 and identity-recovery golden fixtures reproduce the expected PeerId;
 - effective max payload capability is correct;
 - IPC v2 max-payload fixtures with maximum endpoint metadata fit 131072-byte body;
-- Kademlia cross-field/seed-source validation still passes;
+- Kademlia default-on parsing plus cross-field/seed-source validation passes;
 - enabled unsupported providers fail startup/config.
 
 ---
@@ -52,7 +53,7 @@ No production implementation belongs in this architecture repository. This roadm
 
 ## Phase 3 — discovery framework
 
-Unchanged core objective: DiscoveryManager + cache/mDNS/static, provider conformance, no trust/dial ownership. Endpoint directory is **not** a DiscoveryProvider and never enters this layer.
+DiscoveryManager + cache/mDNS/static/**Kademlia**, provider conformance, no trust/dial ownership. The standard v1 build implements the Kademlia provider/driver only after SPIKE-003 evidence passes; configured entries default enabled, while explicit `enabled: false` must yield zero protocol/query activity. Endpoint directory is **not** a DiscoveryProvider and never enters this layer.
 
 ---
 
@@ -81,7 +82,7 @@ Unchanged trust/backoff/dial ownership. Direct and endpoint-directory dials both
 - IPC major mismatch clear;
 - Claude/human data-plane clients lack admin.endpoints/admin.shutdown;
 - claude-channel lacks endpoints.query by default; human-client receives it only when endpoint directory is enabled;
-- optional IPC keepalive releases wedged endpoint leases after bounded misses;
+- EndpointId leases require negotiated IPC keepalive by default; missed probes release wedged leases, and explicit compatibility opt-out is tested;
 - data/admin connections count independently toward max IPC clients.
 
 ---
@@ -131,7 +132,7 @@ Add rate limits/fuzzing and endpoint-specific regressions: route probing, direct
 
 ## Phase 8 — operational packaging
 
-Add service integration, config-v2 migrations, endpoint diagnostics, human/Claude client compatibility matrix, reliable identity-preserving update/rollback, and offline `transportctl identity backup/restore` UX for the ADR-0033 recovery format. Recovery words never transit daemon IPC.
+Add service integration, config-v2 migrations, endpoint diagnostics, human/Claude client compatibility matrix, reliable identity-preserving update/rollback, and offline `transportctl identity backup/verify/restore` UX for the ADR-0033 recovery format. Operational guidance states that complete profile disaster recovery requires both the recovery phrase and a separate `config.yaml` backup. Recovery words never transit daemon IPC.
 
 ---
 
@@ -140,7 +141,3 @@ Add service integration, config-v2 migrations, endpoint diagnostics, human/Claud
 Relay/AutoNAT/DCUtR only as deployment evidence requires.
 
 ---
-
-## Phase 10 — optional Kademlia peer-routing discovery
-
-Implement the existing optional Kademlia blueprint only after SPIKE-003. Default remains `enabled: false`. EndpointId/presence must never be stored in Kademlia records.

@@ -32,7 +32,7 @@ Network side:
   GossipSub = broadcast by ChannelId
   request-response direct v2 = PeerId + EndpointId routing
   endpoint-directory = optional trusted route discovery
-  DiscoveryManager / Kademlia(optional, disabled by default)
+  DiscoveryManager / Kademlia(default-enabled when configured; explicit opt-out)
   PeerTrustPolicy / ConnectionManager / Noise
 ```
 
@@ -51,7 +51,7 @@ The daemon owns the private key and all libp2p state. Local applications never b
 - Endpoint-specific ACLs may narrow profile trust but can never widen it. Remote endpoint denial is exposed as coarse `no_route` / local `RemoteEndpointUnavailable` to avoid an authorization oracle.
 - Broadcast remains GossipSub and ChannelId-scoped; endpoint addressing does not alter broadcast envelopes or subscription semantics.
 - `Transport`, `DiscoveryProvider`, and trust boundaries remain independent of Claude/libp2p details.
-- Kademlia has a complete optional peer-routing integration blueprint but remains **`enabled: false` by default**. It never grants trust or stores application/channel/endpoint records.
+- Kademlia has a complete peer-routing integration blueprint and, per ADR-0034, configured entries are **`enabled: true` by default** in the standard v1 build. Operators may explicitly opt out. It never grants trust or stores application/channel/endpoint records.
 - Discovery only produces candidate reachability and bounded protocol observations. Data-plane connection admission remains trust-gated, including behavior-originated Kademlia dials through the root dial admission policy.
 - Noise secures each admitted libp2p connection. GossipSub validation distinguishes objective invalidity (`Reject`) from valid-but-locally-unauthorized publishers (`Ignore`). Group/application E2EE remains outside v1/v2 transport.
 - Delivery remains realtime/best-effort, bounded, non-durable, with no exactly-once claim or offline mailbox. A human client may persist its own local history above the transport, but the daemon never queues messages for an offline endpoint.
@@ -98,4 +98,5 @@ The working name **claude-p2p-channel** is retained because it describes the Cla
 ## Human-readable recovery and application guidance
 
 - Identity recovery: [`contracts/IDENTITY-RECOVERY.md`](./contracts/IDENTITY-RECOVERY.md), [`docs/architecture/identity-recovery.md`](./docs/architecture/identity-recovery.md), and [`ADR-0033`](./adr/0033-identity-recovery-mnemonic.md).
+- Current Kademlia default-on amendment: [`docs/architecture/KAD-DEFAULT-ON-REVIEW-2026-08-12.md`](./docs/architecture/KAD-DEFAULT-ON-REVIEW-2026-08-12.md) and [`ADR-0034`](./adr/0034-kademlia-default-enabled.md).
 - Non-normative first-party broadcast author hint: [`docs/architecture/application-envelope-guidance.md`](./docs/architecture/application-envelope-guidance.md). Transport still treats broadcast authorship as PeerId-only.

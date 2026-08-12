@@ -8,7 +8,7 @@
 | bootstrap unavailable | no authority loss; other sources/connections remain | bootstrap candidate/dial diagnostics | retry/backoff, alternate hints |
 | static bootstrap DNS lookup fails | candidate remains; dial fails | connection/address-resolution diagnostic, not provider health | ConnectionManager retry/backoff |
 | mDNS unavailable | LAN discovery absent | mdns unavailable | static/cache continue |
-| Kademlia enabled but unsupported | profile fails startup/config | fatal unsupported-provider diagnostic | disable or use supporting build |
+| Kademlia enabled/default-enabled on a reduced build without implementation | profile fails startup/config | fatal unsupported-provider diagnostic | use standard v1 supporting build or explicitly disable/omit Kademlia |
 | Kademlia runtime failure | other providers/connections continue | provider unavailable/degraded | provider restart/disable |
 | Kademlia no trusted eligible seed | cannot bootstrap but daemon stays up | routing_peers=0 | add/fix trusted server seed |
 | Kademlia namespace mismatch | no shared DHT routing | query/protocol failure | align network_id/wire major |
@@ -51,7 +51,8 @@
 | daemon restart | PeerId persists; all endpoint leases initially offline | recovering | local clients reconnect |
 | Claude Code restart | bridge route offline temporarily | Channel unavailable while closed | no offline queue |
 | local IPC disconnect | network continues; endpoint lease released | client degraded | bounded reconnect |
-| local IPC connection half-open/wedged with keepalive negotiated | daemon closes after bounded missed probes and releases endpoint lease | keepalive timeout / EndpointLeaseChanged(released) | client reconnects; tune/disable keepalive only by policy |
+| endpoint-claiming IPC client omits required keepalive | handshake/claim denied before lease grant | CapabilityDenied | negotiate keepalive or explicitly relax profile policy |
+| local IPC connection half-open/wedged with keepalive negotiated | daemon closes after bounded missed probes and releases endpoint lease | keepalive timeout / EndpointLeaseChanged(released) | client reconnects; tune/disable keepalive requirement only by explicit policy |
 | Claude requests endpoint admin/shutdown | IPC capability denial | authorization diagnostic | explicit admin path |
 | slow broadcast consumer | per-client broadcast drops when queue full | overload | consumer recovers; no replay |
 | slow direct endpoint consumer | new direct requests reject overloaded before Accepted | overload | consumer recovers |

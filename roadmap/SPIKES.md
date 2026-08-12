@@ -29,7 +29,7 @@ Spikes validate version-sensitive or deployment-sensitive assumptions. They are 
 
 ## SPIKE-003 — Kademlia integration validation
 
-**Objective:** validate the complete optional Kademlia blueprint before implementation is promoted or `enabled: true` is supported, including behaviour-originated dial policy.
+**Objective:** validate the complete Kademlia blueprint as a **standard-v1 release gate** before shipping configured entries default `enabled: true`, including behaviour-originated dial policy.
 
 **Experiment:** non-production rust-libp2p harness using the selected crate version and private project protocol namespace. Exercise explicit client/server mode, Identify -> manual `add_address`, `BucketInserts::Manual`, bootstrap, `get_n_closest_peers`, disjoint query paths, record filtering, cached protocol-capability observations, effective-target/saturation logic, and the bounded query scheduler. Run 3-, 10-, and 20-node local topologies plus malicious/stale routing responses.
 
@@ -55,7 +55,7 @@ Instrument the Swarm / behaviour boundary so Kademlia-originated `ToSwarm::Dial`
 - disjoint query paths and multi-seed topologies measurably reduce single-path capture, without claiming Byzantine resistance;
 - 20-node convergence/resource behavior is acceptable with default bounds.
 
-**Decision unlocked:** implement the already-specified `KademliaDiscovery`/driver design, adjust bounded defaults, or keep the provider architecture-only. This spike does not authorize ChannelId/provider records or untrusted discovery-only connections; those require separate ADRs.
+**Decision unlocked:** implement/ship the already-specified `KademliaDiscovery`/driver design with default-on configured entries, adjust bounded defaults before release, or block standard-v1 release and revisit ADR-0034 if evidence is unacceptable. This spike does not authorize ChannelId/provider records or untrusted discovery-only connections; those require separate ADRs.
 
 ---
 
@@ -85,8 +85,8 @@ Instrument the Swarm / behaviour boundary so Kademlia-originated `ToSwarm::Dial`
 
 **Objective:** verify that the pinned rust-libp2p identity API can export/import the exact Ed25519 32-byte secret boundary assumed by `cp2p-ed25519-bip39-entropy-v1` and reproduce the same PeerId across backup/restore.
 
-**Experiment:** non-production local harness only. Starting from the test-only zero-secret fixture and multiple CSPRNG-generated Ed25519 identities, obtain the portable secret bytes using the supported identity API/serialization boundary, encode/decode the 24-word BIP-39 entropy form, reconstruct the key, and compare public keys and PeerIds. Exercise process restart and the exact dependency versions selected for implementation. Also prove that the BIP-39 PBKDF2 seed output is never accepted as the transport secret.
+**Experiment:** non-production local harness only. Starting from the test-only zero-secret fixture and multiple CSPRNG-generated Ed25519 identities, obtain the portable secret bytes using the supported identity API/serialization boundary, encode/decode the 24-word BIP-39 entropy form, reconstruct the key, and compare public keys and PeerIds. Exercise process restart and the exact dependency versions selected for implementation. Also prove that the BIP-39 PBKDF2 seed output is never accepted as the transport secret. Explicitly verify which rust-libp2p API exposes the exact 32-byte Ed25519 secret seed used by the recovery format; do **not** derive mnemonic entropy from an opaque/private-key protobuf blob or any 64-byte expanded `secret || public` representation. Exercise the read-only `identity verify` path separately from restore.
 
-**Evidence:** byte-for-byte secret round trip, the repository golden fixture PeerId, random-key round trips, documented API calls/serialization assumptions, and confirmation that no mnemonic/private-key material enters logs, IPC, crash reports, or network traces.
+**Evidence:** byte-for-byte secret round trip, the repository golden fixture PeerId, random-key round trips, documented API calls/serialization assumptions (including the exact 32-byte seed accessor/import path and any larger protobuf representation encountered), verify-only no-write behavior, and confirmation that no mnemonic/private-key material enters logs, IPC, crash reports, or network traces.
 
 **Decision unlocked:** production `transportctl identity backup/restore` implementation against the frozen recovery contract. If the current library boundary cannot reliably expose/reconstruct the exact Ed25519 seed, keep recovery implementation disabled and revise the identity serialization adapter without silently changing the mnemonic format.

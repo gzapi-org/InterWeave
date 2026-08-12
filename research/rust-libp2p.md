@@ -33,7 +33,7 @@ The v1 backend uses TCP + Noise + Yamux. Noise authenticates the libp2p transpor
 ## Discovery components
 
 - mDNS: useful passive/zero-config LAN candidate discovery, optional.
-- Kademlia: current rust-libp2p exposes custom protocol names, manual K-bucket insertion, explicit client/server mode, bootstrap, closest-peer queries, disjoint paths, and routing/query events. The project has a complete optional peer-routing design but keeps it disabled by default.
+- Kademlia: current rust-libp2p exposes custom protocol names, manual K-bucket insertion, explicit client/server mode, bootstrap, closest-peer queries, disjoint paths, and routing/query events. The project has a complete peer-routing design; ADR-0034 makes configured entries enabled by default in the standard v1 build while preserving explicit opt-out.
 - Identify: useful after connection for protocol/address observations; not treated as discovery authority.
 - static bootstrap and peer cache are project-defined `DiscoveryProvider` implementations, not libp2p swarm special cases.
 

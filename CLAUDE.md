@@ -21,6 +21,6 @@ This is an architecture/specification repository.
 - No durable, ordered, exactly-once, guaranteed, or offline endpoint delivery claim unless a future ADR explicitly adds it.
 - Human applications may persist messages they actually receive above transport; the daemon never uses that as an offline mailbox.
 - Secrets and persistent PeerId keys are local state, never repository configuration.
-- Kademlia remains optional and `enabled: false` by default; no EndpointId/channel/application records in DHT.
+- Standard v1 includes Kademlia support; configured Kademlia entries default `enabled: true` with explicit opt-out. No EndpointId/channel/application/trust records enter the DHT.
 
 When implementation begins, update ADR status rather than silently contradicting accepted decisions.

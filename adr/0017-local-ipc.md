@@ -12,7 +12,7 @@ Use Unix domain sockets / Windows named pipes with owner restrictions. Frame UTF
 
 Keep the JSON body ceiling at **131,072 bytes (128 KiB)**. Advance implementation target to **IPC v2**. The hello handshake optionally claims one configured EndpointId; direct-capable clients require a successful exclusive lease. Handshake errors are precise locally (`EndpointUnknown`, `EndpointDisabled`, `EndpointClientKindDenied`, `EndpointInUse`, `CapabilityDenied`) while remote direct routing keeps the coarse `no_route` privacy class. Capabilities remain authorization-relevant: human-client receives `endpoints.query` by default only when endpoint directory is enabled; claude-channel does not; `admin.endpoints`/`admin.shutdown` require explicit administrative policy and are never granted to Claude Channel data-plane clients. IPC version is negotiated in hello, not configured as an operator profile value.
 
-IPC v2 may negotiate bounded server ping/client pong keepalive. Default timers are 30s interval, 10s response timeout, three misses. Expiry closes the connection and releases its endpoint lease; keepalive is liveness only, not authentication.
+IPC v2 negotiates bounded server ping/client pong keepalive. Default timers are 30s interval, 10s response timeout, three misses. **Profile policy defaults to requiring keepalive negotiation for any connection claiming an EndpointId lease**; omission then yields local `CapabilityDenied` before lease grant. Endpoint-less admin/diagnostic sessions are unaffected, and operators may explicitly relax the requirement for third-party compatibility. Expiry closes the connection and releases its endpoint lease; keepalive is liveness only, not authentication.
 
 ## Alternatives considered
 
@@ -24,7 +24,7 @@ One profile socket multiplexes multiple local applications while exact endpoint 
 
 ## Security implications
 
-ACLs provide cross-user isolation but not full same-user isolation. Configured-only exclusive endpoint leases prevent accidental route collisions. Client kind is hygiene, not authentication. Admin endpoint/shutdown authority is capability-separated from data plane.
+ACLs provide cross-user isolation but not full same-user isolation. Configured-only exclusive endpoint leases prevent accidental route collisions. Requiring keepalive for leased data-plane endpoints by default bounds first-party half-open lease retention, but it is not client authentication. Client kind is hygiene, not authentication. Admin endpoint/shutdown authority is capability-separated from data plane.
 
 ## Operational implications
 

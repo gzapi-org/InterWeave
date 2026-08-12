@@ -80,7 +80,7 @@ Use typed tagged enums in Rust for built-in providers. A provider schema can car
 
 ### Unsupported enabled providers
 
-The configuration layer distinguishes unknown, implemented, and known-but-unbuilt providers. Any explicitly `enabled: true` provider must be implemented by the active daemon build. Kademlia stays `enabled: false` by default and is a hard startup/config error when enabled on an unsupported build.
+The configuration layer distinguishes unknown, implemented, and known-but-unbuilt providers. Any configured/defaulted `enabled: true` provider must be implemented by the active daemon build. The standard v1 build includes Kademlia and configured Kademlia entries default to `enabled: true`; reduced/custom builds without it fail startup/config for such an entry.
 
 ## Desired channel subscriptions
 
@@ -90,7 +90,7 @@ The configuration layer distinguishes unknown, implemented, and known-but-unbuil
 
 `transport.limits.max_payload_bytes` may lower the profile's 49,152-byte ceiling. Active value is returned by capabilities.
 
-The IPC v2 JSON-body ceiling of 131,072 bytes and IPC major version are protocol/handshake properties, not operator-selectable profile versions. Profile config may tune client counts/queues and the optional keepalive timers within fixed ranges. A human UI using separate data-plane and admin connections consumes two client slots.
+The IPC v2 JSON-body ceiling of 131,072 bytes and IPC major version are protocol/handshake properties, not operator-selectable profile versions. Profile config may tune client counts/queues and keepalive timers within fixed ranges. By default, an EndpointId lease requires keepalive negotiation; an explicit compatibility policy may relax that requirement. A human UI using separate data-plane and admin connections consumes two client slots.
 
 ## General reload
 
@@ -98,11 +98,11 @@ Safe reloadable classes: supported provider config, rate/queue limits within cei
 
 Trust reload can close data-plane connections, affect endpoint ACL intersections, and emits `TrustPolicyChanged`. Invalid reload leaves previous good config active.
 
-Restart-required: identity key path/rotation/restore, profile IPC socket identity, and core listen transport changes when backend cannot apply atomically. Identity recovery words are never configuration values; see `contracts/IDENTITY-RECOVERY.md`.
+Restart-required: identity key path/rotation/restore, profile IPC socket identity, and core listen transport changes when backend cannot apply atomically. Identity recovery words are never configuration values; see `contracts/IDENTITY-RECOVERY.md`. A complete disaster-recovery plan backs up the phrase and `config.yaml` separately: the phrase restores the PeerId, while config restores trust/endpoints/discovery policy. Runtime cache/leases/messages are deliberately excluded.
 
 ## Kademlia configuration rule
 
-The Kademlia schema is fully defined but optional. `enabled: false` is shipped/default. A supporting build may start it only after explicit opt-in.
+The Kademlia schema is fully defined. Per ADR-0034, a configured Kademlia entry defaults to `enabled: true` in the standard v1 build; `enabled: false` is an explicit operator opt-out. Profiles may deliberately omit the provider entry entirely.
 
 When enabled, `network_id` defines the private protocol namespace, `routing_peer_policy: data-plane-trusted` and `record_mode: disabled` remain fixed security invariants, and all documented cross-field/seed-source constraints are hard validation rules.
 

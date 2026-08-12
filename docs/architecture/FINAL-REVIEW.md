@@ -59,11 +59,12 @@ The major evolution since the original prompt is deliberate and transport-generi
 18. No persistent offline network/endpoint/Claude/human delivery store exists.
 19. Static PeerId trust still gates ordinary data-plane connections, direct peers, and source admission.
 20. Noise remains per-link security; trusted GossipSub forwarders can see plaintext.
-21. Kademlia remains fully designed optional peer-routing discovery but `enabled: false` by default and stores no app/channel/endpoint records.
+21. Per ADR-0034, the standard v1 build includes Kademlia and configured entries default `enabled: true`; explicit opt-out remains supported, and Kademlia stores no app/channel/endpoint records.
 22. IPC v2 remains owner-protected length-prefixed JSON with 128 KiB body and capability-scoped admin methods; version is negotiated, human data/admin sessions count separately, and optional keepalive can release wedged leases.
 23. Claude Channel is not granted `endpoints.query` by default; `peer_endpoints` is explicitly deferred pending a security/tool-surface revisit.
 24. DirectContentFingerprintV1 is fixed byte-for-byte and direct in-flight reservation state is capped at 128 global / 8 per source peer by default.
-25. Initial software identity is Ed25519 with optional offline 24-word exact-key recovery (ADR-0033); mnemonic material never crosses IPC.
+25. Initial software identity is Ed25519 with optional offline 24-word exact-key recovery (ADR-0033); mnemonic material never crosses IPC. Verify-only drills are read-only, and full profile disaster recovery also needs a separate config.yaml backup.
+26. EndpointId leases require negotiated IPC keepalive by default; an explicit compatibility policy may relax this without changing lease ownership semantics.
 
 ## Accepted limitations
 
@@ -76,7 +77,7 @@ The major evolution since the original prompt is deliberate and transport-generi
 - static trust does not scale to public networks;
 - no group E2EE;
 - no universal NAT traversal guarantee;
-- Kademlia minimum build remains disabled/default-off;
+- default-on Kademlia increases ordinary metadata/topology/privacy exposure and therefore makes SPIKE-003/conformance/security a standard-v1 release gate;
 - a human client can persist local history but cannot recover messages never accepted while it was offline;
 - the BIP-39-derived recovery UX has only an 8-bit mnemonic checksum, so expected-PeerId backup metadata is the stronger restore check;
 - recovery phrase theft is full PeerId private-key compromise.
@@ -93,7 +94,7 @@ SPIKE-002 must verify request-response protocol-family negotiation/failure behav
 
 ### Kademlia
 
-SPIKE-003 remains required before optional Kademlia support is enabled.
+SPIKE-003 is required before the standard v1 build ships configured Kademlia entries default-enabled. Failure blocks/revisits ADR-0034 rather than silently shipping an unsupported default.
 
 ### NAT/relay
 

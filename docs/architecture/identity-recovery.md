@@ -41,7 +41,7 @@ Human data IPC ----X---- recovery secret
 Admin IPC ---------X---- recovery secret
 P2P network -------X---- recovery secret
 
-transportctl identity backup/restore
+transportctl identity backup/verify/restore
         |
         +-- local profile files, daemon stopped, exclusive identity lock
 ```
@@ -63,6 +63,10 @@ The display must include:
 
 Clipboard/copy requires an explicit user gesture and is not the default backup path.
 
+## Verify-only drill
+
+Routine recovery exercises should use `transportctl identity verify`, not restore. The command decodes the phrase, reconstructs the Ed25519 public key/PeerId, compares it with the expected public PeerId, reports match/mismatch, then discards secret buffers. It performs no key-file write, no profile mutation, no daemon start, and no network activity.
+
 ## Restore UX
 
 The preferred restore record includes both words and expected PeerId. Restore decodes the exact 32-byte key and verifies the resulting PeerId before writing any identity file.
@@ -74,6 +78,12 @@ If a full-machine loss leaves only the words, a new empty local profile may be r
 A phrase typo normally fails BIP-39 checksum; because the checksum is only 8 bits for 24 words, expected-PeerId comparison is the stronger identity check.
 
 A stolen phrase is equivalent to a stolen private key. Recovery itself cannot revoke that copy. Peers must update trust after intentional rotation/compromise.
+
+## Complete disaster-recovery bundle
+
+The 24 words recover the transport identity only. Complete profile recovery requires a **separate backup of `config.yaml`** containing trust allowlists, configured EndpointIds/default route, discovery/bootstrap/Kademlia configuration, desired channels, and policy/limit choices.
+
+Phrase without config = same PeerId but a bare profile. Config without phrase = policy/topology without the private identity. Runtime peer cache, leases, directory cache, dedup state, undelivered messages, and human-client contacts/history are outside transport recovery and must not be reconstructed implicitly.
 
 ## Future threshold backup
 

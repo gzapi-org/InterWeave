@@ -10,7 +10,7 @@ TCP
  -> GossipSub (broadcast)
  -> request-response /direct/2.0.0 (endpoint-addressed direct)
  -> request-response /endpoints/1.0.0 (optional trusted route directory)
- -> optional Kademlia behaviour (peer-routing only; default disabled)
+ -> Kademlia behaviour when configured (peer-routing only; default enabled, explicit opt-out)
 ```
 
 Discovery behaviors remain behind `DiscoveryProvider`; endpoint directory is **not** a DiscoveryProvider.
@@ -53,4 +53,4 @@ DiscoveryManager candidate observations plus trusted connected-peer Identify inf
 
 ## Optional Kademlia driver
 
-Existing private/trust-bounded Kademlia design remains unchanged and default-disabled. It never stores or advertises EndpointIds.
+Existing private/trust-bounded Kademlia design remains unchanged except ADR-0034 makes configured entries default-enabled in standard v1. It never stores or advertises EndpointIds.

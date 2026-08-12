@@ -9,8 +9,8 @@ trust:
   policy: static-allowlist
   allowed_peers:
     - "<TRUSTED_REMOTE_PEER_ID>"
-    - "<BOOTSTRAP_PEER_ID>"
-    - "<BOOTSTRAP_PEER_ID_2>"
+    - "<KAD_SERVER_A>"
+    - "<KAD_SERVER_B>"
 endpoints:
   registration_policy: configured-only
   default_direct_endpoint: claude
@@ -34,10 +34,36 @@ discovery:
       priority: 30
       config:
         peers:
-          - "/dns4/bootstrap-a.example.net/tcp/4001/p2p/<BOOTSTRAP_PEER_ID>"
-          - "/dns4/bootstrap-b.example.net/tcp/4001/p2p/<BOOTSTRAP_PEER_ID_2>"
+          - "/dns4/bootstrap-a.example.net/tcp/4001/p2p/<KAD_SERVER_A>"
+          - "/dns4/bootstrap-b.example.net/tcp/4001/p2p/<KAD_SERVER_B>"
+    - type: kademlia
+      enabled: true
+      priority: 40
+      config:
+        config_version: 1
+        network_id: "remote-example"
+        mode: client
+        routing_peer_policy: data-plane-trusted
+        seed_sources: [peer-cache, static-bootstrap]
+        candidate_ttl: 30m
+        kbucket_size: 20
+        max_routing_peers: 256
+        query_timeout: 30s
+        parallelism: 3
+        disjoint_query_paths: true
+        max_concurrent_queries: 2
+        max_queries_per_minute: 6
+        exploration_interval: 60s
+        exploration_jitter_percent: 20
+        max_results_per_query: 20
+        target_routing_peers: 64
+        targeted_lookup_cooldown: 5m
+        bootstrap_min_interval: 5m
+        bootstrap_refresh_interval: 15m
+        record_mode: disabled
 channels:
   desired: ["build-events"]
-# Bootstrap configuration does NOT grant trust. This example separately allowlists the bootstrap
-# PeerIds because v1 ConnectionManager will not dial an unauthorized data-plane peer.
-# Allowlisting them permits data-plane connectivity but still grants no identity/membership authority.
+# Bootstrap configuration does NOT grant trust. This example separately allowlists the two
+# Kademlia server/bootstrap PeerIds because v1 will not dial an unauthorized data-plane peer.
+# They must advertise the exact private Kademlia server protocol for DHT routing insertion.
+# Allowlisting them permits connectivity/routing participation but grants no identity/membership authority.

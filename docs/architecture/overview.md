@@ -35,5 +35,5 @@ Human client -------------------IPC v2/EndpointId---------> profile daemon / one
 11. Broadcast remains ChannelId/join-reference scoped and does not carry transport EndpointId routing.
 12. Endpoint directory is optional, trust-gated, bounded, opt-in, and identity-agnostic.
 13. Every queue is bounded, and every legal max-size payload fits IPC v2.
-14. Kademlia remains optional/default-disabled and stores no channel/endpoint/application records.
+14. Standard v1 includes Kademlia support; configured entries default enabled but remain opt-out, and Kademlia stores no channel/endpoint/application records.
 15. Human/chat semantics stay above the transport boundary.

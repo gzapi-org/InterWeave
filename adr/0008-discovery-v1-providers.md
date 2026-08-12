@@ -1,6 +1,6 @@
 # v1 discovery providers are cache, optional mDNS, and static bootstrap
 
-**Status:** Accepted
+**Status:** Superseded in part by ADR-0034 (standard v1 now includes Kademlia support/default-on configured entries); cache/mDNS/static provider roles remain accepted.
 
 ## Context
 
@@ -8,7 +8,7 @@ These three cover fast restart, zero-config LAN operation, and deterministic rem
 
 ## Decision
 
-Ship the architecture for PeerCacheDiscovery, optional MdnsDiscovery, and StaticBootstrapDiscovery as the minimum v1 provider set. Kademlia is outside the minimum v1 provider set but is fully designed as an optional/default-disabled provider in ADR-0009.
+Historical decision: PeerCacheDiscovery, optional MdnsDiscovery, and StaticBootstrapDiscovery formed the minimum provider set. **ADR-0034 supersedes the rollout portion:** the standard v1 build now also includes Kademlia support, and configured Kademlia entries default enabled. The roles/boundaries of cache, mDNS, and static bootstrap remain unchanged.
 
 ## Alternatives considered
 
@@ -16,7 +16,7 @@ mDNS-only; static-only; Kademlia mandatory; central rendezvous service.
 
 ## Consequences
 
-Internet-scale autonomous discovery is limited in v1, but the provider contract leaves it open. Operators can compose providers per deployment.
+Provider composition remains explicit. Standard v1 includes Kademlia support, while operators can still compose/omit providers per deployment; cache/mDNS/static retain their original roles.
 
 ## Security implications
 
@@ -32,4 +32,4 @@ Each provider gets its own crate/module behind discovery-api and must pass commo
 
 ## Revisit conditions
 
-Revisit when remote networks cannot be operated reasonably with configured entry points or when Kademlia/rendezvous value is demonstrated.
+Superseded rollout question is closed by ADR-0034. Revisit only if evidence requires changing the provider set or default-on Kademlia posture.
