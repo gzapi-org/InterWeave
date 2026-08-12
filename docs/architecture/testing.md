@@ -5,6 +5,7 @@
 - ChannelId validation/topic hashing fixtures;
 - EndpointId grammar/length fixtures;
 - endpoint config uniqueness/default/subset/advertisement cross-field validation;
+- IPC keepalive config validation (`response_timeout < interval`) and fixed v2 version-not-in-config rule;
 - endpoint lease grant/conflict/release/revoke/epoch state machine;
 - endpoint inbound/outbound policy is intersection with profile trust and cannot widen it;
 - default-route resolution is deterministic and never connection-order-based;
@@ -18,7 +19,9 @@
 - connection admission/revocation policy;
 - GossipSub Accept|Ignore|Reject mapping;
 - broadcast dedup key `(mode, source_peer, channel, message_id)`;
-- direct dedup key `(mode, source_peer, source_endpoint, destination_selector, message_id)` plus stored first resolved endpoint/content fingerprint;
+- direct dedup key `(mode, source_peer, source_endpoint, destination_selector, message_id)` plus stored first resolved endpoint/DirectContentFingerprintV1;
+- DirectContentFingerprintV1 binary canonicalization and golden SHA-256 fixture (`text/plain`, `hello` -> `3dad2f134909e51812e261b56c84b5ab040de681a9e900c9180b2e88a4b47efe`);
+- direct in-flight reservation global/per-source-peer bounds and overload rejection;
 - backoff/cancellation state machines;
 - direct reply-token exact endpoint route + lease-epoch invalidation;
 - broadcast reply-after-leave;
@@ -60,7 +63,11 @@ Every provider runs `contracts/DISCOVERY-CONFORMANCE.md` tests. Endpoint routing
 ## IPC/local integration
 
 - configured endpoint claim succeeds;
-- unknown/disabled endpoint claim fails;
+- malformed endpoint claim -> InvalidArgument;
+- unknown endpoint claim -> EndpointUnknown;
+- disabled endpoint claim -> EndpointDisabled;
+- allowed_client_kinds mismatch -> EndpointClientKindDenied;
+- ungranted capability -> CapabilityDenied;
 - second live claim for same EndpointId -> EndpointInUse;
 - one connection cannot switch EndpointId without reconnect;
 - direct-capable client without endpoint -> EndpointNotRegistered;
@@ -70,7 +77,10 @@ Every provider runs `contracts/DISCOVERY-CONFORMANCE.md` tests. Endpoint routing
 - config disable revokes live endpoint without auto-rebinding;
 - reconnect and daemon restart create a fresh non-repeating 128-bit lease epoch and stale reply routes fail;
 - max legal payload fits under 131072-byte IPC v2 body with maximum endpoint metadata;
-- IPC body above ceiling is rejected.
+- IPC body above ceiling is rejected;
+- human-client default grant includes endpoints.query only when directory is enabled; claude-channel default grant excludes endpoints.query;
+- one human data-plane connection plus one human admin connection consumes two IPC client slots;
+- negotiated keepalive releases a wedged endpoint lease after configured missed probes; keepalive-disabled clients remain governed by OS connection liveness/admin revoke.
 
 ## Claude integration
 
@@ -105,7 +115,9 @@ Every provider runs `contracts/DISCOVERY-CONFORMANCE.md` tests. Endpoint routing
 - oversized endpoint/direct fields rejected pre-allocation;
 - endpoint directory max 32 entries, per-peer query rate limit, global in-flight bound, and response size are enforced;
 - flood cannot create unbounded endpoint/directory/cache/queue state;
-- corrupt cache/config/identity behavior remains fail-safe.
+- corrupt cache/config/identity behavior remains fail-safe;
+- recovery export fixture decodes exact Ed25519 secret bytes; restore reproduces expected PeerId; wrong checksum/mismatched expected PeerId fails closed;
+- recovery phrase never appears in logs, config, IPC fixtures, crash reports, or Channel events.
 
 ## Compatibility fixtures
 
@@ -119,7 +131,10 @@ Required endpoint-v2 fixtures:
 - RejectedV2 no_route response;
 - IPC v2 hello with endpoint claim and granted lease epoch;
 - maximum legal IPC v2 direct request/event under 131,072-byte body;
-- endpoint-directory empty/max-32 response.
+- endpoint-directory empty/max-32 response;
+- DirectContentFingerprintV1 canonical byte fixture and SHA-256 value;
+- exact IPC endpoint-claim/capability error fixtures;
+- identity recovery zero-secret -> 24-word phrase -> expected PeerId fixture.
 
 Because no production v1 exists, Phase 1 does not require a v1 fan-out compatibility fixture. Unsupported major versions fail clearly.
 

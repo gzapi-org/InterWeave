@@ -17,11 +17,15 @@
 | inbound Kademlia record write | never persist | record-write-attempt counter | continue routing |
 | network partition | connections drop; daemon lives | disconnect/dial failures | rediscovery/reconnect |
 | PeerId intentional rotation | peers see new identity | IdentityChanged | out-of-band trust update |
-| identity key missing/corrupt | fail closed; never silent rotate | daemon unavailable | restore/explicit admin action |
+| identity key missing/corrupt | fail closed; never silent rotate | daemon unavailable | restore exact Ed25519 identity from approved recovery record or explicit new-identity action |
+| recovery phrase decodes but derived PeerId mismatches expected backup metadata | refuse restore | identity-recovery mismatch | verify phrase/record; never overwrite established identity |
 | connection storm | bounded dial concurrency/backoff | overload counters | drain under limits |
 | unauthorized inbound connection | authenticate then close before data-plane participation | policy counter | explicit trust update if intended |
 | unauthorized outbound direct send | fail before dial | UnauthorizedPeer | out-of-band trust change |
-| local data-plane client claims unknown/disabled endpoint | IPC handshake fails | EndpointDisabled/config diagnostic | fix config/endpoint |
+| local client claims unknown endpoint | IPC handshake fails | EndpointUnknown | fix endpoint ID/config |
+| local client claims disabled endpoint | IPC handshake fails | EndpointDisabled | enable endpoint or choose another |
+| local client kind violates endpoint hygiene policy | IPC handshake fails | EndpointClientKindDenied | correct config/client kind |
+| local client requests ungranted capability | request/handshake fails locally | CapabilityDenied | use authorized client/policy |
 | two clients claim same EndpointId | second handshake fails | EndpointInUse | close owner or configure another endpoint |
 | endpoint disabled while leased | lease revoked; no reroute | EndpointLeaseChanged(revoked) | re-enable/reconnect explicitly |
 | human/Claude endpoint process disconnects | route becomes immediately unavailable; no queue | endpoint offline/release | client reconnect/reclaim |
@@ -46,7 +50,8 @@
 | bridge/human-client restart | daemon/network stay up; endpoint lease drops/reacquires | client disconnect/endpoint state | fresh handshake; no replay |
 | daemon restart | PeerId persists; all endpoint leases initially offline | recovering | local clients reconnect |
 | Claude Code restart | bridge route offline temporarily | Channel unavailable while closed | no offline queue |
-| local IPC disconnect | network continues | client degraded | bounded reconnect |
+| local IPC disconnect | network continues; endpoint lease released | client degraded | bounded reconnect |
+| local IPC connection half-open/wedged with keepalive negotiated | daemon closes after bounded missed probes and releases endpoint lease | keepalive timeout / EndpointLeaseChanged(released) | client reconnects; tune/disable keepalive only by policy |
 | Claude requests endpoint admin/shutdown | IPC capability denial | authorization diagnostic | explicit admin path |
 | slow broadcast consumer | per-client broadcast drops when queue full | overload | consumer recovers; no replay |
 | slow direct endpoint consumer | new direct requests reject overloaded before Accepted | overload | consumer recovers |

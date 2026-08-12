@@ -50,7 +50,9 @@ Trust changes, endpoint configuration, key rotation, daemon shutdown, bootstrap/
 
 A network message displayed in the human client must never automatically exercise administrative operations. UI actions that mutate trust/configuration require an explicit local user gesture and the admin capability path.
 
-A single executable may host both UI surfaces, but the architecture treats them as separate authorities.
+A single executable may host both UI surfaces, but the architecture treats them as separate authorities and separate IPC connections. A human app that keeps both sessions open consumes two of the profile's IPC client slots.
+
+Identity recovery is intentionally **not** part of the administrative session: recovery words are private-key-equivalent and remain in the offline `transportctl identity backup/restore` path defined by ADR-0033.
 
 ## Human application model
 
@@ -180,7 +182,7 @@ If only the human endpoint joins, Claude receives nothing. `channels.desired` ca
 
 ## Attachments and richer chat
 
-The generic transport continues to carry opaque payload bytes with optional `media_type`. A human client may define a separate application protocol, for example a versioned JSON/CBOR chat envelope for text, attachments, read markers, reactions, or contact cards.
+The generic transport continues to carry opaque payload bytes with optional `media_type`. A human client may define a separate application protocol, for example a versioned JSON/CBOR chat envelope for text, attachments, read markers, reactions, or contact cards. For first-party interoperability, `application-envelope-guidance.md` recommends a minimal unauthenticated `from_endpoint` broadcast hint, but it remains application data and must never be treated as transport-authenticated authorship.
 
 That application protocol must remain above this project. In particular, this transport does not define:
 
@@ -199,7 +201,7 @@ That application protocol must remain above this project. In particular, this tr
 2. human UI connects to IPC v2 and requests endpoint `human`;
 3. daemon validates configured/enabled endpoint and grants exclusive lease;
 4. `human` becomes locally routable and, if configured, remotely advertised;
-5. UI disconnect/restart removes lease immediately;
+5. UI disconnect/restart removes lease immediately; a negotiated IPC keepalive also releases a half-open/wedged lease after bounded missed probes;
 6. remote directory stops listing `human` after fresh query/cache expiry;
 7. direct requests during downtime receive `no_route`;
 8. reconnect obtains a new lease and routing resumes without changing PeerId.

@@ -35,6 +35,8 @@ Trust boundaries:
 | Offline mailbox creep | implementation stores messages for absent endpoint | contract forbids daemon buffering; no Accepted without active queue | human app may separately store received history | capability-explicit durable backend only |
 | Admin confused deputy | network message causes trust/endpoint mutation | admin.endpoints/admin.shutdown separated from data-plane clients; explicit local gesture | same-process GUI bug/social engineering | process split/OS auth |
 | Private-key theft | attacker impersonates whole PeerId/all endpoints | owner-only key, never over IPC/logs, rotation guidance | compromise persists until revoked | hardware-backed keys |
+| Recovery-phrase theft | attacker reconstructs exact Ed25519 key/PeerId | offline-only export/restore, never config/IPC/logs, explicit warning/physical custody | bearer-secret compromise persists until trust is revoked/rotated | threshold/HSM-backed recovery options |
+| Recovery typo/wrong phrase | operator restores wrong identity | BIP-39 checksum + expected PeerId exact-match requirement | phrase-only disaster recovery without expected metadata has weaker typo detection | richer/versioned/threshold backup format |
 | Topic enumeration/confidentiality | channel info/plaintext via trusted peers | hashed topics + trust-gated overlay + explicit no-E2EE claim | trusted forwarding peer reads payload | group E2EE |
 | GossipSub trust asymmetry | mesh propagation partition | ADR-0029 Ignore vs Reject mapping | downstream route loss | shared membership policy |
 | Prompt injection | remote content asks unsafe actions | Channel instructions/normal permissions/no admin tools | model/user can choose action | sandbox/app policy |

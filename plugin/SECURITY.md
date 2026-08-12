@@ -27,3 +27,8 @@ Direct reply tokens bind remote PeerId + remote source endpoint + this bridge's 
 ## Endpoint enumeration
 
 The Claude bridge does not need to expose remote endpoint enumeration as a default tool. If that is added later, endpoint names must still be described as advertised route labels, not verified service identities.
+
+
+## Endpoint-directory capability
+
+The `claude-channel` IPC client is not granted `endpoints.query` by default and exposes no `peer_endpoints` tool in v2. Adding one requires the ADR-0023 revisit/security review.

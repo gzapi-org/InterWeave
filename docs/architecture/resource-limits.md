@@ -18,13 +18,18 @@ Default values are conservative architecture targets, not performance promises.
 | discovery candidates | 4096 | 16384 |
 | addresses/peer | 16 | 32 |
 | advisory protocol observations/peer | 16 | 16 |
-| IPC clients | 16 | 64 |
+| IPC connections (all client kinds combined) | 16 | 64 |
 | IPC JSON body | 128 KiB | 128 KiB IPC v2 |
+| IPC keepalive interval | 30 s | 5 min |
+| IPC keepalive response timeout | 10 s | < interval, max 1 min |
+| IPC keepalive missed probes | 3 | 10 |
 | backend->runtime events | 1024 | 8192 |
 | per-client event queue | 256 | 1024 |
 | outstanding commands/client | 64 | 256 |
 | direct inflight total | 128 | 512 |
 | direct inflight/peer | 8 | 32 |
+| direct dedup in-flight reservations/global | 128 | 512 |
+| direct dedup in-flight reservations/source peer | 8 | 32 |
 | dedup IDs | 10,000 / 5 min | configurable bounded |
 
 ## Payload/IPC sizing invariant
@@ -37,7 +42,7 @@ Direct inbound acceptance is endpoint-queue-aware. If the resolved endpoint queu
 
 This removes the v1 architecture's shared-profile direct fan-out memory multiplier. Each direct message enters at most one local endpoint queue. Broadcast can still fan out to multiple joined local clients, bounded by `max_clients` and per-client queues.
 
-Endpoint-directory responses are bounded to 32 route IDs, 12 queries/minute/peer by default, 16 in-flight/profile by default, and short-lived cache state; no unbounded presence catalog exists.
+Endpoint-directory responses are bounded to 32 route IDs, 12 queries/minute/peer by default, 16 in-flight/profile by default, and short-lived cache state; no unbounded presence catalog exists. Direct dedup reservation state is separately capped at 128 global / 8 per source peer by default. A human application using separate data-plane and admin IPC sessions consumes two IPC connection slots.
 
 ## Drop policy
 

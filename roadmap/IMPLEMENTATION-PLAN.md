@@ -6,9 +6,9 @@ No production implementation belongs in this architecture repository. This roadm
 
 **Objective:** resolve version-sensitive/runtime-sensitive details.
 
-**Deliverables:** SPIKE-001..005 results. SPIKE-002 now validates direct v2 endpoint framing/acceptance and endpoint-directory behavior in addition to request-response failures.
+**Deliverables:** SPIKE-001..006 results. SPIKE-002 validates direct v2 endpoint framing/acceptance, endpoint-directory behavior, and concurrent dedup reservation behavior; SPIKE-006 validates the exact Ed25519 recovery portability boundary.
 
-**Acceptance:** exact Claude Channel package contract known; rust-libp2p direct v2 failure/negotiation semantics measured; Kademlia/NAT assumptions measured as separately specified.
+**Acceptance:** exact Claude Channel package contract known; rust-libp2p direct v2 failure/negotiation semantics measured; Kademlia/NAT assumptions measured as separately specified; the exact-key mnemonic recovery boundary is empirically verified before production backup/restore is enabled.
 
 ---
 
@@ -23,6 +23,9 @@ No production implementation belongs in this architecture repository. This roadm
 - endpoint config uniqueness/default/subset/advertisement invariants pass;
 - endpoint policy provably cannot widen profile trust;
 - MessageId remains exactly 128 bits;
+- DirectContentFingerprintV1 canonicalization/golden fixture and bounded reservation limits are frozen;
+- IPC endpoint-claim errors are exact (`EndpointUnknown`, `EndpointDisabled`, `EndpointClientKindDenied`, `EndpointInUse`, `CapabilityDenied`);
+- identity types fix software v1 to Ed25519 and identity-recovery golden fixtures reproduce the expected PeerId;
 - effective max payload capability is correct;
 - IPC v2 max-payload fixtures with maximum endpoint metadata fit 131072-byte body;
 - Kademlia cross-field/seed-source validation still passes;
@@ -76,7 +79,10 @@ Unchanged trust/backoff/dial ownership. Direct and endpoint-directory dials both
 - broadcast remains join-filtered and `channels.desired` remains no-buffer prewarm;
 - slow client does not stall Swarm/other endpoints;
 - IPC major mismatch clear;
-- Claude/human data-plane clients lack admin.endpoints/admin.shutdown.
+- Claude/human data-plane clients lack admin.endpoints/admin.shutdown;
+- claude-channel lacks endpoints.query by default; human-client receives it only when endpoint directory is enabled;
+- optional IPC keepalive releases wedged endpoint leases after bounded misses;
+- data/admin connections count independently toward max IPC clients.
 
 ---
 
@@ -125,7 +131,7 @@ Add rate limits/fuzzing and endpoint-specific regressions: route probing, direct
 
 ## Phase 8 — operational packaging
 
-Add service integration, config-v2 migrations, endpoint diagnostics, human/Claude client compatibility matrix, and reliable identity-preserving update/rollback.
+Add service integration, config-v2 migrations, endpoint diagnostics, human/Claude client compatibility matrix, reliable identity-preserving update/rollback, and offline `transportctl identity backup/restore` UX for the ADR-0033 recovery format. Recovery words never transit daemon IPC.
 
 ---
 

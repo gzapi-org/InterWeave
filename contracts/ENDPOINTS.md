@@ -80,10 +80,14 @@ Every data-plane IPC client that sends or receives direct messages owns at most 
 Properties:
 
 - lease is bound to one IPC connection;
-- only an enabled configured endpoint may be claimed;
+- malformed EndpointId -> local `InvalidArgument`;
+- configured endpoint absent -> local `EndpointUnknown`;
+- configured endpoint disabled -> local `EndpointDisabled`;
+- configured `allowed_client_kinds` mismatch -> local `EndpointClientKindDenied`;
+- ungranted capability/connection authorization -> local `CapabilityDenied`;
 - at most one live connection owns an EndpointId at a time;
 - duplicate claim -> `EndpointInUse`;
-- lease disappears immediately on IPC disconnect;
+- lease disappears immediately on IPC disconnect or bounded negotiated IPC keepalive expiry;
 - no message buffering is created while an endpoint is unleased;
 - reconnect performs a new handshake and obtains a fresh opaque 128-bit local lease epoch; the value must not repeat across daemon restart/reconnect within any practical stale-route lifetime;
 - ordinary remote messages can never create, steal, transfer, or enable an endpoint lease.
@@ -152,12 +156,37 @@ The normalized direct accepted-message dedup key is based on the **wire destinat
 )
 ```
 
-A successful cache entry stores the first `resolved_destination_endpoint` plus a content fingerprint over canonical `(media_type, payload)` bytes; `sent_at_ms` is excluded. On a duplicate accepted request within TTL:
+A successful cache entry stores the first `resolved_destination_endpoint` plus **DirectContentFingerprintV1**; `sent_at_ms` is excluded. The fingerprint is fixed for cross-implementation fixtures:
+
+```text
+domain = UTF8("claude-p2p-channel/direct-content-fingerprint/v1\0")
+
+canonical =
+  domain ||
+  media_present:u8 ||
+  [media_len:u16be || media_ascii] ||   # only when media_present = 1
+  payload_len:u32be ||
+  payload_bytes
+
+fingerprint = SHA-256(canonical)
+```
+
+Rules: `media_present` is exactly `0` or `1`; an absent media type uses `0` and has no media-length field; a present media type uses `1`, must be 1..128 ASCII bytes, and includes its two-byte big-endian length. Empty media type is invalid rather than an alias for absence. Payload length is the exact byte length before the payload. No JSON, UTF-8 normalization, endpoint fields, message ID, or timestamp participates.
+
+Golden fixture:
+
+```text
+media_type = "text/plain"
+payload    = UTF8("hello")
+SHA-256    = 3dad2f134909e51812e261b56c84b5ab040de681a9e900c9180b2e88a4b47efe
+```
+
+On a duplicate accepted request within TTL:
 
 - matching fingerprint -> return `AcceptedV2` with the same stored resolved endpoint and do **not** enqueue another local event, even if the endpoint disconnected or the profile default changed;
 - different fingerprint under the same dedup key -> reject as a duplicate-ID/content conflict (`malformed` on the coarse wire, detailed only locally).
 
-This prevents retries from being rerouted to a different local application and prevents one idempotency key from silently aliasing two different message bodies. Concurrent same-key requests are serialized by a bounded in-flight reservation so at most one local enqueue can occur. Rejected/no-route requests are not positive acceptance records: matching in-flight waiters receive that rejection, then the reservation is removed, allowing a later retry to succeed after route recovery. After the bounded dedup TTL expires, the transport no longer promises retry idempotency for that ID.
+This prevents retries from being rerouted to a different local application and prevents one idempotency key from silently aliasing two different message bodies. Concurrent same-key requests are serialized by a bounded in-flight reservation so at most one local enqueue can occur. Reservation capacity is aligned with direct in-flight admission: **128 global / 8 per source PeerId by default, ceilings 512 / 32**. Capacity exhaustion rejects the new request as coarse wire `overloaded` / local `Overloaded`; it must not fall through to a second enqueue path. Rejected/no-route requests are not positive acceptance records: matching in-flight waiters receive that rejection, then the reservation is removed, allowing a later retry to succeed after route recovery. After the bounded dedup TTL expires, the transport no longer promises retry idempotency for that ID.
 
 Including `source_endpoint` prevents a message ID collision between two endpoints on the same authenticated peer from suppressing an independent delivery.
 
@@ -258,6 +287,8 @@ Defaults / ceilings:
 | endpoint-directory queries/peer/minute | 12 | 60 |
 | endpoint-directory inflight/profile | 16 | 64 |
 | one endpoint lease per IPC client | 1 | 1 |
+| direct dedup reservation/global | 128 | 512 |
+| direct dedup reservation/source peer | 8 | 32 |
 
 Existing per-client event-queue and direct-send concurrency limits continue to apply.
 
@@ -272,7 +303,7 @@ Endpoint-directory protocol versioning is independent from direct protocol versi
 ## Required conformance cases
 
 - two local endpoints on one PeerId receive only explicitly/default-routed direct traffic intended for them;
-- endpoint claim collision fails `EndpointInUse`;
+- endpoint handshake error mapping is exact: malformed=`InvalidArgument`, absent=`EndpointUnknown`, disabled=`EndpointDisabled`, kind mismatch=`EndpointClientKindDenied`, capability denied=`CapabilityDenied`, collision=`EndpointInUse`;
 - disconnect makes the endpoint unavailable immediately and creates no queue;
 - peer-only destination resolves exactly one configured default endpoint;
 - no default -> coarse remote `no_route`;
@@ -283,4 +314,5 @@ Endpoint-directory protocol versioning is independent from direct protocol versi
 - directory lists only active advertised endpoints and respects trust;
 - endpoint directory can be disabled while explicit endpoint sends continue to work;
 - same PeerId using the same `message_id` from two source endpoints yields two independent deliveries;
+- DirectContentFingerprintV1 fixture is byte-identical across implementations and reservation overflow returns overload without a second enqueue;
 - an offline human endpoint has no daemon-side message backlog.

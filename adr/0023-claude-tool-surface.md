@@ -24,7 +24,7 @@ The bridge itself owns one configured EndpointId lease over IPC v2. `send.endpoi
 
 `status` includes local profile PeerId, this bridge's EndpointId/lease health, bridge-owned joined channels, profile desired channels, and high-level transport health.
 
-Do not expose trust approval/revocation, endpoint creation/rebinding, identity rotation, daemon shutdown, forced discovery/Kademlia queries, private keys, or raw Swarm/multiaddr internals as Channel tools.
+Do not expose trust approval/revocation, endpoint creation/rebinding, identity rotation/recovery, daemon shutdown, forced discovery/Kademlia queries, private keys, or raw Swarm/multiaddr internals as Channel tools. **`peer_endpoints` is deliberately not a Claude-facing v2 tool and `claude-channel` is not granted `endpoints.query` by default.**
 
 ## Alternatives considered
 
@@ -48,4 +48,4 @@ Bridge handshake includes configured endpoint claim. Tool schemas add optional r
 
 ## Revisit conditions
 
-Revisit if Claude must enumerate remote endpoint directories directly, or if richer application-specific service discovery is intentionally added above transport.
+Revisit `peer_endpoints` only if a concrete user workflow requires Claude to enumerate remote endpoint directories **and** a separate tool-surface/security review approves granting `endpoints.query`; also revisit if richer application-specific service discovery is intentionally added above transport.

@@ -33,7 +33,8 @@ Endpoint availability is reported independently so an offline `human` route does
 - RemoteEndpointUnavailable and endpoint-overload classes;
 - GossipSub validation outcomes;
 - duplicate drops;
-- IPC frame/capability/lease diagnostics;
+- IPC frame/capability/lease/keepalive diagnostics;
+- direct dedup reservation occupancy/overflow and content-ID conflict counts;
 - discovery/Kademlia state;
 - dial/backoff failures;
 - bridge/human client connected state.
@@ -65,6 +66,9 @@ provider_failures_total
 validation_ignore_unauthorized_total
 validation_reject_invalid_total
 ipc_frame_too_large_total
+ipc_keepalive_timeouts_total
+direct_dedup_reservation_overflow_total
+direct_duplicate_content_conflict_total
 trust_policy_revision
 message_no_local_consumer_total{mode}
 ```
@@ -74,3 +78,6 @@ Do not use raw EndpointIds as unbounded metric labels. Per-endpoint detail belon
 ## Kademlia diagnostics
 
 Existing optional Kademlia diagnostics remain. Endpoint IDs and endpoint-directory data are not DHT diagnostics and must not be inserted into Kademlia records/labels.
+
+
+Identity observability may expose algorithm, PeerId, key-file health, and whether an offline backup has been operator-acknowledged **only if that acknowledgement is non-secret state**. It must never expose recovery words, raw secret bytes, or phrase-derived material.

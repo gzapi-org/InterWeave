@@ -27,3 +27,6 @@ Any pre-disconnect direct reply tokens are discarded/invalid because their local
 MCP stdin close/SIGTERM stops only the bridge. Its IPC connection closes, releasing EndpointId lease and bridge joins. Daemon and PeerId remain alive.
 
 The bridge is never granted `admin.shutdown` or `admin.endpoints`.
+
+
+Identity recovery never runs through the bridge or daemon IPC. The bridge must be stopped with the daemon/profile identity operation before offline backup/restore.

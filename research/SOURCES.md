@@ -57,6 +57,13 @@ MCP changed substantially in 2026. The Claude Channel reference remains authorit
 - AutoNAT: https://docs.rs/libp2p/latest/libp2p/autonat/
 - Relay: https://docs.rs/libp2p/latest/libp2p/relay/
 - DCUtR: https://docs.rs/libp2p/latest/libp2p/dcutr/
+- libp2p identity: https://docs.rs/libp2p-identity/latest/libp2p_identity/
+
+## Identity recovery / mnemonic backup
+
+- Bitcoin BIP-39: https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki
+- Trezor BIP-39 reference vectors: https://github.com/trezor/python-mnemonic/blob/master/vectors.json
+- SLIP-0039 threshold mnemonic sharing: https://github.com/satoshilabs/slips/blob/master/slip-0039.md
 
 The 2026-08 research snapshot observed the `libp2p` crate documentation at the 0.56 line. The implementation should not hard-pin to that research version without revalidation.
 

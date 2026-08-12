@@ -99,7 +99,7 @@ It does not decide network endpoint admission policy itself.
 - `pubsub_manager` — GossipSub;
 - `direct_manager` — `/direct/2.0.0`, request/response lifecycle and bounded runtime admission round trip;
 - `endpoint_directory_manager` — `/endpoints/1.0.0`, trust-gated bounded directory query/response;
-- `identity_manager` — key/PeerId;
+- `identity_manager` — Ed25519 key/PeerId, portable key serialization boundary, rotation; offline mnemonic backup/restore remains a transportctl/identity-file workflow, not daemon IPC;
 - `address_book`;
 - `kademlia_driver` — optional Swarm-owned adapter.
 

@@ -36,3 +36,4 @@ All ADRs are **Accepted** architecture decisions unless later superseded.
 | [0030](./0030-local-endpoint-addressing.md) | Model B: one PeerId per profile with exclusive configured EndpointId leases and deterministic direct v2 routing. |
 | [0031](./0031-endpoint-directory.md) | Add an optional trust-gated, opt-in remote directory of currently active advertised EndpointIds. |
 | [0032](./0032-human-client-boundary.md) | Keep the human client above transport as an IPC v2 endpoint consumer with separate administrative authority and application-owned human/chat state. |
+| [0033](./0033-identity-recovery-mnemonic.md) | Use Ed25519 software identities with optional offline 24-word BIP-39 entropy encoding of the exact secret seed for same-PeerId recovery; no wallet PBKDF2 or IPC exposure. |

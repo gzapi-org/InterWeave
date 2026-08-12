@@ -4,6 +4,7 @@
 |---|---|---|
 | Claude Channel contract changes | isolated bridge + SPIKE-001 | revalidate before bridge release |
 | direct v2/request-response edge behavior | explicit protocol + SPIKE-002 | pin crate version/fixtures |
+| direct dedup/reservation race correctness | selector-aware key + fixed fingerprint + bounded in-flight reservation | SPIKE-002 must exercise concurrent same-key retransmission against real request-response scheduling |
 | same-user IPC compromise | owner ACL + configured exclusive leases + admin capability separation | SPIKE-005 if hostile same-user is in threat model |
 | endpoint squatting/collision | configured-only single lease, explicit conflict | stronger local app auth if needed |
 | endpoint names mistaken for identity | contracts/UI require route-only semantics | add signed app identity above transport, not EndpointId |
@@ -17,5 +18,6 @@
 | Kademlia complexity/poisoning | optional/default-off fully specified | SPIKE-003 before support |
 | NAT limitations | conservative scope | SPIKE-004 |
 | backpressure/message loss | bounded best-effort; direct rejects before endpoint acceptance | tune/flow-control, never hidden spool |
-| profile key loss | explicit backup/rotation | future signed rotation/managed identity |
+| profile key loss | optional exact Ed25519 mnemonic recovery record; no silent regeneration | offline recovery drill; future threshold/hardware-backed identity |
+| recovery phrase theft | phrase equals full PeerId impersonation capability | offline-only export/import, no IPC/logging, physical backup discipline, revoke/rotate if exposed |
 | over-abstraction | EndpointRegistry concrete internal module | add trait only with real second implementation |

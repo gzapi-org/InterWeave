@@ -19,9 +19,9 @@ Spikes validate version-sensitive or deployment-sensitive assumptions. They are 
 
 **Objective:** validate rust-libp2p request-response for direct v2 endpoint framing/acceptance and the separate endpoint-directory protocol under timeout, cancellation, connection reuse, and protocol mismatch.
 
-**Experiment:** two local peers with non-production `/direct/2.0.0` and `/endpoints/1.0.0` codecs. Exercise explicit destination, omitted/default destination, resolved endpoint response, no_route privacy class, queue-admission delay/overload, multiple protocol IDs, and unsupported-major negotiation.
+**Experiment:** two local peers with non-production `/direct/2.0.0` and `/endpoints/1.0.0` codecs. Exercise explicit destination, omitted/default destination, resolved endpoint response, no_route privacy class, queue-admission delay/overload, multiple protocol IDs, and unsupported-major negotiation. **Drive many concurrent retransmissions with the exact same dedup key/message ID through the real rust-libp2p request-response task scheduling, including response timeout/cancellation races, and verify one local enqueue plus shared owner result. Also exercise reservation-capacity overflow.**
 
-**Evidence:** failure events, substream/connection reuse, timeout/cancel semantics, exact protocol-family negotiation behavior, and proof that AcceptedV2 can be withheld until bounded local route admission without pathological Swarm blocking.
+**Evidence:** failure events, substream/connection reuse, timeout/cancel semantics, exact protocol-family negotiation behavior, proof that AcceptedV2 can be withheld until bounded local route admission without pathological Swarm blocking, and empirical proof that concurrent same-key retransmissions cannot double-enqueue or escape the bounded reservation map.
 
 **Decision unlocked:** implementation codec/task/channel details without reopening endpoint routing or the direct-vs-GossipSub decision.
 
@@ -80,3 +80,13 @@ Instrument the Swarm / behaviour boundary so Kademlia-originated `ToSwarm::Dial`
 **Evidence:** threat-model fit and operational cost.
 
 **Decision unlocked:** retain OS-boundary-only IPC trust or add a local credential/token mechanism.
+
+## SPIKE-006 — identity-recovery portability
+
+**Objective:** verify that the pinned rust-libp2p identity API can export/import the exact Ed25519 32-byte secret boundary assumed by `cp2p-ed25519-bip39-entropy-v1` and reproduce the same PeerId across backup/restore.
+
+**Experiment:** non-production local harness only. Starting from the test-only zero-secret fixture and multiple CSPRNG-generated Ed25519 identities, obtain the portable secret bytes using the supported identity API/serialization boundary, encode/decode the 24-word BIP-39 entropy form, reconstruct the key, and compare public keys and PeerIds. Exercise process restart and the exact dependency versions selected for implementation. Also prove that the BIP-39 PBKDF2 seed output is never accepted as the transport secret.
+
+**Evidence:** byte-for-byte secret round trip, the repository golden fixture PeerId, random-key round trips, documented API calls/serialization assumptions, and confirmation that no mnemonic/private-key material enters logs, IPC, crash reports, or network traces.
+
+**Decision unlocked:** production `transportctl identity backup/restore` implementation against the frozen recovery contract. If the current library boundary cannot reliably expose/reconstruct the exact Ed25519 seed, keep recovery implementation disabled and revise the identity serialization adapter without silently changing the mnemonic format.

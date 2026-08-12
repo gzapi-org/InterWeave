@@ -1,6 +1,6 @@
 # Final architecture review
 
-Review posture: external CTO / implementation-readiness review. Original review 2026-08-11; amended through **Model B endpoint/human-client design on 2026-08-12**.
+Review posture: external CTO / implementation-readiness review. Original review 2026-08-11; amended through **Model B Phase-1 freeze precision + identity-recovery design on 2026-08-12**.
 
 ## Executive assessment
 
@@ -30,6 +30,9 @@ The major evolution since the original prompt is deliberate and transport-generi
 | ConnectionManager policy bypass? | **No** | root dial admission including Kademlia/direct/directory |
 | GossipSub trust mapping explicit? | **Yes** | ADR-0029 Accept/Ignore/Reject |
 | IPC can carry max payload + endpoint metadata? | **By contract/test requirement** | 128 KiB IPC v2 golden fixtures |
+| endpoint handshake/capability errors deterministic? | **Yes** | exact local error map in LOCAL-IPC/Phase-1 fixtures |
+| direct retry race bounded/canonical? | **Yes on paper; spike required** | fixed DirectContentFingerprintV1 + 128/8 reservation limits + SPIKE-002 race test |
+| recovery changes PeerId? | **No** | ADR-0033 encodes exact 32-byte Ed25519 secret and verifies expected PeerId |
 | daemon/Claude/human lifecycle coupled? | **No** | endpoint leases are runtime; PeerId survives client restart |
 | human admin actions can be triggered by network payload automatically? | **No by architecture** | admin capability path separated from data plane |
 | hidden persistent message state? | **No** | app-local human history is outside transport and only stores observed content |
@@ -57,7 +60,10 @@ The major evolution since the original prompt is deliberate and transport-generi
 19. Static PeerId trust still gates ordinary data-plane connections, direct peers, and source admission.
 20. Noise remains per-link security; trusted GossipSub forwarders can see plaintext.
 21. Kademlia remains fully designed optional peer-routing discovery but `enabled: false` by default and stores no app/channel/endpoint records.
-22. IPC v2 remains owner-protected length-prefixed JSON with 128 KiB body and capability-scoped admin methods.
+22. IPC v2 remains owner-protected length-prefixed JSON with 128 KiB body and capability-scoped admin methods; version is negotiated, human data/admin sessions count separately, and optional keepalive can release wedged leases.
+23. Claude Channel is not granted `endpoints.query` by default; `peer_endpoints` is explicitly deferred pending a security/tool-surface revisit.
+24. DirectContentFingerprintV1 is fixed byte-for-byte and direct in-flight reservation state is capped at 128 global / 8 per source peer by default.
+25. Initial software identity is Ed25519 with optional offline 24-word exact-key recovery (ADR-0033); mnemonic material never crosses IPC.
 
 ## Accepted limitations
 
@@ -71,7 +77,9 @@ The major evolution since the original prompt is deliberate and transport-generi
 - no group E2EE;
 - no universal NAT traversal guarantee;
 - Kademlia minimum build remains disabled/default-off;
-- a human client can persist local history but cannot recover messages never accepted while it was offline.
+- a human client can persist local history but cannot recover messages never accepted while it was offline;
+- the BIP-39-derived recovery UX has only an 8-bit mnemonic checksum, so expected-PeerId backup metadata is the stronger restore check;
+- recovery phrase theft is full PeerId private-key compromise.
 
 ## Remaining implementation risks / spikes
 
@@ -81,7 +89,7 @@ SPIKE-001 remains blocking before production bridge packaging.
 
 ### Direct v2 asynchronous acceptance
 
-SPIKE-002 must verify request-response protocol-family negotiation/failure behavior and the practical pattern for withholding AcceptedV2 until bounded runtime endpoint queue admission. It may adjust task/channel mechanics, not endpoint routing semantics.
+SPIKE-002 must verify request-response protocol-family negotiation/failure behavior, the practical pattern for withholding AcceptedV2 until bounded runtime endpoint queue admission, and concurrent same-key retransmission against the real request-response scheduler so the in-flight reservation guarantee is empirically validated. It may adjust task/channel mechanics, not endpoint routing/dedup semantics.
 
 ### Kademlia
 
@@ -95,6 +103,10 @@ SPIKE-004 determines real deployment requirements.
 
 SPIKE-005 remains conditional. Model B endpoint leases improve routing/isolation but do not cryptographically authenticate same-user client executables.
 
+### Identity-recovery portability
+
+SPIKE-006 must verify that the pinned rust-libp2p Ed25519 identity API/portable serialization boundary round-trips the exact 32-byte secret assumed by `cp2p-ed25519-bip39-entropy-v1` and reproduces the same PeerId. Failure keeps production mnemonic backup/restore disabled; it does not authorize silently changing the recovery format.
+
 ## No-production-implementation verification
 
 Expected content remains Markdown/YAML architecture + Git metadata. No Cargo workspace, `.rs`, production MCP server, human client executable, daemon, installer, service unit, or identity key should exist.
@@ -102,3 +114,8 @@ Expected content remains Markdown/YAML architecture + Git metadata. No Cargo wor
 ## Implementation-readiness verdict
 
 With ADR-0030/0031 and endpoint-aware contracts in place, a team can scaffold Phase 1 without reopening whether one PeerId can serve human + Claude, how direct traffic selects a local consumer, how replies return to the correct remote/local route, whether endpoint discovery implies identity/trust, or what happens while an endpoint is offline.
+
+
+## Identity recovery addendum
+
+Software v1 identities are Ed25519 and may be backed up through the optional offline `cp2p-ed25519-bip39-entropy-v1` recovery format. The 24 words encode the exact 256-bit Ed25519 secret bytes using BIP-39 entropy/checksum/English-wordlist mapping only; Bitcoin BIP-39 PBKDF2 seed derivation is not used. Recovery is never a Channel/IPC operation.

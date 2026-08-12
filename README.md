@@ -43,6 +43,7 @@ The daemon owns the private key and all libp2p state. Local applications never b
 - Claude integration follows the official Channel pattern: stdio MCP, `claude/channel`, push notifications, explicit outbound tools, and pre-delivery admission.
 - The network runtime is a **separate, profile-scoped daemon** so Claude/human-client restarts do not redefine transport identity or tear down P2P connectivity.
 - One profile owns one persistent PeerId. Model B adds configured **EndpointIds** underneath that PeerId for deterministic local direct routing (`human`, `claude`, `automation.build`, etc.). EndpointId is a routing selector, not cryptographic/human/application identity.
+- Initial software identities are **Ed25519**. An optional offline 24-word recovery record can reproduce the exact same PeerId by encoding the raw 32-byte Ed25519 secret with BIP-39 entropy/checksum/English-word mapping only; wallet PBKDF2/passphrase semantics are not used and recovery material never crosses IPC.
 - Every direct-capable IPC v2 client owns one exclusive configured endpoint lease. Direct messages route to exactly one endpoint; the previous architecture-only all-client fan-out is superseded by ADR-0030.
 - Direct protocol target is `/claude-p2p-channel/direct/2.0.0`, carrying required source endpoint and optional destination endpoint. Omitted destination resolves the receiver's explicit `default_direct_endpoint`; it never means fan-out.
 - Direct `Accepted` means the resolved endpoint's bounded local event queue accepted the message, not that Claude or a human processed it.
@@ -92,3 +93,9 @@ Claude/Telegram research was refreshed 2026-08-11; libp2p/Kademlia and endpoint-
 ## Repository name
 
 The working name **claude-p2p-channel** is retained because it describes the Claude integration boundary and transport class without implying an application protocol, project, team, human identity system, or coordination model.
+
+
+## Human-readable recovery and application guidance
+
+- Identity recovery: [`contracts/IDENTITY-RECOVERY.md`](./contracts/IDENTITY-RECOVERY.md), [`docs/architecture/identity-recovery.md`](./docs/architecture/identity-recovery.md), and [`ADR-0033`](./adr/0033-identity-recovery-mnemonic.md).
+- Non-normative first-party broadcast author hint: [`docs/architecture/application-envelope-guidance.md`](./docs/architecture/application-envelope-guidance.md). Transport still treats broadcast authorship as PeerId-only.

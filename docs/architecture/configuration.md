@@ -5,12 +5,20 @@
 | Class | Example | Back up? | Secret? | Safe to delete? |
 |---|---|---|---|---|
 | normal config | listen addresses, providers, endpoint routes, channel subscriptions | yes | generally no | no |
-| identity data | libp2p private key | yes, securely | **yes** | no, changes PeerId |
+| identity data | libp2p Ed25519 private key | yes, securely | **yes** | no, changes PeerId |
+| offline recovery record | 24 words + expected PeerId | yes, offline | **yes** (words) | no if it is the only backup |
 | mutable state | profile lock metadata, runtime state, endpoint leases | usually no | no | usually |
 | peer cache | observed peers/addresses + bounded transport protocol observations | optional | no | **yes** |
 | remote endpoint cache | short-lived advertised EndpointIds | no | no | **yes** |
 | runtime IPC endpoint | socket/pipe | no | no | recreated |
 | logs | structured diagnostics | policy-dependent | must be sanitized | yes |
+
+
+## Identity algorithm and recovery
+
+The initial software profile algorithm is fixed to `ed25519`. The key file remains identity data, not YAML secret material.
+
+Optional recovery uses the offline `cp2p-ed25519-bip39-entropy-v1` record defined in `contracts/IDENTITY-RECOVERY.md`. The 24 words are never stored in this schema. `identity.key_file` is only a path override. Backup/restore requires daemon-offline exclusive identity access and therefore is not a hot-reload operation.
 
 ## Config schema version
 
@@ -82,7 +90,7 @@ The configuration layer distinguishes unknown, implemented, and known-but-unbuil
 
 `transport.limits.max_payload_bytes` may lower the profile's 49,152-byte ceiling. Active value is returned by capabilities.
 
-The IPC v2 JSON-body ceiling of 131,072 bytes is a protocol constant so maximum payload plus two 64-byte EndpointIds and other bounded metadata remains representable.
+The IPC v2 JSON-body ceiling of 131,072 bytes and IPC major version are protocol/handshake properties, not operator-selectable profile versions. Profile config may tune client counts/queues and the optional keepalive timers within fixed ranges. A human UI using separate data-plane and admin connections consumes two client slots.
 
 ## General reload
 
@@ -90,7 +98,7 @@ Safe reloadable classes: supported provider config, rate/queue limits within cei
 
 Trust reload can close data-plane connections, affect endpoint ACL intersections, and emits `TrustPolicyChanged`. Invalid reload leaves previous good config active.
 
-Restart-required: identity key path/rotation, profile IPC socket identity, and core listen transport changes when backend cannot apply atomically.
+Restart-required: identity key path/rotation/restore, profile IPC socket identity, and core listen transport changes when backend cannot apply atomically. Identity recovery words are never configuration values; see `contracts/IDENTITY-RECOVERY.md`.
 
 ## Kademlia configuration rule
 

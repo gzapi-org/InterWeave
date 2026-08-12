@@ -26,8 +26,11 @@ transport:
     strict_validation: literal[true]
     explicit_application_validation: literal[true]
 identity:
+  # Initial software identity algorithm is fixed so portable backup/restore is exact.
+  algorithm: literal[ed25519] = ed25519
   # Private key itself is NOT configuration. This is an optional path override.
   key_file: path?
+  # Recovery phrases/formats are offline identity-tool concerns, never config values or IPC.
 trust:
   policy: enum[static-allowlist]
   allowed_peers: list[PeerId, max=4096]
@@ -123,11 +126,16 @@ discovery:
 channels:
   desired: list[ChannelId, max=128]
 ipc:
-  version: literal[2.0]
-  # IPC JSON-body hard ceiling is fixed at 131072 bytes in v2 and is not
-  # operator configurable. It must carry the max transport payload after base64url.
+  # IPC protocol version is negotiated in hello and is deliberately not an
+  # operator profile setting. The body ceiling is likewise a v2 protocol constant.
   max_clients: integer[1..64] = 16
   client_event_queue: integer[16..1024] = 256
+  keepalive:
+    enabled: bool = true
+    interval: duration[10s..5m] = 30s
+    response_timeout: duration[2s..1m] = 10s
+    max_missed: integer[1..10] = 3
+    # Cross-field when enabled=true: response_timeout < interval.
 observability:
   log_level: enum[error,warn,info,debug] = info
   payload_logging: literal[false]

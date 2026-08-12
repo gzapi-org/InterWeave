@@ -11,7 +11,7 @@ Model B permits a human-facing client and Claude Code to share one profile PeerI
 A human-facing desktop, TUI, CLI, or background messaging client is an **application above transport**, attached to the existing profile daemon through IPC v2.
 
 - its data-plane connection claims one configured EndpointId such as `human`;
-- it uses the same generic `join`, `leave`, `broadcast`, `send`, endpoint-directory query, identity/status, and event contracts as other local consumers;
+- it uses the same generic `join`, `leave`, `broadcast`, `send`, endpoint-directory query, identity/status, and event contracts as other local consumers; its data-plane kind receives `endpoints.query` by default when directory support is enabled, while Claude Channel does not;
 - it does not own a libp2p Swarm, private PeerId key, discovery provider, GossipSub mesh, direct protocol implementation, or Kademlia behavior;
 - contacts, display names, avatars, verification state, conversation models, unread state, reactions, attachment UX, and persisted local history are application-level data above transport;
 - application-local history may persist messages actually sent/received by the client, but does not create transport offline delivery or a daemon mailbox;
@@ -19,7 +19,7 @@ A human-facing desktop, TUI, CLI, or background messaging client is an **applica
 - network message content can never automatically invoke those administrative capabilities;
 - the human UI must display EndpointId as a remote peer-controlled route label unless a higher-level application identity system separately verifies a stronger binding.
 
-The same executable may host both UI surfaces, but the architecture treats data-plane and administrative authority as separate IPC sessions/capabilities.
+The same executable may host both UI surfaces, but the architecture treats data-plane and administrative authority as separate IPC sessions/capabilities. Those are separate IPC connections and therefore consume separate slots from the profile connection limit. Identity recovery phrase export/restore is more sensitive still and remains an offline `transportctl`/identity-file operation rather than either IPC session.
 
 ## Alternatives considered
 

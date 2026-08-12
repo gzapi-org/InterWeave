@@ -14,7 +14,7 @@
 | PubSubManager | ChannelId/topic mapping, GossipSub publish/validation/subscriptions | directed endpoint routing |
 | DirectManager | request-response v2 lifecycle, codec, transport acceptance | local endpoint ownership policy, application acknowledgement |
 | Endpoint directory manager | trust-gated advertised route snapshot/query/cache | app labels, human identity, DHT records |
-| IdentityManager | persistent profile key, PeerId, rotation | endpoint identities, application identity |
+| IdentityManager | persistent Ed25519 profile key, PeerId, rotation, exact-key recovery boundary | endpoint identities, application identity, online mnemonic export |
 | rust-libp2p backend | Swarm, TCP/Noise/Yamux, Identify, GossipSub, direct/endpoints protocols | Claude semantics |
 
 ## Endpoint ownership split

@@ -8,7 +8,7 @@ Network producers can outrun local consumers. Unbounded queues are denial-of-ser
 
 ## Decision
 
-Keep 48 KiB payload and 128 KiB IPC JSON-body ceilings; 128-byte ChannelId; add 64-byte EndpointId, default 16/max64 configured endpoints, default 16/max32 advertised endpoints, one endpoint lease per IPC client, short-lived endpoint-directory cache. Existing queue/client/direct/discovery bounds remain.
+Keep 48 KiB payload and 128 KiB IPC JSON-body ceilings; 128-byte ChannelId; add 64-byte EndpointId, default 16/max64 configured endpoints, default 16/max32 advertised endpoints, one endpoint lease per IPC data-plane connection, short-lived endpoint-directory cache. Direct dedup in-flight reservations are explicitly bounded at 128 global / 8 per source peer by default (ceilings 512 / 32), aligned with direct in-flight admission. Existing queue/client/discovery bounds remain.
 
 Direct inbound messages are rejected as overloaded before `AcceptedV2` when the resolved endpoint queue is full. Broadcast retains bounded best-effort local drop behavior.
 
@@ -30,7 +30,7 @@ Counters show endpoint lease conflicts, route/no-route/overload, directory bound
 
 ## Implementation implications
 
-Use bounded channels/semaphores and fixed directory caps. Golden fixtures prove max payload plus endpoint metadata fits 131072-byte IPC v2 body.
+Use bounded channels/semaphores, fixed directory caps, and bounded direct reservation maps. Reservation overflow returns overload instead of opening a parallel enqueue path. Golden fixtures prove max payload plus endpoint metadata fits 131072-byte IPC v2 body.
 
 ## Revisit conditions
 

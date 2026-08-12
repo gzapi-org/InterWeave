@@ -18,11 +18,11 @@ Single loose state directory; key in YAML; environment-only identities; project 
 
 ## Consequences
 
-Backup/deletion rules stay clear: endpoint config may be backed up; leases/directory cache are recreated. Daemon restart preserves PeerId but all local endpoint routes start offline until clients reconnect.
+Backup/deletion rules stay clear: endpoint config may be backed up; leases/directory cache are recreated. Daemon restart preserves PeerId but all local endpoint routes start offline until clients reconnect. The optional identity recovery record is stored **outside normal profile configuration/state** and is treated as private-key-equivalent offline backup material.
 
 ## Security implications
 
-Private key remains owner-only. Endpoint cache/leases cannot masquerade as durable authorization. Logs sanitize peer/endpoint identifiers as configured.
+Private key remains owner-only. Recovery phrases are never written to config/state/cache/logs and never cross daemon IPC. Endpoint cache/leases cannot masquerade as durable authorization. Logs sanitize peer/endpoint identifiers as configured.
 
 ## Operational implications
 
@@ -30,7 +30,7 @@ Profiles migrate intentionally. Runtime sockets/leases/cache are disposable. Con
 
 ## Implementation implications
 
-Atomic config writes, OS-specific directories, explicit profile initialization. Never auto-regenerate existing profile key; never restore old endpoint lease ownership from disk.
+Atomic config writes, OS-specific directories, explicit profile initialization. Never auto-regenerate existing profile key; never restore old endpoint lease ownership from disk. Identity backup/restore follows ADR-0033 and requires offline exclusive identity-file access plus atomic owner-only writes.
 
 ## Revisit conditions
 

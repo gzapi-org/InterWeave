@@ -55,19 +55,23 @@ Client first frame:
   "ipc_version": {"major": 2, "minor": 0},
   "client": {"kind": "human-client", "version": "..."},
   "endpoint": {"id": "human"},
-  "requested_capabilities": ["events", "commands"]
+  "requested_capabilities": ["events", "commands", "endpoints.query"],
+  "features": ["keepalive"]
 }
 ```
 
 `endpoint` may be omitted only for a client that does not need direct send/receive, such as diagnostics/admin tooling.
 
-Server validates endpoint claim before completing handshake:
+Server validates endpoint claim before completing handshake. Phase 1 fixtures use these exact local error codes:
 
-1. EndpointId grammar;
-2. configured endpoint exists, enabled, and registration policy allows it;
-3. optional `allowed_client_kinds` matches for configuration hygiene;
-4. no live lease already owns it;
-5. connection is otherwise authorized for requested capabilities.
+1. EndpointId grammar invalid -> `InvalidArgument`;
+2. configured endpoint does not exist -> `EndpointUnknown`;
+3. configured endpoint exists but is disabled -> `EndpointDisabled`;
+4. optional `allowed_client_kinds` rejects the declared client kind -> `EndpointClientKindDenied`;
+5. another live lease already owns the endpoint -> `EndpointInUse`;
+6. requested capability or connection authorization is denied -> `CapabilityDenied`.
+
+These are local IPC errors and intentionally more precise than the remote direct-protocol `no_route` privacy class. A remote peer never receives `EndpointUnknown`, `EndpointDisabled`, or `EndpointClientKindDenied`.
 
 Server reply includes selected compatible IPC version, transport contract version, profile PeerId, caller endpoint (if any), a fresh local `endpoint_lease_epoch`, and granted capabilities. `endpoint_lease_epoch` is an opaque **128-bit lease-generation value** unique to that grant across reconnects and daemon restarts (for example random, or daemon-instance nonce + counter). It is not a bearer credential; it exists only to invalidate stale local route/reply state.
 
@@ -87,7 +91,14 @@ Endpoint lease is exclusive and connection-bound. Client cannot change EndpointI
 
 `claude-channel` is never granted `admin.endpoints` or `admin.shutdown`. A human UI data-plane connection should likewise remain non-admin; its settings/control surface opens a separately authorized administrative connection.
 
-Unknown/unauthorized capability requests are not silently elevated.
+Unknown/unauthorized capability requests are not silently elevated. Default grant policy is:
+
+- `human-client`: `events`, `commands`, and `endpoints.query` when the profile endpoint-directory feature is enabled;
+- `claude-channel`: `events` and `commands`; **not** `endpoints.query` by default;
+- diagnostics clients: only explicitly configured read-only capabilities;
+- administrative/control clients: administrative capabilities only when local policy explicitly grants them.
+
+A future Claude `peer_endpoints` tool therefore requires an explicit capability-policy and tool-surface security review rather than inheriting access accidentally.
 
 ## Message classes
 
@@ -103,7 +114,7 @@ A request whose method requires an ungranted capability fails locally with a sta
 
 ## Multiple clients
 
-The daemon supports up to **16 local clients** by default. Each client has independent bounded command/event queues and subscription references. One slow client cannot backpressure the entire network event loop.
+The daemon supports up to **16 IPC connections** by default. The limit counts connections, not applications: if a human application opens one data-plane connection and one separately authorized administrative connection, it consumes **two** client slots. Each connection has independent bounded command/event queues and subscription references. One slow client cannot backpressure the entire network event loop.
 
 Each direct-capable client owns at most one EndpointId lease. Multiple local clients intentionally sharing a profile therefore use distinct endpoint IDs.
 
@@ -156,9 +167,18 @@ Each client event queue defaults to 256. When full:
 4. increment drop/rejection counters;
 5. never spill into an unbounded disk queue.
 
-## Disconnect/reconnect
+## Disconnect/reconnect and optional keepalive
 
 A client disconnect releases its EndpointId lease, ephemeral subscription references, and outstanding response waiters. Reconnect performs a fresh handshake and resubscription. There is no event replay. A late response to a disconnected client is discarded after internal cleanup.
+
+IPC v2 also supports an optional negotiated liveness feature for detecting half-open/wedged clients that still hold endpoint leases:
+
+```text
+server -> ping { nonce }
+client -> pong { nonce }
+```
+
+When enabled by profile policy and negotiated in `hello`, defaults are `interval=30s`, `response_timeout=10s`, `max_missed=3`. Only an exact matching pong satisfies the probe. After the configured miss threshold the daemon closes that IPC connection and releases its endpoint lease exactly as for an ordinary disconnect. Keepalive is local liveness detection only: it is not authentication, replay, a network heartbeat, or a lease-renewal credential. If keepalive is disabled or not negotiated, OS socket/pipe closure and explicit administrative revocation remain the liveness mechanisms.
 
 ## Cancellation
 
