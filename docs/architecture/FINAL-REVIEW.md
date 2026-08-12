@@ -1,6 +1,6 @@
 # Final architecture review
 
-Review posture: external CTO / implementation-readiness review. Original review 2026-08-11; amended through **mandatory Phase-9 Internet reachability design on 2026-08-12**.
+Review posture: external CTO / implementation-readiness review. Original review 2026-08-11; amended through **mandatory Phase-9 Internet reachability and adversarial security hardening on 2026-08-12**.
 
 ## Executive assessment
 
@@ -29,12 +29,16 @@ The major evolution since the original prompt is deliberate and transport-generi
 | Discovery grants trust? | **No** | unchanged deny-default trust boundary |
 | ConnectionManager policy bypass? | **No** | root dial admission including Kademlia/direct/directory/AutoNAT/relay/DCUtR origins |
 | GossipSub trust mapping explicit? | **Yes** | ADR-0029 Accept/Ignore/Reject |
+| GossipSub mesh message-ID cross-publisher suppression? | **Closed** | source+wire-sequence `GossipSubMessageIdV1`; application-envelope ID forbidden as the mesh key |
+| local admin authority selected by spoofable client.kind? | **No** | split data/admin sockets; data socket categorically cannot grant admin.* |
+| unauthenticated handshake flood bounded before PeerId? | **Yes on paper** | pending/rate/timeout pre-Noise limits + deployment firewall residual |
+| poisoned trusted-peer address can poison whole peer backoff? | **No by policy** | address-scoped mismatch quarantine + known-good preference |
 | IPC can carry max payload + endpoint metadata? | **By contract/test requirement** | 128 KiB IPC v2 golden fixtures |
 | endpoint handshake/capability errors deterministic? | **Yes** | exact local error map in LOCAL-IPC/Phase-1 fixtures |
 | direct retry race bounded/canonical? | **Yes on paper; spike required** | fixed DirectContentFingerprintV1 + 128/8 reservation limits + SPIKE-002 race test |
 | recovery changes PeerId? | **No** | ADR-0033 encodes exact 32-byte Ed25519 secret and verifies expected PeerId |
 | daemon/Claude/human lifecycle coupled? | **No** | endpoint leases are runtime; PeerId survives client restart |
-| human admin actions can be triggered by network payload automatically? | **No by architecture** | admin capability path separated from data plane |
+| human admin actions can be triggered by network payload automatically? | **No by architecture** | admin methods exist only on separate admin socket; explicit local action required |
 | hidden persistent message state? | **No** | app-local human history is outside transport and only stores observed content |
 | mandatory Internet reachability complete? | **Yes on paper; spike required** | ADR-0035 + AutoNAT-v2/Relay-v2/DCUtR state machine, path policy, limits and release tests |
 | relay/probe infrastructure accidentally gains application trust? | **No by architecture** | ADR-0036 protocol-scoped connection class; data-plane protocols explicitly denied |
@@ -62,7 +66,7 @@ The major evolution since the original prompt is deliberate and transport-generi
 19. Static PeerId trust still gates ordinary data-plane connections, direct peers, and source admission.
 20. Noise remains per-link security; trusted GossipSub forwarders can see plaintext.
 21. Per ADR-0034, the standard v1 build includes Kademlia and configured entries default `enabled: true`; explicit opt-out remains supported, and Kademlia stores no app/channel/endpoint records.
-22. IPC v2 remains owner-protected length-prefixed JSON with 128 KiB body and capability-scoped admin methods; version is negotiated, human data/admin sessions count separately, and endpoint leases require negotiated keepalive by default.
+22. IPC v2 remains owner-protected length-prefixed JSON with 128 KiB body, split data/admin sockets, and socket-domain-scoped admin methods; version is negotiated, human data/admin connections count separately, and endpoint leases require negotiated keepalive by default.
 23. Claude Channel is not granted `endpoints.query` by default; `peer_endpoints` is explicitly deferred pending a security/tool-surface revisit.
 24. DirectContentFingerprintV1 is fixed byte-for-byte and direct in-flight reservation state is capped at 128 global / 8 per source peer by default.
 25. Initial software identity is Ed25519 with optional offline 24-word exact-key recovery (ADR-0033); mnemonic material never crosses IPC. Verify-only drills are read-only, and full profile disaster recovery also needs a separate config.yaml backup.
@@ -70,13 +74,18 @@ The major evolution since the original prompt is deliberate and transport-generi
 27. Standard v1 requires AutoNAT v2 client, Circuit Relay v2 client/reservations, and DCUtR (ADR-0035); Phase 9 is a release requirement, not optional hardening.
 28. Relay/AutoNAT service peers may use the ADR-0036 connectivity-infrastructure class, which permits only control-plane protocols and never grants GossipSub/direct/endpoint/Kademlia application authority.
 29. Reachability uses multi-observer AutoNAT evidence, redundant relay reservations, direct-first path selection and bounded DCUtR upgrades with relay fallback.
+30. GossipSub duplicate identity is source+wire-sequence bound and versioned; two publishers may safely reuse the same application envelope ID without mesh-level suppression collision.
+31. IPC administration uses a separate admin socket; `client.kind` is never the authority selector and the data socket cannot grant admin.*.
+32. Internet listeners apply pre-Noise pending/rate/time bounds before PeerId exists, while trusted direct peers also face per-peer/global ingress token buckets.
+33. Dial failure state distinguishes address failures/identity mismatches from peer punitive backoff; a poisoned address cannot suppress a known-good trusted route by itself.
+34. Remote AcceptedV2/endpoint-directory metadata is grammar/bound/TTL validated before cache/tool/UI exposure.
 
 ## Accepted limitations
 
 - no network offline mailbox;
 - no exactly-once/global order;
 - EndpointId does not prove person/application identity;
-- same-user malicious local process is partly inside IPC residual boundary;
+- same-user malicious local process that can open the admin socket remains partly inside IPC residual boundary even though data/admin domains are split;
 - endpoint-directory advertisement leaks selected presence to trusted peers;
 - endpoint directory can be stale;
 - static trust does not scale to public networks;
@@ -96,7 +105,7 @@ SPIKE-001 remains blocking before production bridge packaging.
 
 ### Direct v2 asynchronous acceptance
 
-SPIKE-002 must verify request-response protocol-family negotiation/failure behavior, the practical pattern for withholding AcceptedV2 until bounded runtime endpoint queue admission, and concurrent same-key retransmission against the real request-response scheduler so the in-flight reservation guarantee is empirically validated. It may adjust task/channel mechanics, not endpoint routing/dedup semantics.
+SPIKE-002 must verify request-response protocol-family negotiation/failure behavior, the practical pattern for withholding AcceptedV2 until bounded runtime endpoint queue admission, concurrent same-key retransmission against the real request-response scheduler, and the pinned GossipSub authenticity-before-valid-duplicate-cache ordering. It must also prove two authenticated publishers reusing one application-envelope message ID remain distinct under `GossipSubMessageIdV1`. It may adjust task/channel mechanics, not endpoint routing/dedup or mesh-ID semantics.
 
 ### Kademlia
 
@@ -126,3 +135,7 @@ With endpoint-aware contracts and ADR-0035/0036 in place, a team can scaffold Ph
 ## Identity recovery addendum
 
 Software v1 identities are Ed25519 and may be backed up through the optional offline `cp2p-ed25519-bip39-entropy-v1` recovery format. The 24 words encode the exact 256-bit Ed25519 secret bytes using BIP-39 entropy/checksum/English-wordlist mapping only; Bitcoin BIP-39 PBKDF2 seed derivation is not used. Recovery is never a Channel/IPC operation.
+
+### Optional encrypted software-key-at-rest path
+
+ADR-0038 makes a passphrase-encrypted exportable software-key envelope an explicit v2.x option rather than an unnamed future possibility. SPIKE-007 must select an audited maintained format/library and unlock UX. Standard v1 remains owner-permission-protected plaintext portable key storage; this is an accepted at-rest limitation, not a claim of disk-compromise resistance.

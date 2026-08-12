@@ -22,7 +22,7 @@ Backup/deletion rules stay clear: endpoint config may be backed up; leases/direc
 
 ## Security implications
 
-Private key remains owner-only. Recovery phrases are never written to config/state/cache/logs and never cross daemon IPC. Endpoint cache/leases cannot masquerade as durable authorization. Logs sanitize peer/endpoint identifiers as configured.
+Private key remains owner-only. Standard v1 key-at-rest mode is filesystem-only; ADR-0038 records an explicit optional v2.x encrypted-key path rather than leaving it as an unnamed revisit. Recovery phrases are never written to config/state/cache/logs and never cross daemon IPC. Endpoint cache/leases cannot masquerade as durable authorization. Logs sanitize peer/endpoint identifiers as configured.
 
 ## Operational implications
 

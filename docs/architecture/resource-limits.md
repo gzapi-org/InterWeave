@@ -18,7 +18,8 @@ Default values are conservative architecture targets, not performance promises.
 | discovery candidates | 4096 | 16384 |
 | addresses/peer | 16 | 32 |
 | advisory protocol observations/peer | 16 | 16 |
-| IPC connections (all client kinds combined) | 16 | 64 |
+| IPC connections (data + admin combined) | 16 | 64 |
+| IPC admin-socket connections | 4 | 16 |
 | IPC JSON body | 128 KiB | 128 KiB IPC v2 |
 | IPC keepalive interval | 30 s | 5 min |
 | IPC keepalive response timeout | 10 s | < interval, max 1 min |
@@ -29,6 +30,8 @@ Default values are conservative architecture targets, not performance promises.
 | outstanding commands/client | 64 | 256 |
 | direct inflight total | 128 | 512 |
 | direct inflight/peer | 8 | 32 |
+| inbound direct requests/trusted peer/minute | 120, burst 32 | 6000/min, burst 512 |
+| inbound direct requests/global/minute | 1200, burst 256 | 60000/min, burst 2048 |
 | direct dedup in-flight reservations/global | 128 | 512 |
 | direct dedup in-flight reservations/source peer | 8 | 32 |
 | dedup IDs | 10,000 / 5 min | configurable bounded |
@@ -43,7 +46,7 @@ Direct inbound acceptance is endpoint-queue-aware. If the resolved endpoint queu
 
 This removes the v1 architecture's shared-profile direct fan-out memory multiplier. Each direct message enters at most one local endpoint queue. Broadcast can still fan out to multiple joined local clients, bounded by `max_clients` and per-client queues.
 
-Endpoint-directory responses are bounded to 32 route IDs, 12 queries/minute/peer by default, 16 in-flight/profile by default, and short-lived cache state; no unbounded presence catalog exists. Direct dedup reservation state is separately capped at 128 global / 8 per source peer by default. A human application using separate data-plane and admin IPC sessions consumes two IPC connection slots.
+Endpoint-directory responses are bounded to 32 route IDs, 12 queries/minute/peer by default, 16 in-flight/profile by default, and short-lived cache state; no unbounded presence catalog exists. Direct dedup reservation state is separately capped at 128 global / 8 per source peer by default. Trusted-peer inbound direct requests additionally pass fixed token buckets before endpoint routing. A human application using separate data-plane and admin IPC sockets consumes two IPC connection slots.
 
 ## Drop policy
 
@@ -55,6 +58,12 @@ Broadcast local delivery may drop according to per-client bounded policy under o
 | Resource | Default | Hard/config ceiling | Overflow behavior |
 |---|---:|---:|---|
 | total established/pending network connections | 384 | 4096 | root dial admission refuses/defer new work |
+| pre-Noise inbound handshakes pending | 64 | 256 | close/refuse before authentication |
+| pre-Noise pending per source-address bucket | 8 | 32 | close/refuse before authentication |
+| pre-Noise starts/source bucket/minute | 30 | 600 | rate-limit before Noise |
+| pre-Noise starts global/minute | 600 | 6000 | rate-limit before Noise |
+| pre-Noise handshake timeout | 10 s | 30 s | close unauthenticated attempt |
+| address identity-mismatch quarantine | 30 min | 24 h | suppress poisoned address, not whole trusted peer |
 | connections per PeerId | 3 | 8 | refuse redundant new connection unless policy replaces one |
 | AutoNAT v2 client probes in flight | 2 | 8 | defer next probe cycle |
 | AutoNAT addresses tested per cycle | 4 | 16 | deterministic bounded selection |

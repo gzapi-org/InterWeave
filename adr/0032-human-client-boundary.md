@@ -15,7 +15,7 @@ A human-facing desktop, TUI, CLI, or background messaging client is an **applica
 - it does not own a libp2p Swarm, private PeerId key, discovery provider, GossipSub mesh, direct protocol implementation, or Kademlia behavior;
 - contacts, display names, avatars, verification state, conversation models, unread state, reactions, attachment UX, and persisted local history are application-level data above transport;
 - application-local history may persist messages actually sent/received by the client, but does not create transport offline delivery or a daemon mailbox;
-- trust mutation, endpoint configuration, identity/key operations, discovery/bootstrap administration, and daemon shutdown require a separately capability-authorized administrative IPC connection or `transportctl`-equivalent path;
+- trust mutation, endpoint configuration, identity/key operations, discovery/bootstrap administration, and daemon shutdown require the **separate admin IPC socket** or an offline `transportctl`-equivalent identity path; the data-plane socket can never grant `admin.*` based on `client.kind`;
 - network message content can never automatically invoke those administrative capabilities;
 - the human UI must display EndpointId as a remote peer-controlled route label unless a higher-level application identity system separately verifies a stronger binding.
 
@@ -33,7 +33,7 @@ The transport does not provide human-specific durable history, social identity, 
 
 ## Security implications
 
-The private transport key remains daemon-owned. Data-plane UI compromise does not automatically grant transport administration when capability separation is correctly enforced. Same-OS-user malicious code remains a residual IPC threat as documented elsewhere.
+The private transport key remains daemon-owned. Data-plane UI compromise does not automatically grant transport administration because the data socket cannot grant `admin.*`; administrative calls require a second connection to the admin socket. Default same-OS-user access to that admin socket remains a residual IPC threat as documented elsewhere and is not solved by `client.kind`.
 
 A route label such as `human` is not an authentication factor. Security decisions continue to use PeerId trust and explicit local administrative authority, not endpoint naming.
 

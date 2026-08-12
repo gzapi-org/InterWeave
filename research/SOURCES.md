@@ -40,6 +40,9 @@ MCP changed substantially in 2026. The Claude Channel reference remains authorit
 - request-response: https://docs.rs/libp2p/latest/libp2p/request_response/
 - request-response ProtocolSupport: https://docs.rs/libp2p/latest/libp2p/request_response/enum.ProtocolSupport.html
 - GossipSub: https://docs.rs/libp2p/latest/libp2p/gossipsub/
+- GossipSub ConfigBuilder/message-ID function: https://docs.rs/libp2p/latest/libp2p/gossipsub/struct.ConfigBuilder.html
+- GossipSub ValidationMode: https://docs.rs/libp2p/latest/libp2p/gossipsub/enum.ValidationMode.html
+- rust-libp2p GossipSub receive-path source snapshot (validation / duplicate-cache ordering): https://docs.rs/crate/libp2p-gossipsub/latest/source/src/behaviour.rs
 - mDNS: https://docs.rs/libp2p/latest/libp2p/mdns/
 - Kademlia: https://docs.rs/libp2p/latest/libp2p/kad/
 - Kademlia DHT specification: https://github.com/libp2p/specs/blob/master/kad-dht/README.md

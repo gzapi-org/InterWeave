@@ -97,7 +97,9 @@ EndpointDirectoryV1 {
 }
 ```
 
-The list is sorted lexicographically for deterministic fixtures. Only currently leased endpoints configured with `advertise: true` are included. No endpoint metadata beyond `EndpointId` is carried.
+The sender sorts the list lexicographically for deterministic fixtures. Only currently leased endpoints configured with `advertise: true` are included. No endpoint metadata beyond `EndpointId` is carried.
+
+The querying peer treats the response as hostile metadata until validated. More than 32 entries, an invalid/noncanonical EndpointId, or a duplicate entry is a protocol violation and is not cached/surfaced. A valid but unsorted unique list is locally sorted rather than rejected, with a bounded noncanonical diagnostic. `ttl_ms` is clamped to `min(remote_ttl, local_cache_ttl, 300000)` and begins at local receipt; `generated_at_ms` never extends freshness.
 
 The query itself is admitted only for a profile-trusted peer. Before including a particular endpoint, any endpoint inbound subset policy is applied to the querying peer; the directory never advertises an endpoint to a peer that would necessarily receive `no_route` from that endpoint's policy. Queries use a dedicated bounded budget: default **12 queries/minute/remote PeerId**, hard ceiling 60/minute, and default **16 concurrent directory exchanges/profile**, hard ceiling 64. Rate-limit/overload responses reveal no endpoint list.
 
@@ -129,4 +131,4 @@ Endpoint-directory lookup and direct sends use the existing trusted ConnectionMa
 
 Noise authenticates the remote PeerId, not the claimed `source_endpoint`. `source_endpoint` is a route label under that authenticated peer's control. Applications must not treat it as proof of a person or role.
 
-Endpoint enumeration is an information disclosure surface, which is why advertisement is opt-in, results are bounded, and queries are trust-gated.
+Endpoint enumeration is an information disclosure surface, which is why advertisement is opt-in, results are bounded, and queries are trust-gated. Direct `no_route` response causes share one code/shape/encoder; exact timing equivalence is not claimed, and trusted probing is instead bounded by direct ingress rate limits.

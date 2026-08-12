@@ -31,9 +31,13 @@ Endpoint availability is reported independently so an offline `human` route does
 - broadcast/direct messages in/out;
 - direct protocol v2 negotiation failures;
 - RemoteEndpointUnavailable and endpoint-overload classes;
-- GossipSub validation outcomes;
+- GossipSub validation outcomes and source-bound message-ID fixture/version;
 - duplicate drops;
-- IPC frame/capability/lease/keepalive diagnostics;
+- IPC data/admin socket connections, cross-domain capability denials, frame/lease/keepalive diagnostics;
+- pre-Noise pending/rate/timeout rejections by bounded source class (never raw high-cardinality labels);
+- address identity-mismatch/quarantine and address-vs-peer backoff outcomes;
+- direct trusted-peer/global ingress rate-limit outcomes;
+- remote direct/directory protocol-violation, TTL-clamp, and noncanonical-order diagnostics;
 - direct dedup reservation occupancy/overflow and content-ID conflict counts;
 - discovery/Kademlia state;
 - dial/backoff failures;
@@ -67,6 +71,13 @@ validation_ignore_unauthorized_total
 validation_reject_invalid_total
 ipc_frame_too_large_total
 ipc_keepalive_timeouts_total
+ipc_admin_connections
+ipc_cross_domain_capability_denied_total
+preauth_handshake_rejected_total{reason_class}
+address_identity_mismatch_total
+direct_ingress_rate_limited_total{scope}
+endpoint_directory_protocol_violation_total{reason_class}
+direct_response_protocol_violation_total{reason_class}
 direct_dedup_reservation_overflow_total
 direct_duplicate_content_conflict_total
 trust_policy_revision

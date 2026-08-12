@@ -254,6 +254,7 @@ Stable categories, with backend detail hidden in diagnostics:
 - `Overloaded`
 - `BackendUnavailable`
 - `ProtocolUnsupported`
+- `ProtocolViolation`
 - `VersionIncompatible`
 - `ShuttingDown`
 - `Internal`

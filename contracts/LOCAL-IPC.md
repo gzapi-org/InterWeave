@@ -2,15 +2,18 @@
 
 Applies because ADR-0015 selects a separate daemon. Model B endpoint addressing makes this **IPC major version 2**.
 
-## Transport choice
+## Transport choice and authority domains
 
-- Unix: Unix domain socket inside the profile runtime directory.
-- Windows: named pipe with an owner-only ACL.
-- Loopback TCP is not a default fallback; enabling it later requires a separate authentication design.
+IPC v2 uses **two distinct local endpoints**:
+
+- data-plane socket: Unix domain socket `<runtime>/<profile>.sock`; Windows named-pipe equivalent;
+- administrative socket: Unix domain socket `<runtime>/<profile>-admin.sock`; Windows named-pipe equivalent.
+
+Loopback TCP is not a default fallback; enabling it later requires a separate authentication design. The socket selected by the client is an authority-domain input: the data-plane socket can never grant `admin.*`, regardless of `client.kind` or requested capability names. The admin socket never grants an EndpointId lease and is not used for ordinary direct/broadcast message delivery.
 
 ## Security boundary
 
-The daemon creates the socket directory owner-only (`0700` on Unix) and the socket owner-only (`0600` equivalent where applicable). Peer credentials should be inspected where the OS exposes them. This prevents ordinary cross-user access; it does **not** protect against a malicious process already running as the same OS user.
+The daemon creates the runtime directory owner-only (`0700` on Unix) and both sockets owner-only (`0600` equivalent where applicable) by default. Peer credentials should be inspected where the OS exposes them. Deployments may apply a stricter owner/group/service-account ACL to the admin socket than to the data socket. The split is an enforceable protocol/capability boundary against client-kind spoofing and accidental privilege crossover, but default same-UID filesystem permissions still do **not** protect against a malicious process already running as the same OS user. Strong same-user executable/user-presence authentication remains SPIKE-005 territory.
 
 Private identity keys never cross IPC.
 
@@ -60,7 +63,7 @@ Client first frame:
 }
 ```
 
-`endpoint` may be omitted only for a client that does not need direct send/receive, such as diagnostics/admin tooling.
+On the data-plane socket, `endpoint` may be omitted only for a read-only diagnostics client that does not need direct send/receive. Administrative clients connect to the separate admin socket and MUST omit endpoint claims; the admin socket never owns an EndpointId lease.
 
 Server validates endpoint claim before completing handshake. Phase 1 fixtures use these exact local error codes:
 
@@ -79,7 +82,7 @@ Endpoint lease is exclusive and connection-bound. Client cannot change EndpointI
 
 ### Client-kind warning
 
-`client.kind` is not cryptographic authentication. It can prevent accidental configuration mistakes but cannot defend against malicious same-user code. Endpoint security still relies on profile configuration, owner-only IPC, exclusive leases, and any future stronger same-user authentication.
+`client.kind` is not cryptographic authentication. It can prevent accidental endpoint misbinding but cannot select the administrative authority domain. A client claiming `kind: transportctl` on the data-plane socket is still categorically ineligible for `admin.*`; a client on the admin socket is ineligible for EndpointId leases/data-plane messaging. Same-user code that can open the admin socket remains inside the documented residual boundary unless the deployment applies stricter OS ACLs or future SPIKE-005 authentication.
 
 ### Capabilities
 
@@ -89,14 +92,14 @@ Endpoint lease is exclusive and connection-bound. Client cannot change EndpointI
 - `admin.endpoints`: inspect/revoke local endpoint leases or mutate endpoint config through an administrative adapter;
 - `admin.shutdown`: invoke transport `shutdown(grace)`.
 
-`claude-channel` is never granted `admin.endpoints` or `admin.shutdown`. A human UI data-plane connection should likewise remain non-admin; its settings/control surface opens a separately authorized administrative connection.
+`claude-channel` is never granted `admin.endpoints` or `admin.shutdown`. A human UI data-plane connection is likewise non-admin; its settings/control surface opens the separate administrative socket. The data-plane socket rejects every `admin.*` request with `CapabilityDenied` before dispatch even if `client.kind` claims an administrative name.
 
 Unknown/unauthorized capability requests are not silently elevated. Default grant policy is:
 
 - `human-client`: `events`, `commands`, and `endpoints.query` when the profile endpoint-directory feature is enabled;
 - `claude-channel`: `events` and `commands`; **not** `endpoints.query` by default;
 - diagnostics clients: only explicitly configured read-only capabilities;
-- administrative/control clients: administrative capabilities only when local policy explicitly grants them.
+- administrative/control clients: `admin.*` capabilities only on the admin socket and only when local policy/OS access permits the administrative connection; the admin socket does not grant `events`/`commands` for application messaging or EndpointId leases.
 
 A future Claude `peer_endpoints` tool therefore requires an explicit capability-policy and tool-surface security review rather than inheriting access accidentally.
 
@@ -114,7 +117,7 @@ A request whose method requires an ungranted capability fails locally with a sta
 
 ## Multiple clients
 
-The daemon supports up to **16 IPC connections** by default. The limit counts connections, not applications: if a human application opens one data-plane connection and one separately authorized administrative connection, it consumes **two** client slots. Each connection has independent bounded command/event queues and subscription references. One slow client cannot backpressure the entire network event loop.
+The daemon supports up to **16 IPC connections total** by default across both sockets, with at most **4 admin-socket connections** by default. The limit counts connections, not applications: if a human application opens one data-plane connection and one administrative connection, it consumes **two** total slots. Each connection has independent bounded request/event state. One slow client cannot backpressure the entire network event loop.
 
 Each direct-capable client owns at most one EndpointId lease. Multiple local clients intentionally sharing a profile therefore use distinct endpoint IDs.
 
@@ -176,9 +179,11 @@ IPC v2 also supports an optional negotiated liveness feature for detecting half-
 ```text
 server -> ping { nonce }
 client -> pong { nonce }
+
+nonce = 128-bit CSPRNG value, encoded canonically (for example base64url without padding)
 ```
 
-When enabled by profile policy and negotiated in `hello`, defaults are `interval=30s`, `response_timeout=10s`, `max_missed=3`. Only an exact matching pong satisfies the probe. After the configured miss threshold the daemon closes that IPC connection and releases its endpoint lease exactly as for an ordinary disconnect. Keepalive is local liveness detection only: it is not authentication, replay, a network heartbeat, or a lease-renewal credential.
+When enabled by profile policy and negotiated in `hello`, defaults are `interval=30s`, `response_timeout=10s`, `max_missed=3`. The server has at most one outstanding keepalive nonce per connection; only an exact pong for the current 128-bit nonce satisfies the probe. Stale/duplicate/wrong nonces do not reset liveness state. After the configured miss threshold the daemon closes that IPC connection and releases its endpoint lease exactly as for an ordinary disconnect. Keepalive is local liveness detection only: it is not authentication, replay protection for application messages, a network heartbeat, or a lease-renewal credential.
 
 The profile policy `ipc.keepalive.require_for_endpoint_lease` defaults to `true`. When true, any client that claims a data-plane EndpointId lease must negotiate keepalive during `hello`; otherwise endpoint claim fails with `CapabilityDenied`. Connections that do not claim an endpoint (for example a separate admin or diagnostics session) do not need keepalive solely because of this rule. Operators may set the policy false for compatibility with third-party clients, accepting that a half-open client may retain its lease until OS-level failure detection or explicit `admin.endpoints` revocation.
 

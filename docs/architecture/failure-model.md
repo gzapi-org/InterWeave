@@ -19,13 +19,17 @@
 | PeerId intentional rotation | peers see new identity | IdentityChanged | out-of-band trust update |
 | identity key missing/corrupt | fail closed; never silent rotate | daemon unavailable | restore exact Ed25519 identity from approved recovery record or explicit new-identity action |
 | recovery phrase decodes but derived PeerId mismatches expected backup metadata | refuse restore | identity-recovery mismatch | verify phrase/record; never overwrite established identity |
+| pre-Noise inbound handshake budget/rate exhausted | close/refuse unauthenticated attempts before PeerId admission | preauth pending/rate/timeout counters | source/global window drains; deployment firewall may block abusive sources |
 | connection storm | bounded dial concurrency/backoff | overload counters | drain under limits |
+| trusted PeerId candidate address authenticates as another PeerId | close mismatch; quarantine/failure-score that address only | address_identity_mismatch + provenance | try eligible known-good address; peer-wide punitive backoff not advanced solely by mismatch |
 | unauthorized inbound connection | authenticate then close before data-plane participation | policy counter | explicit trust update if intended |
 | unauthorized outbound direct send | fail before dial | UnauthorizedPeer | out-of-band trust change |
 | local client claims unknown endpoint | IPC handshake fails | EndpointUnknown | fix endpoint ID/config |
 | local client claims disabled endpoint | IPC handshake fails | EndpointDisabled | enable endpoint or choose another |
 | local client kind violates endpoint hygiene policy | IPC handshake fails | EndpointClientKindDenied | correct config/client kind |
 | local client requests ungranted capability | request/handshake fails locally | CapabilityDenied | use authorized client/policy |
+| data-socket client claims `transportctl` and requests admin.* | categorical CapabilityDenied; never dispatched | admin-domain denial | connect to authorized admin socket |
+| admin socket unavailable/ACL denied | data-plane transport continues; administrative operations unavailable | admin IPC degraded/unavailable | repair local ACL/socket/service; do not widen data socket |
 | two clients claim same EndpointId | second handshake fails | EndpointInUse | close owner or configure another endpoint |
 | endpoint disabled while leased | lease revoked; no reroute | EndpointLeaseChanged(revoked) | re-enable/reconnect explicitly |
 | human/Claude endpoint process disconnects | route becomes immediately unavailable; no queue | endpoint offline/release | client reconnect/reclaim |
@@ -33,7 +37,11 @@
 | direct omitted endpoint but receiver has no usable default | coarse no_route | RemoteEndpointUnavailable/default-route diagnostic | configure/start default endpoint or address explicit endpoint |
 | retry of previously accepted default-routed direct after default/endpoint state changes | return cached AcceptedV2 for original resolved route without second local delivery while dedup entry lives | duplicate-accepted diagnostic | caller treats as prior transport acceptance; after TTL no idempotency guarantee |
 | same direct dedup key reused with different payload/media | reject as duplicate-ID/content conflict; never deliver second body | local duplicate-conflict counter; coarse malformed wire reason | sender generates a new MessageId |
+| direct ingress token bucket exhausted for trusted peer/global | coarse overloaded before endpoint route work | direct_ingress_rate_limited | retry only after retry-after/window; investigate abusive peer |
 | direct target endpoint queue full | reject before Accepted | endpoint overload counter | consumer/load recovery |
+| remote AcceptedV2 contains invalid/mismatched resolved endpoint | fail operation locally as ProtocolViolation; do not cache/surface metadata | peer protocol-violation diagnostic | peer upgrade/fix; caller may retry only after compatibility issue resolved |
+| endpoint directory response invalid, duplicate, or >32 entries | reject response as ProtocolViolation; cache unchanged | directory protocol-violation diagnostic | query fixed/upgraded peer |
+| endpoint directory response valid but unsorted or TTL exceeds local ceiling | sort locally; clamp TTL from receipt time | noncanonical-order/ttl-clamped diagnostic | no operator action normally |
 | stale direct reply token after lease epoch change | fail locally; no fallback | stale-route diagnostic | use a new inbound route/explicit send |
 | endpoint directory disabled/unsupported | explicit endpoint sends still work | ProtocolUnsupported/disabled status | manual/out-of-band route or enable directory |
 | endpoint directory returns stale route | send may receive no_route | stale-directory/send failure | refresh/retry after current state known |

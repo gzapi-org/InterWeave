@@ -17,7 +17,7 @@ broadcast: (mode=broadcast, source_peer, channel, message_id)
 direct:    (mode=direct, source_peer, source_endpoint, destination_selector[Explicit(id)|Default], message_id)
 ```
 
-Direct caller retries reuse the same message ID. A positive direct entry stores the first resolved destination endpoint and **DirectContentFingerprintV1**, exactly the SHA-256 canonicalization specified in `contracts/ENDPOINTS.md` (domain-separated binary framing; absent media distinct from any present value; empty media invalid). Matching retries return the same acceptance/route without re-enqueueing even if the default later changes. Same key with different content is a duplicate-ID conflict and is rejected. Rejected requests need not be positively cached. Persistence is prohibited.
+Direct caller retries reuse the same message ID. A positive direct entry stores the first resolved destination endpoint and **DirectContentFingerprintV1**, exactly the SHA-256 canonicalization specified in `contracts/ENDPOINTS.md` (domain-separated binary framing; absent media distinct from any present value; empty media invalid). Matching retries that pass current trust/structural/direct-ingress rate admission return the same acceptance/route without re-enqueueing even if the default later changes. A rate-limited retry may receive `overloaded` without deleting the prior positive entry. Same key with different content is a duplicate-ID conflict and is rejected. Rejected requests need not be positively cached. Persistence is prohibited.
 
 To close the concurrent-duplicate race, direct admission also maintains a bounded **in-flight reservation map** keyed identically to the positive cache. The first request becomes owner; matching concurrent duplicates wait on/share that owner's eventual result and never run a second enqueue path. A concurrent request with the same key but different content fingerprint fails immediately as a duplicate-ID/content conflict. Default reservation limits equal direct request admission limits: 128 global / 8 per source PeerId, ceilings 512 / 32. Reservation exhaustion returns `Overloaded` locally / `overloaded` on the coarse direct wire. When the owner is rejected, all matching waiters observe the same rejection and the reservation is removed without creating a positive cache entry, so a later retry can succeed after route recovery.
 
@@ -39,7 +39,7 @@ Expose duplicate-drop counters; do not log payload bodies. Endpoint dimensions s
 
 ## Implementation implications
 
-Direct parsing constructs the selector-aware key and content fingerprint before current default resolution. On positive hit with matching fingerprint, return the stored accepted resolved endpoint without re-enqueue. On fingerprint mismatch, reject. On miss, atomically acquire the bounded in-flight reservation; only its owner may resolve/admit/enqueue. Matching waiters receive the owner result. Successful owner completion atomically installs the positive entry before releasing waiters.
+After current trust/structural/direct-ingress rate admission, direct parsing constructs the selector-aware key and content fingerprint before current default resolution. On positive hit with matching fingerprint, return the stored accepted resolved endpoint without re-enqueue. On fingerprint mismatch, reject. On miss, atomically acquire the bounded in-flight reservation; only its owner may resolve/admit/enqueue. Matching waiters receive the owner result. Successful owner completion atomically installs the positive entry before releasing waiters.
 
 ## Revisit conditions
 

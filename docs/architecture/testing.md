@@ -19,11 +19,12 @@
 - outbound UnauthorizedPeer before dial;
 - connection admission/revocation policy;
 - GossipSub Accept|Ignore|Reject mapping;
+- exact `GossipSubMessageIdV1` source+wire-sequence golden fixture, cross-publisher collision resistance, and authenticity-before-valid-cache ordering;
 - broadcast dedup key `(mode, source_peer, channel, message_id)`;
 - direct dedup key `(mode, source_peer, source_endpoint, destination_selector, message_id)` plus stored first resolved endpoint/DirectContentFingerprintV1;
 - Direct v2 `media_type_len=0` decodes as **absent**, never empty string, and maps to `media_present=0` in DirectContentFingerprintV1;
 - DirectContentFingerprintV1 binary canonicalization and golden SHA-256 fixture (`text/plain`, `hello` -> `3dad2f134909e51812e261b56c84b5ab040de681a9e900c9180b2e88a4b47efe`);
-- direct in-flight reservation global/per-source-peer bounds and overload rejection;
+- direct in-flight reservation global/per-source-peer bounds and overload rejection; rate-limited duplicate retries do not re-enqueue or erase an existing positive dedup record;
 - backoff/cancellation state machines;
 - direct reply-token exact endpoint route + lease-epoch invalidation;
 - broadcast reply-after-leave;
@@ -54,13 +55,15 @@ Every provider runs `contracts/DISCOVERY-CONFORMANCE.md` tests. Endpoint routing
 16. endpoint directory shows only active advertise=true routes allowed for querying peer;
 17. endpoint directory disabled/unsupported does not break explicit endpoint send;
 18. stale directory cache entry followed by endpoint shutdown yields normal no_route;
-19. endpoint directory query from untrusted peer yields no directory disclosure;
-20. three trusted peers: GossipSub broadcast reaches subscribed peers;
-21. human+Claude same profile both joined -> both receive broadcast because both joined;
-22. only human joined -> Claude receives no broadcast;
-23. mDNS/static/cache/discovery trust-gated paths retain prior behavior;
-24. trust revocation closes data plane and removes directory/query access;
-25. daemon restart preserves PeerId but starts with all endpoint leases offline.
+19. two distinct signed publishers reuse the same 16-byte broadcast envelope ID and produce distinct mesh-level GossipSub message IDs/deliveries;
+20. a trusted publisher cannot suppress another publisher merely by prepublishing the other's envelope ID under its own PeerId;
+21. endpoint directory query from untrusted peer yields no directory disclosure;
+22. three trusted peers: GossipSub broadcast reaches subscribed peers;
+23. human+Claude same profile both joined -> both receive broadcast because both joined;
+24. only human joined -> Claude receives no broadcast;
+25. mDNS/static/cache/discovery trust-gated paths retain prior behavior;
+26. trust revocation closes data plane and removes directory/query access;
+27. daemon restart preserves PeerId but starts with all endpoint leases offline.
 
 ## IPC/local integration
 
@@ -74,14 +77,16 @@ Every provider runs `contracts/DISCOVERY-CONFORMANCE.md` tests. Endpoint routing
 - one connection cannot switch EndpointId without reconnect;
 - direct-capable client without endpoint -> EndpointNotRegistered;
 - client kind mismatch is rejected as configuration policy but is not treated as cryptographic auth in security tests;
-- admin endpoint revoke requires `admin.endpoints`;
-- Claude/human data-plane connections never receive `admin.endpoints`/`admin.shutdown`;
+- admin endpoint revoke requires `admin.endpoints` on the admin socket;
+- data socket rejects `admin.endpoints`/`admin.shutdown` for every client kind, including `transportctl` spoofing;
+- admin socket rejects EndpointId claims and ordinary application messaging capabilities;
+- Claude/human data-plane connections use only the data socket;
 - config disable revokes live endpoint without auto-rebinding;
 - reconnect and daemon restart create a fresh non-repeating 128-bit lease epoch and stale reply routes fail;
 - max legal payload fits under 131072-byte IPC v2 body with maximum endpoint metadata;
 - IPC body above ceiling is rejected;
 - human-client default grant includes endpoints.query only when directory is enabled; claude-channel default grant excludes endpoints.query;
-- one human data-plane connection plus one human admin connection consumes two IPC client slots;
+- one human data-plane socket connection plus one human admin-socket connection consumes two total IPC slots and the admin connection consumes the admin sublimit;
 - negotiated keepalive releases a wedged endpoint lease after configured missed probes; keepalive-disabled clients remain governed by OS connection liveness/admin revoke.
 
 ## Claude integration
@@ -209,3 +214,20 @@ These tests are standard-v1 release tests, not optional hardening tests.
 17. GossipSub delivery remains application-trust-gated over direct and relayed connections.
 18. `ConnectivitySummary` and `ConnectivityChanged` expose normalized state without leaking application payloads or granting control authority.
 19. runtime class changes reconcile GossipSub/Kademlia/application state before privilege change; close/reopen fallback is safe if in-place transition cannot be atomic.
+
+## Security review additions (2026-08-12)
+
+Phase 1/2 contract and wire fixtures additionally assert:
+
+- `GossipSubMessageIdV1` canonical source PeerId bytes + `u64be` wire-sequence mapping and the repository golden hash;
+- `AcceptedV2` response message ID and `resolved_endpoint` are validated before cache/tool/UI use; explicit routes require exact endpoint equality;
+- endpoint-directory responses reject >32 entries, invalid grammar and duplicates; valid unsorted responses are sorted locally; remote TTL is clamped and starts from local receipt;
+- keepalive nonces are 128-bit CSPRNG values, only one is outstanding, and stale/wrong pongs do not satisfy liveness;
+- data socket can never grant `admin.*` even when `client.kind=transportctl`; admin socket cannot claim an EndpointId or send/receive application messages.
+
+Phase 4/7 security tests additionally assert:
+
+- 65th default pre-Noise pending inbound handshake is refused and 10-second timeout frees a slot; per-source/global rate windows are enforced before PeerId state exists;
+- a poisoned never-successful address for trusted PeerId A that authenticates as B is quarantined as an address failure and does not suppress a concurrently known-good A address or advance A's peer punitive tier solely from the mismatch;
+- trusted-peer direct ingress token buckets enforce 120/minute burst-32 per PeerId and 1200/minute burst-256 global defaults with coarse `overloaded` response;
+- all `no_route` causes have identical wire code/shape; exact timing equivalence is not asserted and remains a documented residual side channel.

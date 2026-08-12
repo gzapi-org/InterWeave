@@ -23,7 +23,7 @@ For v1 ordinary data-plane operation, connection policy is trust-gated. Mandator
 
 ### Swarm-wide dial admission
 
-ConnectionManager policy applies to **every outbound Swarm dial**, not only calls initiated by the ordinary candidate dial scheduler. `transport-libp2p` therefore includes an internal, synchronous **DialAdmissionGate** (or equivalent root-behaviour hook) fed from ConnectionManager state. Before a Swarm dial is allowed, the gate enforces at least:
+ConnectionManager policy applies to **every outbound Swarm dial**, not only calls initiated by the ordinary candidate dial scheduler. `transport-libp2p` therefore includes an internal, synchronous **DialAdmissionGate** (or equivalent root-behaviour hook) fed from ConnectionManager state. Dial failure accounting is split into **peer-scoped policy/backoff state** and **address-scoped reachability/authentication state** so a poisoned address cannot unnecessarily suppress a trusted peer's known-good route. Before a Swarm dial is allowed, the gate enforces at least:
 
 1. destination connection class (`DataPlaneTrusted`, `ConnectivityInfrastructureOnly`, or unauthorized) and the requested dial origin/purpose;
 2. current `PeerTrustPolicy` / connectivity-infrastructure authorization when the PeerId is known;
@@ -33,6 +33,12 @@ ConnectionManager policy applies to **every outbound Swarm dial**, not only call
 6. address/path policy checks available at that boundary.
 
 A protocol behaviour such as Kademlia may *request* a dial as part of an iterative query, but it does not own the decision to permit that connection. A denied behaviour-originated dial is observable as policy/backoff/limit denial and must not silently reset ConnectionManager retry state.
+
+### Address-scoped failure and poisoned-address resistance
+
+ConnectionManager tracks failure/backoff for each normalized dial address separately from peer-level punitive state. Recently authenticated-successful addresses are preferred over never-successful addresses. A never-successful address failure does not advance the whole PeerId into punitive backoff while another eligible known-good address exists. If Noise authenticates a different PeerId than the dial target, that is an **address identity mismatch**: close the connection, quarantine that address for 30 minutes by default, record the provenance/source that supplied it, and do not penalize the expected trusted PeerId's peer-level backoff. Peer-level backoff advances only for failures that remain meaningfully peer-scoped after eligible address alternatives are considered.
+
+Address failure state remains bounded by the address-book limits. A successful authenticated connection resets the successful address's failure state; it does not automatically rehabilitate unrelated quarantined addresses.
 
 This preserves the architectural invariant while acknowledging libp2p execution reality:
 
@@ -52,7 +58,7 @@ Kademlia query progress may cause dial requests that were not scheduled by the o
 
 ## Security implications
 
-Untrusted discovery cannot force successful connections merely by being discovered or returned in a Kademlia response. Swarm-wide admission applies trust and resource policy before a behaviour-originated connection is established, reducing amplification, connection storms, and unintended GossipSub exposure.
+Untrusted discovery cannot force successful connections merely by being discovered or returned in a Kademlia response. Swarm-wide admission applies trust and resource policy before a behaviour-originated connection is established, reducing amplification, connection storms, and unintended GossipSub exposure. Address-scoped mismatch quarantine prevents an attacker who can inject a bogus address for a trusted PeerId from turning that one address failure into peer-wide punitive backoff while a known-good route remains available.
 
 ## Operational implications
 
@@ -62,7 +68,7 @@ SPIKE-003 must measure Kademlia-originated dial attempts under this gate. Mandat
 
 ## Implementation implications
 
-Backend consumes normalized candidate updates and maintains a bounded dialable address book. ConnectionManager publishes an atomically readable policy snapshot to the Swarm task / `DialAdmissionGate`; the gate must not block on async policy calls while the Swarm is being polled. Policy revision changes invalidate stale authorization/backoff snapshots promptly.
+Backend consumes normalized candidate updates and maintains a bounded dialable address book containing provenance, last authenticated success, address-scoped failure/backoff, and identity-mismatch quarantine. ConnectionManager publishes an atomically readable policy snapshot to the Swarm task / `DialAdmissionGate`; the gate must not block on async policy calls while the Swarm is being polled. Policy revision changes invalidate stale authorization/backoff snapshots promptly.
 
 Before retaining an inbound data-plane connection, ConnectionManager applies the same current authorization policy. Successful observations report back for cache hints. Unauthorized candidates remain diagnostics/discovery state, not active transport peers.
 

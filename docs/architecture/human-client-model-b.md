@@ -46,11 +46,11 @@ Uses ordinary IPC v2:
 
 ### Administrative/settings session
 
-Trust changes, endpoint configuration, key rotation, daemon shutdown, bootstrap/discovery edits, and similarly sensitive actions use a separately capability-granted administrative IPC connection or `transportctl`-equivalent service.
+Trust changes, endpoint configuration, key rotation, daemon shutdown, bootstrap/discovery edits, and similarly sensitive actions use the separate administrative IPC socket or an offline `transportctl`-equivalent identity operation. The human data-plane socket connection can never be upgraded to admin authority by changing `client.kind`.
 
-A network message displayed in the human client must never automatically exercise administrative operations. UI actions that mutate trust/configuration require an explicit local user gesture and the admin capability path.
+A network message displayed in the human client must never automatically exercise administrative operations. UI actions that mutate trust/configuration require an explicit local user gesture and an admin-socket connection authorized by local policy/OS access.
 
-A single executable may host both UI surfaces, but the architecture treats them as separate authorities and separate IPC connections. A human app that keeps both sessions open consumes two of the profile's IPC client slots.
+A single executable may host both UI surfaces, but the architecture treats them as separate socket authority domains and separate IPC connections. A human app that keeps both sessions open consumes two of the profile's IPC client slots.
 
 Identity recovery is intentionally **not** part of the administrative session: recovery words are private-key-equivalent and remain in the offline `transportctl identity backup/restore` path defined by ADR-0033.
 
@@ -228,7 +228,7 @@ Remote listing is opt-in (`advertise: true`), trusted-peer-only, bounded, and re
 
 ### Confused deputy
 
-Network content never triggers trust changes, endpoint configuration, identity rotation, or daemon shutdown automatically. Admin operations are separate IPC capabilities.
+Network content never triggers trust changes, endpoint configuration, identity rotation, or daemon shutdown automatically. Admin operations exist only on the separate admin IPC socket.
 
 ### Default-route confusion
 
@@ -267,6 +267,6 @@ endpoints:
 - human endpoint restart does not rotate PeerId;
 - offline endpoint creates no daemon-side backlog;
 - human app can persist local history without changing transport delivery claims;
-- admin actions require separate capability path and explicit local action;
+- admin actions require the separate admin socket and explicit local action;
 - broadcast delivery still follows each client's join state;
 - endpoint names never become asserted person/application identities in transport diagnostics or UI security indicators.

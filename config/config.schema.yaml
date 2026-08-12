@@ -15,11 +15,29 @@ transport:
     max_candidates: integer[1..16384] = 4096
     max_addresses_per_peer: integer[1..32] = 16
     max_subscriptions: integer[1..1024] = 128
+  pre_auth:
+    # Applies before a remote PeerId exists (direct listener/Noise setup).
+    handshake_timeout: duration[5s..30s] = 10s
+    max_pending_inbound_handshakes: integer[1..256] = 64
+    max_pending_per_source_bucket: integer[1..32] = 8
+    max_attempts_per_source_bucket_per_minute: integer[1..600] = 30
+    max_attempts_global_per_minute: integer[1..6000] = 600
+    ipv6_source_prefix_bits: literal[64] = 64
+  connection_policy:
+    address_backoff_min: duration[1s..1m] = 5s
+    address_backoff_max: duration[30s..30m] = 5m
+    identity_mismatch_quarantine: duration[1m..24h] = 30m
   direct:
     protocol: literal[/claude-p2p-channel/direct/2.0.0]
     timeout_ms: integer[1000..60000] = 10000
     max_inflight_total: integer[1..512] = 128
     max_inflight_per_peer: integer[1..32] = 8
+    inbound_rate_limit:
+      enabled: literal[true] = true
+      per_peer_per_minute: integer[1..6000] = 120
+      per_peer_burst: integer[1..512] = 32
+      global_per_minute: integer[1..60000] = 1200
+      global_burst: integer[1..2048] = 256
   pubsub:
     backend: enum[gossipsub]
     signed_messages: literal[true]
@@ -27,6 +45,9 @@ transport:
     # validation-result reporting per ADR-0029 (Accept/Ignore/Reject).
     strict_validation: literal[true]
     explicit_application_validation: literal[true]
+    # Network compatibility invariant: mesh duplicate suppression binds the
+    # signed source PeerId plus GossipSub wire sequence number; application envelope IDs are never mesh keys.
+    message_id_function: literal[source-peer-seqno-sha256-v1] = source-peer-seqno-sha256-v1
   connectivity:
     # Mandatory standard-v1 reachability stack. Reduced builds that omit any
     # required client mechanism are non-standard and must declare that limitation.
@@ -100,6 +121,10 @@ identity:
   algorithm: literal[ed25519] = ed25519
   # Private key itself is NOT configuration. This is an optional path override.
   key_file: path?
+  # Standard v1 stores the portable key owner-only. ADR-0038 defines a planned
+  # v2.x passphrase-encrypted envelope, but it is not selectable until SPIKE-007
+  # freezes an audited format/library and unlock path.
+  key_protection: literal[filesystem-only] = filesystem-only
   # Recovery phrases/formats are offline identity-tool concerns, never config values or IPC.
 trust:
   policy: enum[static-allowlist]
@@ -198,8 +223,12 @@ channels:
 ipc:
   # IPC protocol version is negotiated in hello and is deliberately not an
   # operator profile setting. The body ceiling is likewise a v2 protocol constant.
+  socket_layout: literal[split-data-admin] = split-data-admin
   max_clients: integer[1..64] = 16
+  max_admin_clients: integer[1..16] = 4
   client_event_queue: integer[16..1024] = 256
+  # Cross-field: max_admin_clients <= max_clients. Admin capability is selected
+  # by the admin socket, never by client.kind on the data socket.
   keepalive:
     enabled: bool = true
     # When true, any IPC client claiming a data-plane EndpointId lease MUST

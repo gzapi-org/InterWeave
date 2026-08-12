@@ -4,8 +4,8 @@
 |---|---|---|
 | Claude Channel bridge | MCP Channel capability, tools, event translation, instructions, one local EndpointId lease, reply tokens | discovery, dialing, keys, GossipSub mesh, endpoint/trust administration |
 | Human client data plane | human UI transport operations, one local EndpointId lease, application-local history/rendering | libp2p Swarm, transport private key, implicit trust mutation |
-| Human/admin settings path | explicit local trust/config/endpoint administration with granted admin capability | automatic actions triggered by network payloads |
-| IPC server | local connection auth/handshake, capability grants, endpoint lease connection lifecycle, bounded per-client queues | peer discovery, application semantics |
+| Human/admin settings path | explicit local trust/config/endpoint administration over the admin socket | automatic actions triggered by network payloads |
+| IPC server | separate data/admin socket acceptors, authority-domain tagging, local handshake/capability grants, endpoint lease lifecycle on data socket, bounded per-client queues | peer discovery, application semantics |
 | EndpointRegistry (runtime) | configured endpoint set, exclusive leases, default route, endpoint policy intersection, local route admission | human/application identity, libp2p protocol mechanics |
 | Transport runtime | neutral command/event semantics, orchestration, endpoint-aware direct admission, health | Claude-specific prompts/tools |
 | DiscoveryManager | provider lifecycle, candidate aggregation/provenance/expiry | trust grants, dialing, endpoint discovery |

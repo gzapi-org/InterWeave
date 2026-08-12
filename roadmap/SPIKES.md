@@ -15,15 +15,19 @@ Spikes validate version-sensitive or deployment-sensitive assumptions. They are 
 
 ---
 
-## SPIKE-002 — direct v2 and endpoint-directory wire behavior
+## SPIKE-002 — transport wire/race and GossipSub cache behavior
 
-**Objective:** validate rust-libp2p request-response for direct v2 endpoint framing/acceptance and the separate endpoint-directory protocol under timeout, cancellation, connection reuse, and protocol mismatch.
+**Objective:** validate rust-libp2p request-response for direct v2/endpoint-directory behavior and pin the target GossipSub duplicate-cache/authenticity ordering used by the frozen broadcast design.
 
 **Experiment:** two local peers with non-production `/direct/2.0.0` and `/endpoints/1.0.0` codecs. Exercise explicit destination, omitted/default destination, resolved endpoint response, no_route privacy class, queue-admission delay/overload, multiple protocol IDs, and unsupported-major negotiation. **Drive many concurrent retransmissions with the exact same dedup key/message ID through the real rust-libp2p request-response task scheduling, including response timeout/cancellation races, and verify one local enqueue plus shared owner result. Also exercise reservation-capacity overflow.**
 
 **Evidence:** failure events, substream/connection reuse, timeout/cancel semantics, exact protocol-family negotiation behavior, proof that AcceptedV2 can be withheld until bounded local route admission without pathological Swarm blocking, and empirical proof that concurrent same-key retransmissions cannot double-enqueue or escape the bounded reservation map.
 
 **Decision unlocked:** implementation codec/task/channel details without reopening endpoint routing or the direct-vs-GossipSub decision.
+
+### GossipSub duplicate-cache validation ordering
+
+Using the exact target rust-libp2p version, verify that an invalid signed-source/sequence claim cannot create a lasting duplicate-cache entry that suppresses a later valid message with the same `GossipSubMessageIdV1`. Also verify that two authenticated publishers carrying the same application-envelope `message_id` produce distinct mesh IDs and both reach application validation. If library ordering differs from this requirement, document and prototype an equivalent pre-cache authenticity gate before Phase 2 is accepted.
 
 ---
 
@@ -85,13 +89,13 @@ Instrument the Swarm / behaviour boundary so Kademlia-originated `ToSwarm::Dial`
 
 ## SPIKE-005 — same-user IPC hardening (conditional)
 
-**Objective:** determine whether OS ownership/permissions are sufficient for target deployments or whether same-user client authentication is required.
+**Objective:** determine whether the mandatory split data/admin socket boundary plus OS ownership/permissions are sufficient for target deployments or whether same-user client authentication/user-presence is required.
 
-**Experiment:** hostile same-UID local client attempts against daemon capability model.
+**Experiment:** hostile same-UID local client attempts against both sockets. Prove that data-socket `client.kind` spoofing cannot obtain `admin.*`, then evaluate the residual case where hostile same-UID code can directly open the admin socket. Compare stricter admin-socket ACL/service-account layouts and viable OS-native credential/user-presence mechanisms.
 
-**Evidence:** threat-model fit and operational cost.
+**Evidence:** threat-model fit, platform coverage, operational cost, and whether a stronger credential can be kept out of config/logs/network payloads.
 
-**Decision unlocked:** retain OS-boundary-only IPC trust or add a local credential/token mechanism.
+**Decision unlocked:** retain split-socket OS-boundary trust for same-UID deployments or add a stronger local authentication/authorization mechanism without merging the sockets.
 
 ## SPIKE-006 — identity-recovery portability
 
@@ -102,3 +106,13 @@ Instrument the Swarm / behaviour boundary so Kademlia-originated `ToSwarm::Dial`
 **Evidence:** byte-for-byte secret round trip, the repository golden fixture PeerId, random-key round trips, documented API calls/serialization assumptions (including the exact 32-byte seed accessor/import path and any larger protobuf representation encountered), verify-only no-write behavior, and confirmation that no mnemonic/private-key material enters logs, IPC, crash reports, or network traces.
 
 **Decision unlocked:** production `transportctl identity backup/restore` implementation against the frozen recovery contract. If the current library boundary cannot reliably expose/reconstruct the exact Ed25519 seed, keep recovery implementation disabled and revise the identity serialization adapter without silently changing the mnemonic format.
+
+## SPIKE-007 — encrypted software-key envelope
+
+**Objective:** select and validate an audited passphrase-encrypted at-rest envelope for exportable Ed25519 software identities as an optional v2.x feature, without changing PeerId or the mnemonic recovery format.
+
+**Experiment:** evaluate maintained Rust implementations/formats that provide a memory-hard password KDF plus authenticated encryption (for example an age/scrypt-style envelope or another reviewed equivalent). Exercise wrong passphrase, parameter/version migration, atomic rewrite, crash recovery, unattended-daemon constraints, memory/secret handling, and interaction with mnemonic backup/restore. Do not design a bespoke cipher/KDF format in this repository.
+
+**Evidence:** pinned external format/library and parameters, interoperability fixture, failure/recovery behavior, explicit unlock UX/credential source, and proof that passphrases/plaintext private keys never enter normal config/logs/IPC/network traffic.
+
+**Decision unlocked:** add a versioned `identity.key_protection=passphrase-envelope` v2.x option. Until this spike/ADR follow-up lands, standard v1 remains `filesystem-only`.

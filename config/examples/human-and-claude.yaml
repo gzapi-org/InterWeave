@@ -43,7 +43,9 @@ discovery:
       priority: 10
       config: { ttl: 7d, max_entries: 1024 }
 ipc:
+  socket_layout: split-data-admin
   max_clients: 16
+  max_admin_clients: 4
   client_event_queue: 256
   keepalive:
     enabled: true

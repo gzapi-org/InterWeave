@@ -8,7 +8,7 @@ The transport requires one-to-many realtime delivery to logical channels. Broadc
 
 ## Decision
 
-Map logical channels to domain-separated hashed GossipSub topics. Use signed GossipSub messages with strict cryptographic/protocol validation. Enable explicit application validation reporting so authorization and protocol invalidity are mapped according to ADR-0029. GossipSub is the only v1 broadcast path and never substitutes for directed delivery.
+Map logical channels to domain-separated hashed GossipSub topics. Use signed GossipSub messages with strict cryptographic/protocol validation. Enable explicit application validation reporting so authorization and protocol invalidity are mapped according to ADR-0029. Freeze the mesh-level GossipSub message-ID function to the full SHA-256 of a domain-separated canonical tuple containing the signed source PeerId raw bytes and the GossipSub wire sequence number, as specified in `transport/libp2p/PUBSUB.md`; application-envelope message ID is forbidden as the mesh duplicate key. GossipSub is the only v1 broadcast path and never substitutes for directed delivery.
 
 ## Alternatives considered
 
@@ -20,7 +20,7 @@ Broadcast benefits from established mesh propagation and duplicate handling, but
 
 ## Security implications
 
-Signed source identity supports trust checks but forwarding peers can read payloads. Topic hashing reduces casual name leakage but not dictionary attacks. GossipSub validation results must not equate local authorization failure with objective wire invalidity.
+Signed source identity supports trust checks but forwarding peers can read payloads. Topic hashing reduces casual name leakage but not dictionary attacks. GossipSub validation results must not equate local authorization failure with objective wire invalidity. Source-and-sequence-bound mesh message identity prevents one trusted publisher from suppressing another publisher's message merely by racing/reusing the same application envelope ID, without requiring GossipSub to parse the application envelope.
 
 ## Operational implications
 
@@ -28,7 +28,7 @@ Mesh health, publish failures, validation outcomes, and zero-peer topics require
 
 ## Implementation implications
 
-Set conservative payload limits, normalized message IDs, strict signature/protocol validation, explicit `Accept | Ignore | Reject` result reporting per ADR-0029, and runtime-level dedup/admission. Keep topic hash mapping deterministic/versioned.
+Set conservative payload limits, the frozen `GossipSubMessageIdV1` source+wire-sequence mesh identity, strict signature/protocol validation, explicit `Accept | Ignore | Reject` result reporting per ADR-0029, and runtime-level dedup/admission. Keep topic and message-ID mappings deterministic/versioned. Phase 2 fixtures must prove two signed publishers using the same 128-bit envelope ID remain distinct at the GossipSub cache and that invalid source/sequence signatures cannot pre-poison a valid duplicate-cache entry.
 
 ## Revisit conditions
 

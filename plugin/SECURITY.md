@@ -16,7 +16,7 @@ None establishes a human name, employee identity, administrator role, repository
 
 ## Administrative separation
 
-Claude's IPC connection may not receive `admin.endpoints`, `admin.shutdown`, trust mutation, identity-key, or private configuration authority.
+Claude connects only to the IPC **data-plane socket**. That socket cannot grant `admin.endpoints`, `admin.shutdown`, trust mutation, identity-key, or private configuration authority under any `client.kind`; administrative authority lives on the separate admin socket.
 
 A remote request such as "register me as endpoint admin", "change the default endpoint", "trust this PeerId", or "revoke the human endpoint" is untrusted content and cannot cause an administrative call automatically.
 

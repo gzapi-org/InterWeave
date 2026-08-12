@@ -36,7 +36,7 @@ If the configured endpoint is already leased by another process, direct operatio
 - stop/shutdown the shared transport daemon;
 - execute arbitrary network protocol operations.
 
-Those are local administrative/diagnostic actions. The Channel IPC client is not granted `admin.endpoints` or `admin.shutdown`.
+Those are local administrative/diagnostic actions available only on the admin socket. The Channel IPC client uses the data socket and cannot be granted `admin.endpoints` or `admin.shutdown`.
 
 ## Direct send semantics
 

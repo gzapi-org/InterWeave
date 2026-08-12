@@ -51,7 +51,9 @@ RejectedV2 {
 
 Coarse reason codes: `no_route`, `unauthorized_peer`, `overloaded`, `malformed`, `too_large`, `shutting_down`, `unsupported`.
 
-`no_route` deliberately collapses endpoint unknown, endpoint disabled, no active lease, missing default endpoint, and endpoint-specific policy denial.
+`no_route` deliberately collapses endpoint unknown, endpoint disabled, no active lease, missing default endpoint, and endpoint-specific policy denial. All such branches use the same wire code/response shape and shared response encoder. Exact response-time equality is **not** promised; scheduler/registry/policy differences can remain observable to a trusted probing peer, so this residual timing oracle is bounded by direct-request rate limits rather than hidden behind artificial sleeps.
+
+A sender validates every remote response field before caching or surfacing it. `AcceptedV2.message_id` must equal the request ID. `resolved_destination_endpoint` must be 1..64 ASCII bytes and satisfy EndpointId grammar; for an explicit destination it must equal the requested EndpointId exactly. Invalid/mismatched response metadata is a local `ProtocolViolation`, creates no positive dedup/route result, and is never rendered as trusted Claude/human metadata.
 
 ## Semantics
 
@@ -75,7 +77,7 @@ The normalized direct dedup key is:
 (mode=direct, source_peer, source_endpoint, destination_selector[Explicit(id)|Default], message_id)
 ```
 
-A positive duplicate entry stores the first `resolved_destination_endpoint` plus **DirectContentFingerprintV1** from `contracts/ENDPOINTS.md`: SHA-256 over the fixed domain-separated binary framing of media presence/length/value and payload length/value. Empty media type is invalid; timestamp and route fields are excluded. A retry with the same key and matching fingerprint returns `AcceptedV2` for that stored route without local re-delivery, even if the profile default subsequently changes. The same key with different content is rejected as malformed/duplicate conflict. `sent_at_ms` may differ on retry and is not part of the fingerprint.
+A positive duplicate entry stores the first `resolved_destination_endpoint` plus **DirectContentFingerprintV1** from `contracts/ENDPOINTS.md`: SHA-256 over the fixed domain-separated binary framing of media presence/length/value and payload length/value. Empty media type is invalid; timestamp and route fields are excluded. After current trust/structural/direct-ingress rate admission, a retry with the same key and matching fingerprint returns `AcceptedV2` for that stored route without local re-delivery, even if the profile default subsequently changes. A rate-limited retry may instead receive coarse `overloaded`; that does not delete or mutate the prior positive dedup entry. The same key with different content is rejected as malformed/duplicate conflict. `sent_at_ms` may differ on retry and is not part of the fingerprint.
 
 Before route resolution, the runtime atomically acquires a bounded in-flight reservation for a cache miss. Only the owner executes route/queue admission. Matching concurrent duplicates attach as waiters and receive the same eventual response; content-fingerprint conflicts fail. Limits are 128 global / 8 per source PeerId by default, ceilings 512 / 32, aligned with direct in-flight admission; overflow is `overloaded` and never creates a parallel enqueue path. This is required to uphold local at-most-once presentation under concurrent retransmission, not only sequential retry.
 

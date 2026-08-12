@@ -48,6 +48,8 @@ No production implementation belongs in this architecture repository. This roadm
 - 48 KiB and endpoint field limits enforce pre-allocation;
 - endpoint directory is trust-gated/bounded/optional;
 - three trusted peers broadcast through GossipSub with ADR-0029 validation mapping;
+- `GossipSubMessageIdV1` matches the frozen source+wire-sequence SHA-256 fixture, and two authenticated publishers reusing the same application-envelope `message_id` remain distinct at mesh dedup;
+- an invalid signed-source/sequence claim cannot create a lasting valid-message duplicate-cache entry that suppresses the later authentic message;
 - no offline/durable claim.
 
 ---
@@ -60,13 +62,15 @@ DiscoveryManager + cache/mDNS/static/**Kademlia**, provider conformance, no trus
 
 ## Phase 4 — connection management
 
-Unchanged trust/backoff/dial ownership. Direct and endpoint-directory dials both use the same ConnectionManager/root admission policy. Kademlia behavior-originated dial handling remains as designed.
+Implement class-aware root dial admission plus pre-Noise inbound admission, address-scoped reachability/authentication failure state, known-good address preference, and peer-wide punitive backoff only for genuinely peer-scoped failures. Direct, endpoint-directory, Kademlia, AutoNAT, Relay and DCUtR behaviour-originated dials all cross the same root policy boundary. A Noise identity mismatch quarantines/failure-scores the candidate address without escalating the expected trusted PeerId while another known-good address remains eligible.
+
+**Acceptance:** pending unauthenticated handshakes/timeouts/rates remain bounded; poisoned never-successful addresses cannot suppress a known-good route to the same trusted PeerId; dial origin/provenance is observable; and no discovery provider becomes dial-policy owner.
 
 ---
 
 ## Phase 5 — daemon, EndpointRegistry, and IPC v2
 
-**Deliverables:** profile lock/service, EndpointRegistry, endpoint policy/default route, owner-protected IPC v2, endpoint lease handshake, per-client joins/queues, admin capability separation, transportctl skeleton.
+**Deliverables:** profile lock/service, EndpointRegistry, endpoint policy/default route, owner-protected IPC v2 split data/admin sockets, data-socket endpoint lease handshake, per-client joins/queues, immutable socket authority domains, transportctl skeleton.
 
 **Acceptance:**
 
@@ -81,10 +85,10 @@ Unchanged trust/backoff/dial ownership. Direct and endpoint-directory dials both
 - broadcast remains join-filtered and `channels.desired` remains no-buffer prewarm;
 - slow client does not stall Swarm/other endpoints;
 - IPC major mismatch clear;
-- Claude/human data-plane clients lack admin.endpoints/admin.shutdown;
+- data socket cannot grant admin.endpoints/admin.shutdown even to a spoofed administrative client kind; admin socket cannot claim EndpointId/data-plane messaging;
 - claude-channel lacks endpoints.query by default; human-client receives it only when endpoint directory is enabled;
 - EndpointId leases require negotiated IPC keepalive by default; missed probes release wedged leases, and explicit compatibility opt-out is tested;
-- data/admin connections count independently toward max IPC clients.
+- data/admin socket connections count independently toward the total max IPC clients and obey the admin sublimit.
 
 ---
 
@@ -121,13 +125,13 @@ Unchanged trust/backoff/dial ownership. Direct and endpoint-directory dials both
 - network content cannot automatically invoke trust/endpoint/daemon administration;
 - endpoint-directory labels are displayed as unverified routes unless separately app-verified.
 
-The settings/admin UX may live in the same executable but uses a separately authorized IPC connection/capability path.
+The settings/admin UX may live in the same executable but opens the separate admin IPC socket; it never upgrades the human data-plane connection.
 
 ---
 
 ## Phase 7 — security hardening
 
-Add rate limits/fuzzing and endpoint-specific regressions: route probing, directory enumeration, local lease squatting/conflicts, stale route tokens, admin confused-deputy behavior, and same-user residual boundary.
+Add mandatory trusted-peer direct token buckets, pre-Noise listener admission limits, remote metadata fuzz/validation, address-poisoning/backoff regressions, route probing, directory enumeration, local lease squatting/conflicts, stale route tokens, split-socket admin confused-deputy behavior, and same-user residual boundary.
 
 ---
 

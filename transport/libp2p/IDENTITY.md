@@ -20,7 +20,7 @@ run:      $XDG_RUNTIME_DIR/claude-p2p-channel/<profile>.sock
 
 Endpoint definitions live in normal profile config. Endpoint leases/presence are runtime-only and are not identity key state.
 
-`identity.key` is written using the implementation's supported libp2p portable private-key representation with owner-only permissions. The architecture does not make an external Ed25519 library's in-memory key type part of the transport API.
+`identity.key` is written using the implementation's supported libp2p portable private-key representation with owner-only permissions. Standard v1 therefore relies on filesystem/OS account protection at rest. ADR-0038 defines a planned optional v2.x passphrase-encrypted key envelope, but production selection of its audited format/KDF/AEAD library is gated by SPIKE-007 and is not silently invented by the v1 implementation. The architecture does not make an external Ed25519 library's in-memory key type part of the transport API.
 
 ## Generation
 

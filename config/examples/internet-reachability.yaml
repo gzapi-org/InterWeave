@@ -5,6 +5,34 @@ transport:
   backend: libp2p
   listen:
     addresses: ["/ip4/0.0.0.0/tcp/4001"]
+  pre_auth:
+    handshake_timeout: 10s
+    max_pending_inbound_handshakes: 64
+    max_pending_per_source_bucket: 8
+    max_attempts_per_source_bucket_per_minute: 30
+    max_attempts_global_per_minute: 600
+    ipv6_source_prefix_bits: 64
+  connection_policy:
+    address_backoff_min: 5s
+    address_backoff_max: 5m
+    identity_mismatch_quarantine: 30m
+  direct:
+    protocol: /claude-p2p-channel/direct/2.0.0
+    timeout_ms: 10000
+    max_inflight_total: 128
+    max_inflight_per_peer: 8
+    inbound_rate_limit:
+      enabled: true
+      per_peer_per_minute: 120
+      per_peer_burst: 32
+      global_per_minute: 1200
+      global_burst: 256
+  pubsub:
+    backend: gossipsub
+    signed_messages: true
+    strict_validation: true
+    explicit_application_validation: true
+    message_id_function: source-peer-seqno-sha256-v1
   connectivity:
     required: true
     infrastructure:
@@ -66,7 +94,9 @@ discovery:
         seed_sources: [peer-cache, static-bootstrap]
         record_mode: disabled
 ipc:
+  socket_layout: split-data-admin
   max_clients: 16
+  max_admin_clients: 4
   client_event_queue: 256
   keepalive:
     enabled: true

@@ -92,7 +92,7 @@ Properties:
 - reconnect performs a new handshake and obtains a fresh opaque 128-bit local lease epoch; the value must not repeat across daemon restart/reconnect within any practical stale-route lifetime;
 - ordinary remote messages can never create, steal, transfer, or enable an endpoint lease.
 
-An administrative client with a separately granted `admin.endpoints` capability may inspect or revoke a local lease. Claude Channel clients are never granted that administrative capability.
+An administrative client connected through the separate admin IPC socket and granted `admin.endpoints` may inspect or revoke a local lease. The data socket, including Claude Channel clients, can never grant that administrative capability.
 
 ## Direct destination
 
@@ -113,8 +113,8 @@ For an authenticated direct request:
 
 1. authenticate remote PeerId through Noise;
 2. apply profile `PeerTrustPolicy`;
-3. validate frame, message ID, endpoint fields, payload bounds, and protocol version;
-4. construct the accepted-message dedup key and content fingerprint; on positive hit return the stored `AcceptedV2(resolved_endpoint)` without re-enqueue; otherwise atomically acquire/join the bounded in-flight reservation for that key (matching duplicates share the owner result; fingerprint conflicts fail);
+3. validate bounded frame/header/message-ID fields sufficiently for safe admission and apply the mandatory per-source-PeerId/global direct ingress token buckets; overflow returns coarse `overloaded`;
+4. validate remaining endpoint/media/payload bounds and protocol version, then construct the accepted-message dedup key and content fingerprint; on positive hit return the stored `AcceptedV2(resolved_endpoint)` without re-enqueue; otherwise atomically acquire/join the bounded in-flight reservation for that key (matching duplicates share the owner result; fingerprint conflicts fail);
 5. reservation owner resolves destination endpoint: explicit endpoint or configured default;
 6. apply endpoint inbound policy as a narrowing filter over profile trust;
 7. require an active exclusive local lease for that endpoint;
@@ -125,7 +125,7 @@ For an authenticated direct request:
 
 If endpoint resolution/policy/lease steps 5-7 cannot produce a local route, the wire response is the coarse `no_route` rejection. Queue admission failure at step 8 returns coarse `overloaded`, not `Accepted`. Local diagnostics retain bounded reason classes (`endpoint_unknown`, `endpoint_offline`, `endpoint_policy`, `endpoint_overloaded`) without disclosing endpoint existence/policy detail remotely.
 
-`Accepted` therefore means the remote daemon admitted the message into the bounded local event queue of the resolved endpoint. It still does not mean the human, Claude instance, or other application processed it.
+`Accepted` therefore means the remote daemon admitted the message into the bounded local event queue of the resolved endpoint. It still does not mean the human, Claude instance, or other application processed it. All endpoint no-route branches emit the same coarse code/response shape through a shared encoder. The transport does not claim constant-time endpoint-policy evaluation; timing differences remain a residual oracle available only to an already trusted peer and are bounded by mandatory per-PeerId direct ingress rate limits.
 
 ## Outbound routing order
 
@@ -138,7 +138,7 @@ For `send(destination, payload)`:
 5. self PeerId is rejected as `InvalidArgument`;
 6. ConnectionManager resolves/dials under existing trust/backoff/global-limit policy;
 7. direct protocol v2 carries the caller's leased `source_endpoint` and requested optional `destination_endpoint`;
-8. remote `Accepted` includes the endpoint that actually accepted the message.
+8. remote `Accepted` includes the endpoint that actually accepted the message; before the result is cached/surfaced, the sender validates the response message ID, EndpointId length/grammar, and (for explicit routing) exact equality with the requested endpoint. Invalid remote metadata is `ProtocolViolation` and does not become tool/UI metadata.
 
 A caller cannot select a different `source_endpoint` field in command arguments.
 
@@ -181,12 +181,12 @@ payload    = UTF8("hello")
 SHA-256    = 3dad2f134909e51812e261b56c84b5ab040de681a9e900c9180b2e88a4b47efe
 ```
 
-On a duplicate accepted request within TTL:
+After the request passes current trust/structural/direct-ingress rate admission, a duplicate accepted request within TTL is handled as follows:
 
 - matching fingerprint -> return `AcceptedV2` with the same stored resolved endpoint and do **not** enqueue another local event, even if the endpoint disconnected or the profile default changed;
 - different fingerprint under the same dedup key -> reject as a duplicate-ID/content conflict (`malformed` on the coarse wire, detailed only locally).
 
-This prevents retries from being rerouted to a different local application and prevents one idempotency key from silently aliasing two different message bodies. Concurrent same-key requests are serialized by a bounded in-flight reservation so at most one local enqueue can occur. Reservation capacity is aligned with direct in-flight admission: **128 global / 8 per source PeerId by default, ceilings 512 / 32**. Capacity exhaustion rejects the new request as coarse wire `overloaded` / local `Overloaded`; it must not fall through to a second enqueue path. Rejected/no-route requests are not positive acceptance records: matching in-flight waiters receive that rejection, then the reservation is removed, allowing a later retry to succeed after route recovery. After the bounded dedup TTL expires, the transport no longer promises retry idempotency for that ID.
+This prevents admitted retries from being rerouted to a different local application and prevents one idempotency key from silently aliasing two different message bodies. A retry rejected by the current direct-ingress token bucket receives coarse `overloaded` before dedup lookup; that rejection neither removes nor rewrites an existing positive dedup entry, so a later admitted retry can still receive the stored acceptance without a second enqueue. Concurrent same-key requests are serialized by a bounded in-flight reservation so at most one local enqueue can occur. Reservation capacity is aligned with direct in-flight admission: **128 global / 8 per source PeerId by default, ceilings 512 / 32**. Capacity exhaustion rejects the new request as coarse wire `overloaded` / local `Overloaded`; it must not fall through to a second enqueue path. Rejected/no-route requests are not positive acceptance records: matching in-flight waiters receive that rejection, then the reservation is removed, allowing a later retry to succeed after route recovery. After the bounded dedup TTL expires, the transport no longer promises retry idempotency for that ID.
 
 Including `source_endpoint` prevents a message ID collision between two endpoints on the same authenticated peer from suppressing an independent delivery.
 
@@ -235,7 +235,8 @@ Important properties:
 - results are advisory and short-lived;
 - a caller may send to an out-of-band EndpointId without first querying the directory;
 - directory support is not required for endpoint-addressed delivery itself;
-- directory requests are rate/concurrency bounded independently of direct-message requests.
+- directory requests are rate/concurrency bounded independently of direct-message requests;
+- remote directory data is validated before cache/tool/UI use: >32 entries, invalid EndpointId grammar, or duplicates are `ProtocolViolation`; valid unsorted unique lists are sorted locally; `ttl_ms` is clamped to the local/hard 5-minute ceiling and freshness starts at local receipt, while `generated_at_ms` is diagnostic only.
 - `advertise: false` controls directory listing only; if such an endpoint is selected explicitly or as the profile default and accepts a direct message, normal direct-protocol routing metadata/acceptance may reveal that route to the communicating peer.
 
 ## Endpoint-specific authorization

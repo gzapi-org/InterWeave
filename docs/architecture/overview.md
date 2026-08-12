@@ -3,10 +3,11 @@
 ## System shape
 
 ```text
-Claude Code <--stdio--> Claude bridge --IPC v2/EndpointId--\
-                                                         \
-Human client -------------------IPC v2/EndpointId---------> profile daemon / one PeerId
-                                                          |
+Claude Code <--stdio--> Claude bridge --IPC v2 DATA / EndpointId--\
+                                                              \
+Human client -------------------IPC v2 DATA / EndpointId-------> profile daemon / one PeerId
+Human settings/admin ---------------- IPC v2 ADMIN ------------>/
+                                                               |
                                                           +-- EndpointRegistry
                                                           +-- PeerTrustPolicy
                                                           +-- DiscoveryManager
@@ -37,6 +38,10 @@ Human client -------------------IPC v2/EndpointId---------> profile daemon / one
 13. Every queue is bounded, and every legal max-size payload fits IPC v2.
 14. Standard v1 includes Kademlia support; configured entries default enabled but remain opt-out, and Kademlia stores no channel/endpoint/application records.
 15. Human/chat semantics stay above the transport boundary.
+16. GossipSub mesh duplicate identity binds signed source PeerId + GossipSub wire sequence number; application envelope IDs are never mesh cache keys.
+17. IPC data/admin sockets are separate authority domains; `client.kind` cannot grant admin authority.
+18. Internet listeners bound pre-Noise handshakes before PeerId exists; trusted direct ingress is token-bucket limited.
+19. Dial identity mismatches penalize/quarantine the address, not an expected trusted PeerId while an eligible known-good address exists.
 
 
 ## Mandatory Internet reachability

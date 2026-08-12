@@ -1,5 +1,11 @@
 # libp2p security boundary
 
+## Pre-Noise listener admission
+
+Before Noise completes there is no authenticated PeerId, so trust allowlists cannot protect the listener. The backend therefore applies a bounded pre-authentication admission layer to every directly accepted transport connection: 64 pending inbound handshakes globally and 8 per source-address bucket by default, 10-second handshake timeout, 30 starts/minute per source bucket, and 600 starts/minute globally. IPv4 buckets use the source address; IPv6 uses /64 by default. If a transport path does not expose a meaningful source IP, it still consumes the global pending/rate budget.
+
+Admission failure closes early and does not create/update PeerId trust, discovery, or peer punitive-backoff state because no authenticated PeerId exists yet. Backend connection-limit behavior should be used where it provides the required bound, supplemented by listener/front-door rate limiting when needed. Internet-facing infrastructure deployments should also use deployment firewall/eBPF/OS controls because application-layer limits cannot eliminate handshake CPU exhaustion or distributed-source attacks.
+
 ## Noise
 
 rust-libp2p Noise authenticates the connection PeerId and encrypts each peer link. It does not authenticate human/application EndpointIds, authorize application actions, define channel membership, or provide GossipSub end-to-end secrecy.
@@ -30,7 +36,7 @@ trusted Noise-authenticated PeerId
 
 EndpointId does not add a cryptographic authentication layer. `source_endpoint=human` means only that the authenticated PeerId sent that route string.
 
-Endpoint policy cannot widen PeerTrustPolicy.
+Endpoint policy cannot widen PeerTrustPolicy. After Noise/profile trust admission, inbound direct v2 requests also pass a mandatory trusted-peer token bucket (default 120 requests/minute with burst 32 per PeerId, plus 1200/minute with burst 256 globally) before endpoint routing/queue work. Rate-limit overflow maps to coarse `overloaded`; source EndpointId is never used as the rate-limit principal.
 
 ## Endpoint directory admission
 
@@ -73,3 +79,7 @@ Infrastructure-only peers are excluded from GossipSub peer participation, direct
 For a relayed application connection, authenticate and authorize the **end PeerId** independently from the relay PeerId. A relay's infrastructure authorization is not transitive.
 
 Relay paths preserve the secure end-peer transport but do not provide anonymity: relay operators remain metadata/availability observers. AutoNAT probe results are reachability evidence only and never feed trust.
+
+## Address identity mismatch
+
+A candidate address is not proof that it belongs to its advertised PeerId. If a dial intended for trusted PeerId A completes Noise as PeerId B, the connection is closed and the **address** is quarantined/failure-scored. That mismatch must not advance A's peer-wide punitive backoff while another known-good A address remains eligible. ConnectionManager records bounded provenance so poisoned mDNS/Kademlia/cache/static observations can be diagnosed without converting discovery metadata into trust.

@@ -33,6 +33,11 @@ Architecture target:
 - ordinary local data-plane connections are trust-gated;
 - accepted messages then pass bounded runtime admission/rate/dedup limits before local consumers;
 - PeerTrustPolicy determines whether an original publisher is eligible for propagation through this node and local Channel delivery.
+- mesh duplicate identity is `GossipSubMessageIdV1 = SHA-256(domain || u16be(source_len) || source_peer_bytes || u64be(sequence_number))`; application-envelope IDs are not mesh keys.
+
+### Message-ID rationale and target-library invariant
+
+The target rust-libp2p GossipSub API exposes a configurable message-ID function; its documented default identifies messages by source PeerId plus sequence number, and its signed-message sequence number is a 64-bit big-endian value on the wire. This project freezes its own byte-exact source+sequence mapping rather than allowing application payload/envelope IDs to become mesh duplicate keys. Phase 2/SPIKE-002 must also pin the target library's receive ordering: cryptographically/protocol-invalid source/sequence claims must not create a valid-message duplicate-cache entry.
 
 GossipSub scoring and advanced anti-Sybil tuning are implementation details to calibrate in a network spike. The architecture requires bounded peer counts, source rate limiting, and observable mesh health without exposing mesh internals to Claude.
 

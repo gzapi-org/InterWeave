@@ -10,7 +10,7 @@ Network producers can outrun local consumers. Unbounded queues are denial-of-ser
 
 Keep 48 KiB payload and 128 KiB IPC JSON-body ceilings; 128-byte ChannelId; add 64-byte EndpointId, default 16/max64 configured endpoints, default 16/max32 advertised endpoints, one endpoint lease per IPC data-plane connection, short-lived endpoint-directory cache. Direct dedup in-flight reservations are explicitly bounded at 128 global / 8 per source peer by default (ceilings 512 / 32), aligned with direct in-flight admission. Existing queue/client/discovery bounds remain.
 
-Direct inbound messages are rejected as overloaded before `AcceptedV2` when the resolved endpoint queue is full. Broadcast retains bounded best-effort local drop behavior.
+Direct inbound messages are rejected as overloaded before `AcceptedV2` when the resolved endpoint queue is full. After Noise/trust admission, every inbound direct request also consumes a per-trusted-PeerId token bucket (default 120/minute, burst 32) and a global bucket (default 1200/minute, burst 256); rate overflow returns coarse `overloaded` before endpoint routing. Broadcast retains bounded best-effort local drop behavior.
 
 ## Alternatives considered
 
@@ -22,7 +22,7 @@ Direct endpoint routing reduces local memory amplification versus v1 fan-out. En
 
 ## Security implications
 
-Bounds limit network/local endpoint probing and slow-consumer exhaustion. Early length/EndpointId validation prevents attacker-directed allocation.
+Bounds limit network/local endpoint probing and slow-consumer exhaustion. Early length/EndpointId validation prevents attacker-directed allocation. Per-PeerId direct ingress buckets limit a malicious-but-trusted peer without treating spoofable source EndpointIds as security principals. Pre-Noise handshake bounds are handled by the libp2p security/connection layer before a PeerId exists.
 
 ## Operational implications
 

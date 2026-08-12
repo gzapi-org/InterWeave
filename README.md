@@ -58,7 +58,9 @@ The daemon owns the private key and all libp2p state. Local applications never b
 - Discovery only produces candidate reachability and bounded protocol observations. Data-plane connection admission remains trust-gated, including behavior-originated Kademlia dials through the root dial admission policy.
 - Noise secures each admitted libp2p connection. GossipSub validation distinguishes objective invalidity (`Reject`) from valid-but-locally-unauthorized publishers (`Ignore`). Group/application E2EE remains outside v1/v2 transport.
 - Delivery remains realtime/best-effort, bounded, non-durable, with no exactly-once claim or offline mailbox. A human client may persist its own local history above the transport, but the daemon never queues messages for an offline endpoint.
-- IPC v2 retains the 128 KiB JSON-body ceiling so every legal 48 KiB payload fits with endpoint metadata after base64url/JSON expansion. Claude Channel clients cannot invoke endpoint administration or daemon shutdown.
+- IPC v2 retains the 128 KiB JSON-body ceiling so every legal 48 KiB payload fits with endpoint metadata after base64url/JSON expansion. Data-plane and administrative IPC use separate sockets; the data socket can never grant `admin.*` based on a claimed client kind.
+- GossipSub mesh duplicate identity is frozen to a SHA-256 mapping over signed publisher PeerId + GossipSub wire sequence number, preventing cross-publisher suppression without coupling mesh identity to the application envelope ID.
+- Internet listeners bound unauthenticated pre-Noise handshakes and trusted-peer direct ingress; dial failure/backoff is address-scoped where appropriate so a poisoned address cannot suppress a known-good trusted route.
 
 ## Human client Model B
 
@@ -90,6 +92,7 @@ See:
 - [Mandatory Internet reachability design](transport/libp2p/CONNECTIVITY.md)
 - [Implementation plan](roadmap/IMPLEMENTATION-PLAN.md)
 - [Final architecture review](docs/architecture/FINAL-REVIEW.md)
+- [Adversarial security review closure](docs/architecture/SECURITY-REVIEW-2026-08-12.md)
 
 ## Source snapshot
 
@@ -116,3 +119,7 @@ The working name **claude-p2p-channel** is retained because it describes the Cla
 - [`docs/architecture/connectivity-deployment.md`](./docs/architecture/connectivity-deployment.md) defines client/infrastructure deployment, redundancy, outage, and rollout topology.
 - [`config/examples/internet-reachability.yaml`](./config/examples/internet-reachability.yaml) shows a two-relay/probe-server Internet profile.
 - [`config/examples/connectivity-infrastructure.yaml`](./config/examples/connectivity-infrastructure.yaml) shows explicit AutoNAT/relay server roles with protocol-scoped authorization.
+
+## Security freeze addendum
+
+The 2026-08-12 adversarial security pass is recorded in [`docs/architecture/SECURITY-REVIEW-2026-08-12.md`](./docs/architecture/SECURITY-REVIEW-2026-08-12.md). It freezes source+wire-sequence GossipSub message identity, split data/admin IPC sockets, pre-Noise admission limits, address-scoped identity-mismatch quarantine, hostile remote endpoint-metadata validation, direct trusted-peer token buckets, and 128-bit IPC keepalive nonces. ADR-0038 also records an explicit optional v2.x encrypted software-key path gated by SPIKE-007; standard v1 remains filesystem-only at rest.

@@ -40,3 +40,5 @@ All ADRs are **Accepted** architecture decisions unless later superseded.
 | [0034](./0034-kademlia-default-enabled.md) | Standard v1 includes Kademlia support and configured Kademlia entries default enabled; operators may explicitly opt out. |
 | [0035](./0035-mandatory-internet-reachability.md) | Standard v1 requires AutoNAT v2 client, Circuit Relay v2 client/reservations, and DCUtR; Phase 9 is a release requirement. |
 | [0036](./0036-connectivity-infrastructure-peer-class.md) | Authorize relay/AutoNAT infrastructure through a protocol-scoped connection class that does not grant application data-plane trust. |
+| [0037](./0037-split-local-admin-socket.md) | Split IPC data-plane and administrative authority onto separate local sockets; client.kind never grants admin authority. |
+| [0038](./0038-optional-encrypted-identity-at-rest.md) | Keep v1 filesystem-only key storage while defining a SPIKE-007-gated audited passphrase-encrypted key envelope as an explicit v2.x option. |

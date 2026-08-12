@@ -10,13 +10,13 @@
 | mutable state | profile lock metadata, runtime state, endpoint leases | usually no | no | usually |
 | peer cache | observed peers/addresses + bounded transport protocol observations | optional | no | **yes** |
 | remote endpoint cache | short-lived advertised EndpointIds | no | no | **yes** |
-| runtime IPC endpoint | socket/pipe | no | no | recreated |
+| runtime IPC endpoints | data socket/pipe + admin socket/pipe | no | no | recreated |
 | logs | structured diagnostics | policy-dependent | must be sanitized | yes |
 
 
 ## Identity algorithm and recovery
 
-The initial software profile algorithm is fixed to `ed25519`. The key file remains identity data, not YAML secret material.
+The initial software profile algorithm is fixed to `ed25519`. The key file remains identity data, not YAML secret material. Standard v1 fixes `identity.key_protection=filesystem-only`; ADR-0038 makes a passphrase-encrypted key envelope an explicit v2.x direction, but it is not selectable until SPIKE-007 pins an audited external format/library and unlock path.
 
 Optional recovery uses the offline `cp2p-ed25519-bip39-entropy-v1` record defined in `contracts/IDENTITY-RECOVERY.md`. The 24 words are never stored in this schema. `identity.key_file` is only a path override. Backup/restore requires daemon-offline exclusive identity access and therefore is not a hot-reload operation.
 
@@ -90,7 +90,13 @@ The configuration layer distinguishes unknown, implemented, and known-but-unbuil
 
 `transport.limits.max_payload_bytes` may lower the profile's 49,152-byte ceiling. Active value is returned by capabilities.
 
-The IPC v2 JSON-body ceiling of 131,072 bytes and IPC major version are protocol/handshake properties, not operator-selectable profile versions. Profile config may tune client counts/queues and keepalive timers within fixed ranges. By default, an EndpointId lease requires keepalive negotiation; an explicit compatibility policy may relax that requirement. A human UI using separate data-plane and admin connections consumes two client slots.
+The IPC v2 JSON-body ceiling of 131,072 bytes and IPC major version are protocol/handshake properties, not operator-selectable profile versions. `ipc.socket_layout` is fixed to `split-data-admin`: data and admin sockets are separate authority domains, with `admin.*` impossible on the data socket regardless of `client.kind`. Profile config may tune total/admin client counts, queues, and keepalive timers within fixed ranges. By default, an EndpointId lease requires keepalive negotiation; an explicit compatibility policy may relax that requirement. A human UI using separate data-plane and admin sockets consumes two client slots.
+
+## Network abuse-control configuration
+
+`transport.pre_auth` bounds listener work before Noise can authenticate a PeerId: 64 pending globally, 8/source bucket, 10-second timeout, 30 starts/minute/source, and 600 starts/minute globally by default. IPv6 source buckets use /64. These limits are not trust decisions and cannot update peer backoff because no authenticated peer exists yet.
+
+`transport.connection_policy` keeps address-level backoff separate from peer punitive state and uses a 30-minute identity-mismatch quarantine by default. `transport.direct.inbound_rate_limit` is mandatory for trusted direct peers (120/minute burst 32 per PeerId; 1200/minute burst 256 global defaults). Reloading these values must preserve hard ceilings and existing in-flight safety.
 
 ## General reload
 

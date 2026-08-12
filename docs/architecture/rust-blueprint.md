@@ -18,7 +18,7 @@ crates/
   transport-libp2p/       # Swarm, direct-v2 codec, endpoint-directory protocol, GossipSub, identity
   transport-runtime/      # generic orchestration + EndpointRegistry/policies/route admission
   ipc-protocol/           # IPC v2 endpoint-aware frames; NO libp2p, NO Claude
-  ipc-server/             # socket/capabilities + connection-bound endpoint lease adapter
+  ipc-server/             # split data/admin sockets, capabilities + endpoint lease adapter
   transport-daemon/       # composition root / CLI entry
   transportctl/           # local admin/diagnostics
   claude-channel-core/    # Channel-event/tool mapping, NO libp2p
@@ -87,7 +87,7 @@ Do not turn EndpointRegistry into a public trait in v2 unless a second implement
 
 ## ipc-server ownership
 
-`ipc-server` owns OS connection lifecycle and capability authorization. On IPC v2 hello it asks `endpoint_registry` to grant an exclusive lease for the configured EndpointId. Connection drop releases that lease.
+`ipc-server` owns both OS socket acceptors and tags each accepted connection with immutable `DataPlane` or `Admin` authority before hello parsing. Only data-plane IPC v2 hello may ask `endpoint_registry` for an exclusive EndpointId lease; only admin-socket sessions may receive `admin.*`. Connection drop releases any data-plane lease.
 
 It does not decide network endpoint admission policy itself.
 
@@ -115,7 +115,7 @@ A small in-memory runtime/backend cache stores remote advertised EndpointIds wit
 
 The human client is intentionally outside transport-runtime. It uses IPC v2 exactly like Claude for data-plane operations.
 
-A human UI may have an admin/settings adapter that opens a separately authorized administrative IPC connection. The application can store contacts/history locally; no transport crate depends on those models.
+A human UI may have an admin/settings adapter that opens the separate profile admin socket. The application can store contacts/history locally; no transport crate depends on those models.
 
 ## Testing packages
 

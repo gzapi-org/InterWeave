@@ -108,7 +108,9 @@ ConnectionManager:
 - retires redundant relay peer connections after a successful stable direct upgrade;
 - exposes path state to transport health/diagnostics.
 
-NetworkBehaviour-originated dial requests from AutoNAT/relay/DCUtR remain subject to the same root gate and diagnostic attribution.
+NetworkBehaviour-originated dial requests from AutoNAT/relay/DCUtR remain subject to the same root gate and diagnostic attribution. Dial result accounting follows ADR-0011's address-scoped policy: a Noise identity mismatch quarantines/failure-scores the attempted address, not the expected trusted PeerId, and never-successful poisoned addresses cannot peer-wide suppress an eligible known-good route.
+
+Inbound Internet listeners also apply the pre-Noise pending/rate/timeout admission limits from `transport/libp2p/SECURITY.md` before any connection class can be known.
 
 ## 4. Connection classes and protocol admission
 

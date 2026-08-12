@@ -3,8 +3,8 @@
 ## Startup
 
 1. Claude Code launches the Channel bridge over stdio.
-2. Bridge loads plugin-local non-secret routing config: profile name/socket + configured local EndpointId.
-3. Bridge connects to daemon IPC v2.
+2. Bridge loads plugin-local non-secret routing config: profile name/data-socket + configured local EndpointId.
+3. Bridge connects only to daemon IPC v2 data socket.
 4. Hello requests non-admin capabilities and claims the configured EndpointId.
 5. Daemon grants endpoint lease/epoch or returns a clear conflict/configuration error.
 6. Bridge obtains profile PeerId/effective limits and establishes its channel joins.
@@ -26,7 +26,7 @@ Any pre-disconnect direct reply tokens are discarded/invalid because their local
 
 MCP stdin close/SIGTERM stops only the bridge. Its IPC connection closes, releasing EndpointId lease and bridge joins. Daemon and PeerId remain alive.
 
-The bridge is never granted `admin.shutdown` or `admin.endpoints`.
+The bridge never connects to the admin socket and can never be granted `admin.shutdown` or `admin.endpoints` on its data-socket connection.
 
 
 Identity recovery never runs through the bridge or daemon IPC. The bridge must be stopped with the daemon/profile identity operation before offline backup/restore.
