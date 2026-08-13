@@ -1,0 +1,10 @@
+{
+  "family": "human-chat",
+  "specification": "architecture/clients/human/HUMAN-CHAT.md",
+  "concepts": [
+    { "name": "envelope", "file": "envelope.schema.json", "status": "approved" }
+  ],
+  "not_modelled": {
+    "retention state": "Pending-outbound, unread-inbound, and receiver-kept are LOCAL application state under ADR-0044, never wire fields. HumanChatV1 has no sender-controlled persistence field by design, and modelling retention as a shape here would suggest a remote party could express it."
+  }
+}

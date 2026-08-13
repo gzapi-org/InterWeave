@@ -29,6 +29,24 @@
       "path": "identity",
       "description": "The offline recovery record: 24 words plus the public metadata that proves a restore reconstructed the intended identity. A bearer secret that never crosses IPC, Channel, or the network — schematised so a backup file can be validated offline, not because it is ever transmitted.",
       "specification": "architecture/contracts/IDENTITY-RECOVERY.md"
+    },
+    {
+      "name": "discovery",
+      "path": "discovery",
+      "description": "Advisory reachability observations and the providers that emit them. Candidates grant nothing: EndpointIds, channels, roles, and presence are explicitly outside discovery, and the closed candidate shape is what keeps them out.",
+      "specification": "architecture/contracts/DISCOVERY.md"
+    },
+    {
+      "name": "connectivity",
+      "path": "connectivity",
+      "description": "The backend-neutral view of Internet reachability — normalized states and counts, deliberately without the infrastructure identities behind them.",
+      "specification": "architecture/contracts/CONNECTIVITY.md"
+    },
+    {
+      "name": "human-chat",
+      "path": "human-chat",
+      "description": "The first-party human message envelope. An APPLICATION protocol above the payload-agnostic transport, versioning independently of it.",
+      "specification": "architecture/clients/human/HUMAN-CHAT.md"
     }
   ]
 }

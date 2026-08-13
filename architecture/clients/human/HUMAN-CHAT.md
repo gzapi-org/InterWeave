@@ -2,6 +2,8 @@
 
 Status: **first-party application protocol design; not part of transport v2**.
 
+The prose here is normative for **behaviour**. The envelope is also defined as JSON Schema at [`../../contracts/schemas/human-chat/`](../../contracts/schemas/human-chat/) — normative for **shape** (ADR-0049). That schema is deliberately OPEN: unknown fields are ignored for forward compatibility within v1, so closing it would break the property this version number exists to provide.
+
 The desktop and Android human clients need an interoperable text-message envelope while the generic transport remains payload-agnostic.
 
 ## Media type
