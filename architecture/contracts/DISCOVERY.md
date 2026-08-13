@@ -2,6 +2,8 @@
 
 Status: **architecture contract, v1 draft**.
 
+The prose here is normative for **behaviour**. The candidate and descriptor shapes are also defined as JSON Schema under [`schemas/discovery/`](./schemas/discovery/) — normative for **shape** (ADR-0049). The candidate schema is closed, which is what mechanically keeps EndpointIds, channels, roles, and presence out of discovery metadata.
+
 Discovery is advisory reachability information. It never grants trust, sends application messages, or owns connections. It discovers **network peers/reachability only**: `EndpointId` and the endpoint-directory protocol are explicitly outside `DiscoveryProvider` and must never become discovery candidate metadata.
 
 ## Conceptual interface

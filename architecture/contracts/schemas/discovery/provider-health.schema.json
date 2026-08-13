@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:discovery:provider-health",
+  "title": "Discovery provider health",
+  "description": "One provider's own health, not the transport's. A provider failure changes this and must not terminate unrelated providers — and the transport can be healthy with discovery degraded, because peers already connected do not need discovering. Aggregate health is DiscoveryManager's to compute.",
+  "enum": ["healthy", "degraded", "unavailable"],
+  "x-contract": {
+    "name": "discovery.provider-health",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": ["0006", "0007"],
+    "specification": "architecture/contracts/DISCOVERY.md"
+  }
+}
