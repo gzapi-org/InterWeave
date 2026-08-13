@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:endpoints:direct-destination",
+  "title": "Direct destination",
+  "description": "Where a directed message is addressed. An ABSENT endpoint means the receiver's configured default_direct_endpoint — it never means fan-out (ADR-0030). If no default exists, or the default has no active lease, the request receives the coarse no_route rejection. The source endpoint is NOT part of this shape: the runtime derives it from the sender's active lease, so a caller cannot spoof another local endpoint.",
+  "type": "object",
+  "required": ["peer"],
+  "additionalProperties": false,
+  "properties": {
+    "peer": { "$ref": "urn:interweave:schemas:common:peer-id" },
+    "endpoint": { "$ref": "urn:interweave:schemas:endpoints:endpoint-id" }
+  },
+  "x-contract": {
+    "name": "endpoints.direct-destination",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": ["0030", "0005"],
+    "specification": "architecture/contracts/ENDPOINTS.md",
+    "wire-protocol": "/interweave/direct/2.0.0"
+  }
+}

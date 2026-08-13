@@ -1,0 +1,69 @@
+# Pin text/EOL behavior so the index stays canonical across machines.
+#
+# Without this file, git inherits each developer's local `core.autocrlf`
+# default. A worktree extracted on a machine whose default differs from
+# the committer's appears "massively dirty" on first checkout — every
+# text file flags as modified solely because of CRLF<->LF drift. Pinning
+# behavior here removes that ambiguity, and it matters more than usual in
+# this repository: frozen fixtures under `fixtures/` are byte-compared,
+# so any EOL renormalisation is a protocol change, not a whitespace one.
+
+# Default: treat every file as text, normalise EOL to LF on commit,
+# check out as LF on every platform. Linux is the primary host; this
+# matches the existing index.
+* text=auto eol=lf
+
+# -- Frozen normative fixtures -------------------------------------------
+# Deterministic wire vectors are compared byte for byte. Never let git
+# rewrite their line endings on any platform.
+fixtures/** -text
+
+# -- Binary asset classes — opt out of text handling entirely ------------
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.webp binary
+*.ico  binary
+*.pdf  binary
+*.zip  binary
+*.gz   binary
+*.tgz  binary
+*.7z   binary
+
+# Fonts
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.otf   binary
+*.eot   binary
+
+# Media
+*.mp4  binary
+*.mov  binary
+*.webm binary
+*.mp3  binary
+*.wav  binary
+*.ogg  binary
+
+# Android / JNI build products that may legitimately be checked in as
+# test material rather than build output.
+*.apk binary
+*.aab binary
+*.so  binary
+*.jks      binary
+*.keystore binary
+
+# Key-container formats. Production material never lands here (see
+# CLAUDE.md §6); labelled test-only vectors under fixtures/ do.
+*.p12 binary
+*.pfx binary
+
+# -- Platform-specific text files that MUST keep CRLF --------------------
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# -- Lockfiles — explicit text so they don't slip through binary ---------
+Cargo.lock text
+*.lock     text

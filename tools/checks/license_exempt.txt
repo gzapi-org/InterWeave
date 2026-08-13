@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# Files exempt from tools/checks/check_license_headers.sh.
+#
+# An entry silences BOTH the missing-header check and the foreign-terms
+# check for that path, so each line must name the material's actual
+# licence and where it came from. A path with no provenance comment is
+# not an exemption, it is an unreviewed import.
+#
+# Format: one repository-relative path per line. `#` starts a comment.
+#
+# (empty — no third-party material is vendored into this repository yet)

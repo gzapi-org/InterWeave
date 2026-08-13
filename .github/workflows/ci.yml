@@ -1,0 +1,102 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# Everything in tools/ runs here, because a check that runs only when
+# someone remembers is not a check. Ten self-test suites and five tree
+# checks existed for a while with nothing invoking them.
+#
+# TWO THINGS ABOUT THIS FILE ARE LOAD-BEARING AND EASY TO BREAK:
+#
+#   1. `merge_group` is NOT optional. `main` is behind a merge queue, and
+#      the queue builds its own ref — a workflow that triggers only on
+#      `pull_request` never reports for that build, so every required
+#      check sits "expected" and the queue waits forever. That is the
+#      exact stall wait-merged.sh exit 6 was written to name.
+#
+#   2. A job's `name:` IS its required-check context. Renaming a job
+#      silently un-gates `main`: the ruleset keeps requiring a context
+#      that no longer exists, and nothing reports it, so the queue hangs
+#      the same way. Rename a job only together with the ruleset
+#      (CLAUDE.md §9).
+#
+# Deliberately NOT conditional-per-surface. The whole run is ~2 minutes
+# wall clock (checks 4s, suites 1m45s, in parallel), so a `changes` job
+# and per-surface `run` inputs would add machinery that costs more to
+# understand than the runners it saves.
+
+name: CI
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  # One run per ref. A superseded push has nothing to say, but never
+  # cancel a merge-queue build: the queue is waiting on its result.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  tree-checks:
+    name: tree checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # check_license_headers.sh and validate_adr_index.sh read the
+          # working tree, not history — but scan_semantic_collisions.sh
+          # is about what a merge produced, so the merge commit the queue
+          # builds must be the tree under test. Default depth is enough
+          # for that; full history is not needed.
+          fetch-depth: 1
+
+      - name: Install validator dependencies
+        run: python3 -m pip install --quiet jsonschema
+
+      - name: ADR index, template, and amendment record
+        run: bash tools/checks/validate_adr_index.sh
+
+      - name: Semantic collisions between parallel branches
+        run: bash tools/checks/scan_semantic_collisions.sh
+
+      - name: Licence headers and foreign licence terms
+        run: bash tools/checks/check_license_headers.sh
+
+      - name: Wire contracts — schema, manifest, provenance
+        run: python3 tools/checks/validate_contracts.py
+
+      - name: Frozen fixture vectors recompute
+        run: python3 tools/checks/verify_fixture_vectors.py
+
+      - name: Every guard is reachable from a workflow
+        run: bash tools/checks/check_guards_are_wired.sh
+
+  tool-suites:
+    name: tool self-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The suites mock `gh` and `curl` on PATH, so no token and no
+      # network are used. They do need jq and coreutils `timeout`, both
+      # present on ubuntu-latest.
+      - name: Run every self-test beside its script
+        run: |
+          set -uo pipefail
+          failed=0
+          for t in tools/gh/test_*.sh tools/checks/test_*.sh; do
+            printf '::group::%s\n' "$t"
+            if bash "$t"; then
+              printf '::endgroup::\n'
+            else
+              printf '::endgroup::\n'
+              printf '::error file=%s::%s failed\n' "$t" "$t"
+              failed=1
+            fi
+          done
+          exit "$failed"

@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# Guards exempt from the self-test requirement in
+# tools/checks/check_guards_are_wired.sh. One path per line, `#` comments.
+#
+# An entry is a claim that the guard cannot meaningfully be self-tested,
+# not that writing one was inconvenient.
+#
+# (empty — every guard here has a self-test)

@@ -51,3 +51,11 @@ All ADRs are **Accepted** architecture decisions unless later superseded.
 | [0045](./0045-implementation-repository-layout.md) | Separate specifications under `architecture/`, thin applications under `apps/`, reusable crates under grouped `crates/`, and place tests/fixtures/spikes by proof scope. |
 | [0046](./0046-bottom-up-implementation-order.md) | Implement bottom-up through dependency gates: contracts/state/persistence before networking, root dial admission before autonomous libp2p behaviours, then runtime/clients/platforms. |
 | [0047](./0047-interweave-project-and-wire-namespace.md) | Adopt InterWeave as the canonical project and machine namespace; replace the pre-implementation working identifiers and re-freeze affected hash vectors. |
+| [0048](./0048-adr-authoring-and-propagation.md) | ADR bodies read current and are edited in place with git as the only change record; re-decisions supersede; index and digest propagate in the same commit series. |
+| [0049](./0049-machine-readable-wire-contracts.md) | Define wire shapes as JSON Schema beside the prose contracts, with a URN identity, family manifests, lifecycle status, mandatory provenance, and recomputed frozen vectors. |
+
+## Navigating this set
+
+Start at [`ADR-DIGEST.md`](./ADR-DIGEST.md) — one current-state entry per ADR plus a keyword → ADR lookup table. It is the cheapest correct entry point; open a full ADR when your change touches its substance. The digest is non-normative: on any discrepancy the ADR wins.
+
+Amendment notes live in [`history/`](./history/). ADR bodies read **current** — every amendment is folded into the section it qualifies — so history is for research, never for reconstructing what a decision says today. The authoring model, the amendment record, and the propagation checklist are [ADR-0048](./0048-adr-authoring-and-propagation.md); the section structure every ADR follows is [`ADR-TEMPLATE.md`](./ADR-TEMPLATE.md).

@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:endpoints:message-received",
+  "title": "Direct MessageReceived event",
+  "description": "The normalized event delivered to exactly one local data-plane session after the receiver resolved a single endpoint. destination_endpoint is NEVER absent — resolution happened before acceptance. Broadcast events deliberately carry no endpoint routing metadata (ADR-0030), so two endpoints under one PeerId are indistinguishable as transport-level broadcast originators.",
+  "type": "object",
+  "required": [
+    "message_id",
+    "mode",
+    "source_peer",
+    "source_endpoint",
+    "destination_endpoint",
+    "payload",
+    "received_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "message_id": {
+      "$ref": "urn:interweave:schemas:common:message-id"
+    },
+    "mode": {
+      "const": "direct"
+    },
+    "source_peer": {
+      "$ref": "urn:interweave:schemas:common:peer-id"
+    },
+    "source_endpoint": {
+      "$ref": "urn:interweave:schemas:endpoints:endpoint-id",
+      "description": "Peer-asserted. Proves only that the authenticated PeerId claimed this route label."
+    },
+    "destination_endpoint": {
+      "$ref": "urn:interweave:schemas:endpoints:endpoint-id",
+      "description": "The resolved local endpoint that accepted the message. Never absent."
+    },
+    "payload": {
+      "type": "object",
+      "required": [
+        "bytes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "media_type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[\\x20-\\x7E]+$",
+          "description": "1..128 ASCII bytes when present. Empty is INVALID rather than an alias for absence — the content fingerprint distinguishes the two cases."
+        },
+        "bytes": {
+          "type": "string",
+          "contentEncoding": "base64url",
+          "pattern": "^([A-Za-z0-9_-]{4})*([A-Za-z0-9_-]{2,3})?$",
+          "maxLength": 65536,
+          "description": "Application payload, unpadded base64url over IPC. `contentEncoding` is an ANNOTATION in Draft 2020-12 and constrains nothing on its own, so both the size and the syntax are asserted here. maxLength 65536 encoded characters is the 48 KiB (49,152-byte) decoded ceiling of ADR-0026. The pattern enforces the alphabet AND the legal terminal lengths: unpadded base64url can never have a length congruent to 1 modulo 4, so a value like \"A\" is malformed and every standard decoder rejects it — accepting it here would only defer the failure to decode time, past the point where the bound was supposed to hold. Residual: the final character's unused low bits are not constrained, which a decoder may accept or normalise; length class is what a schema can express."
+        }
+      }
+    },
+    "received_at": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Local receipt time in milliseconds. Excluded from the content fingerprint."
+    }
+  },
+  "x-contract": {
+    "name": "endpoints.message-received",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": [
+      "0030",
+      "0018",
+      "0026"
+    ],
+    "specification": "architecture/contracts/ENDPOINTS.md",
+    "wire-protocol": "/interweave/direct/2.0.0",
+    "fixtures": [
+      "fixtures/direct-v2/direct-content-fingerprint-v1.json"
+    ]
+  }
+}

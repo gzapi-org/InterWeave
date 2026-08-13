@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:endpoints:directory-response",
+  "title": "Endpoint directory response",
+  "description": "The reply to a trust-gated endpoint-directory query. It lists ONLY endpoints that are simultaneously enabled, actively leased, advertise:true, and admissible for the querying peer. Endpoint identifiers only — no display name, avatar, role, prompt, client kind, payload schema, or permission claim (ADR-0031). Results are advisory and short-lived; a caller may send to an out-of-band EndpointId without querying first.",
+  "type": "object",
+  "required": [
+    "endpoints",
+    "ttl_ms",
+    "generated_at_ms"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "endpoints": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "urn:interweave:schemas:endpoints:endpoint-id"
+      },
+      "description": "At most 32. More than 32 entries, invalid grammar, or duplicates are ProtocolViolation on receipt. A valid but unsorted unique list is sorted locally rather than rejected."
+    },
+    "ttl_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295,
+      "description": "The full wire u32 range is VALID here on purpose. ENDPOINTS.md clamps the effective TTL to min(remote_ttl, local_cache_ttl, 300000) after receipt, and lists only entry count, EndpointId grammar, and duplicates as protocol violations — so an oversized TTL is a tolerated hostile value to be clamped, not a reason to reject the whole response. Asserting the 5-minute ceiling here would turn that into an interoperability failure. Freshness starts at LOCAL RECEIPT, never at generated_at_ms."
+    },
+    "generated_at_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Diagnostic only. Never used for freshness — it is remote-controlled. Bounded by the wire u64 width from `architecture/transport/libp2p/ENDPOINTS.md` so a generated implementation cannot admit an instance that will not encode.",
+      "maximum": 18446744073709551615
+    }
+  },
+  "x-contract": {
+    "name": "endpoints.directory-response",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": [
+      "0031"
+    ],
+    "specification": "architecture/contracts/ENDPOINTS.md",
+    "wire-protocol": "/interweave/endpoints/1.0.0"
+  }
+}

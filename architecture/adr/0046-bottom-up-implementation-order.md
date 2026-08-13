@@ -1,6 +1,6 @@
 # Bottom-up dependency-gated implementation order
 
-**Status:** Accepted.
+**Status:** Accepted
 
 ## Context
 

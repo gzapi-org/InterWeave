@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:_meta:contract-meta",
+  "title": "InterWeave contract meta-schema",
+  "description": "The schema every InterWeave wire contract is validated against. It constrains the envelope — identity, provenance, and lifecycle status — not the wire shape itself. A contract that does not name the ADR and prose specification it derives from is unreviewable, so both are required.",
+
+  "type": "object",
+  "required": ["$schema", "$id", "title", "x-contract"],
+
+  "properties": {
+    "$schema": {
+      "const": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One dialect across the corpus. A mixed-dialect set silently changes validation semantics between files."
+    },
+    "$id": {
+      "type": "string",
+      "pattern": "^urn:interweave:schemas:[a-z][a-z0-9-]*:[a-z][a-z0-9-]*$",
+      "description": "urn:interweave:schemas:<family>:<concept>. Checked against the file's own path by the validator."
+    },
+    "title": { "type": "string", "minLength": 1 },
+    "description": { "type": "string", "minLength": 1 },
+
+    "x-contract": {
+      "type": "object",
+      "required": ["name", "status", "version", "adr", "specification"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*\\.[a-z][a-z0-9-]*$",
+          "description": "<family>.<concept>, the dotted form of $id."
+        },
+        "status": {
+          "enum": ["proposed", "approved", "active", "deprecated"],
+          "description": "What this contract is authoritative ABOUT. `active`/`deprecated` describe the CURRENT wire. `approved` is an authoritative implementation TARGET and is never a claim that anything implements it. `proposed` is a review artifact and MUST NOT drive implementation. Every contract in this repository is `approved` until an implementation exists."
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+          "description": "Contract version, independent of the wire protocol version it describes."
+        },
+        "adr": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "pattern": "^[0-9]{4}$" },
+          "description": "The ADR(s) that decided this shape. Existence is checked against architecture/adr/."
+        },
+        "specification": {
+          "type": "string",
+          "pattern": "^architecture/(contracts|transport|discovery|clients)/.+\\.md$",
+          "description": "The prose contract this schema formalises. Existence is checked. The prose remains normative for behaviour; the schema is normative for shape."
+        },
+        "wire-protocol": {
+          "type": "string",
+          "description": "The libp2p protocol identifier this shape travels on, where one applies."
+        },
+        "fixtures": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^fixtures/.+\\.json$" },
+          "description": "Frozen vector files exercising this contract. Existence is checked; the vectors themselves are recomputed by verify_fixture_vectors.py."
+        }
+      }
+    }
+  }
+}

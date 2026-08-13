@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:common:peer-id",
+  "title": "Transport PeerId",
+  "description": "A libp2p PeerId in its canonical string form. One profile owns exactly one persistent PeerId (ADR-0030); it is the only cryptographic identity in the transport. EndpointId is a routing selector beneath it and is never an identity.",
+  "type": "string",
+  "pattern": "^(12D3KooW[1-9A-HJ-NP-Za-km-z]{44}|Qm[1-9A-HJ-NP-Za-km-z]{44})$",
+  "examples": ["12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN"],
+  "x-contract": {
+    "name": "common.peer-id",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": ["0030", "0013"],
+    "specification": "architecture/contracts/TRANSPORT.md"
+  }
+}
