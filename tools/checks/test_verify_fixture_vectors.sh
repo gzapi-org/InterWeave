@@ -136,6 +136,26 @@ printf 'media_type = "text/plain"\npayload    = UTF8("hello")\nSHA-256    = %s\n
     > "$R/architecture/contracts/SPEC.md"
 [ "$(run_code "$R")" = "0" ] && ok "a correct prose copy passes" || bad "correct prose copy should pass: $(run "$R")"
 
+# ── quoting ANOTHER vector's hash beside these inputs is still wrong ─────
+# Hashes are input-specific, so "is this value somewhere in the fixture"
+# is not the question — a membership test passes a prose copy that quoted
+# the absent-media edge vector beside the golden's own inputs.
+R="$TMP/prose-wrong-vector"; make_fixture "$R" "$GOLDEN"
+python3 - "$R/fixtures/direct-v2/f.json" <<'PY'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p))
+d['vectors'].append({"name":"absent-media","media_type":None,
+                     "payload_hex":"68656c6c6f",
+                     "sha256":"d75d8054e7c0af3c45744e92a0794fa4b18335adf0267965931064c0636bdb86"})
+json.dump(d, open(p,'w'))
+PY
+mkdir -p "$R/architecture/contracts"
+printf 'media_type = "text/plain"\npayload    = UTF8("hello")\nSHA-256    = %s\n' \
+    "d75d8054e7c0af3c45744e92a0794fa4b18335adf0267965931064c0636bdb86" \
+    > "$R/architecture/contracts/SPEC.md"
+[ "$(run_code "$R")" = "1" ] && ok "a neighbouring vector's hash quoted for this golden is caught" \
+    || bad "membership in the file must not be sufficient"
+
 # ── an unrelated hash near OTHER inputs is not attributed ────────────────
 # One document can list several frozen goldens — ADR-0047 lists four — so
 # attribution is by proximity to a vector's own inputs, not by "this file

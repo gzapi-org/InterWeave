@@ -195,11 +195,16 @@ def check_prose_copies(root: pathlib.Path, fixture_rel: pathlib.Path, doc: dict)
                 if media and media not in window:
                     continue
                 for h in found:
-                    if h not in known:
+                    # Compared against THIS golden's hash, not merely
+                    # membership in the file. Hashes are input-specific,
+                    # so prose that quotes a neighbouring edge vector's
+                    # value beside these inputs is wrong in the way that
+                    # matters — and a membership test would pass it.
+                    if h != g["sha256"]:
                         report(
                             f"{rel}:{i + 1}: quotes SHA-256 {h} for the "
-                            f"{g['name']} inputs, which is not any value in "
-                            f"{fixture_rel} — a re-frozen vector left this copy stale"
+                            f"{g['name']} inputs, which should be "
+                            f"{g['sha256']} per {fixture_rel}"
                         )
     return scanned
 
