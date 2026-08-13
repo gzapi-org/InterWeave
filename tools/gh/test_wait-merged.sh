@@ -80,7 +80,11 @@ if [[ "${1:-}" == "api" ]]; then
     # passes `-q` and real gh applies the filter, so the mock returns
     # what that filter would have produced — the count of required
     # contexts on the base branch.
-    *rules/branches*)   cat "$GH_MOCK_STATE/required_checks" 2>/dev/null || echo 1; exit 0 ;;
+    *rules/branches*)
+      printf '%s\t%s\n' \
+        "$(cat "$GH_MOCK_STATE/required_checks" 2>/dev/null || echo 1)" \
+        "$(cat "$GH_MOCK_STATE/required_other"  2>/dev/null || echo 0)"
+      exit 0 ;;
     # Serves the real JSON shape now, not a pre-reduced number: the
     # script reads netAmount AND minute quantity from one response, so a
     # mock that answers with a bare figure could not exercise the
@@ -167,6 +171,7 @@ states() { printf '%s\n' "$@" > "$SANDBOX/state/states"; : > "$SANDBOX/state/cal
            printf 'operational\n' > "$SANDBOX/state/actions_status"
            printf '1\n' > "$SANDBOX/state/runs_count"
            printf '1\n' > "$SANDBOX/state/required_checks"
+           printf '0\n' > "$SANDBOX/state/required_other"
            printf '0\n' > "$SANDBOX/state/billing_net"
            printf '0\n' > "$SANDBOX/state/billing_mins"
            unset INTERWEAVE_ACTIONS_INCLUDED_MINUTES; }
@@ -174,6 +179,8 @@ no_checks()       { : > "$SANDBOX/state/checks_empty"; }
 actions_status()  { printf '%s\n' "$1" > "$SANDBOX/state/actions_status"; }
 runs_count()      { printf '%s\n' "$1" > "$SANDBOX/state/runs_count"; }
 required_checks() { printf '%s\n' "$1" > "$SANDBOX/state/required_checks"; }
+# Required contexts reported by something OTHER than Actions.
+required_other()  { printf '%s\n' "$1" > "$SANDBOX/state/required_other"; }
 billing_net()     { printf '%s\n' "$1" > "$SANDBOX/state/billing_net"; }
 billing_mins()    { printf '%s\n' "$1" > "$SANDBOX/state/billing_mins"; }
 arming() { printf '%s\n' "$1" > "$SANDBOX/state/arming"; }
@@ -581,6 +588,22 @@ assert_contains "names the required check"     "REQUIRED"
 assert_contains "names the webhook cause"      "webhook"
 assert_contains "and the filter cause"         "branch/path filter"
 assert_contains "still says to re-arm"         "RE-ARM"
+
+echo "wait-merged: a non-Actions required check makes the diagnosis decline"
+# The missing-run probe reads the ACTIONS runs API, so it can only prove
+# "nothing will report" for checks Actions reports. A required context
+# from an external CI is legitimately pending while Actions shows no run,
+# and exit 6 there would be a false alarm about a PR that is merely
+# waiting on a different reporter. Declining costs exit 4 — the honest
+# "nobody knows" — where guessing costs a wrong exit 6.
+states "OPEN:BLOCKED"
+no_checks
+runs_count 0
+required_checks 2
+required_other 1
+invoke 431 --interval 1 --timeout 3
+assert_rc       "exits 4, not 6"              4
+assert_lacks    "makes no missing-run claim"  "no workflow run exists"
 
 echo "wait-merged: a merge on the empty-checks poll still reports MERGED"
 # A PR can merge on the very poll where checks still read empty. The

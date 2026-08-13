@@ -58,14 +58,20 @@
 #      Actions allowance is spent. Distinguished from 4 because 4 means
 #      "nobody knows" and 6 names the cause.
 #
-#      The missing-run case is deliberately scoped to REQUIRED checks. A
-#      head SHA with no run is only a stall if something was waiting on
-#      it: with no required check on the base branch it merges fine, and
-#      claiming otherwise would be a false alarm about a PR that is not
-#      stuck. With one required and nothing reporting, the PR cannot ever
-#      merge — and whether a lost webhook or a branch/path filter caused
-#      it does not change that, because a required check a filter skips
-#      waits forever.
+#      The missing-run case is deliberately scoped to REQUIRED checks
+#      that GITHUB ACTIONS reports. A head SHA with no run is only a
+#      stall if something was waiting on it: with no required check on
+#      the base branch it merges fine, and claiming otherwise would be a
+#      false alarm about a PR that is not stuck. With one required and
+#      nothing reporting, the PR cannot ever merge — and whether a lost
+#      webhook or a branch/path filter caused it does not change that,
+#      because a required check a filter skips waits forever.
+#
+#      If any required context comes from a NON-Actions reporter — an
+#      external CI, a third-party check app — this declines and lets the
+#      watch expire at 4 instead. The probe reads the Actions runs API,
+#      so it cannot prove that reporter will not report; 4 says "nobody
+#      knows", which is honest, where a wrong 6 would be acted on.
 # <<< help
 
 set -uo pipefail
@@ -212,14 +218,39 @@ actions_degraded() {
 # check is required, neither cause blocks anything. The verdict no longer
 # has to distinguish them, because the distinction never changed what the
 # caller should do — only the wording.
+#
+# The missing-run probe reads the ACTIONS runs API, so it can only prove
+# "nothing will report" for checks Actions itself reports. A required
+# context supplied by anything else — an external CI posting a commit
+# status, a third-party check app — is legitimately pending while Actions
+# shows no run, and diagnosing a stall there would be a false alarm about
+# a PR that is merely waiting on a different reporter.
+#
+# So this counts only required contexts attributed to the Actions app,
+# and a required context from any other integration makes it decline.
+# Declining costs an exit 4 — "nobody knows", the honest answer — where
+# guessing costs a wrong exit 6, and the whole point of 6 is that it is
+# trustworthy enough to act on without checking.
+readonly GITHUB_ACTIONS_INTEGRATION_ID=15368
+
 required_checks_configured() {
-    local base n
+    local base counts actions_n other_n
     base="$(gh pr view "$PR" --json baseRefName -q .baseRefName 2>/dev/null)" || return 1
     [[ -n "$base" ]] || return 1
-    n="$(gh api "repos/{owner}/{repo}/rules/branches/$base"         -q '[.[] | select(.type == "required_status_checks")
-             | .parameters.required_status_checks[]?.context] | length' 2>/dev/null)" || return 1
-    [[ "$n" =~ ^[0-9]+$ ]] || return 1
-    (( n > 0 ))
+
+    # Two numbers from one call: required contexts Actions reports, and
+    # required contexts something else reports.
+    counts="$(gh api "repos/{owner}/{repo}/rules/branches/$base"         -q "[.[] | select(.type == \"required_status_checks\")
+              | .parameters.required_status_checks[]?] as \$c
+             | [(\$c | map(select(.integration_id == $GITHUB_ACTIONS_INTEGRATION_ID)) | length),
+                (\$c | map(select(.integration_id != $GITHUB_ACTIONS_INTEGRATION_ID)) | length)]
+             | @tsv" 2>/dev/null)" || return 1
+
+    IFS=$'\t' read -r actions_n other_n <<<"$counts"
+    [[ "$actions_n" =~ ^[0-9]+$ && "$other_n" =~ ^[0-9]+$ ]] || return 1
+
+    (( other_n == 0 )) || return 1
+    (( actions_n > 0 ))
 }
 
 head_sha_has_no_run() {
