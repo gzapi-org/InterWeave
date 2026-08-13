@@ -54,12 +54,18 @@
 #      conflicts with its base. BLOCKED with checks merely PENDING is the
 #      normal path and keeps waiting.
 #   6  stalled for a reason OUTSIDE the PR — GitHub Actions is degraded,
-#      the head commit has no workflow run at all, or the included Actions
-#      allowance is spent. Distinguished from 4 because 4 means "nobody
-#      knows" and 6 names the cause. "No run at all" is reported without
-#      asserting WHY: a lost push webhook and a branch/path filter that
-#      skipped every workflow look identical from here, and telling them
-#      apart needs the filters evaluated against the changed paths.
+#      a REQUIRED check has no workflow run to report it, or the included
+#      Actions allowance is spent. Distinguished from 4 because 4 means
+#      "nobody knows" and 6 names the cause.
+#
+#      The missing-run case is deliberately scoped to REQUIRED checks. A
+#      head SHA with no run is only a stall if something was waiting on
+#      it: with no required check on the base branch it merges fine, and
+#      claiming otherwise would be a false alarm about a PR that is not
+#      stuck. With one required and nothing reporting, the PR cannot ever
+#      merge — and whether a lost webhook or a branch/path filter caused
+#      it does not change that, because a required check a filter skips
+#      waits forever.
 # <<< help
 
 set -uo pipefail
@@ -188,39 +194,42 @@ actions_degraded() {
 # PR whose head SHA nothing ever built, and it will never resolve on its
 # own — the fix is to re-trigger, and (per CLAUDE.md) to RE-ARM after,
 # because close/reopen silently drops auto-merge.
+# Does a missing run actually BLOCK this PR? That is a branch-protection
+# question, not a repository one, and it is the question the two probes
+# that used to live here were failing to approximate.
+#
+# A run that never happened matters only if some check is REQUIRED on the
+# base branch. With none configured, a head SHA with no run merges
+# perfectly well — this repository is exactly that case today — and exit
+# 6 would be a false alarm about a PR that is not stuck at all.
+#
+# It also dissolves the branch/path-filter ambiguity that stayed open
+# through two review rounds. A required check that a filter skips is not
+# a benign skip: GitHub leaves it "expected, waiting for status" forever
+# and the merge queue hangs on it identically. So when a check is
+# required and nothing reported, the PR is genuinely stuck whichever
+# cause produced it, and both causes need a human either way. When no
+# check is required, neither cause blocks anything. The verdict no longer
+# has to distinguish them, because the distinction never changed what the
+# caller should do — only the wording.
+required_checks_configured() {
+    local base n
+    base="$(gh pr view "$PR" --json baseRefName -q .baseRefName 2>/dev/null)" || return 1
+    [[ -n "$base" ]] || return 1
+    n="$(gh api "repos/{owner}/{repo}/rules/branches/$base"         -q '[.[] | select(.type == "required_status_checks")
+             | .parameters.required_status_checks[]?.context] | length' 2>/dev/null)" || return 1
+    [[ "$n" =~ ^[0-9]+$ ]] || return 1
+    (( n > 0 ))
+}
+
 head_sha_has_no_run() {
-    local sha runs workflows any_runs
+    local sha runs
     sha="$(gh pr view "$PR" --json headRefOid -q .headRefOid 2>/dev/null)" || return 1
     [[ -n "$sha" ]] || return 1
 
-    # ZERO RUNS ONLY MEANS A LOST WEBHOOK IF A RUN WAS EVER EXPECTED.
-    # Two things must hold before that inference is worth making, and
-    # NEITHER is proof — see the residual below.
-    #
-    # 1. The repository has workflow files at all. One with none produces
-    #    no runs by design; this repository has none today, and CLAUDE.md
-    #    says so. Without this, every watch here ends at exit 6 with
-    #    re-trigger instructions for a run that was never coming.
-    # 2. The repository has actually produced a run at some point. A tree
-    #    whose workflows have never fired is indistinguishable from one
-    #    with no CI, and is likelier to be misconfigured than webhooked.
-    #
-    # RESIDUAL, stated because it cannot be closed here: neither test
-    # proves a workflow applies to THIS push. A branch- or path-filtered
-    # workflow legitimately skips a commit, leaving workflows > 0, runs
-    # elsewhere > 0, and zero runs for this head — the same signature as
-    # a lost webhook. Deciding between them needs the filter expressions
-    # evaluated against the changed paths, which is a real matcher, not a
-    # shell probe. The verdict text therefore names both causes rather
-    # than asserting the webhook.
-    workflows="$(gh api "repos/{owner}/{repo}/actions/workflows?per_page=1"         -q '.total_count' 2>/dev/null)" || return 1
-    [[ "$workflows" =~ ^[0-9]+$ ]] || return 1
-    (( workflows > 0 )) || return 1
-
-    any_runs="$(gh api "repos/{owner}/{repo}/actions/runs?per_page=1"         -q '.total_count' 2>/dev/null)" || return 1
-    [[ "$any_runs" =~ ^[0-9]+$ ]] || return 1
-    (( any_runs > 0 )) || return 1
-
+    # Whether a run was EXPECTED is answered by required_checks_configured
+    # above, which the caller consults first. This function answers only
+    # the narrow factual half: does this head SHA have a run.
     runs="$(gh api "repos/{owner}/{repo}/actions/runs?head_sha=$sha&per_page=1"         -q '.total_count' 2>/dev/null)" || return 1
     [[ "$runs" == "0" ]]
 }
@@ -278,8 +287,10 @@ diagnose_stall() {
     if st="$(actions_degraded)"; then
         verdict 6 "STALLED — GitHub Actions is $st (githubstatus.com); the PR is fine, the platform is not"
     fi
-    if [[ "$no_checks" == "1" ]] && head_sha_has_no_run; then
-        verdict 6 "STALLED — no workflow run exists for this PR's head commit. Either the push webhook was lost, or a branch/path filter skipped every workflow for this commit. Check which before re-triggering; if you re-trigger, RE-ARM auto-merge afterwards"
+    # Ordered deliberately: "is anything required" is cheap and decides
+    # whether the run question is worth asking at all.
+    if [[ "$no_checks" == "1" ]] && required_checks_configured && head_sha_has_no_run; then
+        verdict 6 "STALLED — a status check is REQUIRED on this PR's base branch and no workflow run exists for its head commit, so nothing can ever report and the PR cannot merge. Either the push webhook was lost, or a branch/path filter excluded the required workflow from this commit — a required check that a filter skips waits forever. Re-trigger, or fix the filter; if you re-trigger, RE-ARM auto-merge afterwards"
     fi
     if actions_allowance_spent; then
         verdict 6 "STALLED — the included Actions allowance is spent; green code will not merge until it resets"

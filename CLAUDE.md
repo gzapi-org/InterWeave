@@ -368,7 +368,7 @@ Never post a reply body through `gh api -f body="…"`: replies quote code, and 
 | 0 | MERGED — safe to return to `main` |
 | 3 | CLOSED without merging — do NOT return to `main` |
 | 5 | BLOCKED — a required check already failed, or the base conflicts |
-| 6 | STALLED outside the PR — Actions degraded, or the head commit has no run at all (a lost webhook, or a filter that skipped it) |
+| 6 | STALLED outside the PR — Actions degraded, or a REQUIRED check has no run to report it (lost webhook, or a filter excluding it) |
 | 4 | watch expired, state genuinely unknown |
 | 2 | usage error, or the PR could not be read repeatedly |
 

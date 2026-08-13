@@ -70,13 +70,17 @@ if [[ "${1:-}" == "api" ]]; then
     # Repo-WIDE runs (no head_sha filter): has CI ever fired here at
     # all? Defaults to 1 so every pre-existing case describes a live
     # repository. Must be tested before the head-scoped branch below.
-    *actions/runs*head_sha*) cat "$GH_MOCK_STATE/runs_count" 2>/dev/null || echo 1; exit 0 ;;
-    *actions/runs*)          cat "$GH_MOCK_STATE/any_runs_count" 2>/dev/null || echo 1; exit 0 ;;
-    # How many workflow FILES the repo has. Zero runs only means a lost
-    # webhook if a run was ever expected, so the missing-run probe asks
-    # this first. Defaults to 1 so every pre-existing case still
-    # describes a repository that has CI.
-    *actions/workflows*) cat "$GH_MOCK_STATE/workflows_count" 2>/dev/null || echo 1; exit 0 ;;
+    *actions/runs*)          cat "$GH_MOCK_STATE/runs_count" 2>/dev/null || echo 1; exit 0 ;;
+    # Effective branch rules. The missing-run diagnosis asks whether any
+    # check is REQUIRED on the base branch, because that is what decides
+    # whether an absent run blocks anything. Defaults to one required
+    # context so every pre-existing case still describes a protected
+    # branch that is waiting on CI.
+    # Answered pre-reduced, as every other endpoint here is: the script
+    # passes `-q` and real gh applies the filter, so the mock returns
+    # what that filter would have produced — the count of required
+    # contexts on the base branch.
+    *rules/branches*)   cat "$GH_MOCK_STATE/required_checks" 2>/dev/null || echo 1; exit 0 ;;
     # Serves the real JSON shape now, not a pre-reduced number: the
     # script reads netAmount AND minute quantity from one response, so a
     # mock that answers with a bare figure could not exercise the
@@ -97,6 +101,11 @@ fi
 # The missing-run probe asks for the head SHA.
 if [[ "${2:-}" == "view" && "$*" == *headRefOid* ]]; then
   echo "deadbeefcafe"
+  exit 0
+fi
+# ...and for the base branch, to look up its required checks.
+if [[ "${2:-}" == "view" && "$*" == *baseRefName* ]]; then
+  echo "main"
   exit 0
 fi
 if [[ "${2:-}" == "checks" ]]; then
@@ -157,16 +166,14 @@ states() { printf '%s\n' "$@" > "$SANDBOX/state/states"; : > "$SANDBOX/state/cal
            rm -f "$SANDBOX/state/checks_empty"
            printf 'operational\n' > "$SANDBOX/state/actions_status"
            printf '1\n' > "$SANDBOX/state/runs_count"
-           printf '1\n' > "$SANDBOX/state/workflows_count"
-           printf '1\n' > "$SANDBOX/state/any_runs_count"
+           printf '1\n' > "$SANDBOX/state/required_checks"
            printf '0\n' > "$SANDBOX/state/billing_net"
            printf '0\n' > "$SANDBOX/state/billing_mins"
            unset INTERWEAVE_ACTIONS_INCLUDED_MINUTES; }
 no_checks()       { : > "$SANDBOX/state/checks_empty"; }
 actions_status()  { printf '%s\n' "$1" > "$SANDBOX/state/actions_status"; }
 runs_count()      { printf '%s\n' "$1" > "$SANDBOX/state/runs_count"; }
-workflows_count() { printf '%s\n' "$1" > "$SANDBOX/state/workflows_count"; }
-any_runs_count()  { printf '%s\n' "$1" > "$SANDBOX/state/any_runs_count"; }
+required_checks() { printf '%s\n' "$1" > "$SANDBOX/state/required_checks"; }
 billing_net()     { printf '%s\n' "$1" > "$SANDBOX/state/billing_net"; }
 billing_mins()    { printf '%s\n' "$1" > "$SANDBOX/state/billing_mins"; }
 arming() { printf '%s\n' "$1" > "$SANDBOX/state/arming"; }
@@ -546,43 +553,33 @@ invoke 431 --interval 1 --timeout 3
 assert_rc       "exits 4, not 6"            4
 assert_contains "no missing-run claim"      "watch expired"
 
-echo "wait-merged: a repo with NO workflows is not a lost webhook"
-# This repository has no workflow files today. Without the guard every
-# watch here reaches three empty polls, concludes the push webhook was
-# lost, and exits 6 with re-trigger instructions for a run that was
-# never coming — inverting the signal exit 6 exists to give.
+echo "wait-merged: no REQUIRED check means a missing run blocks nothing"
+# A head SHA with no run is only a stall if something was waiting on it.
+# With no required check on the base branch the PR merges fine — this
+# repository is exactly that case today — so claiming a stall would be a
+# false alarm about a PR that is not stuck.
 states "OPEN:BLOCKED"
 no_checks
 runs_count 0
-workflows_count 0
+required_checks 0
 invoke 431 --interval 1 --timeout 3
 assert_rc       "exits 4, not 6"              4
 assert_lacks    "makes no missing-run claim"  "no workflow run exists"
 
-echo "wait-merged: workflows that have NEVER run are not a lost webhook"
-# Workflow files can exist and never have fired — a tree whose CI was
-# added but never triggered is indistinguishable from one with no CI,
-# and is likelier misconfigured than webhooked.
+echo "wait-merged: a REQUIRED check with no run to report it is a genuine stall"
+# Nothing can ever report, so the PR cannot merge. That holds whether a
+# webhook was lost or a branch/path filter excluded the required
+# workflow — a required check a filter skips waits forever — which is
+# why the verdict names both causes and asserts neither.
 states "OPEN:BLOCKED"
 no_checks
 runs_count 0
-workflows_count 3
-any_runs_count 0
-invoke 431 --interval 1 --timeout 3
-assert_rc       "exits 4, not 6"              4
-assert_lacks    "makes no missing-run claim"  "no workflow run exists"
-
-echo "wait-merged: the missing-run verdict names the filter cause too"
-# Neither probe proves a workflow applies to THIS push, so the verdict
-# must not assert the webhook as the only explanation.
-states "OPEN:BLOCKED"
-no_checks
-runs_count 0
-workflows_count 2
-any_runs_count 9
+required_checks 3
 invoke 431 --interval 1 --timeout 6
-assert_rc       "still exits 6"                6
-assert_contains "names the filter possibility" "branch/path filter"
+assert_rc       "exits 6"                      6
+assert_contains "names the required check"     "REQUIRED"
+assert_contains "names the webhook cause"      "webhook"
+assert_contains "and the filter cause"         "branch/path filter"
 assert_contains "still says to re-arm"         "RE-ARM"
 
 echo "wait-merged: a merge on the empty-checks poll still reports MERGED"
