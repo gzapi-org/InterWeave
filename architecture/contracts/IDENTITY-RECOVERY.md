@@ -2,6 +2,8 @@
 
 Status: **architecture contract, v1 draft**.
 
+The prose here is normative for **behaviour**. The record's shape is also defined as JSON Schema under [`schemas/identity/`](./schemas/identity/), and the golden below is materialised and recomputed as [`fixtures/identity/ed25519-bip39-entropy-v1.json`](../../fixtures/identity/ed25519-bip39-entropy-v1.json) (ADR-0049).
+
 This contract defines optional human-recoverable backup for a software transport identity. It does not change peer trust, endpoint identity, message encryption, or application identity semantics.
 
 ## Scope and selected identity algorithm

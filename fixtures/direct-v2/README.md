@@ -2,6 +2,14 @@
 
 DirectMessageV2 framing and DirectContentFingerprintV1 vectors.
 
+## `direct-message-v2-frame.json`
+
+The request frame implementations must agree on byte for byte. Six vectors covering the cases a codec gets wrong: an explicit destination, `destination_endpoint_len = 0` for the receiver's default, `media_type_len = 0` for absence, an empty payload that still carries its `u32be` length, both endpoint labels at the 64-byte ceiling, and a pair differing only in `sent_at_ms` — the frames differ, the content fingerprint does not.
+
+These are **derived** from the layout in `architecture/transport/libp2p/DIRECT.md`, not published by any ADR, so the file is anchored by its `adr` list rather than a per-vector `frozen_by`.
+
+Writing them surfaced a gap: the frame's byte order was never stated. `DIRECT.md` now pins big-endian, which is the only choice consistent with the IPC length prefix and the content fingerprint — three places that would otherwise disagree about one repository's byte order.
+
 ## `direct-content-fingerprint-v1.json`
 
 The content fingerprint stored alongside a positive direct dedup entry (ADR-0019). It is what stops an admitted retry from being rerouted to a different local application, and what stops one idempotency key from silently aliasing two different message bodies — so implementations must agree on it byte for byte.

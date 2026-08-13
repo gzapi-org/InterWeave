@@ -96,8 +96,106 @@ def direct_content_fingerprint_v1(vector: dict) -> str:
     return hashlib.sha256(buf).hexdigest()
 
 
+def direct_message_v2_frame(vector: dict) -> str:
+    """Encode one DirectMessageV2 request frame, returning hex.
+
+    From architecture/transport/libp2p/DIRECT.md §Request. Multi-byte
+    integers are big-endian, which that document pins explicitly — it did
+    not until these vectors forced the question, and the answer had to
+    match the IPC length prefix and the content fingerprint or the three
+    would disagree about the same repository's byte order.
+    """
+    mid = bytes.fromhex(vector["message_id"])
+    if len(mid) != 16:
+        raise ValueError(f"message_id is {len(mid)} bytes; the frame carries exactly 16 (128 bits)")
+
+    out = mid + int(vector["sent_at_ms"]).to_bytes(8, "big")
+
+    src = vector["source_endpoint"].encode("ascii")
+    if not 1 <= len(src) <= 64:
+        raise ValueError("source_endpoint is 1..64 bytes and is always present")
+    out += bytes([len(src)]) + src
+
+    dst = vector.get("destination_endpoint")
+    dst_b = dst.encode("ascii") if dst is not None else b""
+    if len(dst_b) > 64:
+        raise ValueError("destination_endpoint exceeds 64 bytes")
+    out += bytes([len(dst_b)]) + dst_b
+
+    media = vector.get("media_type")
+    media_b = media.encode("ascii") if media is not None else b""
+    if media is not None and not 1 <= len(media_b) <= 128:
+        raise ValueError("a present media type is 1..128 bytes; empty is absence, not a value")
+    out += bytes([len(media_b)]) + media_b
+
+    payload = bytes.fromhex(vector.get("payload_hex", ""))
+    out += len(payload).to_bytes(4, "big") + payload
+    return out.hex()
+
+
+def _base58btc(data: bytes) -> str:
+    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    n = int.from_bytes(data, "big")
+    out = ""
+    while n:
+        n, r = divmod(n, 58)
+        out = alphabet[r] + out
+    # Every leading ZERO BYTE encodes as a leading '1'. The identity
+    # multihash prefix is 0x00, so dropping this loses the '1' that
+    # begins every Ed25519 PeerId — a mistake that produces a
+    # plausible-looking value, which is the dangerous kind.
+    return "1" * (len(data) - len(data.lstrip(b"\x00"))) + out
+
+
+def ed25519_bip39_entropy_v1(vector: dict) -> str:
+    """entropy -> Ed25519 public key -> libp2p PeerId.
+
+    From architecture/contracts/IDENTITY-RECOVERY.md. The entropy IS the
+    Ed25519 secret seed: no PBKDF2, no passphrase, no further KDF. That
+    is the single most important property to keep verified, because a
+    wallet-style derivation would also produce a valid-looking PeerId —
+    just not the right one, and not recoverable by anyone else.
+    """
+    try:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    except ImportError as e:  # pragma: no cover - environment problem, not drift
+        raise RuntimeError(f"python3 cryptography is required to verify this vector: {e}") from e
+
+    entropy = bytes.fromhex(vector["entropy_hex"])
+    if len(entropy) != 32:
+        raise ValueError(f"entropy is {len(entropy)} bytes; this format is exactly 32 (256 bits)")
+
+    # Word indexes are checked here too: entropy || 8-bit checksum, split
+    # into 24 eleven-bit indexes. Resolving them to words needs the
+    # 2048-word list, which is not vendored for one vector.
+    checksum = hashlib.sha256(entropy).digest()[0]
+    bits = "".join(f"{b:08b}" for b in entropy) + f"{checksum:08b}"
+    indexes = [int(bits[i * 11:(i + 1) * 11], 2) for i in range(24)]
+    stated = vector.get("word_indexes")
+    if stated is not None and stated != indexes:
+        raise ValueError(f"word indexes disagree: stored {stated[:3]}…{stated[-1]}, computed {indexes[:3]}…{indexes[-1]}")
+
+    public = Ed25519PrivateKey.from_private_bytes(entropy).public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+    stated_pub = vector.get("ed25519_public_key_hex")
+    if stated_pub is not None and stated_pub != public.hex():
+        raise ValueError(f"public key disagrees: stored {stated_pub}, computed {public.hex()}")
+
+    protobuf = bytes([0x08, 0x01, 0x12, len(public)]) + public
+    return _base58btc(bytes([0x00, len(protobuf)]) + protobuf)
+
+
+# id -> (function, the vector field holding the value it must reproduce).
+# The field is declared rather than guessed from the name: these
+# algorithms produce a digest, an encoding, and an identifier
+# respectively, and inferring that from a suffix was a hack waiting to
+# mislabel the fourth one.
 ALGORITHMS = {
-    "direct-content-fingerprint-v1": direct_content_fingerprint_v1,
+    "direct-content-fingerprint-v1": (direct_content_fingerprint_v1, "sha256"),
+    "direct-message-v2-frame": (direct_message_v2_frame, "frame_hex"),
+    "ed25519-bip39-entropy-v1": (ed25519_bip39_entropy_v1, "expected_peer_id"),
 }
 
 
@@ -248,18 +346,20 @@ def main(argv: list[str]) -> int:
             continue
 
         alg_id = doc.get("algorithm", {}).get("id")
-        fn = ALGORITHMS.get(alg_id)
-        if fn is None:
+        entry = ALGORITHMS.get(alg_id)
+        if entry is None:
             report(
                 f"{rel}: declares algorithm '{alg_id}', which this verifier cannot "
                 "compute — an unverifiable vector file is the failure, not a skip"
             )
             continue
 
+        fn, field = entry
+
         seen: dict[str, str] = {}
         for v in doc.get("vectors", []):
             name = v.get("name", "(unnamed)")
-            stored = v.get("sha256")
+            stored = v.get(field)
             try:
                 computed = fn(v)
             except Exception as e:  # noqa: BLE001 — the message is the report
@@ -280,8 +380,28 @@ def main(argv: list[str]) -> int:
             else:
                 seen[computed] = name
 
-        if not any(v.get("frozen_by") for v in doc.get("vectors", [])):
-            report(f"{rel}: no vector carries `frozen_by` — nothing anchors this file to an ADR")
+        # ANCHORING. Every vector file must trace to a decision, but the
+        # two ways that happens are different and both are legitimate:
+        #
+        #   per-vector `frozen_by` — this exact value was published by an
+        #     ADR and re-frozen there, so the ADR is the authority for the
+        #     number itself;
+        #   file-level `adr`       — the ALGORITHM was decided by these
+        #     ADRs and the vectors are derived from it, which is the
+        #     normal case for a layout with no published golden.
+        #
+        # Requiring `frozen_by` alone would push a derived-vector file
+        # into either inventing a golden or going unanchored, and the
+        # second is what this check exists to prevent.
+        anchors = [a for a in doc.get("adr", []) if a]
+        if not anchors and not any(v.get("frozen_by") for v in doc.get("vectors", [])):
+            report(
+                f"{rel}: nothing anchors this file to a decision — give it a "
+                "file-level `adr` list, or mark an ADR-published golden with `frozen_by`"
+            )
+        for a in anchors + [v["frozen_by"] for v in doc.get("vectors", []) if v.get("frozen_by")]:
+            if not list((root / "architecture" / "adr").glob(f"{a}-*.md")):
+                report(f"{rel}: cites ADR-{a}, which does not exist")
 
         prose_scanned += check_prose_copies(root, rel, doc)
 

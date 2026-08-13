@@ -31,6 +31,10 @@ GOLDEN="d73342f033f00fca9c4ffcced6f9e6debaeb53e3743049ee9aaf227a55f9bf15"
 make_fixture() {
     local r="$1" sha="$2"
     mkdir -p "$r/fixtures/direct-v2"
+    # The anchor ADR must exist: a fixture citing a decision that is not
+    # there is one of the things the checker reports.
+    mkdir -p "$r/architecture/adr"
+    : > "$r/architecture/adr/0047-namespace.md"
     cat > "$r/fixtures/direct-v2/f.json" <<EOF
 {
   "algorithm": { "id": "direct-content-fingerprint-v1" },
@@ -100,7 +104,7 @@ import json,sys
 p=sys.argv[1]; d=json.load(open(p)); d['vectors'][0].pop('frozen_by')
 json.dump(d, open(p,'w'))" "$R/fixtures/direct-v2/f.json"
 out="$(run "$R")"
-[[ "$out" == *"nothing anchors this file"* ]] && ok "a fixture with no frozen_by anchor is reported" || bad "should require an ADR anchor"
+[[ "$out" == *"nothing anchors this file"* ]] && ok "a fixture with no anchor at all is reported" || bad "should require an anchor"
 
 # ── an out-of-range media type cannot be computed ────────────────────────
 R="$TMP/badmedia"; make_fixture "$R" "$GOLDEN"
@@ -115,6 +119,39 @@ out="$(run "$R")"
 R="$TMP/other"; make_fixture "$R" "$GOLDEN"
 printf '{"note":"not a vector file"}\n' > "$R/fixtures/direct-v2/notes.json"
 [ "$(run_code "$R")" = "0" ] && ok "JSON without a vectors array is ignored" || bad "non-vector JSON should be ignored"
+
+# ── anchoring: a file-level `adr` is a valid anchor on its own ───────────
+# A layout with no ADR-published golden derives every vector from the
+# decided algorithm. Demanding `frozen_by` there would force inventing a
+# golden or going unanchored — the second being what this guards against.
+R="$TMP/anchor-file"; make_fixture "$R" "$GOLDEN"
+mkdir -p "$R/architecture/adr"; : > "$R/architecture/adr/0019-dedup.md"
+python3 -c "
+import json,sys
+p=sys.argv[1]; d=json.load(open(p))
+d['adr']=['0019']; d['vectors'][0].pop('frozen_by')
+json.dump(d, open(p,'w'))" "$R/fixtures/direct-v2/f.json"
+[ "$(run_code "$R")" = "0" ] && ok "a file-level adr anchors a derived-vector file" || bad "file-level adr should anchor: $(run "$R")"
+
+# ── ...but a cited ADR that does not exist is caught ─────────────────────
+R="$TMP/anchor-ghost"; make_fixture "$R" "$GOLDEN"
+mkdir -p "$R/architecture/adr"
+python3 -c "
+import json,sys
+p=sys.argv[1]; d=json.load(open(p))
+d['adr']=['9999']; d['vectors'][0].pop('frozen_by')
+json.dump(d, open(p,'w'))" "$R/fixtures/direct-v2/f.json"
+out="$(run "$R")"
+[[ "$out" == *"ADR-9999"* ]] && ok "a nonexistent anchor ADR is reported" || bad "should report the missing ADR"
+
+# ── neither anchor at all is still a failure ─────────────────────────────
+R="$TMP/anchor-none"; make_fixture "$R" "$GOLDEN"
+python3 -c "
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d['vectors'][0].pop('frozen_by')
+json.dump(d, open(p,'w'))" "$R/fixtures/direct-v2/f.json"
+out="$(run "$R")"
+[[ "$out" == *"nothing anchors this file"* ]] && ok "an unanchored file is still reported" || bad "should require an anchor"
 
 # ── a prose copy that drifted is caught ──────────────────────────────────
 # Only the vector file is recomputed, so a re-freeze would otherwise

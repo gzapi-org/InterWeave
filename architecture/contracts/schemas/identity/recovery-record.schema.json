@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:identity:recovery-record",
+  "title": "RecoveryRecordV1",
+  "description": "A human backup of a transport identity: the 24 words plus the non-secret metadata needed to verify a restore.\n\nTHIS SHAPE IS A BEARER SECRET. Anyone holding `words` can reconstruct the private key and impersonate that PeerId until peers revoke trust. It never crosses IPC, MCP, Claude Channel, the transport network, the endpoint directory, discovery, or Kademlia — export and restore are offline local operations only (ADR-0033). A schema for it exists so a backup file can be validated offline, NOT because the record is ever transmitted.\n\n`expected_peer_id` is public metadata and is load-bearing: the BIP-39 checksum for 256-bit entropy is only 8 bits, so the PeerId is what actually proves a restore reconstructed the intended identity. A checksum-valid phrase deriving a different PeerId is a hard failure with no 'close enough' fallback.",
+  "type": "object",
+  "required": ["format", "identity_algorithm", "words"],
+  "additionalProperties": false,
+  "properties": {
+    "format": {
+      "const": "interweave-ed25519-bip39-entropy-v1",
+      "description": "Uses ONLY BIP-39's entropy-to-mnemonic encoding. The wallet derivation PBKDF2-HMAC-SHA512(mnemonic, \"mnemonic\"+passphrase, 2048) is explicitly not used, and there is no recovery passphrase — the 256-bit entropy IS the Ed25519 secret seed. Feeding these words into a cryptocurrency wallet produces unrelated material."
+    },
+    "identity_algorithm": {
+      "const": "ed25519",
+      "description": "Restore must refuse any other algorithm rather than attempt a conversion."
+    },
+    "expected_peer_id": {
+      "$ref": "urn:interweave:schemas:common:peer-id",
+      "description": "Optional in the record only because a phrase may survive alone. When present, restore requires an exact match."
+    },
+    "words": {
+      "type": "array",
+      "minItems": 24,
+      "maxItems": 24,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z]{3,8}$",
+        "description": "English BIP-39 wordlist only. The list is ASCII, though input is NFKD-normalized before lookup."
+      },
+      "description": "EXACTLY 24 words — 256 bits of entropy plus an 8-bit checksum. The 12/15/18/21-word BIP-39 lengths are rejected for this format rather than accepted with less entropy, so the schema pins the count at both ends."
+    }
+  },
+  "x-contract": {
+    "name": "identity.recovery-record",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": ["0033", "0038"],
+    "specification": "architecture/contracts/IDENTITY-RECOVERY.md",
+    "fixtures": ["fixtures/identity/ed25519-bip39-entropy-v1.json"]
+  }
+}

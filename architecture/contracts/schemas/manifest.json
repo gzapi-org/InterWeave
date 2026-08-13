@@ -23,6 +23,12 @@
       "path": "direct",
       "description": "The directed-messaging vocabulary that is genuinely document-shaped: the coarse rejection codes a remote peer may see, how a sender addressed the message, and the deduplication key. The DirectMessageV2 byte framing is deliberately not modelled here — see the family manifest's not_modelled note.",
       "specification": "architecture/transport/libp2p/DIRECT.md"
+    },
+    {
+      "name": "identity",
+      "path": "identity",
+      "description": "The offline recovery record: 24 words plus the public metadata that proves a restore reconstructed the intended identity. A bearer secret that never crosses IPC, Channel, or the network — schematised so a backup file can be validated offline, not because it is ever transmitted.",
+      "specification": "architecture/contracts/IDENTITY-RECOVERY.md"
     }
   ]
 }
