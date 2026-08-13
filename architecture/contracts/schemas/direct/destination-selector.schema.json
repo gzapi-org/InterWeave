@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:direct:destination-selector",
+  "title": "Direct destination selector",
+  "description": "How the SENDER addressed the message, which is what enters the deduplication key — not the endpoint the receiver ultimately resolved. The distinction is load-bearing: keying on the resolved endpoint would let a profile's default change mid-TTL and turn one logical message into two deliveries (ADR-0019).\n\nOn the wire this is carried by `destination_endpoint_len`: zero means Default, non-zero means Explicit. Here it is the logical form used in dedup keys and diagnostics.",
+  "oneOf": [
+    {
+      "const": "default",
+      "description": "The sender omitted the endpoint, asking for the receiver's configured default_direct_endpoint. Never fan-out, and never a wildcard."
+    },
+    {
+      "type": "object",
+      "required": ["explicit"],
+      "additionalProperties": false,
+      "properties": {
+        "explicit": { "$ref": "urn:interweave:schemas:endpoints:endpoint-id" }
+      }
+    }
+  ],
+  "x-contract": {
+    "name": "direct.destination-selector",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": ["0030", "0019"],
+    "specification": "architecture/transport/libp2p/DIRECT.md",
+    "wire-protocol": "/interweave/direct/2.0.0"
+  }
+}

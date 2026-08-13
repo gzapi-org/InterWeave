@@ -1,5 +1,9 @@
 # Direct peer protocol
 
+The prose here is normative for **behaviour**. The parts of this protocol that are document-shaped — the coarse rejection codes, the destination selector, the deduplication key — are also defined as JSON Schema under [`../../contracts/schemas/direct/`](../../contracts/schemas/direct/) (ADR-0049).
+
+The `DirectMessageV2` byte framing below is deliberately **not** modelled there: it is a fixed-width binary layout, not a JSON document, and cross-implementation agreement on it belongs in `fixtures/direct-v2/` as byte vectors. The family manifest records that boundary explicitly rather than leaving it as an apparent gap.
+
 ## Selected primitive
 
 `libp2p::request_response` with a custom bounded codec remains the selected primitive. ADR-0030 upgrades the initial implementation target to endpoint-aware protocol v2:
