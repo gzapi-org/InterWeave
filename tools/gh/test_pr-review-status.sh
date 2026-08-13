@@ -247,6 +247,14 @@ FAIL
 FAIL" ""
 assert_rc "three failed lookups exit 2" 2
 
+echo "pr-review-status: a MERGED PR is never told that no review is coming"
+# Review lands on merged PRs here routinely — that is why the post-merge
+# sweep exists. Firing exit 5 on one sends the caller to request a review
+# instead of awaiting the sweep that was about to deliver it, and
+# contradicts the merged-PR exception in the same loop.
+run "MERGED:newsha:0" "reviewer-a,oldsha1,2026-08-12T10:00:00Z"
+[ "$RUN_RC" != "5" ] && ok "a merged PR does not exit 5" || bad "merged PR should not claim no review is coming"
+
 echo "pr-review-status: a stale review submitted LAST cannot mask head coverage"
 # A review created before the last push but submitted after a fresh one
 # is newer by timestamp and older by commit. Selecting by recency then

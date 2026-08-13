@@ -337,7 +337,7 @@ if [[ "$THREADS" -eq 1 ]]; then
             while read -r n; do
                 [[ -z "$n" ]] && continue
                 q+=" p${n}: pullRequest(number: ${n}) { number author { login }"
-                q+=" reviewThreads(first: 100) { nodes { isResolved"
+                q+=" reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { isResolved"
                 q+=" comments(last: 1) { nodes { author { login } } } } } }"
             done <<< "$nums"
             q+=" } }"
@@ -350,12 +350,22 @@ if [[ "$THREADS" -eq 1 ]]; then
             THREAD_JSON="$(gh api graphql -f query="$q" --jq '
                 [ .data.repository | to_entries[] | .value
                   | (.author.login // "") as $pr_author
+                  | (.reviewThreads.pageInfo.hasNextPage // false) as $truncated
                   | { key: (.number | tostring),
                       value: {
-                        unresolved: ([.reviewThreads.nodes[] | select(.isResolved == false)] | length),
-                        awaiting:   ([.reviewThreads.nodes[]
-                                      | select(.isResolved == false)
-                                      | select((.comments.nodes[0].author.login // "") != $pr_author)] | length)
+                        # A TRUNCATED PAGE IS UNKNOWN, NOT ZERO. Past 100
+                        # threads only the first page arrives, so a PR
+                        # whose early threads are all resolved and whose
+                        # open one sits later would report "-" and be
+                        # dropped from /unresolved — hiding exactly the
+                        # outstanding work this command promises to
+                        # surface. Same rule as a failed lookup below.
+                        unresolved: (if $truncated then null else
+                                      ([.reviewThreads.nodes[] | select(.isResolved == false)] | length) end),
+                        awaiting:   (if $truncated then null else
+                                      ([.reviewThreads.nodes[]
+                                        | select(.isResolved == false)
+                                        | select((.comments.nodes[0].author.login // "") != $pr_author)] | length) end)
                       } } ] | from_entries' 2>/dev/null)" || THREAD_JSON=""
             # A failed lookup must read as UNKNOWN, never as zero: "0
             # unresolved" is exactly the reassuring answer you would act
@@ -395,14 +405,17 @@ out="$(printf '%s' "$selected" | jq -r --arg me "$ME" --argjson grouped "$GROUPE
     if $want == 0 then ""
     elif $th == null then "?"
     else ($th[(.number | tostring)] // null) as $t
-      | if $t == null then "?"
+      | if $t == null or $t.unresolved == null then "?"
         elif $t.unresolved == 0 then "-"
         else "\($t.unresolved)\(if $t.awaiting > 0 then "!" else "" end)"
         end
     end;
 
   ( if $unres == 1
-      then map(select((($th // {})[(.number | tostring)].unresolved // 0) > 0))
+      then map(select(
+             (($th // {})[(.number | tostring)] // null) as $t
+             | if $t == null or $t.unresolved == null then true
+               else $t.unresolved > 0 end))
       else . end )
   | sort_by(-.number) | .[:$limit]
   | if $grouped == 1 then

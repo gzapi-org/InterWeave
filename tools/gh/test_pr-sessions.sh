@@ -188,6 +188,20 @@ default_graphql() {
     }')"
 }
 
+# A PR whose thread page is TRUNCATED: the first 100 are all resolved,
+# but hasNextPage says more exist. The count is unknowable from this
+# response, so it must read as unknown rather than "none outstanding".
+truncated_graphql() {
+    write_graphql "$(jq -n '{
+      data: {repository: {
+        p30: {number: 30, author: {login: "andreabenetton"},
+              reviewThreads: {pageInfo: {hasNextPage: true}, nodes: [
+                {isResolved: true, comments: {nodes: [{author: {login: "some-reviewer"}}]}}
+              ]}}
+      }}
+    }')"
+}
+
 # ── cases ───────────────────────────────────────────────────────────
 
 setup_sandbox
@@ -438,6 +452,20 @@ run /all -n 10 /lastDate:99d --no-threads
 assert_rc       "exits 0" 0
 assert_contains "warns that the window may be truncated" "may be"
 default_pr_list
+
+echo "pr-sessions: a truncated thread page reads as unknown, not as none"
+# Past 100 threads only the first page arrives. A PR whose early threads
+# are resolved and whose open one sits later would otherwise report "-"
+# and be dropped from /unresolved — hiding exactly the outstanding work
+# the command promises to surface.
+truncated_graphql
+run
+assert_contains "THR shows unknown, not a dash" "?"
+
+truncated_graphql
+run /unresolved
+assert_contains "  and /unresolved KEEPS the row" "#30"
+default_graphql
 
 echo
 if [[ "$failures" -eq 0 ]]; then

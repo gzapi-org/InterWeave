@@ -279,18 +279,25 @@ while :; do
             render; exit 0
         fi
 
-        if no_review_coming; then
+        # TERMINAL STATE FIRST. A PR closed without merging will receive
+        # nothing further. A MERGED one still can, and routinely does
+        # here — that is the whole reason the post-merge sweep exists —
+        # so it keeps waiting.
+        if [[ "$state" == "CLOSED" ]]; then
+            render; exit 1
+        fi
+
+        # ...which is why exit 5 is restricted to an OPEN PR. Run before
+        # the state check, `no_review_coming` fires on a merged PR whose
+        # only review predates the last push and tells the caller to
+        # request one — contradicting the merged-PR exception directly
+        # above it, and sending them away from the sweep that was about
+        # to review it.
+        if [[ "$state" == "OPEN" ]] && no_review_coming; then
             note "head has advanced past the newest review and none is requested"
             render
             printf 'PR #%s NO REVIEW COMING — request one; waiting cannot help (exit 5)\n' "$PR"
             exit 5
-        fi
-
-        # A PR closed without merging will receive nothing further. A
-        # MERGED one still can, and routinely does here — that is the
-        # whole reason the post-merge sweep exists — so it keeps waiting.
-        if [[ "$state" == "CLOSED" ]]; then
-            render; exit 1
         fi
     else
         consecutive_failures=$(( consecutive_failures + 1 ))
