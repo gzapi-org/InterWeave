@@ -33,9 +33,9 @@
         "bytes": {
           "type": "string",
           "contentEncoding": "base64url",
-          "pattern": "^[A-Za-z0-9_-]*$",
+          "pattern": "^([A-Za-z0-9_-]{4})*([A-Za-z0-9_-]{2,3})?$",
           "maxLength": 65536,
-          "description": "Application payload, base64url over IPC, unpadded. The 48 KiB (49,152-byte) decoded ceiling of ADR-0026 is asserted here as maxLength 65536 encoded characters, and the character set is asserted by pattern: `contentEncoding` is an ANNOTATION in Draft 2020-12 and constrains nothing on its own, so a schema relying on it alone would admit an arbitrarily large or malformed payload and lose the pre-allocation bound this limit exists to provide."
+          "description": "Application payload, unpadded base64url over IPC. `contentEncoding` is an ANNOTATION in Draft 2020-12 and constrains nothing on its own, so both the size and the syntax are asserted here. maxLength 65536 encoded characters is the 48 KiB (49,152-byte) decoded ceiling of ADR-0026. The pattern enforces the alphabet AND the legal terminal lengths: unpadded base64url can never have a length congruent to 1 modulo 4, so a value like \"A\" is malformed and every standard decoder rejects it — accepting it here would only defer the failure to decode time, past the point where the bound was supposed to hold. Residual: the final character's unused low bits are not constrained, which a decoder may accept or normalise; length class is what a schema can express."
         }
       }
     },
