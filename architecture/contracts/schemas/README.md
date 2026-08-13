@@ -11,10 +11,11 @@ schemas/
 ├── manifest.json                      root index of families
 ├── _meta/contract.meta.schema.json    the schema every contract validates against
 ├── common/                            shapes referenced across families
-└── endpoints/                         Model B endpoint addressing
+├── endpoints/                         Model B endpoint addressing
+└── ipc/                               the local IPC v2 boundary
 ```
 
-One directory per **family** (a coherent domain area), one file per **concept** (one wire shape). Only `endpoints` and `common` exist today — remaining families (`ipc`, `direct`, `discovery`, `identity`, `connectivity`, `human-chat`) are added as their stages come up under ADR-0046, not up front.
+One directory per **family** (a coherent domain area), one file per **concept** (one wire shape). Remaining families (`direct`, `discovery`, `identity`, `connectivity`, `human-chat`) are added as their stages come up under ADR-0046, not up front.
 
 ## Conventions
 

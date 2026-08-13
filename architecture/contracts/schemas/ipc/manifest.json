@@ -1,0 +1,12 @@
+{
+  "family": "ipc",
+  "specification": "architecture/contracts/LOCAL-IPC.md",
+  "concepts": [
+    { "name": "capability", "file": "capability.schema.json", "status": "approved" },
+    { "name": "error-code", "file": "error-code.schema.json", "status": "approved" },
+    { "name": "hello", "file": "hello.schema.json", "status": "approved" },
+    { "name": "hello-response", "file": "hello-response.schema.json", "status": "approved" },
+    { "name": "send-params", "file": "send-params.schema.json", "status": "approved" },
+    { "name": "frame", "file": "frame.schema.json", "status": "approved" }
+  ]
+}

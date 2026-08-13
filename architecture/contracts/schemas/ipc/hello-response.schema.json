@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:hello-response",
+  "title": "IPC hello response",
+  "description": "The server's answer to a hello: the selected version, the profile identity, the endpoint actually leased, a fresh lease epoch, and the capabilities actually granted. `granted_capabilities` is the authority the connection has — never what the client asked for.",
+  "type": "object",
+  "required": ["type", "ipc_version", "peer", "granted_capabilities"],
+  "additionalProperties": false,
+  "properties": {
+    "type": { "const": "hello_response" },
+    "ipc_version": {
+      "type": "object",
+      "required": ["major", "minor"],
+      "additionalProperties": false,
+      "properties": {
+        "major": { "type": "integer", "const": 2 },
+        "minor": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "transport_contract_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+$",
+      "description": "The transport contract this daemon implements, distinct from the IPC version. Model B is transport v2."
+    },
+    "peer": { "$ref": "urn:interweave:schemas:common:peer-id" },
+    "endpoint": {
+      "$ref": "urn:interweave:schemas:endpoints:endpoint-id",
+      "description": "The endpoint actually leased. Absent for a diagnostics or administrative connection, which hold no lease."
+    },
+    "endpoint_lease_epoch": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "description": "Opaque 128-bit lease generation, fresh for every grant and unique across reconnects and daemon restarts. It is NOT a bearer credential — it exists only so stale local route and reply state can be invalidated. Deliberately NOT pinned to one encoding, unlike MessageId: this value never crosses the network, so no two implementations have to agree on its bytes, and opacity is the property that matters. Only the bound and character set are asserted."
+    },
+    "granted_capabilities": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 8,
+      "items": { "$ref": "urn:interweave:schemas:ipc:capability" }
+    }
+  },
+  "allOf": [
+    {
+      "$comment": "A lease epoch without an endpoint would be a generation for a lease that does not exist.",
+      "if": { "required": ["endpoint_lease_epoch"] },
+      "then": { "required": ["endpoint"] }
+    }
+  ],
+  "x-contract": {
+    "name": "ipc.hello-response",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": ["0017", "0030"],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}

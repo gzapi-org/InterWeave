@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:error-code",
+  "title": "Local IPC error code",
+  "description": "Local errors are deliberately MORE precise than the remote wire. A remote peer never receives EndpointUnknown, EndpointDisabled, or EndpointClientKindDenied — those collapse to the coarse `no_route` class so the directed protocol cannot become an endpoint-existence oracle (ADR-0030). Keeping both vocabularies in one repository makes the asymmetry reviewable rather than accidental.",
+  "enum": [
+    "InvalidArgument",
+    "EndpointUnknown",
+    "EndpointDisabled",
+    "EndpointClientKindDenied",
+    "EndpointInUse",
+    "CapabilityDenied",
+    "EndpointNotRegistered",
+    "UnauthorizedPeer",
+    "Overloaded",
+    "ProtocolViolation",
+    "CancelledBeforeDispatch",
+    "CancellationRaced"
+  ],
+  "x-contract": {
+    "name": "ipc.error-code",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": ["0017", "0030", "0026"],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}

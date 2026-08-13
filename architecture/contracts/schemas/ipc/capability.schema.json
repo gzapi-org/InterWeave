@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:capability",
+  "title": "IPC capability",
+  "description": "A named authority a client may be granted at handshake. The set is CLOSED: an unknown capability name is never silently elevated, and `admin.*` is obtainable only on the administrative socket — never by claiming an administrative `client.kind` on the data socket (ADR-0037).",
+  "enum": [
+    "events",
+    "commands",
+    "endpoints.query",
+    "admin.endpoints",
+    "admin.shutdown"
+  ],
+  "x-contract": {
+    "name": "ipc.capability",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": ["0017", "0037"],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}

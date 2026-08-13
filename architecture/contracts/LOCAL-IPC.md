@@ -2,6 +2,8 @@
 
 Applies because ADR-0015 selects a separate daemon. Model B endpoint addressing makes this **IPC major version 2**.
 
+The prose here is normative for **behaviour**. The shapes it describes are also defined as JSON Schema under [`schemas/ipc/`](./schemas/ipc/) — normative for **shape**, carrying an `x-contract.status` that says what each is authoritative about (ADR-0049). Where the two describe the same field they must agree; a disagreement is a bug in whichever one drifted.
+
 ## Transport choice and authority domains
 
 IPC v2 uses **two distinct local endpoints**:
