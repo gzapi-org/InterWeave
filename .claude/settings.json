@@ -2,6 +2,10 @@
   "worktree": {
     "baseRef": "head"
   },
+  "statusLine": {
+    "type": "command",
+    "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/statusline.sh\""
+  },
   "permissions": {
     "allow": [
       "Bash(gh pr *)",
