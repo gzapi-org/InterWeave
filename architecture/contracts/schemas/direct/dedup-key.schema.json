@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:direct:dedup-key",
+  "title": "Direct deduplication key",
+  "description": "The normalized key under which an accepted direct message is remembered for the bounded TTL. Every field is here because leaving it out breaks something specific:\n\n- `source_peer` — authenticated, so one peer cannot suppress another's delivery;\n- `source_endpoint` — without it, two endpoints on the SAME authenticated peer reusing a message ID would collapse into one delivery, and the second message would silently vanish;\n- `destination_selector` — the sender's addressing, not the resolved endpoint, so a default that changes mid-TTL cannot turn one logical message into two;\n- `message_id` — the sender's idempotency key, reused deliberately on retry.\n\nThe stored VALUE (first resolved endpoint plus DirectContentFingerprintV1) is not part of the key. Same key with a different fingerprint is a duplicate-ID conflict, rejected rather than delivered — one idempotency key must not alias two different bodies.\n\nThis shape is local state, not wire bytes; it is defined here so implementations agree on what identity means for a retry.",
+  "type": "object",
+  "required": ["mode", "source_peer", "source_endpoint", "destination_selector", "message_id"],
+  "additionalProperties": false,
+  "properties": {
+    "mode": {
+      "const": "direct",
+      "description": "Broadcast keys on (mode, source_peer, channel, message_id) instead — and the GossipSub mesh duplicate key is a different thing again, being publisher plus wire sequence number (ADR-0004)."
+    },
+    "source_peer": { "$ref": "urn:interweave:schemas:common:peer-id" },
+    "source_endpoint": {
+      "$ref": "urn:interweave:schemas:endpoints:endpoint-id",
+      "description": "Peer-asserted metadata: it proves only that the authenticated PeerId claimed this label. That is sufficient here, because the key's job is separating that peer's own streams, not authorizing anything."
+    },
+    "destination_selector": { "$ref": "urn:interweave:schemas:direct:destination-selector" },
+    "message_id": { "$ref": "urn:interweave:schemas:common:message-id" }
+  },
+  "x-contract": {
+    "name": "direct.dedup-key",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": ["0019", "0030"],
+    "specification": "architecture/transport/libp2p/DIRECT.md",
+    "fixtures": ["fixtures/direct-v2/direct-content-fingerprint-v1.json"]
+  }
+}

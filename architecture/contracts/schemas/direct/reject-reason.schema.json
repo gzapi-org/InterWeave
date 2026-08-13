@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:direct:reject-reason",
+  "title": "Direct v2 coarse rejection reason",
+  "description": "The COARSE vocabulary a remote peer is allowed to see. `no_route` deliberately collapses five locally-distinct conditions — endpoint unknown, endpoint disabled, no active lease, no configured default, and endpoint-policy denial — so the directed protocol cannot be used as an endpoint-existence or policy oracle (ADR-0030).\n\nCompare `urn:interweave:schemas:ipc:error-code`, the LOCAL vocabulary, which names those five separately. Two enums, deliberately asymmetric: keeping both in the corpus is what makes the asymmetry reviewable instead of accidental. A code from the local set must never be encoded onto this wire.\n\nThe transport does not promise response-time equality across the collapsed branches; that residual timing oracle is bounded by per-peer direct ingress rate limits rather than hidden behind artificial delays.",
+  "enum": [
+    "no_route",
+    "unauthorized_peer",
+    "overloaded",
+    "malformed",
+    "too_large",
+    "shutting_down",
+    "unsupported"
+  ],
+  "x-contract": {
+    "name": "direct.reject-reason",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": ["0005", "0030", "0018"],
+    "specification": "architecture/transport/libp2p/DIRECT.md",
+    "wire-protocol": "/interweave/direct/2.0.0"
+  }
+}

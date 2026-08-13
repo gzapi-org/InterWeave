@@ -17,6 +17,12 @@
       "path": "ipc",
       "description": "The local IPC v2 boundary: handshake and endpoint claim, capability grants, the message-class frame body, and the directed-send parameters whose deliberate omission of a source endpoint is what makes the source non-spoofable.",
       "specification": "architecture/contracts/LOCAL-IPC.md"
+    },
+    {
+      "name": "direct",
+      "path": "direct",
+      "description": "The directed-messaging vocabulary that is genuinely document-shaped: the coarse rejection codes a remote peer may see, how a sender addressed the message, and the deduplication key. The DirectMessageV2 byte framing is deliberately not modelled here — see the family manifest's not_modelled note.",
+      "specification": "architecture/transport/libp2p/DIRECT.md"
     }
   ]
 }

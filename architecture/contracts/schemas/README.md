@@ -12,10 +12,13 @@ schemas/
 ├── _meta/contract.meta.schema.json    the schema every contract validates against
 ├── common/                            shapes referenced across families
 ├── endpoints/                         Model B endpoint addressing
-└── ipc/                               the local IPC v2 boundary
+├── ipc/                               the local IPC v2 boundary
+└── direct/                            directed-messaging vocabulary
 ```
 
-One directory per **family** (a coherent domain area), one file per **concept** (one wire shape). Remaining families (`direct`, `discovery`, `identity`, `connectivity`, `human-chat`) are added as their stages come up under ADR-0046, not up front.
+One directory per **family** (a coherent domain area), one file per **concept** (one wire shape). Remaining families (`discovery`, `identity`, `connectivity`, `human-chat`) are added as their stages come up under ADR-0046, not up front.
+
+**Not everything belongs here.** A family manifest may carry a `not_modelled` note naming shapes deliberately left out and why — the `DirectMessageV2` byte framing is the first, being a fixed-width binary layout rather than a JSON document. Recording the boundary is the point: an unexplained absence reads as an oversight, and the next contributor either re-opens the question or forces the shape into a schema that validates nothing real.
 
 ## Conventions
 
