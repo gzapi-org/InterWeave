@@ -136,18 +136,31 @@ for f in "${TRACKED[@]}"; do
     # quotes the tag mid-sentence (this repository's own documentation
     # does) would otherwise read as an expression naming everything that
     # followed it.
-    # EVERY tag, not just the first. Prepending an Apache header to a
-    # copied file leaves its original declaration further down, and a
-    # first-match-only scan then sees Apache and passes — defeating the
-    # check in exactly the mixed-header case it exists to catch, which is
-    # also the shape every real import takes.
-    while IFS= read -r tok; do
-        [ -n "$tok" ] || continue
-        if [ "$tok" != "$EXPECTED_SPDX" ]; then
-            report "$f" "declares SPDX '$tok', expected '$EXPECTED_SPDX' (exempt it with provenance if genuinely third-party)"
+    # EVERY tag, and the WHOLE expression each time.
+    #
+    # Every tag: prepending an Apache header to a copied file leaves its
+    # original declaration further down, and a first-match-only scan then
+    # sees Apache and passes — blind in the mixed-header case this exists
+    # for, which is the shape every real import takes.
+    #
+    # Whole expression: SPDX is an expression language, so
+    # `Apache-2.0 AND MIT` carries MIT's obligations too. Reading only
+    # the first token reduces it to `Apache-2.0` and passes, which is the
+    # same blindness one level down. Operators and `WITH` exceptions are
+    # therefore compared as written; anything that is not exactly the
+    # expected identifier is reported for a human to judge.
+    #
+    # Anchored to a declaration position — line start, after optional
+    # comment punctuation — so prose that quotes the tag mid-sentence
+    # (this repository's own documentation does) is not read as a
+    # declaration naming the rest of the sentence.
+    while IFS= read -r expr; do
+        [ -n "$expr" ] || continue
+        if [ "$expr" != "$EXPECTED_SPDX" ]; then
+            report "$f" "declares SPDX '$expr', expected '$EXPECTED_SPDX' (exempt it with provenance if genuinely third-party)"
         fi
-    done < <(grep -oE 'SPDX-License-Identifier:[[:space:]]*[A-Za-z0-9.+_-]+' "$f" 2>/dev/null \
-        | sed 's/SPDX-License-Identifier:[[:space:]]*//' | tr -d '[:blank:]')
+    done < <(grep -E '^[[:space:]]*([#;%]|//|/\*|\*|--|<!--)?[[:space:]]*SPDX-License-Identifier:' "$f" 2>/dev/null \
+        | sed -E 's|.*SPDX-License-Identifier:[[:space:]]*||; s|[[:space:]]*(\*/\|-->)[[:space:]]*$||; s|[[:space:]]+$||')
     if grep -q -i -E "$PROPRIETARY_RE" "$f" 2>/dev/null; then
         report "$f" "carries proprietary licence wording — it is not Apache-2.0 until the copyright holder relicenses it"
     fi

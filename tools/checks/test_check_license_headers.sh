@@ -86,6 +86,20 @@ printf '#!/usr/bin/env bash\n# SPDX-License-Identifier: Apache-2.0\n#\n# vendore
 out="$(run_check "$R")"
 [[ "$out" == *"GPL-3.0"* ]] && ok "  and names the foreign licence" || bad "should name GPL-3.0"
 
+# ── a compound SPDX EXPRESSION is not reduced to its first token ─────────
+# SPDX is an expression language: `Apache-2.0 AND MIT` carries MIT's
+# obligations too. Reading only the first token passes it, which is the
+# same blindness as reading only the first tag, one level down.
+R="$TMP/expr"; make_repo "$R"
+printf '#!/usr/bin/env bash\n# %s: Apache-2.0 AND MIT\n' "$TAG" > "$R/compound.sh"
+[ "$(run_code "$R")" = "1" ] && ok "a compound licence expression is caught" || bad "AND-expression should fail"
+out="$(run_check "$R")"
+[[ "$out" == *"Apache-2.0 AND MIT"* ]] && ok "  and reports the whole expression" || bad "should print the full expression"
+
+R="$TMP/exception"; make_repo "$R"
+printf '#!/usr/bin/env bash\n# %s: Apache-2.0 WITH LLVM-exception\n' "$TAG" > "$R/exc.sh"
+[ "$(run_code "$R")" = "1" ] && ok "a WITH exception is caught" || bad "WITH-exception should fail"
+
 # ── an SPDX tag quoted mid-sentence in prose is not a foreign licence ────
 R="$TMP/prose-tag"; make_repo "$R"
 printf 'Files carry `SPDX-License-Identifier: Apache-2.0` in their opening lines, and that is checked.\n' > "$R/DOC.md"
