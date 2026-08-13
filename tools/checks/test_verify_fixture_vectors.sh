@@ -116,6 +116,37 @@ R="$TMP/other"; make_fixture "$R" "$GOLDEN"
 printf '{"note":"not a vector file"}\n' > "$R/fixtures/direct-v2/notes.json"
 [ "$(run_code "$R")" = "0" ] && ok "JSON without a vectors array is ignored" || bad "non-vector JSON should be ignored"
 
+# ── a prose copy that drifted is caught ──────────────────────────────────
+# Only the vector file is recomputed, so a re-freeze would otherwise
+# leave every quoted copy confidently wrong — in the ADRs and contracts a
+# reader trusts most. ADR-0047 re-froze these values once already.
+R="$TMP/prose"; make_fixture "$R" "$GOLDEN"
+mkdir -p "$R/architecture/contracts"
+printf 'media_type = "text/plain"\npayload    = UTF8("hello")\nSHA-256    = %s\n' \
+    "0000000000000000000000000000000000000000000000000000000000000000" \
+    > "$R/architecture/contracts/SPEC.md"
+out="$(run "$R")"
+[ "$(run_code "$R")" = "1" ] && ok "a stale prose copy exits 1" || bad "stale prose copy should fail"
+[[ "$out" == *"SPEC.md:3"* ]] && ok "  and names the file and line" || bad "should name SPEC.md:3"
+
+# ── a prose copy quoting the CORRECT value passes ────────────────────────
+R="$TMP/prose-ok"; make_fixture "$R" "$GOLDEN"
+mkdir -p "$R/architecture/contracts"
+printf 'media_type = "text/plain"\npayload    = UTF8("hello")\nSHA-256    = %s\n' "$GOLDEN" \
+    > "$R/architecture/contracts/SPEC.md"
+[ "$(run_code "$R")" = "0" ] && ok "a correct prose copy passes" || bad "correct prose copy should pass: $(run "$R")"
+
+# ── an unrelated hash near OTHER inputs is not attributed ────────────────
+# One document can list several frozen goldens — ADR-0047 lists four — so
+# attribution is by proximity to a vector's own inputs, not by "this file
+# mentions them somewhere and also contains a hash".
+R="$TMP/prose-neighbour"; make_fixture "$R" "$GOLDEN"
+mkdir -p "$R/architecture/adr"
+printf 'DirectContentFingerprint\n  media_type = "text/plain"\n  payload = UTF8("hello")\n  SHA-256 = %s\n\nTopic key\n  ChannelId = "general"\n  SHA-256 = %s\n' \
+    "$GOLDEN" "1111111111111111111111111111111111111111111111111111111111111111" \
+    > "$R/architecture/adr/0047-names.md"
+[ "$(run_code "$R")" = "0" ] && ok "a neighbouring golden is not misattributed" || bad "neighbour should not be flagged: $(run "$R")"
+
 # ── the real fixtures verify ─────────────────────────────────────────────
 REAL="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)"
 if [ -n "$REAL" ]; then
