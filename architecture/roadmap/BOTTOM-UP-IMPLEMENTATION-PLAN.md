@@ -1,6 +1,6 @@
 # Canonical bottom-up implementation plan
 
-Status: **Accepted / normative implementation order**
+Status: **Accepted / normative implementation order** (ADR-0046)
 
 This document defines the required construction order for the implementation workspace at repository root.
 
@@ -71,6 +71,8 @@ Frozen contracts / schemas / fixtures
    security / packaging / release
 ```
 
+The root box is concrete, not aspirational. Prose contracts are paired with JSON Schemas under `architecture/contracts/schemas/` (ADR-0049) — the prose stays normative for **behaviour**, the schemas for **shape** — and frozen vectors under `fixtures/` are recomputed from their declared algorithms by `tools/checks/verify_fixture_vectors.py` on every CI run. Each schema's `x-contract.status` is `approved`: an authoritative implementation target, never a claim that anything implements it. **The flip to `active` is part of a stage's exit gate**, because "this stage is done" and "this contract now describes the wire" are the same claim; the flips are named per stage below.
+
 ## 2. Stage 0 — implementation foundation
 
 ### Objective
@@ -90,36 +92,47 @@ fixtures/
 
 The root workspace starts with only the packages needed by this stage. Do not activate all planned members at once.
 
+### Already in place — do not rebuild
+
+`tools/checks/` carries the tree checks — ADR index/template conformance, semantic collisions, licence headers, contract validation, fixture recomputation, and guard wiring — each with a self-test beside it, and `.github/workflows/ci.yml` runs all of them as the two required contexts `tree checks` and `tool self-tests`. Three fixture sets are materialized and recomputing (table below). Stage-0 work builds on this rather than duplicating it.
+
 ### Work
 
-- pin the Rust toolchain;
-- establish shared lint/profile/dependency policy;
-- create `xtask` commands for architecture checks, fixture checks, unit/conformance groups, and CI orchestration;
+- pin the Rust toolchain (`rust-toolchain.toml`);
+- establish shared lint/profile/dependency policy in the workspace;
+- create `xtask` commands that orchestrate the cargo-side checks — fmt, clippy, unit/conformance groups — and **call** the existing `tools/checks` scripts rather than reimplementing them;
 - create the test-only `tests/support` package;
-- convert all frozen vectors to machine-readable fixtures where not already represented;
+- materialize the outstanding fixture sets in the table below, exactly as the existing three were: declared algorithm, recomputed by `tools/checks/verify_fixture_vectors.py`, anchored to their ADRs;
 - treat ADR-0047 InterWeave machine/wire identifiers as final inputs to every Stage-0 fixture; no former working-namespace compatibility aliases are materialized;
-- create fixture-loader tests that fail on accidental vector drift;
-- establish CI for format, clippy, unit tests, fixture tests, architecture links/YAML, and dependency-boundary checks.
+- wire the Markdown-link/YAML integrity check into CI — today it exists only as an ad-hoc snippet run by hand, which is exactly the silently-unwired state `check_guards_are_wired.sh` was written to prevent for guards;
+- extend CI with the Rust jobs (format, clippy, unit, fixture-loader) when the workspace gains its first member, adding their job contexts to the ruleset's required checks **in the same change** — a job's `name:` is its required-check context, so this is where un-gating happens silently.
 
 ### Required fixtures
 
-At minimum:
+Materialized, and recomputed on every CI run:
 
-```text
-DirectContentFingerprintV1
-GossipSubMessageIdV1
-Kademlia network hash / protocol namespace
-BIP-39 entropy/checksum mnemonic fixture
-Ed25519 secret -> public key -> PeerId fixture
-IPC v2 maximum payload/frame fixture
-EndpointId grammar fixtures
-HumanChatV1 fixtures
-configuration-v2 fixtures
-```
+| Fixture | File |
+|---|---|
+| DirectContentFingerprintV1 | `fixtures/direct-v2/direct-content-fingerprint-v1.json` |
+| DirectMessageV2 request framing (byte order pinned big-endian in `transport/libp2p/DIRECT.md`) | `fixtures/direct-v2/direct-message-v2-frame.json` |
+| BIP-39 entropy/checksum mnemonic + Ed25519 secret -> public key -> PeerId | `fixtures/identity/ed25519-bip39-entropy-v1.json` |
+
+Outstanding — the directories exist as stubs, and the first three below have fully specified derivations that freeze exactly the way the fingerprint did:
+
+| Fixture | Derivation source | Lands in |
+|---|---|---|
+| GossipSubMessageIdV1 | `transport/libp2p/PUBSUB.md`; golden re-frozen by ADR-0047 | `fixtures/gossipsub/` |
+| GossipSub topic key | `contracts/TRANSPORT.md` topic derivation; golden in ADR-0047 | `fixtures/gossipsub/` |
+| Kademlia network hash / protocol namespace | `docs/architecture/kademlia-integration.md`; golden in ADR-0047 | `fixtures/kademlia/` |
+| IPC v2 maximum payload/frame (payload-fit invariant) | `contracts/LOCAL-IPC.md` §Framing | `fixtures/ipc-v2/` |
+| EndpointId grammar vectors | `contracts/ENDPOINTS.md` + `contracts/schemas/endpoints/` | `fixtures/endpoints/` |
+| HumanChatV1 envelope vectors | `clients/human/HUMAN-CHAT.md` + `contracts/schemas/human-chat/` | `fixtures/human-chat-v1/` |
+| configuration-v2 vectors | `architecture/config/config.schema.yaml` + examples | `fixtures/config/` |
 
 ### Exit gate
 
 - reproducible toolchain;
+- every fixture in the outstanding table above is materialized and recomputing in CI;
 - fixture tests execute without product networking;
 - architecture integrity checks run through `xtask`/CI;
 - no product crate above this stage is active.
@@ -196,10 +209,12 @@ platform-specific socket/process types
 
 ### Exit gate
 
-- all frozen limits and grammars match the architecture;
+- all frozen limits and grammars match the architecture — checked mechanically, not by reading: serde types round-trip against the JSON Schemas under `architecture/contracts/schemas/` (an instance serialized from a Rust type validates against its schema, and every schema-valid instance deserializes), exercised in `tests/transport-contract`;
 - all config cross-field rules pass/fail exactly as specified;
 - neutral crates remain free of backend/UI/platform dependencies;
 - no real Swarm/networking exists yet.
+
+Stage 1 flips **no** `x-contract.status`: types that compile are still an implementation target, not wire behaviour. The first flips come with the stages that put shapes on a wire or into a store.
 
 ## 5. Stage 2 — pure policies and state machines
 
@@ -243,7 +258,7 @@ Backend-specific policy modules may be created under `crates/transport/libp2p` o
 
 ### Implement human domain state
 
-- HumanChatV1 parsing/validation;
+- HumanChatV1 parsing/validation, with envelope conformance cases landing in `tests/human-chat`;
 - message presentation state;
 - pending/retrying/transport-terminal outbound state;
 - unread/read/kept inbound state;
@@ -295,7 +310,7 @@ crates/discovery/cache
 crates/config/profile-config       # persistence/storage portions
 ```
 
-Identity storage may be implemented in the lowest appropriate runtime/identity crate after SPIKE-006 validates the portability boundary.
+Identity storage may be implemented in the lowest appropriate runtime/identity crate after SPIKE-006 validates the portability boundary. The derivation itself is already pinned: `fixtures/identity/ed25519-bip39-entropy-v1.json` recomputes entropy -> word indexes -> Ed25519 public key -> PeerId against the contract's golden on every CI run, so SPIKE-006's open question is narrowed to the libp2p API boundary — extracting and re-importing the exact 32-byte seed without transformation.
 
 ### Human store
 
@@ -350,6 +365,8 @@ storage failure prevents accepting new human delivery
 ### Exit gate
 
 Persistence invariants survive process restart and failure injection before any networking is allowed to rely on them.
+
+With the mnemonic backup/verify/restore path implemented, flip `contracts/schemas/identity` from `approved` to `active` (ADR-0049) — the record shape stops being a target and starts describing real backup files.
 
 ## 7. Stage 4 — minimal libp2p substrate
 
@@ -457,6 +474,8 @@ per-trusted-peer/global ingress rate limits
 
 Initially route to an in-process EndpointRegistry/LocalDataSession implementation; desktop IPC is not required yet.
 
+The codec is built against frozen bytes, not re-derived: multi-byte integers are big-endian — pinned in `transport/libp2p/DIRECT.md`, a gap the fixtures forced — and `fixtures/direct-v2/direct-message-v2-frame.json` carries the six framing vectors, including default-destination (`destination_endpoint_len = 0`), absent media, empty payload, and both endpoints at the 64-byte ceiling.
+
 ### Required real-network tests
 
 Under `tests/direct-v2` and `tests/endpoint-routing`:
@@ -474,6 +493,8 @@ Under `tests/direct-v2` and `tests/endpoint-routing`:
 ### Exit gate
 
 Direct v2 is correct end-to-end between real Rust peers before IPC or UI integration exists.
+
+Flip to `active`: `contracts/schemas/common`, `contracts/schemas/direct`, and the direct-routing shapes of `contracts/schemas/endpoints` (ADR-0049).
 
 ## 10. Stage 7 — GossipSub broadcast
 
@@ -524,6 +545,8 @@ Requirements:
 
 Remote route discovery works without entering peer discovery, GossipSub, or Kademlia state.
 
+Flip to `active`: the directory-response shape in `contracts/schemas/endpoints` (ADR-0049).
+
 ## 12. Stage 9 — discovery framework excluding Kademlia
 
 ### Activate
@@ -552,6 +575,8 @@ Every DiscoveryProvider implementation must pass `tests/discovery-conformance` f
 ### Exit gate
 
 Static, cache and mDNS providers compose correctly and cannot bypass trust/ConnectionManager.
+
+Flip to `active`: `contracts/schemas/discovery` (ADR-0049).
 
 ## 13. Stage 10 — Kademlia
 
@@ -590,6 +615,10 @@ EndpointId records
 trust/membership records
 application messages
 ```
+
+### Tests
+
+SPIKE-003 evidence converts into permanent cases under `tests/kademlia`: namespace derivation against the frozen golden, manual routing admission, bounded exploration/saturation, and dial-gate obedience for query-originated dials.
 
 ### Exit gate
 
@@ -645,6 +674,8 @@ infrastructure peer protocol exclusion
 ### Exit gate
 
 The mandatory standard-v1 NAT/relay/hole-punch matrix passes. At this point the low-level network engine is complete.
+
+Flip to `active`: `contracts/schemas/connectivity` (ADR-0049).
 
 ## 15. Stage 12 — full TransportRuntime composition
 
@@ -716,6 +747,8 @@ apps/transportctl
 
 IPC is proven to be only a serialization/process binding of LocalDataSession semantics, not a second behavior model.
 
+Flip to `active`: `contracts/schemas/ipc` (ADR-0049).
+
 ## 17. Stage 14 — first-party human application core/UI
 
 This work may proceed in parallel with Stages 4-13 after Stages 1-3 are stable, but it may not claim network completeness until Stage 12 exists.
@@ -750,7 +783,9 @@ No UI state may imply remote human read/processing without a future application-
 
 ### Development rule
 
-Build and test UI against a fake/in-memory LocalDataSession first. UI code must not wait for or directly depend on libp2p.
+Build and test UI against a fake/in-memory LocalDataSession first. UI code must not wait for or directly depend on libp2p. Envelope-level conformance stays in `tests/human-chat`; UI tests assert presentation state only.
+
+With HumanChatV1 sent and received between first-party clients, flip `contracts/schemas/human-chat` to `active` (ADR-0049).
 
 ## 18. Stage 15 — desktop human client
 
