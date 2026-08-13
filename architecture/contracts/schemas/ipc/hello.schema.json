@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:hello",
+  "title": "IPC hello — the client's first frame",
+  "description": "Opens an IPC v2 connection: version, client identity, an optional endpoint claim, and the capabilities being requested. The socket the client connected to is an authority-domain input the frame cannot influence — an administrative client connects to the admin socket and MUST omit the endpoint claim, and a data-socket connection can never obtain `admin.*` whatever it asks for here.",
+  "type": "object",
+  "required": ["type", "ipc_version", "client"],
+  "additionalProperties": false,
+  "properties": {
+    "type": { "const": "hello" },
+    "ipc_version": {
+      "type": "object",
+      "required": ["major", "minor"],
+      "additionalProperties": false,
+      "properties": {
+        "major": { "type": "integer", "const": 2 },
+        "minor": { "type": "integer", "minimum": 0 }
+      },
+      "description": "Negotiated in hello, never configured as an operator profile value. Major is 2: endpoint addressing made this a major version change (ADR-0030)."
+    },
+    "client": {
+      "type": "object",
+      "required": ["kind"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "Endpoint-binding and configuration hygiene ONLY. Not cryptographic authentication, and never the selector that grants administrative authority: a client claiming an administrative kind on the data socket stays categorically ineligible for `admin.*` (ADR-0037)."
+        },
+        "version": { "type": "string", "maxLength": 128 }
+      }
+    },
+    "endpoint": {
+      "type": "object",
+      "required": ["id"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "urn:interweave:schemas:endpoints:endpoint-id" }
+      },
+      "description": "Omitted by a read-only diagnostics client, and REQUIRED to be omitted on the admin socket, which never owns a lease. A direct-capable client needs a successful exclusive claim; the lease is connection-bound and cannot be changed without reconnecting."
+    },
+    "requested_capabilities": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 8,
+      "items": { "$ref": "urn:interweave:schemas:ipc:capability" },
+      "description": "Requested, not granted. The reply carries what policy actually allowed; an unknown or unauthorized request is refused rather than silently elevated."
+    },
+    "features": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 8,
+      "items": { "type": "string", "minLength": 1, "maxLength": 64 },
+      "description": "Optional negotiated features, e.g. `keepalive`. With `ipc.keepalive.require_for_endpoint_lease` true (the default), a client claiming an endpoint without negotiating keepalive is denied `CapabilityDenied` — the lease is never granted and then revoked."
+    }
+  },
+  "x-contract": {
+    "name": "ipc.hello",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": ["0017", "0030", "0037"],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}

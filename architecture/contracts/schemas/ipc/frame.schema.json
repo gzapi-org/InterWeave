@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:frame",
+  "title": "IPC frame body",
+  "description": "The JSON object inside one length-prefixed frame, after the 4-byte big-endian length. This schema covers the BODY only: the length prefix, the 131,072-byte ceiling on it, and the rule that zero length is invalid are framing concerns outside JSON Schema and are asserted by the codec (LOCAL-IPC.md §Framing).\n\nThe five message classes are mutually exclusive, discriminated by the properties present.",
+  "oneOf": [
+    { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/response" },
+    { "$ref": "#/$defs/cancel" },
+    { "$ref": "#/$defs/event" },
+    { "$ref": "#/$defs/server_state" }
+  ],
+  "$defs": {
+    "request_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Unique per connection. Not durable and not a replay cursor."
+    },
+    "request": {
+      "type": "object",
+      "required": ["type", "id", "method"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "request" },
+        "id": { "$ref": "#/$defs/request_id" },
+        "method": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "params": { "type": "object" },
+        "deadline_ms": { "type": "integer", "minimum": 0 }
+      },
+      "description": "A method needing an ungranted capability fails locally with a stable authorization error and is never dispatched to the transport runtime — the refusal happens before the request can reach the network."
+    },
+    "response": {
+      "type": "object",
+      "required": ["type", "id", "ok"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "response" },
+        "id": { "$ref": "#/$defs/request_id" },
+        "ok": { "type": "boolean" },
+        "result": {},
+        "error": {
+          "type": "object",
+          "required": ["code"],
+          "additionalProperties": false,
+          "properties": {
+            "code": { "$ref": "urn:interweave:schemas:ipc:error-code" },
+            "message": { "type": "string", "maxLength": 2048 }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "$comment": "ok and error are exclusive: a failed response that carried no code would leave the caller guessing.",
+          "if": { "properties": { "ok": { "const": false } }, "required": ["ok"] },
+          "then": { "required": ["error"], "not": { "required": ["result"] } }
+        },
+        {
+          "if": { "properties": { "ok": { "const": true } }, "required": ["ok"] },
+          "then": { "not": { "required": ["error"] } }
+        }
+      ]
+    },
+    "cancel": {
+      "type": "object",
+      "required": ["type", "id"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "cancel" },
+        "id": { "$ref": "#/$defs/request_id" }
+      },
+      "description": "Advisory. An operation past an irreversible network boundary may complete anyway, which is why the response vocabulary separates CancelledBeforeDispatch from CancellationRaced."
+    },
+    "event": {
+      "type": "object",
+      "required": ["type", "sequence", "event_type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "event" },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Per IPC connection, for gap detection only. NOT a durable replay cursor: there is no event replay after reconnect."
+        },
+        "event_type": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "data": { "type": "object" }
+      }
+    },
+    "server_state": {
+      "type": "object",
+      "required": ["type", "health"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "server_state" },
+        "health": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "connectivity": {
+          "type": "object",
+          "description": "The backend-neutral ConnectivitySummary. Ordinary data-plane clients receive normalized direct/relay state and counts only: raw probe-server identities, relay PeerIds, and relay multiaddrs require a diagnostics or admin capability, and are never inferred as trust (ADR-0035, ADR-0036)."
+        }
+      }
+    }
+  },
+  "x-contract": {
+    "name": "ipc.frame",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": ["0017", "0026"],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}

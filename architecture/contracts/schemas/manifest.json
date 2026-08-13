@@ -11,6 +11,12 @@
       "path": "endpoints",
       "description": "Model B endpoint addressing: the routing selector beneath a PeerId, its configuration, direct destinations, the delivered event, and the endpoint-directory reply.",
       "specification": "architecture/contracts/ENDPOINTS.md"
+    },
+    {
+      "name": "ipc",
+      "path": "ipc",
+      "description": "The local IPC v2 boundary: handshake and endpoint claim, capability grants, the message-class frame body, and the directed-send parameters whose deliberate omission of a source endpoint is what makes the source non-spoofable.",
+      "specification": "architecture/contracts/LOCAL-IPC.md"
     }
   ]
 }

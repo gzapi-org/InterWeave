@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:send-params",
+  "title": "IPC send params",
+  "description": "Parameters of a directed send over local IPC: remote destination and payload, and nothing else.\n\nTHE ABSENCE IS THE POINT. There is no `source_endpoint` parameter, and `additionalProperties: false` is what makes that enforceable rather than merely stated: the runtime derives the source from the caller's active lease, so a client cannot claim to be another local endpoint by adding a field. That is the one place ADR-0030's non-spoofable source is decided, and a schema that accepted unknown properties would quietly re-open it.\n\nA client holding no lease receives EndpointNotRegistered — it cannot send at all, rather than sending as nobody.",
+  "type": "object",
+  "required": ["peer", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "peer": { "$ref": "urn:interweave:schemas:common:peer-id" },
+    "endpoint": {
+      "$ref": "urn:interweave:schemas:endpoints:endpoint-id",
+      "description": "The REMOTE destination endpoint. Omitted asks the remote profile for its configured default endpoint — never fan-out (ADR-0030)."
+    },
+    "payload": {
+      "type": "object",
+      "required": ["bytes"],
+      "additionalProperties": false,
+      "properties": {
+        "media_type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[\\x20-\\x7E]+$",
+          "description": "1..128 ASCII bytes when present. Empty is INVALID rather than an alias for absence — the content fingerprint distinguishes the two, so collapsing them would make two different messages share a dedup identity."
+        },
+        "bytes": {
+          "type": "string",
+          "contentEncoding": "base64url",
+          "pattern": "^([A-Za-z0-9_-]{4})*([A-Za-z0-9_-]{2,3})?$",
+          "maxLength": 65536,
+          "description": "Unpadded base64url. maxLength 65536 encoded characters is the 48 KiB (49,152-byte) payload ceiling of ADR-0026 — the number the 128 KiB frame ceiling exists to accommodate. The pattern asserts both the alphabet and the legal terminal lengths, since `contentEncoding` is an annotation in Draft 2020-12 and constrains nothing on its own."
+        }
+      }
+    },
+    "message_id": { "$ref": "urn:interweave:schemas:common:message-id" }
+  },
+  "x-contract": {
+    "name": "ipc.send-params",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": ["0017", "0030", "0026"],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}
