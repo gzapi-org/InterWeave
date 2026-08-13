@@ -5,7 +5,7 @@ description: Finding and reading the InterWeave ADRs that govern a piece of work
 
 # Reading the ADRs
 
-47 accepted decisions plus this repository's own authoring model live in `architecture/adr/`. Filenames sort by decision date, not topic, so browsing them is the slow way to find anything.
+The accepted decisions live in `architecture/adr/`, one file each. Filenames sort by decision date, not topic, so browsing them is the slow way to find anything.
 
 ## The procedure
 

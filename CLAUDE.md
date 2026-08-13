@@ -9,7 +9,7 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
 - `architecture/` is the normative design source.
 - `apps/`, `crates/`, `tests/`, `fixtures/`, `test-data/`, `spikes/`, `packaging/`, and `xtask/` are tracked landing zones created by ADR-0045.
 - `tools/` is repository tooling — PR/review scripts and tree checks — not an implementation landing zone. It is live now and not gated by stage discipline. Each script has a self-test beside it (`test_*.sh`) that must stay green.
-- `.claude/` is committed shared agent configuration: `settings.json` (push gate, worktree base ref, dispatch hook) and `skills/` (task-scoped procedures loaded on demand — see §10). Only `settings.local.json` and `CLAUDE.local.md` are per-developer and gitignored.
+- `.claude/` is committed shared agent configuration: `settings.json` and `statusline.sh` (§9), plus `skills/` — task-scoped procedures loaded on demand, see §10. Only `settings.local.json` and `CLAUDE.local.md` are per-developer and gitignored.
 - The root Cargo workspace intentionally has zero members until implementation begins.
 - There is no production Rust implementation yet.
 - Display name is **InterWeave**. Machine/wire namespace is lowercase `interweave` per ADR-0047.
@@ -228,7 +228,7 @@ Code copied in from a differently-licensed source keeps its own terms until the 
 - `origin` is `git@github.com:gzapi-org/InterWeave.git`; the integration branch is `main`. The repository is **public** — everything committed here is published.
 - Commit identity is pinned **repository-locally** (`user.name`, `user.email`), so it does not depend on the machine's global config. Commit and tag signing are likewise pinned local (`user.signingkey`, `commit.gpgsign`, `tag.gpgsign`, `gpg.program`). Do not disable signing per-commit.
 - `.gitattributes` pins `* text=auto eol=lf` and marks binary classes, so the index stays canonical across machines. `fixtures/**` is `-text`: frozen vectors are byte-compared, so EOL renormalisation there is a protocol change, not a whitespace one.
-- `.claude/settings.json` is **committed** shared configuration — the push gate, the worktree base ref, and the subagent dispatch hook all live in it. `.claude/settings.local.json` and `CLAUDE.local.md` are per-developer and gitignored.
+- `.claude/settings.json` is **committed** shared configuration — the push gate, the worktree base ref, the subagent dispatch hook, and the status line (`.claude/statusline.sh`, showing model · host · clone · branch, because branches are named for host and clone) all live in it. `.claude/settings.local.json` and `CLAUDE.local.md` are per-developer and gitignored.
 
 ### Commit loop
 
@@ -368,7 +368,7 @@ Never post a reply body through `gh api -f body="…"`: replies quote code, and 
 | 0 | MERGED — safe to return to `main` |
 | 3 | CLOSED without merging — do NOT return to `main` |
 | 5 | BLOCKED — a required check already failed, or the base conflicts |
-| 6 | STALLED outside the PR — Actions degraded, or the head commit has no run at all |
+| 6 | STALLED outside the PR — Actions degraded, or the head commit has no run at all (a lost webhook, or a filter that skipped it) |
 | 4 | watch expired, state genuinely unknown |
 | 2 | usage error, or the PR could not be read repeatedly |
 

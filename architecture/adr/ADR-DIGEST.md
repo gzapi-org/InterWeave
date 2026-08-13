@@ -11,7 +11,7 @@
 
 Authority order is unchanged (`CLAUDE.md` §2): accepted ADRs → normative contracts and protocol specs → the bottom-up plan and test gates → explanatory documents → this digest and the index (navigation aids).
 
-**Maintenance is binding.** Every new ADR gets an entry here in the same commit; every amendment updates its ADR's entry. `tools/checks/validate_adr_index.sh` fails when an ADR file has no digest entry, no index row, or when either references an ADR that does not exist.
+**Maintenance is binding.** Every new ADR gets an entry here in the same commit; every amendment updates its ADR's entry. `tools/checks/validate_adr_index.sh` fails when an ADR file has no digest entry, no index row, when either references an ADR that does not exist, when an ADR breaks the template, or when its amendment record is inconsistent.
 
 ---
 

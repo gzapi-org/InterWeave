@@ -51,7 +51,7 @@ An ADR change is never the ADR file alone. In the same commit series:
 4. update `fixtures/` if and only if the decision intentionally changes a frozen vector;
 5. for an amendment, add the history note and the end-matter row described above.
 
-`tools/checks/validate_adr_index.sh` enforces items 1 and 2 mechanically and is part of the repository-wide verification list in `CLAUDE.md` §9.
+`tools/checks/validate_adr_index.sh` enforces the mechanical part — items 1 and 2, the template every ADR follows, and the amendment record's three-way consistency — and is part of the repository-wide verification list in `CLAUDE.md` §9.
 
 ### The digest is the default entry point, and it is non-normative
 
