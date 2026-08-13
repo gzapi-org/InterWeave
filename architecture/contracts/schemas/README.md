@@ -13,10 +13,16 @@ schemas/
 ├── common/                            shapes referenced across families
 ├── endpoints/                         Model B endpoint addressing
 ├── ipc/                               the local IPC v2 boundary
-└── direct/                            directed-messaging vocabulary
+├── direct/                            directed-messaging vocabulary
+├── identity/                          offline recovery record
+├── discovery/                         advisory reachability observations
+├── connectivity/                      normalized Internet reachability
+└── human-chat/                        the first-party message envelope
 ```
 
-One directory per **family** (a coherent domain area), one file per **concept** (one wire shape). Remaining families (`discovery`, `identity`, `connectivity`, `human-chat`) are added as their stages come up under ADR-0046, not up front.
+One directory per **family** (a coherent domain area), one file per **concept** (one wire shape). All eight planned families now exist; new ones arrive with the stages that need them (ADR-0046).
+
+**Closed or open is a decision, not a default.** Transport shapes set `additionalProperties: false`, which is what makes an omission enforceable — `ipc.send-params` has no `source_endpoint`, and `discovery.candidate-peer` has no EndpointId, because a schema that accepted unknown properties would re-open exactly what those contracts closed. `human-chat.envelope` is deliberately OPEN, because HumanChatV1 specifies that unknown fields are ignored for forward compatibility. Both directions are intentional; neither is the fallback.
 
 **Not everything belongs here.** A family manifest may carry a `not_modelled` note naming shapes deliberately left out and why — the `DirectMessageV2` byte framing is the first, being a fixed-width binary layout rather than a JSON document. Recording the boundary is the point: an unexplained absence reads as an oversight, and the next contributor either re-opens the question or forces the shape into a schema that validates nothing real.
 

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:discovery:provider-descriptor",
+  "title": "Discovery provider descriptor",
+  "description": "What a provider says about itself. The capability fields are minimal and DESCRIPTIVE — they let DiscoveryManager schedule sensibly, and are deliberately not a control plane a provider could use to claim authority it does not have.",
+  "type": "object",
+  "required": ["name", "interface_version", "scope", "mode", "supports_expiry", "supports_hints"],
+  "additionalProperties": false,
+  "properties": {
+    "name": { "type": "string", "minLength": 1, "maxLength": 64,
+      "description": "The stable config/provider type name, e.g. peer-cache, mdns, static-bootstrap, kademlia." },
+    "interface_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+$",
+      "description": "The discovery contract version the provider implements — not the provider's own build version, which the runtime does not require." },
+    "config_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+$",
+      "description": "Present only when a provider's config schema needs migration." },
+    "scope": { "enum": ["local", "configured", "network"] },
+    "mode": { "enum": ["passive", "active", "mixed"] },
+    "supports_expiry": { "type": "boolean" },
+    "supports_hints": { "type": "boolean",
+      "description": "A provider that does not support a hint class must reject it explicitly rather than silently accept it — accepting quietly is how a provider would drift into owning connection policy." }
+  },
+  "x-contract": {
+    "name": "discovery.provider-descriptor",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": ["0006", "0022"],
+    "specification": "architecture/contracts/DISCOVERY.md"
+  }
+}

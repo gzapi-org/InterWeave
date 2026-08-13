@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:discovery:candidate-peer",
+  "title": "Discovery candidate peer",
+  "description": "An advisory reachability observation: this PeerId was seen at these addresses, by this provider, at this time. It grants NOTHING — not trust, not membership, not liveness. Dialing it still requires PeerTrustPolicy authorization and passes the root DialAdmissionGate (ADR-0010, ADR-0011, ADR-0012).\n\nWHAT IS ABSENT IS ENFORCED. `EndpointId`, ChannelIds, application roles, membership, and human presence are explicitly outside discovery and must never become candidate metadata (ADR-0009, DISCOVERY.md). `additionalProperties: false` is what stops one being added later as an obvious convenience — the DHT and the discovery layer are exactly where such a field would leak routing or presence to anyone who can query.\n\nThere is deliberately no `confidence` field: a low/normal/configured scale duplicates provenance and reads as trust, which is the one thing a candidate must never imply.",
+  "type": "object",
+  "required": ["peer_id", "addresses", "source", "observed_at"],
+  "additionalProperties": false,
+  "properties": {
+    "peer_id": { "$ref": "urn:interweave:schemas:common:peer-id" },
+    "addresses": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "description": "An opaque reachability address. Opaque on purpose: the neutral contract does not commit to multiaddr syntax, and a backend-specific format must not leak upward (§4)."
+      }
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "The provider name. Provenance is how candidate quality is judged, which is why it is required rather than optional."
+    },
+    "observed_at": { "type": "integer", "minimum": 0 },
+    "expires_at": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Absent means the provider does not model expiry, not that the observation is permanent."
+    },
+    "protocol_observations": {
+      "type": "array",
+      "maxItems": 16,
+      "description": "Bounded advisory transport facts learned on AUTHENTICATED connections — for example an exact Identify protocol string. Not trust, not application roles, not capability authorization. Capped at 16 per peer so a peer cannot grow unbounded state in another's cache, and freshness must not outlive the candidate that supplied them.",
+      "items": {
+        "type": "object",
+        "required": ["protocol_id", "supported", "observed_at"],
+        "additionalProperties": false,
+        "properties": {
+          "protocol_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[\\x20-\\x7E]+$",
+            "description": "An opaque protocol identifier, 256 ASCII bytes at most. Compared exactly; never parsed for meaning."
+          },
+          "supported": { "type": "boolean" },
+          "observed_at": { "type": "integer", "minimum": 0 }
+        }
+      }
+    }
+  },
+  "x-contract": {
+    "name": "discovery.candidate-peer",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": ["0006", "0010", "0027", "0009"],
+    "specification": "architecture/contracts/DISCOVERY.md"
+  }
+}

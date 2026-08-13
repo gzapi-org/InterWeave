@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:connectivity:connectivity-summary",
+  "title": "ConnectivitySummary",
+  "description": "The backend-neutral view of this profile's Internet reachability. Deliberately normalized: an ordinary data-plane client sees states and counts, never the infrastructure PeerIds, relay multiaddrs, probe traces, or reservation failure codes behind them — those need a diagnostics or admin capability and are never inferred as trust (ADR-0036).\n\nThe states are evidence claims, not guesses. `verified_public` means the backend's direct-inbound verification policy has FRESH SUCCESSFUL evidence — for the libp2p backend, multiple distinct authorized AutoNAT-v2 observers (ADR-0035). Configured or merely Identify-observed addresses never qualify.\n\n`not_verified` is NOT 'definitely private'. It means current evidence does not satisfy the proof rule, which is a statement about what is known rather than about the network.",
+  "type": "object",
+  "required": ["direct_inbound", "relay_inbound", "active_relay_reservations", "target_relay_reservations", "preferred_path_policy", "updated_at"],
+  "additionalProperties": false,
+  "properties": {
+    "direct_inbound": { "enum": ["unknown", "verified_public", "not_verified"] },
+    "relay_inbound": {
+      "enum": ["unavailable", "partial", "ready"],
+      "description": "`ready` means the active reservation target is met; `partial` means at least one reservation exists but the target is not. A profile may be simultaneously verified_public and ready — direct paths stay preferred while relays provide failover."
+    },
+    "active_relay_reservations": { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "target_relay_reservations": {
+      "type": "integer", "minimum": 0, "maximum": 65535,
+      "description": "Target is a function of direct reachability: 2 distinct relays while direct is unknown or not_verified, 1 warm reservation once verified_public, 4 active maximum (ADR-0035)."
+    },
+    "active_relayed_peer_paths": { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "hole_punch_inflight": { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "preferred_path_policy": {
+      "const": "direct_first",
+      "description": "The only v1 policy. A failed DCUtR upgrade never tears down the working relay path."
+    },
+    "updated_at": { "type": "integer", "minimum": 0 }
+  },
+  "x-contract": {
+    "name": "connectivity.connectivity-summary",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": ["0035", "0036"],
+    "specification": "architecture/contracts/CONNECTIVITY.md"
+  }
+}

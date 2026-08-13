@@ -1,0 +1,13 @@
+{
+  "family": "discovery",
+  "specification": "architecture/contracts/DISCOVERY.md",
+  "concepts": [
+    { "name": "candidate-peer", "file": "candidate-peer.schema.json", "status": "approved" },
+    { "name": "provider-descriptor", "file": "provider-descriptor.schema.json", "status": "approved" },
+    { "name": "provider-health", "file": "provider-health.schema.json", "status": "approved" }
+  ],
+  "not_modelled": {
+    "the DiscoveryProvider trait": "A Rust interface, not a document. DISCOVERY.md states plainly that the exact signatures are left to implementation ergonomics and only the behavioural contract is normative; a schema would add nothing a compiler does not already enforce.",
+    "hint classes": "ObservedReachable / ObservedProtocol / CandidateHint are in-process ingress between DiscoveryManager and a provider. They never cross a wire, and shaping them here would imply an interoperability surface that does not exist."
+  }
+}
