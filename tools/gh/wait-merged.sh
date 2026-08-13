@@ -54,9 +54,12 @@
 #      conflicts with its base. BLOCKED with checks merely PENDING is the
 #      normal path and keeps waiting.
 #   6  stalled for a reason OUTSIDE the PR — GitHub Actions is degraded,
-#      the head commit has no workflow run at all (a lost push webhook),
-#      or the included Actions allowance is spent. Distinguished from 4
-#      because 4 means "nobody knows" and 6 names the cause.
+#      the head commit has no workflow run at all, or the included Actions
+#      allowance is spent. Distinguished from 4 because 4 means "nobody
+#      knows" and 6 names the cause. "No run at all" is reported without
+#      asserting WHY: a lost push webhook and a branch/path filter that
+#      skipped every workflow look identical from here, and telling them
+#      apart needs the filters evaluated against the changed paths.
 # <<< help
 
 set -uo pipefail

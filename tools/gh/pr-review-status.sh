@@ -21,8 +21,12 @@
 #      were evaluated against code that did not exist when it was
 #      written. `original_commit_id` is the honest field.
 #
-# So: filter by AUTHOR, and compare the newest independent review's
-# commit against headRefOid. Everything else is noise.
+# So: filter by AUTHOR, and ask whether ANY independent review targets
+# headRefOid. Recency is the wrong axis — a review created before the
+# last push but submitted after a fresh one is newer by timestamp and
+# older by commit, so selecting the newest lets a stale review mask real
+# coverage and produces a false "no review is coming". The newest is kept
+# for reporting only. Everything else is noise.
 #
 # WAITING (--wait). Automated review fires on PR **open** and on
 # explicit request — never on a push. So there are two very different

@@ -16,7 +16,10 @@
 #              in its opening lines. The repository LICENSE says Apache-2.0;
 #              a file that does not say so itself is ambiguous the moment it
 #              is copied back out.
-#   FOREIGN  — a tracked file carrying an SPDX tag that is not Apache-2.0,
+#   FOREIGN  — a tracked file carrying an SPDX EXPRESSION that is not
+#              exactly Apache-2.0 — every tag in the file, compared whole,
+#              so `Apache-2.0 AND MIT` and `Apache-2.0 WITH <exception>`
+#              are caught rather than truncated to something acceptable —
 #              or the boilerplate of a rights-reserved / confidential
 #              notice (see PROPRIETARY_RE below). This is the one that
 #              matters: code moved in from a differently-licensed source
@@ -130,12 +133,9 @@ for f in "${TRACKED[@]}"; do
     # as a foreign notice.
     [ "$f" = "LICENSE" ] && continue
 
-    # FOREIGN — an explicit SPDX tag naming something else, or proprietary
-    # wording anywhere in the file.
-    # Match the licence TOKEN only, not the rest of the line: prose that
-    # quotes the tag mid-sentence (this repository's own documentation
-    # does) would otherwise read as an expression naming everything that
-    # followed it.
+    # FOREIGN — an SPDX declaration naming something other than Apache-2.0,
+    # or proprietary wording anywhere in the file.
+    #
     # EVERY tag, and the WHOLE expression each time.
     #
     # Every tag: prepending an Apache header to a copied file leaves its
