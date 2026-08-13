@@ -289,7 +289,11 @@ A session cannot see its own permission prompts, so do not try to verify this ga
 
 `main` is protected by the `main protection` ruleset: pull request required, direct pushes and force-pushes blocked, branch deletion blocked, **merge commits only** (squash and rebase disabled), and a **merge queue** (`ALLGREEN`, merge method `MERGE`). Required approving reviews are 0 and unresolved review threads do not block — so **the merge is not evidence that anything was reviewed**.
 
-> The ruleset currently declares **no required status checks**, because this repository has no CI workflows yet. The queue therefore gates ordering, not correctness. When the first workflow lands, add its job contexts to the ruleset's `required_status_checks` in the same change — a job's `name:` *is* the required-check context, so renaming a job silently un-gates `main`.
+>  **CI exists** — `.github/workflows/ci.yml` runs every tree check and every self-test on `pull_request`, `merge_group`, and pushes to `main`. It reports two contexts, which are the job `name:` values verbatim: **`tree checks`** and **`tool self-tests`**.
+>
+> A job's `name:` *is* its required-check context, so renaming a job silently un-gates `main` — the ruleset goes on requiring a context nothing reports, and the queue waits forever. Rename a job only together with the ruleset.
+>
+> `merge_group` in that workflow is equally load-bearing: the queue builds its own ref, so a workflow that triggers only on `pull_request` never reports for that build and the queue hangs on a check that will never arrive.
 
 **Commit shape and PR shape are different questions.** The multi-fix and multi-package rules below govern COMMITS — one per root cause, one per package. Bisectability, revertability, and reviewability all live at the commit level and are unaffected by batching several commits into one PR.
 
@@ -468,6 +472,7 @@ For repository-wide changes, verify at minimum:
 - `git status` is understood;
 - Markdown relative links still resolve;
 - YAML/config examples still parse;
+- `tools/checks/check_guards_are_wired.sh` is clean — every guard is invoked by a workflow and has a self-test beside it, because one that runs nowhere passes silently-green;
 - `tools/checks/validate_adr_index.sh` is clean — every ADR is template-conformant, indexed, and digested, and its amendment record is consistent;
 - `tools/checks/scan_semantic_collisions.sh` is clean — no two branches minted the same ADR number or amendment heading;
 - `tools/checks/check_license_headers.sh` is clean — no missing Apache-2.0 header on first-party source, no foreign licence terms;
