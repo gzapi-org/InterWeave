@@ -1,5 +1,7 @@
 # Connectivity contract
 
+The prose here is normative for **behaviour**. The normalized summary and path vocabulary are also defined as JSON Schema under [`schemas/connectivity/`](./schemas/connectivity/) — normative for **shape** (ADR-0049). That schema is closed on purpose: it is what stops infrastructure PeerIds and relay addresses being added to a summary an ordinary data-plane client receives.
+
 Status: **Frozen for standard v1 implementation scaffolding**
 
 This contract defines the backend-neutral Internet reachability surface. It does not expose AutoNAT, Circuit Relay, DCUtR, multiaddr manipulation, or Swarm internals to Claude/human clients.

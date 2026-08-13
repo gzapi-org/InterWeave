@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:connectivity:peer-path",
+  "title": "Peer path",
+  "description": "How a logical application peer is currently reachable. The transition vocabulary matters more than the values: `PeerConnected` fires only when a peer goes from NO usable application connection to at least one, so a successful DCUtR hole punch on an already-connected relayed peer emits `PeerPathChanged { relayed -> direct }` and NOT a second `PeerConnected`. Treating the upgrade as a new connection would double-count peers and re-run whatever a consumer does on first contact.",
+  "enum": ["direct", "relayed", "none"],
+  "x-contract": {
+    "name": "connectivity.peer-path",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": ["0035"],
+    "specification": "architecture/contracts/CONNECTIVITY.md"
+  }
+}

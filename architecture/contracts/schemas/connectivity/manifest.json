@@ -1,0 +1,11 @@
+{
+  "family": "connectivity",
+  "specification": "architecture/contracts/CONNECTIVITY.md",
+  "concepts": [
+    { "name": "connectivity-summary", "file": "connectivity-summary.schema.json", "status": "approved" },
+    { "name": "peer-path", "file": "peer-path.schema.json", "status": "approved" }
+  ],
+  "not_modelled": {
+    "raw reachability detail": "Infrastructure PeerIds, relay multiaddrs, probe traces, and reservation failure codes are deliberately outside the neutral contract — they belong to diagnostics and admin surfaces. Giving them a shape here would invite exposing them on the ordinary data-plane status path, which ADR-0036 exists to prevent."
+  }
+}
