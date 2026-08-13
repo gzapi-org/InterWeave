@@ -133,9 +133,69 @@ def direct_message_v2_frame(vector: dict) -> str:
     return out.hex()
 
 
+def _base58btc(data: bytes) -> str:
+    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    n = int.from_bytes(data, "big")
+    out = ""
+    while n:
+        n, r = divmod(n, 58)
+        out = alphabet[r] + out
+    # Every leading ZERO BYTE encodes as a leading '1'. The identity
+    # multihash prefix is 0x00, so dropping this loses the '1' that
+    # begins every Ed25519 PeerId — a mistake that produces a
+    # plausible-looking value, which is the dangerous kind.
+    return "1" * (len(data) - len(data.lstrip(b"\x00"))) + out
+
+
+def ed25519_bip39_entropy_v1(vector: dict) -> str:
+    """entropy -> Ed25519 public key -> libp2p PeerId.
+
+    From architecture/contracts/IDENTITY-RECOVERY.md. The entropy IS the
+    Ed25519 secret seed: no PBKDF2, no passphrase, no further KDF. That
+    is the single most important property to keep verified, because a
+    wallet-style derivation would also produce a valid-looking PeerId —
+    just not the right one, and not recoverable by anyone else.
+    """
+    try:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    except ImportError as e:  # pragma: no cover - environment problem, not drift
+        raise RuntimeError(f"python3 cryptography is required to verify this vector: {e}") from e
+
+    entropy = bytes.fromhex(vector["entropy_hex"])
+    if len(entropy) != 32:
+        raise ValueError(f"entropy is {len(entropy)} bytes; this format is exactly 32 (256 bits)")
+
+    # Word indexes are checked here too: entropy || 8-bit checksum, split
+    # into 24 eleven-bit indexes. Resolving them to words needs the
+    # 2048-word list, which is not vendored for one vector.
+    checksum = hashlib.sha256(entropy).digest()[0]
+    bits = "".join(f"{b:08b}" for b in entropy) + f"{checksum:08b}"
+    indexes = [int(bits[i * 11:(i + 1) * 11], 2) for i in range(24)]
+    stated = vector.get("word_indexes")
+    if stated is not None and stated != indexes:
+        raise ValueError(f"word indexes disagree: stored {stated[:3]}…{stated[-1]}, computed {indexes[:3]}…{indexes[-1]}")
+
+    public = Ed25519PrivateKey.from_private_bytes(entropy).public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+    stated_pub = vector.get("ed25519_public_key_hex")
+    if stated_pub is not None and stated_pub != public.hex():
+        raise ValueError(f"public key disagrees: stored {stated_pub}, computed {public.hex()}")
+
+    protobuf = bytes([0x08, 0x01, 0x12, len(public)]) + public
+    return _base58btc(bytes([0x00, len(protobuf)]) + protobuf)
+
+
+# id -> (function, the vector field holding the value it must reproduce).
+# The field is declared rather than guessed from the name: these
+# algorithms produce a digest, an encoding, and an identifier
+# respectively, and inferring that from a suffix was a hack waiting to
+# mislabel the fourth one.
 ALGORITHMS = {
-    "direct-content-fingerprint-v1": direct_content_fingerprint_v1,
-    "direct-message-v2-frame": direct_message_v2_frame,
+    "direct-content-fingerprint-v1": (direct_content_fingerprint_v1, "sha256"),
+    "direct-message-v2-frame": (direct_message_v2_frame, "frame_hex"),
+    "ed25519-bip39-entropy-v1": (ed25519_bip39_entropy_v1, "expected_peer_id"),
 }
 
 
@@ -286,18 +346,15 @@ def main(argv: list[str]) -> int:
             continue
 
         alg_id = doc.get("algorithm", {}).get("id")
-        fn = ALGORITHMS.get(alg_id)
-        if fn is None:
+        entry = ALGORITHMS.get(alg_id)
+        if entry is None:
             report(
                 f"{rel}: declares algorithm '{alg_id}', which this verifier cannot "
                 "compute — an unverifiable vector file is the failure, not a skip"
             )
             continue
 
-        # Which field holds the expected output depends on what the
-        # algorithm produces: a digest, or an encoding. Both are "the
-        # value implementations must agree on"; only the column differs.
-        field = "frame_hex" if alg_id.endswith("-frame") else "sha256"
+        fn, field = entry
 
         seen: dict[str, str] = {}
         for v in doc.get("vectors", []):

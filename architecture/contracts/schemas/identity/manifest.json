@@ -1,0 +1,11 @@
+{
+  "family": "identity",
+  "specification": "architecture/contracts/IDENTITY-RECOVERY.md",
+  "concepts": [
+    { "name": "recovery-record", "file": "recovery-record.schema.json", "status": "approved" }
+  ],
+  "not_modelled": {
+    "the private key file": "Serialized by the implementation's portable libp2p key representation and written owner-only. It is not a document, never leaves the machine, and must not acquire a schema that would invite treating it as transferable.",
+    "SLIP-0039 threshold shares": "A future format over the same 32-byte seed. Out of scope until decided; ADR-0033 records it as future work rather than v1 shape."
+  }
+}

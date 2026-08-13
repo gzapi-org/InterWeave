@@ -1,0 +1,60 @@
+{
+  "fixture": "interweave-ed25519-bip39-entropy-v1",
+  "contract": "urn:interweave:schemas:identity:recovery-record",
+  "specification": "architecture/contracts/IDENTITY-RECOVERY.md",
+  "adr": [
+    "0033"
+  ],
+  "status": "frozen",
+  "WARNING": "TEST-ONLY KEY MATERIAL. The all-zero entropy below is the standard public BIP-39 vector and has no secrecy whatsoever. It exists to prove the reconstruction path. NEVER use it as a production identity, and never treat a real recovery phrase this way: a real phrase is private-key-equivalent and must not enter this repository, a log, a diagnostic, or any file (CLAUDE.md §6, ADR-0033).",
+  "algorithm": {
+    "id": "ed25519-bip39-entropy-v1",
+    "steps": [
+      "entropy is exactly 32 bytes and IS the Ed25519 secret seed — no PBKDF2, no passphrase, no extra KDF",
+      "checksum = first 8 bits of SHA-256(entropy)",
+      "entropy||checksum = 264 bits split into 24 eleven-bit English BIP-39 word indexes",
+      "Ed25519 public key derived from the seed",
+      "libp2p PublicKey protobuf = 0x08 0x01 (KeyType Ed25519) 0x12 len pubkey",
+      "PeerId = base58btc(identity-multihash(protobuf)) — the identity hash 0x00 is used because the key is under 42 bytes"
+    ],
+    "not_used": "PBKDF2-HMAC-SHA512(mnemonic, \"mnemonic\"+passphrase, 2048). Feeding these words to a cryptocurrency wallet yields unrelated material and is not a restore path."
+  },
+  "$comment": "word_indexes are VERIFIED from the entropy; `mnemonic` is documentation carried from the contract, since resolving indexes to words needs the 2048-word English list and vendoring it for one vector would be a poor trade. Verification covers entropy -> indexes -> public key -> PeerId, which is the part an implementation can get wrong.",
+  "vectors": [
+    {
+      "name": "golden-zero-entropy",
+      "frozen_by": "0033",
+      "description": "The contract's golden. Proves the whole reconstruction path: entropy to word indexes, seed to public key, public key to PeerId. A restore that produces a different PeerId from a checksum-valid phrase is a hard failure, which is why this vector matters more than the checksum does.",
+      "entropy_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "word_indexes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        102
+      ],
+      "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art",
+      "ed25519_public_key_hex": "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29",
+      "expected_peer_id": "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN"
+    }
+  ]
+}
