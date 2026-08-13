@@ -247,15 +247,26 @@ FAIL
 FAIL" ""
 assert_rc "three failed lookups exit 2" 2
 
+echo "pr-review-status: a stale review submitted LAST cannot mask head coverage"
+# A review created before the last push but submitted after a fresh one
+# is newer by timestamp and older by commit. Selecting by recency then
+# reports the head unreviewed — and exit 5 claims no review is coming —
+# while the review it needed was already there. Coverage is "ANY
+# independent review targets head", not "the newest one does".
+run "OPEN:abc123:0" "reviewer-a,abc123,2026-08-12T10:00:00Z
+reviewer-b,oldsha1,2026-08-12T11:00:00Z"
+assert_rc       "head coverage is found despite a newer stale review" 0
+assert_contains "  and reports it reviewed"  "head reviewed?      : yes"
+
 echo "pr-review-status: a failed reviews lookup is UNREADABLE, not empty"
 # The script's whole job is answering "was this really reviewed". A rate
 # limit, permission gap, or transient 5xx converted into [] would produce
 # the confident wrong answer "no reviews" and let a caller conclude that
 # a reviewed PR was never looked at. It must feed the consecutive-failure
 # counter instead, which is what the exit-2 contract already promises.
-run "OPEN:CLEAN:abc123
-OPEN:CLEAN:abc123
-OPEN:CLEAN:abc123" ""
+run "OPEN:abc123:0
+OPEN:abc123:0
+OPEN:abc123:0" ""
 : > "$SANDBOX/state/reviews_fail"
 RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
     timeout 20 bash "$UNDER_TEST" 77 o/r 2>&1)"; RUN_RC=$?

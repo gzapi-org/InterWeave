@@ -149,6 +149,7 @@ note() { (( QUIET )) || echo "pr-review-status: $*" >&2; }
 # queries below are for the human reading the final answer, and running
 # them every 30 seconds would be rude to the rate limiter for output
 # nobody sees.
+probe_ok=0
 probe() {
     local meta reviews
     meta="$(gh pr view "$PR" --repo "$REPO" \
@@ -185,8 +186,22 @@ probe() {
     newest_ind_commit=""
     if (( ind_count > 0 )); then
         newest_ind_commit="$(jq -r 'sort_by(.submitted_at) | last | .commit_id' <<<"$independent")"
-        [[ "$newest_ind_commit" == "$head" ]] && head_reviewed=yes
+        # COVERAGE IS "ANY review targets head", NOT "the newest one
+        # does". A review created before the last push but submitted
+        # after a fresh one is newer by timestamp and older by commit, so
+        # selecting by recency lets a stale review mask a real one — and
+        # this script would then report the head unreviewed, and exit 5
+        # claiming no review is coming, while the review it needed was
+        # already sitting there. The newest is kept for REPORTING only.
+        if [[ "$(jq -r --arg h "$head" 'any(.[]; .commit_id == $h)' <<<"$independent")" == "true" ]]; then
+            head_reviewed=yes
+        fi
     fi
+    # Only a COMPLETE probe counts. A probe that read the PR metadata and
+    # then failed on reviews leaves head set but the review globals unset,
+    # and the fall-out path below must not mistake that for readable data
+    # and render a zero-coverage report from it.
+    probe_ok=1
     return 0
 }
 
@@ -285,8 +300,10 @@ while :; do
     sleep "$INTERVAL"
 done
 
-# Fell out: either one-shot, or the wait expired with nothing.
-if [[ -z "${head:-}" ]]; then
+# Fell out: either one-shot, or the wait expired with nothing. Requires a
+# probe that completed — `head` alone is not enough, because it is set
+# before the reviews lookup that may be the thing that failed.
+if (( probe_ok == 0 )) || [[ -z "${head:-}" ]]; then
     die "could not read PR #$PR in $REPO."
 fi
 render

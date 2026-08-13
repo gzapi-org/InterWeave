@@ -67,7 +67,11 @@ if [[ "${1:-}" == "api" ]]; then
   # fixtures and default to "nothing wrong", so every pre-existing case
   # keeps its old behaviour.
   case "${2:-}" in
-    *actions/runs*)     cat "$GH_MOCK_STATE/runs_count" 2>/dev/null || echo 1; exit 0 ;;
+    # Repo-WIDE runs (no head_sha filter): has CI ever fired here at
+    # all? Defaults to 1 so every pre-existing case describes a live
+    # repository. Must be tested before the head-scoped branch below.
+    *actions/runs*head_sha*) cat "$GH_MOCK_STATE/runs_count" 2>/dev/null || echo 1; exit 0 ;;
+    *actions/runs*)          cat "$GH_MOCK_STATE/any_runs_count" 2>/dev/null || echo 1; exit 0 ;;
     # How many workflow FILES the repo has. Zero runs only means a lost
     # webhook if a run was ever expected, so the missing-run probe asks
     # this first. Defaults to 1 so every pre-existing case still
@@ -154,6 +158,7 @@ states() { printf '%s\n' "$@" > "$SANDBOX/state/states"; : > "$SANDBOX/state/cal
            printf 'operational\n' > "$SANDBOX/state/actions_status"
            printf '1\n' > "$SANDBOX/state/runs_count"
            printf '1\n' > "$SANDBOX/state/workflows_count"
+           printf '1\n' > "$SANDBOX/state/any_runs_count"
            printf '0\n' > "$SANDBOX/state/billing_net"
            printf '0\n' > "$SANDBOX/state/billing_mins"
            unset INTERWEAVE_ACTIONS_INCLUDED_MINUTES; }
@@ -161,6 +166,7 @@ no_checks()       { : > "$SANDBOX/state/checks_empty"; }
 actions_status()  { printf '%s\n' "$1" > "$SANDBOX/state/actions_status"; }
 runs_count()      { printf '%s\n' "$1" > "$SANDBOX/state/runs_count"; }
 workflows_count() { printf '%s\n' "$1" > "$SANDBOX/state/workflows_count"; }
+any_runs_count()  { printf '%s\n' "$1" > "$SANDBOX/state/any_runs_count"; }
 billing_net()     { printf '%s\n' "$1" > "$SANDBOX/state/billing_net"; }
 billing_mins()    { printf '%s\n' "$1" > "$SANDBOX/state/billing_mins"; }
 arming() { printf '%s\n' "$1" > "$SANDBOX/state/arming"; }
@@ -552,6 +558,32 @@ workflows_count 0
 invoke 431 --interval 1 --timeout 3
 assert_rc       "exits 4, not 6"              4
 assert_lacks    "makes no missing-run claim"  "no workflow run exists"
+
+echo "wait-merged: workflows that have NEVER run are not a lost webhook"
+# Workflow files can exist and never have fired — a tree whose CI was
+# added but never triggered is indistinguishable from one with no CI,
+# and is likelier misconfigured than webhooked.
+states "OPEN:BLOCKED"
+no_checks
+runs_count 0
+workflows_count 3
+any_runs_count 0
+invoke 431 --interval 1 --timeout 3
+assert_rc       "exits 4, not 6"              4
+assert_lacks    "makes no missing-run claim"  "no workflow run exists"
+
+echo "wait-merged: the missing-run verdict names the filter cause too"
+# Neither probe proves a workflow applies to THIS push, so the verdict
+# must not assert the webhook as the only explanation.
+states "OPEN:BLOCKED"
+no_checks
+runs_count 0
+workflows_count 2
+any_runs_count 9
+invoke 431 --interval 1 --timeout 6
+assert_rc       "still exits 6"                6
+assert_contains "names the filter possibility" "branch/path filter"
+assert_contains "still says to re-arm"         "RE-ARM"
 
 echo "wait-merged: a merge on the empty-checks poll still reports MERGED"
 # A PR can merge on the very poll where checks still read empty. The

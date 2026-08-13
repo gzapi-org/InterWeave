@@ -186,20 +186,37 @@ actions_degraded() {
 # own — the fix is to re-trigger, and (per CLAUDE.md) to RE-ARM after,
 # because close/reopen silently drops auto-merge.
 head_sha_has_no_run() {
-    local sha runs workflows
+    local sha runs workflows any_runs
     sha="$(gh pr view "$PR" --json headRefOid -q .headRefOid 2>/dev/null)" || return 1
     [[ -n "$sha" ]] || return 1
 
-    # ZERO RUNS ONLY MEANS A LOST WEBHOOK IF A RUN WAS EVER EXPECTED. A
-    # repository with no workflow files produces no runs BY DESIGN — this
-    # one has none today, and CLAUDE.md says so — and a path-filtered
-    # workflow legitimately skips a push. Without this guard every watch
-    # on such a repository ends at exit 6 with re-trigger instructions
-    # for a run that was never coming, which inverts the signal exit 6
-    # exists to give.
+    # ZERO RUNS ONLY MEANS A LOST WEBHOOK IF A RUN WAS EVER EXPECTED.
+    # Two things must hold before that inference is worth making, and
+    # NEITHER is proof — see the residual below.
+    #
+    # 1. The repository has workflow files at all. One with none produces
+    #    no runs by design; this repository has none today, and CLAUDE.md
+    #    says so. Without this, every watch here ends at exit 6 with
+    #    re-trigger instructions for a run that was never coming.
+    # 2. The repository has actually produced a run at some point. A tree
+    #    whose workflows have never fired is indistinguishable from one
+    #    with no CI, and is likelier to be misconfigured than webhooked.
+    #
+    # RESIDUAL, stated because it cannot be closed here: neither test
+    # proves a workflow applies to THIS push. A branch- or path-filtered
+    # workflow legitimately skips a commit, leaving workflows > 0, runs
+    # elsewhere > 0, and zero runs for this head — the same signature as
+    # a lost webhook. Deciding between them needs the filter expressions
+    # evaluated against the changed paths, which is a real matcher, not a
+    # shell probe. The verdict text therefore names both causes rather
+    # than asserting the webhook.
     workflows="$(gh api "repos/{owner}/{repo}/actions/workflows?per_page=1"         -q '.total_count' 2>/dev/null)" || return 1
     [[ "$workflows" =~ ^[0-9]+$ ]] || return 1
     (( workflows > 0 )) || return 1
+
+    any_runs="$(gh api "repos/{owner}/{repo}/actions/runs?per_page=1"         -q '.total_count' 2>/dev/null)" || return 1
+    [[ "$any_runs" =~ ^[0-9]+$ ]] || return 1
+    (( any_runs > 0 )) || return 1
 
     runs="$(gh api "repos/{owner}/{repo}/actions/runs?head_sha=$sha&per_page=1"         -q '.total_count' 2>/dev/null)" || return 1
     [[ "$runs" == "0" ]]
@@ -259,7 +276,7 @@ diagnose_stall() {
         verdict 6 "STALLED — GitHub Actions is $st (githubstatus.com); the PR is fine, the platform is not"
     fi
     if [[ "$no_checks" == "1" ]] && head_sha_has_no_run; then
-        verdict 6 "STALLED — no workflow run exists for this PR's head commit; the push webhook was lost. Re-trigger it, then RE-ARM auto-merge"
+        verdict 6 "STALLED — no workflow run exists for this PR's head commit. Either the push webhook was lost, or a branch/path filter skipped every workflow for this commit. Check which before re-triggering; if you re-trigger, RE-ARM auto-merge afterwards"
     fi
     if actions_allowance_spent; then
         verdict 6 "STALLED — the included Actions allowance is spent; green code will not merge until it resets"
