@@ -4,6 +4,8 @@ Status: **architecture contract, transport v2 draft**.
 
 This contract defines Model B: one profile-scoped transport identity / PeerId with multiple independently addressable local application endpoints.
 
+The prose here is normative for **behaviour**. The shapes it describes are also defined as JSON Schema under [`schemas/endpoints/`](./schemas/endpoints/) — normative for **shape**, and carrying an `x-contract.status` that says what each is authoritative about (ADR-0049). Where the two describe the same field they must agree; a disagreement is a bug in whichever one drifted.
+
 ## Purpose
 
 A transport profile remains one cryptographic network node:
@@ -173,7 +175,9 @@ fingerprint = SHA-256(canonical)
 
 Rules: `media_present` is exactly `0` or `1`; an absent media type uses `0` and has no media-length field; a present media type uses `1`, must be 1..128 ASCII bytes, and includes its two-byte big-endian length. Empty media type is invalid rather than an alias for absence. Payload length is the exact byte length before the payload. No JSON, UTF-8 normalization, endpoint fields, message ID, or timestamp participates.
 
-Golden fixture:
+Golden vector, re-frozen by ADR-0047 and held with its edge cases in
+[`fixtures/direct-v2/direct-content-fingerprint-v1.json`](../../fixtures/direct-v2/direct-content-fingerprint-v1.json),
+which `tools/checks/verify_fixture_vectors.py` recomputes — including this copy:
 
 ```text
 media_type = "text/plain"

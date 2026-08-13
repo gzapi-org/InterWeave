@@ -46,9 +46,11 @@ Every contract declares `x-contract.status`:
 
 Every contract in this repository is `approved` until a corresponding implementation exists. That is the distinction prose could not express, and it is the one that matters most in a pre-implementation tree.
 
-### Provenance is mandatory
+### Provenance is mandatory, and it points both ways
 
-A contract declares the ADR(s) that decided its shape and the prose specification it formalises; both are existence-checked. A contract that cannot be traced to a decision is unreviewable — a reader confronted with a field cannot tell whether it is load-bearing or incidental.
+A contract declares the ADR(s) that decided its shape and the prose specification it formalises; both are existence-checked, as is any `x-contract.fixtures` entry. A contract that cannot be traced to a decision is unreviewable — a reader confronted with a field cannot tell whether it is load-bearing or incidental.
+
+The prose specification carries the return link: adding a family means adding a line to its specification pointing at `schemas/<family>/`. Only the schema-to-prose direction can be machine-checked, so the other one is a propagation step — without it a reader of the specification never learns the schemas exist, which is the audience the schemas were written for.
 
 ### Frozen vectors are recomputed, not stored and trusted
 
