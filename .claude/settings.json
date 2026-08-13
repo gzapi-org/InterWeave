@@ -8,6 +8,8 @@
   },
   "permissions": {
     "allow": [
+      "Bash(git add*)",
+      "Bash(git commit*)",
       "Bash(gh pr *)",
       "Bash(gh issue *)",
       "Bash(gh run *)",
