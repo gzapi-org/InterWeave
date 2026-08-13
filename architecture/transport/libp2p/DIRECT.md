@@ -33,6 +33,8 @@ DirectMessageV2 {
 }
 ```
 
+All multi-byte integer fields are **big-endian** (network byte order): `sent_at_ms` as u64be and `payload_len` as u32be. This matches the rest of the repository — the IPC frame's 4-byte length prefix and `DirectContentFingerprintV1`'s u16be/u32be lengths — and is the only choice under which those three agree. The single-byte length fields have no byte order.
+
 `media_type_len = 0` encodes **absence**. No empty media-type string exists on the wire. A non-zero length encodes a present ASCII media type and maps to `media_present = 1`; zero maps to `media_present = 0` in `DirectContentFingerprintV1`.
 
 Endpoint strings must satisfy `EndpointId` grammar before routing. Codec rejects invalid/oversized declared lengths before allocation. `sent_at_ms` is not authorization, ordering, freshness, replay-window, or dedup input.

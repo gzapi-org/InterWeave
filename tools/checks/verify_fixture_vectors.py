@@ -96,8 +96,46 @@ def direct_content_fingerprint_v1(vector: dict) -> str:
     return hashlib.sha256(buf).hexdigest()
 
 
+def direct_message_v2_frame(vector: dict) -> str:
+    """Encode one DirectMessageV2 request frame, returning hex.
+
+    From architecture/transport/libp2p/DIRECT.md §Request. Multi-byte
+    integers are big-endian, which that document pins explicitly — it did
+    not until these vectors forced the question, and the answer had to
+    match the IPC length prefix and the content fingerprint or the three
+    would disagree about the same repository's byte order.
+    """
+    mid = bytes.fromhex(vector["message_id"])
+    if len(mid) != 16:
+        raise ValueError(f"message_id is {len(mid)} bytes; the frame carries exactly 16 (128 bits)")
+
+    out = mid + int(vector["sent_at_ms"]).to_bytes(8, "big")
+
+    src = vector["source_endpoint"].encode("ascii")
+    if not 1 <= len(src) <= 64:
+        raise ValueError("source_endpoint is 1..64 bytes and is always present")
+    out += bytes([len(src)]) + src
+
+    dst = vector.get("destination_endpoint")
+    dst_b = dst.encode("ascii") if dst is not None else b""
+    if len(dst_b) > 64:
+        raise ValueError("destination_endpoint exceeds 64 bytes")
+    out += bytes([len(dst_b)]) + dst_b
+
+    media = vector.get("media_type")
+    media_b = media.encode("ascii") if media is not None else b""
+    if media is not None and not 1 <= len(media_b) <= 128:
+        raise ValueError("a present media type is 1..128 bytes; empty is absence, not a value")
+    out += bytes([len(media_b)]) + media_b
+
+    payload = bytes.fromhex(vector.get("payload_hex", ""))
+    out += len(payload).to_bytes(4, "big") + payload
+    return out.hex()
+
+
 ALGORITHMS = {
     "direct-content-fingerprint-v1": direct_content_fingerprint_v1,
+    "direct-message-v2-frame": direct_message_v2_frame,
 }
 
 
@@ -256,10 +294,15 @@ def main(argv: list[str]) -> int:
             )
             continue
 
+        # Which field holds the expected output depends on what the
+        # algorithm produces: a digest, or an encoding. Both are "the
+        # value implementations must agree on"; only the column differs.
+        field = "frame_hex" if alg_id.endswith("-frame") else "sha256"
+
         seen: dict[str, str] = {}
         for v in doc.get("vectors", []):
             name = v.get("name", "(unnamed)")
-            stored = v.get("sha256")
+            stored = v.get(field)
             try:
                 computed = fn(v)
             except Exception as e:  # noqa: BLE001 — the message is the report

@@ -1,0 +1,98 @@
+{
+  "fixture": "DirectMessageV2 request framing",
+  "contract": "urn:interweave:schemas:direct:dedup-key",
+  "specification": "architecture/transport/libp2p/DIRECT.md",
+  "adr": [
+    "0005",
+    "0030"
+  ],
+  "status": "frozen",
+  "algorithm": {
+    "id": "direct-message-v2-frame",
+    "byte_order": "big-endian for every multi-byte integer (network byte order)",
+    "layout": "message_id:16 || sent_at_ms:u64be || source_endpoint_len:u8 || source_endpoint || destination_endpoint_len:u8 || destination_endpoint || media_type_len:u8 || media_type || payload_len:u32be || payload",
+    "notes": [
+      "message_id is exactly 16 bytes — 128 bits — never a printable form.",
+      "source_endpoint_len is 1..64: a source is always present, derived from the sender's lease and never caller-chosen.",
+      "destination_endpoint_len = 0 means the receiver's configured default endpoint, not an empty name and not fan-out.",
+      "media_type_len = 0 encodes ABSENCE; no empty media-type string exists on the wire.",
+      "payload_len is u32be and precedes the payload even when the payload is empty.",
+      "sent_at_ms is diagnostic: not authorization, ordering, freshness, replay-window, or dedup input."
+    ]
+  },
+  "$comment": "Vectors are DERIVED from the layout decided in DIRECT.md — no ADR publishes a golden frame, so this file is anchored by its `adr` list rather than by a per-vector `frozen_by`. Byte order was unspecified until this fixture forced the question; DIRECT.md now pins big-endian, matching the IPC length prefix and the content fingerprint.",
+  "vectors": [
+    {
+      "name": "explicit-destination",
+      "description": "The ordinary case: both endpoints present, a short text payload.",
+      "message_id": "9f2c1d4e7a0b48c3915ed6f0a72b3c58",
+      "sent_at_ms": 1786600000000,
+      "source_endpoint": "human",
+      "destination_endpoint": "claude",
+      "media_type": "text/plain",
+      "payload_hex": "68656c6c6f",
+      "frame_hex": "9f2c1d4e7a0b48c3915ed6f0a72b3c580000019ff9a88a000568756d616e06636c617564650a746578742f706c61696e0000000568656c6c6f",
+      "frame_len": 57
+    },
+    {
+      "name": "default-destination",
+      "description": "destination_endpoint_len = 0 asks for the receiver's configured default endpoint. It is NOT an empty endpoint name, and never means fan-out.",
+      "message_id": "9f2c1d4e7a0b48c3915ed6f0a72b3c58",
+      "sent_at_ms": 1786600000000,
+      "source_endpoint": "human",
+      "destination_endpoint": null,
+      "media_type": "text/plain",
+      "payload_hex": "68656c6c6f",
+      "frame_hex": "9f2c1d4e7a0b48c3915ed6f0a72b3c580000019ff9a88a000568756d616e000a746578742f706c61696e0000000568656c6c6f",
+      "frame_len": 51
+    },
+    {
+      "name": "absent-media-type",
+      "description": "media_type_len = 0 encodes ABSENCE. No empty media-type string exists on the wire, and this maps to media_present=0 in the content fingerprint.",
+      "message_id": "9f2c1d4e7a0b48c3915ed6f0a72b3c58",
+      "sent_at_ms": 1786600000000,
+      "source_endpoint": "human",
+      "destination_endpoint": "claude",
+      "media_type": null,
+      "payload_hex": "68656c6c6f",
+      "frame_hex": "9f2c1d4e7a0b48c3915ed6f0a72b3c580000019ff9a88a000568756d616e06636c61756465000000000568656c6c6f",
+      "frame_len": 47
+    },
+    {
+      "name": "empty-payload",
+      "description": "payload_len = 0 with the u32be length still present. An empty payload is legal; an empty media type is not.",
+      "message_id": "9f2c1d4e7a0b48c3915ed6f0a72b3c58",
+      "sent_at_ms": 1786600000000,
+      "source_endpoint": "human",
+      "destination_endpoint": "claude",
+      "media_type": "application/octet-stream",
+      "payload_hex": "",
+      "frame_hex": "9f2c1d4e7a0b48c3915ed6f0a72b3c580000019ff9a88a000568756d616e06636c61756465186170706c69636174696f6e2f6f637465742d73747265616d00000000",
+      "frame_len": 66
+    },
+    {
+      "name": "max-endpoints-64",
+      "description": "Both endpoint labels at the 64-byte ceiling, the widest legal single-byte length.",
+      "message_id": "9f2c1d4e7a0b48c3915ed6f0a72b3c58",
+      "sent_at_ms": 1786600000000,
+      "source_endpoint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "destination_endpoint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "media_type": "text/plain",
+      "payload_hex": "00",
+      "frame_hex": "9f2c1d4e7a0b48c3915ed6f0a72b3c580000019ff9a88a00406161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616140626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262620a746578742f706c61696e0000000100",
+      "frame_len": 170
+    },
+    {
+      "name": "sent-at-ms-is-not-fingerprinted",
+      "description": "Identical to explicit-destination except for sent_at_ms. The FRAME bytes differ; the content fingerprint does not — sent_at_ms is diagnostic only and excluded from dedup identity.",
+      "message_id": "9f2c1d4e7a0b48c3915ed6f0a72b3c58",
+      "sent_at_ms": 1786699999999,
+      "source_endpoint": "human",
+      "destination_endpoint": "claude",
+      "media_type": "text/plain",
+      "payload_hex": "68656c6c6f",
+      "frame_hex": "9f2c1d4e7a0b48c3915ed6f0a72b3c580000019fff9e6aff0568756d616e06636c617564650a746578742f706c61696e0000000568656c6c6f",
+      "frame_len": 57
+    }
+  ]
+}
