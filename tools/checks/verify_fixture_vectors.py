@@ -280,8 +280,28 @@ def main(argv: list[str]) -> int:
             else:
                 seen[computed] = name
 
-        if not any(v.get("frozen_by") for v in doc.get("vectors", [])):
-            report(f"{rel}: no vector carries `frozen_by` — nothing anchors this file to an ADR")
+        # ANCHORING. Every vector file must trace to a decision, but the
+        # two ways that happens are different and both are legitimate:
+        #
+        #   per-vector `frozen_by` — this exact value was published by an
+        #     ADR and re-frozen there, so the ADR is the authority for the
+        #     number itself;
+        #   file-level `adr`       — the ALGORITHM was decided by these
+        #     ADRs and the vectors are derived from it, which is the
+        #     normal case for a layout with no published golden.
+        #
+        # Requiring `frozen_by` alone would push a derived-vector file
+        # into either inventing a golden or going unanchored, and the
+        # second is what this check exists to prevent.
+        anchors = [a for a in doc.get("adr", []) if a]
+        if not anchors and not any(v.get("frozen_by") for v in doc.get("vectors", [])):
+            report(
+                f"{rel}: nothing anchors this file to a decision — give it a "
+                "file-level `adr` list, or mark an ADR-published golden with `frozen_by`"
+            )
+        for a in anchors + [v["frozen_by"] for v in doc.get("vectors", []) if v.get("frozen_by")]:
+            if not list((root / "architecture" / "adr").glob(f"{a}-*.md")):
+                report(f"{rel}: cites ADR-{a}, which does not exist")
 
         prose_scanned += check_prose_copies(root, rel, doc)
 
