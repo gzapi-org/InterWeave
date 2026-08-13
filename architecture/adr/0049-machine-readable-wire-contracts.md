@@ -88,7 +88,9 @@ Writing a contract is now more work than writing a paragraph — envelope, manif
 
 A schema is a **shape** check and never an authorization boundary. `endpoint-config` can express that a policy is a narrowing subset; it cannot enforce that the subset is applied, and nothing in a schema substitutes for the runtime checks in ADR-0011, ADR-0012, and ADR-0030. Treating validation as admission would be a serious misreading.
 
-Two security-relevant properties do become mechanically enforced. The endpoint-directory response schema caps `endpoints` at 32 with unique items and clamps `ttl_ms` to the five-minute ceiling, so a malformed or hostile directory reply fails validation before it can reach a cache or a UI. And the fingerprint verifier makes a change to the fingerprint domain — which would silently break cross-implementation dedup agreement and could be used to slip a duplicate past a peer — a failing check rather than an invisible edit.
+One security-relevant property does become mechanically enforced: the endpoint-directory response schema caps `endpoints` at 32 with unique items, so an over-long or duplicate-bearing reply fails validation before it can reach a cache or a UI — which is exactly the set ENDPOINTS.md names as protocol violations.
+
+`ttl_ms` is deliberately **not** among them. The schema accepts the full wire `u32` range, because the contract clamps to `min(remote_ttl, local_cache_ttl, 300000)` **after receipt** rather than rejecting; asserting the ceiling in the schema would turn a value the contract tolerates into an interoperability failure. Bounding a hostile value and refusing the message that carried it are different mitigations, and only the first is correct here. And the fingerprint verifier makes a change to the fingerprint domain — which would silently break cross-implementation dedup agreement and could be used to slip a duplicate past a peer — a failing check rather than an invisible edit.
 
 The schemas describe shapes only. No key material, no capability grant, and no trust record is ever expressed as a contract instance.
 
