@@ -1,0 +1,19 @@
+# The workspace's own command runner, and the first member of it.
+#
+# NO DEPENDENCIES, deliberately. xtask is what a developer runs before pushing
+# and what CI runs to prove the tree is sound; a runner that needs a crates.io
+# fetch to tell you the tree is broken has a failure mode nothing else here
+# does. Everything it needs is in std.
+[package]
+name = "xtask"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

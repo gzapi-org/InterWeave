@@ -1,0 +1,18 @@
+# TEST-ONLY. `publish = false` and the name both say so, but the rule that
+# matters is CLAUDE.md §4: no production crate may depend on this package. A
+# harness that leaks into a shipped binary carries fake clocks and permissive
+# defaults into the one place they must not exist.
+[package]
+name = "interweave-test-support"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json = { workspace = true }

@@ -17,7 +17,11 @@
 #      silently un-gates `main`: the ruleset keeps requiring a context
 #      that no longer exists, and nothing reports it, so the queue hangs
 #      the same way. Rename a job only together with the ruleset
-#      (CLAUDE.md §9).
+#      (CLAUDE.md §9). ADDING a job has the mirror-image failure: the
+#      job runs, reports, and gates nothing at all until its name is
+#      added to the ruleset's required_status_checks.
+#
+# Contexts reported here: `rust`, `tree checks`, `tool self-tests`.
 #
 # Deliberately NOT conditional-per-surface. The whole run is ~2 minutes
 # wall clock (checks 4s, suites 1m45s, in parallel), so a `changes` job
@@ -42,6 +46,37 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  rust:
+    # CONTEXT NAME: `rust`. Like the two below, this string is what the
+    # ruleset requires — see the note above before touching it.
+    #
+    # Cargo-only on purpose. The tree checks and the self-tests run in
+    # their own jobs, and `cargo xtask ci` would run all three sets a
+    # third time; xtask is the local entry point, not a CI wrapper.
+    name: rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Installs exactly what rust-toolchain.toml pins, rustfmt and
+      # clippy included. The runner's preinstalled toolchain is whatever
+      # the image was built with, which is the floating compiler the pin
+      # exists to avoid.
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Includes tests/support's fixture-loading suite, which is the
+      # Stage-0 gate that the frozen vectors load from Rust with no
+      # product networking in the graph.
+      - name: Tests
+        run: cargo test --workspace --all-targets
+
   tree-checks:
     name: tree checks
     runs-on: ubuntu-latest
@@ -56,7 +91,7 @@ jobs:
           fetch-depth: 1
 
       - name: Install validator dependencies
-        run: python3 -m pip install --quiet jsonschema cryptography
+        run: python3 -m pip install --quiet jsonschema cryptography pyyaml
 
       - name: ADR index, template, and amendment record
         run: bash tools/checks/validate_adr_index.sh
@@ -72,6 +107,9 @@ jobs:
 
       - name: Frozen fixture vectors recompute
         run: python3 tools/checks/verify_fixture_vectors.py
+
+      - name: Markdown links resolve and YAML parses
+        run: python3 tools/checks/check_docs_integrity.py
 
       - name: Every guard is reachable from a workflow
         run: bash tools/checks/check_guards_are_wired.sh

@@ -1,0 +1,20 @@
+# The toolchain is pinned, not floated.
+#
+# Stage 0 of architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md asks for a
+# REPRODUCIBLE workspace. A floating `stable` gives every machine and every CI
+# run a different compiler, which turns a lint that fires today into a lint that
+# did not exist yesterday, and makes "green here, red there" the normal state
+# instead of the reportable one.
+#
+# `components` is part of the pin. xtask shells out to `cargo fmt` and
+# `cargo clippy`; without them declared here a fresh rustup install has neither,
+# and the check that would have caught the problem is the one that cannot run.
+#
+# Raising `channel` is a deliberate change: bump it here and in the
+# `rust-version` of [workspace.package] together, so the manifest's stated
+# minimum and the compiler actually used never drift apart.
+
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
