@@ -1,0 +1,7 @@
+# `cargo xtask <command>` — the alias exists so the runner is discoverable from
+# the tool everyone already has open, rather than being a path you have to know.
+#
+# See xtask/src/main.rs for what each command does and why CI still invokes the
+# tools/checks scripts by name instead of going through here.
+[alias]
+xtask = "run --quiet --package xtask --"

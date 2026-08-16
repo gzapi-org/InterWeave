@@ -6,7 +6,7 @@
 # gate. `planned_members` below is an inventory, not a queue to drain.
 [workspace]
 resolver = "3"
-members = []
+members = ["xtask"]
 
 [workspace.package]
 license = "Apache-2.0"
@@ -73,7 +73,10 @@ debug = 1
 overflow-checks = true
 
 [workspace.metadata.interweave]
-status = "skeleton-only"
+# Stage 0 of the canonical plan: the workspace builds and checks itself, and
+# `xtask` is its only member. No product crate is active, and none becomes
+# active until the stage that needs it opens (CLAUDE.md §3).
+status = "stage-0-foundation"
 architecture_root = "architecture"
 
 planned_members = [
