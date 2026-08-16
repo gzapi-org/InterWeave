@@ -2,7 +2,7 @@
 
 **InterWeave** is a generic peer-to-peer transport architecture for Claude Code Channels and first-party human clients. It combines payload-agnostic transport contracts, one-PeerId/many-EndpointId local routing, signed GossipSub broadcast, dedicated directed messaging, replaceable discovery, Kademlia peer routing, and mandatory Internet reachability through AutoNAT v2, Circuit Relay v2, and DCUtR.
 
-> **Repository status:** architecture and implementation/test skeleton only. The accepted design is under [`architecture/`](./architecture/). The implementation landing zones under `apps/`, `crates/`, `tests/`, `fixtures/`, `spikes/`, and `packaging/` contain no production Rust implementation yet. The root Cargo workspace intentionally has zero members.
+> **Repository status:** accepted architecture, plus **Stage 0** of the construction plan. The design is under [`architecture/`](./architecture/). There is no production Rust implementation yet: the landing zones under `apps/`, `crates/`, `spikes/`, and `packaging/` are empty of it, and the root Cargo workspace has exactly two members — `xtask` and `tests/support`, neither of them product code. The next package joins when the stage that needs it opens.
 
 ## What InterWeave is
 

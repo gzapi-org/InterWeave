@@ -4,7 +4,7 @@
 
 Developer automation for the workspace: fixture verification, conformance orchestration, multi-process test setup, packaging checks and repository audits. It must not contain runtime application behavior.
 
-Activated by Stage 0 as the workspace's first and, for now, only member.
+Activated by Stage 0 as the workspace's first member, alongside the test-only `tests/support`.
 
 ## Commands
 
