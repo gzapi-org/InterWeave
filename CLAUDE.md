@@ -10,7 +10,8 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
 - `apps/`, `crates/`, `tests/`, `fixtures/`, `test-data/`, `spikes/`, `packaging/`, and `xtask/` are tracked landing zones created by ADR-0045.
 - `tools/` is repository tooling — PR/review scripts and tree checks — not an implementation landing zone. It is live now and not gated by stage discipline. Each script has a self-test beside it (`test_*.sh`) that must stay green.
 - `.claude/` is committed shared agent configuration: `settings.json` and `statusline.sh` (§9), plus `skills/` — task-scoped procedures loaded on demand, see §10. Only `settings.local.json` and `CLAUDE.local.md` are per-developer and gitignored.
-- The root Cargo workspace intentionally has zero members until implementation begins.
+- The root Cargo workspace is open at **Stage 0** and has exactly two members: `xtask` (the command runner) and `tests/support` (the test-only harness). Neither is product code, and no other package joins until the stage that needs it opens (§3).
+- The toolchain is pinned in `rust-toolchain.toml`; edition, MSRV, lints, shared dependency versions, and the release profile are declared once in the root `Cargo.toml` and inherited.
 - There is no production Rust implementation yet.
 - Display name is **InterWeave**. Machine/wire namespace is lowercase `interweave` per ADR-0047.
 - Do not reintroduce the former pre-InterWeave namespace into current production constants, fixtures, paths, package names, or documentation except when discussing history explicitly.
@@ -479,6 +480,8 @@ For repository-wide changes, verify at minimum:
 - `tools/checks/verify_fixture_vectors.py` is clean — every frozen vector recomputes from its declared algorithm;
 - no forbidden production artifacts were introduced outside the active stage;
 - `git fsck --full` passes before archive handoff when a full repository ZIP is requested.
+
+`cargo xtask checks` runs every tree check above in one pass, and `cargo xtask ci` adds fmt, clippy, the workspace tests, and every self-test. Nothing short-circuits, so one invocation reports everything that is wrong. CI still invokes the scripts by name — that is what makes them visible to `check_guards_are_wired.sh`.
 
 ## 10. Context loading map
 

@@ -94,18 +94,21 @@ The root workspace starts with only the packages needed by this stage. Do not ac
 
 ### Already in place — do not rebuild
 
-`tools/checks/` carries the tree checks — ADR index/template conformance, semantic collisions, licence headers, contract validation, fixture recomputation, and guard wiring — each with a self-test beside it, and `.github/workflows/ci.yml` runs all of them as the two required contexts `tree checks` and `tool self-tests`. Three fixture sets are materialized and recomputing (table below). Stage-0 work builds on this rather than duplicating it.
+`tools/checks/` carries the tree checks — ADR index/template conformance, semantic collisions, licence headers, contract validation, fixture recomputation, documentation integrity, and guard wiring — each with a self-test beside it, and `.github/workflows/ci.yml` runs all of them. Three fixture sets are materialized and recomputing (table below). Stage-0 work builds on this rather than duplicating it.
 
-### Work
+### Landed
 
-- pin the Rust toolchain (`rust-toolchain.toml`);
-- establish shared lint/profile/dependency policy in the workspace;
-- create `xtask` commands that orchestrate the cargo-side checks — fmt, clippy, unit/conformance groups — and **call** the existing `tools/checks` scripts rather than reimplementing them;
-- create the test-only `tests/support` package;
+- the toolchain is pinned in `rust-toolchain.toml`, and edition, MSRV, inherited lints, shared dependency versions and the release profile are declared once in the root `Cargo.toml`;
+- `xtask` is the workspace's first member. `cargo xtask checks` runs the tree checks, `cargo xtask ci` adds fmt, clippy, tests and every self-test. It **calls** the `tools/checks` scripts rather than reimplementing them, and a unit test reads that directory from disk so a guard added later cannot be missing from the local run;
+- `tests/support` (`interweave-test-support`) is the test-only harness, with a fixture loader and strict lower-case hex. Its suite proves the frozen vectors load from Rust with no product networking — the question `verify_fixture_vectors.py` cannot answer, since that script owns whether they are *correct*;
+- `tools/checks/check_docs_integrity.py` is a real guard: relative links, heading anchors, and every YAML file and `yaml` block;
+- CI reports a third context, `rust` (fmt, clippy, workspace tests).
+
+### Work remaining
+
 - materialize the outstanding fixture sets in the table below, exactly as the existing three were: declared algorithm, recomputed by `tools/checks/verify_fixture_vectors.py`, anchored to their ADRs;
 - treat ADR-0047 InterWeave machine/wire identifiers as final inputs to every Stage-0 fixture; no former working-namespace compatibility aliases are materialized;
-- wire the Markdown-link/YAML integrity check into CI — today it exists only as an ad-hoc snippet run by hand, which is exactly the silently-unwired state `check_guards_are_wired.sh` was written to prevent for guards;
-- extend CI with the Rust jobs (format, clippy, unit, fixture-loader) when the workspace gains its first member, adding their job contexts to the ruleset's required checks **in the same change** — a job's `name:` is its required-check context, so this is where un-gating happens silently.
+- add `rust` to the ruleset's `required_status_checks`. A job's `name:` is its required-check context, so a reported-but-unrequired context gates nothing — and this is the mirror of the rename hazard, silent in the same way.
 
 ### Required fixtures
 
