@@ -74,6 +74,27 @@ out="$(run "$R")"
 [[ "$out" == *"not-here"* && "$out" != *"'#title'"* ]] && ok "  and only the wrong one is reported" \
     || bad "should report only the bad fragment: $out"
 
+# ── the fragment is compared as written, not re-slugged ──────────────────
+# Slugging both sides makes `#TITLE` match `# Title`, and the link still
+# does not work: the browser looks for id="TITLE" and finds id="title".
+R="$(fresh fragcase)"
+printf '# Title\n\n[wrong case](#TITLE)\n' > "$R/t.md"
+[ "$(run_code "$R")" = "1" ] && ok "a fragment differing only in case is reported" || bad "#TITLE should not match # Title"
+
+R="$(fresh fragcase-ok)"
+printf '# Title\n\n[right case](#title)\n' > "$R/t.md"
+[ "$(run_code "$R")" = "0" ] && ok "  and the canonical fragment passes" || bad "#title should match: $(run "$R")"
+
+R="$(fresh fragcross)"
+printf '# T\n\n[x](other.md#Deep-Section)\n' > "$R/t.md"
+printf '# Other\n\n## Deep section\n' > "$R/other.md"
+[ "$(run_code "$R")" = "1" ] && ok "  and the cross-document check is equally exact" || bad "cross-document fragment should be exact"
+
+R="$(fresh fragencoded)"
+printf '# T\n\n[x](other.md#a%%2Db)\n' > "$R/t.md"
+printf '# Other\n\n## A-b\n' > "$R/other.md"
+[ "$(run_code "$R")" = "0" ] && ok "  and a percent-encoded fragment is decoded first" || bad "encoded fragment should decode: $(run "$R")"
+
 # ── punctuation in a heading still resolves ──────────────────────────────
 # GitHub drops everything outside word characters, hyphen and space, so a
 # heading full of backticks and colons is still reachable.
@@ -81,6 +102,20 @@ R="$(fresh slug)"
 printf '# T\n\n[x](other.md#the-xtask-runner-why)\n' > "$R/t.md"
 printf '# Other\n\n## The `xtask` runner: why?\n' > "$R/other.md"
 [ "$(run_code "$R")" = "0" ] && ok "punctuation in a heading slugs the GitHub way" || bad "slug mismatch: $(run "$R")"
+
+# ── a repeated heading is disambiguated the way GitHub does it ───────────
+# The stage-structured documents here repeat headings by design — every
+# stage has an "Exit gate" — so collapsing duplicates would report links
+# to later occurrences as broken in exactly the files worth protecting.
+R="$(fresh dupheads)"
+printf '# T\n\n[first](plan.md#exit-gate) [second](plan.md#exit-gate-1) [third](plan.md#exit-gate-2)\n' > "$R/t.md"
+printf '# Plan\n\n## Exit gate\n\n## Exit gate\n\n## Exit gate\n' > "$R/plan.md"
+[ "$(run_code "$R")" = "0" ] && ok "repeated headings get -1/-2 suffixes" || bad "duplicate anchors should resolve: $(run "$R")"
+
+R="$(fresh dupheads-over)"
+printf '# T\n\n[fourth](plan.md#exit-gate-3)\n' > "$R/t.md"
+printf '# Plan\n\n## Exit gate\n\n## Exit gate\n' > "$R/plan.md"
+[ "$(run_code "$R")" = "1" ] && ok "  and the suffix stops at the last occurrence" || bad "exit-gate-3 should not resolve against two headings"
 
 # ── a heading inside a code fence is not an anchor ───────────────────────
 # Regression: stripping fences before collecting headings is what stops a

@@ -1,10 +1,10 @@
 # Rust workspace blueprint
 
-This is a package/dependency plan only; no crates are implemented in this repository.
+This is a package/dependency plan only; none of the product crates below are implemented in this repository.
 
 ## Physical implementation workspace
 
-ADR-0045 materializes the planned implementation landing zones at repository root. The current root `Cargo.toml` is a virtual workspace with **zero members**; directories below are not crates until their phase adds a manifest/source and then adds the path to workspace members.
+ADR-0045 materializes the planned implementation landing zones at repository root. The root `Cargo.toml` is a virtual workspace, and Stage 0 opened it with two non-product members — `xtask` and `tests/support`. Every directory below is still a landing zone, not a crate, until its stage adds a manifest/source and adds the path to workspace members in the same change.
 
 ```text
 apps/
