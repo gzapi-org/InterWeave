@@ -1,0 +1,16 @@
+# Clippy configuration for the whole workspace. Lint LEVELS live in
+# [workspace.lints] in Cargo.toml; this file holds the settings those lints
+# read.
+#
+# The panic bans in Cargo.toml exist for one reason: a daemon parsing untrusted
+# remote input must not have a reachable panic. A test is the opposite
+# situation — an assertion that cannot hold means the test cannot ask its
+# question, and the only honest response is to abort. Writing `let Some(x) =
+# … else { return }` in a test converts a failure into a silent pass, which is
+# strictly worse than the panic the lint was avoiding.
+#
+# So the bans stay in force everywhere they mean something, and stand down in
+# test code only.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true

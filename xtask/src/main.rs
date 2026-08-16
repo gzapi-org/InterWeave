@@ -275,10 +275,6 @@ fn main() -> ExitCode {
 }
 
 #[cfg(test)]
-// A test that cannot read the repository has nothing to say, so failing loudly
-// at the read is the correct behaviour here; the workspace-wide ban on
-// `expect` is about paths reachable from untrusted input.
-#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use std::ffi::OsStr;
