@@ -98,6 +98,19 @@ def slug(heading: str) -> str:
     return text.replace(" ", "-")
 
 
+def unfragment(fragment: str) -> str:
+    """The anchor a link is actually asking the browser to jump to.
+
+    Percent-decoded and otherwise LEFT ALONE. Running the fragment
+    through slug() as well would compare two normalised strings and
+    accept links that do not work: `#TITLE` against `# Title` normalises
+    to `title` on both sides and passes, while the browser looks for an
+    element with `id="TITLE"` and finds nothing. Only the heading gets
+    slugged, because only the heading is what the renderer transforms.
+    """
+    return urllib.parse.unquote(fragment)
+
+
 def walk(root: pathlib.Path, suffixes: set[str]) -> list[pathlib.Path]:
     out = []
     for path in sorted(root.rglob("*")):
@@ -154,7 +167,7 @@ def check_links(root: pathlib.Path, markdown: list[pathlib.Path]) -> int:
 
             if not location:
                 # A same-document fragment.
-                if fragment and slug(fragment) not in anchors.get(path.resolve(), set()):
+                if fragment and unfragment(fragment) not in anchors.get(path.resolve(), set()):
                     report(f"{rel}: '#{fragment}' names no heading in this document")
                 continue
 
@@ -169,7 +182,7 @@ def check_links(root: pathlib.Path, markdown: list[pathlib.Path]) -> int:
                     # Outside the scanned set (a skipped directory); the
                     # path resolved, and that is all this can honestly say.
                     continue
-                if slug(fragment) not in known:
+                if unfragment(fragment) not in known:
                     report(f"{rel}: '{target}' names no heading in {resolved.relative_to(root)}")
     return checked
 
