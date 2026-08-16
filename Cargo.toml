@@ -1,11 +1,76 @@
 # Implementation workspace skeleton only.
 # No production crate is a workspace member until its implementation phase begins.
+#
+# `members` grows one stage at a time (CLAUDE.md §3): a package is added here in
+# the same change that creates its manifest and the tests proving its stage
+# gate. `planned_members` below is an inventory, not a queue to drain.
 [workspace]
-resolver = "2"
+resolver = "3"
 members = []
 
 [workspace.package]
 license = "Apache-2.0"
+edition = "2024"
+# Kept in lockstep with rust-toolchain.toml. Stating a minimum the pinned
+# compiler does not match is worse than stating none: it reads as a tested
+# floor while nothing ever builds against it.
+rust-version = "1.97.1"
+repository = "https://github.com/gzapi-org/InterWeave"
+
+# Lints are declared once and inherited with `[lints] workspace = true`, so a
+# new crate cannot quietly opt out of the policy by omitting a directive.
+#
+# The clippy selections are not style preferences — each one maps to an
+# invariant this architecture states in prose and would otherwise only discover
+# at runtime:
+#
+#   unwrap_used / expect_used / panic — a transport daemon serving untrusted
+#     remote input must not have a panic reachable from a parse. Warn rather
+#     than deny so tests and xtask stay ergonomic; a production crate that needs
+#     it stricter raises its own level.
+#   todo / unimplemented / dbg_macro — placeholders that reached a shipped
+#     binary once compiled fine.
+#
+# The bounded-resource invariant (CLAUDE.md §6) is enforced at runtime by
+# `overflow-checks` in [profile.release] below rather than by a lint:
+# clippy::arithmetic_side_effects fires on every integer `+` in the tree, which
+# buys a wall of allow-attributes and no additional guarantee.
+[workspace.lints.rust]
+unsafe_code = "deny"
+unreachable_pub = "warn"
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+
+# Shared dependency versions. A crate writes `serde = { workspace = true }` and
+# gets the reviewed version; two crates cannot end up on two versions of the
+# same wire-format library, which for a protocol implementation is a
+# correctness problem and not merely bloat.
+#
+# Deliberately short. Stage 0 needs only what Stage 0 builds; libp2p, Slint,
+# SQLite and the rest arrive with the stages that activate them.
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+# Line tables only: enough for a symbolicated backtrace out of a deployed
+# daemon, without the size of full debug info.
+debug = 1
+# ON IN RELEASE, on purpose. The default is off, which makes every bound in
+# section 6 of CLAUDE.md hold in debug and wrap in production — the one build
+# where a wrapped length or counter is unobservable.
+overflow-checks = true
 
 [workspace.metadata.interweave]
 status = "skeleton-only"
