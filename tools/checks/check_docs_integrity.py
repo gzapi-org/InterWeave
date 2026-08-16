@@ -25,7 +25,10 @@
 #             never the one that reports it.
 #   ANCHOR  — a `#fragment` naming no heading in the target document.
 #             Renaming a section leaves every deep link pointing at the
-#             top of the page, which looks like a working link.
+#             top of the page, which looks like a working link. A
+#             repeated heading is disambiguated the way GitHub does it,
+#             `exit-gate`, `exit-gate-1`, `exit-gate-2`, so a link to a
+#             later occurrence resolves.
 #   YAML    — a tracked .yaml/.yml file, or a ```yaml block inside
 #             Markdown, that no longer parses. The configuration examples
 #             under architecture/config/examples/ are read as
@@ -131,13 +134,27 @@ def read(path: pathlib.Path) -> str | None:
         return None
 
 
-def headings(text: str) -> set[str]:
-    """Every anchor a document offers.
+def anchor_ids(text: str) -> set[str]:
+    """Every anchor a document offers, in the ids the renderer emits.
 
     Fenced code is stripped first: a `# comment` inside a shell block is
     not a heading, and counting it would make a broken anchor resolve.
+
+    REPEATED HEADINGS GET SUFFIXES. GitHub disambiguates a second
+    `## Exit gate` as `exit-gate-1`, a third as `exit-gate-2`. Collapsing
+    them to one id would report every link to a later occurrence as
+    broken — and the documents most likely to repeat a heading are the
+    stage-structured ones here, so a false positive would land on exactly
+    the files this is meant to protect.
     """
-    return {slug(m.group(2)) for m in HEADING_RE.finditer(FENCE_RE.sub("", text))}
+    ids: set[str] = set()
+    seen: dict[str, int] = {}
+    for m in HEADING_RE.finditer(FENCE_RE.sub("", text)):
+        base = slug(m.group(2))
+        count = seen.get(base, 0)
+        seen[base] = count + 1
+        ids.add(base if count == 0 else f"{base}-{count}")
+    return ids
 
 
 def check_links(root: pathlib.Path, markdown: list[pathlib.Path]) -> int:
@@ -145,7 +162,7 @@ def check_links(root: pathlib.Path, markdown: list[pathlib.Path]) -> int:
     for path in markdown:
         text = read(path)
         if text is not None:
-            anchors[path.resolve()] = headings(text)
+            anchors[path.resolve()] = anchor_ids(text)
 
     checked = 0
     for path in markdown:

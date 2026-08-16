@@ -103,6 +103,20 @@ printf '# T\n\n[x](other.md#the-xtask-runner-why)\n' > "$R/t.md"
 printf '# Other\n\n## The `xtask` runner: why?\n' > "$R/other.md"
 [ "$(run_code "$R")" = "0" ] && ok "punctuation in a heading slugs the GitHub way" || bad "slug mismatch: $(run "$R")"
 
+# ── a repeated heading is disambiguated the way GitHub does it ───────────
+# The stage-structured documents here repeat headings by design — every
+# stage has an "Exit gate" — so collapsing duplicates would report links
+# to later occurrences as broken in exactly the files worth protecting.
+R="$(fresh dupheads)"
+printf '# T\n\n[first](plan.md#exit-gate) [second](plan.md#exit-gate-1) [third](plan.md#exit-gate-2)\n' > "$R/t.md"
+printf '# Plan\n\n## Exit gate\n\n## Exit gate\n\n## Exit gate\n' > "$R/plan.md"
+[ "$(run_code "$R")" = "0" ] && ok "repeated headings get -1/-2 suffixes" || bad "duplicate anchors should resolve: $(run "$R")"
+
+R="$(fresh dupheads-over)"
+printf '# T\n\n[fourth](plan.md#exit-gate-3)\n' > "$R/t.md"
+printf '# Plan\n\n## Exit gate\n\n## Exit gate\n' > "$R/plan.md"
+[ "$(run_code "$R")" = "1" ] && ok "  and the suffix stops at the last occurrence" || bad "exit-gate-3 should not resolve against two headings"
+
 # ── a heading inside a code fence is not an anchor ───────────────────────
 # Regression: stripping fences before collecting headings is what stops a
 # shell comment from satisfying a broken link.
