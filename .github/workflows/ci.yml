@@ -120,6 +120,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # A self-test runs the real script, so this job needs whatever the
+      # scripts need — the same list as tree-checks, not a shorter one.
+      # Installing it only there would leave `tool-suites` passing on a
+      # runner image that happens to ship the module and failing on one
+      # that does not, which is the least debuggable form of green.
+      - name: Install validator dependencies
+        run: python3 -m pip install --quiet jsonschema cryptography pyyaml
+
       # The suites mock `gh` and `curl` on PATH, so no token and no
       # network are used. They do need jq and coreutils `timeout`, both
       # present on ubuntu-latest.
