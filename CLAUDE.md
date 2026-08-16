@@ -470,8 +470,7 @@ Clean up before committing: diagnostic instrumentation added during the chase, t
 For repository-wide changes, verify at minimum:
 
 - `git status` is understood;
-- Markdown relative links still resolve;
-- YAML/config examples still parse;
+- `tools/checks/check_docs_integrity.py` is clean — every relative Markdown link and heading anchor resolves, and every YAML file and `yaml` block parses;
 - `tools/checks/check_guards_are_wired.sh` is clean — every guard is invoked by a workflow and has a self-test beside it, because one that runs nowhere passes silently-green;
 - `tools/checks/validate_adr_index.sh` is clean — every ADR is template-conformant, indexed, and digested, and its amendment record is consistent;
 - `tools/checks/scan_semantic_collisions.sh` is clean — no two branches minted the same ADR number or amendment heading;

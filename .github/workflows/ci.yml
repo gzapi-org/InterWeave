@@ -56,7 +56,7 @@ jobs:
           fetch-depth: 1
 
       - name: Install validator dependencies
-        run: python3 -m pip install --quiet jsonschema cryptography
+        run: python3 -m pip install --quiet jsonschema cryptography pyyaml
 
       - name: ADR index, template, and amendment record
         run: bash tools/checks/validate_adr_index.sh
@@ -72,6 +72,9 @@ jobs:
 
       - name: Frozen fixture vectors recompute
         run: python3 tools/checks/verify_fixture_vectors.py
+
+      - name: Markdown links resolve and YAML parses
+        run: python3 tools/checks/check_docs_integrity.py
 
       - name: Every guard is reachable from a workflow
         run: bash tools/checks/check_guards_are_wired.sh

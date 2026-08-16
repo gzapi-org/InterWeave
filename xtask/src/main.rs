@@ -87,6 +87,11 @@ fn tree_checks() -> Vec<Task> {
             &["tools/checks/verify_fixture_vectors.py"],
         ),
         Task::new(
+            "Markdown links resolve and YAML parses",
+            "python3",
+            &["tools/checks/check_docs_integrity.py"],
+        ),
+        Task::new(
             "every guard is reachable from a workflow",
             "bash",
             &["tools/checks/check_guards_are_wired.sh"],
