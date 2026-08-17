@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# Trust decisions and policy inputs. Depends on transport-api for peer
+# identity and nothing else: this crate must not learn about discovery
+# (which never grants trust, ADR-0012), endpoints beyond the narrowing
+# relationship, connections, or any backend type.
+[package]
+name = "interweave-trust-api"
+version = "0.0.0"
+publish = false
+description = "Deny-by-default peer trust policy types for InterWeave."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+interweave-transport-api = { path = "../transport-api" }
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }

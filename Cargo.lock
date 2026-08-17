@@ -18,6 +18,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "interweave-trust-api"
+version = "0.0.0"
+dependencies = [
+ "interweave-transport-api",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"

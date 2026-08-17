@@ -164,14 +164,14 @@ Implement the stable types and validation boundaries that every higher layer con
 ```text
 crates/api/transport-api          # ACTIVE
 crates/api/discovery-api
-crates/api/trust-api
+crates/api/trust-api              # ACTIVE
 crates/api/local-client-api
 crates/api/ipc-protocol
 crates/api/kademlia-control-api
 crates/config/profile-config
 ```
 
-`transport-api` is a workspace member: identifiers, payloads, capabilities, status, and the error vocabulary, with `tests/schema_agreement.rs` holding them to the frozen schemas. The other six join one at a time, each with its manifest, tests, and `[workspace].members` entry in the same change.
+`transport-api` is a workspace member: identifiers, payloads, capabilities, status, and the error vocabulary, with `tests/schema_agreement.rs` holding them to the frozen schemas. `trust-api` follows it: deny-by-default `PeerTrustPolicy`, endpoint narrowing that cannot widen, and the ADR-0036 infrastructure set as a separate type. The remaining five join one at a time, each with its manifest, tests, and `[workspace].members` entry in the same change.
 
 ### Hard dependency rule
 
