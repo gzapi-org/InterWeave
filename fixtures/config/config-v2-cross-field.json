@@ -1,0 +1,773 @@
+{
+  "algorithm": {
+    "id": "config-v2-cross-field",
+    "specification": "architecture/config/config.schema.yaml",
+    "summary": "The five endpoint cross-field rules stated in the schema: unique endpoint IDs; a set default naming an ENABLED endpoint; static-subset peers being a subset of trust.allowed_peers; endpoint policy narrowing rather than widening profile trust (ADR-0012); and enabled advertised entries fitting directory.max_advertised. Verdict set.",
+    "why_not_json_schema": "Each rule is a relationship BETWEEN fields. JSON Schema constrains shape, not agreement between two branches of a document, which is exactly the gap these vectors cover beside contracts/schemas/."
+  },
+  "adr": [
+    "0012",
+    "0026",
+    "0028",
+    "0030",
+    "0031"
+  ],
+  "vectors": [
+    {
+      "name": "minimal-valid",
+      "config": {
+        "schema_version": 2,
+        "trust": {
+          "policy": "static-allowlist",
+          "allowed_peers": [
+            "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
+            "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5"
+          ]
+        },
+        "endpoints": {
+          "registration_policy": "configured-only",
+          "directory": {
+            "enabled": true,
+            "max_advertised": 16
+          },
+          "entries": [
+            {
+              "id": "human",
+              "enabled": true,
+              "advertise": false
+            },
+            {
+              "id": "claude",
+              "enabled": true,
+              "advertise": false
+            }
+          ]
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "default-names-enabled-endpoint",
+      "config": {
+        "schema_version": 2,
+        "trust": {
+          "policy": "static-allowlist",
+          "allowed_peers": [
+            "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
+            "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5"
+          ]
+        },
+        "endpoints": {
+          "registration_policy": "configured-only",
+          "directory": {
+            "enabled": true,
+            "max_advertised": 16
+          },
+          "entries": [
+            {
+              "id": "human",
+              "enabled": true,
+              "advertise": false
+            },
+            {
+              "id": "claude",
+              "enabled": true,
+              "advertise": false
+            }
+          ],
+          "default_direct_endpoint": "human"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "no-default-configured",
+      "config": {
+        "schema_version": 2,
+        "trust": {
+          "policy": "static-allowlist",
+          "allowed_peers": [
+            "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
+            "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5"
+          ]
+        },
+        "endpoints": {
+          "registration_policy": "configured-only",
+          "directory": {
+            "enabled": true,
+            "max_advertised": 16
+          },
+          "entries": [
+            {
+              "id": "human",
+              "enabled": true,
+              "advertise": false
+            }
+          ]
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "inbound-subset-of-profile-trust",
+      "config": {
+        "schema_version": 2,
+        "trust": {
+          "policy": "static-allowlist",
+          "allowed_peers": [
+            "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
+            "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5"
+          ]
+        },
+        "endpoints": {
+          "registration_policy": "configured-only",
+          "directory": {
+            "enabled": true,
+            "max_advertised": 16
+          },
+          "entries": [
+            {
+              "id": "human",
+              "enabled": true,
+              "advertise": false,
+              "inbound": {
+                "policy": "static-subset",
+                "allowed_peers": [
+                  "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "outbound-subset-of-profile-trust",
+      "config": {
+        "schema_version": 2,
+        "trust": {
+          "policy": "static-allowlist",
+          "allowed_peers": [
+            "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
+            "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5"
+          ]
+        },
+        "endpoints": {
+          "registration_policy": "configured-only",
+          "directory": {
+            "enabled": true,
+            "max_advertised": 16
+          },
+          "entries": [
+            {
+              "id": "human",
+              "enabled": true,
+              "advertise": false,
+              "outbound": {
+                "policy": "static-subset",
+                "allowed_peers": [
+                  "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
+                  "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "inherit-needs-no-subset-check",
+      "config": {
+        "schema_version": 2,
+        "trust": {
+          "policy": "static-allowlist",
+          "allowed_peers": [
+            "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
+            "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5"
+          ]
+        },
+        "endpoints": {
+          "registration_policy": "configured-only",
+          "directory": {
+            "enabled": true,
+            "max_advertised": 16
+          },
+          "entries": [
+            {
+              "id": "human",
+              "enabled": true,
+              "advertise": false,
+              "inbound": {
+                "policy": "inherit-profile-trust"
+              },
+              "outbound": {
+                "policy": "inherit-profile-trust"
+              }
+            }
+          ]
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "advertised-within-directory-bound",
+      "config": {
+        "schema_version": 2,
+        "trust": {
+          "policy": "static-allowlist",
+          "allowed_peers": [
+            "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
+            "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5"
+          ]
+        },
+        "endpoints": {
+          "registration_policy": "configured-only",
+          "directory": {
+            "enabled": true,
+            "max_advertised": 16
+          },
+          "entries": [
+            {
+              "id": "e0",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e1",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e2",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e3",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e4",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e5",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e6",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e7",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e8",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e9",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e10",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e11",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e12",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e13",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e14",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e15",
+              "enabled": true,
+              "advertise": true
+            }
+          ]
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "disabled-advertised-not-counted",
+      "config": {
+        "schema_version": 2,
+        "trust": {
+          "policy": "static-allowlist",
+          "allowed_peers": [
+            "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
+            "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5"
+          ]
+        },
+        "endpoints": {
+          "registration_policy": "configured-only",
+          "directory": {
+            "enabled": true,
+            "max_advertised": 16
+          },
+          "entries": [
+            {
+              "id": "e0",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e1",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e2",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e3",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e4",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e5",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e6",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e7",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e8",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e9",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e10",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e11",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e12",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e13",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e14",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e15",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "spare",
+              "enabled": false,
+              "advertise": true
+            }
+          ]
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "duplicate-endpoint-ids",
+      "config": {
+        "schema_version": 2,
+        "trust": {
+          "policy": "static-allowlist",
+          "allowed_peers": [
+            "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
+            "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5"
+          ]
+        },
+        "endpoints": {
+          "registration_policy": "configured-only",
+          "directory": {
+            "enabled": true,
+            "max_advertised": 16
+          },
+          "entries": [
+            {
+              "id": "human",
+              "enabled": true,
+              "advertise": false
+            },
+            {
+              "id": "human",
+              "enabled": true,
+              "advertise": false
+            }
+          ]
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "default-names-unknown-endpoint",
+      "config": {
+        "schema_version": 2,
+        "trust": {
+          "policy": "static-allowlist",
+          "allowed_peers": [
+            "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
+            "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5"
+          ]
+        },
+        "endpoints": {
+          "registration_policy": "configured-only",
+          "directory": {
+            "enabled": true,
+            "max_advertised": 16
+          },
+          "entries": [
+            {
+              "id": "human",
+              "enabled": true,
+              "advertise": false
+            }
+          ],
+          "default_direct_endpoint": "claude"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "default-names-disabled-endpoint",
+      "config": {
+        "schema_version": 2,
+        "trust": {
+          "policy": "static-allowlist",
+          "allowed_peers": [
+            "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
+            "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5"
+          ]
+        },
+        "endpoints": {
+          "registration_policy": "configured-only",
+          "directory": {
+            "enabled": true,
+            "max_advertised": 16
+          },
+          "entries": [
+            {
+              "id": "human",
+              "enabled": false,
+              "advertise": false
+            }
+          ],
+          "default_direct_endpoint": "human"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "inbound-subset-widens-profile-trust",
+      "config": {
+        "schema_version": 2,
+        "trust": {
+          "policy": "static-allowlist",
+          "allowed_peers": [
+            "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
+            "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5"
+          ]
+        },
+        "endpoints": {
+          "registration_policy": "configured-only",
+          "directory": {
+            "enabled": true,
+            "max_advertised": 16
+          },
+          "entries": [
+            {
+              "id": "human",
+              "enabled": true,
+              "advertise": false,
+              "inbound": {
+                "policy": "static-subset",
+                "allowed_peers": [
+                  "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
+                  "12D3KooWStranger"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "outbound-subset-widens-profile-trust",
+      "config": {
+        "schema_version": 2,
+        "trust": {
+          "policy": "static-allowlist",
+          "allowed_peers": [
+            "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
+            "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5"
+          ]
+        },
+        "endpoints": {
+          "registration_policy": "configured-only",
+          "directory": {
+            "enabled": true,
+            "max_advertised": 16
+          },
+          "entries": [
+            {
+              "id": "human",
+              "enabled": true,
+              "advertise": false,
+              "outbound": {
+                "policy": "static-subset",
+                "allowed_peers": [
+                  "12D3KooWStranger"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "subset-against-empty-profile-trust",
+      "config": {
+        "schema_version": 2,
+        "trust": {
+          "policy": "static-allowlist",
+          "allowed_peers": []
+        },
+        "endpoints": {
+          "registration_policy": "configured-only",
+          "directory": {
+            "enabled": true,
+            "max_advertised": 16
+          },
+          "entries": [
+            {
+              "id": "human",
+              "enabled": true,
+              "advertise": false,
+              "inbound": {
+                "policy": "static-subset",
+                "allowed_peers": [
+                  "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "advertised-over-directory-bound",
+      "config": {
+        "schema_version": 2,
+        "trust": {
+          "policy": "static-allowlist",
+          "allowed_peers": [
+            "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
+            "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5"
+          ]
+        },
+        "endpoints": {
+          "registration_policy": "configured-only",
+          "directory": {
+            "enabled": true,
+            "max_advertised": 16
+          },
+          "entries": [
+            {
+              "id": "e0",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e1",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e2",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e3",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e4",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e5",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e6",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e7",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e8",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e9",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e10",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e11",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e12",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e13",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e14",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e15",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e16",
+              "enabled": true,
+              "advertise": true
+            }
+          ]
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "advertised-over-lowered-bound",
+      "config": {
+        "schema_version": 2,
+        "trust": {
+          "policy": "static-allowlist",
+          "allowed_peers": [
+            "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
+            "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5"
+          ]
+        },
+        "endpoints": {
+          "registration_policy": "configured-only",
+          "directory": {
+            "enabled": true,
+            "max_advertised": 4
+          },
+          "entries": [
+            {
+              "id": "e0",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e1",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e2",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e3",
+              "enabled": true,
+              "advertise": true
+            },
+            {
+              "id": "e4",
+              "enabled": true,
+              "advertise": true
+            }
+          ]
+        }
+      },
+      "valid": false
+    }
+  ]
+}
