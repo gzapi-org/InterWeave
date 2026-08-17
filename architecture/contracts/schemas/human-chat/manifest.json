@@ -2,9 +2,14 @@
   "family": "human-chat",
   "specification": "architecture/clients/human/HUMAN-CHAT.md",
   "concepts": [
-    { "name": "envelope", "file": "envelope.schema.json", "status": "approved" }
+    {
+      "name": "envelope",
+      "file": "envelope.schema.json",
+      "status": "approved"
+    }
   ],
   "not_modelled": {
-    "retention state": "Pending-outbound, unread-inbound, and receiver-kept are LOCAL application state under ADR-0044, never wire fields. HumanChatV1 has no sender-controlled persistence field by design, and modelling retention as a shape here would suggest a remote party could express it."
+    "retention state": "Pending-outbound, unread-inbound, and receiver-kept are LOCAL application state under ADR-0044, never wire fields. HumanChatV2 has no sender-controlled persistence field by design, and modelling retention as a shape here would suggest a remote party could express it.",
+    "compressed form": "The `;ce=br` media-type parameter marks the whole envelope brotli-compressed (ADR-0050). Compression is payload representation selected by media type, not a JSON shape: this schema applies to the decompressed bytes, and the 196,608-byte decompressed ceiling is enforced by the streaming decoder above transport, where a schema cannot reach."
   }
 }

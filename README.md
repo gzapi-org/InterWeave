@@ -123,7 +123,7 @@ Machine namespace:  interweave
 Direct protocol:    /interweave/direct/2.0.0
 Endpoint protocol:  /interweave/endpoints/1.0.0
 Kademlia prefix:    /interweave/kad/1.0.0/<network-hash>
-HumanChat media:    application/vnd.interweave-human-chat+json;v=1
+HumanChat media:    application/vnd.interweave-human-chat+json;v=2
 ```
 
 Claude-specific names such as `claude-channel` remain integration names and are not project branding.

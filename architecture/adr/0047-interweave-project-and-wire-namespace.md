@@ -28,7 +28,7 @@ interweave/kad-network/v1\0
 The canonical application/local identifiers are:
 
 ```text
-application/vnd.interweave-human-chat+json;v=1
+application/vnd.interweave-human-chat+json;v=2
 interweave.app-message/1
 interweave-ed25519-bip39-entropy-v1
 workspace.metadata.interweave
@@ -117,3 +117,11 @@ Network peers using the former libp2p protocol IDs or hash domains are intention
 ## Revisit conditions
 
 Revisit only if a future compatibility requirement intentionally introduces a second protocol namespace, a formal standards allocation requires a different identifier, or project ownership creates a justified machine-namespace migration. A marketing-only rename is not sufficient to silently change deployed InterWeave wire/domain identifiers.
+
+## Amendments
+
+Full notes: [`history/0047-amendments.md`](./history/0047-amendments.md).
+
+| Date | Amendment | Effect |
+|---|---|---|
+| 2026-08-17 | HumanChat media type advanced to v=2 | The application-identifier list names `;v=2` per ADR-0050; the vendor prefix and namespace rules are unchanged |

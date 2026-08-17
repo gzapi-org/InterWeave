@@ -1,24 +1,30 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:interweave:schemas:human-chat:envelope",
-  "title": "HumanChatV1 envelope",
-  "description": "The first-party human text-message envelope, carried as an opaque payload by a transport that stays payload-agnostic. It is an APPLICATION protocol and versions independently of transport v2.\n\nNOTE THE DELIBERATE ASYMMETRY WITH THE TRANSPORT SCHEMAS: this one does NOT set `additionalProperties: false`. HumanChatV1 specifies that unknown fields are ignored for forward compatibility within v1 bounds, so a receiver must accept an envelope carrying fields it has never heard of. Closing it here would turn a forward-compatible message into a validation failure and break the property the version number exists to provide. Where the transport schemas close the object to make an omission enforceable, this one is open because openness is the specified behaviour — the difference is intentional in both directions.\n\nNo field here can influence retention. There is no sender-controlled persistence field, and `from_endpoint`, `reply_to`, unknown extensions, or the text itself cannot request or force the receiver to keep anything (ADR-0044).",
+  "title": "HumanChatV2 envelope",
+  "description": "The first-party human message envelope, carried as an opaque payload by a transport that stays payload-agnostic. It is an APPLICATION protocol and versions independently of transport v2. This schema describes the RAW (decompressed) JSON form; the `;ce=br` media-type parameter marks the same envelope brotli-compressed whole, decoded above transport under the 196,608-byte decompressed ceiling of ADR-0050 before this shape applies.\n\nNOTE THE DELIBERATE ASYMMETRY WITH THE TRANSPORT SCHEMAS: this one does NOT set `additionalProperties: false`. HumanChatV2 specifies that unknown fields are ignored for forward compatibility within v2 bounds, so a receiver must accept an envelope carrying fields it has never heard of. Closing it here would turn a forward-compatible message into a validation failure and break the property the version number exists to provide. Where the transport schemas close the object to make an omission enforceable, this one is open because openness is the specified behaviour \u2014 the difference is intentional in both directions.\n\nNo field here can influence retention. There is no sender-controlled persistence field, and `from_endpoint`, `reply_to`, unknown extensions, or the text itself cannot request or force the receiver to keep anything (ADR-0044).",
   "type": "object",
-  "required": ["v", "kind", "app_message_id"],
+  "required": [
+    "v",
+    "kind",
+    "app_message_id"
+  ],
   "properties": {
-    "v": { "const": 1 },
+    "v": {
+      "const": 2
+    },
     "kind": {
       "const": "text",
-      "description": "The only v1 kind. Attachments, edits, reactions, typing indicators, delivery/read receipts, and multi-device sync are explicitly not part of HumanChatV1."
+      "description": "The only v2 kind. Attachments, edits, reactions, typing indicators, delivery/read receipts, and multi-device sync are explicitly not part of HumanChatV2; artifact/attachment references await their own ADR (ADR-0050 rule 9)."
     },
     "app_message_id": {
       "type": "string",
       "pattern": "^[0-9a-f]{32}$",
-      "description": "Exactly 16 CSPRNG bytes as 32 LOWERCASE hex characters. Uppercase, prefixes, separators, and other lengths are invalid — a canonical form is what makes `reply_to` comparison exact. This is application reply/retention identity and is NOT the DirectMessageV2 dedup identity; the two live at different layers and must not be conflated."
+      "description": "Exactly 16 CSPRNG bytes as 32 LOWERCASE hex characters. Uppercase, prefixes, separators, and other lengths are invalid \u2014 a canonical form is what makes `reply_to` comparison exact. This is application reply/retention identity and is NOT the DirectMessageV2 dedup identity; the two live at different layers and must not be conflated."
     },
     "text": {
       "type": "string",
-      "description": "Plain text. Active markup and script are not supported, and a renderer must not acquire them by treating this as rich content. Bounded in practice by the transport payload ceiling rather than by a field limit here."
+      "description": "UTF-8 markdown: CommonMark plus the table and strikethrough extensions, under the CLOSED subset of ADR-0050 \u2014 raw HTML renders as literal text, link schemes are allowlisted (https, mailto), remote images are never auto-fetched, block nesting <= 16 and tables <= 256x32 (bounds in clients/human/HUMAN-CHAT.md). A construct outside the subset falls back to plain-text display; it does not reject the envelope, so the subset is a RENDERING contract, not a shape constraint this schema could express. Bounded in practice by the transport payload ceiling (after compression when compression is used) rather than by a field limit here."
     },
     "reply_to": {
       "type": "string",
@@ -29,18 +35,23 @@
       "type": "integer",
       "minimum": 0,
       "maximum": 253402300799999,
-      "description": "Display and diagnostics only — never trust, replay, freshness, or ordering authority. The ceiling is 9999-12-31T23:59:59.999Z; outside the closed interval is malformed. A receiver may suppress or annotate an implausible time without changing acceptance."
+      "description": "Display and diagnostics only \u2014 never trust, replay, freshness, or ordering authority. The ceiling is 9999-12-31T23:59:59.999Z; outside the closed interval is malformed. A receiver may suppress or annotate an implausible time without changing acceptance."
     },
     "from_endpoint": {
       "$ref": "urn:interweave:schemas:endpoints:endpoint-id",
-      "description": "AN UNAUTHENTICATED DISPLAY HINT. Direct transport metadata is authoritative for source_peer and the peer-asserted source_endpoint; a conflicting value here is ignored for routing and authority. On broadcast it is unauthenticated by construction, because transport broadcast origin is PeerId-only (ADR-0030) — so a UI that renders this as identity is asserting something the transport never verified."
+      "description": "AN UNAUTHENTICATED DISPLAY HINT. Direct transport metadata is authoritative for source_peer and the peer-asserted source_endpoint; a conflicting value here is ignored for routing and authority. On broadcast it is unauthenticated by construction, because transport broadcast origin is PeerId-only (ADR-0030) \u2014 so a UI that renders this as identity is asserting something the transport never verified."
     }
   },
   "x-contract": {
     "name": "human-chat.envelope",
     "status": "approved",
-    "version": "1.0.0",
-    "adr": ["0039", "0044", "0047"],
+    "version": "2.0.0",
+    "adr": [
+      "0039",
+      "0044",
+      "0047",
+      "0050"
+    ],
     "specification": "architecture/clients/human/HUMAN-CHAT.md"
   }
 }
