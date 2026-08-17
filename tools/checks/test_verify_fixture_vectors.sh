@@ -97,6 +97,28 @@ json.dump(d, open(p,'w'))" "$R/fixtures/direct-v2/f.json"
 out="$(run "$R")"
 [[ "$out" == *"collides with"* ]] && ok "a duplicate fingerprint is reported as a collision" || bad "should report the collision"
 
+# ── but a VALIDATION verdict set is allowed to repeat its result ─────────
+# A grammar file exists to map many inputs onto `true` and many onto
+# `false`. Applying the derivation collision rule there would make a
+# correct verdict set unrepresentable, so distinctness is per-algorithm.
+R="$TMP/verdicts"; mkdir -p "$R/fixtures/endpoints" "$R/architecture/adr"
+touch "$R/architecture/adr/0030-x.md"
+cat > "$R/fixtures/endpoints/g.json" <<'EOF'
+{
+  "algorithm": { "id": "endpoint-id-grammar-v1" },
+  "adr": ["0030"],
+  "vectors": [
+    { "name": "lower", "endpoint_id": "human", "valid": true },
+    { "name": "dotted", "endpoint_id": "automation.build", "valid": true },
+    { "name": "upper", "endpoint_id": "Human", "valid": false },
+    { "name": "empty", "endpoint_id": "", "valid": false }
+  ]
+}
+EOF
+out="$(run "$R")"
+[ "$(run_code "$R")" = "0" ] && ok "repeated verdicts are not treated as collisions" \
+    || bad "a verdict set should pass: $out"
+
 # ── a file with no ADR anchor ────────────────────────────────────────────
 R="$TMP/unanchored"; make_fixture "$R" "$GOLDEN"
 python3 -c "
