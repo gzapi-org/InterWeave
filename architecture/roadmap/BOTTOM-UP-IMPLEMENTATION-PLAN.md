@@ -165,13 +165,13 @@ Implement the stable types and validation boundaries that every higher layer con
 crates/api/transport-api          # ACTIVE
 crates/api/discovery-api          # ACTIVE
 crates/api/trust-api              # ACTIVE
-crates/api/local-client-api
+crates/api/local-client-api      # ACTIVE
 crates/api/ipc-protocol
 crates/api/kademlia-control-api
 crates/config/profile-config
 ```
 
-`transport-api` is a workspace member: identifiers, payloads, capabilities, status, and the error vocabulary, with `tests/schema_agreement.rs` holding them to the frozen schemas. `trust-api` follows it: deny-by-default `PeerTrustPolicy`, endpoint narrowing that cannot widen, and the ADR-0036 infrastructure set as a separate type. `discovery-api` completes the trio: candidates, provider descriptors, and the provider event stream, with no dependency on `trust-api` so a provider cannot reach a trust decision at all. The remaining four join one at a time, each with its manifest, tests, and `[workspace].members` entry in the same change.
+`transport-api` is a workspace member: identifiers, payloads, capabilities, status, and the error vocabulary, with `tests/schema_agreement.rs` holding them to the frozen schemas. `trust-api` follows it: deny-by-default `PeerTrustPolicy`, endpoint narrowing that cannot widen, and the ADR-0036 infrastructure set as a separate type. `discovery-api` completes the trio: candidates, provider descriptors, and the provider event stream, with no dependency on `trust-api` so a provider cannot reach a trust decision at all. `local-client-api` adds the session boundary: `admin.*` is not representable in a data session's capability set, and source endpoint is derived from the lease with no API accepting one. The remaining three join one at a time, each with its manifest, tests, and `[workspace].members` entry in the same change.
 
 ### Hard dependency rule
 

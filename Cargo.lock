@@ -12,6 +12,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "interweave-local-client-api"
+version = "0.0.0"
+dependencies = [
+ "interweave-transport-api",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "interweave-test-support"
 version = "0.0.0"
 dependencies = [
