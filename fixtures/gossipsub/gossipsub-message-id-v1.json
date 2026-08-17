@@ -1,0 +1,40 @@
+{
+  "algorithm": {
+    "id": "gossipsub-message-id-v1",
+    "specification": "architecture/transport/libp2p/PUBSUB.md",
+    "summary": "SHA-256 over domain || u16be(len(source)) || PeerId::to_bytes() || u64be(wire sequence number). Binds authenticated GossipSub transport metadata only; the application envelope message_id is deliberately NOT an input (ADR-0004)."
+  },
+  "adr": [
+    "0004",
+    "0047"
+  ],
+  "vectors": [
+    {
+      "name": "zero-seed-peer-sequence-0",
+      "peer_id": "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
+      "sequence_number": 0,
+      "frozen_by": "0047",
+      "note": "Golden re-frozen by ADR-0047; the same value is quoted in PUBSUB.md.",
+      "sha256": "7f037dd538d9cccfb1949ca26b875c469173e6b248f1b68553ccaeb16bf9cf89"
+    },
+    {
+      "name": "zero-seed-peer-sequence-1",
+      "peer_id": "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
+      "sequence_number": 1,
+      "sha256": "daa108a21185fe3cd017c553e3041986ae124061356366be4cc7105fa28182df"
+    },
+    {
+      "name": "zero-seed-peer-sequence-max",
+      "peer_id": "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
+      "sequence_number": 18446744073709551615,
+      "sha256": "1eaa16ade59e3214aa5080e1bce06cae5e27733f823081ee26a9d9bfae3aabb0"
+    },
+    {
+      "name": "second-peer-sequence-0",
+      "peer_id": "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5",
+      "sequence_number": 0,
+      "sha256": "8347a5fe9a9f6e9050c03f494b9cf34c504f9f83fdf2a1d8e3182018b4cc9d12",
+      "note": "Same sequence number, different publisher: the two MUST NOT collide, which is why keying on the envelope ID alone is forbidden."
+    }
+  ]
+}

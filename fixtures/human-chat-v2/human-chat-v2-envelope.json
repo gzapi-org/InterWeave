@@ -1,0 +1,236 @@
+{
+  "algorithm": {
+    "id": "human-chat-v2-envelope",
+    "specification": "architecture/clients/human/HUMAN-CHAT.md",
+    "summary": "Envelope shape and grammar per ADR-0050. Verdict set. The markdown SUBSET is deliberately NOT decided here: out-of-subset markdown falls back to plain-text display rather than rejecting the envelope, so subset conformance is a rendering contract and belongs in tests/human-chat, not in a validity verdict."
+  },
+  "adr": [
+    "0044",
+    "0050"
+  ],
+  "vectors": [
+    {
+      "name": "minimal-valid",
+      "envelope": {
+        "v": 2,
+        "kind": "text",
+        "app_message_id": "00000000000000000000000000000000",
+        "text": "hello"
+      },
+      "valid": true
+    },
+    {
+      "name": "all-zero-id",
+      "envelope": {
+        "v": 2,
+        "kind": "text",
+        "app_message_id": "00000000000000000000000000000000",
+        "text": "hello"
+      },
+      "valid": true
+    },
+    {
+      "name": "markdown-body",
+      "envelope": {
+        "v": 2,
+        "kind": "text",
+        "app_message_id": "00000000000000000000000000000000",
+        "text": "## Status\n\n- one\n- two\n"
+      },
+      "valid": true
+    },
+    {
+      "name": "reply-to-unknown-message",
+      "envelope": {
+        "v": 2,
+        "kind": "text",
+        "app_message_id": "00000000000000000000000000000000",
+        "text": "hello",
+        "reply_to": "11111111111111111111111111111111"
+      },
+      "valid": true,
+      "note": "An unresolvable reply_to stays valid and triggers no network lookup."
+    },
+    {
+      "name": "timestamp-zero",
+      "envelope": {
+        "v": 2,
+        "kind": "text",
+        "app_message_id": "00000000000000000000000000000000",
+        "text": "hello",
+        "sent_at_ms": 0
+      },
+      "valid": true
+    },
+    {
+      "name": "timestamp-max",
+      "envelope": {
+        "v": 2,
+        "kind": "text",
+        "app_message_id": "00000000000000000000000000000000",
+        "text": "hello",
+        "sent_at_ms": 253402300799999
+      },
+      "valid": true
+    },
+    {
+      "name": "from-endpoint-hint",
+      "envelope": {
+        "v": 2,
+        "kind": "text",
+        "app_message_id": "00000000000000000000000000000000",
+        "text": "hello",
+        "from_endpoint": "human"
+      },
+      "valid": true
+    },
+    {
+      "name": "unknown-field-ignored",
+      "envelope": {
+        "v": 2,
+        "kind": "text",
+        "app_message_id": "00000000000000000000000000000000",
+        "text": "hello",
+        "future_extension": {
+          "anything": 1
+        }
+      },
+      "valid": true,
+      "note": "The v2 schema is OPEN by design; an unknown field is ignored, not rejected."
+    },
+    {
+      "name": "wrong-version-1",
+      "envelope": {
+        "v": 1,
+        "kind": "text",
+        "app_message_id": "00000000000000000000000000000000",
+        "text": "hello"
+      },
+      "valid": false
+    },
+    {
+      "name": "wrong-version-3",
+      "envelope": {
+        "v": 3,
+        "kind": "text",
+        "app_message_id": "00000000000000000000000000000000",
+        "text": "hello"
+      },
+      "valid": false
+    },
+    {
+      "name": "unknown-kind",
+      "envelope": {
+        "v": 2,
+        "kind": "attachment",
+        "app_message_id": "00000000000000000000000000000000",
+        "text": "hello"
+      },
+      "valid": false
+    },
+    {
+      "name": "id-uppercase-hex",
+      "envelope": {
+        "v": 2,
+        "kind": "text",
+        "app_message_id": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "text": "hello"
+      },
+      "valid": false
+    },
+    {
+      "name": "id-31-chars",
+      "envelope": {
+        "v": 2,
+        "kind": "text",
+        "app_message_id": "0000000000000000000000000000000",
+        "text": "hello"
+      },
+      "valid": false
+    },
+    {
+      "name": "id-33-chars",
+      "envelope": {
+        "v": 2,
+        "kind": "text",
+        "app_message_id": "000000000000000000000000000000000",
+        "text": "hello"
+      },
+      "valid": false
+    },
+    {
+      "name": "id-0x-prefixed",
+      "envelope": {
+        "v": 2,
+        "kind": "text",
+        "app_message_id": "0x000000000000000000000000000000",
+        "text": "hello"
+      },
+      "valid": false
+    },
+    {
+      "name": "id-hyphenated-uuid",
+      "envelope": {
+        "v": 2,
+        "kind": "text",
+        "app_message_id": "00000000-0000-0000-0000-000000000000",
+        "text": "hello"
+      },
+      "valid": false
+    },
+    {
+      "name": "id-non-hex",
+      "envelope": {
+        "v": 2,
+        "kind": "text",
+        "app_message_id": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+        "text": "hello"
+      },
+      "valid": false
+    },
+    {
+      "name": "reply-to-uppercase",
+      "envelope": {
+        "v": 2,
+        "kind": "text",
+        "app_message_id": "00000000000000000000000000000000",
+        "text": "hello",
+        "reply_to": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+      },
+      "valid": false
+    },
+    {
+      "name": "timestamp-negative",
+      "envelope": {
+        "v": 2,
+        "kind": "text",
+        "app_message_id": "00000000000000000000000000000000",
+        "text": "hello",
+        "sent_at_ms": -1
+      },
+      "valid": false
+    },
+    {
+      "name": "timestamp-over-max",
+      "envelope": {
+        "v": 2,
+        "kind": "text",
+        "app_message_id": "00000000000000000000000000000000",
+        "text": "hello",
+        "sent_at_ms": 253402300800000
+      },
+      "valid": false
+    },
+    {
+      "name": "from-endpoint-invalid",
+      "envelope": {
+        "v": 2,
+        "kind": "text",
+        "app_message_id": "00000000000000000000000000000000",
+        "text": "hello",
+        "from_endpoint": "Human"
+      },
+      "valid": false
+    }
+  ]
+}

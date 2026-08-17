@@ -1,0 +1,40 @@
+{
+  "algorithm": {
+    "id": "kad-network-namespace-v1",
+    "specification": "architecture/docs/architecture/kademlia-integration.md",
+    "summary": "lowercase unpadded RFC4648-base32 of the FIRST 16 BYTES of SHA-256(\"interweave/kad-network/v1\\0\" || ascii(network_id)). The truncation is load-bearing: hashing to a full digest yields a plausible namespace nobody else computes."
+  },
+  "adr": [
+    "0009",
+    "0034",
+    "0047"
+  ],
+  "vectors": [
+    {
+      "name": "example-private-network",
+      "network_id": "example-private-network",
+      "frozen_by": "0047",
+      "note": "Golden re-frozen by ADR-0047, together with the protocol string /interweave/kad/1.0.0/ssbtblqj7mexczivog5qfbfjvi.",
+      "network_hash": "ssbtblqj7mexczivog5qfbfjvi",
+      "protocol": "/interweave/kad/1.0.0/ssbtblqj7mexczivog5qfbfjvi"
+    },
+    {
+      "name": "single-character",
+      "network_id": "a",
+      "network_hash": "ygneka5pm3tlc4zypofzfj4vsq",
+      "protocol": "/interweave/kad/1.0.0/ygneka5pm3tlc4zypofzfj4vsq"
+    },
+    {
+      "name": "max-length-64",
+      "network_id": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+      "network_hash": "tolhruwfxc6e2zb4bgumglreku",
+      "protocol": "/interweave/kad/1.0.0/tolhruwfxc6e2zb4bgumglreku"
+    },
+    {
+      "name": "digits-and-separators",
+      "network_id": "net-2.staging_7",
+      "network_hash": "fzhdu3ubjjqu572bmnlazlatwe",
+      "protocol": "/interweave/kad/1.0.0/fzhdu3ubjjqu572bmnlazlatwe"
+    }
+  ]
+}

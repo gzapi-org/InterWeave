@@ -119,3 +119,7 @@ Desktop.ini
 !test-data/**/*.jks
 !test-data/**/*.keystore
 !test-data/**/*.seed
+
+# Python bytecode from ad-hoc tooling runs
+__pycache__/
+*.pyc

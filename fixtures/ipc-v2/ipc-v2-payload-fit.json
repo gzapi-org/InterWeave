@@ -1,0 +1,94 @@
+{
+  "algorithm": {
+    "id": "ipc-v2-payload-fit",
+    "specification": "architecture/contracts/LOCAL-IPC.md",
+    "summary": "Builds the maximal legal schema-defined object for one IPC direction and returns its 4-byte big-endian frame length prefix as hex. Proves the payload-fit invariant: every payload legal under the transport contract is representable in BOTH directions under the 131,072-byte frame ceiling.",
+    "canonical_form": "Compact JSON (separators ',' and ':' with no spaces), keys in the order the schema declares them. The IPC contract does not pin a canonical JSON form because the ceiling is a bound rather than an equality; this fixture declares the form it measures instead of attributing one to the contract.",
+    "scope": "The measured object is the schema-defined one (ipc.send-params, endpoints.message-received). The outer request/event envelope is modelled by no schema, so its budget is reported as envelope_headroom_bytes rather than invented here."
+  },
+  "adr": [
+    "0017",
+    "0026",
+    "0030"
+  ],
+  "vectors": [
+    {
+      "name": "send-params-maximal",
+      "direction": "send-params",
+      "payload_bytes": 49152,
+      "base64url_chars": 65536,
+      "media_type_bytes": 128,
+      "peer_id_bytes": 256,
+      "destination_endpoint_bytes": 64,
+      "frame_length_prefix_hex": "00010230",
+      "body_bytes": 66096,
+      "envelope_headroom_bytes": 64976,
+      "note": "The invariant's worst case for a command: 49,152 payload bytes plus every bounded v2 metadata field at its ceiling."
+    },
+    {
+      "name": "message-received-maximal",
+      "direction": "message-received",
+      "payload_bytes": 49152,
+      "base64url_chars": 65536,
+      "media_type_bytes": 128,
+      "peer_id_bytes": 256,
+      "destination_endpoint_bytes": 64,
+      "source_endpoint_bytes": 64,
+      "received_at": 253402300799999,
+      "frame_length_prefix_hex": "000102c6",
+      "body_bytes": 66246,
+      "envelope_headroom_bytes": 64826,
+      "note": "The worst case for the event direction, which carries both endpoints and is therefore the larger of the two."
+    },
+    {
+      "name": "send-params-empty-payload",
+      "direction": "send-params",
+      "payload_bytes": 0,
+      "base64url_chars": 0,
+      "media_type_bytes": 128,
+      "peer_id_bytes": 256,
+      "destination_endpoint_bytes": 64,
+      "frame_length_prefix_hex": "00000230",
+      "body_bytes": 560,
+      "envelope_headroom_bytes": 130512
+    },
+    {
+      "name": "message-received-empty-payload",
+      "direction": "message-received",
+      "payload_bytes": 0,
+      "base64url_chars": 0,
+      "media_type_bytes": 128,
+      "peer_id_bytes": 256,
+      "destination_endpoint_bytes": 64,
+      "source_endpoint_bytes": 64,
+      "received_at": 0,
+      "frame_length_prefix_hex": "000002b8",
+      "body_bytes": 696,
+      "envelope_headroom_bytes": 130376
+    },
+    {
+      "name": "send-params-one-byte-tail",
+      "direction": "send-params",
+      "payload_bytes": 49151,
+      "base64url_chars": 65535,
+      "media_type_bytes": 128,
+      "peer_id_bytes": 256,
+      "destination_endpoint_bytes": 64,
+      "frame_length_prefix_hex": "0001022f",
+      "body_bytes": 66095,
+      "envelope_headroom_bytes": 64977
+    },
+    {
+      "name": "send-params-two-byte-tail",
+      "direction": "send-params",
+      "payload_bytes": 49150,
+      "base64url_chars": 65534,
+      "media_type_bytes": 128,
+      "peer_id_bytes": 256,
+      "destination_endpoint_bytes": 64,
+      "frame_length_prefix_hex": "0001022e",
+      "body_bytes": 66094,
+      "envelope_headroom_bytes": 64978
+    }
+  ]
+}

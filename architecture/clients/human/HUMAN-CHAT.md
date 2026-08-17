@@ -46,7 +46,11 @@ A later richer chat protocol can version independently of transport.
 
 ## Text is markdown
 
-`text` is CommonMark plus the table and strikethrough extensions, under a **closed subset** (ADR-0050). The subset is not extensible within v2: a construct outside it renders as plain text, never as active content.
+`text` is **CommonMark 0.31.2**, plus exactly two extensions taken from the GitHub Flavored Markdown specification, version **0.29-gfm**: its `table` and `strikethrough` grammars. Nothing else from GFM is included — task lists, autolinks, and footnotes are outside the subset and render as literal text.
+
+Both the core version and the extension grammars are pinned deliberately. CommonMark is versioned, and tables and strikethrough are not part of it; implementations disagree about whether a given source is a table, a strikethrough, a link destination, or literal text. That disagreement happens *before* the rules below can be applied to the parse, so naming the dialect is a prerequisite for the security bounds, not documentation polish.
+
+The subset is not extensible within v2: a construct outside it renders as plain text, never as active content.
 
 - **Raw HTML is never parsed or rendered as HTML.** Inline or block HTML is displayed as literal text.
 - **Link schemes are allowlisted**: `https` and `mailto`. A link in any other scheme (including `javascript:`, `file:`, `data:`) renders inert as plain text.
@@ -66,6 +70,7 @@ Compression is a **fit fallback, never a default** (ADR-0050):
 - the sender MUST send the raw form whenever the encoded envelope fits the effective transport payload limit (`max_payload_bytes`);
 - only when the raw encoded envelope exceeds that limit MAY the sender send the whole envelope brotli-compressed as `;ce=br`;
 - if the compressed form still exceeds the limit, the message is too large: no chunking, no multi-message reassembly, no automatic downgrade;
+- **a raw envelope larger than the 196,608-byte decompressed ceiling below is too large before compression is considered.** Compressibility does not extend the ceiling: a repetitive 300 KB document compresses well under the payload limit, but every conforming receiver aborts it mid-decode, so sending it would be conforming and universally unacceptable at once. The legal range for compression is `max_payload_bytes < raw <= 196,608`;
 - receivers accept both forms regardless of size; the constraint binds the sender.
 
 Receiving `;ce=br`:
@@ -75,6 +80,8 @@ Receiving `;ce=br`:
 - the decompressed bytes must be a valid raw-form envelope; all envelope validation runs on the decompressed bytes.
 
 Decompression happens **above transport, once**, in the shared application-protocol library used by the desktop client, the Android client, and the Claude bridge. The daemon never decompresses — payload bytes stay opaque to transport — and the bridge's defense-in-depth checks run on the decompressed bytes.
+
+For the Claude bridge specifically, [`../../contracts/CHANNEL-EVENT.md`](../../contracts/CHANNEL-EVENT.md) carries the matching rule: a content-encoding parameter is decoded before content is classified, because decoding says what the bytes are while parsing would say what they mean, and the bridge still does the former only. Without that rule a compressed envelope would satisfy the contract's non-UTF-8 branch and reach the model as opaque base64url, leaving both the size and subset checks unenforceable.
 
 Because brotli output is not canonical, an application retry MUST resend the stored byte-identical payload rather than re-encoding: `DirectContentFingerprintV1` is computed over the wire payload bytes, and a re-encode can produce a same-key/different-fingerprint conflict that the dedup contract (ADR-0019) correctly rejects.
 
@@ -106,4 +113,5 @@ Phase-1/application fixtures include at least:
 - valid diagnostic timestamps `0` and `253402300799999`; values outside that closed interval are rejected as malformed HumanChatV2 metadata;
 - `reply_to=11111111111111111111111111111111` with no matching local message remains a valid inbound message and renders without lookup/rejection;
 - markdown subset: raw HTML displayed literally; a `javascript:` link rendered inert; a remote image reference producing no fetch; nesting depth 17 and a 33-column table falling back to plain-text display without envelope rejection;
+- sender-side sizing: a raw envelope over 196,608 bytes is rejected as too large even when it compresses under the payload limit;
 - compression, decode direction only: a frozen compressed vector decoding to a frozen raw envelope, and a cap-violating input whose decode MUST abort mid-stream. The encode direction is **not** fixture-testable because brotli output is non-canonical; conformance pins what a receiver must do, not which bytes an encoder must emit.

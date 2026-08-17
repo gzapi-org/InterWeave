@@ -187,15 +187,307 @@ def ed25519_bip39_entropy_v1(vector: dict) -> str:
     return _base58btc(bytes([0x00, len(protobuf)]) + protobuf)
 
 
-# id -> (function, the vector field holding the value it must reproduce).
+def _base58btc_decode(text: str) -> bytes:
+    """Inverse of _base58btc. Needed because a PeerId reaches a fixture in
+    its printable form, while every derivation that consumes one hashes
+    `PeerId::to_bytes()` — the raw multihash. Decoding here rather than
+    storing the bytes alongside keeps one source of truth per vector: a
+    stored byte copy could drift from the printable form it claims to be.
+    """
+    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    n = 0
+    for ch in text:
+        i = alphabet.find(ch)
+        if i < 0:
+            raise ValueError(f"'{ch}' is not a base58btc character")
+        n = n * 58 + i
+    body = n.to_bytes((n.bit_length() + 7) // 8, "big") if n else b""
+    # Leading '1's are leading zero bytes; int arithmetic discards them,
+    # and the identity-multihash prefix 0x00 is exactly one of them.
+    return b"\x00" * (len(text) - len(text.lstrip("1"))) + body
+
+
+GOSSIPSUB_MESSAGE_ID_V1_DOMAIN = b"interweave/gossipsub-message-id/v1\x00"
+TOPIC_KEY_V1_DOMAIN = b"interweave/topic/v1\x00"
+KAD_NETWORK_V1_DOMAIN = b"interweave/kad-network/v1\x00"
+
+
+def gossipsub_message_id_v1(vector: dict) -> str:
+    """From architecture/transport/libp2p/PUBSUB.md §Mesh-level message identity.
+
+    Binds the authenticated source PeerId and the GossipSub WIRE sequence
+    number, never the application envelope `message_id` — ADR-0004 makes
+    keying mesh duplicate suppression on that envelope field illegal,
+    because two publishers may legitimately choose the same 128 bits.
+    """
+    source = _base58btc_decode(vector["peer_id"])
+    seq = int(vector["sequence_number"])
+    if not 0 <= seq < 2**64:
+        raise ValueError(f"sequence_number {seq} does not fit the u64 the wire carries")
+    canonical = (
+        GOSSIPSUB_MESSAGE_ID_V1_DOMAIN
+        + len(source).to_bytes(2, "big")
+        + source
+        + seq.to_bytes(8, "big")
+    )
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def gossipsub_topic_key_v1(vector: dict) -> str:
+    """From architecture/transport/libp2p/PUBSUB.md §Topic mapping.
+
+    sha256(domain || channel_id_ascii). The hash keeps raw channel names
+    off the wire; it does NOT resist dictionary guessing of a
+    low-entropy name, and the specification says so rather than implying
+    secrecy the construction does not provide.
+    """
+    channel = vector["channel_id"]
+    raw = channel.encode("ascii")
+    if not 1 <= len(raw) <= 128:
+        raise ValueError(f"ChannelId is {len(raw)} bytes; the contract allows 1..128")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}", channel):
+        raise ValueError(f"ChannelId '{channel}' does not match the ADR-0025 grammar")
+    return hashlib.sha256(TOPIC_KEY_V1_DOMAIN + raw).hexdigest()
+
+
+def kad_network_namespace_v1(vector: dict) -> str:
+    """From architecture/docs/architecture/kademlia-integration.md §4.
+
+    Lowercase unpadded RFC4648 base32 of the FIRST 16 BYTES of the
+    digest, not the whole thing: the truncation is what keeps the
+    protocol string short, and a verifier that hashed the full digest
+    would produce a plausible-looking namespace nobody else computes.
+    """
+    import base64
+
+    network_id = vector["network_id"]
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", network_id):
+        raise ValueError(f"network_id '{network_id}' is not lower-case ASCII in the allowed grammar")
+    digest = hashlib.sha256(KAD_NETWORK_V1_DOMAIN + network_id.encode("ascii")).digest()
+    return base64.b32encode(digest[:16]).decode("ascii").rstrip("=").lower()
+
+
+# --- validation verdicts --------------------------------------------------
+# These reproduce a `valid` boolean rather than a digest. Their vectors
+# deliberately repeat results (see ALGORITHMS), and each implements the
+# rule from its contract so a grammar loosened in prose without loosening
+# the fixture — or the reverse — is caught.
+
+ENDPOINT_ID_RE = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
+
+
+def endpoint_id_grammar_v1(vector: dict) -> bool:
+    """From architecture/contracts/ENDPOINTS.md §EndpointId.
+
+    ASCII, 1..64 bytes, lower-case canonical. The anchored regex already
+    bounds the length, but the byte check is kept explicit because the
+    contract states both and a future grammar edit could drop the bound
+    from one without the other.
+    """
+    value = vector["endpoint_id"]
+    try:
+        raw = value.encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    return bool(1 <= len(raw) <= 64 and ENDPOINT_ID_RE.fullmatch(value))
+
+
+HEX32_RE = re.compile(r"^[0-9a-f]{32}$")
+SENT_AT_MS_MAX = 253402300799999
+
+
+def human_chat_v2_envelope(vector: dict) -> bool:
+    """From architecture/clients/human/HUMAN-CHAT.md (ADR-0050).
+
+    Shape and grammar only. The markdown SUBSET is a rendering contract,
+    not an envelope-validity one — out-of-subset markdown falls back to
+    plain-text display rather than rejecting the message — so it is not
+    decided here, and a vector may not claim it is.
+    """
+    env = vector["envelope"]
+    if not isinstance(env, dict):
+        return False
+    if env.get("v") != 2 or env.get("kind") != "text":
+        return False
+    mid = env.get("app_message_id")
+    if not isinstance(mid, str) or not HEX32_RE.fullmatch(mid):
+        return False
+    if "text" in env and not isinstance(env["text"], str):
+        return False
+    reply_to = env.get("reply_to")
+    if reply_to is not None and (not isinstance(reply_to, str) or not HEX32_RE.fullmatch(reply_to)):
+        return False
+    sent = env.get("sent_at_ms")
+    if sent is not None:
+        if isinstance(sent, bool) or not isinstance(sent, int):
+            return False
+        if not 0 <= sent <= SENT_AT_MS_MAX:
+            return False
+    src = env.get("from_endpoint")
+    if src is not None and not endpoint_id_grammar_v1({"endpoint_id": src}):
+        return False
+    return True
+
+
+def config_v2_cross_field(vector: dict) -> bool:
+    """From architecture/config/config.schema.yaml §endpoints cross-field.
+
+    The five rules stated there, in order: unique endpoint IDs; a set
+    default naming an ENABLED endpoint; static-subset peers being a
+    subset of profile trust; endpoint policy narrowing rather than
+    widening; and advertised entries fitting the directory bound. Each is
+    a relationship BETWEEN fields, which is exactly what a JSON Schema
+    cannot express and why these vectors exist beside the schema.
+    """
+    cfg = vector["config"]
+    trust = set(cfg.get("trust", {}).get("allowed_peers", []))
+    endpoints = cfg.get("endpoints", {})
+    entries = endpoints.get("entries", [])
+
+    ids = [e.get("id") for e in entries]
+    if len(ids) != len(set(ids)):
+        return False
+
+    default = endpoints.get("default_direct_endpoint")
+    if default is not None:
+        match = [e for e in entries if e.get("id") == default]
+        if not match or not match[0].get("enabled", True):
+            return False
+
+    for e in entries:
+        for direction in ("inbound", "outbound"):
+            policy = e.get(direction, {})
+            if policy.get("policy") == "static-subset":
+                # Narrowing means a subset. A peer here that profile trust
+                # does not hold would WIDEN it, which ADR-0012 forbids
+                # regardless of how the endpoint is configured.
+                if not set(policy.get("allowed_peers", [])) <= trust:
+                    return False
+
+    max_advertised = endpoints.get("directory", {}).get("max_advertised", 16)
+    advertised = [e for e in entries if e.get("advertise") and e.get("enabled", True)]
+    if len(advertised) > max_advertised:
+        return False
+
+    return True
+
+
+# --- IPC payload fit ------------------------------------------------------
+
+_B64_CHARS_PER_3_BYTES = 4
+
+
+def _canonical_json_len(obj: dict) -> int:
+    """Length of the compact canonical serialization this fixture pins.
+
+    Separators without spaces, keys in the order the schema declares
+    them (`sort_keys=False` preserves insertion order). The IPC contract
+    does not pin a canonical JSON form — it does not need to, because the
+    ceiling is a bound rather than an equality — so the fixture declares
+    the form it measures instead of pretending the contract chose one.
+    """
+    return len(json.dumps(obj, separators=(",", ":"), ensure_ascii=False))
+
+
+def ipc_v2_payload_fit(vector: dict) -> str:
+    """From architecture/contracts/LOCAL-IPC.md §Framing / §Payload-fit invariant.
+
+    Builds the maximal legal object for one direction and returns its
+    4-byte big-endian frame length prefix as hex — the same encoding the
+    wire uses, so the vector's stored value IS the number the framing
+    layer would emit.
+
+    The measured object is the schema-defined one (`ipc.send-params` or
+    `endpoints.message-received`). The outer request/event envelope is
+    not modelled by any schema, so its overhead is reported by the
+    vector's own `envelope_headroom_bytes` rather than invented here.
+    """
+    payload_bytes = int(vector["payload_bytes"])
+    if payload_bytes > 49152:
+        raise ValueError(f"{payload_bytes} exceeds the 49,152-byte ADR-0026 payload ceiling")
+
+    # Unpadded base64url: every 3 bytes become 4 characters, and a 1- or
+    # 2-byte tail becomes 2 or 3. This is computed rather than encoded
+    # because the length is the invariant, not the content.
+    whole, tail = divmod(payload_bytes, 3)
+    b64_len = whole * _B64_CHARS_PER_3_BYTES + (0 if tail == 0 else tail + 1)
+    stated_b64 = vector.get("base64url_chars")
+    if stated_b64 is not None and stated_b64 != b64_len:
+        raise ValueError(f"base64url length disagrees: stored {stated_b64}, computed {b64_len}")
+
+    def field(n: int, ch: str = "a") -> str:
+        return ch * n
+
+    direction = vector["direction"]
+    payload = {
+        "media_type": field(vector["media_type_bytes"], "x"),
+        "bytes": field(b64_len, "A"),
+    }
+    if direction == "send-params":
+        obj = {
+            "peer": field(vector["peer_id_bytes"], "P"),
+            "endpoint": field(vector["destination_endpoint_bytes"], "d"),
+            "payload": payload,
+            "message_id": field(32, "0"),
+        }
+    elif direction == "message-received":
+        obj = {
+            "message_id": field(32, "0"),
+            "mode": "direct",
+            "source_peer": field(vector["peer_id_bytes"], "P"),
+            "source_endpoint": field(vector["source_endpoint_bytes"], "s"),
+            "destination_endpoint": field(vector["destination_endpoint_bytes"], "d"),
+            "payload": payload,
+            "received_at": int(vector["received_at"]),
+        }
+    else:
+        raise ValueError(f"unknown direction '{direction}'")
+
+    body_len = _canonical_json_len(obj)
+    stated_len = vector.get("body_bytes")
+    if stated_len is not None and stated_len != body_len:
+        raise ValueError(f"body length disagrees: stored {stated_len}, computed {body_len}")
+
+    ceiling = 131072
+    if body_len > ceiling:
+        raise ValueError(
+            f"{direction} maximal body is {body_len} bytes, over the {ceiling}-byte "
+            "IPC frame ceiling — the payload-fit invariant is broken"
+        )
+    stated_headroom = vector.get("envelope_headroom_bytes")
+    if stated_headroom is not None and stated_headroom != ceiling - body_len:
+        raise ValueError(
+            f"headroom disagrees: stored {stated_headroom}, computed {ceiling - body_len}"
+        )
+    return body_len.to_bytes(4, "big").hex()
+
+
+# id -> (function, the vector field holding the value it must reproduce,
+#        whether distinct inputs must produce distinct results).
 # The field is declared rather than guessed from the name: these
 # algorithms produce a digest, an encoding, and an identifier
 # respectively, and inferring that from a suffix was a hack waiting to
 # mislabel the fourth one.
+#
+# DISTINCTNESS IS PER-ALGORITHM, not universal. For a derivation, two
+# vectors sharing a result means the edge cases stopped distinguishing
+# anything — the exact bug the edge cases exist to catch. For a
+# VALIDATION verdict the opposite holds: a grammar file's whole purpose
+# is many inputs mapping onto `true` and many onto `false`, so an
+# unconditional collision check would make a correct verdict set
+# unrepresentable. Flag it per algorithm rather than letting the shape
+# of the first three decide for every later one.
 ALGORITHMS = {
-    "direct-content-fingerprint-v1": (direct_content_fingerprint_v1, "sha256"),
-    "direct-message-v2-frame": (direct_message_v2_frame, "frame_hex"),
-    "ed25519-bip39-entropy-v1": (ed25519_bip39_entropy_v1, "expected_peer_id"),
+    "direct-content-fingerprint-v1": (direct_content_fingerprint_v1, "sha256", True),
+    "direct-message-v2-frame": (direct_message_v2_frame, "frame_hex", True),
+    "ed25519-bip39-entropy-v1": (ed25519_bip39_entropy_v1, "expected_peer_id", True),
+    "gossipsub-message-id-v1": (gossipsub_message_id_v1, "sha256", True),
+    "gossipsub-topic-key-v1": (gossipsub_topic_key_v1, "sha256", True),
+    "kad-network-namespace-v1": (kad_network_namespace_v1, "network_hash", True),
+    "ipc-v2-payload-fit": (ipc_v2_payload_fit, "frame_length_prefix_hex", True),
+    "endpoint-id-grammar-v1": (endpoint_id_grammar_v1, "valid", False),
+    "human-chat-v2-envelope": (human_chat_v2_envelope, "valid", False),
+    "config-v2-cross-field": (config_v2_cross_field, "valid", False),
 }
 
 
@@ -354,7 +646,7 @@ def main(argv: list[str]) -> int:
             )
             continue
 
-        fn, field = entry
+        fn, field, distinct_required = entry
 
         seen: dict[str, str] = {}
         for v in doc.get("vectors", []):
@@ -372,6 +664,8 @@ def main(argv: list[str]) -> int:
                     f"      stored:   {stored}\n"
                     f"      computed: {computed}"
                 )
+            if not distinct_required:
+                continue
             if computed in seen:
                 report(
                     f"{rel}[{name}]: collides with '{seen[computed]}' — "

@@ -61,12 +61,12 @@ The accepted details live in the contracts and ADRs; this README is an orientati
 | [`test-data/`](./test-data/README.md) | Mutable non-normative scenario data |
 | [`spikes/`](./spikes/README.md) | Empirical implementation investigations; never production dependencies |
 | [`packaging/`](./packaging/README.md) | Future Linux/macOS/Windows/Android packaging |
-| [`xtask/`](./xtask/README.md) | Future repository/test orchestration |
+| [`xtask/`](./xtask/README.md) | Repository/test orchestration — `cargo xtask checks` / `cargo xtask ci` |
 | [`tools/`](./tools/) | Repository tooling — PR/review scripts and tree checks, each with a self-test beside it |
 | `.claude/` | Committed agent configuration and task-scoped skills; per-developer overrides stay untracked |
 | [`IMPLEMENTATION.md`](./IMPLEMENTATION.md) | Implementation landing-zone and activation rules |
 
-The root [`Cargo.toml`](./Cargo.toml) is a zero-member virtual workspace. `workspace.metadata.interweave` records intended members without making them buildable. A crate/package is added to `[workspace].members` only when its canonical implementation stage begins.
+The root [`Cargo.toml`](./Cargo.toml) is a virtual workspace with exactly two members — [`xtask`](./xtask/README.md), the command runner, and `tests/support`, the test-only harness; neither is product code. `workspace.metadata.interweave` records the remaining planned members without making them buildable. A crate/package is added to `[workspace].members` only when its canonical implementation stage begins.
 
 ## Canonical implementation order
 
