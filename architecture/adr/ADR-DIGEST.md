@@ -59,6 +59,7 @@ Authority order is unchanged (`CLAUDE.md` §2): accepted ADRs → normative cont
 | encrypted key at rest, passphrase, SPIKE-007 | **0038** |
 | multiple devices, same person on phone and desktop, cloning identity | **0043** (distinct PeerIds — not account sync) |
 | human message retention, unread, keep-after-read, pending outbound, backup | **0044** (+ 0020, 0018) |
+| human chat envelope, markdown messages, compression, brotli, decompressed ceiling, prompt injection, auto-fetch | **0050** (+ 0044 retention, 0032 boundary) |
 | repository layout, where does this file go, apps vs crates vs tests | **0045** (+ 0021 dependency boundaries) |
 | implementation order, what may be built next, stage gates, workspace members | **0046** (canonical order; phases are scope labels) |
 | naming, wire namespace, `interweave` vs InterWeave, frozen hash vectors | **0047** |
@@ -312,6 +313,12 @@ A second authorization set that buys reachability without buying data-plane memb
 Durable only in three states, per the frozen contract in `clients/human/RETENTION.md`.
 - Rules: content is durable only while **outbound pending** (not yet transport-terminal), **inbound unread** (committed but not yet read), or **inbound kept** (receiver explicitly chose `Keep` after reading). `AcceptedV2` is transport-terminal for direct sends; successful local publication is terminal for broadcast because no recipient acknowledgement exists. Transport-terminal outbound content is removed; read inbound content is removed unless kept. **`Keep` is receiver-only local state**, settable only after read, and never accepted from a remote payload, EndpointId, contact label, or sender request. A future encrypted backup may include **only** inbound unread and inbound kept content — pending outbound is excluded so a restored or second device never becomes an implicit replay/delayed-send source; Android system backup and device transfer stay disabled for all message-content storage.
 - Keywords: retention, unread, keep after read, pending outbound, transport-terminal, no sender-forced persistence, backup exclusion
+
+### 0050 — HumanChatV2 is markdown-native with fit-triggered bounded compression (Proposed)
+Supersedes the HumanChatV1 envelope as the implementation target **on acceptance**; no v1 implementation or compatibility obligation exists.
+- Rules: `text` is CommonMark (+ tables/strikethrough) under a closed subset — raw HTML renders as literal text, link schemes allowlisted (`https`, `mailto`), remote images never auto-fetched, nesting/table bounds, raw source always viewable; plain-text rendering is legal degradation with no negotiation. Compression is a **fit fallback only**: raw JSON whenever it fits `max_payload_bytes`, whole-envelope brotli (`;ce=br`) only when it does not, too-large otherwise — no chunking. Receivers stream-decode under a hard **196,608-byte decompressed ceiling** (4 × the transport payload ceiling, set by this ADR), aborting mid-stream; there is deliberately no declared-length field. Decompression happens once, above transport, in a shared application library (desktop, Android, Claude bridge) — the daemon never decompresses; bridge defense-in-depth checks run on decompressed bytes. `DirectContentFingerprintV1` stays over wire bytes, so retries MUST resend stored byte-identical payloads (brotli output is non-canonical). Peer content is data, not instructions: agent-facing consumers frame it as untrusted with `source_peer`/`source_endpoint` provenance and never auto-follow links. Retention (ADR-0044) unchanged; attachments/artifact references stay out of scope for a future ADR.
+- Security: prompt injection contained by provenance framing plus the ADR-0032/0037 authority split; decompression bombs (measured ≥87,381× expansion) bounded by the mid-stream cap; render injection closed by the subset; read-beacon exfiltration closed by never auto-fetching.
+- Keywords: human chat v2, markdown, commonmark, compression, brotli, decompressed ceiling, decompression bomb, prompt injection, no auto-fetch
 
 ---
 
