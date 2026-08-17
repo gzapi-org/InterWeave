@@ -106,31 +106,26 @@ The root workspace starts with only the packages needed by this stage. Do not ac
 
 ### Work remaining
 
-- materialize the outstanding fixture sets in the table below, exactly as the existing three were: declared algorithm, recomputed by `tools/checks/verify_fixture_vectors.py`, anchored to their ADRs;
-- treat ADR-0047 InterWeave machine/wire identifiers as final inputs to every Stage-0 fixture; no former working-namespace compatibility aliases are materialized;
-- add `rust` to the ruleset's `required_status_checks`. A job's `name:` is its required-check context, so a reported-but-unrequired context gates nothing — and this is the mirror of the rename hazard, silent in the same way.
+Nothing. Every exit-gate item below is met; the stage closes when its final change lands.
 
 ### Required fixtures
 
-Materialized, and recomputed on every CI run:
+All materialized, and recomputed on every CI run by `tools/checks/verify_fixture_vectors.py` — 88 vectors. Each declares its algorithm, is recomputed from the specification rather than from the fixture, and is anchored to its ADRs. ADR-0047 InterWeave identifiers were the inputs throughout; no former working-namespace alias is materialized anywhere.
 
-| Fixture | File |
-|---|---|
-| DirectContentFingerprintV1 | `fixtures/direct-v2/direct-content-fingerprint-v1.json` |
-| DirectMessageV2 request framing (byte order pinned big-endian in `transport/libp2p/DIRECT.md`) | `fixtures/direct-v2/direct-message-v2-frame.json` |
-| BIP-39 entropy/checksum mnemonic + Ed25519 secret -> public key -> PeerId | `fixtures/identity/ed25519-bip39-entropy-v1.json` |
-
-Outstanding — the directories exist as stubs, and the first three below have fully specified derivations that freeze exactly the way the fingerprint did:
-
-| Fixture | Derivation source | Lands in |
+| Fixture | Derivation source | File |
 |---|---|---|
-| GossipSubMessageIdV1 | `transport/libp2p/PUBSUB.md`; golden re-frozen by ADR-0047 | `fixtures/gossipsub/` |
-| GossipSub topic key | `contracts/TRANSPORT.md` topic derivation; golden in ADR-0047 | `fixtures/gossipsub/` |
-| Kademlia network hash / protocol namespace | `docs/architecture/kademlia-integration.md`; golden in ADR-0047 | `fixtures/kademlia/` |
-| IPC v2 maximum payload/frame (payload-fit invariant) | `contracts/LOCAL-IPC.md` §Framing | `fixtures/ipc-v2/` |
-| EndpointId grammar vectors | `contracts/ENDPOINTS.md` + `contracts/schemas/endpoints/` | `fixtures/endpoints/` |
-| HumanChatV2 envelope vectors | `clients/human/HUMAN-CHAT.md` + `contracts/schemas/human-chat/` | `fixtures/human-chat-v2/` |
-| configuration-v2 vectors | `architecture/config/config.schema.yaml` + examples | `fixtures/config/` |
+| DirectContentFingerprintV1 | `contracts/ENDPOINTS.md`; golden in ADR-0047 | `fixtures/direct-v2/direct-content-fingerprint-v1.json` |
+| DirectMessageV2 request framing (byte order pinned big-endian in `transport/libp2p/DIRECT.md`) | `transport/libp2p/DIRECT.md` §Request | `fixtures/direct-v2/direct-message-v2-frame.json` |
+| BIP-39 entropy/checksum mnemonic + Ed25519 secret -> public key -> PeerId | `contracts/IDENTITY-RECOVERY.md` | `fixtures/identity/ed25519-bip39-entropy-v1.json` |
+| GossipSubMessageIdV1 | `transport/libp2p/PUBSUB.md`; golden re-frozen by ADR-0047 | `fixtures/gossipsub/gossipsub-message-id-v1.json` |
+| GossipSub topic key | `transport/libp2p/PUBSUB.md` topic mapping; golden in ADR-0047 | `fixtures/gossipsub/gossipsub-topic-key-v1.json` |
+| Kademlia network hash / protocol namespace | `docs/architecture/kademlia-integration.md`; golden in ADR-0047 | `fixtures/kademlia/kad-network-namespace-v1.json` |
+| IPC v2 maximum payload/frame (payload-fit invariant) | `contracts/LOCAL-IPC.md` §Framing | `fixtures/ipc-v2/ipc-v2-payload-fit.json` |
+| EndpointId grammar vectors | `contracts/ENDPOINTS.md` + `contracts/schemas/endpoints/` | `fixtures/endpoints/endpoint-id-grammar-v1.json` |
+| HumanChatV2 envelope vectors | `clients/human/HUMAN-CHAT.md` + `contracts/schemas/human-chat/` | `fixtures/human-chat-v2/human-chat-v2-envelope.json` |
+| configuration-v2 vectors | `architecture/config/config.schema.yaml` + examples | `fixtures/config/config-v2-cross-field.json` |
+
+Distinctness is a per-algorithm property. Derivation vectors must not collide — two edge cases sharing a digest means they stopped distinguishing anything. Verdict sets (`endpoint-id-grammar-v1`, `human-chat-v2-envelope`, `config-v2-cross-field`) repeat `true` and `false` by design, so the collision rule is off for them.
 
 ### Exit gate
 
