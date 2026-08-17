@@ -129,7 +129,7 @@ Outstanding — the directories exist as stubs, and the first three below have f
 | Kademlia network hash / protocol namespace | `docs/architecture/kademlia-integration.md`; golden in ADR-0047 | `fixtures/kademlia/` |
 | IPC v2 maximum payload/frame (payload-fit invariant) | `contracts/LOCAL-IPC.md` §Framing | `fixtures/ipc-v2/` |
 | EndpointId grammar vectors | `contracts/ENDPOINTS.md` + `contracts/schemas/endpoints/` | `fixtures/endpoints/` |
-| HumanChatV1 envelope vectors | `clients/human/HUMAN-CHAT.md` + `contracts/schemas/human-chat/` | `fixtures/human-chat-v1/` |
+| HumanChatV2 envelope vectors | `clients/human/HUMAN-CHAT.md` + `contracts/schemas/human-chat/` | `fixtures/human-chat-v2/` |
 | configuration-v2 vectors | `architecture/config/config.schema.yaml` + examples | `fixtures/config/` |
 
 ### Exit gate
@@ -261,7 +261,7 @@ Backend-specific policy modules may be created under `crates/transport/libp2p` o
 
 ### Implement human domain state
 
-- HumanChatV1 parsing/validation, with envelope conformance cases landing in `tests/human-chat`;
+- HumanChatV2 parsing/validation — envelope, markdown subset, bounded decompression (ADR-0050) — with conformance cases landing in `tests/human-chat`;
 - message presentation state;
 - pending/retrying/transport-terminal outbound state;
 - unread/read/kept inbound state;
@@ -788,7 +788,7 @@ No UI state may imply remote human read/processing without a future application-
 
 Build and test UI against a fake/in-memory LocalDataSession first. UI code must not wait for or directly depend on libp2p. Envelope-level conformance stays in `tests/human-chat`; UI tests assert presentation state only.
 
-With HumanChatV1 sent and received between first-party clients, flip `contracts/schemas/human-chat` to `active` (ADR-0049).
+With HumanChatV2 sent and received between first-party clients, flip `contracts/schemas/human-chat` to `active` (ADR-0049).
 
 ## 18. Stage 15 — desktop human client
 
@@ -980,7 +980,7 @@ TransportRuntime composition
 ### Track B — human application
 
 ```text
-HumanChatV1
+HumanChatV2
 retention
 SQLite store
 ui-model

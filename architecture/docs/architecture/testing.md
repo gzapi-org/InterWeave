@@ -259,7 +259,7 @@ Phase 4/7 security tests additionally assert:
 
 Shared conformance:
 - desktop IPC and Android embedded adapters run the same LOCAL-CLIENT session/lease/source-endpoint/queue tests;
-- HumanChatV1 parser rejects oversize/invalid JSON and treats direct transport metadata as authoritative;
+- HumanChatV2 parser rejects oversize/invalid JSON, enforces the 196,608-byte decompressed ceiling with mid-stream abort, and treats direct transport metadata as authoritative;
 - desktop and Android exchange the same transport/direct/GossipSub golden fixtures.
 
 Desktop:
@@ -271,10 +271,12 @@ Android:
 - Android system cloud backup and device-transfer exclude identity envelope/recovery/config/trust/human SQLite state; a half-restored install cannot silently recreate/replace an established PeerId; future explicit message backup fixtures include only unread/kept inbound content and exclude pending outbound;
 - `stay-reachable + user-presence` exposes `background_restart_requires_user_authentication=true` and remains offline after restart until user authentication.
 
-HumanChatV1:
+HumanChatV2:
 - `app_message_id`/`reply_to` accept exactly 32 lowercase hexadecimal characters and reject uppercase/prefixed/hyphenated/wrong-length encodings;
 - `sent_at_ms` accepts only `0..253402300799999` and remains diagnostic only;
-- unknown `reply_to` renders the current message without transport lookup or rejection.
+- unknown `reply_to` renders the current message without transport lookup or rejection;
+- markdown subset: raw HTML displays literally, non-allowlisted link schemes render inert, remote images produce no fetch, out-of-bound nesting/tables fall back to plain-text display without envelope rejection;
+- compression: a `;ce=br` payload decodes only under the streaming cap; a cap-violating input aborts mid-stream; a compressed envelope whose raw form would have fit the payload limit is a sender-conformance failure.
 
 Phase-9 V-review additions:
 - authorized AutoNAT probe client requests loopback/private/ULA/link-local/multicast/unrelated-public/DNS targets and server emits no dial; only literal candidate IP equal to observed requester source IP is eligible;

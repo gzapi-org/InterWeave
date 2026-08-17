@@ -75,7 +75,7 @@ The same retention state machine is implemented on desktop and Android: pending 
 
 ## First-party chat envelope
 
-The human clients need one interoperable application convention while keeping it above transport. `clients/human/HUMAN-CHAT.md` defines `HumanChatV1` for text/reply metadata. It does not alter DirectMessageV2 or GossipSub.
+The human clients need one interoperable application convention while keeping it above transport. `clients/human/HUMAN-CHAT.md` defines `HumanChatV2`: markdown text/reply metadata with a size-triggered bounded compression fallback (ADR-0050). It does not alter DirectMessageV2 or GossipSub.
 
 For direct messages, authenticated transport metadata (`source_peer`, peer-asserted `source_endpoint`) is authoritative for routing display. Application fields never override it. For broadcasts, an application `from_endpoint` hint is explicitly unauthenticated because the broadcast transport remains PeerId/channel scoped.
 
@@ -106,7 +106,7 @@ The human contact model may locally group several device routes under one person
 - human UI can send/receive direct and broadcast traffic without libp2p concepts;
 - platform process/lifecycle loss never creates hidden transport durability; only ADR-0044 application retention survives;
 - recovery/config separation remains unchanged;
-- desktop and Android can exchange `HumanChatV1` text using ordinary DirectMessageV2/GossipSub payloads.
+- desktop and Android can exchange `HumanChatV2` text using ordinary DirectMessageV2/GossipSub payloads.
 
 ## Detailed first-party design references
 
@@ -115,5 +115,5 @@ The human contact model may locally group several device routes under one person
 - desktop binding: [`human-client-desktop.md`](./human-client-desktop.md)
 - Android binding: [`human-client-android.md`](./human-client-android.md)
 - human application state: [`../../clients/human/STATE.md`](../../clients/human/STATE.md)
-- HumanChatV1: [`../../clients/human/HUMAN-CHAT.md`](../../clients/human/HUMAN-CHAT.md)
+- HumanChatV2: [`../../clients/human/HUMAN-CHAT.md`](../../clients/human/HUMAN-CHAT.md)
 - message retention: [`../../clients/human/RETENTION.md`](../../clients/human/RETENTION.md)

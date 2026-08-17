@@ -117,7 +117,7 @@ Implement class-aware root dial admission plus pre-Noise inbound admission, addr
 
 **Objective:** provide a human-facing consumer without embedding libp2p or weakening transport boundaries.
 
-**Deliverables:** Rust/Slint desktop client; shared human-core/HumanChatV1/SQLite retention store; IPC v2 data-plane adapter; separate admin adapter; EndpointId claim; contact/routing/channel UI; ADR-0044 pending/unread/kept retention state; endpoint-directory route selection.
+**Deliverables:** Rust/Slint desktop client; shared human-core/HumanChatV2/SQLite retention store; IPC v2 data-plane adapter; separate admin adapter; EndpointId claim; contact/routing/channel UI; ADR-0044 pending/unread/kept retention state; endpoint-directory route selection.
 
 **Acceptance:**
 

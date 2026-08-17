@@ -1,6 +1,6 @@
 # HumanChatV2 carries markdown natively, compresses only to fit, and bounds decompression
 
-**Status:** Proposed (drafted 2026-08-17; not yet accepted by the owner). On acceptance this supersedes the HumanChatV1 envelope design in `clients/human/HUMAN-CHAT.md` **before any implementation exists**, the same pre-implementation supersession `/interweave/direct/2.0.0` applied to `/direct/1.0.0` (ADR-0005/0030); there is no deployed v1 compatibility obligation.
+**Status:** Accepted (2026-08-17). Supersedes the HumanChatV1 envelope design in `clients/human/HUMAN-CHAT.md` **before any implementation exists**, the same pre-implementation supersession `/interweave/direct/2.0.0` applied to `/direct/1.0.0` (ADR-0005/0030); there is no deployed v1 compatibility obligation. Amends the application-identifier list of ADR-0047 to the v2 media type.
 
 ## Context
 
@@ -49,7 +49,7 @@ One content model spans a chat line, an inline document, and any future referenc
 
 Costs: every first-party consumer gains a markdown subset validator and a bounded brotli decoder (one shared library, but it must exist before the human application layer opens); encode-direction compression is not fixture-testable because brotli output is non-canonical, so conformance vectors pin the decode direction only (compressed bytes → expected output, and cap-violation inputs → mandatory abort); the v1 fixture set planned in the bottom-up plan (`fixtures/human-chat-v1/`) is replaced by a v2 set before it was ever materialized.
 
-On acceptance, the same commit series must propagate: rewrite `clients/human/HUMAN-CHAT.md` to v2; update `contracts/schemas/human-chat/` and its manifest (ADR-0049, status `approved`); update the fixture table and Phase rows in `architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md` and the references in `docs/architecture/human-client-cross-platform.md`; flip this ADR and its digest entry to Accepted.
+Acceptance propagated in the same commit series: `clients/human/HUMAN-CHAT.md` is rewritten to v2 and carries the pinned subset bounds; `contracts/schemas/human-chat/` and its manifest are updated (ADR-0049, still `approved` — nothing implements it); the fixture table, phase rows, and track lists in `architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md`, the human-client explanatory documents, and `fixtures/human-chat-v2/` (renamed from the never-materialized v1 directory) all reference v2; ADR-0047's application-identifier list is amended to the v2 media type. The frozen `fixtures/direct-v2/` fingerprint vector that uses the v1 media-type string as sample input bytes is deliberately untouched — those are arbitrary test bytes inside a frozen vector, and changing them would be a protocol event with no protocol reason.
 
 ## Security implications
 

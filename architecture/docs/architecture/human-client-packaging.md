@@ -99,7 +99,7 @@ A release candidate tests at least:
 - Android install/upgrade/process death/background/foreground/network change and Keystore behavior;
 - Android secure recovery screens, in-app mnemonic picker/no-clipboard policy, backup/data-extraction exclusions, and device-to-device reinstall/restore behavior;
 - one desktop human + Claude shared profile routing;
-- desktop-to-Android and Android-to-desktop HumanChatV1 over direct and relay paths;
+- desktop-to-Android and Android-to-desktop HumanChatV2 over direct and relay paths;
 - distinct-device PeerIds and contact grouping;
 - identical wire/golden fixtures on every shipped target;
 - recovery drill without accidental identity regeneration;
