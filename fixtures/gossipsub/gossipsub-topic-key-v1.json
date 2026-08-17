@@ -1,0 +1,41 @@
+{
+  "algorithm": {
+    "id": "gossipsub-topic-key-v1",
+    "specification": "architecture/transport/libp2p/PUBSUB.md",
+    "summary": "SHA-256(\"interweave/topic/v1\\0\" || channel_id_ascii). Keeps raw channel names off the wire; it does not resist dictionary guessing of a low-entropy name."
+  },
+  "adr": [
+    "0025",
+    "0047"
+  ],
+  "vectors": [
+    {
+      "name": "general",
+      "channel_id": "general",
+      "frozen_by": "0047",
+      "note": "Golden re-frozen by ADR-0047; also quoted in PUBSUB.md.",
+      "sha256": "82695daad230a8a8ddb6e43aae1063e4f611ded53d710f48b2ed3d206211c3bc"
+    },
+    {
+      "name": "single-character",
+      "channel_id": "a",
+      "sha256": "07e09dd426d9e7e34aa5f2368ed6e842aec576dd2a0ff1c798829cbb3a3600f7"
+    },
+    {
+      "name": "max-length-128",
+      "channel_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "sha256": "f4d8a9be178722a7ac91f76f541601da1ba50216f82c9ab5ffe16f378e176791"
+    },
+    {
+      "name": "punctuation-grammar",
+      "channel_id": "team.eu:builds/nightly-1",
+      "sha256": "62a5e4736144e6b03bbba8b1cda3a232ae503a3af75e6458121380d71e8c9666"
+    },
+    {
+      "name": "case-sensitive-twin",
+      "channel_id": "General",
+      "sha256": "5e0ac29f1e0dedf8c5af84396feb8ac6e2df74f0fad04590da7622f05f73408f",
+      "note": "ChannelIds are case-sensitive (ADR-0025), so this must not equal the `general` key."
+    }
+  ]
+}
