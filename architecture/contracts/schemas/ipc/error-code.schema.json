@@ -2,26 +2,41 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:interweave:schemas:ipc:error-code",
   "title": "Local IPC error code",
-  "description": "Local errors are deliberately MORE precise than the remote wire. A remote peer never receives EndpointUnknown, EndpointDisabled, or EndpointClientKindDenied — those collapse to the coarse `no_route` class so the directed protocol cannot become an endpoint-existence oracle (ADR-0030). Keeping both vocabularies in one repository makes the asymmetry reviewable rather than accidental.",
+  "description": "Local errors are deliberately MORE precise than the remote wire. A remote peer never receives EndpointUnknown, EndpointDisabled, or EndpointClientKindDenied — those collapse to the coarse `no_route` class so the directed protocol cannot become an endpoint-existence oracle (ADR-0030). Keeping both vocabularies in one repository makes the asymmetry reviewable rather than accidental.\n\nTHE ENUM IS THE COMPLETE LOCAL VOCABULARY. It carries every stable category of `contracts/TRANSPORT.md` §Error model, not only the handshake ones: an ordinary command failing with PayloadTooLarge or PeerUnreachable must be representable, and a closed enum missing those makes a conforming failure response invalid at the IPC boundary. `Cancelled` is the one category refined rather than copied — IPC distinguishes CancelledBeforeDispatch from CancellationRaced, because that difference is observable locally and is exactly what a caller needs to decide whether to retry.",
   "enum": [
     "InvalidArgument",
+    "PayloadTooLarge",
+    "ChannelNotJoined",
+    "EndpointNotRegistered",
     "EndpointUnknown",
+    "EndpointInUse",
     "EndpointDisabled",
     "EndpointClientKindDenied",
-    "EndpointInUse",
     "CapabilityDenied",
-    "EndpointNotRegistered",
     "UnauthorizedPeer",
-    "Overloaded",
-    "ProtocolViolation",
+    "PeerUnknown",
+    "PeerUnreachable",
+    "RemoteEndpointUnavailable",
+    "Timeout",
     "CancelledBeforeDispatch",
-    "CancellationRaced"
+    "CancellationRaced",
+    "Overloaded",
+    "BackendUnavailable",
+    "ProtocolUnsupported",
+    "ProtocolViolation",
+    "VersionIncompatible",
+    "ShuttingDown",
+    "Internal"
   ],
   "x-contract": {
     "name": "ipc.error-code",
     "status": "approved",
     "version": "1.0.0",
-    "adr": ["0017", "0030", "0026"],
+    "adr": [
+      "0017",
+      "0030",
+      "0026"
+    ],
     "specification": "architecture/contracts/LOCAL-IPC.md"
   }
 }
