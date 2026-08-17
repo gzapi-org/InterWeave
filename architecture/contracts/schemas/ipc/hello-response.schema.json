@@ -4,17 +4,34 @@
   "title": "IPC hello response",
   "description": "The server's answer to a hello: the selected version, the profile identity, the endpoint actually leased, a fresh lease epoch, and the capabilities actually granted. `granted_capabilities` is the authority the connection has — never what the client asked for.",
   "type": "object",
-  "required": ["type", "ipc_version", "peer", "granted_capabilities"],
+  "required": [
+    "type",
+    "ipc_version",
+    "transport_contract_version",
+    "peer",
+    "granted_capabilities"
+  ],
   "additionalProperties": false,
   "properties": {
-    "type": { "const": "hello_response" },
+    "type": {
+      "const": "hello_response"
+    },
     "ipc_version": {
       "type": "object",
-      "required": ["major", "minor"],
+      "required": [
+        "major",
+        "minor"
+      ],
       "additionalProperties": false,
       "properties": {
-        "major": { "type": "integer", "const": 2 },
-        "minor": { "type": "integer", "minimum": 0 }
+        "major": {
+          "type": "integer",
+          "const": 2
+        },
+        "minor": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
     "transport_contract_version": {
@@ -22,7 +39,9 @@
       "pattern": "^[0-9]+\\.[0-9]+$",
       "description": "The transport contract this daemon implements, distinct from the IPC version. Model B is transport v2."
     },
-    "peer": { "$ref": "urn:interweave:schemas:common:peer-id" },
+    "peer": {
+      "$ref": "urn:interweave:schemas:common:peer-id"
+    },
     "endpoint": {
       "$ref": "urn:interweave:schemas:endpoints:endpoint-id",
       "description": "The endpoint actually leased. Absent for a diagnostics or administrative connection, which hold no lease."
@@ -38,21 +57,47 @@
       "type": "array",
       "uniqueItems": true,
       "maxItems": 8,
-      "items": { "$ref": "urn:interweave:schemas:ipc:capability" }
+      "items": {
+        "$ref": "urn:interweave:schemas:ipc:capability"
+      }
     }
   },
   "allOf": [
     {
       "$comment": "A lease epoch without an endpoint would be a generation for a lease that does not exist.",
-      "if": { "required": ["endpoint_lease_epoch"] },
-      "then": { "required": ["endpoint"] }
+      "if": {
+        "required": [
+          "endpoint_lease_epoch"
+        ]
+      },
+      "then": {
+        "required": [
+          "endpoint"
+        ]
+      }
+    },
+    {
+      "$comment": "And the converse: a granted endpoint without its epoch. Reply tokens bind the lease epoch to reject stale routes after a reconnect (LOCAL-IPC.md), so an endpoint-bearing response that omits it leaves nothing to invalidate against — the implication has to hold in both directions.",
+      "if": {
+        "required": [
+          "endpoint"
+        ]
+      },
+      "then": {
+        "required": [
+          "endpoint_lease_epoch"
+        ]
+      }
     }
   ],
   "x-contract": {
     "name": "ipc.hello-response",
     "status": "approved",
     "version": "1.0.0",
-    "adr": ["0017", "0030"],
+    "adr": [
+      "0017",
+      "0030"
+    ],
     "specification": "architecture/contracts/LOCAL-IPC.md"
   }
 }
