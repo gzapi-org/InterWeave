@@ -113,18 +113,27 @@ impl<'de> Deserialize<'de> for MediaType {
 /// this holds `Vec<u8>` rather than `String`. A transport that quietly
 /// required text would break the payload-agnostic guarantee every higher
 /// layer is built on.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// # Fields are private, and deserialization is not derived
+///
+/// Both for the same reason: **the ceiling must hold on every path that
+/// can produce a `Payload`**, and the JSON boundary is the one that
+/// matters most because it is where untrusted input arrives. A derived
+/// `Deserialize` would build the struct field by field without consulting
+/// [`MAX_PAYLOAD_BYTES`], so an arbitrarily large array would be accepted
+/// exactly where a bound was supposed to hold; a public `bytes` field
+/// would let ordinary code do the same thing by accident. Construction
+/// goes through [`Payload::new`] or [`Payload::at_ceiling`], and
+/// deserialization goes through the same check.
+///
+/// The JSON representation is `{"media_type"?: string, "bytes": string}`
+/// with `bytes` **unpadded base64url**, matching `ipc/send-params` and
+/// `endpoints/message-received`. A derived impl would emit an array of
+/// integers, which no schema here accepts.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Payload {
-    /// Present media type, or `None` for absence.
-    ///
-    /// `None` and `Some("")` are NOT the same thing, and the second cannot
-    /// be constructed: the content fingerprint distinguishes absence from
-    /// presence, so collapsing them would give two different messages one
-    /// dedup identity.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub media_type: Option<MediaType>,
-    /// The opaque application bytes.
-    pub bytes: Vec<u8>,
+    media_type: Option<MediaType>,
+    bytes: Vec<u8>,
 }
 
 impl Payload {
@@ -173,6 +182,65 @@ impl Payload {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.bytes.is_empty()
+    }
+
+    /// The application bytes.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// The media type, if one is present.
+    #[must_use]
+    pub const fn media_type(&self) -> Option<&MediaType> {
+        self.media_type.as_ref()
+    }
+
+    /// Consume the payload, yielding its parts.
+    #[must_use]
+    pub fn into_parts(self) -> (Option<MediaType>, Vec<u8>) {
+        (self.media_type, self.bytes)
+    }
+}
+
+/// The JSON shape, used for both directions.
+///
+/// Serializing through this rather than deriving on `Payload` keeps the
+/// wire representation in one place, and forces deserialization back
+/// through the validating constructor.
+#[derive(Serialize, Deserialize)]
+struct PayloadJson {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    media_type: Option<MediaType>,
+    bytes: String,
+}
+
+impl Serialize for Payload {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        PayloadJson {
+            media_type: self.media_type.clone(),
+            bytes: crate::base64url::encode(&self.bytes),
+        }
+        .serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for Payload {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = PayloadJson::deserialize(d)?;
+        // Cheap length rejection BEFORE decoding. The encoded form is
+        // 4/3 the size of the decoded, so an over-ceiling payload can be
+        // refused without allocating a buffer for it — which is the point
+        // of a bound at an untrusted boundary.
+        let max_encoded = MAX_PAYLOAD_BYTES.div_ceil(3) * 4;
+        if raw.bytes.len() > max_encoded {
+            return Err(serde::de::Error::custom(PayloadError::TooLarge {
+                got: raw.bytes.len() / 4 * 3,
+                limit: MAX_PAYLOAD_BYTES,
+            }));
+        }
+        let bytes = crate::base64url::decode(&raw.bytes).map_err(serde::de::Error::custom)?;
+        Self::at_ceiling(raw.media_type, bytes).map_err(serde::de::Error::custom)
     }
 }
 

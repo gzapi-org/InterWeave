@@ -47,6 +47,8 @@ pub enum IdError {
         /// Characters required.
         expected: usize,
     },
+    /// A transport identity was not a canonical PeerId string.
+    NotCanonicalPeerId,
 }
 
 impl fmt::Display for IdError {
@@ -69,6 +71,10 @@ impl fmt::Display for IdError {
                     "value is {got} characters; exactly {expected} are required"
                 )
             }
+            Self::NotCanonicalPeerId => write!(
+                f,
+                "not a canonical PeerId: expected 12D3KooW or Qm followed by 44 base58btc characters"
+            ),
         }
     }
 }
@@ -292,11 +298,27 @@ impl TransportIdentity {
     /// Maximum length in bytes for the normalized string form.
     pub const MAX_BYTES: usize = 256;
 
-    /// Wrap a transport identity string.
+    /// Parse a transport identity in its canonical PeerId form.
+    ///
+    /// Accepts exactly what `common/peer-id.schema.json` accepts: a
+    /// `12D3KooW`-prefixed Ed25519 identity or a `Qm`-prefixed multihash,
+    /// each followed by 44 base58btc characters.
+    ///
+    /// **Validated here rather than deferred to the backend.** This type
+    /// crosses the neutral boundary — destinations arrive from IPC as
+    /// JSON — and accepting any non-empty string meant `"garbage"`, or a
+    /// value with control characters in it, passed the validation layer
+    /// and failed much later inside a backend parser, with the error
+    /// surfacing far from the input that caused it. Checking the shape
+    /// costs nothing and needs no libp2p type: the grammar is a prefix, an
+    /// alphabet, and a length.
+    ///
+    /// This proves the string is *well-formed*, not that the peer exists,
+    /// is reachable, or is trusted. Nothing here is an authorization step.
     ///
     /// # Errors
-    /// Returns [`IdError`] when the value is empty or exceeds
-    /// [`Self::MAX_BYTES`].
+    /// Returns [`IdError`] when the value is empty, exceeds
+    /// [`Self::MAX_BYTES`], or is not a canonical PeerId string.
     pub fn parse(value: impl Into<String>) -> Result<Self, IdError> {
         let value = value.into();
         if value.is_empty() {
@@ -308,7 +330,28 @@ impl TransportIdentity {
                 max: Self::MAX_BYTES,
             });
         }
+        Self::check_canonical(&value)?;
         Ok(Self(value))
+    }
+
+    /// `^(12D3KooW[1-9A-HJ-NP-Za-km-z]{44}|Qm[1-9A-HJ-NP-Za-km-z]{44})$`
+    fn check_canonical(value: &str) -> Result<(), IdError> {
+        let rest = value
+            .strip_prefix("12D3KooW")
+            .or_else(|| value.strip_prefix("Qm"))
+            .ok_or(IdError::NotCanonicalPeerId)?;
+        if rest.len() != 44 {
+            return Err(IdError::NotCanonicalPeerId);
+        }
+        // base58btc omits 0, O, I and l precisely so the remaining glyphs
+        // cannot be confused by a human reading one aloud.
+        for &b in rest.as_bytes() {
+            let ok = b.is_ascii_alphanumeric() && !matches!(b, b'0' | b'O' | b'I' | b'l');
+            if !ok {
+                return Err(IdError::NotCanonicalPeerId);
+            }
+        }
+        Ok(())
     }
 
     /// The identity as a string slice.
@@ -482,9 +525,12 @@ mod tests {
         assert!(MessageId::parse_hex("00000000-0000-0000-0000-000000000000").is_err());
     }
 
+    /// A syntactically valid identity for tests. Not a real key.
+    const TEST_PEER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+
     #[test]
     fn a_destination_without_an_endpoint_means_default_not_fan_out() {
-        let peer = TransportIdentity::parse("12D3KooWExample").expect("valid");
+        let peer = TransportIdentity::parse(TEST_PEER).expect("valid");
         let d = DirectDestination::to_default(peer.clone());
         assert!(d.endpoint.is_none());
         let e = EndpointId::parse("human").expect("valid");
@@ -495,9 +541,34 @@ mod tests {
     }
 
     #[test]
-    fn transport_identity_is_bounded() {
+    fn transport_identity_requires_the_canonical_peer_id_form() {
         assert_eq!(TransportIdentity::parse(""), Err(IdError::Empty));
-        assert!(TransportIdentity::parse("p".repeat(256)).is_ok());
+        assert!(TransportIdentity::parse(TEST_PEER).is_ok());
+        // A Qm-form multihash is equally canonical.
+        assert!(TransportIdentity::parse(format!("Qm{}", "a".repeat(44))).is_ok());
+
+        // These all used to pass, and each one would have failed later
+        // inside a backend parser instead of here at the boundary.
+        for bad in [
+            "garbage",
+            "12D3KooW",
+            "12D3KooWshort",
+            "Qm",
+            &format!("12D3KooW{}", "a".repeat(43)),
+            &format!("12D3KooW{}", "a".repeat(45)),
+            // base58btc excludes these four glyphs by design.
+            &format!("12D3KooW{}0", "a".repeat(43)),
+            &format!("12D3KooW{}O", "a".repeat(43)),
+            &format!("12D3KooW{}I", "a".repeat(43)),
+            &format!("12D3KooW{}l", "a".repeat(43)),
+        ] {
+            assert_eq!(
+                TransportIdentity::parse(bad),
+                Err(IdError::NotCanonicalPeerId),
+                "{bad:?} should not parse"
+            );
+        }
+
         assert_eq!(
             TransportIdentity::parse("p".repeat(257)),
             Err(IdError::TooLong { got: 257, max: 256 })

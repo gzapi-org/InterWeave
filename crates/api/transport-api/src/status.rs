@@ -66,11 +66,16 @@ pub enum Health {
     Unavailable,
 }
 
-/// Inbound reachability for one path class.
+/// Relay inbound readiness.
+///
+/// Distinct from [`DirectInboundState`] on purpose. Relay reachability is
+/// a matter of degree — reservations come up one at a time — while direct
+/// reachability is a question of *evidence*, and collapsing the two into
+/// one three-state enum loses the distinction that matters most.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PathReadiness {
-    /// No usable inbound path of this class.
+    /// No usable relayed inbound path.
     Unavailable,
     /// Partially established.
     Partial,
@@ -78,14 +83,36 @@ pub enum PathReadiness {
     Ready,
 }
 
-/// Which path the manager prefers when both are usable.
+/// Direct inbound reachability, expressed as **evidence** rather than degree.
+///
+/// `Unknown` and `NotVerified` are different answers and must stay
+/// different: the first means AutoNAT has not concluded, the second means
+/// it concluded negatively. Merging them would let a client treat "we have
+/// not looked yet" as "we are not reachable" and give up a path it has,
+/// or the reverse. `VerifiedPublic` is the only state that may promote an
+/// address for advertisement (ADR-0035).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "snake_case")]
+pub enum DirectInboundState {
+    /// No sufficient evidence yet; AutoNAT has not concluded.
+    Unknown,
+    /// AutoNAT v2 verified a publicly reachable direct address.
+    VerifiedPublic,
+    /// Evidence exists and says the node is not directly reachable.
+    NotVerified,
+}
+
+/// The path preference in force.
+///
+/// Standard v1 supports exactly one policy, so this is a single-variant
+/// enum rather than a `bool` or a free string. Modelling a second policy
+/// the transport does not implement would let a configuration express a
+/// mode nothing honours, and the schema pins the value as a `const`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PreferredPathPolicy {
-    /// Prefer a direct path.
-    PreferDirect,
-    /// Prefer a relayed path.
-    PreferRelay,
+    /// Prefer a direct path, upgrading from relay when DCUtR succeeds.
+    DirectFirst,
 }
 
 /// Backend-neutral connectivity summary.
@@ -93,20 +120,25 @@ pub enum PreferredPathPolicy {
 /// Every member is required. An absent counter and a zero counter mean
 /// different things — "this daemon did not say" versus "there are none" —
 /// and a status API that blurs them cannot be branched on safely.
+///
+/// The counters are `u16` because that is the width the contract and the
+/// schema both state. Using a wider integer would accept values here that
+/// serialize successfully and are then rejected by the schema, which is
+/// the drift this crate's agreement suite exists to prevent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectivitySummary {
-    /// Direct inbound reachability.
-    pub direct_inbound: PathReadiness,
-    /// Relayed inbound reachability.
+    /// Direct inbound reachability evidence.
+    pub direct_inbound: DirectInboundState,
+    /// Relayed inbound readiness.
     pub relay_inbound: PathReadiness,
     /// Reservations currently held.
-    pub active_relay_reservations: u32,
+    pub active_relay_reservations: u16,
     /// Reservations the policy is trying to hold.
-    pub target_relay_reservations: u32,
+    pub target_relay_reservations: u16,
     /// Peer paths currently traversing a relay.
-    pub active_relayed_peer_paths: u32,
+    pub active_relayed_peer_paths: u16,
     /// Hole-punch attempts in flight.
-    pub hole_punch_inflight: u32,
+    pub hole_punch_inflight: u16,
     /// The active preference.
     pub preferred_path_policy: PreferredPathPolicy,
     /// Local millisecond timestamp of this summary.
@@ -171,22 +203,83 @@ pub enum TransportError {
     Internal,
 }
 
+/// The coarse vocabulary a remote peer is allowed to see.
+///
+/// Deliberately a **separate type** from [`TransportError`], not a subset
+/// of it. No local code may be encoded on the wire, so the two vocabularies
+/// cannot share a representation: the only way to produce one of these is
+/// [`TransportError::to_wire`], and that function is where the collapsing
+/// is decided and reviewed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectRejectReason {
+    /// Collapses endpoint unknown, disabled, unleased, default-missing, and
+    /// endpoint-policy denial into one indistinguishable answer.
+    NoRoute,
+    /// The peer is not admitted by trust policy.
+    UnauthorizedPeer,
+    /// A bounded resource refused admission.
+    Overloaded,
+    /// The frame did not parse or violated the protocol.
+    Malformed,
+    /// The payload exceeded the limit.
+    TooLarge,
+    /// The runtime is shutting down.
+    ShuttingDown,
+    /// The protocol or version is not supported.
+    Unsupported,
+}
+
 impl TransportError {
-    /// Whether this category is safe to reveal to a remote peer.
+    /// Map a local error onto the coarse vocabulary a peer may receive.
     ///
-    /// The endpoint-existence categories are not: distinguishing them on
-    /// the wire would let a probing peer enumerate configured endpoints,
-    /// which is exactly what the coarse `no_route` class prevents.
+    /// This exists instead of an `is_remote_safe` predicate, which was the
+    /// wrong shape: a boolean invites a caller to forward the local code
+    /// whenever it answers true, and most local codes answer true while
+    /// still being things a peer must not learn. `EndpointInUse` is the
+    /// clearest case — it reveals both that an endpoint exists and that it
+    /// currently holds a lease — but `CapabilityDenied` and
+    /// `BackendUnavailable` leak local posture just as surely.
+    ///
+    /// Five locally-distinct conditions collapse into [`DirectRejectReason::NoRoute`]
+    /// so the directed protocol cannot become an endpoint-existence or
+    /// policy oracle (ADR-0030). The mapping is total: every local category
+    /// has a wire answer, because a missing arm would otherwise be filled
+    /// in at the call site under deadline.
     #[must_use]
-    pub const fn is_remote_safe(self) -> bool {
-        !matches!(
-            self,
+    pub const fn to_wire(self) -> DirectRejectReason {
+        match self {
+            // The oracle-prevention set. Everything an attacker could use
+            // to enumerate endpoints or probe policy answers identically.
             Self::EndpointUnknown
-                | Self::EndpointDisabled
-                | Self::EndpointClientKindDenied
-                | Self::EndpointNotRegistered
-                | Self::RemoteEndpointUnavailable
-        )
+            | Self::EndpointDisabled
+            | Self::EndpointClientKindDenied
+            | Self::EndpointNotRegistered
+            | Self::EndpointInUse
+            | Self::RemoteEndpointUnavailable
+            | Self::PeerUnknown
+            | Self::CapabilityDenied => DirectRejectReason::NoRoute,
+
+            Self::UnauthorizedPeer => DirectRejectReason::UnauthorizedPeer,
+            Self::PayloadTooLarge => DirectRejectReason::TooLarge,
+            Self::Overloaded => DirectRejectReason::Overloaded,
+            Self::ShuttingDown => DirectRejectReason::ShuttingDown,
+            Self::ProtocolUnsupported | Self::VersionIncompatible => {
+                DirectRejectReason::Unsupported
+            }
+            Self::InvalidArgument | Self::ProtocolViolation => DirectRejectReason::Malformed,
+
+            // Local-only conditions with no business being described to a
+            // peer. `Overloaded` is the honest answer: the request was not
+            // admitted, and why is not the sender's concern.
+            Self::ChannelNotJoined
+            | Self::PeerUnreachable
+            | Self::Timeout
+            | Self::CancelledBeforeDispatch
+            | Self::CancellationRaced
+            | Self::BackendUnavailable
+            | Self::Internal => DirectRejectReason::Overloaded,
+        }
     }
 }
 
@@ -219,35 +312,103 @@ mod tests {
     }
 
     #[test]
-    fn health_and_readiness_use_their_contract_spellings() {
+    fn state_enums_use_their_contract_spellings() {
         assert_eq!(
             serde_json::to_string(&Health::Healthy).expect("ser"),
             "\"healthy\""
         );
+        // direct_inbound is EVIDENCE, not degree: unknown and not_verified
+        // are different answers and the schema names both.
         assert_eq!(
-            serde_json::to_string(&Health::Degraded).expect("ser"),
-            "\"degraded\""
+            serde_json::to_string(&DirectInboundState::VerifiedPublic).expect("ser"),
+            "\"verified_public\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DirectInboundState::NotVerified).expect("ser"),
+            "\"not_verified\""
         );
         assert_eq!(
             serde_json::to_string(&PathReadiness::Unavailable).expect("ser"),
             "\"unavailable\""
         );
         assert_eq!(
-            serde_json::to_string(&PreferredPathPolicy::PreferDirect).expect("ser"),
-            "\"prefer-direct\""
+            serde_json::to_string(&PreferredPathPolicy::DirectFirst).expect("ser"),
+            "\"direct_first\""
         );
+
+        for h in [Health::Healthy, Health::Degraded, Health::Unavailable] {
+            let j = serde_json::to_string(&h).expect("ser");
+            assert_eq!(serde_json::from_str::<Health>(&j).expect("de"), h);
+        }
+        for d in [
+            DirectInboundState::Unknown,
+            DirectInboundState::VerifiedPublic,
+            DirectInboundState::NotVerified,
+        ] {
+            let j = serde_json::to_string(&d).expect("ser");
+            assert_eq!(
+                serde_json::from_str::<DirectInboundState>(&j).expect("de"),
+                d
+            );
+        }
     }
 
     #[test]
-    fn endpoint_existence_categories_are_not_remote_safe() {
+    fn every_local_error_maps_to_the_coarse_wire_vocabulary() {
+        // The oracle-prevention set. EndpointInUse belongs here because it
+        // would otherwise reveal both that an endpoint exists AND that it
+        // currently holds a lease.
         for e in [
             TransportError::EndpointUnknown,
             TransportError::EndpointDisabled,
             TransportError::EndpointClientKindDenied,
+            TransportError::EndpointNotRegistered,
+            TransportError::EndpointInUse,
+            TransportError::RemoteEndpointUnavailable,
+            TransportError::PeerUnknown,
+            TransportError::CapabilityDenied,
         ] {
-            assert!(!e.is_remote_safe(), "{e:?} would be an endpoint oracle");
+            assert_eq!(
+                e.to_wire(),
+                DirectRejectReason::NoRoute,
+                "{e:?} must be indistinguishable on the wire"
+            );
         }
-        assert!(TransportError::Overloaded.is_remote_safe());
-        assert!(TransportError::ProtocolViolation.is_remote_safe());
+
+        // Local posture is never described to a peer; "not admitted" is
+        // the honest and sufficient answer.
+        for e in [
+            TransportError::BackendUnavailable,
+            TransportError::Internal,
+            TransportError::Timeout,
+            TransportError::ChannelNotJoined,
+        ] {
+            assert_eq!(
+                e.to_wire(),
+                DirectRejectReason::Overloaded,
+                "{e:?} leaked local state"
+            );
+        }
+
+        assert_eq!(
+            TransportError::UnauthorizedPeer.to_wire(),
+            DirectRejectReason::UnauthorizedPeer
+        );
+        assert_eq!(
+            TransportError::PayloadTooLarge.to_wire(),
+            DirectRejectReason::TooLarge
+        );
+        assert_eq!(
+            TransportError::ShuttingDown.to_wire(),
+            DirectRejectReason::ShuttingDown
+        );
+        assert_eq!(
+            TransportError::ProtocolUnsupported.to_wire(),
+            DirectRejectReason::Unsupported
+        );
+        assert_eq!(
+            TransportError::ProtocolViolation.to_wire(),
+            DirectRejectReason::Malformed
+        );
     }
 }

@@ -26,13 +26,15 @@
 
 #![forbid(unsafe_code)]
 
+pub mod base64url;
 pub mod ids;
 pub mod payload;
 pub mod status;
 
+pub use base64url::Base64Error;
 pub use ids::{ChannelId, DirectDestination, EndpointId, IdError, MessageId, TransportIdentity};
 pub use payload::{MAX_MEDIA_TYPE_BYTES, MAX_PAYLOAD_BYTES, MediaType, Payload, PayloadError};
 pub use status::{
-    ConnectivitySummary, Health, PathReadiness, PreferredPathPolicy, TransportCapabilities,
-    TransportError,
+    ConnectivitySummary, DirectInboundState, DirectRejectReason, Health, PathReadiness,
+    PreferredPathPolicy, TransportCapabilities, TransportError,
 };

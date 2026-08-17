@@ -25,9 +25,13 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use interweave_transport_api::{
-    ChannelId, EndpointId, Health, MAX_MEDIA_TYPE_BYTES, MAX_PAYLOAD_BYTES, MediaType, MessageId,
-    PathReadiness, Payload, PreferredPathPolicy, TransportError,
+    ChannelId, ConnectivitySummary, DirectInboundState, EndpointId, Health, MAX_MEDIA_TYPE_BYTES,
+    MAX_PAYLOAD_BYTES, MediaType, MessageId, PathReadiness, Payload, PreferredPathPolicy,
+    TransportError, TransportIdentity,
 };
+
+/// A syntactically valid identity for tests. Not a real key.
+const TEST_PEER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
 
 fn repo_root() -> PathBuf {
     // From CARGO_MANIFEST_DIR, not the working directory: the latter
@@ -139,44 +143,213 @@ fn health_and_path_states_match_the_frame_and_connectivity_schemas() {
         let j = serde_json::to_string(&p).expect("ser");
         assert_eq!(serde_json::from_str::<PathReadiness>(&j).expect("de"), p);
     }
-    for p in [
-        PreferredPathPolicy::PreferDirect,
-        PreferredPathPolicy::PreferRelay,
-    ] {
-        let j = serde_json::to_string(&p).expect("ser");
-        assert_eq!(
-            serde_json::from_str::<PreferredPathPolicy>(&j).expect("de"),
-            p
-        );
-    }
+    let j = serde_json::to_string(&PreferredPathPolicy::DirectFirst).expect("ser");
+    assert_eq!(
+        serde_json::from_str::<PreferredPathPolicy>(&j).expect("de"),
+        PreferredPathPolicy::DirectFirst
+    );
 }
 
 #[test]
-fn the_connectivity_summary_requires_every_member_the_schema_requires() {
+fn the_connectivity_summary_agrees_field_by_field() {
+    // NOT just `required`. An earlier version of this test checked only
+    // which members were mandatory, and every one of the four value
+    // constraints below was wrong in the Rust types while it passed:
+    // direct_inbound had the relay enum, preferred_path_policy had two
+    // invented variants, and the counters were u32 against a u16 bound.
+    // Presence is the cheapest half of agreement and the least valuable.
     let doc = schema("connectivity/connectivity-summary.schema.json");
+    let props = &doc["properties"];
     let required = string_set(&doc["required"]);
-    // Serde structs without Option are required by construction, so the
-    // check is that the schema demands nothing this type would drop.
-    for field in [
-        "direct_inbound",
-        "relay_inbound",
-        "active_relay_reservations",
-        "target_relay_reservations",
-        "active_relayed_peer_paths",
-        "hole_punch_inflight",
-        "preferred_path_policy",
-        "updated_at",
-    ] {
-        assert!(
-            required.contains(field),
-            "{field} is not required by the schema"
-        );
-    }
     assert_eq!(
         required.len(),
         8,
         "the schema gained or lost a required member"
     );
+
+    let direct: BTreeSet<String> = string_set(&props["direct_inbound"]["enum"]);
+    let ours: BTreeSet<String> = [
+        DirectInboundState::Unknown,
+        DirectInboundState::VerifiedPublic,
+        DirectInboundState::NotVerified,
+    ]
+    .iter()
+    .map(|v| {
+        serde_json::to_value(v)
+            .expect("ser")
+            .as_str()
+            .expect("str")
+            .to_owned()
+    })
+    .collect();
+    assert_eq!(
+        ours, direct,
+        "DirectInboundState disagrees with direct_inbound"
+    );
+
+    let relay = string_set(&props["relay_inbound"]["enum"]);
+    let ours_relay: BTreeSet<String> = [
+        PathReadiness::Unavailable,
+        PathReadiness::Partial,
+        PathReadiness::Ready,
+    ]
+    .iter()
+    .map(|v| {
+        serde_json::to_value(v)
+            .expect("ser")
+            .as_str()
+            .expect("str")
+            .to_owned()
+    })
+    .collect();
+    assert_eq!(
+        ours_relay, relay,
+        "PathReadiness disagrees with relay_inbound"
+    );
+
+    // A `const`, not an enum: exactly one policy exists in standard v1.
+    assert_eq!(
+        props["preferred_path_policy"]["const"],
+        serde_json::to_value(PreferredPathPolicy::DirectFirst).expect("ser")
+    );
+
+    // Counter width. u16::MAX is the schema maximum, and a type wider than
+    // the bound would accept values that serialize and are then rejected.
+    for counter in [
+        "active_relay_reservations",
+        "target_relay_reservations",
+        "active_relayed_peer_paths",
+        "hole_punch_inflight",
+    ] {
+        assert_eq!(
+            props[counter]["maximum"],
+            serde_json::json!(u16::MAX),
+            "{counter} is not bounded at u16::MAX"
+        );
+        assert_eq!(props[counter]["minimum"], serde_json::json!(0));
+    }
+
+    // And the whole struct round-trips through the shape the schema
+    // describes. The counters are written as EXPLICITLY TYPED u16 values,
+    // not bare literals: a bare literal infers to whatever the field is,
+    // so widening the field to u32 would still compile and this test would
+    // still pass. With `u16::MAX` the widening becomes a type error, which
+    // is the regression signal — an earlier version of this test used
+    // literals and did not catch exactly that.
+    let saturated: u16 = u16::MAX;
+    let summary = ConnectivitySummary {
+        direct_inbound: DirectInboundState::VerifiedPublic,
+        relay_inbound: PathReadiness::Ready,
+        active_relay_reservations: saturated,
+        target_relay_reservations: saturated,
+        active_relayed_peer_paths: saturated,
+        hole_punch_inflight: saturated,
+        preferred_path_policy: PreferredPathPolicy::DirectFirst,
+        updated_at: 1_700_000_000_000,
+    };
+    // Every counter at its type maximum must still be within the schema's.
+    for counter in [
+        "active_relay_reservations",
+        "target_relay_reservations",
+        "active_relayed_peer_paths",
+        "hole_punch_inflight",
+    ] {
+        let emitted = serde_json::to_value(&summary).expect("ser")[counter]
+            .as_u64()
+            .expect("integer");
+        let allowed = props[counter]["maximum"].as_u64().expect("maximum");
+        assert!(
+            emitted <= allowed,
+            "{counter} at its type maximum ({emitted}) exceeds the schema maximum ({allowed})"
+        );
+    }
+    let json = serde_json::to_value(&summary).expect("ser");
+    for field in required {
+        assert!(
+            json.get(&field).is_some(),
+            "serialized summary omits {field}"
+        );
+    }
+    assert_eq!(
+        serde_json::from_value::<ConnectivitySummary>(json).expect("de"),
+        summary
+    );
+}
+
+#[test]
+fn the_transport_identity_grammar_matches_the_peer_id_schema() {
+    let doc = schema("common/peer-id.schema.json");
+    let pattern = doc["pattern"].as_str().expect("pattern");
+    assert!(
+        pattern.contains("12D3KooW") && pattern.contains("Qm"),
+        "{pattern}"
+    );
+
+    assert!(TransportIdentity::parse(TEST_PEER).is_ok());
+    // The values that used to pass the neutral boundary and fail later in
+    // a backend parser.
+    for bad in ["garbage", "12D3KooW", "", "not-a-peer-id"] {
+        assert!(
+            TransportIdentity::parse(bad).is_err(),
+            "{bad:?} should not parse"
+        );
+    }
+}
+
+#[test]
+fn a_payload_serializes_as_the_schemas_describe_it() {
+    // base64url string, not an array of integers: a derived impl emitted
+    // the latter, which no schema in this repository accepts.
+    let p = Payload::at_ceiling(
+        Some(MediaType::parse("text/plain").expect("valid")),
+        b"hello".to_vec(),
+    )
+    .expect("valid");
+    let json = serde_json::to_value(&p).expect("ser");
+    assert_eq!(json["bytes"], serde_json::json!("aGVsbG8"));
+    assert_eq!(json["media_type"], serde_json::json!("text/plain"));
+    assert_eq!(serde_json::from_value::<Payload>(json).expect("de"), p);
+
+    // An absent media type is absent from the JSON, not present-and-empty.
+    let bare = Payload::at_ceiling(None, Vec::new()).expect("valid");
+    let json = serde_json::to_value(&bare).expect("ser");
+    assert!(json.get("media_type").is_none());
+    assert_eq!(json["bytes"], serde_json::json!(""));
+
+    // The pattern the schema asserts must accept what we emit.
+    let doc = schema("ipc/send-params.schema.json");
+    let pattern = doc["properties"]["payload"]["properties"]["bytes"]["pattern"]
+        .as_str()
+        .expect("pattern");
+    assert!(
+        pattern.contains("A-Za-z0-9_-"),
+        "unexpected alphabet: {pattern}"
+    );
+}
+
+#[test]
+fn deserialization_cannot_bypass_the_payload_ceiling() {
+    // The bound has to hold on the path untrusted input actually takes.
+    let over = "A".repeat(MAX_PAYLOAD_BYTES.div_ceil(3) * 4 + 4);
+    let json = serde_json::json!({ "bytes": over });
+    assert!(
+        serde_json::from_value::<Payload>(json).is_err(),
+        "an over-ceiling payload deserialized"
+    );
+
+    // Exactly at the ceiling still works.
+    let at = crate_encode(&vec![0u8; MAX_PAYLOAD_BYTES]);
+    let json = serde_json::json!({ "bytes": at });
+    let p = serde_json::from_value::<Payload>(json).expect("at the ceiling");
+    assert_eq!(p.len(), MAX_PAYLOAD_BYTES);
+
+    // A non-canonical encoding is refused rather than normalized.
+    assert!(serde_json::from_value::<Payload>(serde_json::json!({ "bytes": "AA==" })).is_err());
+    assert!(serde_json::from_value::<Payload>(serde_json::json!({ "bytes": "A" })).is_err());
+}
+
+fn crate_encode(bytes: &[u8]) -> String {
+    interweave_transport_api::base64url::encode(bytes)
 }
 
 #[test]
