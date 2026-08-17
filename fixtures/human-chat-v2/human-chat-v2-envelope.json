@@ -231,6 +231,27 @@
         "from_endpoint": "Human"
       },
       "valid": false
+    },
+    {
+      "name": "missing-text",
+      "envelope": {
+        "v": 2,
+        "kind": "text",
+        "app_message_id": "00000000000000000000000000000000"
+      },
+      "note": "A text message with no text. `text` is required, so this is malformed rather than an empty message.",
+      "valid": false
+    },
+    {
+      "name": "empty-text",
+      "envelope": {
+        "v": 2,
+        "kind": "text",
+        "app_message_id": "11111111111111111111111111111111",
+        "text": ""
+      },
+      "note": "Present but empty is VALID: the field is required, its content is not bounded from below. Absence and emptiness are different, and only the first is malformed.",
+      "valid": true
     }
   ]
 }
