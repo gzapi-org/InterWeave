@@ -18,6 +18,12 @@ with Channel `content` and string-valued `meta` in the form supported by the tar
 - non-UTF-8 payload: base64url string representation and `meta.payload_encoding=base64url`.
 - the bridge does not parse JSON/application protocols to infer meaning.
 
+**Content-encoding is decoded first, and that is not application parsing.** When the media type carries a content-encoding parameter — currently only `;ce=br`, the brotli form of HumanChatV2 (ADR-0050) — the bridge decodes it before applying the three rules above, under the mandatory streaming cap and mid-stream abort of `clients/human/HUMAN-CHAT.md`. The recovered bytes are then classified normally: a HumanChatV2 envelope is UTF-8 and therefore forwards as text unchanged, with `meta.payload_encoding=utf8`.
+
+The distinction is between representation and meaning. Decoding says what the bytes *are*; parsing would say what they *mean*, and the bridge still does neither for the envelope — it does not read `text`, `reply_to`, or any other field to infer anything. Without this step a compressed envelope would satisfy the non-UTF-8 rule, reach the model as opaque base64url, and make the size and subset checks below unenforceable, since both are calibrated against decoded bytes.
+
+`meta.content_type` reports the media type **with the content-encoding parameter removed**, because the encoding described how the payload travelled, not what it is. A payload the bridge could not decode within the cap is dropped with a bridge-local error and is never forwarded as partial content.
+
 ## Metadata
 
 Proposed stable keys:
