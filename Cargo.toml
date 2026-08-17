@@ -6,7 +6,13 @@
 # gate. `planned_members` below is an inventory, not a queue to drain.
 [workspace]
 resolver = "3"
-members = ["crates/api/transport-api", "crates/api/trust-api", "tests/support", "xtask"]
+members = [
+    "crates/api/discovery-api",
+    "crates/api/transport-api",
+    "crates/api/trust-api",
+    "tests/support",
+    "xtask",
+]
 
 [workspace.package]
 license = "Apache-2.0"
