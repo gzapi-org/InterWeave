@@ -48,7 +48,10 @@ impl fmt::Display for PayloadError {
                 write!(f, "an empty media type is invalid; use absence instead")
             }
             Self::MediaTypeTooLong { got } => {
-                write!(f, "media type is {got} bytes; the limit is {MAX_MEDIA_TYPE_BYTES}")
+                write!(
+                    f,
+                    "media type is {got} bytes; the limit is {MAX_MEDIA_TYPE_BYTES}"
+                )
             }
             Self::MediaTypeNotAscii { index } => {
                 write!(f, "media type byte at index {index} is not printable ASCII")
@@ -141,7 +144,10 @@ impl Payload {
     ) -> Result<Self, PayloadError> {
         let limit = limit.min(MAX_PAYLOAD_BYTES);
         if bytes.len() > limit {
-            return Err(PayloadError::TooLarge { got: bytes.len(), limit });
+            return Err(PayloadError::TooLarge {
+                got: bytes.len(),
+                limit,
+            });
         }
         Ok(Self { media_type, bytes })
     }
@@ -206,7 +212,10 @@ mod tests {
         assert!(Payload::at_ceiling(None, vec![0; MAX_PAYLOAD_BYTES]).is_ok());
         assert_eq!(
             Payload::at_ceiling(None, vec![0; MAX_PAYLOAD_BYTES + 1]),
-            Err(PayloadError::TooLarge { got: MAX_PAYLOAD_BYTES + 1, limit: MAX_PAYLOAD_BYTES })
+            Err(PayloadError::TooLarge {
+                got: MAX_PAYLOAD_BYTES + 1,
+                limit: MAX_PAYLOAD_BYTES
+            })
         );
         let empty = Payload::at_ceiling(None, Vec::new()).expect("valid");
         assert!(empty.is_empty());
@@ -218,13 +227,19 @@ mod tests {
         assert!(Payload::new(None, vec![0; 1024], 1024).is_ok());
         assert_eq!(
             Payload::new(None, vec![0; 1025], 1024),
-            Err(PayloadError::TooLarge { got: 1025, limit: 1024 })
+            Err(PayloadError::TooLarge {
+                got: 1025,
+                limit: 1024
+            })
         );
         // A configuration asking for more than the frozen ceiling is
         // clamped down to it rather than honoured.
         assert_eq!(
             Payload::new(None, vec![0; MAX_PAYLOAD_BYTES + 1], usize::MAX),
-            Err(PayloadError::TooLarge { got: MAX_PAYLOAD_BYTES + 1, limit: MAX_PAYLOAD_BYTES })
+            Err(PayloadError::TooLarge {
+                got: MAX_PAYLOAD_BYTES + 1,
+                limit: MAX_PAYLOAD_BYTES
+            })
         );
     }
 

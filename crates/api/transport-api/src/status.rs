@@ -220,8 +220,14 @@ mod tests {
 
     #[test]
     fn health_and_readiness_use_their_contract_spellings() {
-        assert_eq!(serde_json::to_string(&Health::Healthy).expect("ser"), "\"healthy\"");
-        assert_eq!(serde_json::to_string(&Health::Degraded).expect("ser"), "\"degraded\"");
+        assert_eq!(
+            serde_json::to_string(&Health::Healthy).expect("ser"),
+            "\"healthy\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Health::Degraded).expect("ser"),
+            "\"degraded\""
+        );
         assert_eq!(
             serde_json::to_string(&PathReadiness::Unavailable).expect("ser"),
             "\"unavailable\""

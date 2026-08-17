@@ -14,12 +14,19 @@
 //! validator would prove instances conform while leaving the interesting
 //! question, "do the two definitions say the same thing", unasked.
 
+// This file's helpers read files and index JSON, and they sit OUTSIDE
+// `#[test]` functions, which is where clippy.toml's allow-*-in-tests stops
+// reaching. Panicking is the correct behaviour here: a missing or
+// malformed schema is a broken checkout, and a helper that returned an
+// error would only be unwrapped by every caller anyway.
+#![allow(clippy::expect_used, clippy::panic)]
+
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use interweave_transport_api::{
-    ChannelId, EndpointId, Health, MediaType, MessageId, PathReadiness, Payload,
-    PreferredPathPolicy, TransportError, MAX_MEDIA_TYPE_BYTES, MAX_PAYLOAD_BYTES,
+    ChannelId, EndpointId, Health, MAX_MEDIA_TYPE_BYTES, MAX_PAYLOAD_BYTES, MediaType, MessageId,
+    PathReadiness, Payload, PreferredPathPolicy, TransportError,
 };
 
 fn repo_root() -> PathBuf {
@@ -33,7 +40,9 @@ fn repo_root() -> PathBuf {
 }
 
 fn schema(relative: &str) -> serde_json::Value {
-    let path = repo_root().join("architecture/contracts/schemas").join(relative);
+    let path = repo_root()
+        .join("architecture/contracts/schemas")
+        .join(relative);
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("{} is not JSON: {e}", path.display()))
@@ -81,7 +90,13 @@ fn the_error_vocabulary_matches_the_ipc_schema_exactly() {
         TransportError::Internal,
     ]
     .iter()
-    .map(|e| serde_json::to_value(e).expect("ser").as_str().expect("string").to_owned())
+    .map(|e| {
+        serde_json::to_value(e)
+            .expect("ser")
+            .as_str()
+            .expect("string")
+            .to_owned()
+    })
     .collect();
 
     assert_eq!(
@@ -97,9 +112,18 @@ fn health_and_path_states_match_the_frame_and_connectivity_schemas() {
         string_set(&frame["$defs"]["server_state"]["properties"]["health"]["enum"]);
     let ours: BTreeSet<String> = [Health::Healthy, Health::Degraded, Health::Unavailable]
         .iter()
-        .map(|h| serde_json::to_value(h).expect("ser").as_str().expect("string").to_owned())
+        .map(|h| {
+            serde_json::to_value(h)
+                .expect("ser")
+                .as_str()
+                .expect("string")
+                .to_owned()
+        })
         .collect();
-    assert_eq!(ours, declared_health, "Health disagrees with server_state.health");
+    assert_eq!(
+        ours, declared_health,
+        "Health disagrees with server_state.health"
+    );
 
     // Round-trip rather than only serialize: a rename that broke parsing
     // in one direction would otherwise pass.
@@ -107,13 +131,23 @@ fn health_and_path_states_match_the_frame_and_connectivity_schemas() {
         let j = serde_json::to_string(&h).expect("ser");
         assert_eq!(serde_json::from_str::<Health>(&j).expect("de"), h);
     }
-    for p in [PathReadiness::Unavailable, PathReadiness::Partial, PathReadiness::Ready] {
+    for p in [
+        PathReadiness::Unavailable,
+        PathReadiness::Partial,
+        PathReadiness::Ready,
+    ] {
         let j = serde_json::to_string(&p).expect("ser");
         assert_eq!(serde_json::from_str::<PathReadiness>(&j).expect("de"), p);
     }
-    for p in [PreferredPathPolicy::PreferDirect, PreferredPathPolicy::PreferRelay] {
+    for p in [
+        PreferredPathPolicy::PreferDirect,
+        PreferredPathPolicy::PreferRelay,
+    ] {
         let j = serde_json::to_string(&p).expect("ser");
-        assert_eq!(serde_json::from_str::<PreferredPathPolicy>(&j).expect("de"), p);
+        assert_eq!(
+            serde_json::from_str::<PreferredPathPolicy>(&j).expect("de"),
+            p
+        );
     }
 }
 
@@ -133,9 +167,16 @@ fn the_connectivity_summary_requires_every_member_the_schema_requires() {
         "preferred_path_policy",
         "updated_at",
     ] {
-        assert!(required.contains(field), "{field} is not required by the schema");
+        assert!(
+            required.contains(field),
+            "{field} is not required by the schema"
+        );
     }
-    assert_eq!(required.len(), 8, "the schema gained or lost a required member");
+    assert_eq!(
+        required.len(),
+        8,
+        "the schema gained or lost a required member"
+    );
 }
 
 #[test]
@@ -148,7 +189,10 @@ fn the_endpoint_id_grammar_matches_its_schema() {
     // documentation bug that would otherwise ship as guidance.
     for example in doc["examples"].as_array().expect("examples") {
         let s = example.as_str().expect("string");
-        assert!(EndpointId::parse(s).is_ok(), "schema example {s:?} does not parse");
+        assert!(
+            EndpointId::parse(s).is_ok(),
+            "schema example {s:?} does not parse"
+        );
     }
 }
 
@@ -192,5 +236,8 @@ fn channel_id_matches_its_common_schema() {
     let doc = schema("common/channel-id.schema.json");
     assert_eq!(doc["maxLength"], serde_json::json!(ChannelId::MAX_BYTES));
     let pattern = doc["pattern"].as_str().expect("pattern");
-    assert!(pattern.starts_with("^[A-Za-z0-9]"), "unexpected pattern: {pattern}");
+    assert!(
+        pattern.starts_with("^[A-Za-z0-9]"),
+        "unexpected pattern: {pattern}"
+    );
 }

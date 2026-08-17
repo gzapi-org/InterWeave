@@ -55,13 +55,19 @@ impl fmt::Display for IdError {
             Self::Empty => write!(f, "value is empty"),
             Self::TooLong { got, max } => write!(f, "value is {got} bytes; the limit is {max}"),
             Self::IllegalByte { index, byte } => {
-                write!(f, "byte {byte:#04x} at index {index} is outside the grammar")
+                write!(
+                    f,
+                    "byte {byte:#04x} at index {index} is outside the grammar"
+                )
             }
             Self::IllegalLeadingByte { byte } => {
                 write!(f, "leading byte {byte:#04x} is outside the grammar")
             }
             Self::WrongLength { got, expected } => {
-                write!(f, "value is {got} characters; exactly {expected} are required")
+                write!(
+                    f,
+                    "value is {got} characters; exactly {expected} are required"
+                )
             }
         }
     }
@@ -96,13 +102,17 @@ impl EndpointId {
             return Err(IdError::Empty);
         };
         if bytes.len() > Self::MAX_BYTES {
-            return Err(IdError::TooLong { got: bytes.len(), max: Self::MAX_BYTES });
+            return Err(IdError::TooLong {
+                got: bytes.len(),
+                max: Self::MAX_BYTES,
+            });
         }
         if !first.is_ascii_lowercase() {
             return Err(IdError::IllegalLeadingByte { byte: first });
         }
         for (index, &b) in bytes.iter().enumerate() {
-            let ok = b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-');
+            let ok =
+                b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-');
             if !ok {
                 return Err(IdError::IllegalByte { index, byte: b });
             }
@@ -142,7 +152,10 @@ impl ChannelId {
             return Err(IdError::Empty);
         };
         if bytes.len() > Self::MAX_BYTES {
-            return Err(IdError::TooLong { got: bytes.len(), max: Self::MAX_BYTES });
+            return Err(IdError::TooLong {
+                got: bytes.len(),
+                max: Self::MAX_BYTES,
+            });
         }
         if !first.is_ascii_alphanumeric() {
             return Err(IdError::IllegalLeadingByte { byte: first });
@@ -201,7 +214,10 @@ impl MessageId {
     pub fn parse_hex(value: &str) -> Result<Self, IdError> {
         let bytes = value.as_bytes();
         if bytes.len() != Self::HEX_CHARS {
-            return Err(IdError::WrongLength { got: bytes.len(), expected: Self::HEX_CHARS });
+            return Err(IdError::WrongLength {
+                got: bytes.len(),
+                expected: Self::HEX_CHARS,
+            });
         }
         let mut out = [0u8; 16];
         for (i, chunk) in bytes.chunks_exact(2).enumerate() {
@@ -287,7 +303,10 @@ impl TransportIdentity {
             return Err(IdError::Empty);
         }
         if value.len() > Self::MAX_BYTES {
-            return Err(IdError::TooLong { got: value.len(), max: Self::MAX_BYTES });
+            return Err(IdError::TooLong {
+                got: value.len(),
+                max: Self::MAX_BYTES,
+            });
         }
         Ok(Self(value))
     }
@@ -336,13 +355,19 @@ impl DirectDestination {
     /// Address the peer's configured default endpoint.
     #[must_use]
     pub const fn to_default(peer: TransportIdentity) -> Self {
-        Self { peer, endpoint: None }
+        Self {
+            peer,
+            endpoint: None,
+        }
     }
 
     /// Address one explicit endpoint.
     #[must_use]
     pub const fn to_endpoint(peer: TransportIdentity, endpoint: EndpointId) -> Self {
-        Self { peer, endpoint: Some(endpoint) }
+        Self {
+            peer,
+            endpoint: Some(endpoint),
+        }
     }
 }
 
@@ -352,7 +377,14 @@ mod tests {
 
     #[test]
     fn endpoint_id_accepts_the_conventional_names() {
-        for name in ["human", "claude", "automation.build", "a_b-c.d", "a", &"e".repeat(64)] {
+        for name in [
+            "human",
+            "claude",
+            "automation.build",
+            "a_b-c.d",
+            "a",
+            &"e".repeat(64),
+        ] {
             assert!(EndpointId::parse(name).is_ok(), "{name} should parse");
         }
     }
@@ -381,7 +413,10 @@ mod tests {
         );
         assert_eq!(
             EndpointId::parse("huMan"),
-            Err(IdError::IllegalByte { index: 2, byte: b'M' })
+            Err(IdError::IllegalByte {
+                index: 2,
+                byte: b'M'
+            })
         );
         assert!(EndpointId::parse("human client").is_err());
         assert!(EndpointId::parse("human/main").is_err());
@@ -393,8 +428,8 @@ mod tests {
         assert!(ChannelId::parse("general").is_ok());
         assert!(ChannelId::parse("General").is_ok());
         assert!(ChannelId::parse("team.eu:builds/nightly-1").is_ok());
-        assert!(ChannelId::parse(&"c".repeat(128)).is_ok());
-        assert!(ChannelId::parse(&"c".repeat(129)).is_err());
+        assert!(ChannelId::parse("c".repeat(128)).is_ok());
+        assert!(ChannelId::parse("c".repeat(129)).is_err());
         assert_eq!(
             ChannelId::parse(".leading"),
             Err(IdError::IllegalLeadingByte { byte: b'.' })
@@ -412,7 +447,10 @@ mod tests {
         let id = MessageId::from_bytes([0xab; 16]);
         assert_eq!(id.to_hex(), "ab".repeat(16));
         assert_eq!(MessageId::parse_hex(&id.to_hex()), Ok(id));
-        assert_eq!(MessageId::parse_hex(&"0".repeat(32)), Ok(MessageId::from_bytes([0; 16])));
+        assert_eq!(
+            MessageId::parse_hex(&"0".repeat(32)),
+            Ok(MessageId::from_bytes([0; 16]))
+        );
     }
 
     #[test]
@@ -421,15 +459,24 @@ mod tests {
         // implementations must compare equal without a normalization step.
         assert_eq!(
             MessageId::parse_hex(&"AB".repeat(16)),
-            Err(IdError::IllegalByte { index: 0, byte: b'A' })
+            Err(IdError::IllegalByte {
+                index: 0,
+                byte: b'A'
+            })
         );
         assert_eq!(
             MessageId::parse_hex(&"0".repeat(31)),
-            Err(IdError::WrongLength { got: 31, expected: 32 })
+            Err(IdError::WrongLength {
+                got: 31,
+                expected: 32
+            })
         );
         assert_eq!(
             MessageId::parse_hex(&"0".repeat(33)),
-            Err(IdError::WrongLength { got: 33, expected: 32 })
+            Err(IdError::WrongLength {
+                got: 33,
+                expected: 32
+            })
         );
         assert!(MessageId::parse_hex("0x00000000000000000000000000000000").is_err());
         assert!(MessageId::parse_hex("00000000-0000-0000-0000-000000000000").is_err());
@@ -441,7 +488,10 @@ mod tests {
         let d = DirectDestination::to_default(peer.clone());
         assert!(d.endpoint.is_none());
         let e = EndpointId::parse("human").expect("valid");
-        assert_eq!(DirectDestination::to_endpoint(peer, e.clone()).endpoint, Some(e));
+        assert_eq!(
+            DirectDestination::to_endpoint(peer, e.clone()).endpoint,
+            Some(e)
+        );
     }
 
     #[test]

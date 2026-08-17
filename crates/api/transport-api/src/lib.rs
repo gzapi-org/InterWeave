@@ -31,9 +31,7 @@ pub mod payload;
 pub mod status;
 
 pub use ids::{ChannelId, DirectDestination, EndpointId, IdError, MessageId, TransportIdentity};
-pub use payload::{
-    MediaType, Payload, PayloadError, MAX_MEDIA_TYPE_BYTES, MAX_PAYLOAD_BYTES,
-};
+pub use payload::{MAX_MEDIA_TYPE_BYTES, MAX_PAYLOAD_BYTES, MediaType, Payload, PayloadError};
 pub use status::{
     ConnectivitySummary, Health, PathReadiness, PreferredPathPolicy, TransportCapabilities,
     TransportError,
