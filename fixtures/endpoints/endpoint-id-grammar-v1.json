@@ -1,0 +1,103 @@
+{
+  "algorithm": {
+    "id": "endpoint-id-grammar-v1",
+    "specification": "architecture/contracts/ENDPOINTS.md",
+    "summary": "^[a-z][a-z0-9._-]{0,63}$, ASCII, 1..64 bytes, lower-case canonical. A verdict set: `valid` is recomputed from the contract grammar, so loosening the prose without loosening the fixture (or the reverse) is caught."
+  },
+  "adr": [
+    "0030",
+    "0026"
+  ],
+  "vectors": [
+    {
+      "name": "conventional-human",
+      "endpoint_id": "human",
+      "valid": true
+    },
+    {
+      "name": "conventional-claude",
+      "endpoint_id": "claude",
+      "valid": true
+    },
+    {
+      "name": "dotted-namespace",
+      "endpoint_id": "automation.build",
+      "valid": true
+    },
+    {
+      "name": "hyphen-and-underscore",
+      "endpoint_id": "a_b-c.d",
+      "valid": true
+    },
+    {
+      "name": "single-character",
+      "endpoint_id": "a",
+      "valid": true
+    },
+    {
+      "name": "max-length-64",
+      "endpoint_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "valid": true
+    },
+    {
+      "name": "empty",
+      "endpoint_id": "",
+      "valid": false
+    },
+    {
+      "name": "over-length-65",
+      "endpoint_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "valid": false
+    },
+    {
+      "name": "leading-digit",
+      "endpoint_id": "1human",
+      "valid": false
+    },
+    {
+      "name": "leading-hyphen",
+      "endpoint_id": "-human",
+      "valid": false
+    },
+    {
+      "name": "leading-dot",
+      "endpoint_id": ".human",
+      "valid": false
+    },
+    {
+      "name": "uppercase",
+      "endpoint_id": "Human",
+      "valid": false
+    },
+    {
+      "name": "internal-uppercase",
+      "endpoint_id": "huMan",
+      "valid": false
+    },
+    {
+      "name": "space",
+      "endpoint_id": "human client",
+      "valid": false
+    },
+    {
+      "name": "slash",
+      "endpoint_id": "human/main",
+      "valid": false
+    },
+    {
+      "name": "colon",
+      "endpoint_id": "human:main",
+      "valid": false
+    },
+    {
+      "name": "non-ascii",
+      "endpoint_id": "hüman",
+      "valid": false
+    },
+    {
+      "name": "trailing-newline",
+      "endpoint_id": "human\n",
+      "valid": false
+    }
+  ]
+}
