@@ -7,7 +7,7 @@ The repository now has two deliberately separate halves:
 
 There are no production Rust crates, application binaries, Android Gradle project, installers, or service units yet.
 
-**Stage 0 is open.** The virtual root [`Cargo.toml`](./Cargo.toml) has exactly two members — [`xtask`](./xtask/README.md), the command runner, and `tests/support`, the test-only harness. Neither is product code. `workspace.metadata.interweave` records the remaining planned member/test paths without making them buildable; when a canonical bottom-up stage starts, add a crate manifest only for the crate/package being implemented and add that path to `[workspace].members` in the same change.
+**Stage 0 is complete; Stage 1 is open.** The virtual root [`Cargo.toml`](./Cargo.toml) has three members — [`xtask`](./xtask/README.md), the command runner, `tests/support`, the test-only harness, and [`crates/api/transport-api`](./crates/api/transport-api/README.md), the first neutral contract crate. `workspace.metadata.interweave` records the remaining planned member/test paths without making them buildable; when a canonical bottom-up stage starts, add a crate manifest only for the crate/package being implemented and add that path to `[workspace].members` in the same change.
 
 The toolchain is pinned in [`rust-toolchain.toml`](./rust-toolchain.toml), and edition, MSRV, inherited lints, shared dependency versions and the release profile are declared once at the workspace root. `cargo xtask ci` runs formatting, lints, tests, every tree check and every self-test in one pass.
 
