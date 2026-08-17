@@ -130,6 +130,15 @@ def direct_message_v2_frame(vector: dict) -> str:
 
     payload = bytes.fromhex(vector.get("payload_hex", ""))
     out += len(payload).to_bytes(4, "big") + payload
+
+    # `frame_len` is stored beside `frame_hex` as a reader convenience, so
+    # it is recomputed too. A stored number nobody checks is the exact
+    # thing this script exists to prevent — and a length that disagrees
+    # with its own frame is the most quietly misleading kind, because the
+    # frame stays correct while the documentation of it does not.
+    stated_len = vector.get("frame_len")
+    if stated_len is not None and stated_len != len(out):
+        raise ValueError(f"frame_len disagrees: stored {stated_len}, computed {len(out)}")
     return out.hex()
 
 
