@@ -2,7 +2,7 @@
 
 Status: **Frozen first-party application contract; transport remains non-durable.**
 
-This contract defines which HumanChatV1 message content may exist in durable first-party human-client storage on desktop and Android. It does not add a transport mailbox, daemon spool, network delivery guarantee, read receipt, or cross-device synchronization.
+This contract defines which HumanChatV2 message content may exist in durable first-party human-client storage on desktop and Android. It does not add a transport mailbox, daemon spool, network delivery guarantee, read receipt, or cross-device synchronization.
 
 ## 1. Core invariant
 
@@ -39,9 +39,9 @@ PENDING_OUTBOUND (durable)
                                       `--> optional RAM-only rendering until session ends
 ```
 
-The durable pending record preserves the destination selector, HumanChatV1 `app_message_id`, payload/media type, creation time, and retry state needed by the application. It does not live in `TransportRuntime`, IPC, the daemon, peer cache, Kademlia, relay state, or endpoint queues.
+The durable pending record preserves the destination selector, HumanChatV2 `app_message_id`, payload/media type, creation time, and retry state needed by the application. It does not live in `TransportRuntime`, IPC, the daemon, peer cache, Kademlia, relay state, or endpoint queues.
 
-A retry reuses the same HumanChatV1 `app_message_id`. Transport-level retry/idempotency continues to follow the frozen direct-message contract and its bounded dedup window; the human client must not claim exactly-once application delivery.
+A retry reuses the same HumanChatV2 `app_message_id` and resends the stored byte-identical payload (ADR-0050). Transport-level retry/idempotency continues to follow the frozen direct-message contract and its bounded dedup window; the human client must not claim exactly-once application delivery.
 
 Pending outbound content is **not eligible for cross-device/system backup** in standard v1. Its purpose is local crash/restart survival, not delayed delivery from another device or restored image.
 

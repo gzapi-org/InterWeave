@@ -53,7 +53,7 @@ When endpoint-directory lookup is used, returned EndpointIds are displayed as re
 
 A direct conversation is keyed locally by the selected remote route `{PeerId, EndpointId?}`. A channel conversation is keyed by ChannelId. Human-readable titles can be changed without altering transport addresses.
 
-The first-party text payload uses `HumanChatV1`. Plain text is rendered inertly. Remote content cannot trigger trust/config changes, commands, link opening, downloads, recovery operations, or admin actions.
+The first-party text payload uses `HumanChatV2`. Text is markdown rendered inside the closed subset of ADR-0050 — raw HTML shown literally, allowlisted link schemes, no automatic image fetch, raw source always viewable. Remote content cannot trigger trust/config changes, commands, link opening, downloads, recovery operations, or admin actions.
 
 ## 5. Message-status language
 
@@ -156,7 +156,7 @@ Raw internal codes remain available in diagnostics.
 - DCUtR path change does not create a duplicate logical connection/conversation event;
 - explicit trust mutation shows exact target PeerId;
 - remote text cannot invoke admin/recovery handlers;
-- desktop and Android render the same HumanChatV1 fixture consistently;
+- desktop and Android render the same HumanChatV2 fixture consistently;
 - pending outbound and unread inbound survive restart; read-unkept/transport-terminal messages do not;
 - receiver Keep can be set only after read and cannot be forced by remote content;
 - accessibility tree contains meaningful labels/actions for message, route, trust, and connectivity controls.
@@ -167,4 +167,4 @@ When Android is configured with both `availability_mode=stay-reachable` and `key
 
 ## 15. HumanChat reply rendering
 
-An inbound HumanChatV1 `reply_to` may reference an application message that is not present in the current retention/session store. The message is still valid and must render normally; the client may show a neutral `Referenced message unavailable` placeholder and preserve the referenced ID for bounded diagnostics/retention metadata. It must not auto-fetch, create transport traffic, reject the message, or infer tampering solely because the referenced message is absent locally.
+An inbound HumanChatV2 `reply_to` may reference an application message that is not present in the current retention/session store. The message is still valid and must render normally; the client may show a neutral `Referenced message unavailable` placeholder and preserve the referenced ID for bounded diagnostics/retention metadata. It must not auto-fetch, create transport traffic, reject the message, or infer tampering solely because the referenced message is absent locally.
