@@ -146,14 +146,25 @@ def anchor_ids(text: str) -> set[str]:
     broken — and the documents most likely to repeat a heading are the
     stage-structured ones here, so a false positive would land on exactly
     the files this is meant to protect.
+
+    Each suffix is chosen against ALL ids already emitted, not merely a
+    per-base counter. A document mixing `# Foo`, `# Foo-1`, `# Foo`
+    renders as `foo`, `foo-1`, `foo-2`: the third heading's counter says
+    `foo-1`, but that id is already taken by the second heading, so the
+    renderer keeps counting. A per-base counter would emit `foo-1` twice
+    and reject the valid `#foo-2` link.
     """
     ids: set[str] = set()
     seen: dict[str, int] = {}
     for m in HEADING_RE.finditer(FENCE_RE.sub("", text)):
         base = slug(m.group(2))
         count = seen.get(base, 0)
+        candidate = base if count == 0 else f"{base}-{count}"
+        while candidate in ids:
+            count += 1
+            candidate = f"{base}-{count}"
         seen[base] = count + 1
-        ids.add(base if count == 0 else f"{base}-{count}")
+        ids.add(candidate)
     return ids
 
 

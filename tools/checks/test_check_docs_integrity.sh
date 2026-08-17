@@ -117,6 +117,23 @@ printf '# T\n\n[fourth](plan.md#exit-gate-3)\n' > "$R/t.md"
 printf '# Plan\n\n## Exit gate\n\n## Exit gate\n' > "$R/plan.md"
 [ "$(run_code "$R")" = "1" ] && ok "  and the suffix stops at the last occurrence" || bad "exit-gate-3 should not resolve against two headings"
 
+# ── mixed explicit and generated suffixes stay globally unique ───────────
+# `## Foo`, `## Foo-1`, `## Foo` renders as foo, foo-1, foo-2: the third
+# heading's per-base counter says foo-1, but that id is taken, so the
+# renderer keeps counting. Counting only per base slug emits foo-1 twice
+# and reports the valid #foo-2 link as broken.
+R="$(fresh dupheads-mixed)"
+printf '# T\n\n[a](plan.md#foo) [b](plan.md#foo-1) [c](plan.md#foo-2)\n' > "$R/t.md"
+printf '# Plan\n\n## Foo\n\n## Foo-1\n\n## Foo\n' > "$R/plan.md"
+[ "$(run_code "$R")" = "0" ] && ok "  and a taken explicit suffix advances the counter" \
+    || bad "foo/foo-1/foo-2 should all resolve: $(run "$R")"
+
+R="$(fresh dupheads-mixed-rev)"
+printf '# T\n\n[a](plan.md#foo) [b](plan.md#foo-1) [c](plan.md#foo-1-1)\n' > "$R/t.md"
+printf '# Plan\n\n## Foo\n\n## Foo\n\n## Foo-1\n' > "$R/plan.md"
+[ "$(run_code "$R")" = "0" ] && ok "  and an explicit heading colliding with a generated id gets its own suffix" \
+    || bad "foo/foo-1/foo-1-1 should all resolve: $(run "$R")"
+
 # ── a heading inside a code fence is not an anchor ───────────────────────
 # Regression: stripping fences before collecting headings is what stops a
 # shell comment from satisfying a broken link.
