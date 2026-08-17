@@ -77,7 +77,7 @@ pub enum DenyReason {
 /// Static and deny-by-default (ADR-0012). Discovery, Identify observations,
 /// and bootstrap configuration never mutate it — a bootstrap entry is
 /// reachability input, not authority, and this type gives them no way in.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct PeerTrustPolicy {
     allowed_peers: BTreeSet<TransportIdentity>,
     /// The local profile identity, self-authorized and never remote.
@@ -95,12 +95,27 @@ impl PeerTrustPolicy {
     /// that default, and a convenience constructor is how a rejected
     /// default returns — first in a test, then in a fixture, then in a
     /// shipped profile.
-    #[must_use]
-    pub fn new(allowed_peers: impl IntoIterator<Item = TransportIdentity>) -> Self {
-        Self {
-            allowed_peers: allowed_peers.into_iter().collect(),
-            local_peer: None,
+    ///
+    /// # Errors
+    /// Returns [`TrustPolicyError::AllowlistTooLarge`] above
+    /// [`Self::MAX_ALLOWED_PEERS`]. The ceiling is enforced here rather
+    /// than offered as a query: a policy that exceeds it is out of
+    /// contract, and `decide` would otherwise run against an unbounded set
+    /// unless every consumer remembered to check first.
+    pub fn new(
+        allowed_peers: impl IntoIterator<Item = TransportIdentity>,
+    ) -> Result<Self, TrustPolicyError> {
+        let allowed_peers: BTreeSet<_> = allowed_peers.into_iter().collect();
+        if allowed_peers.len() > Self::MAX_ALLOWED_PEERS {
+            return Err(TrustPolicyError::AllowlistTooLarge {
+                got: allowed_peers.len(),
+                max: Self::MAX_ALLOWED_PEERS,
+            });
         }
+        Ok(Self {
+            allowed_peers,
+            local_peer: None,
+        })
     }
 
     /// Record the local profile identity.
@@ -126,12 +141,6 @@ impl PeerTrustPolicy {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.allowed_peers.is_empty()
-    }
-
-    /// Whether the allowlist is within its configured ceiling.
-    #[must_use]
-    pub fn within_bounds(&self) -> bool {
-        self.allowed_peers.len() <= Self::MAX_ALLOWED_PEERS
     }
 
     /// Decide profile-level data-plane trust for one peer.
@@ -173,16 +182,65 @@ impl PeerTrustPolicy {
     }
 }
 
+/// Why a trust policy could not be built.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrustPolicyError {
+    /// The allowlist exceeded its configured ceiling.
+    AllowlistTooLarge {
+        /// Entries supplied.
+        got: usize,
+        /// Entries permitted.
+        max: usize,
+    },
+}
+
+impl core::fmt::Display for TrustPolicyError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::AllowlistTooLarge { got, max } => {
+                write!(f, "allowlist has {got} peers; the ceiling is {max}")
+            }
+        }
+    }
+}
+
+impl core::error::Error for TrustPolicyError {}
+
+/// The JSON shape, deserialized through the validating constructor.
+#[derive(Deserialize)]
+struct PeerTrustPolicyRepr {
+    #[serde(default)]
+    allowed_peers: BTreeSet<TransportIdentity>,
+    #[serde(default)]
+    local_peer: Option<TransportIdentity>,
+}
+
+impl<'de> Deserialize<'de> for PeerTrustPolicy {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // The ceiling must hold on the path a configuration file takes,
+        // not only the one a Rust caller takes.
+        let raw = PeerTrustPolicyRepr::deserialize(d)?;
+        let mut policy = Self::new(raw.allowed_peers).map_err(serde::de::Error::custom)?;
+        policy.local_peer = raw.local_peer;
+        Ok(policy)
+    }
+}
+
 /// One endpoint's narrowing filter over profile trust.
 ///
-/// `Inherit` is the default and takes the profile's answer unchanged.
-/// `StaticSubset` restricts it further. Neither can admit a peer the
-/// profile refused — [`PeerTrustPolicy::decide_for_endpoint`] guarantees
-/// that structurally, and [`Self::is_subset_of`] lets configuration
-/// validation reject a subset naming peers outside profile trust before it
-/// ever reaches a decision.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", tag = "policy")]
+/// `InheritProfileTrust` is the default and takes the profile's answer
+/// unchanged. `StaticSubset` restricts it further. Neither can admit a
+/// peer the profile refused — [`PeerTrustPolicy::decide_for_endpoint`]
+/// guarantees that structurally, and [`Self::is_subset_of`] lets
+/// configuration validation reject a subset naming peers outside profile
+/// trust before it ever reaches a decision.
+///
+/// The serialized form is the one `endpoints/endpoint-config.schema.json`
+/// froze: the bare string `"inherit_profile_trust"`, or the object
+/// `{"static_subset": [...]}`. An internally tagged Serde representation
+/// would be tidier Rust and would not deserialize a single schema-valid
+/// configuration, which is the wrong trade at a contract boundary.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum EndpointTrustPolicy {
     /// Take the profile decision unchanged. The default: an endpoint that
     /// says nothing narrows nothing.
@@ -195,14 +253,62 @@ pub enum EndpointTrustPolicy {
     },
 }
 
+/// The wire shape, matching the frozen `oneOf`.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum EndpointTrustPolicyRepr {
+    Inherit(InheritLiteral),
+    Subset {
+        static_subset: BTreeSet<TransportIdentity>,
+    },
+}
+
+/// The single legal string, as its own type so no other value parses.
+#[derive(Serialize, Deserialize)]
+enum InheritLiteral {
+    #[serde(rename = "inherit_profile_trust")]
+    InheritProfileTrust,
+}
+
+impl Serialize for EndpointTrustPolicy {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::InheritProfileTrust => {
+                EndpointTrustPolicyRepr::Inherit(InheritLiteral::InheritProfileTrust).serialize(s)
+            }
+            Self::StaticSubset { allowed_peers } => EndpointTrustPolicyRepr::Subset {
+                static_subset: allowed_peers.clone(),
+            }
+            .serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for EndpointTrustPolicy {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(match EndpointTrustPolicyRepr::deserialize(d)? {
+            EndpointTrustPolicyRepr::Inherit(InheritLiteral::InheritProfileTrust) => {
+                Self::InheritProfileTrust
+            }
+            EndpointTrustPolicyRepr::Subset { static_subset } => Self::StaticSubset {
+                allowed_peers: static_subset,
+            },
+        })
+    }
+}
+
 impl EndpointTrustPolicy {
-    /// Whether this filter admits the peer, ignoring profile trust.
+    /// Whether this filter alone admits the peer, IGNORING profile trust.
     ///
-    /// Private in effect: callers should use
+    /// Private, and that is the point. Exposed, it is a
+    /// profile-independent admission check: `InheritProfileTrust.admits(p)`
+    /// answers `true` for every peer alive, including ones the allowlist
+    /// has never heard of. A consumer reaching for the obvious-looking
+    /// method would defeat the narrowing guarantee entirely, so the only
+    /// public way to get an answer is
     /// [`PeerTrustPolicy::decide_for_endpoint`], which cannot be ordered
-    /// wrongly. It is exposed only for configuration validation.
-    #[must_use]
-    pub fn admits(&self, peer: &TransportIdentity) -> bool {
+    /// wrongly.
+    fn admits(&self, peer: &TransportIdentity) -> bool {
         match self {
             Self::InheritProfileTrust => true,
             Self::StaticSubset { allowed_peers } => allowed_peers.contains(peer),
@@ -300,6 +406,10 @@ mod tests {
         TransportIdentity::parse(s).expect("valid test identity")
     }
 
+    fn allowlist(peers: &[&str]) -> PeerTrustPolicy {
+        PeerTrustPolicy::new(peers.iter().map(|p| peer(p))).expect("within the ceiling")
+    }
+
     #[test]
     fn the_default_policy_admits_nobody() {
         let policy = PeerTrustPolicy::default();
@@ -312,7 +422,7 @@ mod tests {
 
     #[test]
     fn an_allowlisted_peer_is_admitted_and_others_are_not() {
-        let policy = PeerTrustPolicy::new([peer(P1)]);
+        let policy = allowlist(&[P1]);
         assert_eq!(policy.decide(&peer(P1)), TrustDecision::Allowed);
         assert_eq!(
             policy.decide(&peer(P2)),
@@ -325,13 +435,13 @@ mod tests {
         // Self-authorized for identity checks, but a send to self is
         // InvalidArgument and never a self-dial — so the data-plane answer
         // is a denial with its own reason, not Allowed.
-        let policy = PeerTrustPolicy::new([peer(P1)]).with_local_peer(peer(P2));
+        let policy = allowlist(&[P1]).with_local_peer(peer(P2));
         assert_eq!(
             policy.decide(&peer(P2)),
             TrustDecision::Denied(DenyReason::SelfIdentity)
         );
         // Even if someone also allowlists it, self stays self.
-        let policy = PeerTrustPolicy::new([peer(P2)]).with_local_peer(peer(P2));
+        let policy = allowlist(&[P2]).with_local_peer(peer(P2));
         assert_eq!(
             policy.decide(&peer(P2)),
             TrustDecision::Denied(DenyReason::SelfIdentity)
@@ -340,7 +450,7 @@ mod tests {
 
     #[test]
     fn an_endpoint_policy_narrows_and_cannot_widen() {
-        let profile = PeerTrustPolicy::new([peer(P1)]);
+        let profile = allowlist(&[P1]);
 
         // Narrowing works: P1 is profile-trusted but excluded here.
         let narrowed = EndpointTrustPolicy::StaticSubset {
@@ -375,7 +485,7 @@ mod tests {
 
     #[test]
     fn a_widening_subset_is_detectable_at_configuration_load() {
-        let profile = PeerTrustPolicy::new([peer(P1)]);
+        let profile = allowlist(&[P1]);
         let good = EndpointTrustPolicy::StaticSubset {
             allowed_peers: [peer(P1)].into_iter().collect(),
         };
@@ -389,7 +499,7 @@ mod tests {
 
     #[test]
     fn infrastructure_authorization_is_not_data_plane_trust() {
-        let data_plane = PeerTrustPolicy::new([peer(P1)]);
+        let data_plane = allowlist(&[P1]);
         let infra = InfrastructureSet::new([peer(P3)]);
 
         // The relay may open a control connection and is still refused by
@@ -411,9 +521,82 @@ mod tests {
     }
 
     #[test]
-    fn the_allowlist_bound_is_checkable() {
-        assert!(PeerTrustPolicy::default().within_bounds());
+    fn the_allowlist_ceiling_is_enforced_at_construction() {
         assert_eq!(PeerTrustPolicy::MAX_ALLOWED_PEERS, 4096);
+
+        // Synthesised identities differing only in their tail, so the set
+        // genuinely holds MAX+1 distinct members.
+        let many: Vec<TransportIdentity> = (0..=PeerTrustPolicy::MAX_ALLOWED_PEERS)
+            .map(|i| {
+                let tail = format!("{i:044}").replace('0', "a");
+                peer(&format!("Qm{}", &tail[..44]))
+            })
+            .collect();
+        assert!(many.len() > PeerTrustPolicy::MAX_ALLOWED_PEERS);
+        assert!(matches!(
+            PeerTrustPolicy::new(many),
+            Err(TrustPolicyError::AllowlistTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn deserialization_cannot_bypass_the_allowlist_ceiling() {
+        // The path a configuration file takes, not only the Rust one.
+        let peers: Vec<String> = (0..=PeerTrustPolicy::MAX_ALLOWED_PEERS)
+            .map(|i| {
+                let tail = format!("{i:044}").replace('0', "a");
+                format!("Qm{}", &tail[..44])
+            })
+            .collect();
+        let json = serde_json::json!({ "allowed_peers": peers });
+        assert!(serde_json::from_value::<PeerTrustPolicy>(json).is_err());
+    }
+
+    #[test]
+    fn endpoint_policies_use_the_frozen_wire_shape() {
+        // A bare string, not a tagged object: the schema froze this.
+        let inherit = EndpointTrustPolicy::InheritProfileTrust;
+        assert_eq!(
+            serde_json::to_value(&inherit).expect("ser"),
+            serde_json::json!("inherit_profile_trust")
+        );
+        assert_eq!(
+            serde_json::from_value::<EndpointTrustPolicy>(serde_json::json!(
+                "inherit_profile_trust"
+            ))
+            .expect("de"),
+            inherit
+        );
+
+        let subset = EndpointTrustPolicy::StaticSubset {
+            allowed_peers: [peer(P1)].into_iter().collect(),
+        };
+        assert_eq!(
+            serde_json::to_value(&subset).expect("ser"),
+            serde_json::json!({ "static_subset": [P1] })
+        );
+        assert_eq!(
+            serde_json::from_value::<EndpointTrustPolicy>(
+                serde_json::json!({ "static_subset": [P1] })
+            )
+            .expect("de"),
+            subset
+        );
+
+        // The old tagged spelling must NOT parse, or both shapes would be
+        // accepted and the frozen one would stop being the only one.
+        assert!(
+            serde_json::from_value::<EndpointTrustPolicy>(serde_json::json!({
+                "policy": "inherit-profile-trust"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<EndpointTrustPolicy>(serde_json::json!(
+                "inherit-profile-trust"
+            ))
+            .is_err()
+        );
     }
 
     #[test]
