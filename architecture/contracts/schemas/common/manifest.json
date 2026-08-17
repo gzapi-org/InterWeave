@@ -1,7 +1,20 @@
 {
   "family": "common",
   "concepts": [
-    { "name": "peer-id", "file": "peer-id.schema.json", "status": "approved" },
-    { "name": "message-id", "file": "message-id.schema.json", "status": "approved" }
+    {
+      "name": "peer-id",
+      "file": "peer-id.schema.json",
+      "status": "approved"
+    },
+    {
+      "name": "message-id",
+      "file": "message-id.schema.json",
+      "status": "approved"
+    },
+    {
+      "name": "channel-id",
+      "file": "channel-id.schema.json",
+      "status": "approved"
+    }
   ]
 }

@@ -2,13 +2,29 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:interweave:schemas:ipc:frame",
   "title": "IPC frame body",
-  "description": "The JSON object inside one length-prefixed frame, after the 4-byte big-endian length. This schema covers the BODY only: the length prefix, the 131,072-byte ceiling on it, and the rule that zero length is invalid are framing concerns outside JSON Schema and are asserted by the codec (LOCAL-IPC.md §Framing).\n\nThe five message classes are mutually exclusive, discriminated by the properties present.",
+  "description": "The JSON object inside one length-prefixed frame, after the 4-byte big-endian length. This schema covers the BODY only: the length prefix, the 131,072-byte ceiling on it, and the rule that zero length is invalid are framing concerns outside JSON Schema and are asserted by the codec (LOCAL-IPC.md §Framing).\n\nThe seven message classes are mutually exclusive, discriminated by the properties present. `ping` and `pong` are included because keepalive is REQUIRED by default for any connection holding an endpoint lease (LOCAL-IPC.md): omitting them made every mandatory exchange invalid under the normative shape.",
   "oneOf": [
-    { "$ref": "#/$defs/request" },
-    { "$ref": "#/$defs/response" },
-    { "$ref": "#/$defs/cancel" },
-    { "$ref": "#/$defs/event" },
-    { "$ref": "#/$defs/server_state" }
+    {
+      "$ref": "#/$defs/request"
+    },
+    {
+      "$ref": "#/$defs/response"
+    },
+    {
+      "$ref": "#/$defs/cancel"
+    },
+    {
+      "$ref": "#/$defs/event"
+    },
+    {
+      "$ref": "#/$defs/server_state"
+    },
+    {
+      "$ref": "#/$defs/ping"
+    },
+    {
+      "$ref": "#/$defs/pong"
+    }
   ],
   "$defs": {
     "request_id": {
@@ -19,92 +35,234 @@
     },
     "request": {
       "type": "object",
-      "required": ["type", "id", "method"],
+      "required": [
+        "type",
+        "id",
+        "method"
+      ],
       "additionalProperties": false,
       "properties": {
-        "type": { "const": "request" },
-        "id": { "$ref": "#/$defs/request_id" },
-        "method": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "params": { "type": "object" },
-        "deadline_ms": { "type": "integer", "minimum": 0 }
+        "type": {
+          "const": "request"
+        },
+        "id": {
+          "$ref": "#/$defs/request_id"
+        },
+        "method": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "params": {
+          "type": "object"
+        },
+        "deadline_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
       },
       "description": "A method needing an ungranted capability fails locally with a stable authorization error and is never dispatched to the transport runtime — the refusal happens before the request can reach the network."
     },
     "response": {
       "type": "object",
-      "required": ["type", "id", "ok"],
+      "required": [
+        "type",
+        "id",
+        "ok"
+      ],
       "additionalProperties": false,
       "properties": {
-        "type": { "const": "response" },
-        "id": { "$ref": "#/$defs/request_id" },
-        "ok": { "type": "boolean" },
+        "type": {
+          "const": "response"
+        },
+        "id": {
+          "$ref": "#/$defs/request_id"
+        },
+        "ok": {
+          "type": "boolean"
+        },
         "result": {},
         "error": {
           "type": "object",
-          "required": ["code"],
+          "required": [
+            "code"
+          ],
           "additionalProperties": false,
           "properties": {
-            "code": { "$ref": "urn:interweave:schemas:ipc:error-code" },
-            "message": { "type": "string", "maxLength": 2048 }
+            "code": {
+              "$ref": "urn:interweave:schemas:ipc:error-code"
+            },
+            "message": {
+              "type": "string",
+              "maxLength": 2048
+            }
           }
         }
       },
       "allOf": [
         {
           "$comment": "ok and error are exclusive: a failed response that carried no code would leave the caller guessing.",
-          "if": { "properties": { "ok": { "const": false } }, "required": ["ok"] },
-          "then": { "required": ["error"], "not": { "required": ["result"] } }
+          "if": {
+            "properties": {
+              "ok": {
+                "const": false
+              }
+            },
+            "required": [
+              "ok"
+            ]
+          },
+          "then": {
+            "required": [
+              "error"
+            ],
+            "not": {
+              "required": [
+                "result"
+              ]
+            }
+          }
         },
         {
-          "if": { "properties": { "ok": { "const": true } }, "required": ["ok"] },
-          "then": { "not": { "required": ["error"] } }
+          "if": {
+            "properties": {
+              "ok": {
+                "const": true
+              }
+            },
+            "required": [
+              "ok"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "error"
+              ]
+            }
+          }
         }
       ]
     },
     "cancel": {
       "type": "object",
-      "required": ["type", "id"],
+      "required": [
+        "type",
+        "id"
+      ],
       "additionalProperties": false,
       "properties": {
-        "type": { "const": "cancel" },
-        "id": { "$ref": "#/$defs/request_id" }
+        "type": {
+          "const": "cancel"
+        },
+        "id": {
+          "$ref": "#/$defs/request_id"
+        }
       },
       "description": "Advisory. An operation past an irreversible network boundary may complete anyway, which is why the response vocabulary separates CancelledBeforeDispatch from CancellationRaced."
     },
     "event": {
       "type": "object",
-      "required": ["type", "sequence", "event_type"],
+      "required": [
+        "type",
+        "sequence",
+        "event_type"
+      ],
       "additionalProperties": false,
       "properties": {
-        "type": { "const": "event" },
+        "type": {
+          "const": "event"
+        },
         "sequence": {
           "type": "integer",
           "minimum": 0,
           "description": "Per IPC connection, for gap detection only. NOT a durable replay cursor: there is no event replay after reconnect."
         },
-        "event_type": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "data": { "type": "object" }
+        "event_type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "data": {
+          "type": "object"
+        }
       }
     },
     "server_state": {
       "type": "object",
-      "required": ["type", "health"],
+      "required": [
+        "type",
+        "health"
+      ],
       "additionalProperties": false,
       "properties": {
-        "type": { "const": "server_state" },
-        "health": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "type": {
+          "const": "server_state"
+        },
+        "health": {
+          "enum": [
+            "healthy",
+            "degraded",
+            "unavailable"
+          ],
+          "description": "The closed set from contracts/TRANSPORT.md §status. A bounded string accepted values like \"unknown-state\", which consumers cannot branch on safely — and a status field whose vocabulary is open is one a client must treat as untyped text."
+        },
         "connectivity": {
           "type": "object",
           "description": "The backend-neutral ConnectivitySummary. Ordinary data-plane clients receive normalized direct/relay state and counts only: raw probe-server identities, relay PeerIds, and relay multiaddrs require a diagnostics or admin capability, and are never inferred as trust (ADR-0035, ADR-0036)."
         }
       }
+    },
+    "keepalive_nonce": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "description": "The 128-bit CSPRNG keepalive value, canonically encoded (LOCAL-IPC.md suggests unpadded base64url). Like the lease epoch it is deliberately NOT pinned to one encoding: it never crosses the network, so no two implementations must agree on its bytes. It is not authentication, not replay protection for application messages, and not a lease-renewal credential — only an exact echo of the CURRENT outstanding nonce satisfies the probe, and stale, duplicate, or wrong nonces do not reset liveness state."
+    },
+    "ping": {
+      "type": "object",
+      "required": [
+        "type",
+        "nonce"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "ping"
+        },
+        "nonce": {
+          "$ref": "#/$defs/keepalive_nonce"
+        }
+      },
+      "description": "Server to client. At most one is outstanding per connection."
+    },
+    "pong": {
+      "type": "object",
+      "required": [
+        "type",
+        "nonce"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "pong"
+        },
+        "nonce": {
+          "$ref": "#/$defs/keepalive_nonce"
+        }
+      },
+      "description": "Client to server, echoing the nonce exactly. Any other value leaves the probe unsatisfied."
     }
   },
   "x-contract": {
     "name": "ipc.frame",
     "status": "approved",
     "version": "1.0.0",
-    "adr": ["0017", "0026"],
+    "adr": [
+      "0017",
+      "0026"
+    ],
     "specification": "architecture/contracts/LOCAL-IPC.md"
   }
 }

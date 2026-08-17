@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# Discovery candidate/event/health contracts. Depends on transport-api for
+# peer identity and NOT on trust-api: discovery never grants trust, and a
+# dependency edge to the trust types would make the wrong thing reachable
+# from a provider (ADR-0006, ADR-0012).
+[package]
+name = "interweave-discovery-api"
+version = "0.0.0"
+publish = false
+description = "Neutral discovery provider and candidate contract types for InterWeave."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+interweave-transport-api = { path = "../transport-api" }
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }

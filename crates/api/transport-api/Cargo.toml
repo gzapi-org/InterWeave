@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# Neutral transport contract. The hard rule of ADR-0021/0045 and Stage 1 is
+# what is ABSENT from this dependency list: no libp2p, no Slint, no JNI, no
+# SQLite, no Claude/MCP libraries, no platform socket or process types. A
+# backend concept that reaches this crate has escaped the boundary that makes
+# the backend replaceable.
+[package]
+name = "interweave-transport-api"
+version = "0.0.0"
+publish = false
+description = "Neutral transport, endpoint, and connectivity contract types for InterWeave."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }

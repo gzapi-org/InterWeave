@@ -1,6 +1,5 @@
 {
   "fixture": "DirectMessageV2 request framing",
-  "contract": "urn:interweave:schemas:direct:dedup-key",
   "specification": "architecture/transport/libp2p/DIRECT.md",
   "adr": [
     "0005",
@@ -20,7 +19,7 @@
       "sent_at_ms is diagnostic: not authorization, ordering, freshness, replay-window, or dedup input."
     ]
   },
-  "$comment": "Vectors are DERIVED from the layout decided in DIRECT.md — no ADR publishes a golden frame, so this file is anchored by its `adr` list rather than by a per-vector `frozen_by`. Byte order was unspecified until this fixture forced the question; DIRECT.md now pins big-endian, matching the IPC length prefix and the content fingerprint.",
+  "$comment": "Vectors are DERIVED from the layout decided in DIRECT.md — no ADR publishes a golden frame, so this file is anchored by its `adr` list rather than by a per-vector `frozen_by`. Byte order was unspecified until this fixture forced the question; DIRECT.md now pins big-endian, matching the IPC length prefix and the content fingerprint. There is deliberately NO `contract` URN here: DIRECT.md and the direct family manifest both record that the request frame is a byte layout JSON Schema cannot express, so a schema pointer would name a contract this file does not verify. The previous pointer named the dedup-key schema, which is a different concept entirely.",
   "vectors": [
     {
       "name": "explicit-destination",

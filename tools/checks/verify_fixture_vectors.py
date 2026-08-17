@@ -130,6 +130,15 @@ def direct_message_v2_frame(vector: dict) -> str:
 
     payload = bytes.fromhex(vector.get("payload_hex", ""))
     out += len(payload).to_bytes(4, "big") + payload
+
+    # `frame_len` is stored beside `frame_hex` as a reader convenience, so
+    # it is recomputed too. A stored number nobody checks is the exact
+    # thing this script exists to prevent — and a length that disagrees
+    # with its own frame is the most quietly misleading kind, because the
+    # frame stays correct while the documentation of it does not.
+    stated_len = vector.get("frame_len")
+    if stated_len is not None and stated_len != len(out):
+        raise ValueError(f"frame_len disagrees: stored {stated_len}, computed {len(out)}")
     return out.hex()
 
 
@@ -312,7 +321,11 @@ def human_chat_v2_envelope(vector: dict) -> bool:
     mid = env.get("app_message_id")
     if not isinstance(mid, str) or not HEX32_RE.fullmatch(mid):
         return False
-    if "text" in env and not isinstance(env["text"], str):
+    # `text` is REQUIRED. The canonical envelope marks optional fields with
+    # `?` and this is not one of them; a v2 object carrying only v, kind and
+    # app_message_id is a text message with no text, which no client can
+    # render as the envelope it claims to be.
+    if not isinstance(env.get("text"), str):
         return False
     reply_to = env.get("reply_to")
     if reply_to is not None and (not isinstance(reply_to, str) or not HEX32_RE.fullmatch(reply_to)):

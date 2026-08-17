@@ -2,7 +2,7 @@
 
 **InterWeave** is a generic peer-to-peer transport architecture for Claude Code Channels and first-party human clients. It combines payload-agnostic transport contracts, one-PeerId/many-EndpointId local routing, signed GossipSub broadcast, dedicated directed messaging, replaceable discovery, Kademlia peer routing, and mandatory Internet reachability through AutoNAT v2, Circuit Relay v2, and DCUtR.
 
-> **Repository status:** accepted architecture, plus **Stage 0** of the construction plan. The design is under [`architecture/`](./architecture/). There is no production Rust implementation yet: the landing zones under `apps/`, `crates/`, `spikes/`, and `packaging/` are empty of it, and the root Cargo workspace has exactly two members — `xtask` and `tests/support`, neither of them product code. The next package joins when the stage that needs it opens.
+> **Repository status:** accepted architecture, **Stage 0 complete**, **Stage 1 open**. The design is under [`architecture/`](./architecture/). Active workspace members are `xtask` (the command runner), `tests/support` (the test-only harness), and the Stage-1 neutral contracts `crates/api/transport-api`, `crates/api/trust-api`, and `crates/api/discovery-api` — the contract crates are types and validation only, no I/O and no backend. `apps/`, `spikes/`, and `packaging/` are still empty of implementation. The next package joins when the stage that needs it opens.
 
 ## What InterWeave is
 
@@ -66,7 +66,7 @@ The accepted details live in the contracts and ADRs; this README is an orientati
 | `.claude/` | Committed agent configuration and task-scoped skills; per-developer overrides stay untracked |
 | [`IMPLEMENTATION.md`](./IMPLEMENTATION.md) | Implementation landing-zone and activation rules |
 
-The root [`Cargo.toml`](./Cargo.toml) is a virtual workspace with exactly two members — [`xtask`](./xtask/README.md), the command runner, and `tests/support`, the test-only harness; neither is product code. `workspace.metadata.interweave` records the remaining planned members without making them buildable. A crate/package is added to `[workspace].members` only when its canonical implementation stage begins.
+The root [`Cargo.toml`](./Cargo.toml) is a virtual workspace. Its members are [`xtask`](./xtask/README.md) the command runner, `tests/support` the test-only harness, and the Stage-1 neutral contracts [`transport-api`](./crates/api/transport-api/README.md), [`trust-api`](./crates/api/trust-api/README.md), and [`discovery-api`](./crates/api/discovery-api/README.md). `[workspace].members` in the manifest is the authoritative list — this paragraph names them for orientation, and the manifest is what to trust if the two ever disagree. `workspace.metadata.interweave` records the remaining planned members without making them buildable. A crate/package is added only when its canonical implementation stage begins.
 
 ## Canonical implementation order
 

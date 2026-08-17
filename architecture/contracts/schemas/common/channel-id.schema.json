@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:common:channel-id",
+  "title": "ChannelId",
+  "description": "A logical broadcast channel name. Case-sensitive and ASCII-only, so no Unicode normalization question exists for v1/v2 (ADR-0025) — two spellings differing only in case are two different channels, and they derive two different hashed wire topics.\n\nThe transport attaches NO application semantics to a ChannelId. It is not a room, a topic in the human sense, a permission scope, or a membership set; joining is a local subscription reference, and the backend may hide the raw name on the wire behind a deterministic domain-separated hash. That hash keeps casual names off the wire but does not resist dictionary guessing of a low-entropy name, which is a property of the construction rather than an oversight.",
+  "type": "string",
+  "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$",
+  "minLength": 1,
+  "maxLength": 128,
+  "examples": ["general", "team.eu:builds/nightly-1", "Announcements"],
+  "x-contract": {
+    "name": "common.channel-id",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": ["0025", "0026"],
+    "specification": "architecture/contracts/TRANSPORT.md"
+  }
+}
