@@ -24,6 +24,7 @@ interweave-local-client-api = { path = "../../api/local-client-api" }
 interweave-transport-api = { path = "../../api/transport-api" }
 interweave-trust-api = { path = "../../api/trust-api" }
 serde = { workspace = true, features = ["derive"] }
+sha2 = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

@@ -8,8 +8,15 @@
 
 #![forbid(unsafe_code)]
 
+pub mod dedup;
 pub mod endpoint_registry;
+pub mod fingerprint;
 
+pub use dedup::{
+    Admission, DedupCache, DedupKey, DestinationSelector, Reservation, ReservationFailure,
+    ReservationMap,
+};
 pub use endpoint_registry::{
     ActiveLease, ClaimFailure, EndpointRegistry, LocalSessionId, RegisteredEndpoint, ResolveFailure,
 };
+pub use fingerprint::{ContentFingerprint, FingerprintError, direct_content_fingerprint_v1};
