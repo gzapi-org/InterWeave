@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# The ADR-0044 conformance suite. TEST-ONLY: nothing depends on this
+# package.
+#
+# WHY IT IS HERE AND NOT IN THE STORE CRATE. `RETENTION.md` §9 requires
+# the desktop and Android human clients to share these tests, and the
+# behaviour spans two crates — the state machine in `human-core` and the
+# storage in `human-store`. A suite living inside either one would prove
+# only that half agrees with itself.
+#
+# Every case that claims something SURVIVES uses a real file which is
+# closed and reopened. An in-memory database cannot answer a question
+# about durability, because it has none.
+[package]
+name = "interweave-human-retention-tests"
+version = "0.0.0"
+publish = false
+description = "ADR-0044 human-client retention conformance tests for InterWeave."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+# NOT EMPTY, unlike the other test-only packages. `crash_writer` is a real
+# binary that commits rows and then aborts without unwinding, which is the
+# only way to ask "does this survive a crash" rather than "does this
+# survive a clean close" — and a binary is built from [dependencies].
+[dependencies]
+interweave-human-store = { path = "../../crates/human/store" }
+interweave-transport-api = { path = "../../crates/api/transport-api" }
+
+[dev-dependencies]
+interweave-human-core = { path = "../../crates/human/core" }
+rusqlite = { workspace = true }
+tempfile = { workspace = true }

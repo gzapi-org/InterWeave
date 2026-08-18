@@ -307,10 +307,12 @@ Make durable state correct before network events can depend on it.
 ### Activate
 
 ```text
-crates/human/store
-crates/discovery/cache
-crates/config/profile-config       # persistence/storage portions
+crates/human/store                 # ACTIVE
+crates/discovery/cache             # ACTIVE
+crates/config/profile-config       # ACTIVE — persistence/storage portions
 ```
+
+`tests/human-retention` is a workspace member alongside them, carrying the `RETENTION.md` §9 conformance cases. Case 13 — Android system backup excludes the human store — is an `allowBackup` packaging property and stays open until Stage 17; the suite names it as uncovered rather than leaving its absence to be discovered.
 
 Identity storage may be implemented in the lowest appropriate runtime/identity crate after SPIKE-006 validates the portability boundary. The derivation itself is already pinned: `fixtures/identity/ed25519-bip39-entropy-v1.json` recomputes entropy -> word indexes -> Ed25519 public key -> PeerId against the contract's golden on every CI run, so SPIKE-006's open question is narrowed to the libp2p API boundary — extracting and re-importing the exact 32-byte seed without transformation.
 
@@ -344,10 +346,10 @@ The cache is safe to delete and never contains trust authority or application me
 
 Implement:
 
-- profile path/state separation;
-- atomic config/state writes;
-- owner-only key storage for standard v1;
-- exact Ed25519 identity persistence;
+- profile path/state separation; **landed**;
+- atomic config/state writes; **landed**;
+- owner-only key storage for standard v1; **landed** as the byte-level storage primitive;
+- exact Ed25519 identity persistence; **open** — the file CONTENT is the libp2p portable representation, which is the boundary SPIKE-006 gates;
 - optional mnemonic backup/verify/restore only after SPIKE-006 passes;
 - no mnemonic/private-key material in logs/IPC/network.
 

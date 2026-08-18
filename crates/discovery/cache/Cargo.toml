@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# Bounded advisory persistence for the peer cache. SAFE TO DELETE is a
+# design property, not a disclaimer: nothing here is trust authority,
+# nothing here is application content, and every method works from an
+# empty cache. Losing this file costs a cold start and nothing else.
+#
+# Clock-free, like the rest of the pre-network stages: every expiry,
+# debounce, and eviction decision takes `now_ms`, which is what lets a
+# seven-day TTL be tested in a microsecond.
+[package]
+name = "interweave-discovery-cache"
+version = "0.0.0"
+publish = false
+description = "Bounded advisory peer-cache persistence for InterWeave discovery."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+interweave-discovery-api = { path = "../../api/discovery-api" }
+interweave-transport-api = { path = "../../api/transport-api" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

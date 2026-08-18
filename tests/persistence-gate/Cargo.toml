@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# The Stage 3 exit gate: persistence invariants that span more than one
+# crate. TEST-ONLY; nothing depends on this package.
+#
+# Each store proves its own rules in its own suite. What is here are the
+# claims no single crate can make — chiefly "the peer cache is safe to
+# delete", which is only meaningful if the identity, the configuration,
+# and the retained messages are all still there afterwards, and those
+# live in three different packages.
+[package]
+name = "interweave-persistence-gate-tests"
+version = "0.0.0"
+publish = false
+description = "Stage 3 cross-crate persistence exit-gate tests for InterWeave."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+interweave-discovery-cache = { path = "../../crates/discovery/cache" }
+interweave-human-core = { path = "../../crates/human/core" }
+interweave-human-store = { path = "../../crates/human/store" }
+interweave-profile-config = { path = "../../crates/config/profile-config" }
+interweave-transport-api = { path = "../../crates/api/transport-api" }
+tempfile = { workspace = true }

@@ -13,10 +13,14 @@ members = [
     "crates/api/local-client-api",
     "crates/api/transport-api",
     "crates/config/profile-config",
+    "crates/discovery/cache",
     "crates/human/chat-protocol",
     "crates/human/core",
+    "crates/human/store",
     "crates/transport/runtime",
     "crates/api/trust-api",
+    "tests/human-retention",
+    "tests/persistence-gate",
     "tests/support",
     "tests/transport-contract",
     "xtask",
@@ -80,6 +84,15 @@ sha2 = "0.10"
 # Brotli for the HumanChatV2 fit-fallback decode path. Used through its
 # streaming interface so the decompressed ceiling aborts mid-stream.
 brotli = { version = "8", default-features = false, features = ["std"] }
+# SQLite for the human store (STATE.md). `bundled` compiles the amalgamation
+# rather than linking whatever the host provides: desktop and Android must
+# agree on the storage engine, and a retention invariant that depends on the
+# distribution's SQLite version is not an invariant. `default-features =
+# false` drops the WASM shim that 0.40 enables by default.
+rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
+# Temporary directories for storage tests. A retention test that never
+# touches a real file cannot prove anything survives a restart.
+tempfile = "3"
 
 [profile.release]
 lto = "thin"
@@ -96,7 +109,7 @@ overflow-checks = true
 # Stage 0 of the canonical plan: the workspace builds and checks itself, and
 # `xtask` is its only member. No product crate is active, and none becomes
 # active until the stage that needs it opens (CLAUDE.md §3).
-status = "stage-0-foundation"
+status = "stage-3-persistence"
 architecture_root = "architecture"
 
 planned_members = [

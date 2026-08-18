@@ -30,6 +30,76 @@ use interweave_transport_api::{EndpointId, TransportIdentity};
 use interweave_trust_api::{EndpointTrustPolicy, PeerTrustPolicy};
 use serde::{Deserialize, Serialize};
 
+pub mod paths;
+pub mod persist;
+
+pub use paths::{NAMESPACE, PROFILES, ProfilePaths, XdgRoots, absolute_or_none};
+pub use persist::{
+    OWNER_ONLY_DIR, OWNER_ONLY_FILE, create_private_dir, is_owner_only, write_atomic,
+    write_private_atomic,
+};
+
+/// What can go wrong resolving paths or writing to disk.
+///
+/// SEPARATE from [`ConfigError`], which is the vocabulary of
+/// configuration VALIDATION — a `Vec<ConfigError>` is what `validate`
+/// returns, and it is `Clone + PartialEq` because callers compare and
+/// collect it. `std::io::Error` is none of those things, and folding it
+/// in would cost every validation caller the ability to compare results.
+#[derive(Debug)]
+pub enum PersistError {
+    /// The filesystem refused.
+    Io(std::io::Error),
+    /// `$HOME` is unset and an XDG default was needed.
+    MissingHome,
+    /// `XDG_RUNTIME_DIR` is unset.
+    ///
+    /// Deliberately fatal rather than defaulted. That directory's
+    /// guarantees — owner-only, per-user, cleared per boot — are exactly
+    /// what an IPC socket relies on, and inventing a `/tmp` path in its
+    /// absence would silently drop all three.
+    NoRuntimeDir,
+    /// A profile name that could escape or hide in a path.
+    InvalidProfileName {
+        /// The rejected name.
+        name: String,
+    },
+    /// Owner-only permissions cannot be enforced on this platform.
+    ///
+    /// Refusing beats writing a key file this build cannot protect.
+    UnsupportedPlatform,
+}
+
+impl core::fmt::Display for PersistError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "filesystem: {e}"),
+            Self::MissingHome => write!(f, "$HOME is unset and an XDG default was required"),
+            Self::NoRuntimeDir => write!(
+                f,
+                "XDG_RUNTIME_DIR is unset; there is no safe substitute for the IPC socket directory"
+            ),
+            Self::InvalidProfileName { name } => write!(
+                f,
+                "profile name {name:?} must be 1-64 characters of [A-Za-z0-9_-] and must not begin with a dot"
+            ),
+            Self::UnsupportedPlatform => write!(
+                f,
+                "owner-only file permissions cannot be enforced on this platform"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for PersistError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
 /// Maximum configured endpoints in one profile.
 pub const MAX_ENDPOINTS: usize = 64;
 /// Maximum advertised endpoints the directory may hold.
