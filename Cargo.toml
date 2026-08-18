@@ -13,6 +13,9 @@ members = [
     "crates/api/local-client-api",
     "crates/api/transport-api",
     "crates/config/profile-config",
+    "crates/human/chat-protocol",
+    "crates/human/core",
+    "crates/transport/runtime",
     "crates/api/trust-api",
     "tests/support",
     "tests/transport-contract",
@@ -71,6 +74,12 @@ dbg_macro = "warn"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# SHA-256 for DirectContentFingerprintV1. A pure function with frozen
+# vectors, so the implementation is checkable rather than trusted.
+sha2 = "0.10"
+# Brotli for the HumanChatV2 fit-fallback decode path. Used through its
+# streaming interface so the decompressed ceiling aborts mid-stream.
+brotli = { version = "8", default-features = false, features = ["std"] }
 
 [profile.release]
 lto = "thin"

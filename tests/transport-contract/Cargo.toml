@@ -27,6 +27,7 @@ interweave-local-client-api = { path = "../../crates/api/local-client-api" }
 interweave-profile-config = { path = "../../crates/config/profile-config" }
 interweave-test-support = { path = "../support" }
 interweave-transport-api = { path = "../../crates/api/transport-api" }
+interweave-transport-runtime = { path = "../../crates/transport/runtime" }
 interweave-trust-api = { path = "../../crates/api/trust-api" }
 jsonschema = "0.49"
 serde = { workspace = true, features = ["derive"] }

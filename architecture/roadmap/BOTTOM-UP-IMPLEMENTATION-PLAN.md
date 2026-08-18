@@ -225,10 +225,12 @@ Implement security/routing/retention logic that can be exhaustively tested witho
 ### Activate
 
 ```text
-crates/transport/runtime           # pure modules first
-crates/human/chat-protocol
-crates/human/core
+crates/transport/runtime           # ACTIVE — pure modules first
+crates/human/chat-protocol         # ACTIVE
+crates/human/core                  # ACTIVE
 ```
+
+`crates/transport/runtime` is a workspace member carrying its pure modules only: `endpoint_registry` first — leases, generations, deterministic default resolution, and the local/coarse failure split. The connection-policy and human-domain modules follow, each with its tests in the same change.
 
 Backend-specific policy modules may be created under `crates/transport/libp2p` only if they remain pure and do not start a Swarm.
 

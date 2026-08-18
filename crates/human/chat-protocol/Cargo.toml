@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# HumanChatV2 envelope, media type, and the bounded decode path (ADR-0050).
+# Above transport and independent of it: no libp2p, no IPC, no UI. The
+# same library serves the desktop client, the Android client, and the
+# Claude bridge, which is what makes "decompression happens once" true
+# rather than aspirational.
+[package]
+name = "interweave-human-chat-protocol"
+version = "0.0.0"
+publish = false
+description = "HumanChatV2 envelope parsing, validation, and bounded decompression."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+brotli = { workspace = true }
+interweave-transport-api = { path = "../../api/transport-api" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
