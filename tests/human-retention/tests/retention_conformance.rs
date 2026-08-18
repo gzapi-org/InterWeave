@@ -403,7 +403,7 @@ fn case_14_a_full_store_degrades_rather_than_claiming_durability() {
     let mut store = HumanStore::open(
         &path,
         StoreOptions {
-            max_pages: Some(16),
+            max_pages: Some(64),
         },
     )
     .expect("opens");
@@ -420,6 +420,13 @@ fn case_14_a_full_store_degrades_rather_than_claiming_durability() {
         committed += 1;
     }
     assert!(committed < 8, "the page ceiling must be reached");
+    // A ceiling so low that nothing fits would exercise a store that was
+    // never usable rather than one that filled up — and `committed < 8`
+    // alone is satisfied by zero.
+    assert!(
+        committed > 0,
+        "the ceiling must admit at least one message first"
+    );
     assert_eq!(store.health(), StorageHealth::Degraded);
 
     // The required reaction: stop presenting as a durable receiver.

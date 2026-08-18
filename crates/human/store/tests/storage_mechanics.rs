@@ -178,13 +178,14 @@ fn a_full_medium_degrades_the_store_and_refuses_new_unread() {
     let mut store = HumanStore::open(
         &path,
         StoreOptions {
-            max_pages: Some(16),
+            max_pages: Some(64),
         },
     )
     .expect("opens");
     assert_eq!(store.health(), StorageHealth::Healthy);
 
     let big = vec![0_u8; interweave_transport_api::MAX_PAYLOAD_BYTES];
+    let mut committed = 0_u32;
     let mut hit_full = false;
     for i in 0..8_u32 {
         let id = format!("{i:032x}");
@@ -195,8 +196,16 @@ fn a_full_medium_degrades_the_store_and_refuses_new_unread() {
             hit_full = true;
             break;
         }
+        committed += 1;
     }
-    assert!(hit_full, "a 16-page ceiling must be reached by 8 × 48 KiB");
+    assert!(hit_full, "the page ceiling must be reached by 8 × 48 KiB");
+    // Without this the test passes when the ceiling is so low that NOTHING
+    // fits, which exercises a store that was never usable rather than one
+    // that filled up.
+    assert!(
+        committed > 0,
+        "the ceiling must admit at least one message first"
+    );
     assert_eq!(
         store.health(),
         StorageHealth::Degraded,
