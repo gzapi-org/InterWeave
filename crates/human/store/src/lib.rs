@@ -54,6 +54,10 @@ pub use records::{
 pub use schema::{REQUIRED_TABLES, SCHEMA_VERSION};
 pub use store::{HumanStore, StoreOptions};
 
+// Re-exported so a caller acting on retention does not need a second
+// dependency to name the event it is reporting.
+pub use interweave_human_core::retention::{Durability, StorageHealth, TerminalCause};
+
 /// Everything that can go wrong with the human store.
 #[derive(Debug)]
 pub enum StoreError {

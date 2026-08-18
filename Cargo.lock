@@ -746,6 +746,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "interweave-human-retention-tests"
+version = "0.0.0"
+dependencies = [
+ "interweave-human-core",
+ "interweave-human-store",
+ "interweave-transport-api",
+ "rusqlite",
+ "tempfile",
+]
+
+[[package]]
 name = "interweave-human-store"
 version = "0.0.0"
 dependencies = [
