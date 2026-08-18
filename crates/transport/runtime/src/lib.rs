@@ -8,10 +8,15 @@
 
 #![forbid(unsafe_code)]
 
+pub mod connection_policy;
 pub mod dedup;
 pub mod endpoint_registry;
 pub mod fingerprint;
 
+pub use connection_policy::{
+    AddressState, ConnectionClass, ConnectionPolicy, DialDenial, DialOrigin, DialRequest,
+    PeerBackoff,
+};
 pub use dedup::{
     Admission, DedupCache, DedupKey, DestinationSelector, Reservation, ReservationFailure,
     ReservationMap,

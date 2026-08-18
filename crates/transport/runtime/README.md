@@ -46,3 +46,21 @@ Other properties with reasons:
 - **Time is a parameter.** Every expiring method takes `now_ms`, so TTL is tested by enumeration rather than by sleeping.
 
 `ReservationMap` closes the concurrent-duplicate race: first caller owns, matching duplicates wait and share the outcome, differing content conflicts immediately. Per-peer budget is checked *before* the global one, so one noisy peer cannot consume the whole allowance and refuse everyone else; both limits are clamped to their ceilings rather than trusted from configuration.
+
+## `connection_policy`
+
+`DialAdmissionGate` decisions, connection classes, and the two failure scopes. Pure: this answers *may this dial proceed*, and whoever asks owns the doing.
+
+**Every outbound dial, not merely the scheduled ones.** A libp2p `NetworkBehaviour` can request a dial while driving its own protocol — Kademlia's iterative queries do — so "the provider does not call the dial scheduler" is not enough. `DialOrigin` has **no exempt variant**: a value meaning "skip the gate" would recreate the hole the gate closes. A test walks every origin against an exhausted budget.
+
+**`ConnectionClass` is not a spectrum.** `ConnectivityInfrastructureOnly` is not "slightly less than trusted" — it permits reachability control and nothing else. The gate takes the origin *and* the class, so the same peer at the same address in the same instant is dialable for a relay reservation and refused for a Kademlia query (ADR-0036).
+
+**Two failure scopes, kept apart.** `AddressState` and `PeerBackoff` are separate because an attacker who injects one bogus address for a trusted peer must not turn that address's failures into peer-wide backoff while a known-good route exists. Concretely:
+
+- an **identity mismatch** quarantines the address for 30 minutes and leaves the peer's backoff untouched — that is the attack the split defeats;
+- an **address failure** advances peer backoff *only* when no other eligible known-good address remains; while one does, the problem is demonstrably the address;
+- a **success** clears the peer and that address, and deliberately does not rehabilitate other quarantined addresses — one working route says nothing about an address that authenticated the wrong identity.
+
+`preferred_addresses` is a preference, not a filter: a never-tried address sorts last but is still returned, because excluding it would make a peer whose only address is new permanently undialable. Quarantined addresses *are* omitted, and reappear when the quarantine lapses.
+
+The policy is a snapshot rather than a live query because the gate runs synchronously inside the Swarm poll and must not block on an async call while the Swarm is being driven.
