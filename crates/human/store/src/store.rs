@@ -58,6 +58,20 @@ impl HumanStore {
     /// Returns [`StoreError`] if the file cannot be opened, a migration
     /// fails, or the database contains a table ADR-0044 forbids.
     pub fn open(path: &Path, options: StoreOptions) -> Result<Self, StoreError> {
+        // Create the parent, owner-only. SQLite will not, and a caller
+        // that has to remember to mkdir first is a caller that will
+        // eventually not — the peer cache and the config writer both
+        // create their own parents, and a store that alone did not would
+        // be the one that failed on a fresh profile.
+        //
+        // Owner-only because this directory holds message content. The
+        // mode is applied at creation rather than after, so there is no
+        // window in which it is world-traversable. This duplicates three
+        // lines of `interweave-profile-config` on purpose: the store must
+        // not depend on configuration to protect its own files.
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            create_private_dir(parent)?;
+        }
         let conn = Connection::open(path)?;
         Self::from_connection(conn, options)
     }
@@ -637,6 +651,26 @@ impl HumanStore {
             StorageHealth::Healthy => Ok(()),
             StorageHealth::Degraded => Err(StoreError::Degraded),
         }
+    }
+}
+
+/// Create `dir` and its parents, readable only by the owner.
+fn create_private_dir(dir: &std::path::Path) -> Result<(), StoreError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .map_err(StoreError::Io)
+    }
+    #[cfg(not(unix))]
+    {
+        // Refusing beats creating a directory of message content this
+        // build cannot protect.
+        let _ = dir;
+        Err(StoreError::UnsupportedPlatform)
     }
 }
 

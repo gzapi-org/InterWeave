@@ -95,6 +95,13 @@ pub enum StoreError {
     Migration(String),
     /// An error from SQLite itself.
     Sql(rusqlite::Error),
+    /// The store directory could not be created.
+    Io(std::io::Error),
+    /// Owner-only permissions cannot be enforced on this platform.
+    ///
+    /// Refusing beats creating a directory of message content this build
+    /// cannot protect.
+    UnsupportedPlatform,
 }
 
 impl From<rusqlite::Error> for StoreError {
@@ -122,6 +129,11 @@ impl core::fmt::Display for StoreError {
             Self::Corrupt(detail) => write!(f, "stored row is unreadable: {detail}"),
             Self::Migration(detail) => write!(f, "schema migration failed: {detail}"),
             Self::Sql(e) => write!(f, "sqlite: {e}"),
+            Self::Io(e) => write!(f, "human store directory: {e}"),
+            Self::UnsupportedPlatform => write!(
+                f,
+                "owner-only directory permissions cannot be enforced on this platform"
+            ),
         }
     }
 }
@@ -130,6 +142,7 @@ impl core::error::Error for StoreError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Sql(e) => Some(e),
+            Self::Io(e) => Some(e),
             _ => None,
         }
     }
