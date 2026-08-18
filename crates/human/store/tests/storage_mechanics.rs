@@ -393,3 +393,46 @@ fn keeping_an_already_kept_message_is_not_an_error() {
     assert_eq!(mine.kept_at, Some(3_000));
     assert_eq!(store.health(), StorageHealth::Healthy);
 }
+
+#[test]
+fn debug_output_never_carries_a_message_body() {
+    // RETENTION.md section 8: logs, analytics, and crash reports must not
+    // become shadow message archives. A derived Debug puts the body into
+    // whatever printed it — a panic message, a tracing span — where the
+    // retention state machine has no reach, so a message deleted at read
+    // would still be sitting in a log.
+    const SECRET: &[u8] = b"the-quick-brown-fox-jumped";
+
+    let mut store = memory();
+    let out = outbound(ID_A, SECRET.to_vec());
+    let inb = inbound(ID_B, SECRET.to_vec());
+
+    let out_row = store.commit_pending_outbound(&out).expect("pending");
+    let in_row = store.commit_unread_inbound(&inb).expect("unread");
+    let pending = store.pending_outbound().expect("read");
+    let unread = store.unread_inbound().expect("read");
+    let held = store.mark_read(in_row, 1_000).expect("read");
+
+    let printed = [
+        format!("{out:?}"),
+        format!("{inb:?}"),
+        format!("{pending:?}"),
+        format!("{unread:?}"),
+        format!("{held:?}"),
+    ];
+    let secret = String::from_utf8_lossy(SECRET).into_owned();
+    for text in &printed {
+        assert!(
+            !text.contains(&secret),
+            "a message body reached Debug output: {text}"
+        );
+        assert!(
+            text.contains("redacted"),
+            "the redaction must be visible, not silent: {text}"
+        );
+    }
+    // What a debugger actually wants still survives.
+    assert!(printed[2].contains(ID_A));
+    assert!(printed[4].contains(ID_B));
+    assert_eq!(out_row.get(), pending[0].row_id.get());
+}

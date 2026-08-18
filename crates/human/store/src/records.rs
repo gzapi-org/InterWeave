@@ -103,7 +103,7 @@ pub struct InboundOrigin {
 }
 
 /// The content and metadata of a message being sent.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct NewOutbound {
     /// The HumanChatV2 application id. A retry reuses it.
     pub app_message_id: AppMessageId,
@@ -122,7 +122,7 @@ pub struct NewOutbound {
 }
 
 /// A durable pending-outbound row.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PendingOutbound {
     /// This row's local identity.
     pub row_id: RowId,
@@ -143,7 +143,7 @@ pub struct PendingOutbound {
 }
 
 /// The content and metadata of a message just received.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct NewInbound {
     /// The HumanChatV2 application id.
     pub app_message_id: AppMessageId,
@@ -158,7 +158,7 @@ pub struct NewInbound {
 }
 
 /// A durable inbound row, unread or kept.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct StoredInbound {
     /// This row's local identity.
     pub row_id: RowId,
@@ -198,7 +198,7 @@ pub struct StoredInbound {
 /// row id would still exist after a restart and would need a runtime
 /// check to refuse. Holding the content in memory makes the restart case
 /// disappear instead of being defended.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ReadEphemeral {
     pub(crate) app_message_id: AppMessageId,
     pub(crate) origin: InboundOrigin,
@@ -243,5 +243,97 @@ impl ReadEphemeral {
     #[must_use]
     pub const fn read_at(&self) -> u64 {
         self.read_at
+    }
+}
+
+// ---------------------------------------------------------------------
+// Debug that cannot become a shadow message archive
+// ---------------------------------------------------------------------
+//
+// `RETENTION.md` §8: logs, analytics, crash reports, notification
+// databases, OS backup, and search indexes must not become shadow
+// message archives. A derived `Debug` on any of these types puts the
+// message BODY into whatever printed it — a panic message, a tracing
+// span, a crash report — where the retention state machine has no reach
+// at all. A message deleted at read would still be sitting in a log.
+//
+// So the five types carrying content implement `Debug` by hand and print
+// the payload's LENGTH. Everything a debugger actually wants — which
+// message, from whom, how big, what state — survives; the one thing that
+// must not leave the store does not. Writing these out rather than
+// deriving is also what makes the omission visible: adding a field to
+// one of these structs will not silently start logging it.
+
+fn redacted(f: &mut core::fmt::Formatter<'_>, name: &str, len: usize) -> core::fmt::Result {
+    write!(f, "{name} {{ payload: <{len} bytes redacted>, ")
+}
+
+impl core::fmt::Debug for NewOutbound {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        redacted(f, "NewOutbound", self.payload.len())?;
+        write!(
+            f,
+            "app_message_id: {:?}, destination: {:?}, media_type: {:?}, created_at: {} }}",
+            self.app_message_id, self.destination, self.media_type, self.created_at
+        )
+    }
+}
+
+impl core::fmt::Debug for PendingOutbound {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        redacted(f, "PendingOutbound", self.payload.len())?;
+        write!(
+            f,
+            "row_id: {:?}, app_message_id: {:?}, destination: {:?}, media_type: {:?}, \
+             created_at: {}, last_attempt_at: {:?}, attempts: {} }}",
+            self.row_id,
+            self.app_message_id,
+            self.destination,
+            self.media_type,
+            self.created_at,
+            self.last_attempt_at,
+            self.attempts
+        )
+    }
+}
+
+impl core::fmt::Debug for NewInbound {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        redacted(f, "NewInbound", self.payload.len())?;
+        write!(
+            f,
+            "app_message_id: {:?}, origin: {:?}, media_type: {:?}, received_at: {} }}",
+            self.app_message_id, self.origin, self.media_type, self.received_at
+        )
+    }
+}
+
+impl core::fmt::Debug for StoredInbound {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        redacted(f, "StoredInbound", self.payload.len())?;
+        write!(
+            f,
+            "row_id: {:?}, app_message_id: {:?}, origin: {:?}, media_type: {:?}, \
+             received_at: {}, read_at: {:?}, kept_at: {:?} }}",
+            self.row_id,
+            self.app_message_id,
+            self.origin,
+            self.media_type,
+            self.received_at,
+            self.read_at,
+            self.kept_at
+        )
+    }
+}
+
+impl core::fmt::Debug for ReadEphemeral {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        redacted(f, "ReadEphemeral", self.payload.len())?;
+        write!(
+            f,
+            "app_message_id: {:?}, origin: {:?}, media_type: {:?}, received_at: {}, \
+             read_at: {} }}",
+            self.app_message_id, self.origin, self.media_type, self.received_at, self.read_at
+        )
     }
 }
