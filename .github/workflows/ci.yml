@@ -56,7 +56,10 @@ jobs:
     name: rust
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Pinned to a commit, not a tag. A tag is mutable by whoever owns
+      # the action, so `@v4` is a promise from a third party rather than
+      # a fact about what runs. This SHA is actions/checkout v4.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       # Installs exactly what rust-toolchain.toml pins, rustfmt and
       # clippy included. The runner's preinstalled toolchain is whatever
@@ -81,7 +84,10 @@ jobs:
     name: tree checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Pinned to a commit, not a tag. A tag is mutable by whoever owns
+      # the action, so `@v4` is a promise from a third party rather than
+      # a fact about what runs. This SHA is actions/checkout v4.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           # check_license_headers.sh and validate_adr_index.sh read the
           # working tree, not history — but scan_semantic_collisions.sh
@@ -91,7 +97,13 @@ jobs:
           fetch-depth: 1
 
       - name: Install validator dependencies
-        run: python3 -m pip install --quiet jsonschema cryptography pyyaml
+        run: |
+          # --require-hashes: every distribution is verified against
+          # tools/requirements.txt, and pip refuses the install if any
+          # package in the resolved set is unpinned. A guard that
+          # recomputes a frozen vector is only as trustworthy as the
+          # library that recomputed it.
+          python3 -m pip install --quiet --require-hashes -r tools/requirements.txt
 
       - name: ADR index, template, and amendment record
         run: bash tools/checks/validate_adr_index.sh
@@ -121,7 +133,10 @@ jobs:
     name: tool self-tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Pinned to a commit, not a tag. A tag is mutable by whoever owns
+      # the action, so `@v4` is a promise from a third party rather than
+      # a fact about what runs. This SHA is actions/checkout v4.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       # A self-test runs the real script, so this job needs whatever the
       # scripts need — the same list as tree-checks, not a shorter one.
@@ -129,7 +144,13 @@ jobs:
       # runner image that happens to ship the module and failing on one
       # that does not, which is the least debuggable form of green.
       - name: Install validator dependencies
-        run: python3 -m pip install --quiet jsonschema cryptography pyyaml
+        run: |
+          # --require-hashes: every distribution is verified against
+          # tools/requirements.txt, and pip refuses the install if any
+          # package in the resolved set is unpinned. A guard that
+          # recomputes a frozen vector is only as trustworthy as the
+          # library that recomputed it.
+          python3 -m pip install --quiet --require-hashes -r tools/requirements.txt
 
       # The suites mock `gh` and `curl` on PATH, so no token and no
       # network are used. They do need jq and coreutils `timeout`, both
