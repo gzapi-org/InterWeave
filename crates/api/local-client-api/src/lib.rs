@@ -193,7 +193,7 @@ pub struct EndpointLease {
 /// capabilities, or the client kind: a session's authority is decided when
 /// the runtime creates it, and a mutable field here would let a client
 /// widen its own grant after admission.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LocalDataSession {
     session_id: Generation,
     client_kind: String,
@@ -201,6 +201,37 @@ pub struct LocalDataSession {
     endpoint_lease: Option<EndpointLease>,
     capabilities: BTreeSet<DataCapability>,
     event_queue: usize,
+}
+
+/// The JSON shape, deserialized through the validating constructor.
+#[derive(Deserialize)]
+struct LocalDataSessionRepr {
+    session_id: Generation,
+    client_kind: String,
+    #[serde(default)]
+    endpoint_lease: Option<EndpointLease>,
+    #[serde(default)]
+    capabilities: BTreeSet<DataCapability>,
+    event_queue: usize,
+}
+
+impl<'de> Deserialize<'de> for LocalDataSession {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // Routed through `new` so the invariants hold on the serialized
+        // boundary too. A derived impl would build the struct field by
+        // field, accepting `event_queue: 0` or an empty `client_kind` —
+        // states the constructor exists to make unrepresentable, arriving
+        // by the one path that skips it.
+        let raw = LocalDataSessionRepr::deserialize(d)?;
+        Self::new(
+            raw.session_id,
+            raw.client_kind,
+            raw.endpoint_lease,
+            raw.capabilities,
+            raw.event_queue,
+        )
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 impl LocalDataSession {
@@ -530,6 +561,45 @@ mod tests {
         assert!(port.holds(AdminCapability::Shutdown));
         assert!(!port.holds(AdminCapability::Endpoints));
         assert_eq!(port.endpoint_lease(), None);
+    }
+
+    #[test]
+    fn deserialization_cannot_bypass_the_session_invariants() {
+        // The serialized boundary is where untrusted input arrives, so it
+        // is the path that most needs the constructor's checks.
+        for bad in [
+            serde_json::json!({
+                "session_id": "sess____________",
+                "client_kind": "human-client",
+                "capabilities": ["events"],
+                "event_queue": 0
+            }),
+            serde_json::json!({
+                "session_id": "sess____________",
+                "client_kind": "",
+                "capabilities": ["events"],
+                "event_queue": 256
+            }),
+            serde_json::json!({
+                "session_id": "short",
+                "client_kind": "human-client",
+                "capabilities": ["events"],
+                "event_queue": 256
+            }),
+        ] {
+            assert!(
+                serde_json::from_value::<LocalDataSession>(bad.clone()).is_err(),
+                "{bad} should not deserialize"
+            );
+        }
+
+        // A well-formed session still round-trips.
+        let s = session(Some(leased()), &[DataCapability::Events]);
+        let json = serde_json::to_value(&s).expect("ser");
+        assert_eq!(
+            serde_json::from_value::<LocalDataSession>(json).expect("de"),
+            s
+        );
     }
 
     #[test]

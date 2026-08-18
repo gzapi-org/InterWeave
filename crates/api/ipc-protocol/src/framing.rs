@@ -50,11 +50,19 @@ pub enum FrameError {
     },
     /// The body was not valid UTF-8.
     NotUtf8,
-    /// The body did not parse as a JSON object.
+    /// The body did not parse as JSON.
     NotJson {
         /// The parser's message.
         detail: String,
     },
+    /// The body parsed, but is not a JSON **object**.
+    ///
+    /// `null`, `[]`, `"x"` and `7` are all valid JSON and none is a frame:
+    /// the contract says each frame carries a UTF-8 JSON object, and every
+    /// message class is discriminated by a property. Passing a scalar
+    /// through as "successfully decoded" would defer the failure to a
+    /// layer that has no way to report a framing error.
+    NotAnObject,
 }
 
 impl core::fmt::Display for FrameError {
@@ -67,6 +75,7 @@ impl core::fmt::Display for FrameError {
             Self::Incomplete { needed } => write!(f, "{needed} more bytes needed"),
             Self::NotUtf8 => write!(f, "frame body is not valid UTF-8"),
             Self::NotJson { detail } => write!(f, "frame body is not JSON: {detail}"),
+            Self::NotAnObject => write!(f, "frame body is JSON but not an object"),
         }
     }
 }

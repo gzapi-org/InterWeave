@@ -45,6 +45,7 @@ pub enum AuthorityDomain {
 
 /// The negotiated version pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IpcVersion {
     /// Always 2 for this contract.
     pub major: u32,
@@ -54,6 +55,7 @@ pub struct IpcVersion {
 
 /// The client's self-description.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClientInfo {
     /// A hygiene label, never authentication and never an authority selector.
     pub kind: String,
@@ -64,6 +66,7 @@ pub struct ClientInfo {
 
 /// The endpoint a client is claiming.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EndpointClaim {
     /// The configured endpoint requested.
     pub id: EndpointId,
@@ -195,12 +198,31 @@ impl Hello {
             .iter()
             .any(|c| c.as_admin().is_some());
 
+        let wants_data = self
+            .requested_capabilities
+            .iter()
+            .any(|c| c.as_data().is_some());
+
         match domain {
             AuthorityDomain::Data => {
                 // The categorical rule. Not "unlikely", not "policy will
                 // probably refuse": a data connection is ineligible for
                 // admin.* regardless of what it claims to be.
                 if wants_admin {
+                    return Err(TransportError::CapabilityDenied);
+                }
+                // `endpoint` may be omitted ONLY by a read-only diagnostics
+                // client that does not need direct send/receive
+                // (LOCAL-IPC.md). `commands` is exactly the capability such
+                // a client does not need, so the pair is contradictory —
+                // and granting it would create a command-capable session
+                // with no source endpoint, which is the state ADR-0030's
+                // non-spoofable source exists to make impossible.
+                if self.endpoint.is_none()
+                    && self
+                        .requested_capabilities
+                        .contains(&RequestedCapability::Commands)
+                {
                     return Err(TransportError::CapabilityDenied);
                 }
                 if self.endpoint.is_some()
@@ -227,12 +249,17 @@ impl Hello {
                 if self.endpoint.is_some() {
                     return Err(TransportError::CapabilityDenied);
                 }
+                // And it never gets application messaging: LOCAL-IPC.md
+                // says the admin socket does not grant `events`/`commands`.
+                // REFUSED rather than filtered out, mirroring the data-side
+                // rule — silently dropping them would let an admin client
+                // believe it holds a data grant it does not, and leave the
+                // boundary depending on every later caller re-filtering.
+                if wants_data {
+                    return Err(TransportError::CapabilityDenied);
+                }
                 Ok(HandshakeOutcome {
-                    granted_data: self
-                        .requested_capabilities
-                        .iter()
-                        .filter_map(|c| c.as_data())
-                        .collect(),
+                    granted_data: BTreeSet::new(),
                     granted_admin: self
                         .requested_capabilities
                         .iter()
@@ -316,6 +343,63 @@ mod tests {
         // is what changed — not anything the client said.
         let out = h.evaluate(AuthorityDomain::Admin, false).expect("granted");
         assert!(out.granted_admin.contains(&AdminCapability::Shutdown));
+    }
+
+    #[test]
+    fn an_admin_connection_gets_no_application_messaging() {
+        // The mirror of the data-side rule, and refused rather than
+        // filtered for the same reason: an admin client must not come away
+        // believing it holds a data grant.
+        let h = hello(
+            "settings",
+            &[
+                RequestedCapability::AdminEndpoints,
+                RequestedCapability::Events,
+            ],
+            None,
+        );
+        assert_eq!(
+            h.evaluate(AuthorityDomain::Admin, false),
+            Err(TransportError::CapabilityDenied)
+        );
+
+        // Admin-only requests are unaffected.
+        let h = hello("settings", &[RequestedCapability::AdminEndpoints], None);
+        let out = h.evaluate(AuthorityDomain::Admin, false).expect("granted");
+        assert!(out.granted_data.is_empty());
+        assert!(out.granted_admin.contains(&AdminCapability::Endpoints));
+    }
+
+    #[test]
+    fn a_data_hello_wanting_commands_must_claim_an_endpoint() {
+        // `endpoint` may be omitted only by a read-only diagnostics client
+        // that does not need direct send/receive, and `commands` is
+        // precisely what such a client does not need. Granting the pair
+        // would build a command-capable session with no source endpoint.
+        let h = hello("tool", &[RequestedCapability::Commands], None);
+        assert_eq!(
+            h.evaluate(AuthorityDomain::Data, false),
+            Err(TransportError::CapabilityDenied)
+        );
+
+        // Read-only capabilities without an endpoint remain legal.
+        let h = hello(
+            "diagnostics",
+            &[
+                RequestedCapability::Events,
+                RequestedCapability::EndpointsQuery,
+            ],
+            None,
+        );
+        assert!(h.evaluate(AuthorityDomain::Data, false).is_ok());
+
+        // And with an endpoint, commands are fine.
+        let h = hello(
+            "human-client",
+            &[RequestedCapability::Commands],
+            Some("human"),
+        );
+        assert!(h.evaluate(AuthorityDomain::Data, true).is_ok());
     }
 
     #[test]

@@ -244,7 +244,15 @@ impl RoutingView {
     /// exploration loop forever.
     #[must_use]
     pub const fn next_exploration_interval_ms(&self, base_ms: u64) -> u64 {
-        let mut interval = base_ms;
+        // Clamp the BASE, not only the backed-off value. The profile
+        // permits an exploration base up to one hour, so a view with zero
+        // no-progress rounds would otherwise skip the loop entirely and
+        // return four times the cap this function promises.
+        let mut interval = if base_ms > MAX_EXPLORATION_INTERVAL_MS {
+            MAX_EXPLORATION_INTERVAL_MS
+        } else {
+            base_ms
+        };
         let mut round = 0;
         while round < self.no_progress_rounds {
             interval = interval.saturating_mul(2);
