@@ -227,7 +227,7 @@ Implement security/routing/retention logic that can be exhaustively tested witho
 ```text
 crates/transport/runtime           # ACTIVE — pure modules first
 crates/human/chat-protocol         # ACTIVE
-crates/human/core
+crates/human/core                  # ACTIVE
 ```
 
 `crates/transport/runtime` is a workspace member carrying its pure modules only: `endpoint_registry` first — leases, generations, deterministic default resolution, and the local/coarse failure split. The connection-policy and human-domain modules follow, each with its tests in the same change.

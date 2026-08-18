@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# The ADR-0044 retention state machine.
+#
+# NOTE WHAT IS ABSENT: no dependency on chat-protocol, transport-api, or
+# any store. The retention decision cannot see message content, a sender,
+# an EndpointId, or a contact — so "a remote sender cannot request or
+# force retention" is not a rule this crate follows, it is a rule the
+# dependency graph makes unstateable. It decides `Durability`; a store
+# carries it out, which is also what lets every transition be tested by
+# enumeration.
+[package]
+name = "interweave-human-core"
+version = "0.0.0"
+publish = false
+description = "Human client domain state: the ADR-0044 message retention state machine."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }
