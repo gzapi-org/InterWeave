@@ -277,34 +277,6 @@ const STRICTER_THAN_SCHEMA: &[(&str, &str, &str)] = &[];
 ///
 /// Each entry is `(boundary, exact label, what is wrong)`.
 const KNOWN_DISAGREEMENTS: &[(&str, &str, &str)] = &[
-    // decode_frame parses to `serde_json::Value` and discards it without
-    // checking `is_object`. `FrameError::NotAnObject` exists, with a doc
-    // comment naming these five inputs, and is never constructed.
-    (
-        "ipc.frame",
-        "root is a JSON null, not an object",
-        "NotAnObject never constructed",
-    ),
-    (
-        "ipc.frame",
-        "root is a JSON array, not an object",
-        "NotAnObject never constructed",
-    ),
-    (
-        "ipc.frame",
-        "root is a JSON number, not an object",
-        "NotAnObject never constructed",
-    ),
-    (
-        "ipc.frame",
-        "root is a JSON string, not an object",
-        "NotAnObject never constructed",
-    ),
-    (
-        "ipc.frame",
-        "root is a JSON boolean, not an object",
-        "NotAnObject never constructed",
-    ),
     // Both arrays deserialize straight into `BTreeSet`, so duplicates are
     // gone before `evaluate` counts them: nine repeats become one member.
     (
