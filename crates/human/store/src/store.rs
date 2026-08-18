@@ -498,11 +498,23 @@ impl HumanStore {
             ));
         }
 
-        let result = self.conn.execute(
+        // ON CONFLICT because the state machine treats keeping an
+        // already-kept message as fine, and a UI can produce a second
+        // Keep from one double-click. Failing here would make the store
+        // stricter than the contract it implements.
+        // RETURNING rather than last_insert_rowid(): that counter is not
+        // updated when an upsert takes the UPDATE path, so it would hand
+        // back whichever row was inserted most recently — a different
+        // message's id, if anything was committed in between.
+        let result = self.conn.query_row(
             "INSERT INTO kept_inbound
                  (app_message_id, source_peer, source_endpoint, channel_id,
                   media_type, payload, received_at, read_at, kept_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(app_message_id) DO UPDATE SET
+                 read_at = excluded.read_at,
+                 kept_at = excluded.kept_at
+             RETURNING row_id",
             params![
                 held.app_message_id.as_str(),
                 held.origin.peer.as_str(),
@@ -514,10 +526,11 @@ impl HumanStore {
                 i64::try_from(held.read_at).unwrap_or(i64::MAX),
                 i64::try_from(at_ms).unwrap_or(i64::MAX),
             ],
+            |r| r.get::<_, i64>(0),
         );
 
         match result {
-            Ok(_) => Ok(RowId::new(self.conn.last_insert_rowid())),
+            Ok(row_id) => Ok(RowId::new(row_id)),
             Err(e) => Err(self.note_failure(e)),
         }
     }

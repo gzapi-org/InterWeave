@@ -357,3 +357,39 @@ fn a_stale_row_id_cannot_read_a_later_message() {
         "the unread message must survive"
     );
 }
+
+#[test]
+fn keeping_an_already_kept_message_is_not_an_error() {
+    // The state machine says keeping a kept message is fine, and a UI can
+    // produce a second Keep from one double-click. A store stricter than
+    // the contract it implements would surface that as a storage failure.
+    let mut store = memory();
+    let row = store
+        .commit_unread_inbound(&inbound(ID_A, b"body".to_vec()))
+        .expect("commit");
+    let held = store.mark_read(row, 1_000).expect("read");
+
+    let first = store.keep(&held, 2_000).expect("keep");
+
+    // Something else lands in between. Without this the second keep would
+    // pass while returning the wrong id, because last_insert_rowid() is
+    // not updated by an upsert that takes the UPDATE path.
+    let other = store
+        .commit_unread_inbound(&inbound(ID_B, b"other".to_vec()))
+        .expect("other");
+    let other_held = store.mark_read(other, 2_500).expect("read other");
+    let other_kept = store.keep(&other_held, 2_600).expect("keep other");
+
+    let second = store.keep(&held, 3_000).expect("keep again");
+    assert_eq!(first, second, "the same message, not a second copy");
+    assert_ne!(second, other_kept, "and not some other message's row");
+
+    let kept = store.kept_inbound().expect("read");
+    assert_eq!(kept.len(), 2);
+    let mine = kept
+        .iter()
+        .find(|r| r.app_message_id.as_str() == ID_A)
+        .expect("still there");
+    assert_eq!(mine.kept_at, Some(3_000));
+    assert_eq!(store.health(), StorageHealth::Healthy);
+}
