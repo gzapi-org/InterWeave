@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# The durable side of ADR-0044. `interweave-human-core` decides
+# `Durability`; this crate is the thing that carries it out, and the split
+# is what lets the decision be tested by enumeration and the storage be
+# tested against a real file that gets reopened.
+#
+# THREE CONTENT TABLES, and no fourth. `pending_outbound`, `unread_inbound`,
+# `kept_inbound` — there is deliberately no `messages` or
+# `conversation_history` table, because a general history table is the
+# shape the retention contract exists to forbid, and one added "for the
+# UI" would violate it silently.
+[package]
+name = "interweave-human-store"
+version = "0.0.0"
+publish = false
+description = "Durable ADR-0044 retention storage for the InterWeave human client."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+interweave-human-core = { path = "../core" }
+interweave-transport-api = { path = "../../api/transport-api" }
+# Bundled on purpose: the desktop and Android clients must run the SAME
+# SQLite, and a system library makes the storage engine a property of the
+# host rather than of the release. `default-features = false` drops the
+# WASM shim the 0.40 default pulls in.
+rusqlite = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
