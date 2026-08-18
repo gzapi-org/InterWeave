@@ -807,6 +807,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "interweave-persistence-gate-tests"
+version = "0.0.0"
+dependencies = [
+ "interweave-discovery-cache",
+ "interweave-human-core",
+ "interweave-human-store",
+ "interweave-profile-config",
+ "interweave-transport-api",
+ "tempfile",
+]
+
+[[package]]
 name = "interweave-profile-config"
 version = "0.0.0"
 dependencies = [

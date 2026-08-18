@@ -20,6 +20,7 @@ members = [
     "crates/transport/runtime",
     "crates/api/trust-api",
     "tests/human-retention",
+    "tests/persistence-gate",
     "tests/support",
     "tests/transport-contract",
     "xtask",
