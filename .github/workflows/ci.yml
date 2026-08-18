@@ -102,6 +102,9 @@ jobs:
       - name: Licence headers and foreign licence terms
         run: bash tools/checks/check_license_headers.sh
 
+      - name: Stage status agrees across the tree
+        run: bash tools/checks/check_stage_status.sh
+
       - name: Wire contracts — schema, manifest, provenance
         run: python3 tools/checks/validate_contracts.py
 

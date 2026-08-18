@@ -77,6 +77,11 @@ fn tree_checks() -> Vec<Task> {
             &["tools/checks/check_license_headers.sh"],
         ),
         Task::new(
+            "stage status agrees across the tree",
+            "bash",
+            &["tools/checks/check_stage_status.sh"],
+        ),
+        Task::new(
             "wire contracts — schema, manifest, provenance",
             "python3",
             &["tools/checks/validate_contracts.py"],
