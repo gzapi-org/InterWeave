@@ -265,7 +265,7 @@ fn boundaries() -> Vec<Boundary> {
 /// send is an interoperability failure that only shows up in the field.
 const STRICTER_THAN_SCHEMA: &[(&str, &str, &str)] = &[];
 
-/// Defects this harness found on first run, still outstanding.
+/// Known disagreements, currently none.
 ///
 /// # This list may only shrink
 ///
@@ -275,20 +275,16 @@ const STRICTER_THAN_SCHEMA: &[(&str, &str, &str)] = &[];
 /// list fails immediately — the list is an inventory of known debt, never
 /// a way to admit more.
 ///
+/// It was seeded with the twenty defects the harness found on its first
+/// run and is now empty. Adding an entry means accepting that a boundary
+/// admits what its contract forbids, which needs a reason good enough to
+/// write down next to it.
+///
 /// Each entry is `(boundary, exact label, what is wrong)`.
 const KNOWN_DISAGREEMENTS: &[(&str, &str, &str)] = &[
-    // Both arrays deserialize straight into `BTreeSet`, so duplicates are
-    // gone before `evaluate` counts them: nine repeats become one member.
-    // `evaluate` checks the client kind's length and the collection
-    // sizes, and no individual string beyond that.
-    // A missing property is absence; `null` is a value, and no schema
-    // here includes it in any type.
-    // Found by this harness, not previously reported. The schema's own
-    // description says `additionalProperties: false` is what stops an
-    // EndpointId or presence field being added to discovery "as an
-    // obvious convenience" — and the Rust type does not enforce it.
-    // The same BTreeSet defect as hello, in a different crate: 65
-    // duplicate addresses collapse to one before `validate` counts them.
+    // EMPTY, and it should stay that way. Every one of the twenty
+    // disagreements this harness found on its first run has been fixed;
+    // an entry here is debt, not a place to put a failing case.
 ];
 
 fn known(boundary: &str, label: &str) -> bool {
