@@ -12,6 +12,7 @@ members = [
     "crates/api/kademlia-control-api",
     "crates/api/local-client-api",
     "crates/api/transport-api",
+    "crates/config/profile-config",
     "crates/api/trust-api",
     "tests/support",
     "xtask",

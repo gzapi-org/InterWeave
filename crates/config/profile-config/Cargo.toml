@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# Configuration-v2 structures and cross-field validation. Depends on the
+# neutral contracts it configures, and on nothing that reads a file: the
+# format and the source are separate concerns, and a crate that knew about
+# paths would tie the rules to one deployment's layout.
+[package]
+name = "interweave-profile-config"
+version = "0.0.0"
+publish = false
+description = "InterWeave profile configuration v2 structures and cross-field validation."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+interweave-transport-api = { path = "../../api/transport-api" }
+interweave-trust-api = { path = "../../api/trust-api" }
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }
