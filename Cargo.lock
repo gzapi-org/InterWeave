@@ -12,6 +12,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "interweave-ipc-protocol"
+version = "0.0.0"
+dependencies = [
+ "interweave-local-client-api",
+ "interweave-transport-api",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "interweave-local-client-api"
 version = "0.0.0"
 dependencies = [
