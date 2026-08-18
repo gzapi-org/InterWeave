@@ -728,6 +728,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "interweave-discovery-cache"
+version = "0.0.0"
+dependencies = [
+ "interweave-discovery-api",
+ "interweave-transport-api",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "interweave-human-chat-protocol"
 version = "0.0.0"
 dependencies = [

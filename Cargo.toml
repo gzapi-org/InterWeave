@@ -13,6 +13,7 @@ members = [
     "crates/api/local-client-api",
     "crates/api/transport-api",
     "crates/config/profile-config",
+    "crates/discovery/cache",
     "crates/human/chat-protocol",
     "crates/human/core",
     "crates/human/store",
