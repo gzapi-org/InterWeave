@@ -27,6 +27,16 @@ use serde::{Deserialize, Serialize};
 pub const IPC_MAJOR: u32 = 2;
 /// Maximum requested capabilities or negotiated features.
 pub const MAX_REQUESTED: usize = 8;
+
+/// Maximum bytes in one negotiated feature name.
+///
+/// `ipc/hello.schema.json` states `minLength: 1, maxLength: 64` on each
+/// feature. The lower bound matters as much as the upper: an empty
+/// feature name is a request for nothing that still consumes a slot.
+pub const MAX_FEATURE_BYTES: usize = 64;
+
+/// Maximum bytes in the optional client version string.
+pub const MAX_CLIENT_VERSION_BYTES: usize = 128;
 /// The feature name a client negotiates for keepalive.
 pub const FEATURE_KEEPALIVE: &str = "keepalive";
 
@@ -87,10 +97,18 @@ pub struct Hello {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<EndpointClaim>,
     /// Capabilities **requested**, not granted.
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeSet::is_empty",
+        deserialize_with = "wire_set"
+    )]
     pub requested_capabilities: BTreeSet<RequestedCapability>,
     /// Optional negotiated features, e.g. `keepalive`.
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeSet::is_empty",
+        deserialize_with = "wire_feature_set"
+    )]
     pub features: BTreeSet<String>,
 }
 
@@ -160,6 +178,76 @@ pub struct HandshakeOutcome {
     pub granted_admin: BTreeSet<AdminCapability>,
     /// The endpoint to attempt a lease for, if any.
     pub endpoint: Option<EndpointId>,
+}
+
+/// Deserialize a wire array into a set, enforcing the WIRE cardinality
+/// first.
+///
+/// # Why this cannot be `BTreeSet` directly
+///
+/// Collecting into a set during deserialization destroys the evidence
+/// the contract is about. `ipc/hello.schema.json` declares `uniqueItems:
+/// true` and `maxItems: 8`; nine copies of one capability violate both,
+/// and both violations vanish the instant serde inserts them into a set —
+/// `evaluate` then counts one member and admits a frame every conforming
+/// validator refuses.
+///
+/// So the sequence is read as a `Vec`, judged as it arrived, and only
+/// then collected.
+fn wire_set<'de, D, T>(deserializer: D) -> Result<BTreeSet<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de> + Ord,
+{
+    use serde::de::Error as _;
+    let items = Vec::<T>::deserialize(deserializer)?;
+    if items.len() > MAX_REQUESTED {
+        return Err(D::Error::custom(format!(
+            "at most {MAX_REQUESTED} entries, got {}",
+            items.len()
+        )));
+    }
+    let count = items.len();
+    let set: BTreeSet<T> = items.into_iter().collect();
+    // Compared after collecting: a shorter set means the wire array
+    // repeated something, which `uniqueItems: true` forbids. This is the
+    // whole point of the detour through `Vec` — after the collect, the
+    // duplicate is unrecoverable.
+    if set.len() != count {
+        return Err(D::Error::custom(
+            "requested_capabilities must be unique on the wire",
+        ));
+    }
+    Ok(set)
+}
+
+/// The same, plus the per-name length bounds the schema states.
+fn wire_feature_set<'de, D>(deserializer: D) -> Result<BTreeSet<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    let items = Vec::<String>::deserialize(deserializer)?;
+    if items.len() > MAX_REQUESTED {
+        return Err(D::Error::custom(format!(
+            "at most {MAX_REQUESTED} features, got {}",
+            items.len()
+        )));
+    }
+    for name in &items {
+        if name.is_empty() || name.len() > MAX_FEATURE_BYTES {
+            return Err(D::Error::custom(format!(
+                "feature names are 1..={MAX_FEATURE_BYTES} bytes, got {}",
+                name.len()
+            )));
+        }
+    }
+    let count = items.len();
+    let set: BTreeSet<String> = items.into_iter().collect();
+    if set.len() != count {
+        return Err(D::Error::custom("features must be unique"));
+    }
+    Ok(set)
 }
 
 impl Hello {
@@ -500,5 +588,45 @@ mod tests {
             "client": { "kind": "x" }
         });
         assert!(serde_json::from_value::<Hello>(json).is_err());
+    }
+    #[test]
+    fn wire_duplicates_are_refused_before_the_set_hides_them() {
+        // Nine copies violate both `uniqueItems` and `maxItems: 8`, and
+        // both violations vanish the instant serde collects into a set.
+        // The check has to happen on the sequence or not at all.
+        let nine = r#"{"type":"hello","ipc_version":{"major":2,"minor":0},
+            "client":{"kind":"human-client"},
+            "requested_capabilities":["events","events","events","events",
+            "events","events","events","events","events"]}"#;
+        assert!(serde_json::from_str::<Hello>(nine).is_err());
+
+        let two = r#"{"type":"hello","ipc_version":{"major":2,"minor":0},
+            "client":{"kind":"human-client"},
+            "requested_capabilities":["events","events"]}"#;
+        assert!(
+            serde_json::from_str::<Hello>(two).is_err(),
+            "a duplicate within the cap is still a duplicate"
+        );
+
+        let ok = r#"{"type":"hello","ipc_version":{"major":2,"minor":0},
+            "client":{"kind":"human-client"},
+            "requested_capabilities":["events","commands"]}"#;
+        assert!(serde_json::from_str::<Hello>(ok).is_ok());
+    }
+
+    #[test]
+    fn feature_names_outside_their_bounds_are_refused() {
+        let with = |f: &str| {
+            format!(
+                r#"{{"type":"hello","ipc_version":{{"major":2,"minor":0}},
+                "client":{{"kind":"human-client"}},"features":["{f}"]}}"#
+            )
+        };
+        assert!(serde_json::from_str::<Hello>(&with("")).is_err(), "empty");
+        assert!(
+            serde_json::from_str::<Hello>(&with(&"x".repeat(MAX_FEATURE_BYTES + 1))).is_err(),
+            "over maxLength"
+        );
+        assert!(serde_json::from_str::<Hello>(&with(&"x".repeat(MAX_FEATURE_BYTES))).is_ok());
     }
 }

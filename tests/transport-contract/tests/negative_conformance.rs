@@ -279,38 +279,8 @@ const STRICTER_THAN_SCHEMA: &[(&str, &str, &str)] = &[];
 const KNOWN_DISAGREEMENTS: &[(&str, &str, &str)] = &[
     // Both arrays deserialize straight into `BTreeSet`, so duplicates are
     // gone before `evaluate` counts them: nine repeats become one member.
-    (
-        "ipc.hello",
-        "/features repeats an item",
-        "BTreeSet dedupes before the cardinality check",
-    ),
-    (
-        "ipc.hello",
-        "/features has 9 copies of one item, over maxItems",
-        "BTreeSet dedupes before the cardinality check",
-    ),
-    (
-        "ipc.hello",
-        "/requested_capabilities repeats an item",
-        "BTreeSet dedupes before the cardinality check",
-    ),
-    (
-        "ipc.hello",
-        "/requested_capabilities has 9 copies of one item, over maxItems",
-        "BTreeSet dedupes before the cardinality check",
-    ),
     // `evaluate` checks the client kind's length and the collection
     // sizes, and no individual string beyond that.
-    (
-        "ipc.hello",
-        "/features/0 is one over maxLength 64",
-        "feature names unvalidated",
-    ),
-    (
-        "ipc.hello",
-        "/features/0 is one under minLength 1",
-        "feature names unvalidated",
-    ),
     (
         "ipc.hello",
         "/client/version is one over maxLength 128",
