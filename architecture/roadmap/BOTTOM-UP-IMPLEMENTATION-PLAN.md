@@ -226,7 +226,7 @@ Implement security/routing/retention logic that can be exhaustively tested witho
 
 ```text
 crates/transport/runtime           # ACTIVE — pure modules first
-crates/human/chat-protocol
+crates/human/chat-protocol         # ACTIVE
 crates/human/core
 ```
 
