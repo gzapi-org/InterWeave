@@ -386,12 +386,36 @@ deserialize_via_parse!(TransportIdentity);
 /// never fan-out (ADR-0030). The distinction is preserved in the type so
 /// no call site can express "broadcast to all endpoints" by omission.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// CLOSED. An unknown property here is how a caller would try to smuggle
+// a second destination, a source claim, or a fan-out hint into a type
+// whose entire purpose is resolving to exactly ONE endpoint.
+#[serde(deny_unknown_fields)]
 pub struct DirectDestination {
     /// The remote transport identity.
     pub peer: TransportIdentity,
     /// The remote endpoint, or `None` for its configured default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// Absent or an EndpointId. NOT `null`: absence means the receiver's
+    /// configured default, and an explicit null would be a third state
+    /// the contract does not define — on a type where the difference
+    /// decides where a message goes.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "absent_or_endpoint"
+    )]
     pub endpoint: Option<EndpointId>,
+}
+
+/// An optional EndpointId that may be ABSENT but never explicitly `null`.
+fn absent_or_endpoint<'de, D>(deserializer: D) -> Result<Option<EndpointId>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    Option::<EndpointId>::deserialize(deserializer)?
+        .map(Some)
+        .ok_or_else(|| D::Error::custom("must be an endpoint id or omitted entirely, not null"))
 }
 
 impl DirectDestination {
@@ -573,5 +597,25 @@ mod tests {
             TransportIdentity::parse("p".repeat(257)),
             Err(IdError::TooLong { got: 257, max: 256 })
         );
+    }
+    #[test]
+    fn a_direct_destination_refuses_unknown_fields_and_explicit_null() {
+        // On a type whose whole purpose is resolving to exactly one
+        // endpoint, an unknown property is how a caller smuggles in a
+        // second destination or a source claim, and an explicit null is a
+        // third state that decides where a message goes.
+        let closed = format!(r#"{{"peer":"{TEST_PEER}","fanout":true}}"#);
+        assert!(serde_json::from_str::<DirectDestination>(&closed).is_err());
+
+        let nulled = format!(r#"{{"peer":"{TEST_PEER}","endpoint":null}}"#);
+        assert!(serde_json::from_str::<DirectDestination>(&nulled).is_err());
+
+        // Omitted still means the configured default, and a named
+        // endpoint still parses.
+        let omitted = format!(r#"{{"peer":"{TEST_PEER}"}}"#);
+        let d: DirectDestination = serde_json::from_str(&omitted).expect("parses");
+        assert_eq!(d.endpoint, None);
+        let named = format!(r#"{{"peer":"{TEST_PEER}","endpoint":"human"}}"#);
+        assert!(serde_json::from_str::<DirectDestination>(&named).is_ok());
     }
 }

@@ -289,16 +289,6 @@ const KNOWN_DISAGREEMENTS: &[(&str, &str, &str)] = &[
     // obvious convenience" — and the Rust type does not enforce it.
     // The same BTreeSet defect as hello, in a different crate: 65
     // duplicate addresses collapse to one before `validate` counts them.
-    (
-        "endpoints.direct-destination",
-        "<root> is closed but carries an unknown property",
-        "no deny_unknown_fields",
-    ),
-    (
-        "endpoints.direct-destination",
-        "/endpoint is explicit null rather than absent",
-        "null read as absence",
-    ),
 ];
 
 fn known(boundary: &str, label: &str) -> bool {
