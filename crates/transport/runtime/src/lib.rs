@@ -28,4 +28,4 @@ pub use endpoint_registry::{
 };
 pub use fingerprint::{ContentFingerprint, FingerprintError, direct_content_fingerprint_v1};
 pub use ingress::{IngressDenial, IngressLimiter, SubscriptionRegistry};
-pub use reply_token::{ReplyResolution, ReplyRoute, ReplyTokenTable};
+pub use reply_token::{DuplicateToken, ReplyResolution, ReplyRoute, ReplyTokenTable};
