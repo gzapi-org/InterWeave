@@ -287,28 +287,8 @@ const KNOWN_DISAGREEMENTS: &[(&str, &str, &str)] = &[
     // description says `additionalProperties: false` is what stops an
     // EndpointId or presence field being added to discovery "as an
     // obvious convenience" — and the Rust type does not enforce it.
-    (
-        "discovery.candidate-peer",
-        "<root> is closed but carries an unknown property",
-        "no deny_unknown_fields on the type the schema relies on being closed",
-    ),
     // The same BTreeSet defect as hello, in a different crate: 65
     // duplicate addresses collapse to one before `validate` counts them.
-    (
-        "discovery.candidate-peer",
-        "/addresses repeats an item",
-        "BTreeSet dedupes before the cardinality check",
-    ),
-    (
-        "discovery.candidate-peer",
-        "/addresses has 65 copies of one item, over maxItems",
-        "BTreeSet dedupes before the cardinality check",
-    ),
-    (
-        "discovery.candidate-peer",
-        "/expires_at is explicit null rather than absent",
-        "null read as absence",
-    ),
     (
         "endpoints.direct-destination",
         "<root> is closed but carries an unknown property",

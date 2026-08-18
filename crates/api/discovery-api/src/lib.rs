@@ -116,6 +116,13 @@ pub struct ProtocolObservation {
 /// Produced by providers, consumed only by `DiscoveryManager`. Holding one
 /// implies nothing about trust, reachability now, or willingness to talk.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// CLOSED, because this schema's own description says so:
+// `additionalProperties: false` is what stops an EndpointId, a ChannelId,
+// a membership record, or a presence flag being added to a candidate
+// "as an obvious convenience". Discovery is exactly where such a field
+// would leak routing or presence to anyone who can query, and the type
+// that was relied on to refuse one was accepting it.
+#[serde(deny_unknown_fields)]
 pub struct CandidatePeer {
     /// The peer this candidate is about.
     pub peer_id: TransportIdentity,
@@ -125,6 +132,11 @@ pub struct CandidatePeer {
     /// here would put libp2p's address grammar into a neutral contract.
     /// A `BTreeSet` because the schema declares a set — duplicates would
     /// consume the cap without adding information.
+    ///
+    /// Deserialized through the wire sequence rather than straight into
+    /// the set: collecting first destroys the duplicate, and `validate`
+    /// would then count one address where sixty-five arrived.
+    #[serde(deserialize_with = "wire_address_set")]
     pub addresses: BTreeSet<String>,
     /// Which provider observed it.
     pub source: String,
@@ -135,11 +147,52 @@ pub struct CandidatePeer {
     /// `None` means the provider does not express expiry, not that the
     /// candidate never expires. `DiscoveryManager` applies its own bound in
     /// that case rather than treating the observation as permanent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "absent_or_u64"
+    )]
     pub expires_at: Option<u64>,
     /// Bounded advisory protocol facts.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub protocol_observations: BTreeSet<ProtocolObservation>,
+}
+
+/// Read the wire array, judge it as it arrived, then collect.
+///
+/// `uniqueItems: true` and `maxItems: 64` are properties of the ARRAY.
+/// Collecting into a `BTreeSet` during deserialization erases both, and
+/// the check in [`CandidatePeer::validate`] then runs against a
+/// collection that no longer resembles what was sent.
+fn wire_address_set<'de, D>(deserializer: D) -> Result<BTreeSet<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    let items = Vec::<String>::deserialize(deserializer)?;
+    if items.len() > MAX_ADDRESSES {
+        return Err(D::Error::custom(format!(
+            "at most {MAX_ADDRESSES} addresses, got {}",
+            items.len()
+        )));
+    }
+    let count = items.len();
+    let set: BTreeSet<String> = items.into_iter().collect();
+    if set.len() != count {
+        return Err(D::Error::custom("addresses must be unique on the wire"));
+    }
+    Ok(set)
+}
+
+/// An optional integer that may be ABSENT but never explicitly `null`.
+fn absent_or_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    Option::<u64>::deserialize(deserializer)?
+        .map(Some)
+        .ok_or_else(|| D::Error::custom("must be an integer or omitted entirely, not null"))
 }
 
 impl CandidatePeer {
@@ -491,5 +544,60 @@ mod tests {
             serde_json::from_value::<CandidatePeer>(json).expect("de"),
             c
         );
+    }
+    #[test]
+    fn a_candidate_refuses_the_fields_discovery_must_never_carry() {
+        // The schema is closed precisely so an EndpointId or a presence
+        // flag cannot be added to a candidate as a convenience. The type
+        // has to refuse them or that reasoning is decoration.
+        for extra in [
+            r#""endpoint_id":"human""#,
+            r#""channel_id":"c1""#,
+            r#""presence":"online""#,
+            r#""trusted":true"#,
+        ] {
+            let json = format!(
+                r#"{{"peer_id":"{P1}","addresses":["/ip4/10.0.0.1/tcp/4001"],
+                "source":"peer-cache","observed_at":1,{extra}}}"#
+            );
+            assert!(
+                serde_json::from_str::<CandidatePeer>(&json).is_err(),
+                "discovery must refuse {extra}"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_wire_addresses_are_refused_before_the_set_hides_them() {
+        // Sixty-five duplicates collapse to one member, and validate()
+        // would then count one address where sixty-five arrived.
+        let many = vec![r#""/ip4/10.0.0.1/tcp/4001""#; MAX_ADDRESSES + 1].join(",");
+        let json = format!(
+            r#"{{"peer_id":"{P1}","addresses":[{many}],
+            "source":"peer-cache","observed_at":1}}"#
+        );
+        assert!(serde_json::from_str::<CandidatePeer>(&json).is_err());
+
+        let two = r#""/ip4/10.0.0.1/tcp/4001","/ip4/10.0.0.1/tcp/4001""#;
+        let json = format!(
+            r#"{{"peer_id":"{P1}","addresses":[{two}],
+            "source":"peer-cache","observed_at":1}}"#
+        );
+        assert!(
+            serde_json::from_str::<CandidatePeer>(&json).is_err(),
+            "a duplicate within the cap is still a duplicate"
+        );
+    }
+
+    #[test]
+    fn an_explicit_null_expiry_is_not_absence() {
+        // `None` means the provider does not express expiry. An explicit
+        // null is a value the schema does not permit, and reading it as
+        // "no expiry" would let a malformed record become a permanent one.
+        let json = format!(
+            r#"{{"peer_id":"{P1}","addresses":["/ip4/10.0.0.1/tcp/4001"],
+            "source":"peer-cache","observed_at":1,"expires_at":null}}"#
+        );
+        assert!(serde_json::from_str::<CandidatePeer>(&json).is_err());
     }
 }
