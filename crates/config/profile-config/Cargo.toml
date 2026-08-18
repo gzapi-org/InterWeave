@@ -1,10 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Andrea Benetton
 #
-# Configuration-v2 structures and cross-field validation. Depends on the
-# neutral contracts it configures, and on nothing that reads a file: the
-# format and the source are separate concerns, and a crate that knew about
-# paths would tie the rules to one deployment's layout.
+# Configuration-v2 structures, cross-field validation, and — since Stage 3
+# — the profile path layout and the atomic owner-only writes beneath it.
+#
+# The Stage 1 comment here argued that a crate knowing about paths would
+# tie the validation rules to one deployment's layout. That argument was
+# about a DEPENDENCY, and it still holds: `paths` and `persist` are leaf
+# modules, and the validation in `lib.rs` references neither. Nothing that
+# decides whether a config is legal can see where it came from. What
+# changed is only that the layout now lives beside the format instead of
+# in a crate of its own with two modules in it.
 [package]
 name = "interweave-profile-config"
 version = "0.0.0"
@@ -25,3 +31,4 @@ serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+tempfile = { workspace = true }
