@@ -16,7 +16,8 @@ pub mod ingress;
 pub mod reply_token;
 
 pub use connection_policy::{
-    AddressState, ConnectionClass, ConnectionPolicy, DialDenial, DialOrigin, DialRequest,
+    AddressState, ConnectionClass, ConnectionPolicy, DEFAULT_IDLE_TTL_MS,
+    DEFAULT_MAX_ADDRESS_ENTRIES, DEFAULT_MAX_PEER_ENTRIES, DialDenial, DialOrigin, DialRequest,
     PeerBackoff,
 };
 pub use dedup::{

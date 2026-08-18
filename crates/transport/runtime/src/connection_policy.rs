@@ -37,6 +37,30 @@ use interweave_transport_api::TransportIdentity;
 /// Default quarantine for an address that authenticated the wrong PeerId.
 pub const IDENTITY_MISMATCH_QUARANTINE_MS: u64 = 30 * 60 * 1000;
 
+/// Maximum retained `(peer, address)` state entries.
+///
+/// Generous, because the cost of an entry is small and the cost of
+/// forgetting a quarantine is not. The bound exists so the map cannot
+/// grow with the number of addresses an adversary can name — CLAUDE.md
+/// section 6 requires every map here to be bounded, and this one was not.
+pub const DEFAULT_MAX_ADDRESS_ENTRIES: usize = 8_192;
+
+/// Maximum retained peer-backoff entries.
+///
+/// Matches the configuration ceiling on allowed peers: a peer must be
+/// authorized before it can be dialed at all, so the number of peers that
+/// can ever be in backoff is bounded by the allowlist. Aligning the two
+/// means this cap is only reached in a configuration that was already at
+/// its own limit.
+pub const DEFAULT_MAX_PEER_ENTRIES: usize = 4_096;
+
+/// How long a non-punitive entry survives untouched.
+///
+/// One hour. Long enough to keep "known-good" useful across a normal
+/// session, short enough that a peer set churning through addresses does
+/// not accumulate them forever.
+pub const DEFAULT_IDLE_TTL_MS: u64 = 60 * 60 * 1000;
+
 /// What a peer is authorized to do, computed locally.
 ///
 /// Not a spectrum. `ConnectivityInfrastructureOnly` is emphatically not
@@ -121,6 +145,14 @@ pub enum DialDenial {
     TooManyPendingDials,
     /// The global connection budget is exhausted.
     ConnectionLimitReached,
+    /// Policy state is full of live suppressions and cannot take more.
+    ///
+    /// Fails CLOSED. The alternative is evicting a live quarantine to
+    /// make room, which is attacker-controlled: anyone able to provoke
+    /// evictions could flood the table to clear their own. A table that
+    /// is entirely live suppressions already describes a hostile peer
+    /// set, so denying is the honest answer.
+    PolicyStateFull,
 }
 
 /// Address-scoped reachability and authentication state.
@@ -130,6 +162,12 @@ pub enum DialDenial {
 pub struct AddressState {
     /// Consecutive failures for this address.
     pub consecutive_failures: u32,
+    /// When this entry was last written.
+    ///
+    /// Drives pruning. Without it the map has no notion of an entry that
+    /// stopped mattering, and "bounded" would depend on the peer set
+    /// never changing.
+    pub last_touched_ms: u64,
     /// When this address last authenticated successfully.
     ///
     /// The field that makes "prefer known-good" possible: an address that
@@ -152,6 +190,21 @@ impl AddressState {
     pub const fn is_known_good(&self) -> bool {
         self.last_success_ms.is_some()
     }
+
+    /// Whether this entry is currently PROTECTING something.
+    ///
+    /// A live quarantine, or a failure count that is shaping retries.
+    /// Such an entry must never be evicted to make room: dropping it
+    /// restores a route the policy had decided to suppress, and an
+    /// attacker who can cause evictions could then clear their own
+    /// quarantine by flooding the table.
+    #[must_use]
+    pub fn is_punitive_at(&self, now_ms: u64) -> bool {
+        self.consecutive_failures > 0
+            || self
+                .quarantined_until_ms
+                .is_some_and(|until| now_ms < until)
+    }
 }
 
 /// Peer-scoped punitive backoff.
@@ -159,6 +212,8 @@ impl AddressState {
 pub struct PeerBackoff {
     /// Consecutive peer-scoped failures.
     pub consecutive_failures: u32,
+    /// When this entry was last written.
+    pub last_touched_ms: u64,
     /// In backoff until this time.
     pub until_ms: Option<u64>,
 }
@@ -168,6 +223,12 @@ impl PeerBackoff {
     #[must_use]
     pub fn is_clear_at(&self, now_ms: u64) -> bool {
         self.until_ms.is_none_or(|until| now_ms >= until)
+    }
+
+    /// Whether this entry is currently suppressing dials.
+    #[must_use]
+    pub fn is_punitive_at(&self, now_ms: u64) -> bool {
+        !self.is_clear_at(now_ms)
     }
 }
 
@@ -182,10 +243,16 @@ type AddressKey = (TransportIdentity, String);
 /// A snapshot rather than a live query because the gate runs synchronously
 /// inside the Swarm poll: it must not block on an async policy call while
 /// the Swarm is being driven (ADR-0011).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ConnectionPolicy {
     addresses: BTreeMap<AddressKey, AddressState>,
     peers: BTreeMap<TransportIdentity, PeerBackoff>,
+    /// Maximum address entries retained.
+    pub max_addresses: usize,
+    /// Maximum peer-backoff entries retained.
+    pub max_peers: usize,
+    /// How long a non-punitive entry survives without being touched.
+    pub idle_ttl_ms: u64,
     /// Currently pending dials.
     pub pending_dials: usize,
     /// Currently established connections.
@@ -198,6 +265,23 @@ pub struct ConnectionPolicy {
     pub shutting_down: bool,
 }
 
+impl Default for ConnectionPolicy {
+    fn default() -> Self {
+        Self {
+            addresses: BTreeMap::new(),
+            peers: BTreeMap::new(),
+            max_addresses: DEFAULT_MAX_ADDRESS_ENTRIES,
+            max_peers: DEFAULT_MAX_PEER_ENTRIES,
+            idle_ttl_ms: DEFAULT_IDLE_TTL_MS,
+            pending_dials: 0,
+            connections: 0,
+            max_pending_dials: 0,
+            max_connections: 0,
+            shutting_down: false,
+        }
+    }
+}
+
 impl ConnectionPolicy {
     /// Build a policy with explicit limits.
     #[must_use]
@@ -205,7 +289,95 @@ impl ConnectionPolicy {
         Self {
             max_pending_dials,
             max_connections,
+            max_addresses: DEFAULT_MAX_ADDRESS_ENTRIES,
+            max_peers: DEFAULT_MAX_PEER_ENTRIES,
+            idle_ttl_ms: DEFAULT_IDLE_TTL_MS,
             ..Self::default()
+        }
+    }
+
+    /// Drop entries that are neither punitive nor recently used.
+    ///
+    /// Returns how many were dropped. Separate from every decision path,
+    /// because a read that mutated would make the policy's answer depend
+    /// on how often it was asked.
+    ///
+    /// A punitive entry is NEVER dropped here regardless of age: its
+    /// whole purpose is to outlive the traffic that created it.
+    pub fn prune(&mut self, now_ms: u64) -> usize {
+        let ttl = self.idle_ttl_ms;
+        let idle = |touched: u64| now_ms.saturating_sub(touched) >= ttl;
+
+        let before = self.addresses.len() + self.peers.len();
+        self.addresses
+            .retain(|_, s| s.is_punitive_at(now_ms) || !idle(s.last_touched_ms));
+        self.peers
+            .retain(|_, b| b.is_punitive_at(now_ms) || !idle(b.last_touched_ms));
+        before - (self.addresses.len() + self.peers.len())
+    }
+
+    /// How many address entries are currently held.
+    #[must_use]
+    pub fn address_entries(&self) -> usize {
+        self.addresses.len()
+    }
+
+    /// How many peer-backoff entries are currently held.
+    #[must_use]
+    pub fn peer_entries(&self) -> usize {
+        self.peers.len()
+    }
+
+    /// Make room for one more address entry, or report that there is none.
+    ///
+    /// # Eviction can never clear a quarantine
+    ///
+    /// Only non-punitive entries are candidates, least recently touched
+    /// first. If every entry is punitive the table is FULL and this
+    /// returns false — the caller then denies the dial rather than
+    /// forgetting a suppression.
+    ///
+    /// That direction is deliberate. Forgetting is attacker-controlled:
+    /// anyone who can provoke evictions could flood the table to clear
+    /// their own quarantine, which turns a bounded map into a way to
+    /// launder a failed identity check. Denying is at worst self-
+    /// inflicted, and a table consisting entirely of live suppressions is
+    /// already a description of a hostile peer set.
+    fn make_room_for_address(&mut self, now_ms: u64) -> bool {
+        if self.addresses.len() < self.max_addresses {
+            return true;
+        }
+        let victim = self
+            .addresses
+            .iter()
+            .filter(|(_, s)| !s.is_punitive_at(now_ms))
+            .min_by_key(|(_, s)| s.last_touched_ms)
+            .map(|(k, _)| k.clone());
+        match victim {
+            Some(key) => {
+                self.addresses.remove(&key);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn make_room_for_peer(&mut self, now_ms: u64) -> bool {
+        if self.peers.len() < self.max_peers {
+            return true;
+        }
+        let victim = self
+            .peers
+            .iter()
+            .filter(|(_, b)| !b.is_punitive_at(now_ms))
+            .min_by_key(|(_, b)| b.last_touched_ms)
+            .map(|(k, _)| k.clone());
+        match victim {
+            Some(key) => {
+                self.peers.remove(&key);
+                true
+            }
+            None => false,
         }
     }
 
@@ -273,6 +445,21 @@ impl ConnectionPolicy {
         if self.connections >= self.max_connections {
             return Err(DialDenial::ConnectionLimitReached);
         }
+
+        // A dial whose outcome could not be RECORDED is a dial whose
+        // failure cannot suppress a retry, so admitting it would turn the
+        // capacity bound into a way to dial without accounting. Only
+        // relevant when this (peer, address) has no entry yet and nothing
+        // benign can be evicted to make one.
+        if let Some(peer) = &request.peer {
+            let key = (peer.clone(), request.address.clone());
+            if !self.addresses.contains_key(&key)
+                && self.addresses.len() >= self.max_addresses
+                && !self.addresses.values().any(|s| !s.is_punitive_at(now_ms))
+            {
+                return Err(DialDenial::PolicyStateFull);
+            }
+        }
         Ok(())
     }
 
@@ -283,13 +470,19 @@ impl ConnectionPolicy {
     /// route says nothing about an address that authenticated the wrong
     /// identity.
     pub fn record_success(&mut self, peer: &TransportIdentity, address: &str, now_ms: u64) {
-        let entry = self
-            .addresses
-            .entry((peer.clone(), address.to_owned()))
-            .or_default();
+        let key = (peer.clone(), address.to_owned());
+        if !self.addresses.contains_key(&key) && !self.make_room_for_address(now_ms) {
+            // Nothing evictable. A success is not worth denying over, so
+            // it is simply not recorded — the address stays un-preferred
+            // rather than the table forgetting a quarantine.
+            self.peers.remove(peer);
+            return;
+        }
+        let entry = self.addresses.entry(key).or_default();
         entry.consecutive_failures = 0;
         entry.last_success_ms = Some(now_ms);
         entry.quarantined_until_ms = None;
+        entry.last_touched_ms = now_ms;
         self.peers.remove(peer);
     }
 
@@ -306,11 +499,17 @@ impl ConnectionPolicy {
         now_ms: u64,
         backoff_ms: u64,
     ) -> bool {
-        let entry = self
-            .addresses
-            .entry((peer.clone(), address.to_owned()))
-            .or_default();
+        let key = (peer.clone(), address.to_owned());
+        if !self.addresses.contains_key(&key) {
+            // A failure that cannot be recorded is worse than one that
+            // can: it is the entry that would have suppressed a retry.
+            // Prune first, then evict a benign entry to hold it.
+            self.prune(now_ms);
+            let _ = self.make_room_for_address(now_ms);
+        }
+        let entry = self.addresses.entry(key).or_default();
         entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
+        entry.last_touched_ms = now_ms;
 
         // Scoped to THIS peer. A global scan would let any unrelated
         // peer's past success spare this one from backoff indefinitely,
@@ -321,9 +520,21 @@ impl ConnectionPolicy {
         if alternative_exists {
             return false;
         }
+        if !self.peers.contains_key(peer) && !self.make_room_for_peer(now_ms) {
+            // Every entry is a live backoff and there is no room. Report
+            // truthfully that peer backoff did NOT advance rather than
+            // growing the map: the return value is what the caller uses
+            // to decide whether the peer is now suppressed.
+            //
+            // Losing a backoff that was never created is bounded harm —
+            // that peer keeps being retried. Evicting a live one is not:
+            // it restores a peer the policy had decided to suppress.
+            return false;
+        }
         let b = self.peers.entry(peer.clone()).or_default();
         b.consecutive_failures = b.consecutive_failures.saturating_add(1);
         b.until_ms = Some(now_ms.saturating_add(backoff_ms));
+        b.last_touched_ms = now_ms;
         true
     }
 
@@ -340,12 +551,15 @@ impl ConnectionPolicy {
         address: &str,
         now_ms: u64,
     ) {
-        let entry = self
-            .addresses
-            .entry((expected_peer.clone(), address.to_owned()))
-            .or_default();
+        let key = (expected_peer.clone(), address.to_owned());
+        if !self.addresses.contains_key(&key) {
+            self.prune(now_ms);
+            let _ = self.make_room_for_address(now_ms);
+        }
+        let entry = self.addresses.entry(key).or_default();
         entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
         entry.quarantined_until_ms = Some(now_ms.saturating_add(IDENTITY_MISMATCH_QUARANTINE_MS));
+        entry.last_touched_ms = now_ms;
         // The peer map is untouched, on purpose.
     }
 
@@ -683,5 +897,144 @@ mod tests {
             p.admit(&anonymous, ConnectionClass::DataPlaneTrusted, 0),
             Err(DialDenial::ConnectionLimitReached)
         );
+    }
+    #[test]
+    fn flooding_the_table_cannot_clear_an_existing_quarantine() {
+        // THE attack this bound has to survive. An address that failed
+        // its identity check is quarantined; the attacker then names as
+        // many fresh addresses as the table will hold, hoping the
+        // eviction that follows drops the quarantine and restores their
+        // route. It must not.
+        let mut p = ConnectionPolicy::new(64, 64);
+        p.max_addresses = 8;
+
+        p.record_identity_mismatch(&peer(), "/ip4/10.0.0.1/tcp/1", 1_000);
+        assert!(
+            !p.address(&peer(), "/ip4/10.0.0.1/tcp/1")
+                .expect("quarantined")
+                .is_dialable_at(2_000)
+        );
+
+        // Flood well past the cap.
+        for i in 0..200 {
+            p.record_success(&peer(), &format!("/ip4/10.0.0.2/tcp/{i}"), 2_000);
+        }
+
+        assert!(
+            p.address_entries() <= p.max_addresses,
+            "the table must stay bounded: {} entries",
+            p.address_entries()
+        );
+        let quarantined = p
+            .address(&peer(), "/ip4/10.0.0.1/tcp/1")
+            .expect("the quarantine must survive the flood");
+        assert!(
+            !quarantined.is_dialable_at(2_000),
+            "an attacker must not be able to evict their own quarantine"
+        );
+    }
+
+    #[test]
+    fn a_table_of_live_quarantines_denies_rather_than_forgetting_one() {
+        // With nothing benign left to evict the only options are dropping
+        // a live suppression or refusing. Refusing is at worst
+        // self-inflicted; forgetting is attacker-controlled.
+        let mut p = ConnectionPolicy::new(64, 64);
+        p.max_addresses = 4;
+        for i in 0..4 {
+            p.record_identity_mismatch(&peer(), &format!("/ip4/10.0.0.9/tcp/{i}"), 1_000);
+        }
+        assert_eq!(p.address_entries(), 4);
+
+        let fresh = DialRequest {
+            peer: Some(peer()),
+            address: "/ip4/10.0.0.99/tcp/1".to_owned(),
+            origin: DialOrigin::ConnectionManager,
+        };
+        assert_eq!(
+            p.admit(&fresh, ConnectionClass::DataPlaneTrusted, 2_000),
+            Err(DialDenial::PolicyStateFull)
+        );
+
+        // Once the quarantines lapse, the same dial is admitted again.
+        let later = 1_000 + IDENTITY_MISMATCH_QUARANTINE_MS;
+        p.record_success(&peer(), "/ip4/10.0.0.9/tcp/0", later);
+        assert!(
+            p.admit(&fresh, ConnectionClass::DataPlaneTrusted, later)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn pruning_drops_idle_entries_and_keeps_punitive_ones() {
+        let mut p = ConnectionPolicy::new(64, 64);
+        p.idle_ttl_ms = 1_000;
+
+        p.record_success(&peer(), "/ip4/10.0.0.1/tcp/1", 0);
+        p.record_identity_mismatch(&peer(), "/ip4/10.0.0.2/tcp/1", 0);
+        assert_eq!(p.address_entries(), 2);
+
+        // Well past the idle TTL but inside the quarantine window.
+        let dropped = p.prune(5_000);
+        assert_eq!(dropped, 1, "only the benign idle entry goes");
+        assert!(p.address(&peer(), "/ip4/10.0.0.1/tcp/1").is_none());
+        assert!(
+            p.address(&peer(), "/ip4/10.0.0.2/tcp/1").is_some(),
+            "a punitive entry outlives the traffic that created it"
+        );
+
+        // And once the quarantine lapses it becomes prunable like any other.
+        let after = IDENTITY_MISMATCH_QUARANTINE_MS + 10_000;
+        assert_eq!(p.prune(after), 0, "consecutive_failures still protects it");
+        p.record_success(&peer(), "/ip4/10.0.0.2/tcp/1", after);
+        assert_eq!(p.prune(after + 10_000), 1);
+    }
+
+    #[test]
+    fn peer_backoff_entries_are_bounded_too() {
+        let mut p = ConnectionPolicy::new(64, 64);
+        p.max_peers = 4;
+        for i in 0..40_u8 {
+            let mut raw = [b'1'; 44];
+            raw[0] = b'1' + (i % 9);
+            raw[1] = b'A' + (i / 9);
+            let Ok(id) = TransportIdentity::parse(format!(
+                "12D3KooW{}",
+                core::str::from_utf8(&raw).expect("ascii")
+            )) else {
+                continue;
+            };
+            // A failure with no alternative address advances peer backoff.
+            p.record_address_failure(&id, "/ip4/10.0.0.1/tcp/1", 1_000, 5_000);
+        }
+        assert!(
+            p.peer_entries() <= p.max_peers,
+            "peer backoff map must stay bounded: {}",
+            p.peer_entries()
+        );
+    }
+
+    #[test]
+    fn a_full_backoff_map_reports_that_backoff_did_not_advance() {
+        // The return value is what a caller uses to decide the peer is
+        // suppressed. Growing the map instead would be unbounded; lying
+        // about it would be worse.
+        let mut p = ConnectionPolicy::new(64, 64);
+        p.max_peers = 1;
+
+        let first = peer();
+        assert!(p.record_address_failure(&first, "/ip4/10.0.0.1/tcp/1", 1_000, 5_000));
+
+        let second = TransportIdentity::parse(P2).expect("valid identity");
+        assert!(
+            !p.record_address_failure(&second, "/ip4/10.0.0.2/tcp/1", 1_000, 5_000),
+            "with no room, backoff did not advance and the caller must be told"
+        );
+        assert_eq!(p.peer_entries(), 1);
+
+        // Once the first backoff lapses it is evictable and the second
+        // peer records normally.
+        assert!(p.record_address_failure(&second, "/ip4/10.0.0.2/tcp/1", 9_000, 5_000));
+        assert_eq!(p.peer_entries(), 1);
     }
 }
