@@ -686,6 +686,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "interweave-transport-runtime"
+version = "0.0.0"
+dependencies = [
+ "interweave-local-client-api",
+ "interweave-transport-api",
+ "interweave-trust-api",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "interweave-trust-api"
 version = "0.0.0"
 dependencies = [

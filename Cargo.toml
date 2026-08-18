@@ -13,6 +13,7 @@ members = [
     "crates/api/local-client-api",
     "crates/api/transport-api",
     "crates/config/profile-config",
+    "crates/transport/runtime",
     "crates/api/trust-api",
     "tests/support",
     "tests/transport-contract",
