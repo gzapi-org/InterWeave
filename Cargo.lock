@@ -781,6 +781,7 @@ dependencies = [
  "interweave-profile-config",
  "interweave-test-support",
  "interweave-transport-api",
+ "interweave-transport-runtime",
  "interweave-trust-api",
  "jsonschema",
  "serde",

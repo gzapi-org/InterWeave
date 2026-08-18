@@ -64,3 +64,25 @@ Other properties with reasons:
 `preferred_addresses` is a preference, not a filter: a never-tried address sorts last but is still returned, because excluding it would make a peer whose only address is new permanently undialable. Quarantined addresses *are* omitted, and reappear when the quarantine lapses.
 
 The policy is a snapshot rather than a live query because the gate runs synchronously inside the Swarm poll and must not block on an async call while the Swarm is being driven.
+
+## `reply_token`
+
+A reply token is a **local routing handle, not a capability**. It records where a message came from so a reply can go back the same way, and confers nothing — current trust and endpoint policy apply to the reply as to any other send.
+
+**Binding to the lease epoch is the whole mechanism.** A token stores the epoch it was minted under; after a reconnect the epoch is new, so every token from the previous session stops resolving. Without that, a reply issued after reconnect would be routed by a token whose local endpoint now belongs to a different session — delivering it as somebody else.
+
+Unknown and expired are deliberately **one answer**: distinguishing them would tell a caller whether a token had ever existed. A broadcast token does not recreate a subscription — if the channel was left, replying fails `ChannelNotJoined` — and it carries no endpoint at all, because broadcast origin is PeerId-only.
+
+The table bounds and expires tokens; it does not *generate* them. Unguessability needs a CSPRNG, which a pure module has no business owning.
+
+## `ingress`
+
+**The buckets apply to trusted peers.** They run after Noise and trust admission, which is the point: they bound a peer that is authorized and misbehaving. The source EndpointId is deliberately not a bucket dimension — it is peer-asserted, so keying on it would let one peer multiply its allowance by inventing endpoint names.
+
+**Per-peer is charged before global.** Charging global first would let a peer already over its own limit consume shared allowance on the way to being refused — spending everyone else's budget to be told no. A test drains one peer ten times and then shows three other peers still have the remaining global tokens.
+
+Refill is computed from elapsed time and **does not advance the clock when less than a whole token was earned**. Dropping sub-token remainders on every call would starve a slow steady stream, since each arrival would forfeit the fraction it had accrued; there is a test that polls every 100 ms against a one-second token.
+
+Idle peers are pruned because a peer at full allowance is indistinguishable from one never seen — retaining it is the state growth an attacker cycling identities would cause.
+
+`SubscriptionRegistry` keeps client joins separate from the daemon's topic subscription. A profile may keep a mesh warm with `channels.desired` while zero clients hold a join; inbound then has no local consumer and is dropped rather than buffered. Publishing requires the **caller's own** join — borrowing another client's would let one client's membership authorize another's traffic.

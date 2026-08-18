@@ -12,6 +12,8 @@ pub mod connection_policy;
 pub mod dedup;
 pub mod endpoint_registry;
 pub mod fingerprint;
+pub mod ingress;
+pub mod reply_token;
 
 pub use connection_policy::{
     AddressState, ConnectionClass, ConnectionPolicy, DialDenial, DialOrigin, DialRequest,
@@ -25,3 +27,5 @@ pub use endpoint_registry::{
     ActiveLease, ClaimFailure, EndpointRegistry, LocalSessionId, RegisteredEndpoint, ResolveFailure,
 };
 pub use fingerprint::{ContentFingerprint, FingerprintError, direct_content_fingerprint_v1};
+pub use ingress::{IngressDenial, IngressLimiter, SubscriptionRegistry};
+pub use reply_token::{ReplyResolution, ReplyRoute, ReplyTokenTable};
