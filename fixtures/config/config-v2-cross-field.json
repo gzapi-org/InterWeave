@@ -3,7 +3,8 @@
     "id": "config-v2-cross-field",
     "specification": "architecture/config/config.schema.yaml",
     "summary": "The five endpoint cross-field rules stated in the schema: unique endpoint IDs; a set default naming an ENABLED endpoint; static-subset peers being a subset of trust.allowed_peers; endpoint policy narrowing rather than widening profile trust (ADR-0012); and enabled advertised entries fitting directory.max_advertised. Verdict set.",
-    "why_not_json_schema": "Each rule is a relationship BETWEEN fields. JSON Schema constrains shape, not agreement between two branches of a document, which is exactly the gap these vectors cover beside contracts/schemas/."
+    "why_not_json_schema": "Each rule is a relationship BETWEEN fields. JSON Schema constrains shape, not agreement between two branches of a document, which is exactly the gap these vectors cover beside contracts/schemas/.",
+    "wire_shape": "Endpoint policies use the shape frozen by endpoints/endpoint-config.schema.json: the bare string \"inherit_profile_trust\", or {\"static_subset\": [...]}. An earlier revision of this file used a Serde-tagged {\"policy\": ...} form that the schema never accepted — corrected as a defect, not a protocol change, since no shape ever validated both ways."
   },
   "adr": [
     "0012",
@@ -131,8 +132,7 @@
               "enabled": true,
               "advertise": false,
               "inbound": {
-                "policy": "static-subset",
-                "allowed_peers": [
+                "static_subset": [
                   "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN"
                 ]
               }
@@ -165,8 +165,7 @@
               "enabled": true,
               "advertise": false,
               "outbound": {
-                "policy": "static-subset",
-                "allowed_peers": [
+                "static_subset": [
                   "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
                   "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5"
                 ]
@@ -199,12 +198,8 @@
               "id": "human",
               "enabled": true,
               "advertise": false,
-              "inbound": {
-                "policy": "inherit-profile-trust"
-              },
-              "outbound": {
-                "policy": "inherit-profile-trust"
-              }
+              "inbound": "inherit_profile_trust",
+              "outbound": "inherit_profile_trust"
             }
           ]
         }
@@ -536,10 +531,9 @@
               "enabled": true,
               "advertise": false,
               "inbound": {
-                "policy": "static-subset",
-                "allowed_peers": [
+                "static_subset": [
                   "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
-                  "12D3KooWStranger"
+                  "12D3KooWStrangerzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
                 ]
               }
             }
@@ -571,9 +565,8 @@
               "enabled": true,
               "advertise": false,
               "outbound": {
-                "policy": "static-subset",
-                "allowed_peers": [
-                  "12D3KooWStranger"
+                "static_subset": [
+                  "12D3KooWStrangerzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
                 ]
               }
             }
@@ -602,8 +595,7 @@
               "enabled": true,
               "advertise": false,
               "inbound": {
-                "policy": "static-subset",
-                "allowed_peers": [
+                "static_subset": [
                   "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN"
                 ]
               }

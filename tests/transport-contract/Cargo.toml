@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# Cross-crate conformance for the neutral contracts. TEST-ONLY: nothing
+# depends on this package, and it may therefore take dependencies a
+# production crate must not — notably a real JSON Schema validator, which
+# is how the Stage 1 exit gate is checked rather than asserted.
+[package]
+name = "interweave-transport-contract-tests"
+version = "0.0.0"
+publish = false
+description = "Backend-neutral Transport API conformance tests for InterWeave."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+interweave-discovery-api = { path = "../../crates/api/discovery-api" }
+interweave-ipc-protocol = { path = "../../crates/api/ipc-protocol" }
+interweave-local-client-api = { path = "../../crates/api/local-client-api" }
+interweave-profile-config = { path = "../../crates/config/profile-config" }
+interweave-test-support = { path = "../support" }
+interweave-transport-api = { path = "../../crates/api/transport-api" }
+interweave-trust-api = { path = "../../crates/api/trust-api" }
+jsonschema = "0.49"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }

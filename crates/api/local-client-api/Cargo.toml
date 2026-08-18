@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# The neutral local-session boundary shared by desktop IPC and the Android
+# in-process adapter. No socket, process, JNI, or UI type appears here:
+# LOCAL-CLIENT.md exists precisely because the boundary is the same whether
+# it is serialized over a socket or called in-process.
+[package]
+name = "interweave-local-client-api"
+version = "0.0.0"
+publish = false
+description = "Neutral local data-session and admin-port contract for InterWeave."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+interweave-transport-api = { path = "../transport-api" }
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }

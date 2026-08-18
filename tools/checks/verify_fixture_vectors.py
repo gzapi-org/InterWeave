@@ -369,13 +369,20 @@ def config_v2_cross_field(vector: dict) -> bool:
 
     for e in entries:
         for direction in ("inbound", "outbound"):
-            policy = e.get(direction, {})
-            if policy.get("policy") == "static-subset":
+            policy = e.get(direction)
+            # The shape frozen by endpoints/endpoint-config.schema.json: the
+            # bare string "inherit_profile_trust", or {"static_subset": [...]}.
+            if isinstance(policy, dict) and "static_subset" in policy:
                 # Narrowing means a subset. A peer here that profile trust
                 # does not hold would WIDEN it, which ADR-0012 forbids
                 # regardless of how the endpoint is configured.
-                if not set(policy.get("allowed_peers", [])) <= trust:
+                if not set(policy["static_subset"]) <= trust:
                     return False
+            elif policy is not None and policy != "inherit_profile_trust":
+                # An unrecognised policy shape is a failure, not a pass. A
+                # verifier that ignored it would silently approve exactly
+                # the drift this file exists to catch.
+                return False
 
     max_advertised = endpoints.get("directory", {}).get("max_advertised", 16)
     advertised = [e for e in entries if e.get("advertise") and e.get("enabled", True)]
