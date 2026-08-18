@@ -15,6 +15,7 @@ members = [
     "crates/config/profile-config",
     "crates/api/trust-api",
     "tests/support",
+    "tests/transport-contract",
     "xtask",
 ]
 

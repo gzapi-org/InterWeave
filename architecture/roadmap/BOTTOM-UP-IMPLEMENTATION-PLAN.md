@@ -209,7 +209,7 @@ platform-specific socket/process types
 
 ### Exit gate
 
-- all frozen limits and grammars match the architecture — checked mechanically, not by reading: serde types round-trip against the JSON Schemas under `architecture/contracts/schemas/` (an instance serialized from a Rust type validates against its schema, and every schema-valid instance deserializes), exercised in `tests/transport-contract`;
+- all frozen limits and grammars match the architecture — checked mechanically, not by reading: serde types round-trip against the JSON Schemas under `architecture/contracts/schemas/` (an instance serialized from a Rust type validates against its schema, and every schema-valid instance deserializes), exercised in `tests/transport-contract` with a real JSON Schema validator. Note that instance conformance and definition agreement are different checks and both are needed: each crate's own suite compares enum members and bounds against the schema text, while `tests/transport-contract` validates actual serialized values;
 - all config cross-field rules pass/fail exactly as specified;
 - neutral crates remain free of backend/UI/platform dependencies;
 - no real Swarm/networking exists yet.
