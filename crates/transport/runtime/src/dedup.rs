@@ -189,12 +189,29 @@ impl DedupCache {
         now_ms: u64,
     ) -> Admission {
         self.expire(now_ms);
-        match self.entries.get(key) {
-            None => Admission::Fresh,
-            Some(record) if record.fingerprint == fingerprint => Admission::DuplicateAccepted {
-                resolved_endpoint: record.resolved_endpoint.clone(),
-            },
-            Some(_) => Admission::Conflict,
+        let Some(record) = self.entries.get(key) else {
+            return Admission::Fresh;
+        };
+        if record.fingerprint != fingerprint {
+            return Admission::Conflict;
+        }
+        let resolved_endpoint = record.resolved_endpoint.clone();
+        // LRU, so a HIT is a use. Without this a frequently retried entry
+        // is evicted before a newer one nobody has touched, and the next
+        // retry of the hot key reads as fresh — delivering it a second
+        // time inside the TTL, which is the duplicate this cache exists
+        // to suppress.
+        self.touch(key);
+        Admission::DuplicateAccepted { resolved_endpoint }
+    }
+
+    /// Move a key to the most-recently-used end.
+    fn touch(&mut self, key: &DedupKey) {
+        if let Some(pos) = self.order.iter().position(|o| o == key) {
+            let k = self.order.remove(pos);
+            if let Some(k) = k {
+                self.order.push_back(k);
+            }
         }
     }
 
@@ -528,6 +545,33 @@ mod tests {
             c.admit(&direct(DestinationSelector::Default, 2), fp(b"x"), 3),
             Admission::DuplicateAccepted { .. }
         ));
+    }
+
+    #[test]
+    fn a_hit_refreshes_recency_so_a_hot_entry_is_not_evicted_first() {
+        // Insert A and B, use A, then insert C. A cold-insertion-order
+        // cache would evict A — the entry actually in use — and the next
+        // retry of A would read as fresh and be delivered again inside
+        // the TTL.
+        let mut c = DedupCache::new(2, DEFAULT_TTL_MS);
+        let a = direct(DestinationSelector::Default, 1);
+        let b = direct(DestinationSelector::Default, 2);
+        let d = direct(DestinationSelector::Default, 3);
+        c.record_accepted(a.clone(), ep("human"), fp(b"x"), 0);
+        c.record_accepted(b.clone(), ep("human"), fp(b"x"), 1);
+
+        assert!(matches!(
+            c.admit(&a, fp(b"x"), 2),
+            Admission::DuplicateAccepted { .. }
+        ));
+
+        c.record_accepted(d, ep("human"), fp(b"x"), 3);
+        // A survives because it was used; B, untouched, is the eviction.
+        assert!(matches!(
+            c.admit(&a, fp(b"x"), 4),
+            Admission::DuplicateAccepted { .. }
+        ));
+        assert_eq!(c.admit(&b, fp(b"x"), 4), Admission::Fresh);
     }
 
     #[test]

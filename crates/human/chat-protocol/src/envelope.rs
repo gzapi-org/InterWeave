@@ -186,8 +186,13 @@ impl HumanChatV2 {
             .ok_or(EnvelopeError::MissingText)?
             .to_owned();
 
+        // A MISSING property is absence. An explicit `null` is not: the
+        // schema permits a string here and does not include null, so
+        // accepting it would make this parser more permissive than every
+        // schema-driven implementation — the two would disagree about the
+        // same document, which is the drift these types exist to prevent.
         let reply_to = match raw.get("reply_to") {
-            None | Some(serde_json::Value::Null) => None,
+            None => None,
             Some(v) => Some(
                 v.as_str()
                     .filter(|s| is_canonical_id(s))
@@ -197,7 +202,7 @@ impl HumanChatV2 {
         };
 
         let sent_at_ms = match raw.get("sent_at_ms") {
-            None | Some(serde_json::Value::Null) => None,
+            None => None,
             Some(v) => {
                 let n = v
                     .as_u64()
@@ -208,7 +213,7 @@ impl HumanChatV2 {
         };
 
         let from_endpoint = match raw.get("from_endpoint") {
-            None | Some(serde_json::Value::Null) => None,
+            None => None,
             Some(v) => Some(
                 v.as_str()
                     .and_then(|s| EndpointId::parse(s).ok())
@@ -319,6 +324,25 @@ mod tests {
         // Valid, and the store simply does not have it.
         assert!(!e.reply_is_resolvable(&|_| false));
         assert!(e.reply_is_resolvable(&|_| true));
+    }
+
+    #[test]
+    fn an_explicit_null_is_not_absence() {
+        // The schema permits a string or integer for these and does not
+        // include null, so accepting null would make this parser more
+        // permissive than every schema-driven implementation.
+        for field in ["reply_to", "sent_at_ms", "from_endpoint"] {
+            let json = envelope(&format!(r#","{field}":null"#));
+            assert!(
+                HumanChatV2::parse(&json).is_err(),
+                "an explicit null {field} should be rejected"
+            );
+        }
+        // Omitting them entirely is still absence.
+        let e = HumanChatV2::parse(&envelope("")).expect("parses");
+        assert!(e.reply_to.is_none());
+        assert!(e.sent_at_ms.is_none());
+        assert!(e.from_endpoint.is_none());
     }
 
     #[test]

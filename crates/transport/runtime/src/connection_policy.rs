@@ -22,6 +22,13 @@
 //! able to turn that address's failures into peer-wide punitive backoff
 //! while a known-good route still exists. Merging the two counters is
 //! precisely how that attack would succeed.
+//!
+//! Address state is keyed by **(peer, address)**, not by address alone.
+//! A bare address key looks tidier and is wrong in both directions: one
+//! peer's success at some address would spare a *different* peer from
+//! backoff forever, and an identity mismatch is a fact about the
+//! address-claims-to-be-this-peer mapping rather than about the address
+//! in general.
 
 use std::collections::BTreeMap;
 
@@ -164,6 +171,12 @@ impl PeerBackoff {
     }
 }
 
+/// The key for address state: which peer this address was dialed as.
+///
+/// Keyed by the pair rather than by the address alone, so one peer's
+/// history cannot answer questions about another's.
+type AddressKey = (TransportIdentity, String);
+
 /// The atomically readable policy snapshot the gate consults.
 ///
 /// A snapshot rather than a live query because the gate runs synchronously
@@ -171,7 +184,7 @@ impl PeerBackoff {
 /// the Swarm is being driven (ADR-0011).
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionPolicy {
-    addresses: BTreeMap<String, AddressState>,
+    addresses: BTreeMap<AddressKey, AddressState>,
     peers: BTreeMap<TransportIdentity, PeerBackoff>,
     /// Currently pending dials.
     pub pending_dials: usize,
@@ -196,10 +209,10 @@ impl ConnectionPolicy {
         }
     }
 
-    /// The state of one address.
+    /// The state of one address as dialed for one peer.
     #[must_use]
-    pub fn address(&self, address: &str) -> Option<&AddressState> {
-        self.addresses.get(address)
+    pub fn address(&self, peer: &TransportIdentity, address: &str) -> Option<&AddressState> {
+        self.addresses.get(&(peer.clone(), address.to_owned()))
     }
 
     /// The backoff state of one peer.
@@ -247,7 +260,8 @@ impl ConnectionPolicy {
             return Err(DialDenial::PeerBackoff);
         }
 
-        if let Some(state) = self.addresses.get(&request.address)
+        if let Some(peer) = &request.peer
+            && let Some(state) = self.addresses.get(&(peer.clone(), request.address.clone()))
             && !state.is_dialable_at(now_ms)
         {
             return Err(DialDenial::AddressQuarantined);
@@ -269,7 +283,10 @@ impl ConnectionPolicy {
     /// route says nothing about an address that authenticated the wrong
     /// identity.
     pub fn record_success(&mut self, peer: &TransportIdentity, address: &str, now_ms: u64) {
-        let entry = self.addresses.entry(address.to_owned()).or_default();
+        let entry = self
+            .addresses
+            .entry((peer.clone(), address.to_owned()))
+            .or_default();
         entry.consecutive_failures = 0;
         entry.last_success_ms = Some(now_ms);
         entry.quarantined_until_ms = None;
@@ -289,13 +306,18 @@ impl ConnectionPolicy {
         now_ms: u64,
         backoff_ms: u64,
     ) -> bool {
-        let entry = self.addresses.entry(address.to_owned()).or_default();
+        let entry = self
+            .addresses
+            .entry((peer.clone(), address.to_owned()))
+            .or_default();
         entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
 
-        let alternative_exists = self
-            .addresses
-            .iter()
-            .any(|(a, s)| a != address && s.is_known_good() && s.is_dialable_at(now_ms));
+        // Scoped to THIS peer. A global scan would let any unrelated
+        // peer's past success spare this one from backoff indefinitely,
+        // removing retry protection exactly where it is needed.
+        let alternative_exists = self.addresses.iter().any(|((p, a), s)| {
+            p == peer && a != address && s.is_known_good() && s.is_dialable_at(now_ms)
+        });
         if alternative_exists {
             return false;
         }
@@ -312,8 +334,16 @@ impl ConnectionPolicy {
     /// address for a trusted peer must not thereby suppress that peer's
     /// real routes — which is exactly what would happen if this counted
     /// as a peer failure (ADR-0011).
-    pub fn record_identity_mismatch(&mut self, address: &str, now_ms: u64) {
-        let entry = self.addresses.entry(address.to_owned()).or_default();
+    pub fn record_identity_mismatch(
+        &mut self,
+        expected_peer: &TransportIdentity,
+        address: &str,
+        now_ms: u64,
+    ) {
+        let entry = self
+            .addresses
+            .entry((expected_peer.clone(), address.to_owned()))
+            .or_default();
         entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
         entry.quarantined_until_ms = Some(now_ms.saturating_add(IDENTITY_MISMATCH_QUARANTINE_MS));
         // The peer map is untouched, on purpose.
@@ -325,17 +355,23 @@ impl ConnectionPolicy {
     /// returned, just later. Excluding it would make a peer whose only
     /// address is new permanently undialable.
     #[must_use]
-    pub fn preferred_addresses(&self, candidates: &[String], now_ms: u64) -> Vec<String> {
+    pub fn preferred_addresses(
+        &self,
+        peer: &TransportIdentity,
+        candidates: &[String],
+        now_ms: u64,
+    ) -> Vec<String> {
+        let key = |a: &String| (peer.clone(), a.clone());
         let mut dialable: Vec<&String> = candidates
             .iter()
             .filter(|a| {
                 self.addresses
-                    .get(*a)
+                    .get(&key(a))
                     .is_none_or(|s| s.is_dialable_at(now_ms))
             })
             .collect();
         dialable.sort_by_key(|a| {
-            let s = self.addresses.get(*a);
+            let s = self.addresses.get(&key(a));
             let known_good = s.is_some_and(AddressState::is_known_good);
             let failures = s.map_or(0, |s| s.consecutive_failures);
             // Known-good first, then fewest failures, then stable by name
@@ -351,6 +387,7 @@ mod tests {
     use super::*;
 
     const P1: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+    const P2: &str = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
     const A1: &str = "/ip4/192.0.2.1/tcp/4001";
     const A2: &str = "/ip4/192.0.2.2/tcp/4001";
 
@@ -368,6 +405,14 @@ mod tests {
 
     fn policy() -> ConnectionPolicy {
         ConnectionPolicy::new(16, 64)
+    }
+
+    fn request_for(p: &TransportIdentity, address: &str) -> DialRequest {
+        DialRequest {
+            peer: Some(p.clone()),
+            address: address.to_owned(),
+            origin: DialOrigin::ConnectionManager,
+        }
     }
 
     #[test]
@@ -449,7 +494,7 @@ mod tests {
         // The attack this split exists to defeat: injecting one bogus
         // address for a trusted peer must not suppress its real routes.
         let mut p = policy();
-        p.record_identity_mismatch(A1, 1_000);
+        p.record_identity_mismatch(&peer(), A1, 1_000);
 
         assert_eq!(
             p.admit(
@@ -527,9 +572,61 @@ mod tests {
     }
 
     #[test]
+    fn one_peers_success_does_not_spare_a_different_peer_from_backoff() {
+        // The scan used to be global, so P1 succeeding at A2 left P2
+        // permanently clear however often it failed — removing retry
+        // protection exactly where it was needed.
+        let mut p = policy();
+        let other = TransportIdentity::parse(P2).expect("valid identity");
+        p.record_success(&peer(), A2, 0);
+
+        let advanced = p.record_address_failure(&other, A1, 100, 30_000);
+        assert!(
+            advanced,
+            "a different peer's success must not spare this one"
+        );
+        let request = DialRequest {
+            peer: Some(other.clone()),
+            address: A2.to_owned(),
+            origin: DialOrigin::ConnectionManager,
+        };
+        assert_eq!(
+            p.admit(&request, ConnectionClass::DataPlaneTrusted, 100),
+            Err(DialDenial::PeerBackoff)
+        );
+        // And the peer that really does have a good route is unaffected.
+        assert!(
+            p.admit(
+                &request_for(&peer(), A2),
+                ConnectionClass::DataPlaneTrusted,
+                100
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn an_identity_mismatch_is_scoped_to_the_peer_it_was_dialed_as() {
+        // The mismatch is a fact about "A1 claims to be P1", not about A1
+        // in general: another peer legitimately reachable there is not
+        // quarantined by it.
+        let mut p = policy();
+        let other = TransportIdentity::parse(P2).expect("valid identity");
+        p.record_identity_mismatch(&peer(), A1, 0);
+        assert!(
+            p.admit(
+                &request_for(&other, A1),
+                ConnectionClass::DataPlaneTrusted,
+                0
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn a_success_clears_the_peer_but_not_unrelated_quarantines() {
         let mut p = policy();
-        p.record_identity_mismatch(A1, 0);
+        p.record_identity_mismatch(&peer(), A1, 0);
         p.record_address_failure(&peer(), A2, 0, 30_000);
         assert!(p.peer(&peer()).is_some());
 
@@ -537,7 +634,7 @@ mod tests {
         assert!(p.peer(&peer()).is_none());
         // One working route says nothing about an address that
         // authenticated the wrong identity.
-        assert!(!p.address(A1).expect("known").is_dialable_at(10));
+        assert!(!p.address(&peer(), A1).expect("known").is_dialable_at(10));
     }
 
     #[test]
@@ -546,24 +643,25 @@ mod tests {
         p.record_success(&peer(), A2, 0);
         p.record_address_failure(&peer(), A1, 1, 0);
 
-        let order = p.preferred_addresses(&[A1.to_owned(), A2.to_owned()], 10);
+        let order = p.preferred_addresses(&peer(), &[A1.to_owned(), A2.to_owned()], 10);
         assert_eq!(order, vec![A2.to_owned(), A1.to_owned()]);
 
         // A never-tried address is still offered: excluding it would make
         // a peer whose only address is new permanently undialable.
         let fresh = "/ip4/192.0.2.3/tcp/4001".to_owned();
-        let order = p.preferred_addresses(std::slice::from_ref(&fresh), 10);
+        let order = p.preferred_addresses(&peer(), std::slice::from_ref(&fresh), 10);
         assert_eq!(order, vec![fresh]);
     }
 
     #[test]
     fn quarantined_addresses_are_omitted_from_the_preference_list() {
         let mut p = policy();
-        p.record_identity_mismatch(A1, 0);
-        let order = p.preferred_addresses(&[A1.to_owned(), A2.to_owned()], 10);
+        p.record_identity_mismatch(&peer(), A1, 0);
+        let order = p.preferred_addresses(&peer(), &[A1.to_owned(), A2.to_owned()], 10);
         assert_eq!(order, vec![A2.to_owned()]);
         // And return once the quarantine lapses.
         let order = p.preferred_addresses(
+            &peer(),
             &[A1.to_owned(), A2.to_owned()],
             IDENTITY_MISMATCH_QUARANTINE_MS + 1,
         );

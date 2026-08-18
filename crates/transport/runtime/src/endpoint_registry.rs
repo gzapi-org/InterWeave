@@ -106,7 +106,7 @@ impl ResolveFailure {
 }
 
 /// Why a lease claim was refused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaimFailure {
     /// No such endpoint is configured.
     EndpointUnknown,
@@ -116,6 +116,15 @@ pub enum ClaimFailure {
     EndpointClientKindDenied,
     /// Another live session already owns it.
     EndpointInUse,
+    /// This session already holds a lease on another endpoint.
+    ///
+    /// A session owns **at most one** lease. A second would make its
+    /// authoritative outbound `source_endpoint` ambiguous, and that value
+    /// is the whole of ADR-0030's non-spoofable source.
+    SessionAlreadyLeased {
+        /// The endpoint it already holds.
+        held: EndpointId,
+    },
 }
 
 impl From<ClaimFailure> for TransportError {
@@ -125,6 +134,10 @@ impl From<ClaimFailure> for TransportError {
             ClaimFailure::EndpointDisabled => Self::EndpointDisabled,
             ClaimFailure::EndpointClientKindDenied => Self::EndpointClientKindDenied,
             ClaimFailure::EndpointInUse => Self::EndpointInUse,
+            // Locally precise; the caller's own mistake rather than a
+            // statement about the endpoint, so it is InvalidArgument
+            // rather than an endpoint-existence answer.
+            ClaimFailure::SessionAlreadyLeased { .. } => Self::InvalidArgument,
         }
     }
 }
@@ -182,6 +195,13 @@ impl EndpointRegistry {
         // redirect its traffic to whoever asked most recently.
         if self.leases.contains_key(endpoint) {
             return Err(ClaimFailure::EndpointInUse);
+        }
+        // And one lease per SESSION, not merely one session per endpoint.
+        // A session holding two leases has no single authoritative
+        // source_endpoint, which is the value ADR-0030 derives from the
+        // lease precisely so a caller cannot choose it.
+        if let Some((held, _)) = self.leases.iter().find(|(_, l)| l.owner == session) {
+            return Err(ClaimFailure::SessionAlreadyLeased { held: held.clone() });
         }
         let lease = ActiveLease {
             owner: session,
@@ -460,14 +480,33 @@ mod tests {
     }
 
     #[test]
-    fn session_teardown_releases_every_lease_it_held() {
+    fn a_session_may_hold_only_one_lease() {
+        // Not merely one session per endpoint: one endpoint per session.
+        // Two leases would leave the session with no single authoritative
+        // source_endpoint, which is the value ADR-0030 derives from the
+        // lease precisely so a caller cannot choose it.
         let mut r = registry();
         r.claim(&ep("human"), session("a"), "k", epoch("e1"))
             .expect("claimed");
-        r.claim(&ep("claude"), session("a"), "k", epoch("e2"))
+        assert_eq!(
+            r.claim(&ep("claude"), session("a"), "k", epoch("e2")),
+            Err(ClaimFailure::SessionAlreadyLeased { held: ep("human") })
+        );
+        // Releasing frees the session to claim a different endpoint.
+        r.release_session(&session("a"));
+        assert!(
+            r.claim(&ep("claude"), session("a"), "k", epoch("e3"))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn session_teardown_releases_the_lease_it_held() {
+        let mut r = registry();
+        r.claim(&ep("human"), session("a"), "k", epoch("e1"))
             .expect("claimed");
         let released = r.release_session(&session("a"));
-        assert_eq!(released, vec![ep("claude"), ep("human")]);
+        assert_eq!(released, vec![ep("human")]);
         assert!(r.lease(&ep("human")).is_none());
         // And the endpoint is claimable again, rather than stuck.
         assert!(

@@ -19,6 +19,7 @@ Ordering matters and is tested: endpoint policy is evaluated **before** the leas
 Other decisions worth naming:
 
 - **A duplicate claim is refused, not granted by displacement.** Taking a lease from a live session would silently redirect its traffic to whoever asked most recently.
+- **One lease per session, not merely one session per endpoint.** A session holding two leases has no single authoritative `source_endpoint` — the value ADR-0030 derives from the lease precisely so a caller cannot choose it.
 - **Disabling an endpoint revokes its lease** and returns the ended epoch. Leaving it would have a session believing it owns a route that no longer accepts traffic.
 - **An unleased endpoint drops, it does not buffer.** `EndpointOffline` creates no queue — there is no mailbox here to accumulate one (ADR-0020).
 - **Outbound authorization delegates to `trust-api`** rather than re-implementing the intersection, so "narrow but never widen" has one implementation.
@@ -44,6 +45,7 @@ Other properties with reasons:
 - **Asking does not create an entry.** A caller about to reject a message must not have cached it by enquiring.
 - **Only positive outcomes are recorded.** Caching a rejection would keep refusing a message whose endpoint was briefly offline, long after the route recovered.
 - **Time is a parameter.** Every expiring method takes `now_ms`, so TTL is tested by enumeration rather than by sleeping.
+- **A cache hit refreshes recency.** It is an LRU, so a use counts: without it a frequently retried entry is evicted before an untouched newer one, and the next retry of the hot key reads as fresh and is delivered again inside the TTL.
 
 `ReservationMap` closes the concurrent-duplicate race: first caller owns, matching duplicates wait and share the outcome, differing content conflicts immediately. Per-peer budget is checked *before* the global one, so one noisy peer cannot consume the whole allowance and refuse everyone else; both limits are clamped to their ceilings rather than trusted from configuration.
 
@@ -54,6 +56,8 @@ Other properties with reasons:
 **Every outbound dial, not merely the scheduled ones.** A libp2p `NetworkBehaviour` can request a dial while driving its own protocol — Kademlia's iterative queries do — so "the provider does not call the dial scheduler" is not enough. `DialOrigin` has **no exempt variant**: a value meaning "skip the gate" would recreate the hole the gate closes. A test walks every origin against an exhausted budget.
 
 **`ConnectionClass` is not a spectrum.** `ConnectivityInfrastructureOnly` is not "slightly less than trusted" — it permits reachability control and nothing else. The gate takes the origin *and* the class, so the same peer at the same address in the same instant is dialable for a relay reservation and refused for a Kademlia query (ADR-0036).
+
+**Address state is keyed by (peer, address), not by address alone.** A bare address key is wrong in both directions: one peer’s success somewhere would spare a *different* peer from backoff forever, and an identity mismatch is a fact about the address-claims-to-be-this-peer mapping rather than about the address in general.
 
 **Two failure scopes, kept apart.** `AddressState` and `PeerBackoff` are separate because an attacker who injects one bogus address for a trusted peer must not turn that address's failures into peer-wide backoff while a known-good route exists. Concretely:
 
@@ -81,7 +85,7 @@ The table bounds and expires tokens; it does not *generate* them. Unguessability
 
 **Per-peer is charged before global.** Charging global first would let a peer already over its own limit consume shared allowance on the way to being refused — spending everyone else's budget to be told no. A test drains one peer ten times and then shows three other peers still have the remaining global tokens.
 
-Refill is computed from elapsed time and **does not advance the clock when less than a whole token was earned**. Dropping sub-token remainders on every call would starve a slow steady stream, since each arrival would forfeit the fraction it had accrued; there is a test that polls every 100 ms against a one-second token.
+Refill advances the clock by **the time the credited tokens represent**, never to `now_ms`. Jumping to now discards the sub-token remainder on every call and the loss compounds: at 120/minute polled every 300 ms the bucket delivered 100/minute. It also does not advance at all when less than a whole token was earned. Dropping sub-token remainders on every call would starve a slow steady stream, since each arrival would forfeit the fraction it had accrued; there is a test that polls every 100 ms against a one-second token.
 
 Idle peers are pruned because a peer at full allowance is indistinguishable from one never seen — retaining it is the state growth an attacker cycling identities would cause.
 

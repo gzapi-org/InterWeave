@@ -53,6 +53,9 @@ impl Bucket {
     }
 
     fn refill(&mut self, now_ms: u64) {
+        if self.per_minute == 0 {
+            return;
+        }
         let elapsed = now_ms.saturating_sub(self.last_refill_ms);
         if elapsed == 0 {
             return;
@@ -60,16 +63,23 @@ impl Bucket {
         let gained = (elapsed.saturating_mul(u64::from(self.per_minute)) / MS_PER_MINUTE)
             .min(u64::from(u32::MAX));
         if gained == 0 {
-            // Do NOT advance the clock: dropping sub-token remainders every
-            // call would starve a slow steady stream, because each arrival
-            // would forfeit the fraction it had earned.
+            // Not a whole token yet. Do NOT advance the clock: the
+            // fraction earned so far must survive to the next call.
             return;
         }
         self.tokens = self
             .tokens
             .saturating_add(u32::try_from(gained).unwrap_or(u32::MAX))
             .min(self.burst);
-        self.last_refill_ms = now_ms;
+        // Advance by the time the CREDITED tokens represent, not to
+        // `now_ms`. Jumping to now would discard the sub-token remainder
+        // on every refill, and the loss compounds: at 120/minute with
+        // arrivals every 750 ms each call earns 1.5 tokens, credits 1,
+        // and forfeits 0.5 — delivering 80/minute against a configured
+        // 120. Keeping the remainder makes the long-run rate the
+        // configured one.
+        let consumed_ms = gained.saturating_mul(MS_PER_MINUTE) / u64::from(self.per_minute);
+        self.last_refill_ms = self.last_refill_ms.saturating_add(consumed_ms);
     }
 
     fn try_consume(&mut self, now_ms: u64) -> bool {
@@ -313,6 +323,33 @@ mod tests {
         }
         // The earned token still arrives on schedule.
         assert!(l.admit(&peer(P1), 1_000).is_ok());
+    }
+
+    #[test]
+    fn the_long_run_rate_is_the_configured_rate() {
+        // The remainder bug, demonstrated where it actually bites: a poll
+        // interval that does not divide the token interval. At 120/minute
+        // a token is due every 500 ms; polling every 300 ms credits one
+        // token per 600 ms and used to forfeit the extra 100 ms each
+        // time, delivering 100/minute against a configured 120.
+        //
+        // The bucket is drained first so the measurement is of REFILL,
+        // not of the initial burst.
+        let mut l = IngressLimiter::new(120, 120, 1_000_000, 1_000_000, 0);
+        for _ in 0..120 {
+            l.admit(&peer(P1), 0).expect("draining the initial burst");
+        }
+
+        let mut admitted = 0;
+        for t in (300..=60_000).step_by(300) {
+            if l.admit(&peer(P1), t).is_ok() {
+                admitted += 1;
+            }
+        }
+        assert_eq!(
+            admitted, 120,
+            "a minute of refill should yield the configured 120 tokens"
+        );
     }
 
     #[test]
