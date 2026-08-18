@@ -70,7 +70,17 @@ pub struct ClientInfo {
     /// A hygiene label, never authentication and never an authority selector.
     pub kind: String,
     /// Optional client version string.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// Absent or a string. NOT `null`: the schema permits a string here
+    /// and does not include null, so accepting it would make this parser
+    /// more permissive than every schema-driven implementation it has to
+    /// interoperate with — the two would disagree about the same
+    /// document.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "absent_or_string"
+    )]
     pub version: Option<String>,
 }
 
@@ -94,7 +104,11 @@ pub struct Hello {
     /// Who is connecting.
     pub client: ClientInfo,
     /// The endpoint claim, absent for diagnostics and required absent on admin.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "absent_or_claim"
+    )]
     pub endpoint: Option<EndpointClaim>,
     /// Capabilities **requested**, not granted.
     #[serde(
@@ -178,6 +192,50 @@ pub struct HandshakeOutcome {
     pub granted_admin: BTreeSet<AdminCapability>,
     /// The endpoint to attempt a lease for, if any.
     pub endpoint: Option<EndpointId>,
+}
+
+/// An optional string that may be ABSENT but never explicitly `null`.
+///
+/// A missing property is absence; `null` is a value, and no schema in
+/// this repository includes it in any of these types. Serde's default
+/// `Option` treats the two as identical, which is one of the few places
+/// a derive is quietly more permissive than the contract it implements.
+fn absent_or_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    // The field is only visited when the key is PRESENT, so reaching a
+    // null here means the sender wrote one.
+    let value = Option::<String>::deserialize(deserializer)?;
+    let Some(text) = value else {
+        return Err(D::Error::custom(
+            "must be a string or omitted entirely, not null",
+        ));
+    };
+    if text.len() > MAX_CLIENT_VERSION_BYTES {
+        return Err(D::Error::custom(format!(
+            "client version is at most {MAX_CLIENT_VERSION_BYTES} bytes, got {}",
+            text.len()
+        )));
+    }
+    Ok(Some(text))
+}
+
+/// An optional endpoint claim that may be ABSENT but never `null`.
+///
+/// The distinction is load-bearing here beyond conformance: omitting the
+/// claim is how a read-only diagnostics client says it wants no lease,
+/// and an explicit null would be a third state the contract does not
+/// define.
+fn absent_or_claim<'de, D>(deserializer: D) -> Result<Option<EndpointClaim>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    Option::<EndpointClaim>::deserialize(deserializer)?
+        .map(Some)
+        .ok_or_else(|| D::Error::custom("must be an object or omitted entirely, not null"))
 }
 
 /// Deserialize a wire array into a set, enforcing the WIRE cardinality
@@ -628,5 +686,41 @@ mod tests {
             "over maxLength"
         );
         assert!(serde_json::from_str::<Hello>(&with(&"x".repeat(MAX_FEATURE_BYTES))).is_ok());
+    }
+    #[test]
+    fn an_explicit_null_is_not_absence() {
+        // A missing property is absence; `null` is a value, and the
+        // schema includes it in neither type. Serde's default Option
+        // treats them as the same, which is more permissive than every
+        // schema-driven implementation this has to interoperate with.
+        let base = r#"{"type":"hello","ipc_version":{"major":2,"minor":0},
+            "client":{"kind":"human-client"%EXTRA%}%TAIL%}"#;
+        let with_null_version = base
+            .replace("%EXTRA%", r#","version":null"#)
+            .replace("%TAIL%", "");
+        assert!(serde_json::from_str::<Hello>(&with_null_version).is_err());
+
+        let with_null_endpoint = base
+            .replace("%EXTRA%", "")
+            .replace("%TAIL%", r#","endpoint":null"#);
+        assert!(serde_json::from_str::<Hello>(&with_null_endpoint).is_err());
+
+        // Omitted is still fine, and a real value still parses.
+        let omitted = base.replace("%EXTRA%", "").replace("%TAIL%", "");
+        assert!(serde_json::from_str::<Hello>(&omitted).is_ok());
+        let present = base
+            .replace("%EXTRA%", r#","version":"1.0.0""#)
+            .replace("%TAIL%", "");
+        assert!(serde_json::from_str::<Hello>(&present).is_ok());
+    }
+
+    #[test]
+    fn an_oversized_client_version_is_refused() {
+        let long = "x".repeat(MAX_CLIENT_VERSION_BYTES + 1);
+        let json = format!(
+            r#"{{"type":"hello","ipc_version":{{"major":2,"minor":0}},
+            "client":{{"kind":"human-client","version":"{long}"}}}}"#
+        );
+        assert!(serde_json::from_str::<Hello>(&json).is_err());
     }
 }

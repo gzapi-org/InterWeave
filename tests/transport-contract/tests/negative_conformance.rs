@@ -281,23 +281,8 @@ const KNOWN_DISAGREEMENTS: &[(&str, &str, &str)] = &[
     // gone before `evaluate` counts them: nine repeats become one member.
     // `evaluate` checks the client kind's length and the collection
     // sizes, and no individual string beyond that.
-    (
-        "ipc.hello",
-        "/client/version is one over maxLength 128",
-        "version length unvalidated",
-    ),
     // A missing property is absence; `null` is a value, and no schema
     // here includes it in any type.
-    (
-        "ipc.hello",
-        "/client/version is explicit null rather than absent",
-        "null read as absence",
-    ),
-    (
-        "ipc.hello",
-        "/endpoint is explicit null rather than absent",
-        "null read as absence",
-    ),
     // Found by this harness, not previously reported. The schema's own
     // description says `additionalProperties: false` is what stops an
     // EndpointId or presence field being added to discovery "as an
