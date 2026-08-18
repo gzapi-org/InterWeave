@@ -89,11 +89,25 @@ pub fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
 }
 
 /// v1 — the three retention tables plus content-free settings.
+///
+/// # Why every content table is AUTOINCREMENT
+///
+/// A bare `INTEGER PRIMARY KEY` reuses the id of the highest row once it
+/// is deleted, and deletion is what this store does constantly. Combined
+/// with an idempotent `transport_terminal` — a retry reaching terminal
+/// twice must not error — a late duplicate event for a finished message
+/// would delete whatever message inherited its id, silently losing
+/// something the user had just composed. On the inbound side a reused id
+/// would hand a caller someone else's body and delete the durable copy
+/// of a message nobody had seen.
+///
+/// AUTOINCREMENT costs one internal `sqlite_sequence` row and makes the
+/// hazard unreachable rather than defended against.
 fn migration_1(tx: &Transaction<'_>) -> Result<(), StoreError> {
     tx.execute_batch(
         "
         CREATE TABLE pending_outbound (
-            row_id                INTEGER PRIMARY KEY,
+            row_id                INTEGER PRIMARY KEY AUTOINCREMENT,
             app_message_id        TEXT    NOT NULL UNIQUE,
             destination_peer      TEXT    NOT NULL,
             destination_endpoint  TEXT,
@@ -106,7 +120,7 @@ fn migration_1(tx: &Transaction<'_>) -> Result<(), StoreError> {
         );
 
         CREATE TABLE unread_inbound (
-            row_id          INTEGER PRIMARY KEY,
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
             app_message_id  TEXT    NOT NULL UNIQUE,
             source_peer     TEXT    NOT NULL,
             source_endpoint TEXT,
@@ -117,7 +131,7 @@ fn migration_1(tx: &Transaction<'_>) -> Result<(), StoreError> {
         );
 
         CREATE TABLE kept_inbound (
-            row_id          INTEGER PRIMARY KEY,
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
             app_message_id  TEXT    NOT NULL UNIQUE,
             source_peer     TEXT    NOT NULL,
             source_endpoint TEXT,

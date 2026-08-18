@@ -296,3 +296,64 @@ fn a_terminal_outbound_row_is_gone_and_a_second_terminal_event_is_harmless() {
         .transport_terminal(row, TerminalCause::Cancelled)
         .expect("idempotent");
 }
+
+#[test]
+fn a_stale_row_id_cannot_delete_a_later_message() {
+    // SQLite reuses a rowid after the highest row is deleted. Since
+    // `transport_terminal` is deliberately idempotent — a retry reaching
+    // terminal twice must not error — a late duplicate event for a
+    // finished message would otherwise delete whatever message inherited
+    // its id. That is silent loss of something the user just composed.
+    let mut store = memory();
+    let first = store
+        .commit_pending_outbound(&outbound(ID_A, b"finished".to_vec()))
+        .expect("first");
+    store
+        .transport_terminal(first, TerminalCause::Accepted)
+        .expect("terminal");
+
+    let second = store
+        .commit_pending_outbound(&outbound(ID_B, b"just composed".to_vec()))
+        .expect("second");
+    assert_ne!(
+        first.get(),
+        second.get(),
+        "a row id must never be handed out twice"
+    );
+
+    // The late duplicate event for the FIRST message.
+    store
+        .transport_terminal(first, TerminalCause::Accepted)
+        .expect("idempotent");
+
+    let pending = store.pending_outbound().expect("read");
+    assert_eq!(pending.len(), 1, "the new message must still be pending");
+    assert_eq!(pending[0].payload, b"just composed".to_vec());
+}
+
+#[test]
+fn a_stale_row_id_cannot_read_a_later_message() {
+    // Same hazard on the inbound side, where the consequence is worse: a
+    // reused id would hand the caller someone else's message body and
+    // delete the durable copy of a message the user never saw.
+    let mut store = memory();
+    let first = store
+        .commit_unread_inbound(&inbound(ID_A, b"already read".to_vec()))
+        .expect("first");
+    store.mark_read(first, 1_000).expect("read");
+
+    let second = store
+        .commit_unread_inbound(&inbound(ID_B, b"never seen".to_vec()))
+        .expect("second");
+    assert_ne!(first.get(), second.get());
+
+    assert!(
+        store.mark_read(first, 2_000).is_err(),
+        "a stale row id must not read the message that inherited it"
+    );
+    assert_eq!(
+        store.unread_inbound().expect("read").len(),
+        1,
+        "the unread message must survive"
+    );
+}
