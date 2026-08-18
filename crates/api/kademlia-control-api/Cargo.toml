@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# The neutral command/event port between the Kademlia provider and the
+# Swarm-owned driver. Depends on transport-api for peer identity and on
+# discovery-api for the candidate shape it normalizes into. NOT on
+# trust-api: routing eligibility consults trust, but the port carries
+# observations and commands, and giving it the trust types would put the
+# decision on the wrong side of the boundary.
+[package]
+name = "interweave-kademlia-control-api"
+version = "0.0.0"
+publish = false
+description = "Neutral Kademlia driver command/event port for InterWeave."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+interweave-discovery-api = { path = "../discovery-api" }
+interweave-transport-api = { path = "../transport-api" }
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }

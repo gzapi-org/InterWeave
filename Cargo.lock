@@ -22,6 +22,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "interweave-kademlia-control-api"
+version = "0.0.0"
+dependencies = [
+ "interweave-discovery-api",
+ "interweave-transport-api",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "interweave-local-client-api"
 version = "0.0.0"
 dependencies = [

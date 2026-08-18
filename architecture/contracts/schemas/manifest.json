@@ -48,5 +48,8 @@
       "description": "The first-party human message envelope. An APPLICATION protocol above the payload-agnostic transport, versioning independently of it.",
       "specification": "architecture/clients/human/HUMAN-CHAT.md"
     }
-  ]
+  ],
+  "not_modelled": {
+    "kademlia": "There is no `kademlia` family, and that is a decision rather than a gap. ADR-0049 schematises WIRE shapes — documents that cross a boundary as JSON — and Kademlia has none. The control surface in `crates/api/kademlia-control-api` is an in-process port between the provider and the Swarm-owned driver: it never crosses IPC or the network. Kademlia's peer observations reach consumers as ordinary `discovery.candidate-peer` documents, which ARE modelled. Its one externally visible string, the `/interweave/kad/1.0.0/<network-hash>` protocol name, is a derived value rather than a document and is frozen in `fixtures/kademlia/kad-network-namespace-v1.json`. And the DHT stores nothing: record mode is disabled (ADR-0009), so there is no record shape to describe. A `kademlia` family would therefore have to invent documents nothing transmits."
+  }
 }
