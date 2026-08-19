@@ -123,3 +123,8 @@ Desktop.ini
 # Python bytecode from ad-hoc tooling runs
 __pycache__/
 *.pyc
+
+# Spike build outputs. Spikes are outside the workspace, so each has its
+# own target/ and lock file; neither is evidence.
+spikes/**/target/
+spikes/**/Cargo.lock

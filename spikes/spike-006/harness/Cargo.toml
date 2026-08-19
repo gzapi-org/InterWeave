@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# SPIKE-006 harness — EVIDENCE ONLY, and deliberately not a workspace
+# member. Nothing depends on it, and its results reach production as
+# permanent tests rather than as code (CLAUDE.md §4, spikes/README.md).
+#
+# The single question: does the pinned rust-libp2p identity API expose and
+# accept the EXACT 32-byte Ed25519 secret seed that
+# `interweave-ed25519-bip39-entropy-v1` assumes — not a 64-byte expanded
+# `secret || public`, and not an opaque protobuf blob?
+#
+# It matters because the recovery format encodes 32 bytes of entropy as 24
+# BIP-39 words. If the library only round-trips a larger or opaque
+# representation, then either the words mean something other than the key,
+# or a restore reconstructs a different PeerId — and a restore that yields
+# a different PeerId from a checksum-valid phrase is the worst failure
+# available, because it looks exactly like success.
+# An EMPTY workspace table, which is what keeps this package out of the
+# root workspace. Not an oversight and not a convenience: a spike that
+# joined `[workspace].members` would be built and linted by `cargo xtask
+# ci`, would appear in Cargo.lock, and would be one `path = ` away from
+# becoming a production dependency by accident — the exact thing
+# spikes/README.md and CLAUDE.md §4 forbid.
+[workspace]
+
+[package]
+name = "spike-006-harness"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+libp2p-identity = { version = "0.3", features = ["ed25519", "peerid", "rand"] }
+sha2 = "0.10"
+# For the negative half of the spike: compute what a BIP-39 WALLET would
+# derive from the same words, and show it is a different identity.
+hmac = "0.12"
+pbkdf2 = { version = "0.12", default-features = false }
