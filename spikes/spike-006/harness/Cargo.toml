@@ -32,7 +32,10 @@ edition = "2024"
 license = "Apache-2.0"
 
 [dependencies]
-libp2p-identity = { version = "0.3", features = ["ed25519", "peerid", "rand"] }
+# 0.2.14, because that is what `libp2p` 0.56 pulls and therefore what
+# ships. A spike measuring a version the product does not use measures
+# nothing.
+libp2p-identity = { version = "0.2.14", features = ["ed25519", "peerid", "rand"] }
 sha2 = "0.10"
 # For the negative half of the spike: compute what a BIP-39 WALLET would
 # derive from the same words, and show it is a different identity.

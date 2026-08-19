@@ -15,6 +15,7 @@ members = [
     "crates/config/profile-config",
     "crates/discovery/cache",
     "crates/identity/profile-identity",
+    "crates/transport/libp2p",
     "crates/human/chat-protocol",
     "crates/human/core",
     "crates/human/store",
@@ -85,11 +86,40 @@ sha2 = "0.10"
 # Brotli for the HumanChatV2 fit-fallback decode path. Used through its
 # streaming interface so the decompressed ceiling aborts mid-stream.
 brotli = { version = "8", default-features = false, features = ["std"] }
-# The libp2p identity boundary, and nothing else from libp2p yet. Pinned
-# because SPIKE-006's findings are about THIS version's API surface:
-# `SecretKey::to_bytes` is pub(crate) here, and the only public accessor
-# is `AsRef<[u8]>`.
-libp2p-identity = { version = "0.3", default-features = false, features = ["ed25519", "peerid", "rand"] }
+# The libp2p substrate. Stage 4 enables exactly TCP, Noise, Yamux and
+# Identify — no Kademlia, no AutoNAT, no Relay, no DCUtR, no GossipSub.
+# Those are not merely unused here, they are absent from the feature list,
+# so a stray `use` cannot switch one on: CLAUDE.md §3 forbids turning on
+# autonomous libp2p behaviour and retrofitting admission policy later, and
+# a feature that is not compiled cannot be turned on by accident.
+libp2p = { version = "0.56", default-features = false, features = [
+    "tcp",
+    "noise",
+    "yamux",
+    "identify",
+    "tokio",
+    "macros",
+    "ed25519",
+] }
+# The async runtime the Swarm is driven on. Bounded channels only (§6).
+tokio = { version = "1", default-features = false, features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+] }
+futures = "0.3"
+# The libp2p identity boundary. Pinned to 0.2 because that is what
+# `libp2p` 0.56 depends on, and two versions in one graph would mean two
+# incompatible `Keypair` types — the identity crate could not hand its key
+# to the Swarm at all.
+#
+# SPIKE-006 was first run against 0.3.0 and re-run against this version
+# when the substrate landed; the three findings are identical, and the
+# spike records both. The point of pinning is that the findings are about
+# a specific API surface, so the version the spike measured has to be the
+# version that ships.
+libp2p-identity = { version = "0.2.14", default-features = false, features = ["ed25519", "peerid", "rand"] }
 # BIP-39 entropy <-> words. Used for the mapping only; the PBKDF2 seed
 # derivation it also offers is the wallet convention and is never called
 # (ADR-0033, fixtures/identity/ed25519-bip39-entropy-v1.json).
@@ -125,7 +155,7 @@ overflow-checks = true
 # Do not restate the member list here. `[workspace].members` above is the
 # only roster, and a comment describing it goes stale the moment a stage
 # opens.
-status = "stage-3-persistence"
+status = "stage-4-libp2p-substrate"
 architecture_root = "architecture"
 
 planned_members = [

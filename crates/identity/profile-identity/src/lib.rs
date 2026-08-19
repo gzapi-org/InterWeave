@@ -196,6 +196,20 @@ impl ProfileIdentity {
         RecoveryPhrase::from_entropy(&self.seed())
     }
 
+    /// The keypair, for the one caller that must drive a Swarm with it.
+    ///
+    /// Deliberately named for what it is used for. The transport
+    /// substrate needs the real key to complete a Noise handshake, so
+    /// this cannot be avoided — but it is the only way the key leaves
+    /// this crate, and every call site is therefore visible in a grep.
+    ///
+    /// Returns the general `Keypair` rather than the Ed25519 one because
+    /// that is what `SwarmBuilder` takes; the conversion is lossless.
+    #[must_use]
+    pub fn swarm_keypair(&self) -> Keypair {
+        Keypair::from(self.keypair.clone())
+    }
+
     /// The exact 32-byte Ed25519 secret seed.
     ///
     /// Through `AsRef<[u8]>`, because `SecretKey::to_bytes` is
