@@ -314,7 +314,7 @@ crates/config/profile-config       # ACTIVE — persistence/storage portions
 
 `tests/human-retention` is a workspace member alongside them, carrying the `RETENTION.md` §9 conformance cases. Case 13 — Android system backup excludes the human store — is an `allowBackup` packaging property and stays open until Stage 17; the suite names it as uncovered rather than leaving its absence to be discovered.
 
-Identity storage may be implemented in the lowest appropriate runtime/identity crate after SPIKE-006 validates the portability boundary. The derivation itself is already pinned: `fixtures/identity/ed25519-bip39-entropy-v1.json` recomputes entropy -> word indexes -> Ed25519 public key -> PeerId against the contract's golden on every CI run, so SPIKE-006's open question is narrowed to the libp2p API boundary — extracting and re-importing the exact 32-byte seed without transformation.
+Identity storage may be implemented in the lowest appropriate runtime/identity crate after SPIKE-006 validates the portability boundary. **SPIKE-006 passed** ([`spikes/spike-006/`](../../spikes/spike-006/README.md)) and `crates/identity/profile-identity` is that crate — the lowest one permitted to know about libp2p, translating to `TransportIdentity` at its own boundary so the PeerId type stops there. The derivation itself is already pinned: `fixtures/identity/ed25519-bip39-entropy-v1.json` recomputes entropy -> word indexes -> Ed25519 public key -> PeerId against the contract's golden on every CI run, so SPIKE-006's open question is narrowed to the libp2p API boundary — extracting and re-importing the exact 32-byte seed without transformation.
 
 ### Human store
 
@@ -348,10 +348,10 @@ Implement:
 
 - profile path/state separation; **landed**;
 - atomic config/state writes; **landed**;
-- owner-only key storage for standard v1; **landed** as the byte-level storage primitive;
-- exact Ed25519 identity persistence; **open** — the file CONTENT is the libp2p portable representation, which is the boundary SPIKE-006 gates;
-- optional mnemonic backup/verify/restore only after SPIKE-006 passes;
-- no mnemonic/private-key material in logs/IPC/network.
+- owner-only key storage for standard v1; **landed**, and `load` refuses a key whose mode has been widened rather than repairing it;
+- exact Ed25519 identity persistence; **landed** in `crates/identity/profile-identity`, after SPIKE-006 established the seed boundary;
+- optional mnemonic backup/verify/restore; **landed** — SPIKE-006 passed, and `verify` is a read-only path that touches no file;
+- no mnemonic/private-key material in logs/IPC/network; **landed** structurally — `RecoveryPhrase` has no `Display` and no `Serialize`, and both it and `RecoveryRecord` redact their `Debug`.
 
 ### Tests
 
@@ -370,7 +370,7 @@ storage failure prevents accepting new human delivery
 
 Persistence invariants survive process restart and failure injection before any networking is allowed to rely on them.
 
-With the mnemonic backup/verify/restore path implemented, flip `contracts/schemas/identity` from `approved` to `active` (ADR-0049) — the record shape stops being a target and starts describing real backup files.
+With the mnemonic backup/verify/restore path implemented, flip `contracts/schemas/identity` from `approved` to `active` (ADR-0049) — the record shape stops being a target and starts describing real backup files. **Done**: `RecoveryRecord` produces and consumes that shape, and it is a boundary in the negative-conformance suite, so the claim is checked rather than asserted.
 
 ## 7. Stage 4 — minimal libp2p substrate
 
