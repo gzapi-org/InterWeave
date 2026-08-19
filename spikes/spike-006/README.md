@@ -9,8 +9,21 @@ Do not treat the experiment in [`harness/`](./harness) as production implementat
 ## What was pinned
 
 ```text
-libp2p-identity 0.3.0   features: ed25519, peerid, rand
+libp2p-identity 0.2.14   features: ed25519, peerid, rand
 ```
+
+**The version changed after the first run, and that matters.** This spike
+was originally run against `libp2p-identity 0.3.0`, chosen as the latest
+release. Stage 4 then showed that `libp2p 0.56` — the substrate — depends
+on `libp2p-identity 0.2.14`. Two versions in one graph would have meant
+two incompatible `Keypair` types, so the identity crate could not have
+handed its key to the Swarm at all.
+
+The harness was re-run against 0.2.14 and every answer is identical,
+including all three findings below. That is a good outcome and not a
+reason to skip the re-run: a spike measuring a version the product does
+not use measures nothing, and "the API probably did not change" is the
+assumption this exercise exists to replace.
 
 ## The question
 

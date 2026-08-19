@@ -114,7 +114,7 @@ Instrument the Swarm / behaviour boundary so Kademlia-originated `ToSwarm::Dial`
 
 **Decision unlocked:** production `transportctl identity backup/restore` implementation against the frozen recovery contract. If the current library boundary cannot reliably expose/reconstruct the exact Ed25519 seed, keep recovery implementation disabled and revise the identity serialization adapter without silently changing the mnemonic format.
 
-**Result (2026-08-19): PASS**, against `libp2p-identity 0.3.0`. Evidence and the reproducing harness are in [`spikes/spike-006/`](../../spikes/spike-006/README.md). The golden all-zero entropy reproduces the frozen public key and PeerId through libp2p, and 64 CSPRNG identities round-trip byte-for-byte.
+**Result (2026-08-19): PASS**, against `libp2p-identity 0.2.14` — the version `libp2p 0.56` depends on, re-run when Stage 4 showed the originally-measured 0.3.0 would have put two incompatible `Keypair` types in one graph. Every answer was identical. Evidence and the reproducing harness are in [`spikes/spike-006/`](../../spikes/spike-006/README.md). The golden all-zero entropy reproduces the frozen public key and PeerId through libp2p, and 64 CSPRNG identities round-trip byte-for-byte.
 
 Three findings constrain the adapter:
 
