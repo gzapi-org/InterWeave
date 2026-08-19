@@ -45,15 +45,9 @@ where
 
 async fn listening_on_loopback(runtime: &mut SwarmRuntime) -> Multiaddr {
     let addr: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse().expect("loopback multiaddr");
-    runtime.listen(addr).await.expect("listen accepted");
-    let event = wait_for(runtime, "a listen address", |e| {
-        matches!(e, SwarmEvent::Listening { .. })
-    })
-    .await;
-    match event {
-        SwarmEvent::Listening { address } => address,
-        other => panic!("unexpected {other:?}"),
-    }
+    // `listen` resolves to the bound address, so nothing has to consume a
+    // separate event to learn where it is listening.
+    runtime.listen(addr).await.expect("listen accepted")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -310,4 +304,46 @@ async fn dialling_an_address_where_a_different_peer_answers_does_not_connect() {
 
     dialer.shutdown().await.expect("stops");
     impostor.shutdown().await.expect("stops");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn listen_resolves_to_the_address_it_bound() {
+    // Port 0 means "pick one", so the assigned port is only knowable from
+    // the answer. Returning a placeholder made this method's own
+    // documentation false and forced every caller to consume an event to
+    // learn what it had just been told.
+    let identity = ProfileIdentity::generate();
+    let runtime = SwarmRuntime::start(&identity, SubstrateConfig::default()).expect("start");
+
+    let requested: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse().expect("multiaddr");
+    let bound = runtime.listen(requested).await.expect("listen");
+
+    let text = bound.to_string();
+    assert!(text.starts_with("/ip4/127.0.0.1/tcp/"), "{text}");
+    let port: u16 = text
+        .rsplit('/')
+        .next()
+        .expect("a port component")
+        .parse()
+        .expect("the port is a number");
+    assert_ne!(port, 0, "the ASSIGNED port, not the one that was asked for");
+
+    // And the address is real: a second runtime can dial it.
+    let peer = runtime.local_peer().clone();
+    let other_identity = ProfileIdentity::generate();
+    let mut other =
+        SwarmRuntime::start(&other_identity, SubstrateConfig::default()).expect("start");
+    other
+        .dial(peer.clone(), bound)
+        .await
+        .expect("command delivered")
+        .expect("admitted");
+    let connected = wait_for(&mut other, "a connection to the returned address", |e| {
+        matches!(e, SwarmEvent::Connected { .. })
+    })
+    .await;
+    assert_eq!(connected, SwarmEvent::Connected { peer });
+
+    other.shutdown().await.expect("stops");
+    runtime.shutdown().await.expect("stops");
 }

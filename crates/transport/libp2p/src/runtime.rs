@@ -27,6 +27,7 @@
 //! "shut down without leaked tasks", and the only way to know a task
 //! ended is to have waited for it.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use futures::StreamExt as _;
@@ -35,6 +36,7 @@ use interweave_transport_api::TransportIdentity;
 use interweave_transport_runtime::{
     ConnectionClass, ConnectionPolicy, DialDenial, DialOrigin, DialRequest,
 };
+use libp2p::core::transport::ListenerId;
 use libp2p::swarm::SwarmEvent as Libp2pSwarmEvent;
 use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
 use libp2p::{Multiaddr, PeerId, Swarm, identify, noise, tcp, yamux};
@@ -87,7 +89,13 @@ pub enum SwarmCommand {
     Listen {
         /// The address to listen on.
         address: Multiaddr,
-        /// Answered with the listener's assigned address.
+        /// Answered with the listener's assigned address, once the OS
+        /// has assigned it.
+        ///
+        /// Held until `NewListenAddr` arrives rather than answered
+        /// immediately: `listen_on` returns only a `ListenerId`, so an
+        /// immediate answer could carry nothing a caller could advertise
+        /// or dial.
         reply: oneshot::Sender<Result<Multiaddr, String>>,
     },
     /// Dial a peer at an address.
@@ -237,6 +245,13 @@ impl SwarmRuntime {
         // line of substrate code rather than being wired in later.
         let mut policy = ConnectionPolicy::new(config.max_pending_dials, config.max_connections);
 
+        // Listen replies wait for the address the OS actually assigned.
+        // `listen_on` returns a ListenerId and nothing else; the bound
+        // address arrives later as `NewListenAddr`. A reply sent before
+        // then can only be a placeholder, and a caller cannot advertise
+        // or dial a placeholder.
+        let mut listens: PendingListens = HashMap::new();
+
         let (command_tx, mut command_rx) = mpsc::channel(config.command_capacity);
         let (event_tx, event_rx) = mpsc::channel(config.event_capacity);
 
@@ -255,12 +270,12 @@ impl SwarmRuntime {
                                 break;
                             }
                             Some(command) => {
-                                handle_command(&mut swarm, &mut policy, command);
+                                handle_command(&mut swarm, &mut policy, &mut listens, command);
                             }
                         }
                     }
                     event = swarm.select_next_some() => {
-                        if let Some(translated) = translate(event)
+                        if let Some(translated) = translate(event, &mut listens)
                             // A CLOSED event channel means the consumer is
                             // gone. Stop rather than accumulate.
                             && event_tx.send(translated).await.is_err() {
@@ -287,7 +302,10 @@ impl SwarmRuntime {
         &self.local_peer
     }
 
-    /// Start listening, returning the bound address.
+    /// Start listening, returning the address that was actually bound.
+    ///
+    /// With port 0 the assigned port is only knowable from this answer,
+    /// so it waits for the listener to report it.
     ///
     /// # Errors
     /// Returns [`SubstrateError::Stopped`] if the task is gone, or
@@ -376,21 +394,29 @@ impl Drop for SwarmRuntime {
     }
 }
 
+/// Listen commands whose bound address has not arrived yet.
+type PendingListens = HashMap<ListenerId, oneshot::Sender<Result<Multiaddr, String>>>;
+
 fn handle_command(
     swarm: &mut Swarm<SubstrateBehaviour>,
     policy: &mut ConnectionPolicy,
+    listens: &mut PendingListens,
     command: SwarmCommand,
 ) {
     match command {
         SwarmCommand::Listen { address, reply } => {
-            let answer = swarm
-                .listen_on(address)
-                .map(|_| Multiaddr::empty())
-                .map_err(|e| e.to_string());
-            // The bound address arrives asynchronously as NewListenAddr;
-            // report the immediate outcome and let the event carry the
-            // real address.
-            let _ = reply.send(answer);
+            match swarm.listen_on(address) {
+                // Held until `NewListenAddr` names the assigned address.
+                // Answering now could only mean answering with a
+                // placeholder, and `listen` documents its result as the
+                // bound address.
+                Ok(id) => {
+                    listens.insert(id, reply);
+                }
+                Err(e) => {
+                    let _ = reply.send(Err(e.to_string()));
+                }
+            }
         }
         SwarmCommand::Dial {
             peer,
@@ -450,9 +476,37 @@ fn handle_command(
 /// gives backoff something to act on. Recording here without a scheduler
 /// would populate state nothing reads, and a half-wired feedback loop is
 /// harder to reason about than an absent one.
-fn translate(event: Libp2pSwarmEvent<SubstrateBehaviourEvent>) -> Option<SwarmEvent> {
+fn translate(
+    event: Libp2pSwarmEvent<SubstrateBehaviourEvent>,
+    listens: &mut PendingListens,
+) -> Option<SwarmEvent> {
     match event {
-        Libp2pSwarmEvent::NewListenAddr { address, .. } => Some(SwarmEvent::Listening { address }),
+        Libp2pSwarmEvent::NewListenAddr {
+            listener_id,
+            address,
+        } => {
+            // Answer the waiting `listen` with the address the OS
+            // assigned. A listener may report several; the first answers
+            // and the rest are ordinary events.
+            if let Some(reply) = listens.remove(&listener_id) {
+                let _ = reply.send(Ok(address.clone()));
+            }
+            Some(SwarmEvent::Listening { address })
+        }
+        // A listener that dies before binding must not leave `listen`
+        // waiting for an address that will never arrive.
+        Libp2pSwarmEvent::ListenerClosed { listener_id, .. } => {
+            if let Some(reply) = listens.remove(&listener_id) {
+                let _ = reply.send(Err("the listener closed before binding".to_owned()));
+            }
+            None
+        }
+        Libp2pSwarmEvent::ListenerError { listener_id, error } => {
+            if let Some(reply) = listens.remove(&listener_id) {
+                let _ = reply.send(Err(error.to_string()));
+            }
+            None
+        }
         Libp2pSwarmEvent::ConnectionEstablished { peer_id, .. } => to_transport_identity(&peer_id)
             .ok()
             .map(|peer| SwarmEvent::Connected { peer }),
