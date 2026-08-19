@@ -32,9 +32,24 @@ version = 2
 # A yanked version is one its own author withdrew. Continuing to build on
 # it needs a reason written down, not silence.
 yanked = "deny"
-# Empty, and it should stay short. Each entry is a decision to ship with a
-# known advisory, so it carries the ID and the reason it is tolerable.
-ignore = []
+# Short on purpose. Each entry is a decision to ship with a KNOWN
+# advisory, so it carries the ID, the reason it is tolerable, and what
+# would change the answer.
+ignore = [
+    # `paste` 1.0.15 — unmaintained, not vulnerable. A proc-macro that
+    # concatenates identifiers, reached transitively through the libp2p
+    # substrate.
+    #
+    # Tolerated because of WHERE it runs: a proc-macro executes at compile
+    # time and contributes no code to the binary, so an unmaintained one
+    # is a build-reproducibility concern rather than a runtime attack
+    # surface. Its input is this workspace's own source.
+    #
+    # Revisit if it ever gains a vulnerability advisory rather than an
+    # unmaintained one, or if libp2p drops it — at which point this entry
+    # should be deleted rather than left to accumulate.
+    { id = "RUSTSEC-2024-0436", reason = "paste is a compile-time-only proc-macro reached through libp2p; unmaintained, not vulnerable" },
+]
 
 [licenses]
 version = 2
@@ -71,6 +86,21 @@ allow = [
     # SHA-256 this workspace already has in `sha2`. Worth revisiting if the
     # Bitcoin dependency chain grows, not worth a worse crate today.
     "CC0-1.0",
+    # BSD-2-Clause, ISC and Zlib — added 2026-08-19 with the libp2p
+    # substrate (Stage 4). All three are permissive notice-only licences
+    # of the same family as the ones already here.
+    #
+    # These are the three I REMOVED on 2026-08-19 as unmatched, when the
+    # graph did not yet contain them. That was the right call and this is
+    # the proof: the next real dependency had to re-admit them
+    # deliberately rather than sliding in under an aspirational entry.
+    #
+    # `ring` is `Apache-2.0 AND ISC` — a conjunction, so both halves must
+    # be allowed for it to resolve. Apache-2.0 already was; ISC is what
+    # completes it.
+    "BSD-2-Clause",
+    "ISC",
+    "Zlib",
 ]
 # A dual-licensed crate is resolved by taking the allowed side. `r-efi` is
 # `Apache-2.0 OR LGPL-2.1-or-later` and resolves to Apache-2.0; this

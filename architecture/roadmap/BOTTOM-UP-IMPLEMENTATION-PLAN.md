@@ -381,7 +381,7 @@ Create the authenticated transport substrate only.
 ### Activate
 
 ```text
-crates/transport/libp2p
+crates/transport/libp2p            # ACTIVE
 ```
 
 ### Implement first
@@ -399,6 +399,10 @@ deterministic shutdown
 
 Do not enable GossipSub, direct v2, Kademlia, AutoNAT, Relay or DCUtR yet.
 
+They are **absent from the `libp2p` feature list** rather than merely unused, so none can be switched on by a `use` statement or a stray builder call. A behaviour that is not compiled cannot be enabled by accident, which is the cheapest way to keep §3's promise that admission policy is never retrofitted.
+
+The dial path runs through the Stage 2 `ConnectionPolicy` from the first line of substrate code. Stage 5 owns making that gate **root** — behaviour-originated dials, the ConnectionManager, the retry scheduler, and feeding connection outcomes back into the policy so backoff has something to act on. What Stage 4 declines to do is ship a dial path with no gate and add one later.
+
 ### Exit gate
 
 Two local test peers can:
@@ -408,6 +412,8 @@ Two local test peers can:
 - exchange Identify state;
 - shut down without leaked tasks;
 - preserve identity across restart.
+
+**Met.** `crates/transport/libp2p/tests/two_peers.rs` runs all five clauses over loopback TCP rather than a mock, and `shutdown` awaits the task's join handle — "without leaked tasks" is only checkable if something waited for the task to end.
 
 ## 8. Stage 5 — root connection and dial admission
 

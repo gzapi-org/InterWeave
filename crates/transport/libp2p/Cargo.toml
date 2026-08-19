@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# Stage 4: the authenticated transport substrate, and nothing else.
+#
+# TCP, Noise, Yamux, Identify. No GossipSub, no direct v2, no Kademlia,
+# no AutoNAT, no Relay, no DCUtR — and those are absent from the feature
+# list rather than merely unused, so a stray `use` cannot switch one on.
+# CLAUDE.md §3 forbids enabling autonomous libp2p behaviour and
+# retrofitting admission policy afterwards; a behaviour that is not
+# compiled cannot be enabled by accident.
+#
+# This crate owns the Swarm. Nothing above it sees a `libp2p::` type:
+# the boundary speaks `TransportIdentity` and this crate's own command
+# and event enums, so the backend stays replaceable and the neutral
+# contracts stay free of libp2p (CLAUDE.md §4).
+[package]
+name = "interweave-transport-libp2p"
+version = "0.0.0"
+publish = false
+description = "InterWeave libp2p transport substrate: TCP, Noise, Yamux, Identify."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+interweave-profile-identity = { path = "../../identity/profile-identity" }
+interweave-transport-api = { path = "../../api/transport-api" }
+interweave-transport-runtime = { path = "../runtime" }
+futures = { workspace = true }
+libp2p = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
