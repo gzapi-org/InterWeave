@@ -36,6 +36,7 @@ use interweave_transport_runtime::{
     ConnectionClass, ConnectionPolicy, DialDenial, DialOrigin, DialRequest,
 };
 use libp2p::swarm::SwarmEvent as Libp2pSwarmEvent;
+use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
 use libp2p::{Multiaddr, PeerId, Swarm, identify, noise, tcp, yamux};
 use tokio::sync::{mpsc, oneshot};
 
@@ -91,10 +92,12 @@ pub enum SwarmCommand {
     },
     /// Dial a peer at an address.
     ///
-    /// Carries the EXPECTED PeerId. Noise authenticates what the remote
-    /// actually proves, and a mismatch is reported rather than accepted:
-    /// dialling an address is not the same as reaching the peer that was
-    /// supposed to be there.
+    /// Carries the EXPECTED PeerId, and it is bound into the dial rather
+    /// than used only for admission. Dialling a bare address tells libp2p
+    /// nothing about who should be there, so a server at that address can
+    /// complete a Noise handshake with any key and the connection is
+    /// accepted — dialling an address is not the same as reaching the
+    /// peer that was supposed to be there.
     Dial {
         /// The peer this address is believed to belong to.
         peer: TransportIdentity,
@@ -406,7 +409,28 @@ fn handle_command(
                 let _ = reply.send(Err(DialRefusal::Policy(denial)));
                 return;
             }
-            let answer = match swarm.dial(address) {
+            // BOUND TO THE EXPECTED IDENTITY. Dialling a bare address
+            // tells libp2p nothing about who should be there, so a server
+            // at that address can complete a Noise handshake with any key
+            // and the connection is accepted. Building the dial with the
+            // PeerId makes the mismatch libp2p's problem: it refuses the
+            // connection instead of reporting `Connected` for a peer
+            // nobody asked for.
+            //
+            // This is what the command's documentation always claimed and
+            // the code did not do.
+            let Ok(expected) = peer.as_str().parse::<PeerId>() else {
+                let _ = reply.send(Err(DialRefusal::Backend(format!(
+                    "expected peer {} is not a libp2p PeerId",
+                    peer.as_str()
+                ))));
+                return;
+            };
+            let opts = DialOpts::peer_id(expected)
+                .addresses(vec![address])
+                .condition(PeerCondition::Always)
+                .build();
+            let answer = match swarm.dial(opts) {
                 Ok(()) => Ok(()),
                 Err(e) => Err(DialRefusal::Backend(e.to_string())),
             };

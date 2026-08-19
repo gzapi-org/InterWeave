@@ -255,3 +255,59 @@ async fn a_dial_to_nowhere_reports_failure_without_stopping_the_substrate() {
     assert!(address.to_string().contains("127.0.0.1"));
     runtime.shutdown().await.expect("stops");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn dialling_an_address_where_a_different_peer_answers_does_not_connect() {
+    // The test the original suite could not have failed. It asserted that
+    // the connected peer equalled the expected one — and it did, because
+    // the listener genuinely WAS that peer. Nothing distinguished "libp2p
+    // enforced the identity" from "the address happened to be right".
+    //
+    // Here the address is right and the identity is not: a real listener
+    // answers, completes a Noise handshake with its own key, and is not
+    // who the dialler asked for. Without the expected PeerId bound into
+    // the dial, that connection succeeds.
+    let impostor_identity = ProfileIdentity::generate();
+    let dialer_identity = ProfileIdentity::generate();
+    let expected_but_absent = ProfileIdentity::generate()
+        .transport_identity()
+        .expect("peer id");
+
+    let mut impostor =
+        SwarmRuntime::start(&impostor_identity, SubstrateConfig::default()).expect("impostor");
+    let mut dialer =
+        SwarmRuntime::start(&dialer_identity, SubstrateConfig::default()).expect("dialer");
+
+    let address = listening_on_loopback(&mut impostor).await;
+
+    dialer
+        .dial(expected_but_absent.clone(), address)
+        .await
+        .expect("command delivered")
+        .expect("admitted by policy");
+
+    // What must NOT happen is a Connected event. A dial failure is the
+    // correct outcome: someone answered, and it was not the peer asked
+    // for.
+    let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match dialer.next_event().await {
+                Some(SwarmEvent::Connected { peer }) => return Some(peer),
+                Some(SwarmEvent::DialFailed { .. }) => return None,
+                Some(_) => {}
+                None => return None,
+            }
+        }
+    })
+    .await
+    .expect("the dialler must reach a verdict");
+
+    assert!(
+        outcome.is_none(),
+        "connected to {outcome:?} while expecting {expected_but_absent:?} — \
+         the expected identity was not enforced"
+    );
+
+    dialer.shutdown().await.expect("stops");
+    impostor.shutdown().await.expect("stops");
+}
