@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# The profile's transport identity: generation, owner-only persistence,
+# and the ADR-0033 recovery phrase.
+#
+# This is the LOWEST crate allowed to know about libp2p, and it is not an
+# `api/` crate for exactly that reason (CLAUDE.md §4). Its own boundary
+# speaks `TransportIdentity`, the neutral type, so the libp2p PeerId stops
+# here rather than travelling upward with it.
+#
+# Activated by SPIKE-006, which established that this library's identity
+# API exposes and accepts the exact 32-byte Ed25519 seed the recovery
+# format assumes. See spikes/spike-006/README.md — three findings there
+# constrain what this crate is allowed to call.
+[package]
+name = "interweave-profile-identity"
+version = "0.0.0"
+publish = false
+description = "InterWeave profile transport identity: Ed25519 persistence and recovery."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+interweave-profile-config = { path = "../../config/profile-config" }
+interweave-transport-api = { path = "../../api/transport-api" }
+libp2p-identity = { workspace = true }
+# Entropy <-> 24 words ONLY. `Mnemonic::to_seed` — the wallet PBKDF2 path
+# — is never called, and the wrapper in `recovery` is what keeps it out of
+# reach: the bip39 type is private, so no caller can get at it.
+bip39 = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tempfile = { workspace = true }

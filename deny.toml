@@ -52,6 +52,25 @@ allow = [
     "BSD-3-Clause",
     "Unicode-3.0",
     "Unlicense",
+    # CC0-1.0 — added 2026-08-19 for `bip39` and the two crates it pulls,
+    # `bitcoin_hashes` and `hex-conservative`.
+    #
+    # A public-domain dedication: the most permissive terms available, with
+    # no attribution or notice obligation, so nothing about it constrains
+    # shipping an Apache-2.0 project.
+    #
+    # The alternatives were worse rather than better. Vendoring the 2048-word
+    # list would make the wallet PBKDF2 path literally nonexistent, which is
+    # attractive — but BIP-0039 is BSD-2-Clause, so it would mean a copied
+    # asset, a provenance record, an exemption entry, and a SIXTH licence on
+    # this list to avoid a fifth. Swapping to `tiny-bip39` would avoid the
+    # edit, but choosing a less-maintained fork of a crypto-adjacent crate to
+    # keep a list short is optimising the wrong thing.
+    #
+    # Recorded cost, since it is real: `bip39` brings `bitcoin_hashes` for a
+    # SHA-256 this workspace already has in `sha2`. Worth revisiting if the
+    # Bitcoin dependency chain grows, not worth a worse crate today.
+    "CC0-1.0",
 ]
 # A dual-licensed crate is resolved by taking the allowed side. `r-efi` is
 # `Apache-2.0 OR LGPL-2.1-or-later` and resolves to Apache-2.0; this
