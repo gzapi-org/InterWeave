@@ -45,15 +45,9 @@ where
 
 async fn listening_on_loopback(runtime: &mut SwarmRuntime) -> Multiaddr {
     let addr: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse().expect("loopback multiaddr");
-    runtime.listen(addr).await.expect("listen accepted");
-    let event = wait_for(runtime, "a listen address", |e| {
-        matches!(e, SwarmEvent::Listening { .. })
-    })
-    .await;
-    match event {
-        SwarmEvent::Listening { address } => address,
-        other => panic!("unexpected {other:?}"),
-    }
+    // `listen` resolves to the bound address, so nothing has to consume a
+    // separate event to learn where it is listening.
+    runtime.listen(addr).await.expect("listen accepted")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -254,4 +248,146 @@ async fn a_dial_to_nowhere_reports_failure_without_stopping_the_substrate() {
     let address = listening_on_loopback(&mut runtime).await;
     assert!(address.to_string().contains("127.0.0.1"));
     runtime.shutdown().await.expect("stops");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn dialling_an_address_where_a_different_peer_answers_does_not_connect() {
+    // The test the original suite could not have failed. It asserted that
+    // the connected peer equalled the expected one — and it did, because
+    // the listener genuinely WAS that peer. Nothing distinguished "libp2p
+    // enforced the identity" from "the address happened to be right".
+    //
+    // Here the address is right and the identity is not: a real listener
+    // answers, completes a Noise handshake with its own key, and is not
+    // who the dialler asked for. Without the expected PeerId bound into
+    // the dial, that connection succeeds.
+    let impostor_identity = ProfileIdentity::generate();
+    let dialer_identity = ProfileIdentity::generate();
+    let expected_but_absent = ProfileIdentity::generate()
+        .transport_identity()
+        .expect("peer id");
+
+    let mut impostor =
+        SwarmRuntime::start(&impostor_identity, SubstrateConfig::default()).expect("impostor");
+    let mut dialer =
+        SwarmRuntime::start(&dialer_identity, SubstrateConfig::default()).expect("dialer");
+
+    let address = listening_on_loopback(&mut impostor).await;
+
+    dialer
+        .dial(expected_but_absent.clone(), address)
+        .await
+        .expect("command delivered")
+        .expect("admitted by policy");
+
+    // What must NOT happen is a Connected event. A dial failure is the
+    // correct outcome: someone answered, and it was not the peer asked
+    // for.
+    let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match dialer.next_event().await {
+                Some(SwarmEvent::Connected { peer }) => return Some(peer),
+                Some(SwarmEvent::DialFailed { .. }) => return None,
+                Some(_) => {}
+                None => return None,
+            }
+        }
+    })
+    .await
+    .expect("the dialler must reach a verdict");
+
+    assert!(
+        outcome.is_none(),
+        "connected to {outcome:?} while expecting {expected_but_absent:?} — \
+         the expected identity was not enforced"
+    );
+
+    dialer.shutdown().await.expect("stops");
+    impostor.shutdown().await.expect("stops");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn listen_resolves_to_the_address_it_bound() {
+    // Port 0 means "pick one", so the assigned port is only knowable from
+    // the answer. Returning a placeholder made this method's own
+    // documentation false and forced every caller to consume an event to
+    // learn what it had just been told.
+    let identity = ProfileIdentity::generate();
+    let runtime = SwarmRuntime::start(&identity, SubstrateConfig::default()).expect("start");
+
+    let requested: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse().expect("multiaddr");
+    let bound = runtime.listen(requested).await.expect("listen");
+
+    let text = bound.to_string();
+    assert!(text.starts_with("/ip4/127.0.0.1/tcp/"), "{text}");
+    let port: u16 = text
+        .rsplit('/')
+        .next()
+        .expect("a port component")
+        .parse()
+        .expect("the port is a number");
+    assert_ne!(port, 0, "the ASSIGNED port, not the one that was asked for");
+
+    // And the address is real: a second runtime can dial it.
+    let peer = runtime.local_peer().clone();
+    let other_identity = ProfileIdentity::generate();
+    let mut other =
+        SwarmRuntime::start(&other_identity, SubstrateConfig::default()).expect("start");
+    other
+        .dial(peer.clone(), bound)
+        .await
+        .expect("command delivered")
+        .expect("admitted");
+    let connected = wait_for(&mut other, "a connection to the returned address", |e| {
+        matches!(e, SwarmEvent::Connected { .. })
+    })
+    .await;
+    assert_eq!(connected, SwarmEvent::Connected { peer });
+
+    other.shutdown().await.expect("stops");
+    runtime.shutdown().await.expect("stops");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_completes_while_the_event_channel_is_full() {
+    // The deadlock. With the send awaited inline, a full event channel
+    // parks the whole task inside the event branch: the command branch is
+    // never polled, so `shutdown` enqueues its command and waits forever
+    // for a reply from a task that is waiting for the consumer it is
+    // blocking.
+    //
+    // A capacity of 1 and a consumer that never drains reproduces it in
+    // one connection.
+    let listener_identity = ProfileIdentity::generate();
+    let dialer_identity = ProfileIdentity::generate();
+    let listener_peer = listener_identity.transport_identity().expect("peer id");
+
+    let mut listener = SwarmRuntime::start(
+        &listener_identity,
+        SubstrateConfig {
+            event_capacity: 1,
+            ..SubstrateConfig::default()
+        },
+    )
+    .expect("listener");
+    let dialer = SwarmRuntime::start(&dialer_identity, SubstrateConfig::default()).expect("dialer");
+
+    let address = listening_on_loopback(&mut listener).await;
+
+    dialer
+        .dial(listener_peer, address)
+        .await
+        .expect("command delivered")
+        .expect("admitted");
+
+    // Give the listener time to fill its one-slot event channel and try to
+    // enqueue more. Its events are deliberately NEVER read.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    tokio::time::timeout(Duration::from_secs(10), listener.shutdown())
+        .await
+        .expect("shutdown must not hang behind a full event channel")
+        .expect("the task joins");
+
+    dialer.shutdown().await.expect("stops");
 }
