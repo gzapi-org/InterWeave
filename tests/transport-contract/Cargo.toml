@@ -18,10 +18,16 @@ repository.workspace = true
 [lints]
 workspace = true
 
+# NOT EMPTY: the mutation generator is a library because the negative
+# suite and its own self-test both use it. A generator that only existed
+# inside a test file could not be tested itself, and a generator nobody
+# tests is one that can silently stop generating.
 [dependencies]
+serde_json = { workspace = true }
 
 [dev-dependencies]
 interweave-discovery-api = { path = "../../crates/api/discovery-api" }
+interweave-human-chat-protocol = { path = "../../crates/human/chat-protocol" }
 interweave-ipc-protocol = { path = "../../crates/api/ipc-protocol" }
 interweave-local-client-api = { path = "../../crates/api/local-client-api" }
 interweave-profile-config = { path = "../../crates/config/profile-config" }

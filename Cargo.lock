@@ -849,6 +849,7 @@ name = "interweave-transport-contract-tests"
 version = "0.0.0"
 dependencies = [
  "interweave-discovery-api",
+ "interweave-human-chat-protocol",
  "interweave-ipc-protocol",
  "interweave-local-client-api",
  "interweave-profile-config",

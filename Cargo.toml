@@ -106,9 +106,15 @@ debug = 1
 overflow-checks = true
 
 [workspace.metadata.interweave]
-# Stage 0 of the canonical plan: the workspace builds and checks itself, and
-# `xtask` is its only member. No product crate is active, and none becomes
-# active until the stage that needs it opens (CLAUDE.md §3).
+# The open stage of the canonical plan, and the ONE machine-readable place
+# it is recorded. Every human-facing status sentence — README.md,
+# IMPLEMENTATION.md, CLAUDE.md §1 — is checked against this value by
+# tools/checks/check_stage_status.sh, because three prose copies of one
+# fact drifted apart twice before the check existed.
+#
+# Do not restate the member list here. `[workspace].members` above is the
+# only roster, and a comment describing it goes stale the moment a stage
+# opens.
 status = "stage-3-persistence"
 architecture_root = "architecture"
 

@@ -160,9 +160,18 @@ pub fn decode_frame(buffer: &[u8]) -> Result<DecodedFrame, FrameError> {
         });
     };
     let text = core::str::from_utf8(body).map_err(|_| FrameError::NotUtf8)?;
-    serde_json::from_str::<serde_json::Value>(text).map_err(|e| FrameError::NotJson {
-        detail: e.to_string(),
-    })?;
+    let value =
+        serde_json::from_str::<serde_json::Value>(text).map_err(|e| FrameError::NotJson {
+            detail: e.to_string(),
+        })?;
+    // The parsed value is CONSULTED, not discarded. Every message class is
+    // discriminated by a property — `type`, `id`, `method` — so a scalar
+    // or array has nowhere to carry one, and passing it on as
+    // successfully decoded hands the next layer something it can neither
+    // classify nor report a framing error about.
+    if !value.is_object() {
+        return Err(FrameError::NotAnObject);
+    }
     Ok(DecodedFrame {
         body: text.to_owned(),
         consumed: total,
@@ -256,6 +265,24 @@ mod tests {
             decode_frame(&framed),
             Err(FrameError::NotJson { .. })
         ));
+    }
+
+    #[test]
+    fn valid_json_that_is_not_an_object_is_not_a_frame() {
+        // The contract says each frame body is a UTF-8 JSON object, and
+        // every message class is discriminated by a property. These five
+        // are all valid JSON and none of them is a frame.
+        for body in ["null", "[]", "7", "\"text\"", "true"] {
+            let framed = encode_frame(body).expect("encodes");
+            assert_eq!(
+                decode_frame(&framed),
+                Err(FrameError::NotAnObject),
+                "{body} must not decode as a frame"
+            );
+        }
+        // And an object still does.
+        let framed = encode_frame(r#"{"type":"ping"}"#).expect("encodes");
+        assert!(decode_frame(&framed).is_ok());
     }
 
     #[test]
