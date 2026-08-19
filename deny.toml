@@ -1,0 +1,121 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# Dependency policy: what this project is willing to depend on, and on
+# what terms. Enforced by `tools/checks/check_dependencies.sh`.
+#
+# The policy is an ALLOW-LIST in every dimension that has one. A deny-list
+# only stops what someone thought to name, and the interesting supply-chain
+# failure is always the thing nobody thought of.
+#
+# Written before libp2p arrives on purpose. The graph is 240 packages
+# today and libp2p roughly doubles it; a policy adopted after that has to
+# be written around whatever is already there, which is how an allow-list
+# turns into a description of the status quo.
+
+[graph]
+# Every feature, so a dependency that only appears under a non-default
+# feature is still governed. Checking the default feature set would leave
+# `rusqlite/bundled` — a C library compiled into the binary — outside the
+# policy.
+all-features = true
+
+# Dev-dependencies ARE included. They are not distributed, so their
+# licences carry no obligation on a release, but they execute on developer
+# machines and in CI with full access to the checkout and the token. The
+# advisory check is the reason: a compromised test-only crate is a
+# compromised build.
+exclude-dev = false
+
+[advisories]
+version = 2
+# A yanked version is one its own author withdrew. Continuing to build on
+# it needs a reason written down, not silence.
+yanked = "deny"
+# Empty, and it should stay short. Each entry is a decision to ship with a
+# known advisory, so it carries the ID and the reason it is tolerable.
+ignore = []
+
+[licenses]
+version = 2
+# Everything not listed is DENIED. These are the terms compatible with
+# shipping an Apache-2.0 project, and each was observed in the current
+# graph rather than added speculatively.
+# Exactly the six the current graph resolves to, and no more. An
+# aspirational entry is worse than a missing one: it makes the next
+# dependency slip in without anyone deciding, which is the whole failure
+# an allow-list exists to prevent. Adding a seventh should cost a commit
+# and a sentence about why those terms are acceptable.
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+    "Unlicense",
+]
+# A dual-licensed crate is resolved by taking the allowed side. `r-efi` is
+# `Apache-2.0 OR LGPL-2.1-or-later` and resolves to Apache-2.0; this
+# threshold makes that automatic while still refusing a crate whose ONLY
+# terms are copyleft.
+confidence-threshold = 0.93
+
+[bans]
+# WARN, not deny. Duplicate versions are real bloat and a real hazard when
+# the duplicate is a crypto or parsing crate, but they arrive through
+# transitive graphs nobody here controls, and denying them would make the
+# check fail for reasons no commit in this repository caused. Reviewed at
+# the point a duplicate appears in a diff.
+multiple-versions = "warn"
+# A `*` version requirement means "whatever resolves today", which is the
+# opposite of the reproducibility the rest of this repository is built on.
+wildcards = "deny"
+# Except between packages in this workspace. `{ path = "../foo" }` with no
+# version is how every intra-workspace dependency here is written, and it
+# is not a wildcard in the sense that matters: the resolved code is in this
+# repository, at this commit, and moves only when someone edits it.
+allow-wildcard-paths = true
+
+[bans.build]
+# Native EXECUTABLES shipped inside a crate, detected by content rather
+# than by extension. A build script is at least source someone can read;
+# a precompiled binary in a crates.io package is code nobody in the
+# dependency chain has seen, running with the developer's environment at
+# compile time. There is no legitimate reason for one here.
+executables = "deny"
+
+# ALLOWED, after measuring it. Turned on, this reports 83 shell scripts
+# in the current graph — every one a legitimate `ci/` or `tests/` file
+# that got swept into a published tarball by aws-lc-sys, zerocopy,
+# aws-lc-rs and libc. None is executed by a build script here.
+#
+# Left as a warning it would print 83 multi-line blocks on every local
+# `cargo xtask checks` run, burying the output of every other check. A
+# warning nobody reads is worse than no warning, because it teaches
+# people to scroll past this tool's output entirely.
+#
+# `executables = "deny"` above is the part of this that carries signal:
+# it fires on zero crates today, so any future hit is genuinely anomalous
+# rather than one of eighty-four.
+interpreted = "allow"
+
+# NOT SET: a build-script allow-list.
+#
+# It is the strongest supply-chain control cargo-deny offers — a build
+# script is arbitrary code executed at compile time, before any test runs
+# and with the developer's full environment. Thirty-one crates in the
+# current graph have one, including libc, ring, aws-lc-sys and
+# libsqlite3-sys, and libp2p will add more.
+#
+# It is deliberately left off rather than set to a list, because a list
+# that has to be edited on every transitive bump is a list that gets
+# widened under time pressure until it means nothing. Turning it on is a
+# decision to accept that maintenance; recording the absence here is
+# better than a `allow-build-scripts` entry that silently grows.
+
+[sources]
+# The supply-chain control that matters most and costs least: code may
+# come from crates.io and nowhere else. A git dependency is a moving
+# target with no version, no yank mechanism, and no advisory database.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

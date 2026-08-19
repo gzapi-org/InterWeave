@@ -216,6 +216,14 @@ Do not:
 
 If a new dependency or copied asset has unclear licensing, stop and resolve that before landing it.
 
+### The dependency policy is enforced
+
+`deny.toml` is the accepted policy and `tools/checks/check_dependencies.sh` enforces it. The licence list is an **allow-list containing exactly the terms the current graph resolves to** — a deny-list only stops what someone thought to name, and an aspirational entry lets the next dependency in without anyone deciding.
+
+Adding a dependency whose licence is not already listed therefore fails the check. That is the intended cost: widening the list is a licensing decision, and it should arrive as a commit with a sentence about why those terms are acceptable for an Apache-2.0 project — not as a one-word edit made to get CI green.
+
+The same file forbids git dependencies and any registry other than crates.io. A git dependency has no version, no yank mechanism, and no advisory database, so it is outside every other control in this section.
+
 ### Licence headers are checked
 
 Every first-party source file carries an `SPDX-License-Identifier: Apache-2.0` header in its opening lines. `tools/checks/check_license_headers.sh` enforces that, and also fails on foreign licence terms — an SPDX tag naming another licence, or rights-reserved / confidential boilerplate — anywhere in the tracked or about-to-be-committed tree. It scans untracked-but-not-ignored files too, because the file about to be committed is exactly the one worth catching.
@@ -478,6 +486,8 @@ For repository-wide changes, verify at minimum:
 - `tools/checks/check_license_headers.sh` is clean — no missing Apache-2.0 header on first-party source, no foreign licence terms;
 - `tools/checks/validate_contracts.py` is clean — every wire schema is meta-valid, manifested both ways, and traceable to an ADR and a prose specification;
 - `tools/checks/verify_fixture_vectors.py` is clean — every frozen vector recomputes from its declared algorithm;
+- `tools/checks/check_stage_status.sh` is clean — every human-facing statement of the open stage agrees with `workspace.metadata.interweave.status`;
+- `tools/checks/check_dependencies.sh` is clean — the graph satisfies `deny.toml`: no advisory or yanked version, every licence on the allow-list, no wildcard requirement or shipped executable, and crates.io as the only source;
 - no forbidden production artifacts were introduced outside the active stage;
 - `git fsck --full` passes before archive handoff when a full repository ZIP is requested.
 

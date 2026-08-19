@@ -45,6 +45,13 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# The cargo-deny pin lives HERE, once, because two jobs install it and a
+# version bumped in one place only would leave the self-tests exercising a
+# different binary from the checks — green for a reason nobody could see.
+env:
+  CARGO_DENY_VERSION: "0.20.2"
+  CARGO_DENY_SHA256: "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
+
 jobs:
   rust:
     # CONTEXT NAME: `rust`. Like the two below, this string is what the
@@ -117,6 +124,29 @@ jobs:
       - name: Stage status agrees across the tree
         run: bash tools/checks/check_stage_status.sh
 
+      # Installed from the upstream release binary, verified by checksum,
+      # rather than through a third-party action.
+      #
+      # Two reasons. A `cargo install` compiles cargo-deny and its own
+      # dependency tree on every run, which is minutes; and an action to
+      # run a supply-chain check adds a supply-chain dependency that the
+      # check itself would not cover. A pinned tarball with a known
+      # sha256 is the same discipline this repository applies to its pip
+      # dependencies, applied to its own tooling.
+      - name: Install cargo-deny
+        run: |
+          set -euo pipefail
+          asset="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          url="https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${asset}"
+          curl -fsSL -o "$asset" "$url"
+          echo "${CARGO_DENY_SHA256}  ${asset}" | sha256sum --check --strict
+          tar -xzf "$asset" --strip-components=1 -C /usr/local/bin \
+            "cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl/cargo-deny"
+          cargo-deny --version
+
+      - name: Dependency policy — advisories, licences, bans, sources
+        run: bash tools/checks/check_dependencies.sh
+
       - name: Wire contracts — schema, manifest, provenance
         run: python3 tools/checks/validate_contracts.py
 
@@ -151,6 +181,21 @@ jobs:
           # recomputes a frozen vector is only as trustworthy as the
           # library that recomputed it.
           python3 -m pip install --quiet --require-hashes -r tools/requirements.txt
+
+      # test_check_dependencies.sh degrades to an absence-path-only run
+      # when cargo-deny is missing, and reports success. That is right for
+      # a developer laptop and wrong for CI, where it would quietly stop
+      # exercising the policy at all.
+      - name: Install cargo-deny
+        run: |
+          set -euo pipefail
+          asset="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          url="https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${asset}"
+          curl -fsSL -o "$asset" "$url"
+          echo "${CARGO_DENY_SHA256}  ${asset}" | sha256sum --check --strict
+          tar -xzf "$asset" --strip-components=1 -C /usr/local/bin \
+            "cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl/cargo-deny"
+          cargo-deny --version
 
       # The suites mock `gh` and `curl` on PATH, so no token and no
       # network are used. They do need jq and coreutils `timeout`, both
