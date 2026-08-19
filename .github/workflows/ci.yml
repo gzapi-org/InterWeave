@@ -140,9 +140,18 @@ jobs:
           url="https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${asset}"
           curl -fsSL -o "$asset" "$url"
           echo "${CARGO_DENY_SHA256}  ${asset}" | sha256sum --check --strict
-          tar -xzf "$asset" --strip-components=1 -C /usr/local/bin \
+          # A directory this job creates, rather than /usr/local/bin.
+          # Writing there works on today's ubuntu-latest image — the runs
+          # prove it — but only because that image happens to leave it
+          # writable by the unprivileged runner user, which GitHub does
+          # not document or guarantee. An image change would break both
+          # required jobs at once, and the failure would look like a
+          # dependency problem rather than an install one.
+          mkdir -p "${RUNNER_TEMP}/bin"
+          tar -xzf "$asset" --strip-components=1 -C "${RUNNER_TEMP}/bin" \
             "cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl/cargo-deny"
-          cargo-deny --version
+          echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
+          "${RUNNER_TEMP}/bin/cargo-deny" --version
 
       - name: Dependency policy — advisories, licences, bans, sources
         run: bash tools/checks/check_dependencies.sh
@@ -193,9 +202,18 @@ jobs:
           url="https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${asset}"
           curl -fsSL -o "$asset" "$url"
           echo "${CARGO_DENY_SHA256}  ${asset}" | sha256sum --check --strict
-          tar -xzf "$asset" --strip-components=1 -C /usr/local/bin \
+          # A directory this job creates, rather than /usr/local/bin.
+          # Writing there works on today's ubuntu-latest image — the runs
+          # prove it — but only because that image happens to leave it
+          # writable by the unprivileged runner user, which GitHub does
+          # not document or guarantee. An image change would break both
+          # required jobs at once, and the failure would look like a
+          # dependency problem rather than an install one.
+          mkdir -p "${RUNNER_TEMP}/bin"
+          tar -xzf "$asset" --strip-components=1 -C "${RUNNER_TEMP}/bin" \
             "cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl/cargo-deny"
-          cargo-deny --version
+          echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
+          "${RUNNER_TEMP}/bin/cargo-deny" --version
 
       # The suites mock `gh` and `curl` on PATH, so no token and no
       # network are used. They do need jq and coreutils `timeout`, both
