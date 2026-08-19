@@ -33,7 +33,7 @@
   },
   "x-contract": {
     "name": "identity.recovery-record",
-    "status": "approved",
+    "status": "active",
     "version": "1.0.0",
     "adr": ["0033", "0038"],
     "specification": "architecture/contracts/IDENTITY-RECOVERY.md",

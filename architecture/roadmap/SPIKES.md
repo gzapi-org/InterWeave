@@ -114,6 +114,14 @@ Instrument the Swarm / behaviour boundary so Kademlia-originated `ToSwarm::Dial`
 
 **Decision unlocked:** production `transportctl identity backup/restore` implementation against the frozen recovery contract. If the current library boundary cannot reliably expose/reconstruct the exact Ed25519 seed, keep recovery implementation disabled and revise the identity serialization adapter without silently changing the mnemonic format.
 
+**Result (2026-08-19): PASS**, against `libp2p-identity 0.3.0`. Evidence and the reproducing harness are in [`spikes/spike-006/`](../../spikes/spike-006/README.md). The golden all-zero entropy reproduces the frozen public key and PeerId through libp2p, and 64 CSPRNG identities round-trip byte-for-byte.
+
+Three findings constrain the adapter:
+
+1. `ed25519::SecretKey::to_bytes()` is **`pub(crate)`**. The only public path to the raw seed is `AsRef<[u8]>`; an implementer reaching for the obvious accessor will not find it, and the tempting next move — `Keypair::to_bytes()` — returns a different, 64-byte thing.
+2. That 64-byte form is `seed || public`, **not** `expanded || public`, so its first half is genuinely the seed. It is still not what the adapter should use: a 64-byte intermediate is one refactor away from being mnemonic-encoded whole, which this spike's objective forbids.
+3. `try_from_bytes` **zeroes the caller's buffer** on success. An adapter passing its only copy loses it, and nothing at the call site says so.
+
 ## SPIKE-007 — encrypted software-key envelope
 
 **Objective:** select and validate an audited passphrase-encrypted at-rest envelope for exportable Ed25519 software identities as an optional v2.x feature, without changing PeerId or the mnemonic recovery format.

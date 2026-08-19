@@ -2,7 +2,7 @@
   "family": "identity",
   "specification": "architecture/contracts/IDENTITY-RECOVERY.md",
   "concepts": [
-    { "name": "recovery-record", "file": "recovery-record.schema.json", "status": "approved" }
+    { "name": "recovery-record", "file": "recovery-record.schema.json", "status": "active" }
   ],
   "not_modelled": {
     "the private key file": "Serialized by the implementation's portable libp2p key representation and written owner-only. It is not a document, never leaves the machine, and must not acquire a schema that would invite treating it as transferable.",

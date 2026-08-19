@@ -200,6 +200,15 @@ fn parse_direct_destination(doc: &Value) -> bool {
     serde_json::from_value::<DirectDestination>(doc.clone()).is_ok()
 }
 
+/// The identity recovery record: deserialization plus its own shape check.
+///
+/// `restore()` is deliberately not called — it would reconstruct a key,
+/// and the question here is conformance, not cryptography.
+fn parse_recovery_record(doc: &Value) -> bool {
+    serde_json::from_value::<interweave_profile_identity::RecoveryRecord>(doc.clone())
+        .is_ok_and(|r| r.validate().is_ok())
+}
+
 fn boundaries() -> Vec<Boundary> {
     vec![
         Boundary {
@@ -244,6 +253,18 @@ fn boundaries() -> Vec<Boundary> {
                 "observed_at": 1_700_000_000_000_u64
             }),
             parse: parse_candidate_peer,
+            responsible: everything,
+        },
+        Boundary {
+            name: "identity.recovery-record",
+            schema: "identity/recovery-record.schema.json",
+            seed: json!({
+                "format": "interweave-ed25519-bip39-entropy-v1",
+                "identity_algorithm": "ed25519",
+                "expected_peer_id": PEER,
+                "words": (0..24).map(|_| "abandon").collect::<Vec<_>>()
+            }),
+            parse: parse_recovery_record,
             responsible: everything,
         },
         Boundary {

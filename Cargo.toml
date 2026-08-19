@@ -14,6 +14,7 @@ members = [
     "crates/api/transport-api",
     "crates/config/profile-config",
     "crates/discovery/cache",
+    "crates/identity/profile-identity",
     "crates/human/chat-protocol",
     "crates/human/core",
     "crates/human/store",
@@ -84,6 +85,15 @@ sha2 = "0.10"
 # Brotli for the HumanChatV2 fit-fallback decode path. Used through its
 # streaming interface so the decompressed ceiling aborts mid-stream.
 brotli = { version = "8", default-features = false, features = ["std"] }
+# The libp2p identity boundary, and nothing else from libp2p yet. Pinned
+# because SPIKE-006's findings are about THIS version's API surface:
+# `SecretKey::to_bytes` is pub(crate) here, and the only public accessor
+# is `AsRef<[u8]>`.
+libp2p-identity = { version = "0.3", default-features = false, features = ["ed25519", "peerid", "rand"] }
+# BIP-39 entropy <-> words. Used for the mapping only; the PBKDF2 seed
+# derivation it also offers is the wallet convention and is never called
+# (ADR-0033, fixtures/identity/ed25519-bip39-entropy-v1.json).
+bip39 = { version = "2", default-features = false, features = ["std"] }
 # SQLite for the human store (STATE.md). `bundled` compiles the amalgamation
 # rather than linking whatever the host provides: desktop and Android must
 # agree on the storage engine, and a retention invariant that depends on the

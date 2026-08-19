@@ -31,6 +31,7 @@ interweave-human-chat-protocol = { path = "../../crates/human/chat-protocol" }
 interweave-ipc-protocol = { path = "../../crates/api/ipc-protocol" }
 interweave-local-client-api = { path = "../../crates/api/local-client-api" }
 interweave-profile-config = { path = "../../crates/config/profile-config" }
+interweave-profile-identity = { path = "../../crates/identity/profile-identity" }
 interweave-test-support = { path = "../support" }
 interweave-transport-api = { path = "../../crates/api/transport-api" }
 interweave-transport-runtime = { path = "../../crates/transport/runtime" }
