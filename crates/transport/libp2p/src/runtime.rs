@@ -26,6 +26,15 @@
 //! join handle**. It does not drop a handle and hope. The exit gate says
 //! "shut down without leaked tasks", and the only way to know a task
 //! ended is to have waited for it.
+//!
+//! Bounded channels and deterministic shutdown interact, and the first
+//! version of this module got the interaction wrong. Awaiting the event
+//! send inline parks the whole task inside the event branch: with a full
+//! channel and a consumer that has stopped draining, the command branch
+//! is never polled again, so `shutdown` enqueues its command and waits
+//! forever for a reply from a task that is waiting for the consumer it
+//! is blocking. The loop therefore holds a translated event and selects
+//! between delivering it and taking a command, so shutdown always wins.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -256,7 +265,52 @@ impl SwarmRuntime {
         let (event_tx, event_rx) = mpsc::channel(config.event_capacity);
 
         let task = tokio::spawn(async move {
+            // An event that has been translated but not yet handed over.
+            //
+            // THIS IS WHY SHUTDOWN CANNOT DEADLOCK. Awaiting the send
+            // inline would park the whole task inside the event branch:
+            // with a full channel and a consumer that has stopped
+            // draining, the command branch is never polled again, so
+            // `shutdown` enqueues its command and waits forever for a
+            // reply from a task that is waiting for the consumer it is
+            // blocking. Holding the event here instead lets the loop keep
+            // selecting, and a Shutdown command wins over delivering it.
+            let mut pending: Option<SwarmEvent> = None;
+
             loop {
+                if let Some(event) = pending.take() {
+                    tokio::select! {
+                        // `reserve` waits for capacity WITHOUT consuming
+                        // the event, so it can be put back if a command
+                        // arrives first.
+                        permit = event_tx.reserve() => {
+                            match permit {
+                                Ok(permit) => permit.send(event),
+                                // The consumer is gone; nothing can be
+                                // delivered again. Stop rather than
+                                // accumulate.
+                                Err(_) => break,
+                            }
+                        }
+                        command = command_rx.recv() => {
+                            // Put it back: a command interrupting delivery
+                            // must not silently drop a network event.
+                            pending = Some(event);
+                            match command {
+                                None => break,
+                                Some(SwarmCommand::Shutdown { reply }) => {
+                                    let _ = reply.send(());
+                                    break;
+                                }
+                                Some(command) => {
+                                    handle_command(&mut swarm, &mut policy, &mut listens, command);
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+
                 tokio::select! {
                     command = command_rx.recv() => {
                         match command {
@@ -275,12 +329,7 @@ impl SwarmRuntime {
                         }
                     }
                     event = swarm.select_next_some() => {
-                        if let Some(translated) = translate(event, &mut listens)
-                            // A CLOSED event channel means the consumer is
-                            // gone. Stop rather than accumulate.
-                            && event_tx.send(translated).await.is_err() {
-                                break;
-                            }
+                        pending = translate(event, &mut listens);
                     }
                 }
             }

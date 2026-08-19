@@ -347,3 +347,47 @@ async fn listen_resolves_to_the_address_it_bound() {
     other.shutdown().await.expect("stops");
     runtime.shutdown().await.expect("stops");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_completes_while_the_event_channel_is_full() {
+    // The deadlock. With the send awaited inline, a full event channel
+    // parks the whole task inside the event branch: the command branch is
+    // never polled, so `shutdown` enqueues its command and waits forever
+    // for a reply from a task that is waiting for the consumer it is
+    // blocking.
+    //
+    // A capacity of 1 and a consumer that never drains reproduces it in
+    // one connection.
+    let listener_identity = ProfileIdentity::generate();
+    let dialer_identity = ProfileIdentity::generate();
+    let listener_peer = listener_identity.transport_identity().expect("peer id");
+
+    let mut listener = SwarmRuntime::start(
+        &listener_identity,
+        SubstrateConfig {
+            event_capacity: 1,
+            ..SubstrateConfig::default()
+        },
+    )
+    .expect("listener");
+    let dialer = SwarmRuntime::start(&dialer_identity, SubstrateConfig::default()).expect("dialer");
+
+    let address = listening_on_loopback(&mut listener).await;
+
+    dialer
+        .dial(listener_peer, address)
+        .await
+        .expect("command delivered")
+        .expect("admitted");
+
+    // Give the listener time to fill its one-slot event channel and try to
+    // enqueue more. Its events are deliberately NEVER read.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    tokio::time::timeout(Duration::from_secs(10), listener.shutdown())
+        .await
+        .expect("shutdown must not hang behind a full event channel")
+        .expect("the task joins");
+
+    dialer.shutdown().await.expect("stops");
+}
