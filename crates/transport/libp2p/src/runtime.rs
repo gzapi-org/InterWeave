@@ -36,7 +36,7 @@
 //! is blocking. The loop therefore holds a translated event and selects
 //! between delivering it and taking a command, so shutdown always wins.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 use futures::StreamExt as _;
@@ -265,7 +265,7 @@ impl SwarmRuntime {
         let (event_tx, event_rx) = mpsc::channel(config.event_capacity);
 
         let task = tokio::spawn(async move {
-            // An event that has been translated but not yet handed over.
+            // Events translated but not yet handed over.
             //
             // THIS IS WHY SHUTDOWN CANNOT DEADLOCK. Awaiting the send
             // inline would park the whole task inside the event branch:
@@ -273,45 +273,55 @@ impl SwarmRuntime {
             // draining, the command branch is never polled again, so
             // `shutdown` enqueues its command and waits forever for a
             // reply from a task that is waiting for the consumer it is
-            // blocking. Holding the event here instead lets the loop keep
-            // selecting, and a Shutdown command wins over delivering it.
-            let mut pending: Option<SwarmEvent> = None;
+            // blocking. Holding events here instead lets the loop keep
+            // selecting, and a Shutdown command wins over delivering one.
+            //
+            // AND THIS IS WHY `listen` CANNOT HANG. An earlier version
+            // held a single event and, while it was held, selected only
+            // between channel capacity and more commands — so the Swarm
+            // was not polled at all. `translate` is what answers a
+            // pending `listen`, and it only runs on a polled event, so a
+            // `Listen` issued in that state waited for a `NewListenAddr`
+            // that could never be observed. The caller could not drain
+            // its way out either: `listen` borrows `&self` and
+            // `next_event` borrows `&mut self`, so no one holding the
+            // former can call the latter. Keeping the Swarm in the same
+            // select is what closes that cycle.
+            let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
 
             loop {
-                if let Some(event) = pending.take() {
-                    tokio::select! {
-                        // `reserve` waits for capacity WITHOUT consuming
-                        // the event, so it can be put back if a command
-                        // arrives first.
-                        permit = event_tx.reserve() => {
-                            match permit {
-                                Ok(permit) => permit.send(event),
-                                // The consumer is gone; nothing can be
-                                // delivered again. Stop rather than
-                                // accumulate.
-                                Err(_) => break,
-                            }
-                        }
-                        command = command_rx.recv() => {
-                            // Put it back: a command interrupting delivery
-                            // must not silently drop a network event.
-                            pending = Some(event);
-                            match command {
-                                None => break,
-                                Some(SwarmCommand::Shutdown { reply }) => {
-                                    let _ = reply.send(());
-                                    break;
-                                }
-                                Some(command) => {
-                                    handle_command(&mut swarm, &mut policy, &mut listens, command);
-                                }
-                            }
-                        }
-                    }
-                    continue;
-                }
+                // BOUNDED, per the resource rules: a consumer that stops
+                // draining must not let a remote peer choose this
+                // process's memory. The cap is the channel's own
+                // capacity, so a stalled consumer costs at most twice
+                // what it already agreed to buffer.
+                //
+                // The slack is one slot per OUTSTANDING LISTEN, and it is
+                // safe for the reason the cap exists: `listens` grows
+                // only when a local caller issues `Listen` and shrinks
+                // when that caller is answered, so its size is chosen by
+                // this process and never by the network. Without the
+                // slack a full outbox would stop the polling that
+                // resolves those very callers, which is the deadlock
+                // above wearing a bound.
+                let room = outbox.len() < config.event_capacity.saturating_add(listens.len());
 
                 tokio::select! {
+                    // `reserve` waits for capacity WITHOUT consuming an
+                    // event, so nothing is lost when another branch wins.
+                    permit = event_tx.reserve(), if !outbox.is_empty() => {
+                        match permit {
+                            Ok(permit) => {
+                                if let Some(event) = outbox.pop_front() {
+                                    permit.send(event);
+                                }
+                            }
+                            // The consumer is gone; nothing can be
+                            // delivered again. Stop rather than
+                            // accumulate.
+                            Err(_) => break,
+                        }
+                    }
                     command = command_rx.recv() => {
                         match command {
                             // The channel closed: every sender is gone, so
@@ -328,8 +338,10 @@ impl SwarmRuntime {
                             }
                         }
                     }
-                    event = swarm.select_next_some() => {
-                        pending = translate(event, &mut listens);
+                    event = swarm.select_next_some(), if room => {
+                        if let Some(event) = translate(event, &mut listens) {
+                            outbox.push_back(event);
+                        }
                     }
                 }
             }
