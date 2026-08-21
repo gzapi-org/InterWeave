@@ -266,21 +266,15 @@ fi
 # cannot be attributed to a session, so any scope filter removes them.
 # COUNTED, because removing them silently is exactly how this command
 # hid nine PRs and an unanswered P1: the answer looked complete and was
-# not. Reported in the footer whenever it is non-zero.
-UNATTRIBUTED=0
-if [[ "$FILTER" != "" ]]; then
-    UNATTRIBUTED="$(printf '%s' "$rows" | jq '
-      def bots: ["dependabot","renovate","github-actions","weblate","imgbot",
-                 "allcontributors","pre-commit-ci","snyk-bot"];
-      [ .[] | select((.headRefName | split("/")) as $p
-          | (($p | length) < 4)
-            or (($p[0] | length) == 0)
-            or (($p[1] | length) == 0)
-            or (bots | index($p[0]) != null)
-            or (($p[2] | test("^[a-z][a-z0-9._-]*$")) | not)) ] | length' 2>/dev/null || echo 0)"
-fi
-
-selected="$(printf '%s' "$rows" | jq --arg me "$ME" --arg filter "$FILTER" \
+# not.
+#
+# Counted in the SAME pass that builds `selected`, and from the rows
+# left after /lastDate and /lastItem have narrowed the pool. A separate
+# pass over the unnarrowed rows reported PRs the caller never asked
+# about — `/lastItem:1` would announce an unscopable PR that was outside
+# the one-item pool and had therefore not been omitted by anything.
+# Sharing the pipeline is what keeps the two answers about the same set.
+envelope="$(printf '%s' "$rows" | jq --arg me "$ME" --arg filter "$FILTER" \
         --argjson limit "$CANDIDATES" --arg cutoff "$CUTOFF" \
         --argjson lastitem "${LAST_ITEM:-0}" '
   # STRUCTURAL, not an allow-list of type words.
@@ -331,10 +325,19 @@ selected="$(printf '%s' "$rows" | jq --arg me "$ME" --arg filter "$FILTER" \
   # POOL FIRST: /lastDate then /lastItem, before scope or anything else.
   | ( if $cutoff != "" then map(select(.updatedAt >= $cutoff)) else . end )
   | ( if $lastitem > 0 then .[:$lastitem] else . end )
-  | ( if $filter == "__MINE__" then map(select(._s == $me))
-      elif $filter != "" then map(select(._s | test($filter; "i")))
-      else . end )
-  | sort_by(-.number) | .[:$limit]
+  # The pool is now fixed, so both answers below describe the same set.
+  | . as $pool
+  | { # Nothing is dropped by scope when there is no scope, so /all
+      # reports zero rather than a number no filter acted on.
+      unattributed:
+        (if $filter == "" then 0
+         else ([$pool[] | select(._s == "(unconventional)")] | length) end),
+      rows:
+        ($pool
+         | ( if $filter == "__MINE__" then map(select(._s == $me))
+             elif $filter != "" then map(select(._s | test($filter; "i")))
+             else . end )
+         | sort_by(-.number) | .[:$limit]) }
 ')" || {
     # `--session '['` kills jq on the regex, and the unchecked command
     # substitution then left `selected` empty — which the block below
@@ -345,6 +348,24 @@ selected="$(printf '%s' "$rows" | jq --arg me "$ME" --arg filter "$FILTER" \
     exit 2
 }
 
+selected="$(printf '%s' "$envelope" | jq '.rows')"
+UNATTRIBUTED="$(printf '%s' "$envelope" | jq '.unattributed')"
+
+# Say it on EVERY exit path, not just the one that prints a table.
+#
+# The warning used to live in the footer alone, so the two paths that
+# exit early — no rows at all, and /unresolved finding no known open
+# threads — printed a reassuring "no PRs" and omitted the disclosure
+# entirely. Those are precisely the answers a reader acts on, and
+# precisely the failure this warning exists to prevent: it was itself
+# silently dropped exactly where silence was most costly.
+unattributed_note() {
+    [[ "${UNATTRIBUTED:-0}" -gt 0 ]] || return 0
+    echo "  NOTE: $UNATTRIBUTED PR(s) have a branch that does not parse as" >&2
+    echo "  <host>/<clone>/<type>/<short-desc>, so they cannot be scoped to a" >&2
+    echo "  session and are not listed. Pass /all to see every PR regardless." >&2
+}
+
 if [[ "$(printf '%s' "$selected" | jq 'length')" -eq 0 ]]; then
     what="PRs"
     [[ "$FILTER" == "__MINE__" ]] && what="PRs for this clone ($ME)"
@@ -352,6 +373,7 @@ if [[ "$(printf '%s' "$selected" | jq 'length')" -eq 0 ]]; then
     echo "pr-sessions: no $what in the last $FETCH ${STATE} PR(s)."
     [[ "$DEFAULTED_TO_MINE" -eq 1 ]] && \
         echo "  (scoped to this clone by default — pass /all to see every session)"
+    unattributed_note
     exit 0
 fi
 
@@ -479,19 +501,14 @@ if [[ -z "${out//[$' \t\n']/}" ]]; then
     [[ -n "$FILTER" && "$FILTER" != "__MINE__" ]] && scope="sessions matching '$FILTER'"
     echo "pr-sessions: no PRs with unresolved review threads for $scope"
     echo "  (checked the newest $CANDIDATES of the last $FETCH ${STATE} PRs)"
+    unattributed_note
     exit 0
 fi
 
 printf '%s\n' "$out"
 
 echo
-# An unattributable branch is dropped by any scope filter, and a drop
-# nobody mentions reads as "there was nothing there". Say the number.
-if [[ "${UNATTRIBUTED:-0}" -gt 0 ]]; then
-    echo "  NOTE: $UNATTRIBUTED PR(s) have a branch that does not parse as" >&2
-    echo "  <host>/<clone>/<type>/<short-desc>, so they cannot be scoped to a" >&2
-    echo "  session and are not listed. Pass /all to see every PR regardless." >&2
-fi
+unattributed_note
 if [[ "$DEFAULTED_TO_MINE" -eq 1 ]]; then
     echo "  Scoped to this clone ($ME) — pass /all for every session."
 elif [[ "$GROUPED" -eq 0 ]]; then

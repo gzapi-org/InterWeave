@@ -76,7 +76,7 @@ Compression is a **fit fallback, never a default** (ADR-0050):
 
 Receiving `;ce=br`:
 
-- stream-decode under a hard decompressed ceiling of **196,608 bytes** (4 × the 49,152-byte transport payload ceiling, set by ADR-0050), aborting mid-stream when the cap is reached;
+- stream-decode under a hard decompressed ceiling of **196,608 bytes** (4 × the 49,152-byte transport payload ceiling, set by ADR-0050), aborting mid-stream as soon as the output would exceed the cap — exactly 196,608 bytes decode, the next one does not;
 - there is deliberately **no declared uncompressed-length field** — a declared length would be peer-asserted metadata the cap must override anyway;
 - the decompressed bytes must be a valid raw-form envelope; all envelope validation runs on the decompressed bytes.
 

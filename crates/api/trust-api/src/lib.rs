@@ -254,8 +254,15 @@ pub enum EndpointTrustPolicy {
 }
 
 /// The wire shape, matching the frozen `oneOf`.
+///
+/// CLOSED. Serde's derived struct-variant deserializer ignores unknown
+/// fields by default, so `{"static_subset": [...], "policy":
+/// "static-subset"}` was accepted while the frozen policy schema sets
+/// `additionalProperties: false`. Rejecting the old tagged-only form was
+/// not enough: a document carrying BOTH still parsed, which is exactly
+/// the shape a client migrating from the tagged representation emits.
 #[derive(Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(untagged, deny_unknown_fields)]
 enum EndpointTrustPolicyRepr {
     Inherit(InheritLiteral),
     Subset {
@@ -343,18 +350,55 @@ impl EndpointTrustPolicy {
 /// A peer may legitimately appear in both sets; then it is data-plane
 /// trusted because the *data-plane* policy says so, never because this one
 /// does.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct InfrastructureSet {
     allowed_peers: BTreeSet<TransportIdentity>,
 }
 
+/// The JSON shape, deserialized through the validating constructor.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InfrastructureSetRepr {
+    #[serde(default)]
+    allowed_peers: BTreeSet<TransportIdentity>,
+}
+
+impl<'de> Deserialize<'de> for InfrastructureSet {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // The same checked path a Rust caller takes. A configuration file
+        // is where an oversized set would actually arrive.
+        let raw = InfrastructureSetRepr::deserialize(d)?;
+        Self::new(raw.allowed_peers).map_err(serde::de::Error::custom)
+    }
+}
+
 impl InfrastructureSet {
+    /// Ceiling from `architecture/config/config.schema.yaml`:
+    /// `transport.connectivity.infrastructure.allowed_peers` is
+    /// `list[PeerId, max=256]`.
+    pub const MAX_ALLOWED_PEERS: usize = 256;
+
     /// Build the infrastructure authorization set.
-    #[must_use]
-    pub fn new(allowed_peers: impl IntoIterator<Item = TransportIdentity>) -> Self {
-        Self {
-            allowed_peers: allowed_peers.into_iter().collect(),
+    ///
+    /// # Errors
+    /// Returns [`TrustPolicyError::AllowlistTooLarge`] above
+    /// [`Self::MAX_ALLOWED_PEERS`]. Enforced here rather than left to a
+    /// configuration validator, because both this constructor and the
+    /// derived `Deserialize` used to produce a fully operative
+    /// authorization set of any size — an out-of-contract set that then
+    /// participates in control-connection admission is the resource
+    /// bound not merely unchecked but bypassed.
+    pub fn new(
+        allowed_peers: impl IntoIterator<Item = TransportIdentity>,
+    ) -> Result<Self, TrustPolicyError> {
+        let allowed_peers: BTreeSet<TransportIdentity> = allowed_peers.into_iter().collect();
+        if allowed_peers.len() > Self::MAX_ALLOWED_PEERS {
+            return Err(TrustPolicyError::AllowlistTooLarge {
+                got: allowed_peers.len(),
+                max: Self::MAX_ALLOWED_PEERS,
+            });
         }
+        Ok(Self { allowed_peers })
     }
 
     /// Whether this peer may open a reachability-control connection.
@@ -404,6 +448,13 @@ mod tests {
 
     fn peer(s: &str) -> TransportIdentity {
         TransportIdentity::parse(s).expect("valid test identity")
+    }
+
+    /// Distinct synthetic identities differing only in their tail, so a
+    /// set genuinely holds as many members as it was asked for.
+    fn synthetic_peer(i: usize) -> TransportIdentity {
+        let tail = format!("{i:044}").replace('0', "a");
+        peer(&format!("Qm{}", &tail[..44]))
     }
 
     fn allowlist(peers: &[&str]) -> PeerTrustPolicy {
@@ -500,7 +551,7 @@ mod tests {
     #[test]
     fn infrastructure_authorization_is_not_data_plane_trust() {
         let data_plane = allowlist(&[P1]);
-        let infra = InfrastructureSet::new([peer(P3)]);
+        let infra = InfrastructureSet::new([peer(P3)]).expect("within the ceiling");
 
         // The relay may open a control connection and is still refused by
         // the data plane. This is the whole point of ADR-0036.
@@ -515,9 +566,70 @@ mod tests {
 
         // Membership in both is legitimate; the data-plane answer comes
         // from the data-plane policy, never from this set.
-        let both = InfrastructureSet::new([peer(P1), peer(P3)]);
+        let both = InfrastructureSet::new([peer(P1), peer(P3)]).expect("within the ceiling");
         assert!(both.permits_control_connection(&peer(P1)));
         assert_eq!(data_plane.decide(&peer(P1)), TrustDecision::Allowed);
+    }
+
+    #[test]
+    fn an_endpoint_subset_object_is_closed() {
+        // Serde's derived struct-variant deserializer ignores unknown
+        // fields, so refusing the old tagged-only form was not enough:
+        // a document carrying BOTH the subset and a leftover tag still
+        // parsed, which is exactly what a client migrating from the
+        // tagged representation emits.
+        let with_tag = format!(r#"{{"static_subset":["{P1}"],"policy":"static-subset"}}"#);
+        assert!(
+            serde_json::from_str::<EndpointTrustPolicy>(&with_tag).is_err(),
+            "an unknown field beside static_subset must be refused"
+        );
+
+        let clean = format!(r#"{{"static_subset":["{P1}"]}}"#);
+        assert!(
+            serde_json::from_str::<EndpointTrustPolicy>(&clean).is_ok(),
+            "the frozen shape itself must still parse"
+        );
+        assert!(
+            serde_json::from_str::<EndpointTrustPolicy>(r#""inherit_profile_trust""#).is_ok(),
+            "and so must the bare literal"
+        );
+    }
+
+    #[test]
+    fn the_infrastructure_ceiling_holds_on_both_paths() {
+        // An out-of-contract set is not merely unchecked: it goes on to
+        // participate in control-connection admission, so the resource
+        // bound is bypassed rather than deferred.
+        let over: Vec<TransportIdentity> = (0..=InfrastructureSet::MAX_ALLOWED_PEERS)
+            .map(synthetic_peer)
+            .collect();
+        assert_eq!(
+            InfrastructureSet::new(over.clone()),
+            Err(TrustPolicyError::AllowlistTooLarge {
+                got: InfrastructureSet::MAX_ALLOWED_PEERS + 1,
+                max: InfrastructureSet::MAX_ALLOWED_PEERS,
+            })
+        );
+
+        // The path a configuration file actually takes.
+        let peers: Vec<String> = over
+            .iter()
+            .map(|p| format!(r#""{}""#, p.as_str()))
+            .collect();
+        let doc = format!(r#"{{"allowed_peers":[{}]}}"#, peers.join(","));
+        assert!(
+            serde_json::from_str::<InfrastructureSet>(&doc).is_err(),
+            "the derived Deserialize must not build what the constructor refuses"
+        );
+
+        let at_cap: Vec<TransportIdentity> = over
+            .into_iter()
+            .take(InfrastructureSet::MAX_ALLOWED_PEERS)
+            .collect();
+        assert!(
+            InfrastructureSet::new(at_cap).is_ok(),
+            "exactly at the ceiling is legal"
+        );
     }
 
     #[test]

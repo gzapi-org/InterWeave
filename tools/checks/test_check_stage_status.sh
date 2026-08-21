@@ -63,6 +63,28 @@ make_tree "$TMP/comment" "stage-3-persistence" \
   "Stage 0 of the canonical plan: xtask is its only member."
 expect "the comment contradicts its own field" "$TMP/comment" 1
 
+echo "check_stage_status: the no-\`is\` phrasing is recognised on both sides"
+# The positive check accepts "Stage 3 open" as well as "Stage 3 is
+# open", and the README uses that shorter form. The exclusion scan
+# recognised only the longer one, so a file could name TWO different open
+# stages and pass — over the phrasing the repository actually uses.
+make_tree "$TMP/shortform" "stage-3-persistence" \
+  "Stage 3 open." "Stage 3 is open." "Stage 3 is open."
+expect "the short form alone still passes" "$TMP/shortform" 0
+
+make_tree "$TMP/shortstale" "stage-3-persistence" \
+  "Stage 3 open. Stage 1 open." "Stage 3 is open." "Stage 3 is open."
+expect "two open stages in the short form fails" "$TMP/shortstale" 1
+
+make_tree "$TMP/mixedstale" "stage-3-persistence" \
+  "Stage 3 is open. Stage 1 open." "Stage 3 is open." "Stage 3 is open."
+expect "mixing the phrasings does not hide it" "$TMP/mixedstale" 1
+
+echo "check_stage_status: \"opened\" is prose, not a claim about the open stage"
+make_tree "$TMP/opened" "stage-3-persistence" \
+  "Stage 3 is open. Stage 1 opened long ago." "Stage 3 is open." "Stage 3 is open."
+expect "a past-tense mention is not a stale claim" "$TMP/opened" 0
+
 echo "check_stage_status: a prose roster fails"
 make_tree "$TMP/roster" "stage-3-persistence" \
   "Stage 3 is open. Its members are \`xtask\` the command runner and tests/support." \

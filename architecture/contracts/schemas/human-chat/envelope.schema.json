@@ -30,7 +30,10 @@
     "reply_to": {
       "type": "string",
       "pattern": "^[0-9a-f]{32}$",
-      "description": "Same canonical grammar. The referenced message NEED NOT exist locally: an unknown reference neither rejects the envelope nor triggers a network lookup, and the UI shows a neutral placeholder. Treating it as a fetchable pointer would turn a display hint into a remote-triggered request."
+      "description": "Same canonical grammar. The referenced message NEED NOT exist locally: an unknown reference neither rejects the envelope nor triggers a network lookup, and the UI shows a neutral placeholder. Treating it as a fetchable pointer would turn a display hint into a remote-triggered request.",
+      "examples": [
+        "0123456789abcdef0123456789abcdef"
+      ]
     },
     "sent_at_ms": {
       "type": "integer",

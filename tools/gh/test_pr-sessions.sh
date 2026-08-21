@@ -248,6 +248,39 @@ truncated_graphql() {
     }')"
 }
 
+
+# Every branch unattributable. The scope filter empties `selected`, so
+# the script takes its early "no PRs" exit — the path that used to skip
+# the disclosure entirely and print a reassuring answer instead.
+all_unattributable_pr_list() {
+    write_pr_list "$(jq -n '[
+      {number: 51, state: "OPEN", headRefName: "no-slashes-at-all",
+       title: "a", updatedAt: "2026-08-09T10:00:00Z", isDraft: false, mergedAt: null},
+      {number: 50, state: "OPEN", headRefName: "dependabot/cargo/serde-1.2.3",
+       title: "b", updatedAt: "2026-08-08T10:00:00Z", isDraft: false, mergedAt: null}
+    ]')"
+}
+
+# Newest row is conventional and clean; the older one is unattributable.
+# `/lastItem:1` narrows the pool to the newest alone, so the older row
+# was never in the requested set and nothing omitted it.
+pooled_pr_list() {
+    write_pr_list "$(jq -n --arg me "$ME" '[
+      {number: 50, state: "OPEN", headRefName: ($me + "/fix/newest"),
+       title: "newest", updatedAt: "2026-08-09T10:00:00Z", isDraft: false, mergedAt: null},
+      {number: 49, state: "OPEN", headRefName: "no-slashes-at-all",
+       title: "older", updatedAt: "2026-08-08T10:00:00Z", isDraft: false, mergedAt: null}
+    ]')"
+}
+
+pooled_graphql() {
+    write_graphql "$(jq -n '{
+      data: {repository: {
+        p50: {number: 50, author: {login: "andreabenetton"}, reviewThreads: {nodes: []}}
+      }}
+    }')"
+}
+
 # ── cases ───────────────────────────────────────────────────────────
 
 setup_sandbox
@@ -519,6 +552,32 @@ run
 assert_rc       "exits 0" 0
 assert_contains "says how many could not be scoped" "cannot be scoped"
 assert_not_contains "and does not list it"          "#37"
+
+echo "pr-sessions: the empty-result exit still discloses what it could not scope"
+all_unattributable_pr_list; default_graphql
+run
+assert_rc       "exits 0" 0
+assert_contains "says there are no PRs for this clone" "no PRs for this clone"
+assert_contains "  and STILL discloses the drop"      "cannot be scoped"
+
+echo "pr-sessions: the /unresolved empty exit discloses it too"
+all_unattributable_pr_list; default_graphql
+run /unresolved
+assert_rc       "exits 0" 0
+assert_contains "reports nothing outstanding" "no PRs"
+assert_contains "  and STILL discloses the drop" "cannot be scoped"
+
+echo "pr-sessions: the count describes the pool asked for, not everything fetched"
+pooled_pr_list; pooled_graphql
+run
+assert_rc       "exits 0" 0
+assert_contains "unpooled, the older row is disclosed" "cannot be scoped"
+
+pooled_pr_list; pooled_graphql
+run /lastItem:1
+assert_rc           "exits 0" 0
+assert_contains     "the pooled row is listed"                "#50"
+assert_not_contains "and nothing outside the pool is claimed" "cannot be scoped"
 
 echo
 if [[ "$failures" -eq 0 ]]; then

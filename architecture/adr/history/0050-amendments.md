@@ -1,5 +1,13 @@
 # ADR-0050 — amendment history
 
+### Amendment 2026-08-21 — Decoding aborts when the output would exceed the ceiling, not when it reaches it
+
+Rule 4 gives the sender the inclusive range `max_payload_bytes < raw <= 196,608`, while rule 5 required the receiver to abort "when it is reached". An envelope of exactly 196,608 raw bytes was therefore sender-conforming and refused by every conforming receiver — the identical sender-conforming/universally-unacceptable gap the 2026-08-17 amendment closed at the other end of the range, reopened at one value by the boundary wording.
+
+There was no coherent behaviour to implement: the two rules disagreed about a single size. `crates/human/chat-protocol` had already resolved it in rule 4's favour — its decoder accepts exactly the ceiling and refuses the next byte — so the prose was the part that was wrong.
+
+Rule 5 now aborts as soon as the output *would exceed* the cap. 196,608 bytes decode; the 196,609th aborts. The ceiling stays 4 × the 49,152-byte transport payload ceiling, and that transport ceiling is inclusive too, so the multiplier now means the same thing at both ends.
+
 ### Amendment 2026-08-17 — Bridge decodes content-encoding before classifying content
 
 Rule 6 required the Claude bridge's defense-in-depth checks to run on decompressed bytes, but `contracts/CHANNEL-EVENT.md` independently required non-UTF-8 payloads to be forwarded as base64url and stated that the bridge "does not parse JSON/application protocols to infer meaning". A brotli-compressed envelope is non-UTF-8, so a bridge conforming to that contract would forward opaque base64url and never invoke the decoder, while a bridge following rule 6 would violate the event contract. Two accepted documents in conflict is precisely what must not be resolved silently in code (`CLAUDE.md` §2).

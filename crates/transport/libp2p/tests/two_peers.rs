@@ -391,3 +391,64 @@ async fn shutdown_completes_while_the_event_channel_is_full() {
 
     dialer.shutdown().await.expect("stops");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn listen_completes_while_the_event_channel_is_full() {
+    // The second half of the same deadlock, and the half that survived
+    // the first fix. Holding one translated event kept `shutdown`
+    // responsive, but while that event was held the loop selected only
+    // between channel capacity and more commands — the Swarm was not
+    // polled at all.
+    //
+    // `translate` is what answers a pending `listen`, and it runs only on
+    // a polled event, so a `Listen` issued in that state waited for a
+    // `NewListenAddr` that could never be observed. The caller could not
+    // rescue itself either: `listen` borrows `&self` and `next_event`
+    // borrows `&mut self`, so nobody awaiting the former can drain with
+    // the latter.
+    //
+    // Capacity 1 and a consumer that never drains reproduces it in three
+    // listeners: the first fills the channel, the second fills the held
+    // slot, and the third is the one that used to hang forever.
+    let identity = ProfileIdentity::generate();
+    let runtime = SwarmRuntime::start(
+        &identity,
+        SubstrateConfig {
+            event_capacity: 1,
+            ..SubstrateConfig::default()
+        },
+    )
+    .expect("runtime");
+
+    let loopback: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse().expect("loopback multiaddr");
+
+    // Events are deliberately NEVER read, so each `Listening` stays where
+    // the task put it.
+    for nth in 1..=3 {
+        let bound = tokio::time::timeout(PATIENCE, runtime.listen(loopback.clone()))
+            .await
+            .unwrap_or_else(|_| panic!("listen #{nth} hung behind a full event channel"))
+            .expect("listen accepted");
+
+        // A bound address, not a placeholder: the reply is only correct
+        // if it came from the `NewListenAddr` this test is proving can
+        // still be observed.
+        assert!(
+            bound.to_string().starts_with("/ip4/127.0.0.1/tcp/"),
+            "listen #{nth} resolved to {bound}, not a bound loopback address"
+        );
+        assert!(
+            !bound.to_string().ends_with("/tcp/0"),
+            "listen #{nth} returned the requested port, not the assigned one"
+        );
+
+        // Let the task translate and shelve the resulting event before
+        // the next call, so each iteration starts one slot fuller.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    tokio::time::timeout(Duration::from_secs(10), runtime.shutdown())
+        .await
+        .expect("shutdown must not hang behind a full event channel")
+        .expect("the task joins");
+}
