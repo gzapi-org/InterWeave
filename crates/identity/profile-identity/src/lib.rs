@@ -47,6 +47,54 @@ use libp2p_identity::{Keypair, PeerId, ed25519};
 pub use record::{ALGORITHM, FORMAT, RecoveryRecord};
 pub use recovery::{ENTROPY_BYTES, PHRASE_WORDS, RecoveryPhrase};
 
+/// Take the rotation marker, or say why not.
+///
+/// # Why `ENOENT` is not "there is no identity"
+///
+/// `link` resolves its source to an INODE and then completes the link.
+/// The winning rotation finishes with a `rename` onto the same path,
+/// which drops the previous inode's last link — so a loser whose `link`
+/// had already resolved that inode finds it with no links left and gets
+/// `ENOENT`, while the name itself never stopped existing.
+///
+/// Reporting that as [`IdentityError::NotFound`] told a caller its
+/// profile had no key at the exact moment another caller was rotating
+/// it, which is both false and alarming. The condition is transient by
+/// construction — it happens only because a rotation just completed — so
+/// the answer is to look again. What the retry then finds is a different
+/// identity, and the loser gets the `PeerIdMismatch` it should have had.
+///
+/// A genuinely absent key is distinguished by asking whether the NAME is
+/// there, which is a different question from whether the inode survived.
+fn acquire_marker(path: &Path, marker: &Path) -> Result<(), IdentityError> {
+    // Bounded: each attempt costs one completed rotation by someone
+    // else, so exhausting them means losing repeatedly rather than
+    // waiting on anything.
+    const ATTEMPTS: usize = 8;
+
+    for _ in 0..ATTEMPTS {
+        match std::fs::hard_link(path, marker) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(IdentityError::RotationInProgress {
+                    marker: marker.to_path_buf(),
+                });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if !path.exists() {
+                    return Err(IdentityError::NotFound);
+                }
+                // The name is there; the inode we resolved is not. Some
+                // other rotation landed between the two.
+            }
+            Err(e) => return Err(IdentityError::Storage(PersistError::Io(e))),
+        }
+    }
+    Err(IdentityError::RotationInProgress {
+        marker: marker.to_path_buf(),
+    })
+}
+
 /// The exclusive marker a rotation holds, beside the key it replaces.
 ///
 /// Beside it because `link` works within one filesystem, and because a
@@ -386,16 +434,7 @@ impl ProfileIdentity {
         // which is what makes the identity read below the one actually
         // being replaced rather than whatever is there a moment later.
         let marker = marker_path(path);
-        match std::fs::hard_link(path, &marker) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                return Err(IdentityError::RotationInProgress { marker });
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(IdentityError::NotFound);
-            }
-            Err(e) => return Err(IdentityError::Storage(PersistError::Io(e))),
-        }
+        acquire_marker(path, &marker)?;
 
         let outcome = self.rotate_holding(path, &marker, replacing);
         // Released whatever happened. A marker left behind by a failed
