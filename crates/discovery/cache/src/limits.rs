@@ -42,17 +42,41 @@ pub const MAX_LABEL_BYTES: usize = 128;
 
 /// Largest cache file this build will read, in bytes.
 ///
-/// DERIVED, not chosen. One peer at every other limit is roughly
-/// 64 bytes of PeerId, 8 addresses of 256 plus a timestamp each, and 16
-/// capability observations of three 128-byte labels plus scalars — under
-/// 8 KiB once JSON overhead is counted generously. At [`MAX_PEERS`] that
-/// is 8 MiB, and a file larger than the format's own worst case is not a
-/// big cache, it is not this format.
+/// COMPUTED from the other limits, not chosen to look round. The first
+/// version of this was a hand-derived 8 MiB that undercounted a legal
+/// peer by a third: at every documented maximum one record serializes to
+/// roughly 11 KiB, so a full cache is over 11 MiB — `flush` would write
+/// a perfectly legal file that the next `load` quarantined, and the
+/// cache would delete its own contents on restart for no reason a user
+/// could see.
 ///
-/// The point is that the size is checked BEFORE the bytes are read. The
-/// cache is advisory and disposable, so a file that cannot be true is
-/// quarantined rather than parsed.
-pub const MAX_CACHE_FILE_BYTES: u64 = 8 * 1024 * 1024;
+/// Deriving it means the two can no longer disagree. Raising
+/// [`MAX_ADDRESSES_PER_PEER`] or [`MAX_LABEL_BYTES`] moves this with
+/// them.
+pub const MAX_CACHE_FILE_BYTES: u64 = {
+    // Field names, quotes, commas, braces — everything that is not the
+    // value itself. Generous per item rather than exact: this is a
+    // ceiling, and being loose costs nothing while being tight costs a
+    // legal file.
+    const JSON_OVERHEAD_PER_ITEM: u64 = 96;
+    const PEER_ID_BYTES: u64 = 64;
+    const TIMESTAMP_BYTES: u64 = 24;
+
+    let per_address = MAX_ADDRESS_BYTES as u64 + TIMESTAMP_BYTES + JSON_OVERHEAD_PER_ITEM;
+    // Three labels, a `wire_major`, a `supported`, and an `observed_at`.
+    let per_capability =
+        3 * MAX_LABEL_BYTES as u64 + 2 * TIMESTAMP_BYTES + JSON_OVERHEAD_PER_ITEM * 2;
+    let per_peer = PEER_ID_BYTES
+        + 3 * TIMESTAMP_BYTES
+        + MAX_ADDRESSES_PER_PEER as u64 * per_address
+        + MAX_CAPABILITIES_PER_PEER as u64 * per_capability
+        + JSON_OVERHEAD_PER_ITEM;
+
+    // Doubled, because the file is written pretty-printed and a ceiling
+    // that a legal file can brush against is a ceiling that will reject
+    // one.
+    2 * (MAX_PEERS as u64 * per_peer + 1024)
+};
 
 /// Minimum interval between writes to disk.
 ///

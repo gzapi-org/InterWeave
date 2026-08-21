@@ -60,7 +60,9 @@ fn write_whole_profile(p: &ProfilePaths) {
     write_atomic(&p.config_file(), CONFIG).expect("config");
 
     let mut cache = PeerCache::load(&p.peer_cache_file(), CacheLimits::default()).expect("cache");
-    cache.record_success(&peer(), "/ip4/10.0.0.1/tcp/4001", 1_000);
+    cache
+        .record_success(&peer(), "/ip4/10.0.0.1/tcp/4001", 1_000)
+        .expect("within the bounded format");
     cache.flush(1_000).expect("flush");
 
     let mut store = HumanStore::open(

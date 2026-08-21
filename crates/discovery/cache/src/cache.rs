@@ -71,6 +71,22 @@ pub struct PeerCache {
     last_write_ms: Option<u64>,
 }
 
+/// One bounded string on the way IN.
+///
+/// The mirror of the load-path check, and the reason the two exist
+/// together: a value only one of them accepts is a file that writes
+/// cleanly and refuses to load.
+fn bounded(field: &'static str, value: &str, max: usize) -> Result<(), CacheError> {
+    if value.is_empty() || value.len() > max {
+        return Err(CacheError::OutOfBounds {
+            field,
+            got: value.len(),
+            max,
+        });
+    }
+    Ok(())
+}
+
 /// Read at most `limit` bytes of UTF-8 from `path`.
 ///
 /// `Ok(None)` when the file is absent. An error when it is larger than
@@ -297,7 +313,18 @@ impl PeerCache {
     /// This is the only thing that extends a record's TTL, which is why
     /// the cache decays toward the peers that actually work rather than
     /// the peers that were once mentioned.
-    pub fn record_success(&mut self, peer: &TransportIdentity, address: &str, now_ms: u64) {
+    pub fn record_success(
+        &mut self,
+        peer: &TransportIdentity,
+        address: &str,
+        now_ms: u64,
+    ) -> Result<(), CacheError> {
+        // BOUNDED HERE, not only on the way back in. `load` validates
+        // every record, so an over-long address accepted at this point
+        // becomes a file `flush` writes and the next `load` quarantines
+        // — the cache discarding everything it held because of a value
+        // it had already agreed to store.
+        bounded("address", address, MAX_ADDRESS_BYTES)?;
         let key = peer.as_str().to_owned();
         let limit = self.limits.max_addresses_per_peer;
 
@@ -327,6 +354,7 @@ impl PeerCache {
 
         self.dirty = true;
         self.enforce_peer_cap(now_ms);
+        Ok(())
     }
 
     /// Record that a dial to `peer` failed.
@@ -359,12 +387,20 @@ impl PeerCache {
         &mut self,
         peer: &TransportIdentity,
         observation: ProtocolCapabilityObservation,
-    ) {
+    ) -> Result<(), CacheError> {
+        bounded(
+            "protocol_family",
+            &observation.protocol_family,
+            MAX_LABEL_BYTES,
+        )?;
+        bounded("network_hash", &observation.network_hash, MAX_LABEL_BYTES)?;
+        bounded("role", &observation.role, MAX_LABEL_BYTES)?;
+
         let Some(record) = self.peers.get_mut(peer.as_str()) else {
             // No record means no successful connection, so there is
             // nothing for this observation to hang off. Creating one here
             // would mint a reachability record out of a protocol fact.
-            return;
+            return Ok(());
         };
 
         let same = |o: &ProtocolCapabilityObservation| {
@@ -384,6 +420,7 @@ impl PeerCache {
             .capabilities
             .truncate(self.limits.max_capabilities_per_peer);
         self.dirty = true;
+        Ok(())
     }
 
     /// Every peer still fresh at `now_ms`, as advisory candidates.
