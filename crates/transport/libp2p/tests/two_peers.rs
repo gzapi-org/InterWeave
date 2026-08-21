@@ -16,7 +16,9 @@ use std::time::Duration;
 
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::TransportIdentity;
-use interweave_transport_libp2p::{SubstrateConfig, SwarmEvent, SwarmRuntime};
+use interweave_transport_libp2p::{
+    MAX_CONFIGURED_CAPACITY, SubstrateConfig, SubstrateError, SwarmEvent, SwarmRuntime,
+};
 use libp2p::Multiaddr;
 
 /// Every wait is bounded. A hung substrate must fail the suite rather
@@ -451,4 +453,97 @@ async fn listen_completes_while_the_event_channel_is_full() {
         .await
         .expect("shutdown must not hang behind a full event channel")
         .expect("the task joins");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_zero_capacity_configuration_is_an_error_not_a_panic() {
+    // `mpsc::channel(0)` aborts the process. A public configuration field
+    // must not be able to do that to a transport daemon, whose lint
+    // policy treats a reachable panic as a defect everywhere else.
+    let identity = ProfileIdentity::generate();
+
+    for (field, config) in [
+        (
+            "command_capacity",
+            SubstrateConfig {
+                command_capacity: 0,
+                ..SubstrateConfig::default()
+            },
+        ),
+        (
+            "event_capacity",
+            SubstrateConfig {
+                event_capacity: 0,
+                ..SubstrateConfig::default()
+            },
+        ),
+    ] {
+        match SwarmRuntime::start(&identity, config) {
+            Err(SubstrateError::InvalidConfig { field: got, .. }) => assert_eq!(got, field),
+            other => panic!("{field}: expected InvalidConfig, got {other:?}"),
+        }
+    }
+
+    // A cap of zero is NOT an error. "Admit no dial", "hold no
+    // connection", "accept no listen" are coherent policies and are how
+    // the refusal paths are exercised — a panic guard must not become an
+    // opinion about them.
+    for config in [
+        SubstrateConfig {
+            max_pending_dials: 0,
+            ..SubstrateConfig::default()
+        },
+        SubstrateConfig {
+            max_connections: 0,
+            ..SubstrateConfig::default()
+        },
+        SubstrateConfig {
+            max_pending_listens: 0,
+            ..SubstrateConfig::default()
+        },
+    ] {
+        let runtime = SwarmRuntime::start(&identity, config).expect("a zero cap is a policy");
+        runtime.shutdown().await.expect("stops");
+    }
+
+    // And an absurd request is refused rather than allocated: a ceiling
+    // is what stops "tuning" from being the denial of service.
+    let huge = SubstrateConfig {
+        event_capacity: MAX_CONFIGURED_CAPACITY + 1,
+        ..SubstrateConfig::default()
+    };
+    assert!(matches!(
+        SwarmRuntime::start(&identity, huge),
+        Err(SubstrateError::InvalidConfig { .. })
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pending_listeners_are_bounded_and_abandoned_ones_are_closed() {
+    // The command channel bounds how many `Listen` commands may be
+    // QUEUED. The task drains it continuously, so listeners and their
+    // pending replies accumulate past any instantaneous queue depth
+    // unless the table itself is bounded.
+    let identity = ProfileIdentity::generate();
+    let runtime = SwarmRuntime::start(
+        &identity,
+        SubstrateConfig {
+            max_pending_listens: 2,
+            ..SubstrateConfig::default()
+        },
+    )
+    .expect("runtime");
+
+    let loopback: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse().expect("loopback multiaddr");
+
+    // Each of these resolves, so nothing is left pending — the bound is
+    // on listeners still AWAITING an address, and a resolved one is not.
+    for _ in 0..4 {
+        tokio::time::timeout(PATIENCE, runtime.listen(loopback.clone()))
+            .await
+            .expect("listen resolves")
+            .expect("accepted");
+    }
+
+    runtime.shutdown().await.expect("stops");
 }

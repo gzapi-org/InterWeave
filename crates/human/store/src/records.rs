@@ -12,7 +12,9 @@
 //!   type, because their transport-terminal events differ and a UI that
 //!   confused them would claim a delivery nobody made.
 
-use interweave_transport_api::{ChannelId, DirectDestination, EndpointId, TransportIdentity};
+use interweave_transport_api::{
+    ChannelId, DirectDestination, EndpointId, MediaType, TransportIdentity,
+};
 
 use crate::StoreError;
 
@@ -110,7 +112,7 @@ pub struct NewOutbound {
     /// Where it is going.
     pub destination: OutboundDestination,
     /// The media type of `payload`, if the application set one.
-    pub media_type: Option<String>,
+    pub media_type: Option<MediaType>,
     /// The exact wire bytes to send.
     ///
     /// Stored as sent, so a retry resends byte-identical content and its
@@ -131,7 +133,7 @@ pub struct PendingOutbound {
     /// Where it is going.
     pub destination: OutboundDestination,
     /// The media type of `payload`, if any.
-    pub media_type: Option<String>,
+    pub media_type: Option<MediaType>,
     /// The exact bytes to resend.
     pub payload: Vec<u8>,
     /// When it was composed.
@@ -150,7 +152,7 @@ pub struct NewInbound {
     /// Who sent it and over what.
     pub origin: InboundOrigin,
     /// The media type of `payload`, if the sender set one.
-    pub media_type: Option<String>,
+    pub media_type: Option<MediaType>,
     /// The received bytes.
     pub payload: Vec<u8>,
     /// Local millisecond timestamp of receipt.
@@ -167,7 +169,7 @@ pub struct StoredInbound {
     /// Who sent it and over what.
     pub origin: InboundOrigin,
     /// The media type of `payload`, if any.
-    pub media_type: Option<String>,
+    pub media_type: Option<MediaType>,
     /// The content.
     pub payload: Vec<u8>,
     /// When it was received.
@@ -202,7 +204,7 @@ pub struct StoredInbound {
 pub struct ReadEphemeral {
     pub(crate) app_message_id: AppMessageId,
     pub(crate) origin: InboundOrigin,
-    pub(crate) media_type: Option<String>,
+    pub(crate) media_type: Option<MediaType>,
     pub(crate) payload: Vec<u8>,
     pub(crate) received_at: u64,
     pub(crate) read_at: u64,
@@ -229,8 +231,8 @@ impl ReadEphemeral {
 
     /// The media type, if any.
     #[must_use]
-    pub fn media_type(&self) -> Option<&str> {
-        self.media_type.as_deref()
+    pub fn media_type(&self) -> Option<&MediaType> {
+        self.media_type.as_ref()
     }
 
     /// When it was received.
@@ -335,5 +337,82 @@ impl core::fmt::Debug for ReadEphemeral {
              read_at: {} }}",
             self.app_message_id, self.origin, self.media_type, self.received_at, self.read_at
         )
+    }
+}
+
+/// Where a paged read left off.
+///
+/// Both halves are needed: the tables are ordered by timestamp so a
+/// client retries in the order the human composed, and timestamps are
+/// caller-supplied and can repeat. `row_id` breaks the tie, and the pair
+/// compares as a row value so a page boundary lands between two rows
+/// rather than inside a group sharing one timestamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cursor {
+    pub(crate) sort_key: u64,
+    pub(crate) row_id: RowId,
+}
+
+/// Which table a backup enumeration is currently in.
+///
+/// Unread and kept have independent row-id spaces, so one position
+/// cannot mean anything without naming which of them it is in — a backup
+/// that resumed in the wrong table would duplicate or skip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackupTable {
+    /// Inbound the receiver has not read.
+    Unread,
+    /// Inbound the receiver read and chose to keep.
+    Kept,
+}
+
+/// Where a backup enumeration left off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackupCursor {
+    /// Which table.
+    pub table: BackupTable,
+    /// Where in it, or `None` at the start of that table.
+    pub within: Option<Cursor>,
+}
+
+/// One page of a bulk read, and where to resume.
+///
+/// Generic over the cursor because a backup walks two tables and its
+/// position is meaningless without naming which one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Page<T, C = Cursor> {
+    /// The rows in this page.
+    pub items: Vec<T>,
+    /// Pass to the next call to continue. `None` means this was the last
+    /// page — an empty `items` with `None` is a finished enumeration.
+    pub next: Option<C>,
+}
+
+/// What one page may cost.
+///
+/// Two ceilings because either alone is escapable: a record count says
+/// nothing about 48 KiB payloads, and a byte budget alone lets a corpus
+/// of empty messages return unboundedly many rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageLimits {
+    /// Most rows in one page.
+    pub max_records: usize,
+    /// Most payload bytes in one page, past the first row.
+    ///
+    /// The first row of a page is always emitted even if it exceeds this
+    /// on its own. Otherwise a single large message would stall the
+    /// enumeration at that row forever, which is worse than one page
+    /// being one message too big.
+    pub max_bytes: usize,
+}
+
+impl Default for PageLimits {
+    fn default() -> Self {
+        Self {
+            max_records: 256,
+            // 4 MiB: about 85 messages at the transport payload ceiling,
+            // and small enough that a page is a page rather than a heap.
+            max_bytes: 4 * 1024 * 1024,
+        }
     }
 }

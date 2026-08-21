@@ -487,6 +487,7 @@ For repository-wide changes, verify at minimum:
 - `tools/checks/validate_contracts.py` is clean — every wire schema is meta-valid, manifested both ways, and traceable to an ADR and a prose specification;
 - `tools/checks/verify_fixture_vectors.py` is clean — every frozen vector recomputes from its declared algorithm;
 - `tools/checks/check_stage_status.sh` is clean — every human-facing statement of the open stage agrees with `workspace.metadata.interweave.status`;
+- `tools/checks/check_component_status.sh` is clean — no component README calls itself an unimplemented placeholder while its own directory holds a manifest and source;
 - `tools/checks/check_dependencies.sh` is clean — the graph satisfies `deny.toml`: no advisory or yanked version, every licence on the allow-list, no wildcard requirement or shipped executable, and crates.io as the only source;
 - no forbidden production artifacts were introduced outside the active stage;
 - `git fsck --full` passes before archive handoff when a full repository ZIP is requested.

@@ -78,7 +78,7 @@ fn memory() -> HumanStore {
 #[test]
 fn case_1_outbound_is_durable_before_the_call_returns() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("human.sqlite3");
+    let path = dir.path().join("state").join("human.sqlite3");
     let mut store = HumanStore::open(&path, StoreOptions::default()).expect("opens");
     store
         .commit_pending_outbound(&pending_outbound())
@@ -101,7 +101,7 @@ fn case_1_outbound_is_durable_before_the_call_returns() {
 #[test]
 fn case_5_inbound_is_durable_before_the_call_returns() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("human.sqlite3");
+    let path = dir.path().join("state").join("human.sqlite3");
     let mut store = HumanStore::open(&path, StoreOptions::default()).expect("opens");
     store
         .commit_unread_inbound(&unread_inbound())
@@ -287,7 +287,7 @@ fn case_10_removing_keep_deletes_the_durable_copy_immediately() {
 #[test]
 fn case_6_pending_outbound_and_unread_inbound_survive_a_crash() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("human.sqlite3");
+    let path = dir.path().join("state").join("human.sqlite3");
     crash_after(&path, "durable");
 
     let store = reopen(&path);
@@ -305,7 +305,7 @@ fn case_6_pending_outbound_and_unread_inbound_survive_a_crash() {
 #[test]
 fn case_11_terminal_outbound_and_read_unkept_inbound_are_gone_after_a_crash() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("human.sqlite3");
+    let path = dir.path().join("state").join("human.sqlite3");
     crash_after(&path, "ephemeral");
 
     let store = reopen(&path);
@@ -399,7 +399,7 @@ fn case_12_backup_includes_only_unread_and_kept_inbound() {
 #[test]
 fn case_14_a_full_store_degrades_rather_than_claiming_durability() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("human.sqlite3");
+    let path = dir.path().join("state").join("human.sqlite3");
     let mut store = HumanStore::open(
         &path,
         StoreOptions {

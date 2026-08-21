@@ -209,7 +209,10 @@ impl core::error::Error for TrustPolicyError {}
 /// The JSON shape, deserialized through the validating constructor.
 #[derive(Deserialize)]
 struct PeerTrustPolicyRepr {
-    #[serde(default)]
+    // Judged as the array that arrived, for the reason spelled out on
+    // `wire_bounded_peers`: 4097 copies of one PeerId collapse into a set
+    // of one before any count can see them.
+    #[serde(default, deserialize_with = "wire_bounded_profile_peers")]
     allowed_peers: BTreeSet<TransportIdentity>,
     #[serde(default)]
     local_peer: Option<TransportIdentity>,
@@ -359,8 +362,63 @@ pub struct InfrastructureSet {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InfrastructureSetRepr {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "wire_bounded_peers")]
     allowed_peers: BTreeSet<TransportIdentity>,
+}
+
+/// Read the wire array, judge its length, then collect.
+///
+/// `max=256` is a property of the ARRAY the configuration supplies.
+/// Deserializing straight into a `BTreeSet` collapses repeats first, so
+/// 300 copies of one valid PeerId arrive at the constructor as a set of
+/// one and pass — and an input array of any size at all is parsed and
+/// allocated on the way, which is the resource bound the limit exists to
+/// impose.
+///
+/// The same mistake as collecting `addresses` before counting them, one
+/// crate over. Judging the sequence as it arrived is the fix in both.
+fn wire_bounded_peers<'de, D>(deserializer: D) -> Result<BTreeSet<TransportIdentity>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    bounded_peer_seq(
+        deserializer,
+        InfrastructureSet::MAX_ALLOWED_PEERS,
+        "infrastructure",
+    )
+}
+
+/// The profile allowlist's own ceiling, judged the same way.
+fn wire_bounded_profile_peers<'de, D>(
+    deserializer: D,
+) -> Result<BTreeSet<TransportIdentity>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    bounded_peer_seq(
+        deserializer,
+        PeerTrustPolicy::MAX_ALLOWED_PEERS,
+        "allowlist",
+    )
+}
+
+fn bounded_peer_seq<'de, D>(
+    deserializer: D,
+    max: usize,
+    what: &str,
+) -> Result<BTreeSet<TransportIdentity>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    let items = Vec::<TransportIdentity>::deserialize(deserializer)?;
+    if items.len() > max {
+        return Err(D::Error::custom(format!(
+            "at most {max} {what} peers, got {}",
+            items.len()
+        )));
+    }
+    Ok(items.into_iter().collect())
 }
 
 impl<'de> Deserialize<'de> for InfrastructureSet {
@@ -592,6 +650,42 @@ mod tests {
         assert!(
             serde_json::from_str::<EndpointTrustPolicy>(r#""inherit_profile_trust""#).is_ok(),
             "and so must the bare literal"
+        );
+    }
+
+    #[test]
+    fn a_repeated_peer_cannot_smuggle_an_oversized_array_past_the_ceiling() {
+        // The ceiling bounds the ARRAY the configuration supplies.
+        // Deserializing straight into a set collapses repeats first, so
+        // 300 copies of one valid PeerId arrived at the constructor as a
+        // set of one and passed — while an input array of any size at all
+        // was parsed and allocated on the way, which is the resource
+        // bound the limit exists to impose.
+        let one = format!(r#""{P1}""#);
+        let repeated = vec![one; InfrastructureSet::MAX_ALLOWED_PEERS + 1].join(",");
+        let doc = format!(r#"{{"allowed_peers":[{repeated}]}}"#);
+        assert!(
+            serde_json::from_str::<InfrastructureSet>(&doc).is_err(),
+            "an over-length array must be refused before its duplicates vanish"
+        );
+
+        // The same shape one type over, and the same ceiling question.
+        let repeated = vec![format!(r#""{P1}""#); PeerTrustPolicy::MAX_ALLOWED_PEERS + 1].join(",");
+        let doc = format!(r#"{{"allowed_peers":[{repeated}]}}"#);
+        assert!(
+            serde_json::from_str::<PeerTrustPolicy>(&doc).is_err(),
+            "the profile allowlist collapses duplicates the same way"
+        );
+
+        // A set genuinely at the cap, expressed with no duplicates, is
+        // still legal — the bound is on the array, not on repetition.
+        let distinct: Vec<String> = (0..InfrastructureSet::MAX_ALLOWED_PEERS)
+            .map(|i| format!(r#""{}""#, synthetic_peer(i).as_str()))
+            .collect();
+        let doc = format!(r#"{{"allowed_peers":[{}]}}"#, distinct.join(","));
+        assert!(
+            serde_json::from_str::<InfrastructureSet>(&doc).is_ok(),
+            "exactly the ceiling, distinct, is legal"
         );
     }
 

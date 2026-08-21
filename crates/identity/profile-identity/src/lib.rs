@@ -38,12 +38,27 @@ pub mod recovery;
 
 use std::path::Path;
 
-use interweave_profile_config::{PersistError, is_owner_only, write_private_atomic};
+use interweave_profile_config::{
+    PersistError, create_private_exclusive, is_owner_only, write_private_atomic,
+};
 use interweave_transport_api::{IdError, TransportIdentity};
 use libp2p_identity::{Keypair, PeerId, ed25519};
 
 pub use record::{ALGORITHM, FORMAT, RecoveryRecord};
 pub use recovery::{ENTROPY_BYTES, PHRASE_WORDS, RecoveryPhrase};
+
+/// What a rotation changed.
+///
+/// Both PeerIds, because a rotation is only meaningful as a pair: the
+/// old one is what every existing trust relationship names, and a caller
+/// that cannot say what it was cannot tell anyone what stopped working.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rotation {
+    /// The identity that was stored before.
+    pub previous: TransportIdentity,
+    /// The identity stored now.
+    pub current: TransportIdentity,
+}
 
 /// What can go wrong with a profile identity.
 #[derive(Debug)]
@@ -275,23 +290,30 @@ impl ProfileIdentity {
     /// care.
     ///
     /// Refuses a path that already holds an identity. `write_private_atomic`
-    /// renames over its target, so without this check
+    /// renames over its target, so without this
     /// `ProfileIdentity::generate().save(existing)` destroys an
     /// established key and hands the profile a new PeerId — the exact
     /// silent regeneration [`IdentityError::NotFound`] exists to
     /// prevent, arriving through the other door. Rotation is a decision,
     /// so it has its own call: [`Self::replace_saved`].
     ///
+    /// THE FILESYSTEM decides the path is free, in the operation that
+    /// installs the file. Checking first and writing second leaves a
+    /// window: two processes initializing the same profile both pass the
+    /// check before either writes, and the loser silently replaces the
+    /// identity the winner had already established — which is the very
+    /// failure this refusal exists to prevent, reintroduced by the shape
+    /// of the guard.
+    ///
     /// # Errors
     /// Returns [`IdentityError::AlreadyExists`] if `path` exists, or
     /// [`IdentityError::Storage`] if the write fails.
     pub fn save(&self, path: &Path) -> Result<(), IdentityError> {
-        // `exists()` reports false for a broken symlink, which would let
-        // one through. Ask about the link itself.
-        if path.symlink_metadata().is_ok() {
-            return Err(IdentityError::AlreadyExists);
-        }
-        self.write_to(path)
+        let encoded = self.encoded()?;
+        create_private_exclusive(path, &encoded).map_err(|e| match e {
+            PersistError::AlreadyExists => IdentityError::AlreadyExists,
+            other => IdentityError::Storage(other),
+        })
     }
 
     /// Replace the identity stored at `path`, rotating the profile.
@@ -299,22 +321,78 @@ impl ProfileIdentity {
     /// Separated from [`Self::save`] because the consequence is
     /// different in kind: the profile's persistent PeerId changes, and
     /// every trust relationship established against the old one stops
-    /// resolving. Nothing here makes that safe — it makes it *stated*,
-    /// so a rotation cannot happen because a save was pointed at an
-    /// occupied path.
+    /// resolving. Nothing here makes that safe — it makes it *stated*.
+    ///
+    /// `replacing` is the identity the caller believes is stored, and it
+    /// is checked against the file. A rotation is only ever intentional
+    /// about a specific key: naming the wrong one means the caller is
+    /// operating on a profile it has not actually read, and the answer
+    /// to that is to stop, not to overwrite. The returned [`Rotation`]
+    /// carries both PeerIds so what changed can be recorded, announced,
+    /// or shown to a human before anything else acts on it.
     ///
     /// # Errors
-    /// Returns [`IdentityError::Storage`] if the write fails.
-    pub fn replace_saved(&self, path: &Path) -> Result<(), IdentityError> {
-        self.write_to(path)
+    /// Returns [`IdentityError::NotFound`] if nothing is stored there,
+    /// [`IdentityError::PeerIdMismatch`] if the stored identity is not
+    /// `replacing`, or [`IdentityError::Storage`] if the write fails.
+    pub fn replace_saved(
+        &self,
+        path: &Path,
+        replacing: &TransportIdentity,
+    ) -> Result<Rotation, IdentityError> {
+        let stored = Self::load(path)?.transport_identity()?;
+        if stored.as_str() != replacing.as_str() {
+            return Err(IdentityError::PeerIdMismatch {
+                got: stored.as_str().to_owned(),
+                expected: replacing.as_str().to_owned(),
+            });
+        }
+        let current = self.transport_identity()?;
+        self.write_to(path)?;
+        Ok(Rotation {
+            previous: stored,
+            current,
+        })
+    }
+
+    /// Restore a profile from its recovery phrase, into `path`.
+    ///
+    /// The whole point of a restore is that the caller knows which
+    /// profile they are restoring, so `expected` is required and checked
+    /// before anything touches the filesystem. A checksum-valid phrase
+    /// for a different key is still checksum-valid; without the
+    /// comparison this would cheerfully install a stranger's identity
+    /// and report success.
+    ///
+    /// Installs over whatever is there, because that is what restoring
+    /// means — but only once the phrase has been shown to reconstruct
+    /// the identity the caller named.
+    ///
+    /// # Errors
+    /// Returns [`IdentityError::PeerIdMismatch`] if the phrase
+    /// reconstructs a different identity, the phrase errors of
+    /// [`Self::from_phrase`], or [`IdentityError::Storage`] if the write
+    /// fails.
+    pub fn restore(
+        path: &Path,
+        phrase: &RecoveryPhrase,
+        expected: &TransportIdentity,
+    ) -> Result<Self, IdentityError> {
+        Self::verify_phrase(phrase, expected)?;
+        let restored = Self::from_phrase(phrase)?;
+        restored.write_to(path)?;
+        Ok(restored)
     }
 
     fn write_to(&self, path: &Path) -> Result<(), IdentityError> {
-        let encoded = Keypair::from(self.keypair.clone())
-            .to_protobuf_encoding()
-            .map_err(|e| IdentityError::Corrupt(e.to_string()))?;
-        write_private_atomic(path, &encoded)?;
+        write_private_atomic(path, &self.encoded()?)?;
         Ok(())
+    }
+
+    fn encoded(&self) -> Result<Vec<u8>, IdentityError> {
+        Keypair::from(self.keypair.clone())
+            .to_protobuf_encoding()
+            .map_err(|e| IdentityError::Corrupt(e.to_string()))
     }
 
     /// Load the identity from `path`.

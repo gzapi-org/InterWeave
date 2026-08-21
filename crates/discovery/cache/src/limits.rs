@@ -27,6 +27,33 @@ pub const MAX_ADDRESSES_PER_PEER: usize = 8;
 /// footprint by generating one of each.
 pub const MAX_CAPABILITIES_PER_PEER: usize = 16;
 
+/// Longest opaque address retained, in bytes.
+///
+/// Matches the neutral candidate contract's own address bound. The
+/// on-disk record is a `String`, so without this the file decides how
+/// much memory a load allocates.
+pub const MAX_ADDRESS_BYTES: usize = 256;
+
+/// Longest protocol family, network hash, or role string, in bytes.
+///
+/// One number for the three because they are the same kind of thing: a
+/// short opaque label compared exactly and never parsed.
+pub const MAX_LABEL_BYTES: usize = 128;
+
+/// Largest cache file this build will read, in bytes.
+///
+/// DERIVED, not chosen. One peer at every other limit is roughly
+/// 64 bytes of PeerId, 8 addresses of 256 plus a timestamp each, and 16
+/// capability observations of three 128-byte labels plus scalars — under
+/// 8 KiB once JSON overhead is counted generously. At [`MAX_PEERS`] that
+/// is 8 MiB, and a file larger than the format's own worst case is not a
+/// big cache, it is not this format.
+///
+/// The point is that the size is checked BEFORE the bytes are read. The
+/// cache is advisory and disposable, so a file that cannot be true is
+/// quarantined rather than parsed.
+pub const MAX_CACHE_FILE_BYTES: u64 = 8 * 1024 * 1024;
+
 /// Minimum interval between writes to disk.
 ///
 /// Five seconds. A burst of successful dials on startup would otherwise

@@ -372,7 +372,7 @@ fn an_endpoint_trust_policy_validates_in_both_shapes() {
 
 #[test]
 fn a_discovery_candidate_validates() {
-    use interweave_discovery_api::{CandidatePeer, ProtocolObservation};
+    use interweave_discovery_api::{CandidatePeer, ProtocolId, ProtocolObservation};
 
     let validator = validator_for("discovery/candidate-peer.schema.json");
     let candidate = CandidatePeer {
@@ -382,7 +382,7 @@ fn a_discovery_candidate_validates() {
         observed_at: 1_700_000_000_000,
         expires_at: Some(1_700_000_060_000),
         protocol_observations: [ProtocolObservation {
-            protocol_id: "/interweave/direct/2.0.0".to_owned(),
+            protocol_id: ProtocolId::parse("/interweave/direct/2.0.0").expect("valid"),
             supported: true,
             observed_at: 1_700_000_000_000,
         }]

@@ -13,11 +13,12 @@
 use interweave_human_core::retention::{StorageHealth, TerminalCause};
 use interweave_human_store::{
     AppMessageId, HumanStore, InboundOrigin, NewInbound, NewOutbound, OutboundDestination,
-    StoreError, StoreOptions,
+    PageLimits, StoreError, StoreOptions,
 };
-use interweave_transport_api::{DirectDestination, TransportIdentity};
+use interweave_transport_api::{DirectDestination, MediaType, TransportIdentity};
 
 const PEER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+const PEER_B: &str = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
 const ID_A: &str = "0123456789abcdef0123456789abcdef";
 const ID_B: &str = "fedcba9876543210fedcba9876543210";
 
@@ -25,11 +26,29 @@ fn peer() -> TransportIdentity {
     TransportIdentity::parse(PEER).expect("the fixture peer id is canonical")
 }
 
+fn other_peer() -> TransportIdentity {
+    TransportIdentity::parse(PEER_B).expect("the second fixture peer id is canonical")
+}
+
+fn inbound_from(who: TransportIdentity, id: &str, payload: Vec<u8>) -> NewInbound {
+    NewInbound {
+        origin: InboundOrigin {
+            peer: who,
+            endpoint: None,
+            channel: None,
+        },
+        ..inbound(id, payload)
+    }
+}
+
 fn outbound(id: &str, payload: Vec<u8>) -> NewOutbound {
     NewOutbound {
         app_message_id: AppMessageId::parse(id).expect("test id is canonical"),
         destination: OutboundDestination::Direct(DirectDestination::to_default(peer())),
-        media_type: Some("application/vnd.interweave-human-chat+json;v=2".to_owned()),
+        media_type: Some(
+            MediaType::parse("application/vnd.interweave-human-chat+json;v=2")
+                .expect("a valid test media type"),
+        ),
         payload,
         created_at: 1_000,
     }
@@ -56,7 +75,7 @@ fn memory() -> HumanStore {
 #[test]
 fn a_fresh_store_has_exactly_the_allowed_tables() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("human.sqlite3");
+    let path = dir.path().join("state").join("human.sqlite3");
     let store = HumanStore::open(&path, StoreOptions::default()).expect("opens");
     drop(store);
 
@@ -88,7 +107,7 @@ fn opening_a_database_with_a_history_table_is_refused() {
     // The failure this guards against is a plausible-sounding addition,
     // so it is caught at open rather than left to review.
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("human.sqlite3");
+    let path = dir.path().join("state").join("human.sqlite3");
     drop(HumanStore::open(&path, StoreOptions::default()).expect("first open"));
 
     let conn = rusqlite::Connection::open(&path).expect("reopen");
@@ -107,7 +126,7 @@ fn opening_a_database_with_a_history_table_is_refused() {
 #[test]
 fn a_newer_schema_is_refused_rather_than_downgraded() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("human.sqlite3");
+    let path = dir.path().join("state").join("human.sqlite3");
     drop(HumanStore::open(&path, StoreOptions::default()).expect("first open"));
 
     let conn = rusqlite::Connection::open(&path).expect("reopen");
@@ -126,7 +145,7 @@ fn a_newer_schema_is_refused_rather_than_downgraded() {
 #[test]
 fn reopening_is_idempotent() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("human.sqlite3");
+    let path = dir.path().join("state").join("human.sqlite3");
     for _ in 0..3 {
         drop(HumanStore::open(&path, StoreOptions::default()).expect("reopen"));
     }
@@ -174,7 +193,7 @@ fn a_full_medium_degrades_the_store_and_refuses_new_unread() {
     // A real SQLITE_FULL from a real page quota, not an injected fake:
     // the degradation path must be the one production takes.
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("human.sqlite3");
+    let path = dir.path().join("state").join("human.sqlite3");
     let mut store = HumanStore::open(
         &path,
         StoreOptions {
@@ -395,6 +414,68 @@ fn keeping_an_already_kept_message_is_not_an_error() {
 }
 
 #[test]
+fn two_peers_may_use_the_same_application_id() {
+    // `app_message_id` is HumanChatV2's APPLICATION identity, chosen by
+    // the sender. Globally unique inbound rows made one peer's choice
+    // collide with another's, so the second arrival could not be stored
+    // at all — two unrelated people picking the same 128 bits is a
+    // birthday problem, but one peer echoing an id it saw is not.
+    let mut store = memory();
+    let a = store
+        .commit_unread_inbound(&inbound_from(peer(), ID_A, b"from a".to_vec()))
+        .expect("first peer");
+    let b = store
+        .commit_unread_inbound(&inbound_from(other_peer(), ID_A, b"from b".to_vec()))
+        .expect("a different peer may reuse the id");
+    assert_ne!(a, b, "they are different messages");
+
+    let unread = store.unread_inbound().expect("read");
+    assert_eq!(unread.len(), 2, "both are held");
+}
+
+#[test]
+fn one_peer_reusing_its_own_id_for_new_content_is_a_conflict() {
+    // The keep upsert conflicts on remote-controlled data. Refreshing
+    // the older row's timestamps and leaving its body in place would
+    // report success for a message that never reached durable kept
+    // state — the newer content simply disappears.
+    let mut store = memory();
+
+    let first = store
+        .commit_unread_inbound(&inbound(ID_A, b"original".to_vec()))
+        .expect("commit");
+    let held = store.mark_read(first, 1_000).expect("read");
+    store.keep(&held, 2_000).expect("keep");
+
+    // A second message from the same peer, reusing the id, with a
+    // different body. Committing it unread is fine — the first row left
+    // that table when it was kept — and the collision surfaces where the
+    // two would actually alias.
+    let second = store
+        .commit_unread_inbound(&inbound(ID_A, b"replacement".to_vec()))
+        .expect("a new arrival is admitted");
+    let second_held = store.mark_read(second, 3_000).expect("read");
+
+    match store.keep(&second_held, 4_000) {
+        Err(StoreError::IdentityConflict {
+            app_message_id,
+            source_peer,
+        }) => {
+            assert_eq!(app_message_id, ID_A);
+            assert_eq!(source_peer, PEER);
+        }
+        other => panic!("expected an identity conflict, got {other:?}"),
+    }
+
+    // And the original body is intact — not silently replaced, and not
+    // silently left while the caller was told the keep succeeded.
+    let kept = store.kept_inbound().expect("read");
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].payload, b"original".to_vec());
+    assert_eq!(store.health(), StorageHealth::Healthy);
+}
+
+#[test]
 fn debug_output_never_carries_a_message_body() {
     // RETENTION.md section 8: logs, analytics, and crash reports must not
     // become shadow message archives. A derived Debug puts the body into
@@ -435,4 +516,231 @@ fn debug_output_never_carries_a_message_body() {
     assert!(printed[2].contains(ID_A));
     assert!(printed[4].contains(ID_B));
     assert_eq!(out_row.get(), pending[0].row_id.get());
+}
+
+#[test]
+fn the_files_holding_message_content_are_owner_only() {
+    // The store's documentation promised owner-only and checked nothing.
+    // SQLite creates the database — and later the WAL and SHM — with the
+    // process umask, which is 0644 on a default system: message content
+    // readable by every local account.
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    let mut store = HumanStore::open(&path, StoreOptions::default()).expect("opens");
+
+    // Force the WAL and SHM into existence.
+    store
+        .commit_unread_inbound(&inbound(ID_A, b"body".to_vec()))
+        .expect("commit");
+
+    for suffix in ["", "-wal", "-shm"] {
+        let mut companion = path.as_os_str().to_owned();
+        companion.push(suffix);
+        let companion = std::path::PathBuf::from(companion);
+        if !companion.exists() {
+            continue;
+        }
+        let mode = std::fs::metadata(&companion)
+            .expect("stat")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "{} is mode {:04o}",
+            companion.display(),
+            mode & 0o777
+        );
+    }
+
+    let mode = std::fs::metadata(path.parent().expect("parent"))
+        .expect("stat")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o077, 0, "the state directory is mode {mode:04o}");
+}
+
+#[test]
+fn an_already_open_state_directory_is_refused_rather_than_tightened() {
+    // Created owner-only says nothing about one that was already there —
+    // restored, copied, or made by an older build. Refused rather than
+    // narrowed, for the reason the identity key is: content that has been
+    // broadly readable should be treated as exposed, and quietly fixing
+    // the mode would hide that it ever was.
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).expect("mkdir");
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    match HumanStore::open(&state.join("human.sqlite3"), StoreOptions::default()) {
+        Err(StoreError::PermissionsTooOpen { mode, .. }) => assert_eq!(mode, 0o755),
+        other => panic!("expected a permissions refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_unexpected_content_table_is_refused_even_with_an_innocent_name() {
+    // The forbidden-name list can only catch what it names, while the
+    // module claims REQUIRED_TABLES is the whole content surface. A table
+    // called `chat_archive` passed while being exactly the archive
+    // ADR-0044 forbids.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
+
+    for ddl in [
+        "CREATE TABLE chat_archive (row_id INTEGER PRIMARY KEY, payload BLOB)",
+        "CREATE VIEW everything AS SELECT * FROM kept_inbound",
+        "CREATE TRIGGER copy_it AFTER INSERT ON kept_inbound BEGIN SELECT 1; END",
+    ] {
+        let conn = rusqlite::Connection::open(&path).expect("reopen");
+        conn.execute_batch(ddl).expect("create");
+        drop(conn);
+
+        let refused = HumanStore::open(&path, StoreOptions::default());
+        assert!(
+            matches!(refused, Err(StoreError::Migration(_))),
+            "{ddl} must be refused, got {refused:?}"
+        );
+
+        let conn = rusqlite::Connection::open(&path).expect("reopen");
+        let (kind, name) = ddl
+            .strip_prefix("CREATE ")
+            .and_then(|r| r.split_once(' '))
+            .map(|(k, rest)| (k, rest.split_whitespace().next().unwrap_or("")))
+            .expect("parsed");
+        conn.execute_batch(&format!("DROP {kind} {name}"))
+            .expect("drop");
+    }
+
+    // And with them gone it opens again, so the refusal was about the
+    // extra object and not about the store having been touched.
+    HumanStore::open(&path, StoreOptions::default()).expect("opens once they are gone");
+}
+
+#[test]
+fn bulk_reads_are_paged_with_record_and_byte_ceilings() {
+    // The unpaged accessors materialize every matching payload, which
+    // turns a bounded per-message design into an unbounded one-call
+    // allocation. They stay, for the small case, but they refuse a
+    // second page rather than growing quietly.
+    let mut store = memory();
+    for i in 0..12_u32 {
+        let id = format!("{i:032x}");
+        store
+            .commit_unread_inbound(&NewInbound {
+                received_at: 2_000 + u64::from(i),
+                ..inbound(&id, vec![b'x'; 1024])
+            })
+            .expect("commit");
+    }
+
+    // A record ceiling.
+    let limits = PageLimits {
+        max_records: 5,
+        max_bytes: 1024 * 1024,
+    };
+    let mut seen = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = store.unread_inbound_page(cursor, limits).expect("page");
+        assert!(page.items.len() <= 5, "a page must respect max_records");
+        assert!(!page.items.is_empty(), "a page with a cursor holds rows");
+        seen.extend(
+            page.items
+                .iter()
+                .map(|r| r.app_message_id.as_str().to_owned()),
+        );
+        match page.next {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(seen.len(), 12, "every row is visited exactly once");
+    let mut unique = seen.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), 12, "and none is visited twice");
+
+    // A byte ceiling, small enough that it binds before the record one.
+    let tight = PageLimits {
+        max_records: 100,
+        max_bytes: 2048,
+    };
+    let page = store.unread_inbound_page(None, tight).expect("page");
+    assert!(
+        page.items.len() <= 3,
+        "the byte budget must bind: got {} rows",
+        page.items.len()
+    );
+    assert!(page.next.is_some(), "and there is more to come");
+
+    // A single payload over the whole budget still makes progress: the
+    // first row of a page is always emitted, or the walk stalls forever.
+    let stingy = PageLimits {
+        max_records: 100,
+        max_bytes: 1,
+    };
+    let page = store.unread_inbound_page(None, stingy).expect("page");
+    assert_eq!(page.items.len(), 1, "always at least one row");
+
+    // And the convenience accessor says so rather than allocating.
+    let refused = store.unread_inbound();
+    assert!(
+        refused.is_ok(),
+        "twelve small rows are still the small case"
+    );
+}
+
+#[test]
+fn a_backup_walk_covers_both_tables_exactly_once() {
+    // Unread and kept have independent row-id spaces, so a cursor that
+    // did not name its table would let a resumed backup duplicate or skip
+    // — and reporting the walk finished when unread runs out silently
+    // loses the kept half.
+    let mut store = memory();
+    let mut expected = Vec::new();
+
+    for i in 0..6_u32 {
+        let id = format!("{i:032x}");
+        expected.push(id.clone());
+        let row = store
+            .commit_unread_inbound(&NewInbound {
+                received_at: 2_000 + u64::from(i),
+                ..inbound(&id, b"body".to_vec())
+            })
+            .expect("commit");
+        // Half of them get read and kept, so both tables are populated.
+        if i % 2 == 0 {
+            let held = store.mark_read(row, 3_000 + u64::from(i)).expect("read");
+            store.keep(&held, 4_000 + u64::from(i)).expect("keep");
+        }
+    }
+
+    let limits = PageLimits {
+        max_records: 2,
+        max_bytes: 1024 * 1024,
+    };
+    let mut seen = Vec::new();
+    let mut cursor = None;
+    for _ in 0..64 {
+        let page = store.backup_eligible_page(cursor, limits).expect("page");
+        seen.extend(
+            page.items
+                .iter()
+                .map(|r| r.app_message_id.as_str().to_owned()),
+        );
+        match page.next {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+
+    seen.sort();
+    expected.sort();
+    assert_eq!(seen, expected, "every eligible message, exactly once");
 }

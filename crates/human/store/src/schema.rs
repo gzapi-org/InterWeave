@@ -27,7 +27,7 @@ use rusqlite::{Connection, Transaction};
 use crate::StoreError;
 
 /// The schema version this build writes and expects.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Every table the store is allowed to contain.
 ///
@@ -35,6 +35,18 @@ pub const SCHEMA_VERSION: i64 = 1;
 /// ADR-0044; the rest is content-free metadata that cannot reconstruct a
 /// deleted body.
 pub const REQUIRED_TABLES: &[&str] = &[
+    "pending_outbound",
+    "unread_inbound",
+    "kept_inbound",
+    "settings",
+];
+
+/// Tables whose SQLite-generated indexes are legitimate.
+///
+/// An autoindex is named `sqlite_autoindex_<table>_<n>` and is caught by
+/// the `sqlite_` prefix; this covers any index SQLite names after the
+/// table it backs.
+const INTERNAL_INDEX_OWNERS: &[&str] = &[
     "pending_outbound",
     "unread_inbound",
     "kept_inbound",
@@ -80,12 +92,79 @@ pub fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
     if current < 1 {
         migration_1(&tx)?;
     }
+    if current < 2 {
+        migration_2(&tx)?;
+    }
     // The version bump rides the SAME transaction as the DDL above, which
     // is what makes a crashed migration a no-op rather than a schema the
     // store misreads on the next open.
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
     Ok(())
+}
+
+/// v2 — inbound identity is scoped to the peer that asserted it.
+///
+/// `app_message_id` is HumanChatV2's APPLICATION reply/retention
+/// identity. It is chosen by the sender, so on the inbound side it is
+/// remote-controlled data and not a dedup identity this store may trust
+/// globally — that is transport's `DirectContentFingerprintV1`, at a
+/// different layer.
+///
+/// A `UNIQUE` on it alone meant a peer reusing one of its own prior ids,
+/// or two peers happening to pick the same one, collided in the store.
+/// The keep upsert would then update the OLDER row's timestamps and
+/// leave its body in place, so the newer message quietly never reached
+/// durable kept state and the caller was told it had.
+///
+/// SQLite cannot drop a column constraint, so the tables are rebuilt.
+/// They hold only what this build itself wrote, and the rebuild is
+/// inside the migration transaction with the version bump.
+fn migration_2(tx: &Transaction<'_>) -> Result<(), StoreError> {
+    tx.execute_batch(
+        "
+        CREATE TABLE unread_inbound_v2 (
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            media_type      TEXT,
+            payload         BLOB    NOT NULL,
+            received_at     INTEGER NOT NULL,
+            UNIQUE(source_peer, app_message_id)
+        );
+        INSERT OR IGNORE INTO unread_inbound_v2
+            (row_id, app_message_id, source_peer, source_endpoint, channel_id,
+             media_type, payload, received_at)
+            SELECT row_id, app_message_id, source_peer, source_endpoint, channel_id,
+                   media_type, payload, received_at FROM unread_inbound;
+        DROP TABLE unread_inbound;
+        ALTER TABLE unread_inbound_v2 RENAME TO unread_inbound;
+
+        CREATE TABLE kept_inbound_v2 (
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            media_type      TEXT,
+            payload         BLOB    NOT NULL,
+            received_at     INTEGER NOT NULL,
+            read_at         INTEGER NOT NULL,
+            kept_at         INTEGER NOT NULL,
+            UNIQUE(source_peer, app_message_id)
+        );
+        INSERT OR IGNORE INTO kept_inbound_v2
+            (row_id, app_message_id, source_peer, source_endpoint, channel_id,
+             media_type, payload, received_at, read_at, kept_at)
+            SELECT row_id, app_message_id, source_peer, source_endpoint, channel_id,
+                   media_type, payload, received_at, read_at, kept_at FROM kept_inbound;
+        DROP TABLE kept_inbound;
+        ALTER TABLE kept_inbound_v2 RENAME TO kept_inbound;
+        ",
+    )
+    .map_err(|e| StoreError::Migration(e.to_string()))
 }
 
 /// v1 — the three retention tables plus content-free settings.
@@ -164,25 +243,63 @@ fn migration_1(tx: &Transaction<'_>) -> Result<(), StoreError> {
 /// Returns [`StoreError::Migration`] naming the missing or forbidden
 /// table.
 pub fn verify_shape(conn: &Connection) -> Result<(), StoreError> {
-    let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type = 'table'")?;
-    let names: Vec<String> = stmt
-        .query_map([], |r| r.get::<_, String>(0))?
+    let mut stmt = conn.prepare("SELECT type, name FROM sqlite_master")?;
+    let objects: Vec<(String, String)> = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
         .collect::<Result<_, _>>()?;
 
+    let tables: Vec<&String> = objects
+        .iter()
+        .filter(|(kind, _)| kind == "table")
+        .map(|(_, name)| name)
+        .collect();
+
     for required in REQUIRED_TABLES {
-        if !names.iter().any(|n| n == required) {
+        if !tables.iter().any(|n| *n == required) {
             return Err(StoreError::Migration(format!(
                 "table `{required}` is missing"
             )));
         }
     }
-    for name in &names {
+
+    // AN ALLOWLIST, not a list of names someone thought of.
+    //
+    // The named-enemies list still runs, because a `messages` table
+    // deserves the message that says why it is forbidden. But it can only
+    // ever catch what it names, and the doc comment above claims
+    // REQUIRED_TABLES is "the whole content surface" — a table called
+    // `chat_archive` passed while being exactly the archive ADR-0044
+    // forbids. Anything not on the list is refused now, so an addition
+    // has to be a decision made here rather than one nobody noticed.
+    //
+    // Views and triggers are refused for the same reason and are worse:
+    // a view is a content surface with no storage of its own, and a
+    // trigger can copy a row somewhere on its way out.
+    for (kind, name) in &objects {
         let lowered = name.to_ascii_lowercase();
         if FORBIDDEN_TABLES.contains(&lowered.as_str()) {
             return Err(StoreError::Migration(format!(
                 "table `{name}` is a general message archive; ADR-0044 allows only \
                  pending_outbound, unread_inbound, and kept_inbound to hold content"
             )));
+        }
+        // SQLite's own bookkeeping, which the store does not create and
+        // cannot remove: `sqlite_sequence` exists because the content
+        // tables are AUTOINCREMENT, and autoindexes back the UNIQUE
+        // constraints those tables declare.
+        if lowered.starts_with("sqlite_") {
+            continue;
+        }
+        match kind.as_str() {
+            "table" if REQUIRED_TABLES.contains(&name.as_str()) => {}
+            "index" if INTERNAL_INDEX_OWNERS.iter().any(|t| lowered.contains(t)) => {}
+            _ => {
+                return Err(StoreError::Migration(format!(
+                    "{kind} `{name}` is not part of this store's schema; ADR-0044 makes \
+                     pending_outbound, unread_inbound, kept_inbound and settings the whole \
+                     content surface, and anything else must be an explicit decision"
+                )));
+            }
         }
     }
     Ok(())

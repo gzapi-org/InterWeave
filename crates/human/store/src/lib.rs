@@ -48,8 +48,8 @@ pub mod schema;
 pub mod store;
 
 pub use records::{
-    AppMessageId, InboundOrigin, NewInbound, NewOutbound, OutboundDestination, PendingOutbound,
-    ReadEphemeral, RowId, StoredInbound,
+    AppMessageId, BackupCursor, BackupTable, Cursor, InboundOrigin, NewInbound, NewOutbound,
+    OutboundDestination, Page, PageLimits, PendingOutbound, ReadEphemeral, RowId, StoredInbound,
 };
 pub use schema::{REQUIRED_TABLES, SCHEMA_VERSION};
 pub use store::{HumanStore, StoreOptions};
@@ -76,6 +76,45 @@ pub enum StoreError {
     MalformedAppMessageId {
         /// What was supplied.
         got: String,
+    },
+    /// A convenience read found more rows than it will materialize.
+    ///
+    /// The unpaged accessors exist for the small case and say so. A
+    /// corpus large enough to need a second page must be walked with the
+    /// paged API, because turning a bounded per-message design into an
+    /// unbounded one-call allocation is exactly what those accessors
+    /// would otherwise do — silently, and only in the field.
+    TooManyRows {
+        /// The paged accessor to use instead.
+        use_instead: &'static str,
+    },
+    /// A file or directory holding message content is reachable by
+    /// someone other than its owner.
+    ///
+    /// Refused rather than repaired, for the reason the identity key is:
+    /// content that has been broadly readable should be treated as
+    /// exposed, and quietly narrowing the mode would hide that it ever
+    /// was.
+    PermissionsTooOpen {
+        /// Which file or directory.
+        what: String,
+        /// The mode it carries.
+        mode: u32,
+    },
+    /// One peer used an `app_message_id` it had already used, for
+    /// different content.
+    ///
+    /// Inbound identity is `(source_peer, app_message_id)`, and
+    /// `app_message_id` is chosen by the sender. Repeating a keep for the
+    /// SAME message is idempotent and succeeds; repeating the identity
+    /// with a different body, endpoint, channel, media type, or receipt
+    /// time is a collision, and answering it by silently selecting one of
+    /// the two bodies would lose the other.
+    IdentityConflict {
+        /// The reused application id.
+        app_message_id: String,
+        /// The peer that reused it.
+        source_peer: String,
     },
     /// A payload above the transport payload ceiling.
     ///
@@ -122,6 +161,21 @@ impl core::fmt::Display for StoreError {
             Self::MalformedAppMessageId { got } => write!(
                 f,
                 "app_message_id must be 32 lowercase hex characters, got {got:?}"
+            ),
+            Self::TooManyRows { use_instead } => write!(
+                f,
+                "more rows than this accessor materializes; walk them with {use_instead}"
+            ),
+            Self::PermissionsTooOpen { what, mode } => write!(
+                f,
+                "{what} is mode {mode:04o}; message content must be owner-only"
+            ),
+            Self::IdentityConflict {
+                app_message_id,
+                source_peer,
+            } => write!(
+                f,
+                "peer {source_peer} reused app_message_id {app_message_id} for different content"
             ),
             Self::PayloadTooLarge { got, max } => {
                 write!(f, "payload is {got} bytes; the limit is {max}")

@@ -93,11 +93,7 @@ fn write_atomic_with_mode(
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent).map_err(PersistError::Io)?;
 
-    // The temporary lives beside the target, because rename is atomic
-    // only within one filesystem and a temp directory may be another.
-    let mut temp = path.as_os_str().to_owned();
-    temp.push(".tmp");
-    let temp = std::path::PathBuf::from(temp);
+    let temp = temp_beside(path);
 
     let mut file = open_for_write(&temp, mode)?;
     file.write_all(contents).map_err(PersistError::Io)?;
@@ -120,6 +116,88 @@ fn write_atomic_with_mode(
     }
 
     Ok(())
+}
+
+/// Install `contents` at `path` only if nothing is there, owner-only.
+///
+/// The distinction from [`write_private_atomic`] is WHO decides that the
+/// target is free. A caller that checks first and writes second has a
+/// window between the two, and two processes initializing the same
+/// profile both pass the check before either writes — so the loser
+/// silently replaces an identity the winner had already established.
+/// Here the filesystem decides, in the operation that installs the file.
+///
+/// `link` is what makes that one operation: it fails with `EEXIST` if
+/// the target exists, and unlike `rename` it never replaces. The content
+/// is still written and fsynced to a private temporary first, so the
+/// file is whole before it has a name and a crash cannot publish a
+/// partial key.
+///
+/// # Errors
+/// Returns [`PersistError::AlreadyExists`] if `path` is taken,
+/// [`PersistError::Io`] if any step fails, or
+/// [`PersistError::UnsupportedPlatform`] where owner-only permissions
+/// cannot be enforced. Nothing at `path` is touched in any case.
+pub fn create_private_exclusive(path: &Path, contents: &[u8]) -> Result<(), PersistError> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(PersistError::Io)?;
+
+    let temp = temp_beside(path);
+    let mut file = open_for_write(&temp, Some(OWNER_ONLY_FILE))?;
+    let written = file
+        .write_all(contents)
+        .and_then(|()| file.sync_all())
+        .map_err(PersistError::Io);
+    drop(file);
+    if let Err(e) = written {
+        let _ = fs::remove_file(&temp);
+        return Err(e);
+    }
+
+    let outcome = match fs::hard_link(&temp, path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(PersistError::AlreadyExists),
+        Err(e) => Err(PersistError::Io(e)),
+    };
+
+    // The temporary is always removed: on success the link is the file,
+    // and on failure it is unpublished key material.
+    let _ = fs::remove_file(&temp);
+    outcome?;
+
+    #[cfg(unix)]
+    if let Ok(dir) = fs::File::open(parent) {
+        let _ = dir.sync_all();
+    }
+
+    Ok(())
+}
+
+/// A temporary path beside `path`, unique to this writer.
+///
+/// Beside the target because rename is atomic only within one
+/// filesystem and a temp directory may be another.
+///
+/// UNIQUE because a fixed `<path>.tmp` is shared state between every
+/// writer of that file. Two processes writing concurrently both open it,
+/// and one renames it into place while the other still holds the same
+/// inode open and goes on writing — into the file that is now the
+/// installed key. The rename is atomic; the name was not private, so
+/// atomicity protected nothing.
+///
+/// Process id and a per-process counter are enough: the id separates
+/// processes and the counter separates writers inside one.
+fn temp_beside(path: &Path) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    let mut temp = path.as_os_str().to_owned();
+    temp.push(format!(
+        ".{}.{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::path::PathBuf::from(temp)
 }
 
 fn open_for_write(path: &Path, mode: Option<u32>) -> Result<fs::File, PersistError> {
@@ -166,5 +244,37 @@ pub fn is_owner_only(path: &Path) -> Result<bool, PersistError> {
     {
         let _ = path;
         Err(PersistError::UnsupportedPlatform)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_writer_gets_its_own_temporary() {
+        // A fixed `<path>.tmp` is shared state between every writer of
+        // that file. Two writers open the same inode, one renames it into
+        // place, and the other goes on writing into what is now the
+        // installed file — the rename is atomic, but the name it renamed
+        // FROM was not private, so atomicity protected nothing.
+        let target = Path::new("/tmp/interweave-test/identity.key");
+        let a = temp_beside(target);
+        let b = temp_beside(target);
+        assert_ne!(a, b, "two writers must not share a temporary");
+
+        for t in [&a, &b] {
+            assert_eq!(
+                t.parent(),
+                target.parent(),
+                "the temporary stays beside the target, or rename is not atomic"
+            );
+            assert!(
+                t.extension().is_some_and(|e| e == "tmp"),
+                "still recognisable as a temporary: {}",
+                t.display()
+            );
+            assert_ne!(t.as_path(), target, "and is never the target itself");
+        }
     }
 }

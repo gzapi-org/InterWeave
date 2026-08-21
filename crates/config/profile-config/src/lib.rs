@@ -35,8 +35,8 @@ pub mod persist;
 
 pub use paths::{NAMESPACE, PROFILES, ProfilePaths, XdgRoots, absolute_or_none};
 pub use persist::{
-    OWNER_ONLY_DIR, OWNER_ONLY_FILE, create_private_dir, is_owner_only, write_atomic,
-    write_private_atomic,
+    OWNER_ONLY_DIR, OWNER_ONLY_FILE, create_private_dir, create_private_exclusive, is_owner_only,
+    write_atomic, write_private_atomic,
 };
 
 /// What can go wrong resolving paths or writing to disk.
@@ -68,6 +68,13 @@ pub enum PersistError {
     ///
     /// Refusing beats writing a key file this build cannot protect.
     UnsupportedPlatform,
+    /// An exclusive create found the target already present.
+    ///
+    /// Reported by [`persist::create_private_exclusive`], which installs
+    /// a file only if nothing is there — decided by the filesystem in one
+    /// operation, so two processes racing to create the same identity
+    /// cannot both believe they won.
+    AlreadyExists,
 }
 
 impl core::fmt::Display for PersistError {
@@ -87,6 +94,7 @@ impl core::fmt::Display for PersistError {
                 f,
                 "owner-only file permissions cannot be enforced on this platform"
             ),
+            Self::AlreadyExists => write!(f, "a file already exists at that path"),
         }
     }
 }

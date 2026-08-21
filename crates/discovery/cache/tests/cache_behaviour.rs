@@ -12,8 +12,8 @@
 use std::path::Path;
 
 use interweave_discovery_cache::{
-    CacheHealth, CacheLimits, DEFAULT_TTL_MS, MAX_ADDRESSES_PER_PEER, MAX_CAPABILITIES_PER_PEER,
-    PeerCache, ProtocolCapabilityObservation,
+    CacheHealth, CacheLimits, DEFAULT_TTL_MS, MAX_ADDRESSES_PER_PEER, MAX_CACHE_FILE_BYTES,
+    MAX_CAPABILITIES_PER_PEER, PeerCache, ProtocolCapabilityObservation,
 };
 use interweave_transport_api::TransportIdentity;
 
@@ -361,4 +361,166 @@ fn the_write_is_atomic_and_leaves_no_temporary_behind() {
         .filter(|n| n != "peers.json")
         .collect();
     assert!(leftovers.is_empty(), "unexpected files: {leftovers:?}");
+}
+
+/// Everything a `String`/`Vec` shape cannot say about itself.
+///
+/// The load path checked JSON syntax and a version number and then
+/// inserted whatever it found. Both say the file is roughly the right
+/// shape; neither says a peer id is canonical, an address is bounded, or
+/// a count is inside the limits this cache advertises — so a restored,
+/// corrupted, or locally replaced file could allocate far more than the
+/// runtime limits imply, on state that is explicitly disposable.
+#[test]
+fn a_file_outside_the_bounded_format_is_quarantined_not_loaded() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let limits = CacheLimits::default();
+
+    let cases: Vec<(&str, String)> = vec![
+        (
+            "a non-canonical peer id",
+            format!(
+                r#"{{"version":1,"peers":[{}]}}"#,
+                record_json("not-a-peer-id", 1, 1, &[], &[])
+            ),
+        ),
+        (
+            "an address past its byte bound",
+            format!(
+                r#"{{"version":1,"peers":[{}]}}"#,
+                record_json(PEER_A, 1, 1, &["x".repeat(257)], &[])
+            ),
+        ),
+        (
+            "an empty address",
+            format!(
+                r#"{{"version":1,"peers":[{}]}}"#,
+                record_json(PEER_A, 1, 1, &[String::new()], &[])
+            ),
+        ),
+        (
+            "more addresses than the cache retains",
+            format!(
+                r#"{{"version":1,"peers":[{}]}}"#,
+                record_json(
+                    PEER_A,
+                    1,
+                    1,
+                    &(0..=MAX_ADDRESSES_PER_PEER)
+                        .map(|i| format!("/ip4/10.0.0.{i}/tcp/1"))
+                        .collect::<Vec<_>>(),
+                    &[]
+                )
+            ),
+        ),
+        (
+            "more capability observations than the cache retains",
+            format!(
+                r#"{{"version":1,"peers":[{}]}}"#,
+                record_json(
+                    PEER_A,
+                    1,
+                    1,
+                    &[],
+                    &(0..=MAX_CAPABILITIES_PER_PEER)
+                        .map(|i| format!("fam{i}"))
+                        .collect::<Vec<_>>()
+                )
+            ),
+        ),
+        (
+            "a capability label past its byte bound",
+            format!(
+                r#"{{"version":1,"peers":[{}]}}"#,
+                record_json(PEER_A, 1, 1, &[], &["f".repeat(129)])
+            ),
+        ),
+        (
+            "a record that last succeeded before it first did",
+            format!(
+                r#"{{"version":1,"peers":[{}]}}"#,
+                record_json(PEER_A, 500, 100, &[], &[])
+            ),
+        ),
+    ];
+
+    for (what, body) in cases {
+        let path = dir.path().join(format!("{}.json", what.replace(' ', "-")));
+        std::fs::write(&path, &body).expect("write");
+        let cache = PeerCache::load(&path, limits).expect("load reports rather than fails");
+        assert!(
+            matches!(cache.health(), CacheHealth::Quarantined { .. }),
+            "{what} must be quarantined, health was {:?}",
+            cache.health()
+        );
+        assert_eq!(cache.len(), 0, "{what} must not be partially loaded");
+    }
+}
+
+#[test]
+fn a_file_larger_than_the_format_is_never_read_into_memory() {
+    // The ceiling is derived from the format's own worst case, so a file
+    // above it cannot be a valid cache — and the size is checked before
+    // the bytes are read, because this is exactly the state a restore or
+    // a local edit can replace.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("huge.json");
+
+    let mut body = String::from(r#"{"version":1,"peers":[]}"#);
+    body.push_str(&" ".repeat(usize::try_from(MAX_CACHE_FILE_BYTES).unwrap_or(usize::MAX)));
+    std::fs::write(&path, &body).expect("write");
+
+    let cache =
+        PeerCache::load(&path, CacheLimits::default()).expect("load reports rather than fails");
+    assert!(
+        matches!(cache.health(), CacheHealth::Quarantined { .. }),
+        "an over-size file must be quarantined, health was {:?}",
+        cache.health()
+    );
+}
+
+#[test]
+fn a_valid_file_still_loads() {
+    // The bound must not have become a refusal to load anything: every
+    // check above has to pass for a file this cache itself wrote.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("peers.json");
+
+    let mut cache = PeerCache::load(&path, CacheLimits::default()).expect("empty");
+    cache.record_success(&peer(PEER_A), "/ip4/10.0.0.1/tcp/4001", 1_000);
+    cache.flush(1_000_000).expect("writes");
+
+    let reloaded = PeerCache::load(&path, CacheLimits::default()).expect("loads");
+    assert!(
+        matches!(reloaded.health(), CacheHealth::Healthy),
+        "a file this cache wrote must load: {:?}",
+        reloaded.health()
+    );
+    assert_eq!(reloaded.len(), 1);
+}
+
+fn record_json(
+    peer_id: &str,
+    first: u64,
+    last: u64,
+    addresses: &[String],
+    families: &[String],
+) -> String {
+    let addrs: Vec<String> = addresses
+        .iter()
+        .map(|a| format!(r#"{{"address":"{a}","last_success_ms":1}}"#))
+        .collect();
+    let caps: Vec<String> = families
+        .iter()
+        .map(|f| {
+            format!(
+                r#"{{"protocol_family":"{f}","wire_major":1,"network_hash":"h","role":"server","supported":true,"observed_at_ms":1}}"#
+            )
+        })
+        .collect();
+    format!(
+        r#"{{"peer_id":"{peer_id}","addresses":[{}],"first_success_ms":{first},"last_success_ms":{last},"capabilities":[{}]}}"#,
+        addrs.join(","),
+        caps.join(",")
+    )
 }

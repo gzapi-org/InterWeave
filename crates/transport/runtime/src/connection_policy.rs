@@ -628,6 +628,12 @@ mod tests {
     const A1: &str = "/ip4/192.0.2.1/tcp/4001";
     const A2: &str = "/ip4/192.0.2.2/tcp/4001";
 
+    /// Distinct synthetic identities, so a small pool genuinely collides.
+    fn peer_n(i: usize) -> TransportIdentity {
+        let tail = format!("{i:044}").replace('0', "a");
+        TransportIdentity::parse(format!("Qm{}", &tail[..44])).expect("valid test identity")
+    }
+
     fn peer() -> TransportIdentity {
         TransportIdentity::parse(P1).expect("valid identity")
     }
@@ -1077,6 +1083,71 @@ mod tests {
             "no eligible known-good address remains, so the peer backs off"
         );
         assert_eq!(p.address_entries(), 2, "and the table did not grow");
+    }
+
+    #[test]
+    fn the_caps_hold_under_arbitrary_outcome_sequences() {
+        // Selected examples prove the cases someone thought of, and the
+        // bug this replaces was in a path nobody had thought of: the
+        // eviction result was computed and discarded on exactly the
+        // branch the examples did not reach.
+        //
+        // So drive the state machine with a deterministic pseudo-random
+        // mix of every mutation and assert the invariant after each one.
+        // Deterministic because a cap violation must reproduce from the
+        // seed printed in the failure, not on a rerun that happens to
+        // shuffle differently.
+        const MAX_ADDRESSES: usize = 8;
+        const MAX_PEERS: usize = 4;
+
+        for seed in 0..16u64 {
+            let mut p = ConnectionPolicy::new(64, 64);
+            p.max_addresses = MAX_ADDRESSES;
+            p.max_peers = MAX_PEERS;
+
+            // xorshift: no dependency, and the sequence is a pure
+            // function of the seed.
+            let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
+            let mut next = move || {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state
+            };
+
+            for step in 0..400u64 {
+                let r = next();
+                // A small pool of peers and addresses, so entries
+                // genuinely collide and evictions genuinely happen.
+                let who = peer_n(usize::try_from(r % 6).unwrap_or(0));
+                let addr = format!("/ip4/10.0.0.{}/tcp/{}", (r >> 8) % 7, (r >> 16) % 5);
+                let now = step.wrapping_mul(37);
+
+                match (r >> 32) % 4 {
+                    0 => p.record_success(&who, &addr, now),
+                    1 => {
+                        let _ = p.record_address_failure(&who, &addr, now, 500);
+                    }
+                    2 => {
+                        let _ = p.record_identity_mismatch(&who, &addr, now);
+                    }
+                    _ => {
+                        let _ = p.prune(now);
+                    }
+                }
+
+                assert!(
+                    p.address_entries() <= MAX_ADDRESSES,
+                    "seed {seed} step {step}: address table holds {} entries, cap is {MAX_ADDRESSES}",
+                    p.address_entries()
+                );
+                assert!(
+                    p.peer_entries() <= MAX_PEERS,
+                    "seed {seed} step {step}: peer table holds {} entries, cap is {MAX_PEERS}",
+                    p.peer_entries()
+                );
+            }
+        }
     }
 
     #[test]

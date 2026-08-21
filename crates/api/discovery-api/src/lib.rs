@@ -114,6 +114,63 @@ impl core::error::Error for DiscoveryError {}
 
 /// A transport fact observed on an **authenticated** connection.
 ///
+/// An opaque protocol identifier: 1..=256 printable ASCII bytes.
+///
+/// A TYPE rather than a check, because the check was the thing that was
+/// missing. `CandidatePeer::validate` counted observations and looked
+/// inside none of them, so a provider could park sixteen strings of any
+/// length and any byte content in another node's bounded cache. A
+/// validated field cannot be constructed past the boundary that
+/// validates it, which is a different guarantee from one every future
+/// call site has to remember.
+///
+/// Compared exactly and never parsed for meaning, which is why the
+/// grammar is this narrow: control bytes and arbitrary UTF-8 buy a
+/// provider nothing except room to carry content through a field nothing
+/// inspects.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
+pub struct ProtocolId(String);
+
+impl ProtocolId {
+    /// Parse a protocol identifier.
+    ///
+    /// # Errors
+    /// Returns [`DiscoveryError::InvalidLength`] when empty or longer
+    /// than [`MAX_PROTOCOL_ID_BYTES`], or
+    /// [`DiscoveryError::NonPrintableProtocolId`] for a byte outside
+    /// `0x20..=0x7E`.
+    pub fn parse(value: impl Into<String>) -> Result<Self, DiscoveryError> {
+        let value = value.into();
+        if value.is_empty() || value.len() > MAX_PROTOCOL_ID_BYTES {
+            return Err(DiscoveryError::InvalidLength {
+                field: "protocol_observations[].protocol_id",
+                got: value.len(),
+                max: MAX_PROTOCOL_ID_BYTES,
+            });
+        }
+        if let Some(at) = value.bytes().position(|b| !(0x20..=0x7E).contains(&b)) {
+            return Err(DiscoveryError::NonPrintableProtocolId { at });
+        }
+        Ok(Self(value))
+    }
+
+    /// The identifier as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ProtocolId {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // The wire path goes through the same parse. A derived
+        // `Deserialize` on the inner `String` is exactly how a validated
+        // type ends up more permissive than the boundary it names.
+        Self::parse(String::deserialize(d)?).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Advisory only. "This peer was seen speaking protocol X" is not "this
 /// peer may use protocol X here": authorization is the trust policy's
 /// answer, and a routing decision that consulted this instead would let a
@@ -126,7 +183,7 @@ impl core::error::Error for DiscoveryError {}
 #[serde(deny_unknown_fields)]
 pub struct ProtocolObservation {
     /// The exact protocol string observed, e.g. an Identify entry.
-    pub protocol_id: String,
+    pub protocol_id: ProtocolId,
     /// Whether the peer was observed supporting it.
     pub supported: bool,
     /// Local millisecond timestamp of the observation.
@@ -288,26 +345,10 @@ impl CandidatePeer {
                 max: MAX_PROTOCOL_OBSERVATIONS,
             });
         }
-        // Each identifier, not just how many there are. Checking only the
-        // count let a provider store sixteen strings of any length and any
-        // byte content in another node's bounded cache — the cap was
-        // enforced on the collection and on nothing inside it.
-        for o in &self.protocol_observations {
-            if o.protocol_id.is_empty() || o.protocol_id.len() > MAX_PROTOCOL_ID_BYTES {
-                return Err(DiscoveryError::InvalidLength {
-                    field: "protocol_observations[].protocol_id",
-                    got: o.protocol_id.len(),
-                    max: MAX_PROTOCOL_ID_BYTES,
-                });
-            }
-            if let Some(at) = o
-                .protocol_id
-                .bytes()
-                .position(|b| !(0x20..=0x7E).contains(&b))
-            {
-                return Err(DiscoveryError::NonPrintableProtocolId { at });
-            }
-        }
+        // Each identifier's bounds are [`ProtocolId`]'s to keep — the cap
+        // used to be enforced on the collection and on nothing inside it,
+        // and a validated type is what makes that unreachable rather than
+        // remembered.
         if self.source.is_empty() || self.source.len() > MAX_PROVIDER_NAME_BYTES {
             return Err(DiscoveryError::InvalidLength {
                 field: "source",
@@ -511,44 +552,24 @@ mod tests {
         assert_eq!(candidate().validate(), Ok(()));
     }
 
-    fn observation(protocol_id: &str) -> ProtocolObservation {
-        ProtocolObservation {
-            protocol_id: protocol_id.to_owned(),
-            supported: true,
-            observed_at: 1_000,
-        }
-    }
-
     #[test]
     fn every_protocol_identifier_is_bounded_not_just_their_number() {
-        // The cap was enforced on the collection and on nothing inside
-        // it, so a provider could park sixteen strings of any length in
-        // another node's bounded cache and pass validation.
-        let mut c = candidate();
-        c.protocol_observations = [observation(&"x".repeat(MAX_PROTOCOL_ID_BYTES + 1))]
-            .into_iter()
-            .collect();
-        assert_eq!(
-            c.validate(),
-            Err(DiscoveryError::InvalidLength {
-                field: "protocol_observations[].protocol_id",
-                got: MAX_PROTOCOL_ID_BYTES + 1,
-                max: MAX_PROTOCOL_ID_BYTES,
-            })
-        );
-
-        let mut empty = candidate();
-        empty.protocol_observations = [observation("")].into_iter().collect();
+        // The cap used to be enforced on the collection and on nothing
+        // inside it, so a provider could park sixteen strings of any
+        // length in another node's bounded cache. It is the type's now,
+        // which makes the invalid value unconstructible rather than
+        // caught by a check every future call site has to remember.
         assert!(matches!(
-            empty.validate(),
+            ProtocolId::parse("x".repeat(MAX_PROTOCOL_ID_BYTES + 1)),
+            Err(DiscoveryError::InvalidLength { got, max, .. })
+                if got == MAX_PROTOCOL_ID_BYTES + 1 && max == MAX_PROTOCOL_ID_BYTES
+        ));
+        assert!(matches!(
+            ProtocolId::parse(""),
             Err(DiscoveryError::InvalidLength { got: 0, .. })
         ));
-
-        let mut ok = candidate();
-        ok.protocol_observations = [observation("/interweave/direct/2.0.0")]
-            .into_iter()
-            .collect();
-        assert_eq!(ok.validate(), Ok(()));
+        assert!(ProtocolId::parse("/interweave/direct/2.0.0").is_ok());
+        assert!(ProtocolId::parse("x".repeat(MAX_PROTOCOL_ID_BYTES)).is_ok());
     }
 
     #[test]
@@ -557,14 +578,41 @@ mod tests {
         // control byte or arbitrary UTF-8 buys a provider nothing except
         // room to carry content through a field nothing inspects.
         for (id, at) in [("\u{1}nope", 0), ("ok\u{7f}", 2), ("caf\u{e9}", 3)] {
-            let mut c = candidate();
-            c.protocol_observations = [observation(id)].into_iter().collect();
             assert_eq!(
-                c.validate(),
+                ProtocolId::parse(id),
                 Err(DiscoveryError::NonPrintableProtocolId { at }),
                 "{id:?} must be refused"
             );
         }
+    }
+
+    #[test]
+    fn the_wire_path_goes_through_the_same_parse() {
+        // A derived `Deserialize` on the inner String is exactly how a
+        // validated type ends up more permissive than the boundary it
+        // names — the recurring defect this crate has now hit twice.
+        let over = "x".repeat(MAX_PROTOCOL_ID_BYTES + 1);
+        let doc = format!(
+            r#"{{"peer_id":"{P1}","addresses":["/a"],"source":"s","observed_at":1,"protocol_observations":[{{"protocol_id":"{over}","supported":true,"observed_at":1}}]}}"#
+        );
+        assert!(
+            serde_json::from_str::<CandidatePeer>(&doc).is_err(),
+            "an over-length protocol id must not deserialize"
+        );
+
+        let doc = format!(
+            r#"{{"peer_id":"{P1}","addresses":["/a"],"source":"s","observed_at":1,"protocol_observations":[{{"protocol_id":"café","supported":true,"observed_at":1}}]}}"#
+        );
+        assert!(
+            serde_json::from_str::<CandidatePeer>(&doc).is_err(),
+            "a non-ASCII protocol id must not deserialize"
+        );
+
+        let doc = format!(
+            r#"{{"peer_id":"{P1}","addresses":["/a"],"source":"s","observed_at":1,"protocol_observations":[{{"protocol_id":"/interweave/direct/2.0.0","supported":true,"observed_at":1}}]}}"#
+        );
+        let parsed = serde_json::from_str::<CandidatePeer>(&doc).expect("a legal one still parses");
+        assert_eq!(parsed.validate(), Ok(()));
     }
 
     #[test]
@@ -665,7 +713,7 @@ mod tests {
         let mut c = candidate();
         c.protocol_observations = (0..=MAX_PROTOCOL_OBSERVATIONS)
             .map(|i| ProtocolObservation {
-                protocol_id: format!("/p/{i}"),
+                protocol_id: ProtocolId::parse(format!("/p/{i}")).expect("valid"),
                 supported: true,
                 observed_at: 1,
             })

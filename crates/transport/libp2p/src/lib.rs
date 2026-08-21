@@ -41,6 +41,6 @@ pub mod runtime;
 
 pub use behaviour::{IDENTIFY_PROTOCOL, SubstrateBehaviour};
 pub use runtime::{
-    DEFAULT_COMMAND_CAPACITY, DEFAULT_EVENT_CAPACITY, DialRefusal, SubstrateConfig, SubstrateError,
-    SwarmCommand, SwarmEvent, SwarmRuntime,
+    DEFAULT_COMMAND_CAPACITY, DEFAULT_EVENT_CAPACITY, DialRefusal, MAX_CONFIGURED_CAPACITY,
+    SubstrateConfig, SubstrateError, SwarmCommand, SwarmEvent, SwarmRuntime,
 };

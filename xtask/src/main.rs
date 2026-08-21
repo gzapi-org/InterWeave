@@ -82,6 +82,11 @@ fn tree_checks() -> Vec<Task> {
             &["tools/checks/check_stage_status.sh"],
         ),
         Task::new(
+            "component READMEs agree with their own directories",
+            "bash",
+            &["tools/checks/check_component_status.sh"],
+        ),
+        Task::new(
             "dependency policy — advisories, licences, bans, sources",
             "bash",
             &["tools/checks/check_dependencies.sh"],
