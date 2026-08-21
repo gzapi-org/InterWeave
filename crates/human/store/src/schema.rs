@@ -27,7 +27,7 @@ use rusqlite::{Connection, Transaction};
 use crate::StoreError;
 
 /// The schema version this build writes and expects.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Every table the store is allowed to contain.
 ///
@@ -80,12 +80,79 @@ pub fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
     if current < 1 {
         migration_1(&tx)?;
     }
+    if current < 2 {
+        migration_2(&tx)?;
+    }
     // The version bump rides the SAME transaction as the DDL above, which
     // is what makes a crashed migration a no-op rather than a schema the
     // store misreads on the next open.
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
     Ok(())
+}
+
+/// v2 — inbound identity is scoped to the peer that asserted it.
+///
+/// `app_message_id` is HumanChatV2's APPLICATION reply/retention
+/// identity. It is chosen by the sender, so on the inbound side it is
+/// remote-controlled data and not a dedup identity this store may trust
+/// globally — that is transport's `DirectContentFingerprintV1`, at a
+/// different layer.
+///
+/// A `UNIQUE` on it alone meant a peer reusing one of its own prior ids,
+/// or two peers happening to pick the same one, collided in the store.
+/// The keep upsert would then update the OLDER row's timestamps and
+/// leave its body in place, so the newer message quietly never reached
+/// durable kept state and the caller was told it had.
+///
+/// SQLite cannot drop a column constraint, so the tables are rebuilt.
+/// They hold only what this build itself wrote, and the rebuild is
+/// inside the migration transaction with the version bump.
+fn migration_2(tx: &Transaction<'_>) -> Result<(), StoreError> {
+    tx.execute_batch(
+        "
+        CREATE TABLE unread_inbound_v2 (
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            media_type      TEXT,
+            payload         BLOB    NOT NULL,
+            received_at     INTEGER NOT NULL,
+            UNIQUE(source_peer, app_message_id)
+        );
+        INSERT OR IGNORE INTO unread_inbound_v2
+            (row_id, app_message_id, source_peer, source_endpoint, channel_id,
+             media_type, payload, received_at)
+            SELECT row_id, app_message_id, source_peer, source_endpoint, channel_id,
+                   media_type, payload, received_at FROM unread_inbound;
+        DROP TABLE unread_inbound;
+        ALTER TABLE unread_inbound_v2 RENAME TO unread_inbound;
+
+        CREATE TABLE kept_inbound_v2 (
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            media_type      TEXT,
+            payload         BLOB    NOT NULL,
+            received_at     INTEGER NOT NULL,
+            read_at         INTEGER NOT NULL,
+            kept_at         INTEGER NOT NULL,
+            UNIQUE(source_peer, app_message_id)
+        );
+        INSERT OR IGNORE INTO kept_inbound_v2
+            (row_id, app_message_id, source_peer, source_endpoint, channel_id,
+             media_type, payload, received_at, read_at, kept_at)
+            SELECT row_id, app_message_id, source_peer, source_endpoint, channel_id,
+                   media_type, payload, received_at, read_at, kept_at FROM kept_inbound;
+        DROP TABLE kept_inbound;
+        ALTER TABLE kept_inbound_v2 RENAME TO kept_inbound;
+        ",
+    )
+    .map_err(|e| StoreError::Migration(e.to_string()))
 }
 
 /// v1 — the three retention tables plus content-free settings.

@@ -18,11 +18,27 @@ use interweave_human_store::{
 use interweave_transport_api::{DirectDestination, TransportIdentity};
 
 const PEER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+const PEER_B: &str = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
 const ID_A: &str = "0123456789abcdef0123456789abcdef";
 const ID_B: &str = "fedcba9876543210fedcba9876543210";
 
 fn peer() -> TransportIdentity {
     TransportIdentity::parse(PEER).expect("the fixture peer id is canonical")
+}
+
+fn other_peer() -> TransportIdentity {
+    TransportIdentity::parse(PEER_B).expect("the second fixture peer id is canonical")
+}
+
+fn inbound_from(who: TransportIdentity, id: &str, payload: Vec<u8>) -> NewInbound {
+    NewInbound {
+        origin: InboundOrigin {
+            peer: who,
+            endpoint: None,
+            channel: None,
+        },
+        ..inbound(id, payload)
+    }
 }
 
 fn outbound(id: &str, payload: Vec<u8>) -> NewOutbound {
@@ -391,6 +407,68 @@ fn keeping_an_already_kept_message_is_not_an_error() {
         .find(|r| r.app_message_id.as_str() == ID_A)
         .expect("still there");
     assert_eq!(mine.kept_at, Some(3_000));
+    assert_eq!(store.health(), StorageHealth::Healthy);
+}
+
+#[test]
+fn two_peers_may_use_the_same_application_id() {
+    // `app_message_id` is HumanChatV2's APPLICATION identity, chosen by
+    // the sender. Globally unique inbound rows made one peer's choice
+    // collide with another's, so the second arrival could not be stored
+    // at all — two unrelated people picking the same 128 bits is a
+    // birthday problem, but one peer echoing an id it saw is not.
+    let mut store = memory();
+    let a = store
+        .commit_unread_inbound(&inbound_from(peer(), ID_A, b"from a".to_vec()))
+        .expect("first peer");
+    let b = store
+        .commit_unread_inbound(&inbound_from(other_peer(), ID_A, b"from b".to_vec()))
+        .expect("a different peer may reuse the id");
+    assert_ne!(a, b, "they are different messages");
+
+    let unread = store.unread_inbound().expect("read");
+    assert_eq!(unread.len(), 2, "both are held");
+}
+
+#[test]
+fn one_peer_reusing_its_own_id_for_new_content_is_a_conflict() {
+    // The keep upsert conflicts on remote-controlled data. Refreshing
+    // the older row's timestamps and leaving its body in place would
+    // report success for a message that never reached durable kept
+    // state — the newer content simply disappears.
+    let mut store = memory();
+
+    let first = store
+        .commit_unread_inbound(&inbound(ID_A, b"original".to_vec()))
+        .expect("commit");
+    let held = store.mark_read(first, 1_000).expect("read");
+    store.keep(&held, 2_000).expect("keep");
+
+    // A second message from the same peer, reusing the id, with a
+    // different body. Committing it unread is fine — the first row left
+    // that table when it was kept — and the collision surfaces where the
+    // two would actually alias.
+    let second = store
+        .commit_unread_inbound(&inbound(ID_A, b"replacement".to_vec()))
+        .expect("a new arrival is admitted");
+    let second_held = store.mark_read(second, 3_000).expect("read");
+
+    match store.keep(&second_held, 4_000) {
+        Err(StoreError::IdentityConflict {
+            app_message_id,
+            source_peer,
+        }) => {
+            assert_eq!(app_message_id, ID_A);
+            assert_eq!(source_peer, PEER);
+        }
+        other => panic!("expected an identity conflict, got {other:?}"),
+    }
+
+    // And the original body is intact — not silently replaced, and not
+    // silently left while the caller was told the keep succeeded.
+    let kept = store.kept_inbound().expect("read");
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].payload, b"original".to_vec());
     assert_eq!(store.health(), StorageHealth::Healthy);
 }
 

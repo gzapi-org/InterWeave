@@ -77,6 +77,21 @@ pub enum StoreError {
         /// What was supplied.
         got: String,
     },
+    /// One peer used an `app_message_id` it had already used, for
+    /// different content.
+    ///
+    /// Inbound identity is `(source_peer, app_message_id)`, and
+    /// `app_message_id` is chosen by the sender. Repeating a keep for the
+    /// SAME message is idempotent and succeeds; repeating the identity
+    /// with a different body, endpoint, channel, media type, or receipt
+    /// time is a collision, and answering it by silently selecting one of
+    /// the two bodies would lose the other.
+    IdentityConflict {
+        /// The reused application id.
+        app_message_id: String,
+        /// The peer that reused it.
+        source_peer: String,
+    },
     /// A payload above the transport payload ceiling.
     ///
     /// The store holds the exact wire bytes so a retry can resend them
@@ -122,6 +137,13 @@ impl core::fmt::Display for StoreError {
             Self::MalformedAppMessageId { got } => write!(
                 f,
                 "app_message_id must be 32 lowercase hex characters, got {got:?}"
+            ),
+            Self::IdentityConflict {
+                app_message_id,
+                source_peer,
+            } => write!(
+                f,
+                "peer {source_peer} reused app_message_id {app_message_id} for different content"
             ),
             Self::PayloadTooLarge { got, max } => {
                 write!(f, "payload is {got} bytes; the limit is {max}")

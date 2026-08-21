@@ -502,6 +502,19 @@ impl HumanStore {
         // already-kept message as fine, and a UI can produce a second
         // Keep from one double-click. Failing here would make the store
         // stricter than the contract it implements.
+        //
+        // But idempotent means SAME MESSAGE, and the conflict target is
+        // remote-controlled data. `app_message_id` is HumanChatV2's
+        // application identity, chosen by the sender — so the WHERE is
+        // what separates "this exact message again" from "a different
+        // message wearing an id this peer already used". Without it the
+        // upsert refreshed the older row's timestamps, left its body in
+        // place, and reported success for a message that never reached
+        // durable kept state.
+        //
+        // A conflict that fails the WHERE updates no row, so RETURNING
+        // yields nothing and the caller is told, rather than handed
+        // someone else's row id.
         // RETURNING rather than last_insert_rowid(): that counter is not
         // updated when an upsert takes the UPDATE path, so it would hand
         // back whichever row was inserted most recently — a different
@@ -511,9 +524,14 @@ impl HumanStore {
                  (app_message_id, source_peer, source_endpoint, channel_id,
                   media_type, payload, received_at, read_at, kept_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-             ON CONFLICT(app_message_id) DO UPDATE SET
+             ON CONFLICT(source_peer, app_message_id) DO UPDATE SET
                  read_at = excluded.read_at,
                  kept_at = excluded.kept_at
+             WHERE kept_inbound.source_endpoint IS excluded.source_endpoint
+               AND kept_inbound.channel_id      IS excluded.channel_id
+               AND kept_inbound.media_type      IS excluded.media_type
+               AND kept_inbound.received_at      = excluded.received_at
+               AND kept_inbound.payload          = excluded.payload
              RETURNING row_id",
             params![
                 held.app_message_id.as_str(),
@@ -531,6 +549,10 @@ impl HumanStore {
 
         match result {
             Ok(row_id) => Ok(RowId::new(row_id)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Err(StoreError::IdentityConflict {
+                app_message_id: held.app_message_id.as_str().to_owned(),
+                source_peer: held.origin.peer.as_str().to_owned(),
+            }),
             Err(e) => Err(self.note_failure(e)),
         }
     }
