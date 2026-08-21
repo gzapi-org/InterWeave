@@ -405,20 +405,54 @@ where
 fn bounded_peer_seq<'de, D>(
     deserializer: D,
     max: usize,
-    what: &str,
+    what: &'static str,
 ) -> Result<BTreeSet<TransportIdentity>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    use serde::de::Error as _;
-    let items = Vec::<TransportIdentity>::deserialize(deserializer)?;
-    if items.len() > max {
-        return Err(D::Error::custom(format!(
-            "at most {max} {what} peers, got {}",
-            items.len()
-        )));
+    /// Stops at `max + 1` instead of materializing the input.
+    ///
+    /// `Vec::<T>::deserialize` parses and allocates the whole array
+    /// before any length check can run, so a ceiling applied afterwards
+    /// rejects the RESULT while the input has already been paid for —
+    /// which is the resource bound the limit exists to impose, not a
+    /// separate nicety. One element past the limit is enough to know,
+    /// and it is the only element past the limit this ever holds.
+    struct Bounded {
+        max: usize,
+        what: &'static str,
     }
-    Ok(items.into_iter().collect())
+
+    impl<'de> serde::de::Visitor<'de> for Bounded {
+        type Value = BTreeSet<TransportIdentity>;
+
+        fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(f, "at most {} {} peer ids", self.max, self.what)
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut out = BTreeSet::new();
+            let mut count = 0usize;
+            // COUNTED, not measured by the set. Duplicates collapse, and
+            // the ceiling is on the array the configuration supplied.
+            while let Some(peer) = seq.next_element::<TransportIdentity>()? {
+                count = count.saturating_add(1);
+                if count > self.max {
+                    return Err(serde::de::Error::custom(format!(
+                        "at most {} {} peers, got more",
+                        self.max, self.what
+                    )));
+                }
+                out.insert(peer);
+            }
+            Ok(out)
+        }
+    }
+
+    deserializer.deserialize_seq(Bounded { max, what })
 }
 
 impl<'de> Deserialize<'de> for InfrastructureSet {
@@ -687,6 +721,37 @@ mod tests {
             serde_json::from_str::<InfrastructureSet>(&doc).is_ok(),
             "exactly the ceiling, distinct, is legal"
         );
+    }
+
+    #[test]
+    fn an_oversized_allowlist_stops_being_read_rather_than_being_rejected_after() {
+        // `Vec::<T>::deserialize` parses and allocates the whole array
+        // before any length check runs, so a ceiling applied afterwards
+        // rejects the RESULT while the input has already been paid for.
+        //
+        // Proved by what comes AFTER the limit: the array is followed by
+        // syntactically broken JSON. Reaching it is a parse error, so
+        // getting the ceiling's own message instead is evidence the
+        // reader stopped.
+        let one = format!(r#""{P1}""#);
+        let over = vec![one; InfrastructureSet::MAX_ALLOWED_PEERS + 1].join(",");
+        let doc = format!(r#"{{"allowed_peers":[{over}, {{{{{{ ]}}"#);
+
+        let err = serde_json::from_str::<InfrastructureSet>(&doc)
+            .expect_err("an over-length array must be refused")
+            .to_string();
+        assert!(
+            err.contains("at most"),
+            "expected the ceiling to stop the read, got a parse error instead: {err}"
+        );
+
+        // The same array under the limit still parses, trailing garbage
+        // removed — so the test above failed for the length and not for
+        // the shape.
+        let under = vec![format!(r#""{P1}""#); InfrastructureSet::MAX_ALLOWED_PEERS].join(",");
+        let doc = format!(r#"{{"allowed_peers":[{under}]}}"#);
+        let set = serde_json::from_str::<InfrastructureSet>(&doc).expect("at the ceiling");
+        assert_eq!(set.len(), 1, "duplicates still collapse into the set");
     }
 
     #[test]
