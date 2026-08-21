@@ -259,7 +259,7 @@ def gossipsub_topic_key_v1(vector: dict) -> str:
     return hashlib.sha256(TOPIC_KEY_V1_DOMAIN + raw).hexdigest()
 
 
-def kad_network_namespace_v1(vector: dict) -> str:
+def kad_network_namespace_v1(vector: dict) -> dict[str, str]:
     """From architecture/docs/architecture/kademlia-integration.md §4.
 
     Lowercase unpadded RFC4648 base32 of the FIRST 16 BYTES of the
@@ -273,7 +273,15 @@ def kad_network_namespace_v1(vector: dict) -> str:
     if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", network_id):
         raise ValueError(f"network_id '{network_id}' is not lower-case ASCII in the allowed grammar")
     digest = hashlib.sha256(KAD_NETWORK_V1_DOMAIN + network_id.encode("ascii")).digest()
-    return base64.b32encode(digest[:16]).decode("ascii").rstrip("=").lower()
+    namespace = base64.b32encode(digest[:16]).decode("ascii").rstrip("=").lower()
+    # BOTH fields, because the fixture freezes both. Verifying only the
+    # hash left `protocol` unchecked: replacing a golden's protocol with
+    # `/definitely/wrong` passed, and consumers read that field as a
+    # frozen value on the same authority as the hash beside it.
+    return {
+        "network_hash": namespace,
+        "protocol": f"/interweave/kad/1.0.0/{namespace}",
+    }
 
 
 # --- validation verdicts --------------------------------------------------
@@ -497,17 +505,43 @@ def ipc_v2_payload_fit(vector: dict) -> str:
 # unconditional collision check would make a correct verdict set
 # unrepresentable. Flag it per algorithm rather than letting the shape
 # of the first three decide for every later one.
+# The fourth element is the INPUT FIELDS a prose copy of a golden is
+# recognised by, and it is declared rather than sniffed.
+#
+# `golden_marker` used to look only for `payload_hex`/`payload_utf8`, so
+# every algorithm whose input is something else — a PeerId and a sequence
+# number, a channel id, a network id — produced no marker at all. The
+# prose scan then matched nothing for those files and reported the same
+# cheerful count as for the ones it really checked, which is worse than
+# not scanning: a stale hash in PUBSUB.md or ADR-0047 read as covered.
+#
+# An empty tuple means the goldens in that file are not quoted in prose.
+# Saying so is a decision; leaving it to be inferred was the bug.
 ALGORITHMS = {
-    "direct-content-fingerprint-v1": (direct_content_fingerprint_v1, "sha256", True),
-    "direct-message-v2-frame": (direct_message_v2_frame, "frame_hex", True),
-    "ed25519-bip39-entropy-v1": (ed25519_bip39_entropy_v1, "expected_peer_id", True),
-    "gossipsub-message-id-v1": (gossipsub_message_id_v1, "sha256", True),
-    "gossipsub-topic-key-v1": (gossipsub_topic_key_v1, "sha256", True),
-    "kad-network-namespace-v1": (kad_network_namespace_v1, "network_hash", True),
-    "ipc-v2-payload-fit": (ipc_v2_payload_fit, "frame_length_prefix_hex", True),
-    "endpoint-id-grammar-v1": (endpoint_id_grammar_v1, "valid", False),
-    "human-chat-v2-envelope": (human_chat_v2_envelope, "valid", False),
-    "config-v2-cross-field": (config_v2_cross_field, "valid", False),
+    "direct-content-fingerprint-v1": (
+        direct_content_fingerprint_v1, "sha256", True, ("payload_hex", "payload_utf8"),
+    ),
+    "direct-message-v2-frame": (
+        direct_message_v2_frame, "frame_hex", True, ("payload_hex", "payload_utf8"),
+    ),
+    "ed25519-bip39-entropy-v1": (
+        ed25519_bip39_entropy_v1, "expected_peer_id", True, ("entropy_hex",),
+    ),
+    "gossipsub-message-id-v1": (
+        gossipsub_message_id_v1, "sha256", True, ("peer_id",),
+    ),
+    "gossipsub-topic-key-v1": (
+        gossipsub_topic_key_v1, "sha256", True, ("channel_id",),
+    ),
+    "kad-network-namespace-v1": (
+        kad_network_namespace_v1, ("network_hash", "protocol"), True, ("network_id",),
+    ),
+    "ipc-v2-payload-fit": (
+        ipc_v2_payload_fit, "frame_length_prefix_hex", True, (),
+    ),
+    "endpoint-id-grammar-v1": (endpoint_id_grammar_v1, "valid", False, ()),
+    "human-chat-v2-envelope": (human_chat_v2_envelope, "valid", False, ()),
+    "config-v2-cross-field": (config_v2_cross_field, "valid", False, ()),
 }
 
 
@@ -533,27 +567,43 @@ HEX64_RE = re.compile(r"\b([0-9a-f]{64})\b")
 SKIP_DIRS = {".git", "target", "node_modules", ".claude"}
 
 
-def golden_marker(vector: dict) -> str | None:
+def golden_marker(vector: dict, marker_fields: tuple[str, ...]) -> str | None:
     """The text a prose copy of this vector is recognised by.
 
-    Derived from `payload_hex`, the actual hash input, rather than from
-    `payload_utf8` — that field is a reader convenience and optional, so
-    a check that depended on it would silently stop attributing anything
-    the moment a fixture omitted it, and report success while scanning
-    nothing.
+    Drawn from the INPUT fields the algorithm declares, in order, because
+    an input is what a document quotes next to the hash. `payload_hex` is
+    decoded first where it is one of them: it is the actual hash input,
+    while `payload_utf8` is a reader convenience a fixture may omit, so
+    depending on the latter would stop attributing anything the moment
+    one did.
+
+    Returns None when nothing usable is present, and the caller reports
+    that rather than scanning nothing and calling it coverage.
     """
-    raw = vector.get("payload_hex")
-    if raw:
-        try:
-            decoded = bytes.fromhex(raw).decode("utf-8")
-        except (ValueError, UnicodeDecodeError):
-            decoded = ""
-        if decoded.isprintable() and decoded.strip():
-            return decoded
-    return vector.get("payload_utf8") or None
+    for field in marker_fields:
+        raw = vector.get(field)
+        if raw is None:
+            continue
+        if field == "payload_hex":
+            try:
+                decoded = bytes.fromhex(str(raw)).decode("utf-8")
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if decoded.isprintable() and decoded.strip():
+                return decoded
+            continue
+        text = str(raw)
+        if text.strip():
+            return text
+    return None
 
 
-def check_prose_copies(root: pathlib.Path, fixture_rel: pathlib.Path, doc: dict) -> int:
+def check_prose_copies(
+    root: pathlib.Path,
+    fixture_rel: pathlib.Path,
+    doc: dict,
+    marker_fields: tuple[str, ...],
+) -> int:
     """Report prose that quotes a stale hash for a vector. Returns files scanned."""
     known: set[str] = {v["sha256"] for v in doc.get("vectors", []) if v.get("sha256")}
     if not known:
@@ -564,6 +614,21 @@ def check_prose_copies(root: pathlib.Path, fixture_rel: pathlib.Path, doc: dict)
     goldens = [v for v in doc.get("vectors", []) if v.get("frozen_by")]
     if not goldens:
         return 0
+
+    # A file whose goldens are declared unquoted is not scanned, and says
+    # so by carrying no marker fields. A file that DOES declare them and
+    # still yields no marker is a defect: it would scan nothing and be
+    # counted alongside the files that scanned everything.
+    if not marker_fields:
+        return 0
+    for g in goldens:
+        if golden_marker(g, marker_fields) is None:
+            report(
+                f"{fixture_rel}[{g.get('name', '(unnamed)')}]: none of the declared "
+                f"marker fields {list(marker_fields)} are present, so no prose copy of "
+                "this golden can be attributed to it"
+            )
+            return 0
 
     scanned = 0
     for path in sorted(root.rglob("*")):
@@ -598,7 +663,7 @@ def check_prose_copies(root: pathlib.Path, fixture_rel: pathlib.Path, doc: dict)
                 continue
             window = "\n".join(lines[max(0, i - WINDOW):i + 1])
             for g in goldens:
-                marker = golden_marker(g)
+                marker = golden_marker(g, marker_fields)
                 media = g.get("media_type")
                 if not marker or marker not in window:
                     continue
@@ -666,26 +731,34 @@ def main(argv: list[str]) -> int:
             )
             continue
 
-        fn, field, distinct_required = entry
+        fn, field, distinct_required, marker_fields = entry
+        fields = (field,) if isinstance(field, str) else tuple(field)
 
         seen: dict[str, str] = {}
         for v in doc.get("vectors", []):
             name = v.get("name", "(unnamed)")
-            stored = v.get(field)
             try:
-                computed = fn(v)
+                result = fn(v)
             except Exception as e:  # noqa: BLE001 — the message is the report
                 report(f"{rel}[{name}]: cannot compute — {e}")
                 continue
             checked += 1
-            if computed != stored:
-                report(
-                    f"{rel}[{name}]: DRIFT\n"
-                    f"      stored:   {stored}\n"
-                    f"      computed: {computed}"
-                )
+            # An algorithm freezing more than one field returns them all.
+            # Every declared field is compared, so a value the fixture
+            # publishes as frozen cannot go unchecked beside one that is.
+            results = result if isinstance(result, dict) else {fields[0]: result}
+            for f in fields:
+                stored = v.get(f)
+                computed = results.get(f)
+                if computed != stored:
+                    report(
+                        f"{rel}[{name}]: DRIFT in {f}\n"
+                        f"      stored:   {stored}\n"
+                        f"      computed: {computed}"
+                    )
             if not distinct_required:
                 continue
+            computed = results[fields[0]]
             if computed in seen:
                 report(
                     f"{rel}[{name}]: collides with '{seen[computed]}' — "
@@ -717,7 +790,7 @@ def main(argv: list[str]) -> int:
             if not list((root / "architecture" / "adr").glob(f"{a}-*.md")):
                 report(f"{rel}: cites ADR-{a}, which does not exist")
 
-        prose_scanned += check_prose_copies(root, rel, doc)
+        prose_scanned += check_prose_copies(root, rel, doc, marker_fields)
 
     if problems:
         print(f"\nverify_fixture_vectors: {len(problems)} problem(s).", file=sys.stderr)

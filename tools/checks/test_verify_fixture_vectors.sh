@@ -175,6 +175,68 @@ json.dump(d, open(p,'w'))" "$R/fixtures/direct-v2/f.json"
 out="$(run "$R")"
 [[ "$out" == *"nothing anchors this file"* ]] && ok "an unanchored file is still reported" || bad "should require an anchor"
 
+# ── an algorithm freezing two fields has BOTH verified ───────────────────
+# The Kademlia fixture publishes `network_hash` and `protocol` on the
+# same authority. Only the hash used to be recomputed, so replacing a
+# golden protocol with anything at all still passed and consumers read an
+# unchecked value as frozen.
+make_kad() {
+    local r="$1" proto="$2"
+    mkdir -p "$r/fixtures/kademlia" "$r/architecture/adr"
+    : > "$r/architecture/adr/0047-namespace.md"
+    cat > "$r/fixtures/kademlia/k.json" <<EOF
+{
+  "algorithm": { "id": "kad-network-namespace-v1" },
+  "adr": ["0047"],
+  "vectors": [
+    {
+      "name": "single-character",
+      "network_id": "a",
+      "network_hash": "ygneka5pm3tlc4zypofzfj4vsq",
+      "protocol": "$proto"
+    }
+  ]
+}
+EOF
+}
+
+R="$TMP/kad-ok"; make_kad "$R" "/interweave/kad/1.0.0/ygneka5pm3tlc4zypofzfj4vsq"
+[ "$(run_code "$R")" = "0" ] && ok "both frozen fields recompute" || bad "should pass: $(run "$R")"
+
+R="$TMP/kad-bad"; make_kad "$R" "/definitely/wrong"
+out="$(run "$R")"
+[ "$(run_code "$R")" = "1" ] && ok "a wrong protocol string exits 1" || bad "an unchecked golden should fail"
+[[ "$out" == *"DRIFT in protocol"* ]] && ok "  and names which field drifted" || bad "should name the field: $out"
+
+# ── a golden with no usable marker is reported, not skipped ──────────────
+# The prose scan can only attribute a quoted hash to a vector through the
+# vector's own inputs. When none of the declared marker fields are
+# present it matches nothing — and used to count that as a scanned file,
+# so a stale hash read as covered.
+R="$TMP/nomarker"
+mkdir -p "$R/fixtures/gossipsub" "$R/architecture/adr"
+: > "$R/architecture/adr/0047-namespace.md"
+cat > "$R/fixtures/gossipsub/g.json" <<'EOF'
+{
+  "algorithm": { "id": "gossipsub-topic-key-v1" },
+  "adr": ["0047"],
+  "vectors": [
+    {
+      "name": "general",
+      "frozen_by": "0047",
+      "channel_id": "general",
+      "sha256": "82695daad230a8a8ddb6e43aae1063e4f611ded53d710f48b2ed3d206211c3bc"
+    }
+  ]
+}
+EOF
+printf 'ChannelId  = general\nSHA-256    = 82695daad230a8a8ddb6e43aae1063e4f611ded53d710f48b2ed3d206211c3bc\n' > "$R/PUBSUB.md"
+[ "$(run_code "$R")" = "0" ] && ok "a correct prose copy of a non-payload golden passes" || bad "should pass: $(run "$R")"
+
+printf 'ChannelId  = general\nSHA-256    = 0000000000000000000000000000000000000000000000000000000000000000\n' > "$R/PUBSUB.md"
+out="$(run "$R")"
+[ "$(run_code "$R")" = "1" ] && ok "a stale copy of a non-payload golden is caught" || bad "the prose scan must see channel_id-keyed goldens: $out"
+
 # ── a prose copy that drifted is caught ──────────────────────────────────
 # Only the vector file is recomputed, so a re-freeze would otherwise
 # leave every quoted copy confidently wrong — in the ADRs and contracts a
