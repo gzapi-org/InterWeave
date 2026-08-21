@@ -94,8 +94,17 @@ for rel in $FILES; do
   fi
 
   # And must not name any OTHER stage as open.
-  others="$(grep -Eoi "stage [0-9]+ is open" "$f" \
-            | grep -Evi "stage $STAGE is open" | sort -u || true)"
+  #
+  # BOTH PHRASINGS, matching what the positive check above accepts. The
+  # exclusion scan used to recognise only "stage N is open", so a file
+  # saying "Stage 4 open. Stage 1 open." passed while stating two
+  # different open stages — and the no-`is` form is the one the README
+  # actually uses, so the gap was over the common case.
+  #
+  # `\b` stops "stage 3 opened" being read as a claim that Stage 3 is
+  # open.
+  others="$(grep -Eoi "stage [0-9]+ (is )?open\b" "$f" \
+            | grep -Evi "stage $STAGE (is )?open\b" | sort -u || true)"
   if [ -n "$others" ]; then
     while IFS= read -r line; do
       [ -n "$line" ] && report "$rel: says \"$line\" but the manifest says Stage $STAGE"
