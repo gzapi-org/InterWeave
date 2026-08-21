@@ -388,3 +388,59 @@ fn a_record_with_an_unknown_field_is_refused() {
         "identity_algorithm":"ed25519","words":[],"passphrase":"hunter2"}"#;
     assert!(serde_json::from_str::<interweave_profile_identity::RecoveryRecord>(json).is_err());
 }
+
+#[test]
+fn saving_over_an_established_identity_is_refused() {
+    // `write_private_atomic` renames over its target, so a save aimed at
+    // an occupied path is a rotation wearing the name of a write: the
+    // profile's persistent PeerId changes and every trust relationship
+    // established against the old one stops resolving.
+    //
+    // This is the same failure `NotFound` exists to prevent — an
+    // established profile silently acquiring a new identity — arriving
+    // through the other door.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("identity.key");
+
+    let established = ProfileIdentity::generate();
+    established.save(&path).expect("the first save creates it");
+    let established_peer = established.transport_identity().expect("peer id");
+
+    let intruder = ProfileIdentity::generate();
+    let refused = intruder.save(&path);
+    assert!(
+        matches!(refused, Err(IdentityError::AlreadyExists)),
+        "a second save must be refused, got {refused:?}"
+    );
+
+    // Refused, not partially applied: the established key is still the
+    // one on disk.
+    let loaded = ProfileIdentity::load(&path).expect("still loads");
+    assert_eq!(
+        loaded.transport_identity().expect("peer id").as_str(),
+        established_peer.as_str(),
+        "the refused save must leave the established identity untouched"
+    );
+}
+
+#[test]
+fn replacing_an_identity_is_available_but_has_to_be_asked_for() {
+    // Rotation is legitimate; it just cannot happen by accident. The
+    // guarded call does what the unguarded one used to.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("identity.key");
+
+    ProfileIdentity::generate().save(&path).expect("first save");
+
+    let replacement = ProfileIdentity::generate();
+    replacement
+        .replace_saved(&path)
+        .expect("an explicit replacement is allowed");
+
+    let loaded = ProfileIdentity::load(&path).expect("loads");
+    assert_eq!(
+        loaded.transport_identity().expect("peer id").as_str(),
+        replacement.transport_identity().expect("peer id").as_str(),
+        "the replacement is what is now stored"
+    );
+}

@@ -90,6 +90,15 @@ pub enum IdentityError {
     Storage(PersistError),
     /// A stored PeerId is not one the neutral contract accepts.
     Id(IdError),
+    /// `save` was called for a path that already holds an identity.
+    ///
+    /// The mirror of [`Self::NotFound`], and refused for the same
+    /// reason. An established profile owns one persistent PeerId, so
+    /// overwriting its key silently is not a save — it is a rotation
+    /// that invalidates every trust relationship anyone holds, wearing
+    /// the name of an ordinary write. Replacement is deliberate and goes
+    /// through [`ProfileIdentity::replace_saved`].
+    AlreadyExists,
 }
 
 impl From<PersistError> for IdentityError {
@@ -126,6 +135,10 @@ impl core::fmt::Display for IdentityError {
             Self::Bip39(d) => write!(f, "the recovery phrase is not valid: {d}"),
             Self::Storage(e) => write!(f, "identity storage: {e}"),
             Self::Id(e) => write!(f, "stored identity: {e}"),
+            Self::AlreadyExists => write!(
+                f,
+                "an identity key already exists at that path; replacing it rotates the profile's PeerId"
+            ),
         }
     }
 }
@@ -261,9 +274,42 @@ impl ProfileIdentity {
     /// the file is private-key-equivalent and is written with the same
     /// care.
     ///
+    /// Refuses a path that already holds an identity. `write_private_atomic`
+    /// renames over its target, so without this check
+    /// `ProfileIdentity::generate().save(existing)` destroys an
+    /// established key and hands the profile a new PeerId — the exact
+    /// silent regeneration [`IdentityError::NotFound`] exists to
+    /// prevent, arriving through the other door. Rotation is a decision,
+    /// so it has its own call: [`Self::replace_saved`].
+    ///
+    /// # Errors
+    /// Returns [`IdentityError::AlreadyExists`] if `path` exists, or
+    /// [`IdentityError::Storage`] if the write fails.
+    pub fn save(&self, path: &Path) -> Result<(), IdentityError> {
+        // `exists()` reports false for a broken symlink, which would let
+        // one through. Ask about the link itself.
+        if path.symlink_metadata().is_ok() {
+            return Err(IdentityError::AlreadyExists);
+        }
+        self.write_to(path)
+    }
+
+    /// Replace the identity stored at `path`, rotating the profile.
+    ///
+    /// Separated from [`Self::save`] because the consequence is
+    /// different in kind: the profile's persistent PeerId changes, and
+    /// every trust relationship established against the old one stops
+    /// resolving. Nothing here makes that safe — it makes it *stated*,
+    /// so a rotation cannot happen because a save was pointed at an
+    /// occupied path.
+    ///
     /// # Errors
     /// Returns [`IdentityError::Storage`] if the write fails.
-    pub fn save(&self, path: &Path) -> Result<(), IdentityError> {
+    pub fn replace_saved(&self, path: &Path) -> Result<(), IdentityError> {
+        self.write_to(path)
+    }
+
+    fn write_to(&self, path: &Path) -> Result<(), IdentityError> {
         let encoded = Keypair::from(self.keypair.clone())
             .to_protobuf_encoding()
             .map_err(|e| IdentityError::Corrupt(e.to_string()))?;
