@@ -235,26 +235,40 @@ fn no_secret_material_reaches_debug_output() {
     // reports, or traces. A derived Debug puts it in all three.
     let identity = ProfileIdentity::generate();
     let phrase = identity.recovery_phrase().expect("phrase");
-    let words = phrase.expose_words();
-    let first_word = words.split_whitespace().next().expect("a word");
 
+    // EXACT, not "does not contain a word".
+    //
+    // A substring test against the redaction text is unsound, because the
+    // redaction text is English and so is the BIP-39 wordlist: `act` is a
+    // word and `redacted` contains it, `word` is a word and `words`
+    // contains it. That made this assertion fail roughly once in a
+    // thousand runs on the phrase alone, for a phrase that had leaked
+    // nothing — a flake that reads as a security failure, which is the
+    // worst kind to hand someone at 3am.
+    //
+    // The real contract is stronger and simpler anyway: this Debug prints
+    // one fixed string with no phrase-derived content in it at all.
+    // Pinning that makes leakage unrepresentable rather than unlikely.
     let phrase_debug = format!("{phrase:?}");
-    assert!(
-        !phrase_debug.contains(first_word) || first_word.len() < 3,
-        "the phrase reached Debug output: {phrase_debug}"
+    assert_eq!(
+        phrase_debug, "RecoveryPhrase(<24 words redacted>)",
+        "the phrase Debug must be a fixed redaction and nothing else"
     );
-    assert!(phrase_debug.contains("redacted"), "{phrase_debug}");
 
-    // The identity prints its PeerId, which is public, and nothing else.
-    let id_debug = format!("{identity:?}");
-    for word in words.split_whitespace() {
-        assert!(
-            !id_debug.contains(&format!(" {word} ")),
-            "identity Debug leaked a phrase word: {id_debug}"
-        );
-    }
+    // Exact here too, and for a sharper version of the same reason: the
+    // type's own name contains a BIP-39 word (`ProfileIdentity` contains
+    // `file`), so a substring scan over 24 words would fail on about one
+    // identity in eighty while nothing had leaked.
+    //
+    // Naming the whole output states the contract instead of sampling
+    // it: the PeerId, which is public by construction, and nothing else.
     let peer = identity.transport_identity().expect("peer id");
-    assert!(id_debug.contains(peer.as_str()), "{id_debug}");
+    let id_debug = format!("{identity:?}");
+    assert_eq!(
+        id_debug,
+        format!("ProfileIdentity({})", peer.as_str()),
+        "the identity Debug must be its PeerId and nothing else"
+    );
 }
 
 #[test]
