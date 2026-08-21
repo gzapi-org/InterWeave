@@ -254,8 +254,15 @@ pub enum EndpointTrustPolicy {
 }
 
 /// The wire shape, matching the frozen `oneOf`.
+///
+/// CLOSED. Serde's derived struct-variant deserializer ignores unknown
+/// fields by default, so `{"static_subset": [...], "policy":
+/// "static-subset"}` was accepted while the frozen policy schema sets
+/// `additionalProperties: false`. Rejecting the old tagged-only form was
+/// not enough: a document carrying BOTH still parsed, which is exactly
+/// the shape a client migrating from the tagged representation emits.
 #[derive(Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(untagged, deny_unknown_fields)]
 enum EndpointTrustPolicyRepr {
     Inherit(InheritLiteral),
     Subset {
@@ -518,6 +525,30 @@ mod tests {
         let both = InfrastructureSet::new([peer(P1), peer(P3)]);
         assert!(both.permits_control_connection(&peer(P1)));
         assert_eq!(data_plane.decide(&peer(P1)), TrustDecision::Allowed);
+    }
+
+    #[test]
+    fn an_endpoint_subset_object_is_closed() {
+        // Serde's derived struct-variant deserializer ignores unknown
+        // fields, so refusing the old tagged-only form was not enough:
+        // a document carrying BOTH the subset and a leftover tag still
+        // parsed, which is exactly what a client migrating from the
+        // tagged representation emits.
+        let with_tag = format!(r#"{{"static_subset":["{P1}"],"policy":"static-subset"}}"#);
+        assert!(
+            serde_json::from_str::<EndpointTrustPolicy>(&with_tag).is_err(),
+            "an unknown field beside static_subset must be refused"
+        );
+
+        let clean = format!(r#"{{"static_subset":["{P1}"]}}"#);
+        assert!(
+            serde_json::from_str::<EndpointTrustPolicy>(&clean).is_ok(),
+            "the frozen shape itself must still parse"
+        );
+        assert!(
+            serde_json::from_str::<EndpointTrustPolicy>(r#""inherit_profile_trust""#).is_ok(),
+            "and so must the bare literal"
+        );
     }
 
     #[test]
