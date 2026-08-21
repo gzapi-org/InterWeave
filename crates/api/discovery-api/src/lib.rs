@@ -461,6 +461,20 @@ pub enum DiscoveryEvent {
         peer_id: TransportIdentity,
         /// Which provider is retracting it.
         source: String,
+        /// Which of that provider's addresses expired.
+        ///
+        /// Empty retracts the whole `(peer_id, source)` candidate, which
+        /// is what a provider with no per-address lifetime means.
+        ///
+        /// Present because ADR-0007 makes expiry per source AND address:
+        /// one provider may report several addresses with independent
+        /// lifetimes, and `DISCOVERY.md` gives `Expired` an optional
+        /// `addresses` for exactly that. Without the selector the manager
+        /// had a choice of two wrong answers — drop addresses that are
+        /// still valid, or keep one that has expired — and no way to
+        /// express what the provider actually observed.
+        #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+        addresses: BTreeSet<String>,
     },
     /// The provider's own health changed.
     HealthChanged {
@@ -592,6 +606,46 @@ mod tests {
         assert!(
             serde_json::from_str::<CandidatePeer>(&doc).is_err(),
             "an unknown property on an observation must be refused"
+        );
+    }
+
+    #[test]
+    fn an_expiry_can_name_the_addresses_it_retracts() {
+        // ADR-0007 makes expiry per source AND address. One provider may
+        // report several addresses with independent lifetimes, so an
+        // event that can only retract the whole (peer_id, source) leaves
+        // the manager choosing between dropping still-valid addresses and
+        // keeping an expired one.
+        let scoped = DiscoveryEvent::CandidateExpired {
+            peer_id: peer(),
+            source: "mdns".to_owned(),
+            addresses: ["/ip4/192.0.2.1/tcp/4001".to_owned()].into_iter().collect(),
+        };
+        let json = serde_json::to_string(&scoped).expect("serializes");
+        assert!(
+            json.contains("\"addresses\""),
+            "the selector reaches the wire"
+        );
+        assert_eq!(
+            serde_json::from_str::<DiscoveryEvent>(&json).expect("round trips"),
+            scoped
+        );
+
+        // Absent means the whole candidate, which is what a provider with
+        // no per-address lifetime means — and stays the wire shape it was.
+        let whole = DiscoveryEvent::CandidateExpired {
+            peer_id: peer(),
+            source: "mdns".to_owned(),
+            addresses: BTreeSet::new(),
+        };
+        let json = serde_json::to_string(&whole).expect("serializes");
+        assert!(
+            !json.contains("addresses"),
+            "an empty selector is omitted, not sent as []"
+        );
+        assert_eq!(
+            serde_json::from_str::<DiscoveryEvent>(&json).expect("round trips"),
+            whole
         );
     }
 
