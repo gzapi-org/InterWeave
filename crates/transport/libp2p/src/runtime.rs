@@ -64,6 +64,13 @@ pub const DEFAULT_COMMAND_CAPACITY: usize = 64;
 /// unbounded local memory.
 pub const DEFAULT_EVENT_CAPACITY: usize = 256;
 
+/// Upper bound on every channel depth and table size below.
+///
+/// Not a tuning value — a ceiling. Without one a configuration can ask
+/// for an allocation large enough to be the denial of service it was
+/// meant to prevent, and the request looks like ordinary tuning.
+pub const MAX_CONFIGURED_CAPACITY: usize = 65_536;
+
 /// How the substrate is built.
 #[derive(Debug, Clone, Copy)]
 pub struct SubstrateConfig {
@@ -77,6 +84,14 @@ pub struct SubstrateConfig {
     pub max_connections: usize,
     /// Idle connection timeout.
     pub idle_timeout: Duration,
+    /// Maximum listeners with a caller still awaiting their address.
+    ///
+    /// The command channel bounds how many `Listen` commands can be
+    /// QUEUED, not how many can be accepted: the task drains commands
+    /// continuously, so pending replies and OS listeners accumulate past
+    /// any instantaneous queue depth. This is the bound on the table
+    /// itself.
+    pub max_pending_listens: usize,
 }
 
 impl Default for SubstrateConfig {
@@ -87,7 +102,42 @@ impl Default for SubstrateConfig {
             max_pending_dials: 32,
             max_connections: 256,
             idle_timeout: Duration::from_secs(60),
+            max_pending_listens: 64,
         }
+    }
+}
+
+impl SubstrateConfig {
+    /// Check every limit before anything is built.
+    ///
+    /// # Errors
+    /// Returns [`SubstrateError::InvalidConfig`] naming the first field
+    /// outside `1..=`[`MAX_CONFIGURED_CAPACITY`].
+    pub fn validate(&self) -> Result<(), SubstrateError> {
+        // CHANNEL DEPTHS need at least one slot: `mpsc::channel(0)`
+        // panics, so zero here is not a strict policy but an abort.
+        let depths = [
+            ("command_capacity", self.command_capacity, 1),
+            ("event_capacity", self.event_capacity, 1),
+            // CAPS may be zero, and zero is not a mistake: a policy
+            // admitting no dial, holding no connection, or accepting no
+            // listen is a coherent thing to configure and is how the
+            // refusal paths are exercised. Rejecting it would turn a
+            // panic guard into a policy opinion.
+            ("max_pending_dials", self.max_pending_dials, 0),
+            ("max_connections", self.max_connections, 0),
+            ("max_pending_listens", self.max_pending_listens, 0),
+        ];
+        for (field, got, min) in depths {
+            if got < min || got > MAX_CONFIGURED_CAPACITY {
+                return Err(SubstrateError::InvalidConfig {
+                    field,
+                    got,
+                    allowed: (min, MAX_CONFIGURED_CAPACITY),
+                });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -192,6 +242,20 @@ pub enum SubstrateError {
     Stopped,
     /// A stored or observed PeerId is not one the neutral contract accepts.
     Identity(String),
+    /// A [`SubstrateConfig`] value outside its permitted range.
+    ///
+    /// Returned rather than panicked. `mpsc::channel(0)` aborts the
+    /// process, and this is a transport daemon whose lint policy treats a
+    /// reachable panic as a defect — a configuration mistake must not be
+    /// the thing that takes it down.
+    InvalidConfig {
+        /// Which field.
+        field: &'static str,
+        /// The value supplied.
+        got: usize,
+        /// The permitted range, inclusive.
+        allowed: (usize, usize),
+    },
 }
 
 impl core::fmt::Display for SubstrateError {
@@ -200,6 +264,11 @@ impl core::fmt::Display for SubstrateError {
             Self::Transport(d) => write!(f, "transport: {d}"),
             Self::Stopped => write!(f, "the swarm task has stopped"),
             Self::Identity(d) => write!(f, "identity: {d}"),
+            Self::InvalidConfig {
+                field,
+                got,
+                allowed: (min, max),
+            } => write!(f, "{field} is {got}; it must be {min}..={max}"),
         }
     }
 }
@@ -234,6 +303,10 @@ impl SwarmRuntime {
         identity: &ProfileIdentity,
         config: SubstrateConfig,
     ) -> Result<Self, SubstrateError> {
+        // BEFORE anything is built. `mpsc::channel(0)` panics, and a
+        // half-constructed Swarm would still have opened sockets.
+        config.validate()?;
+
         let keypair = identity.swarm_keypair();
         let local_peer = to_transport_identity(&PeerId::from_public_key(&keypair.public()))?;
 
@@ -334,13 +407,37 @@ impl SwarmRuntime {
                                 break;
                             }
                             Some(command) => {
-                                handle_command(&mut swarm, &mut policy, &mut listens, command);
+                                handle_command(
+                                    &mut swarm,
+                                    &mut policy,
+                                    &mut listens,
+                                    config.max_pending_listens,
+                                    command,
+                                );
                             }
                         }
                     }
                     event = swarm.select_next_some(), if room => {
-                        if let Some(event) = translate(event, &mut listens) {
+                        let mut abandoned = Vec::new();
+                        if let Some(event) = translate(event, &mut listens, &mut abandoned) {
                             outbox.push_back(event);
+                        }
+                        // A caller that stopped awaiting `listen` — a
+                        // dropped future, a cancelled task, a timeout —
+                        // leaves an OS listener that nobody holds a
+                        // handle to and nobody can close. The bound above
+                        // limits how many can accumulate; this is what
+                        // makes them go away rather than merely be
+                        // capped.
+                        abandoned.extend(
+                            listens
+                                .iter()
+                                .filter(|(_, reply)| reply.is_closed())
+                                .map(|(id, _)| *id),
+                        );
+                        for id in abandoned {
+                            listens.remove(&id);
+                            let _ = swarm.remove_listener(id);
                         }
                     }
                 }
@@ -462,10 +559,24 @@ fn handle_command(
     swarm: &mut Swarm<SubstrateBehaviour>,
     policy: &mut ConnectionPolicy,
     listens: &mut PendingListens,
+    max_pending_listens: usize,
     command: SwarmCommand,
 ) {
     match command {
         SwarmCommand::Listen { address, reply } => {
+            // REFUSED BEFORE THE SOCKET, not after. The command channel
+            // bounds how many Listen commands may be queued, and the task
+            // drains it continuously — so listeners and their pending
+            // replies accumulate far past any instantaneous queue depth
+            // unless the table itself is bounded. Binding first and then
+            // declining to remember the reply would leave the OS listener
+            // open with nobody able to close it.
+            if listens.len() >= max_pending_listens {
+                let _ = reply.send(Err(format!(
+                    "at most {max_pending_listens} listeners may be awaiting an address"
+                )));
+                return;
+            }
             match swarm.listen_on(address) {
                 // Held until `NewListenAddr` names the assigned address.
                 // Answering now could only mean answering with a
@@ -540,6 +651,7 @@ fn handle_command(
 fn translate(
     event: Libp2pSwarmEvent<SubstrateBehaviourEvent>,
     listens: &mut PendingListens,
+    abandoned: &mut Vec<ListenerId>,
 ) -> Option<SwarmEvent> {
     match event {
         Libp2pSwarmEvent::NewListenAddr {
@@ -549,8 +661,12 @@ fn translate(
             // Answer the waiting `listen` with the address the OS
             // assigned. A listener may report several; the first answers
             // and the rest are ordinary events.
-            if let Some(reply) = listens.remove(&listener_id) {
-                let _ = reply.send(Ok(address.clone()));
+            if let Some(reply) = listens.remove(&listener_id)
+                && reply.send(Ok(address.clone())).is_err()
+            {
+                // The caller is gone and this listener now belongs to
+                // nobody. Close it rather than leave it bound.
+                abandoned.push(listener_id);
             }
             Some(SwarmEvent::Listening { address })
         }
