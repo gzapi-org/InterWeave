@@ -9,7 +9,7 @@
 use interweave_human_store::{
     AppMessageId, InboundOrigin, NewInbound, NewOutbound, OutboundDestination,
 };
-use interweave_transport_api::{DirectDestination, TransportIdentity};
+use interweave_transport_api::{DirectDestination, MediaType, TransportIdentity};
 
 /// A canonical test PeerId. Test-only; no private key exists for it.
 pub const PEER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
@@ -44,7 +44,10 @@ pub fn pending_outbound() -> NewOutbound {
     NewOutbound {
         app_message_id: AppMessageId::parse(OUTBOUND_ID).expect("canonical id"),
         destination: OutboundDestination::Direct(DirectDestination::to_default(peer())),
-        media_type: Some("application/vnd.interweave-human-chat+json;v=2".to_owned()),
+        media_type: Some(
+            MediaType::parse("application/vnd.interweave-human-chat+json;v=2")
+                .expect("a valid test media type"),
+        ),
         payload: OUTBOUND_BODY.to_vec(),
         created_at: 1_700_000_000_000,
     }
@@ -64,7 +67,10 @@ pub fn unread_inbound() -> NewInbound {
             endpoint: None,
             channel: None,
         },
-        media_type: Some("application/vnd.interweave-human-chat+json;v=2".to_owned()),
+        media_type: Some(
+            MediaType::parse("application/vnd.interweave-human-chat+json;v=2")
+                .expect("a valid test media type"),
+        ),
         payload: INBOUND_BODY.to_vec(),
         received_at: 1_700_000_001_000,
     }

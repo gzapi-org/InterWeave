@@ -17,7 +17,9 @@ use interweave_human_core::retention::{
     Durability, InboundMessage, OutboundMessage, StorageHealth, TerminalCause,
 };
 use interweave_transport_api::payload::MAX_PAYLOAD_BYTES;
-use interweave_transport_api::{ChannelId, DirectDestination, EndpointId, TransportIdentity};
+use interweave_transport_api::{
+    ChannelId, DirectDestination, EndpointId, MediaType, TransportIdentity,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::StoreError;
@@ -259,7 +261,7 @@ impl HumanStore {
                 peer.unwrap_or_default(),
                 endpoint,
                 channel,
-                new.media_type,
+                new.media_type.as_ref().map(MediaType::as_str),
                 new.payload,
                 i64::try_from(new.created_at).unwrap_or(i64::MAX),
             ],
@@ -388,7 +390,7 @@ impl HumanStore {
                 row_id: RowId::new(id),
                 app_message_id: AppMessageId::parse(amid)?,
                 destination,
-                media_type,
+                media_type: parse_media_type(media_type)?,
                 payload,
                 created_at: u64::try_from(created).unwrap_or(0),
                 last_attempt_at: last.map(|v| u64::try_from(v).unwrap_or(0)),
@@ -425,7 +427,7 @@ impl HumanStore {
                 new.origin.peer.as_str(),
                 new.origin.endpoint.as_ref().map(|e| e.as_str()),
                 new.origin.channel.as_ref().map(|c| c.as_str()),
-                new.media_type,
+                new.media_type.as_ref().map(MediaType::as_str),
                 new.payload,
                 i64::try_from(new.received_at).unwrap_or(i64::MAX),
             ],
@@ -501,7 +503,7 @@ impl HumanStore {
                         .transpose()
                         .map_err(|e| StoreError::Corrupt(e.to_string()))?,
                 },
-                media_type: row.4,
+                media_type: parse_media_type(row.4)?,
                 payload: row.5,
                 received_at: u64::try_from(row.6).unwrap_or(0),
                 read_at: at_ms,
@@ -590,7 +592,7 @@ impl HumanStore {
                 held.origin.peer.as_str(),
                 held.origin.endpoint.as_ref().map(|e| e.as_str()),
                 held.origin.channel.as_ref().map(|c| c.as_str()),
-                held.media_type,
+                held.media_type.as_ref().map(MediaType::as_str),
                 held.payload,
                 i64::try_from(held.received_at).unwrap_or(i64::MAX),
                 i64::try_from(held.read_at).unwrap_or(i64::MAX),
@@ -703,7 +705,7 @@ impl HumanStore {
                         .transpose()
                         .map_err(|e| StoreError::Corrupt(e.to_string()))?,
                 },
-                media_type,
+                media_type: parse_media_type(media_type)?,
                 payload,
                 received_at: u64::try_from(received).unwrap_or(0),
                 read_at: read.map(|v| u64::try_from(v).unwrap_or(0)),
@@ -783,6 +785,19 @@ fn require_owner_only(path: &std::path::Path, what: &str) -> Result<(), StoreErr
         let _ = (path, what);
         Err(StoreError::UnsupportedPlatform)
     }
+}
+
+/// Read a stored media type back through the validating type.
+///
+/// A row this build wrote is always valid, so this only ever speaks for
+/// a database that was edited, restored, or corrupted — which is exactly
+/// when durable state should not be handed to a caller as if it had come
+/// out of the boundary that validates it.
+fn parse_media_type(stored: Option<String>) -> Result<Option<MediaType>, StoreError> {
+    stored
+        .map(MediaType::parse)
+        .transpose()
+        .map_err(|e| StoreError::Corrupt(e.to_string()))
 }
 
 fn check_payload(payload: &[u8]) -> Result<(), StoreError> {

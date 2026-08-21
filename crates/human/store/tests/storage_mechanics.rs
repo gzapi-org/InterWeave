@@ -15,7 +15,7 @@ use interweave_human_store::{
     AppMessageId, HumanStore, InboundOrigin, NewInbound, NewOutbound, OutboundDestination,
     StoreError, StoreOptions,
 };
-use interweave_transport_api::{DirectDestination, TransportIdentity};
+use interweave_transport_api::{DirectDestination, MediaType, TransportIdentity};
 
 const PEER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
 const PEER_B: &str = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
@@ -45,7 +45,10 @@ fn outbound(id: &str, payload: Vec<u8>) -> NewOutbound {
     NewOutbound {
         app_message_id: AppMessageId::parse(id).expect("test id is canonical"),
         destination: OutboundDestination::Direct(DirectDestination::to_default(peer())),
-        media_type: Some("application/vnd.interweave-human-chat+json;v=2".to_owned()),
+        media_type: Some(
+            MediaType::parse("application/vnd.interweave-human-chat+json;v=2")
+                .expect("a valid test media type"),
+        ),
         payload,
         created_at: 1_000,
     }

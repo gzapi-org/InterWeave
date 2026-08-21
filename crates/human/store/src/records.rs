@@ -12,7 +12,9 @@
 //!   type, because their transport-terminal events differ and a UI that
 //!   confused them would claim a delivery nobody made.
 
-use interweave_transport_api::{ChannelId, DirectDestination, EndpointId, TransportIdentity};
+use interweave_transport_api::{
+    ChannelId, DirectDestination, EndpointId, MediaType, TransportIdentity,
+};
 
 use crate::StoreError;
 
@@ -110,7 +112,7 @@ pub struct NewOutbound {
     /// Where it is going.
     pub destination: OutboundDestination,
     /// The media type of `payload`, if the application set one.
-    pub media_type: Option<String>,
+    pub media_type: Option<MediaType>,
     /// The exact wire bytes to send.
     ///
     /// Stored as sent, so a retry resends byte-identical content and its
@@ -131,7 +133,7 @@ pub struct PendingOutbound {
     /// Where it is going.
     pub destination: OutboundDestination,
     /// The media type of `payload`, if any.
-    pub media_type: Option<String>,
+    pub media_type: Option<MediaType>,
     /// The exact bytes to resend.
     pub payload: Vec<u8>,
     /// When it was composed.
@@ -150,7 +152,7 @@ pub struct NewInbound {
     /// Who sent it and over what.
     pub origin: InboundOrigin,
     /// The media type of `payload`, if the sender set one.
-    pub media_type: Option<String>,
+    pub media_type: Option<MediaType>,
     /// The received bytes.
     pub payload: Vec<u8>,
     /// Local millisecond timestamp of receipt.
@@ -167,7 +169,7 @@ pub struct StoredInbound {
     /// Who sent it and over what.
     pub origin: InboundOrigin,
     /// The media type of `payload`, if any.
-    pub media_type: Option<String>,
+    pub media_type: Option<MediaType>,
     /// The content.
     pub payload: Vec<u8>,
     /// When it was received.
@@ -202,7 +204,7 @@ pub struct StoredInbound {
 pub struct ReadEphemeral {
     pub(crate) app_message_id: AppMessageId,
     pub(crate) origin: InboundOrigin,
-    pub(crate) media_type: Option<String>,
+    pub(crate) media_type: Option<MediaType>,
     pub(crate) payload: Vec<u8>,
     pub(crate) received_at: u64,
     pub(crate) read_at: u64,
@@ -229,8 +231,8 @@ impl ReadEphemeral {
 
     /// The media type, if any.
     #[must_use]
-    pub fn media_type(&self) -> Option<&str> {
-        self.media_type.as_deref()
+    pub fn media_type(&self) -> Option<&MediaType> {
+        self.media_type.as_ref()
     }
 
     /// When it was received.
