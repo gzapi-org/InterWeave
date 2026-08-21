@@ -584,3 +584,123 @@ fn concurrent_creation_produces_exactly_one_winner() {
         "the stored identity is the one the winner wrote"
     );
 }
+
+#[test]
+fn concurrent_rotation_produces_exactly_one_winner() {
+    // The same window the creation race had, one operation over.
+    // Reading the stored identity, checking it, and then writing lets two
+    // processes both name the identity that really is stored, both pass
+    // the check, and both report a successful rotation — while the later
+    // write silently replaces the earlier one, leaving the first caller
+    // reporting an identity that is no longer there.
+    //
+    // That is exactly the guarantee `replacing` exists to provide, so a
+    // check that cannot hold it is worse than no check: it reads as one.
+    use std::sync::{Arc, Barrier};
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("identity.key");
+
+    let established = ProfileIdentity::generate();
+    established.save(&path).expect("first save");
+    let established_peer = established.transport_identity().expect("peer id");
+
+    const RACERS: usize = 8;
+    let barrier = Arc::new(Barrier::new(RACERS));
+    let mut handles = Vec::new();
+    for _ in 0..RACERS {
+        let barrier = Arc::clone(&barrier);
+        let path = path.clone();
+        let replacing = established_peer.clone();
+        handles.push(std::thread::spawn(move || {
+            let replacement = ProfileIdentity::generate();
+            barrier.wait();
+            replacement.replace_saved(&path, &replacing)
+        }));
+    }
+
+    let mut winners = Vec::new();
+    let mut refused = 0;
+    for h in handles {
+        match h.join().expect("thread did not panic") {
+            Ok(rotation) => winners.push(rotation),
+            // Either it could not take the marker, or it took it after
+            // the winner and found an identity it had not named. Both are
+            // a refusal; neither is a second rotation.
+            Err(
+                IdentityError::RotationInProgress { .. } | IdentityError::PeerIdMismatch { .. },
+            ) => {
+                refused += 1;
+            }
+            Err(other) => panic!("unexpected error: {other}"),
+        }
+    }
+
+    assert_eq!(winners.len(), 1, "exactly one rotation may succeed");
+    assert_eq!(
+        refused,
+        RACERS - 1,
+        "and every other caller is told it lost"
+    );
+
+    // The winner's report is TRUE: what it says is stored really is.
+    let rotation = &winners[0];
+    assert_eq!(rotation.previous.as_str(), established_peer.as_str());
+    assert_eq!(
+        ProfileIdentity::load(&path)
+            .expect("loads")
+            .transport_identity()
+            .expect("peer id")
+            .as_str(),
+        rotation.current.as_str(),
+        "the successful rotation must describe the identity actually on disk"
+    );
+
+    // And the marker is released, so the profile is not wedged.
+    assert!(
+        !dir.path().join("identity.key.rotating").exists(),
+        "a completed rotation must not leave its marker behind"
+    );
+    let next = ProfileIdentity::generate();
+    next.replace_saved(&path, &rotation.current)
+        .expect("a later rotation still works");
+}
+
+#[test]
+fn an_interrupted_rotation_is_reported_rather_than_ignored() {
+    // A marker left by a rotation that died is indistinguishable from one
+    // held right now, so both are reported. Removing it is a person's
+    // decision, which is the right amount of friction for an operation
+    // that invalidates every trust relationship.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("identity.key");
+
+    let established = ProfileIdentity::generate();
+    established.save(&path).expect("save");
+    let established_peer = established.transport_identity().expect("peer id");
+
+    let marker = dir.path().join("identity.key.rotating");
+    std::fs::hard_link(&path, &marker).expect("simulate an interrupted rotation");
+
+    let replacement = ProfileIdentity::generate();
+    match replacement.replace_saved(&path, &established_peer) {
+        Err(IdentityError::RotationInProgress { marker: reported }) => {
+            assert_eq!(reported, marker, "the error names what has to be removed");
+        }
+        other => panic!("expected RotationInProgress, got {other:?}"),
+    }
+
+    // Nothing changed, and clearing the marker restores the operation.
+    assert_eq!(
+        ProfileIdentity::load(&path)
+            .expect("loads")
+            .transport_identity()
+            .expect("peer id")
+            .as_str(),
+        established_peer.as_str()
+    );
+    std::fs::remove_file(&marker).expect("clear it");
+    replacement
+        .replace_saved(&path, &established_peer)
+        .expect("rotation works once the marker is gone");
+}

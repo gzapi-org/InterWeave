@@ -47,6 +47,17 @@ use libp2p_identity::{Keypair, PeerId, ed25519};
 pub use record::{ALGORITHM, FORMAT, RecoveryRecord};
 pub use recovery::{ENTROPY_BYTES, PHRASE_WORDS, RecoveryPhrase};
 
+/// The exclusive marker a rotation holds, beside the key it replaces.
+///
+/// Beside it because `link` works within one filesystem, and because a
+/// marker anywhere else would not be found by the next rotation of this
+/// profile.
+fn marker_path(path: &Path) -> std::path::PathBuf {
+    let mut marker = path.as_os_str().to_owned();
+    marker.push(".rotating");
+    std::path::PathBuf::from(marker)
+}
+
 /// What a rotation changed.
 ///
 /// Both PeerIds, because a rotation is only meaningful as a pair: the
@@ -105,6 +116,19 @@ pub enum IdentityError {
     Storage(PersistError),
     /// A stored PeerId is not one the neutral contract accepts.
     Id(IdError),
+    /// A rotation is already under way, or one was interrupted.
+    ///
+    /// Rotation acquires an exclusive marker beside the key. Finding it
+    /// present means either another process holds it right now, or a
+    /// previous rotation died holding it — and those are not
+    /// distinguishable from outside, so both are reported rather than
+    /// one being assumed. A stale marker is a state a person removes
+    /// after looking at the key, which is the right amount of friction
+    /// for an operation that invalidates every trust relationship.
+    RotationInProgress {
+        /// The marker that must be gone before a rotation can proceed.
+        marker: std::path::PathBuf,
+    },
     /// `save` was called for a path that already holds an identity.
     ///
     /// The mirror of [`Self::NotFound`], and refused for the same
@@ -150,6 +174,11 @@ impl core::fmt::Display for IdentityError {
             Self::Bip39(d) => write!(f, "the recovery phrase is not valid: {d}"),
             Self::Storage(e) => write!(f, "identity storage: {e}"),
             Self::Id(e) => write!(f, "stored identity: {e}"),
+            Self::RotationInProgress { marker } => write!(
+                f,
+                "a rotation is in progress or was interrupted; {} must be removed first",
+                marker.display()
+            ),
             Self::AlreadyExists => write!(
                 f,
                 "an identity key already exists at that path; replacing it rotates the profile's PeerId"
@@ -340,7 +369,52 @@ impl ProfileIdentity {
         path: &Path,
         replacing: &TransportIdentity,
     ) -> Result<Rotation, IdentityError> {
-        let stored = Self::load(path)?.transport_identity()?;
+        // COMPARE AND SWAP, not compare then swap.
+        //
+        // Reading the stored identity, checking it, and then writing
+        // leaves a window: two processes rotating the same profile, both
+        // naming the identity that really is stored, both pass the check
+        // before either writes. Both then return a successful `Rotation`
+        // while the later write silently replaces the earlier one — so
+        // the first caller reports an identity that is no longer there,
+        // which is precisely the guarantee `replacing` was added to
+        // provide.
+        //
+        // `link` is the exclusive acquire: it fails with `EEXIST` and
+        // never replaces, so exactly one rotation can hold the marker.
+        // It also pins the inode that was at `path` when it succeeded,
+        // which is what makes the identity read below the one actually
+        // being replaced rather than whatever is there a moment later.
+        let marker = marker_path(path);
+        match std::fs::hard_link(path, &marker) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(IdentityError::RotationInProgress { marker });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(IdentityError::NotFound);
+            }
+            Err(e) => return Err(IdentityError::Storage(PersistError::Io(e))),
+        }
+
+        let outcome = self.rotate_holding(path, &marker, replacing);
+        // Released whatever happened. A marker left behind by a failed
+        // rotation would block every later one for a reason that has
+        // nothing to do with the key.
+        let _ = std::fs::remove_file(&marker);
+        outcome
+    }
+
+    /// The rotation itself, with the marker held.
+    fn rotate_holding(
+        &self,
+        path: &Path,
+        marker: &Path,
+        replacing: &TransportIdentity,
+    ) -> Result<Rotation, IdentityError> {
+        // Read through the MARKER, not through `path`: the marker is the
+        // inode this rotation acquired, and it is the one being replaced.
+        let stored = Self::load(marker)?.transport_identity()?;
         if stored.as_str() != replacing.as_str() {
             return Err(IdentityError::PeerIdMismatch {
                 got: stored.as_str().to_owned(),
