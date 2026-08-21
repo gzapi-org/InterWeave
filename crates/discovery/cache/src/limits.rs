@@ -54,28 +54,37 @@ pub const MAX_LABEL_BYTES: usize = 128;
 /// [`MAX_ADDRESSES_PER_PEER`] or [`MAX_LABEL_BYTES`] moves this with
 /// them.
 pub const MAX_CACHE_FILE_BYTES: u64 = {
-    // Field names, quotes, commas, braces — everything that is not the
-    // value itself. Generous per item rather than exact: this is a
-    // ceiling, and being loose costs nothing while being tight costs a
+    // Field names, quotes, commas, braces, and the indentation of a
+    // pretty-printed file. Generous per item rather than exact: this is
+    // a ceiling, and being loose costs nothing while being tight costs a
     // legal file.
-    const JSON_OVERHEAD_PER_ITEM: u64 = 96;
+    const STRUCTURE_PER_ITEM: u64 = 128;
+    const STRUCTURE_PER_CAPABILITY: u64 = 256;
     const PEER_ID_BYTES: u64 = 64;
     const TIMESTAMP_BYTES: u64 = 24;
 
-    let per_address = MAX_ADDRESS_BYTES as u64 + TIMESTAMP_BYTES + JSON_OVERHEAD_PER_ITEM;
-    // Three labels, a `wire_major`, a `supported`, and an `observed_at`.
+    // JSON ESCAPING, which the first version of this budgeted at 1×.
+    //
+    // A stored byte is not a serialized byte. Within printable ASCII the
+    // worst case is `"` and `\`, which encode as two bytes each — so a
+    // value contributes at most twice its length. That bound only holds
+    // because [`is_bounded_label`] refuses everything else: a control
+    // character encodes as six (`\u0000`), and a cache of those would
+    // serialize to three times this ceiling while passing every input
+    // check.
+    const ESCAPE_FACTOR: u64 = 2;
+
+    let per_address =
+        ESCAPE_FACTOR * MAX_ADDRESS_BYTES as u64 + TIMESTAMP_BYTES + STRUCTURE_PER_ITEM;
     let per_capability =
-        3 * MAX_LABEL_BYTES as u64 + 2 * TIMESTAMP_BYTES + JSON_OVERHEAD_PER_ITEM * 2;
+        ESCAPE_FACTOR * 3 * MAX_LABEL_BYTES as u64 + 2 * TIMESTAMP_BYTES + STRUCTURE_PER_CAPABILITY;
     let per_peer = PEER_ID_BYTES
         + 3 * TIMESTAMP_BYTES
         + MAX_ADDRESSES_PER_PEER as u64 * per_address
         + MAX_CAPABILITIES_PER_PEER as u64 * per_capability
-        + JSON_OVERHEAD_PER_ITEM;
+        + STRUCTURE_PER_ITEM;
 
-    // Doubled, because the file is written pretty-printed and a ceiling
-    // that a legal file can brush against is a ceiling that will reject
-    // one.
-    2 * (MAX_PEERS as u64 * per_peer + 1024)
+    MAX_PEERS as u64 * per_peer + 4096
 };
 
 /// Minimum interval between writes to disk.

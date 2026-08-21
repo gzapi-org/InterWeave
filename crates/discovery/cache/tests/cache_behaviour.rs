@@ -587,9 +587,14 @@ fn a_cache_full_of_legal_records_fits_under_its_own_ceiling() {
     let who = peer(PEER_A);
 
     // One peer at every documented maximum.
+    // The WORST legal characters, not comfortable ones: `"` and `\`
+    // each encode as two JSON bytes, so a record of them is twice the
+    // size of the same record made of letters. A maximal test built from
+    // `a` would measure the easy case and miss the ceiling entirely.
+    let worst = |n: usize| "\"\\".repeat(n / 2);
     for i in 0..MAX_ADDRESSES_PER_PEER {
         cache
-            .record_success(&who, &format!("/{}/{i:04}", "a".repeat(240)), 1_000)
+            .record_success(&who, &format!("{}{i:04}", worst(252)), 1_000)
             .expect("within the bounded format");
     }
     for i in 0..MAX_CAPABILITIES_PER_PEER {
@@ -649,6 +654,19 @@ fn nothing_the_cache_accepts_can_produce_a_file_it_refuses() {
     assert!(matches!(
         cache.record_success(&who, "", 1_000),
         Err(CacheError::OutOfBounds { got: 0, .. })
+    ));
+
+    // A control character passes every LENGTH check and encodes as six
+    // JSON bytes, so a cache of them serializes to three times the
+    // ceiling — `flush` succeeding and the next `load` quarantining. The
+    // character set is part of the size bound, not a separate opinion.
+    assert!(matches!(
+        cache.record_success(&who, "/ip4/10.0.0.1/tcp/\u{0}4001", 1_000),
+        Err(CacheError::OutOfBounds { .. })
+    ));
+    assert!(matches!(
+        cache.record_success(&who, "/ip4/10.0.0.1/tcp/caf\u{e9}", 1_000),
+        Err(CacheError::OutOfBounds { .. })
     ));
 
     cache

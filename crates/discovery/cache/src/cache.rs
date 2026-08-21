@@ -77,7 +77,7 @@ pub struct PeerCache {
 /// together: a value only one of them accepts is a file that writes
 /// cleanly and refuses to load.
 fn bounded(field: &'static str, value: &str, max: usize) -> Result<(), CacheError> {
-    if value.is_empty() || value.len() > max {
+    if !is_bounded_label(value, max) {
         return Err(CacheError::OutOfBounds {
             field,
             got: value.len(),
@@ -85,6 +85,27 @@ fn bounded(field: &'static str, value: &str, max: usize) -> Result<(), CacheErro
         });
     }
     Ok(())
+}
+
+/// Whether a value is inside the bounded format: 1..=`max` bytes of
+/// printable ASCII.
+///
+/// # Why the character set is part of the SIZE bound
+///
+/// [`MAX_CACHE_FILE_BYTES`] is derived from these limits, and a stored
+/// byte is not a serialized byte. Within printable ASCII the worst JSON
+/// expansion is `"` and `\` at two bytes each; a control character
+/// encodes as six (`\u0000`), so a cache of 128-byte control-character
+/// labels passes every length check and serializes to three times the
+/// ceiling — `flush` succeeding and the next `load` quarantining, which
+/// is the failure this pair of bounds exists to prevent.
+///
+/// Refusing them costs nothing: these are opaque values compared exactly
+/// and never parsed, so a control byte buys a peer no expressiveness it
+/// can use — only room to make the file bigger than the format says it
+/// can be.
+fn is_bounded_label(value: &str, max: usize) -> bool {
+    !value.is_empty() && value.len() <= max && value.bytes().all(|b| (0x20..=0x7E).contains(&b))
 }
 
 /// Read at most `limit` bytes of UTF-8 from `path`.
@@ -134,7 +155,7 @@ fn validate_record(record: &PeerRecord, limits: CacheLimits) -> Result<(), Strin
         ));
     }
     for a in &record.addresses {
-        if a.address.is_empty() || a.address.len() > MAX_ADDRESS_BYTES {
+        if !is_bounded_label(&a.address, MAX_ADDRESS_BYTES) {
             return Err(format!(
                 "peer {id} has a {}-byte address; the limit is 1..={MAX_ADDRESS_BYTES}",
                 a.address.len()
@@ -155,7 +176,7 @@ fn validate_record(record: &PeerRecord, limits: CacheLimits) -> Result<(), Strin
             ("network_hash", &c.network_hash),
             ("role", &c.role),
         ] {
-            if value.is_empty() || value.len() > MAX_LABEL_BYTES {
+            if !is_bounded_label(value, MAX_LABEL_BYTES) {
                 return Err(format!(
                     "peer {id} has a {}-byte {what}; the limit is 1..={MAX_LABEL_BYTES}",
                     value.len()
