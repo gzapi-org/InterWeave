@@ -124,6 +124,9 @@ jobs:
       - name: Stage status agrees across the tree
         run: bash tools/checks/check_stage_status.sh
 
+      - name: Component READMEs agree with their own directories
+        run: bash tools/checks/check_component_status.sh
+
       # Installed from the upstream release binary, verified by checksum,
       # rather than through a third-party action.
       #
