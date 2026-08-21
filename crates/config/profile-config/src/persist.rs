@@ -118,6 +118,61 @@ fn write_atomic_with_mode(
     Ok(())
 }
 
+/// Install `contents` at `path` only if nothing is there, owner-only.
+///
+/// The distinction from [`write_private_atomic`] is WHO decides that the
+/// target is free. A caller that checks first and writes second has a
+/// window between the two, and two processes initializing the same
+/// profile both pass the check before either writes — so the loser
+/// silently replaces an identity the winner had already established.
+/// Here the filesystem decides, in the operation that installs the file.
+///
+/// `link` is what makes that one operation: it fails with `EEXIST` if
+/// the target exists, and unlike `rename` it never replaces. The content
+/// is still written and fsynced to a private temporary first, so the
+/// file is whole before it has a name and a crash cannot publish a
+/// partial key.
+///
+/// # Errors
+/// Returns [`PersistError::AlreadyExists`] if `path` is taken,
+/// [`PersistError::Io`] if any step fails, or
+/// [`PersistError::UnsupportedPlatform`] where owner-only permissions
+/// cannot be enforced. Nothing at `path` is touched in any case.
+pub fn create_private_exclusive(path: &Path, contents: &[u8]) -> Result<(), PersistError> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(PersistError::Io)?;
+
+    let temp = temp_beside(path);
+    let mut file = open_for_write(&temp, Some(OWNER_ONLY_FILE))?;
+    let written = file
+        .write_all(contents)
+        .and_then(|()| file.sync_all())
+        .map_err(PersistError::Io);
+    drop(file);
+    if let Err(e) = written {
+        let _ = fs::remove_file(&temp);
+        return Err(e);
+    }
+
+    let outcome = match fs::hard_link(&temp, path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(PersistError::AlreadyExists),
+        Err(e) => Err(PersistError::Io(e)),
+    };
+
+    // The temporary is always removed: on success the link is the file,
+    // and on failure it is unpublished key material.
+    let _ = fs::remove_file(&temp);
+    outcome?;
+
+    #[cfg(unix)]
+    if let Ok(dir) = fs::File::open(parent) {
+        let _ = dir.sync_all();
+    }
+
+    Ok(())
+}
+
 /// A temporary path beside `path`, unique to this writer.
 ///
 /// Beside the target because rename is atomic only within one

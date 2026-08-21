@@ -444,3 +444,64 @@ fn replacing_an_identity_is_available_but_has_to_be_asked_for() {
         "the replacement is what is now stored"
     );
 }
+
+#[test]
+fn concurrent_creation_produces_exactly_one_winner() {
+    // A check-then-write guard has a window: two processes initializing
+    // the same profile both pass the check before either writes, and the
+    // loser silently replaces the identity the winner established. That
+    // is the failure the refusal exists to prevent, reintroduced by the
+    // shape of the guard.
+    //
+    // Threads rather than processes because the guarantee has to come
+    // from the filesystem operation either way — a check-then-write loses
+    // this race regardless of what does the racing.
+    use std::sync::{Arc, Barrier};
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("identity.key");
+
+    const RACERS: usize = 8;
+    let barrier = Arc::new(Barrier::new(RACERS));
+    let mut handles = Vec::new();
+    for _ in 0..RACERS {
+        let barrier = Arc::clone(&barrier);
+        let path = path.clone();
+        handles.push(std::thread::spawn(move || {
+            let identity = ProfileIdentity::generate();
+            let peer = identity
+                .transport_identity()
+                .expect("peer id")
+                .as_str()
+                .to_owned();
+            barrier.wait();
+            identity.save(&path).map(|()| peer)
+        }));
+    }
+
+    let mut winners = Vec::new();
+    let mut refusals = 0;
+    for h in handles {
+        match h.join().expect("thread did not panic") {
+            Ok(peer) => winners.push(peer),
+            Err(IdentityError::AlreadyExists) => refusals += 1,
+            Err(other) => panic!("unexpected error: {other}"),
+        }
+    }
+
+    assert_eq!(
+        winners.len(),
+        1,
+        "exactly one caller may create the identity"
+    );
+    assert_eq!(refusals, RACERS - 1, "every other caller is told it lost");
+
+    // And the file on disk is the winner's, whole — not a blend of eight
+    // writers that all believed they had an empty path.
+    let loaded = ProfileIdentity::load(&path).expect("loads");
+    assert_eq!(
+        loaded.transport_identity().expect("peer id").as_str(),
+        winners[0],
+        "the stored identity is the one the winner wrote"
+    );
+}
