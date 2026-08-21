@@ -42,7 +42,9 @@ use interweave_discovery_api::CandidatePeer;
 use interweave_human_chat_protocol::HumanChatV2;
 use interweave_ipc_protocol::{Hello, decode_frame, encode_frame};
 use interweave_transport_api::DirectDestination;
-use interweave_transport_contract_tests::{Candidate, SchemaIndex, index_from, mutations};
+use interweave_transport_contract_tests::{
+    Candidate, SchemaIndex, index_from, mutations, mutations_and_seeds,
+};
 use serde_json::{Value, json};
 
 const PEER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
@@ -352,7 +354,30 @@ fn run(boundary: &Boundary, index: &SchemaIndex) -> Outcome {
         boundary.name
     );
 
-    let candidates: Vec<Candidate> = mutations(&schema, &boundary.seed, index);
+    let generated = mutations_and_seeds(&schema, &boundary.seed, index);
+
+    // An OPTIONAL property the seed omits hides every constraint beneath
+    // it, so the generator synthesizes one and walks the subtree against
+    // a seed that carries it. Each synthesized seed is therefore a CLAIM
+    // that the invented value is legal, and an untrue claim would make
+    // every mutation below it invalid for a second, unstated reason —
+    // the boundary would appear to agree with the schema for the wrong
+    // cause.
+    //
+    // Checked here rather than trusted. When one fails the fix is to add
+    // an `examples` entry to that subschema, which the generator prefers
+    // over anything it would invent.
+    for (pointer, seed) in &generated.synthesized_seeds {
+        assert!(
+            validator.is_valid(seed),
+            "{}: the value synthesized for the omitted optional {pointer} is not valid \
+             against the schema, so every mutation beneath it would be invalid twice. \
+             Add an `examples` entry to that subschema.",
+            boundary.name
+        );
+    }
+
+    let candidates: Vec<Candidate> = generated.candidates;
     assert!(
         candidates.len() > 5,
         "{}: only {} candidates — the generator is not seeing this schema",
@@ -510,4 +535,59 @@ fn the_generator_finds_the_constraints_it_claims_to() {
                 .collect::<Vec<_>>()
         );
     }
+}
+
+#[test]
+fn constraints_under_an_omitted_optional_property_are_still_generated() {
+    // The floor for the traversal itself. An optional property the seed
+    // leaves out used to end the walk: every mutation below it wrote
+    // through a JSON Pointer resolving to nothing and came back as the
+    // unchanged seed, so the schema read as covered while none of it was
+    // tested.
+    //
+    // `protocol_observations` is the case that proved it — its
+    // `maxItems`, its `uniqueItems`, its closed item object and the
+    // bounds on `protocol_id` were all invisible, and the boundary
+    // accepted several of them.
+    let index = index();
+    let schema = schema_doc("discovery/candidate-peer.schema.json");
+    let seed = json!({
+        "peer_id": PEER,
+        "addresses": ["/ip4/10.0.0.1/tcp/4001"],
+        "source": "mdns",
+        "observed_at": 1_700_000_000_000u64,
+    });
+    assert!(
+        seed.get("protocol_observations").is_none(),
+        "the point of this test is that the seed omits it"
+    );
+
+    let generated = mutations_and_seeds(&schema, &seed, &index);
+    let labels: Vec<&str> = generated
+        .candidates
+        .iter()
+        .map(|c| c.label.as_str())
+        .collect();
+
+    for expected in [
+        "/protocol_observations repeats an item",
+        "over maxItems",
+        "/protocol_observations/0 is closed but carries an unknown property",
+        "/protocol_observations/0/protocol_id is one over maxLength 256",
+        "/protocol_observations/0/protocol_id is one under minLength 1",
+        "/protocol_observations/0/protocol_id violates its pattern",
+    ] {
+        assert!(
+            labels.iter().any(|l| l.contains(expected)),
+            "no candidate for {expected:?} — the walk stopped at the omitted optional. Got: {labels:#?}"
+        );
+    }
+
+    assert!(
+        generated
+            .synthesized_seeds
+            .iter()
+            .any(|(pointer, _)| pointer == "/protocol_observations"),
+        "the synthesized seed must be reported so the caller can validate it"
+    );
 }

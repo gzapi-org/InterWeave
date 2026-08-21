@@ -49,6 +49,23 @@ pub struct Candidate {
 /// Every schema in the tree, keyed by `$id`, for `$ref` resolution.
 pub type SchemaIndex = BTreeMap<String, Value>;
 
+/// What one walk produced: the candidates, and the seeds it had to
+/// invent to reach them.
+#[derive(Debug, Default)]
+pub struct Generated {
+    /// One deliberately invalid document per declared constraint.
+    pub candidates: Vec<Candidate>,
+    /// Seeds augmented with a synthesized value for an optional property
+    /// the original seed omitted, keyed by the pointer that was filled.
+    ///
+    /// Exposed because each one is a CLAIM — that the synthesized value
+    /// is itself valid — and an untrue claim would make every mutation
+    /// beneath it invalid for a second, unstated reason. The caller
+    /// validates these, so a bad synthesis fails loudly rather than
+    /// quietly weakening the suite it was added to strengthen.
+    pub synthesized_seeds: Vec<(String, Value)>,
+}
+
 /// Resolve a schema node through any `$ref` it carries.
 ///
 /// Handles both forms this repository uses: a `urn:interweave:...`
@@ -102,16 +119,10 @@ fn remove_at(doc: &mut Value, pointer: &str, key: &str) {
     }
 }
 
-fn push(
-    out: &mut Vec<Candidate>,
-    seed: &Value,
-    pointer: &str,
-    label: String,
-    f: impl Fn(&mut Value),
-) {
+fn push(out: &mut Generated, seed: &Value, pointer: &str, label: String, f: impl Fn(&mut Value)) {
     let mut doc = seed.clone();
     f(&mut doc);
-    out.push(Candidate {
+    out.candidates.push(Candidate {
         label,
         pointer: if pointer.is_empty() {
             "<root>".to_owned()
@@ -141,36 +152,189 @@ fn wrong_type_for(declared: Option<&str>) -> Value {
 /// leaving the reader to work out which of several violations mattered.
 #[must_use]
 pub fn mutations(schema: &Value, seed: &Value, index: &SchemaIndex) -> Vec<Candidate> {
-    let mut out = Vec::new();
+    mutations_and_seeds(schema, seed, index).candidates
+}
 
-    // Root type confusion, emitted unconditionally. Every message class
-    // here is discriminated by a PROPERTY, so a scalar or array has
-    // nowhere to carry one; passing it on as "decoded" hands the next
-    // layer something it cannot classify and cannot report a framing
-    // error about.
-    //
-    // Emitted without checking whether the schema declares `type:
-    // object`, because THE GENERATOR DOES NOT DECIDE VALIDITY. The
-    // differential loop runs a real validator over every candidate and
-    // discards the ones that turn out to be legal. That is what lets this
-    // work against `oneOf` roots, where no single branch is the schema
-    // and a sound generator would need to reason about all of them.
-    for (name, v) in [
+/// Root type confusion, emitted unconditionally. Every message class
+/// here is discriminated by a PROPERTY, so a scalar or array has nowhere
+/// to carry one; passing it on as "decoded" hands the next layer
+/// something it cannot classify and cannot report a framing error about.
+///
+/// Emitted without checking whether the schema declares `type: object`,
+/// because THE GENERATOR DOES NOT DECIDE VALIDITY. The differential loop
+/// runs a real validator over every candidate and discards the ones that
+/// turn out to be legal. That is what lets this work against `oneOf`
+/// roots, where no single branch is the schema and a sound generator
+/// would need to reason about all of them.
+fn generated_root() -> Generated {
+    let candidates = [
         ("null", json!(null)),
         ("array", json!([])),
         ("number", json!(7)),
         ("string", json!("text")),
         ("boolean", json!(true)),
-    ] {
-        out.push(Candidate {
-            label: format!("root is a JSON {name}, not an object"),
-            pointer: "<root>".to_owned(),
-            document: v,
-        });
+    ]
+    .into_iter()
+    .map(|(name, v)| Candidate {
+        label: format!("root is a JSON {name}, not an object"),
+        pointer: "<root>".to_owned(),
+        document: v,
+    })
+    .collect();
+    Generated {
+        candidates,
+        synthesized_seeds: Vec::new(),
     }
+}
 
+/// Like [`mutations`], and also returns the seeds the walk had to invent.
+///
+/// Use this when the caller can validate: every synthesized seed is an
+/// assertion that the value invented for an omitted optional property is
+/// itself legal, and checking it is what keeps the extra coverage
+/// honest.
+#[must_use]
+pub fn mutations_and_seeds(schema: &Value, seed: &Value, index: &SchemaIndex) -> Generated {
+    let mut out = generated_root();
     walk(schema, seed, "", index, &mut out, seed, schema);
     out
+}
+
+/// Whether `schema` plausibly describes `node` — used to decide where a
+/// value may be invented, never to decide validity.
+///
+/// A `oneOf` root is walked branch by branch against the same node, so
+/// without this a `ping` seed gets a `request`-only optional property
+/// synthesized into it and the augmented seed is invalid for a reason
+/// that has nothing to do with the constraint being probed.
+///
+/// Deliberately structural and cheap: every `required` present, every
+/// `const` discriminator matching, and nothing extra in a closed object.
+/// It answers "is this the branch the seed is an instance of", which is
+/// all the synthesis decision needs.
+fn describes(schema: &Value, node: &Value, index: &SchemaIndex, root: &Value) -> bool {
+    let Some(obj) = node.as_object() else {
+        return false;
+    };
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|r| r.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    if !required.iter().all(|r| obj.contains_key(*r)) {
+        return false;
+    }
+    let Some(props) = schema.get("properties").and_then(Value::as_object) else {
+        return true;
+    };
+    if schema.get("additionalProperties") == Some(&json!(false))
+        && obj.keys().any(|k| !props.contains_key(k))
+    {
+        return false;
+    }
+    for (name, sub) in props {
+        if let Some(resolved) = resolve(sub, index, root)
+            && let Some(expected) = resolved.get("const")
+            && obj.get(name).is_some_and(|actual| actual != expected)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// A minimal instance satisfying `schema`, for reaching constraints the
+/// seed leaves unreachable.
+///
+/// An OPTIONAL property the seed omits hides every constraint beneath
+/// it. The candidate-peer seed omits `protocol_observations`, so its
+/// `maxItems`, its `uniqueItems`, its closed item object, and the bounds
+/// on `protocol_id` were all invisible — and the generator reported the
+/// schema as covered while testing none of them.
+///
+/// Prefers what the schema states about itself — `const`, `enum`,
+/// `default`, `examples` — and only then builds from `type`. A `pattern`
+/// is NOT interpreted here: this returns a plausible string and the
+/// caller is expected to validate the result. That is deliberate. A
+/// generator that silently skipped patterned strings would recreate the
+/// blind spot it exists to remove, whereas a synthesized seed that turns
+/// out invalid fails loudly and is fixed by adding one `examples` entry
+/// to the schema.
+fn synthesize(schema: &Value, index: &SchemaIndex, root: &Value) -> Option<Value> {
+    let schema = resolve(schema, index, root)?;
+
+    if let Some(c) = schema.get("const") {
+        return Some(c.clone());
+    }
+    if let Some(first) = schema
+        .get("enum")
+        .and_then(Value::as_array)
+        .and_then(|m| m.first())
+    {
+        return Some(first.clone());
+    }
+    if let Some(d) = schema.get("default") {
+        return Some(d.clone());
+    }
+    if let Some(first) = schema
+        .get("examples")
+        .and_then(Value::as_array)
+        .and_then(|m| m.first())
+    {
+        return Some(first.clone());
+    }
+
+    match schema.get("type").and_then(Value::as_str)? {
+        "object" => {
+            let props = schema.get("properties").and_then(Value::as_object);
+            let mut map = Map::new();
+            for name in schema
+                .get("required")
+                .and_then(Value::as_array)
+                .map(|r| r.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+                .unwrap_or_default()
+            {
+                let sub = props.and_then(|p| p.get(name))?;
+                map.insert(name.to_owned(), synthesize(sub, index, root)?);
+            }
+            Some(Value::Object(map))
+        }
+        "array" => {
+            let item = synthesize(schema.get("items")?, index, root)?;
+            let min = schema
+                .get("minItems")
+                .and_then(Value::as_u64)
+                .unwrap_or(1)
+                .max(1);
+            let count = usize::try_from(min).ok()?;
+            // Distinct members are not synthesizable from one template,
+            // so a set that must hold several is left alone rather than
+            // seeded with something the schema rejects for a second
+            // reason.
+            if count > 1 && schema.get("uniqueItems") == Some(&json!(true)) {
+                return None;
+            }
+            Some(Value::Array(vec![item; count]))
+        }
+        "string" => {
+            let min = schema.get("minLength").and_then(Value::as_u64).unwrap_or(1);
+            let max = schema
+                .get("maxLength")
+                .and_then(Value::as_u64)
+                .unwrap_or(min.max(1));
+            if max < min {
+                return None;
+            }
+            let len = usize::try_from(min.max(1).min(max)).ok()?;
+            Some(json!("a".repeat(len)))
+        }
+        "integer" | "number" => Some(json!(
+            schema.get("minimum").and_then(Value::as_u64).unwrap_or(1)
+        )),
+        "boolean" => Some(json!(false)),
+        "null" => Some(Value::Null),
+        _ => None,
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -179,14 +343,14 @@ fn walk(
     node: &Value,
     pointer: &str,
     index: &SchemaIndex,
-    out: &mut Vec<Candidate>,
+    out: &mut Generated,
     seed: &Value,
     root: &Value,
 ) {
     let Some(schema) = resolve(schema, index, root) else {
         // An unresolved `$ref`. Reported as a candidate so it fails
         // loudly instead of silently skipping every constraint behind it.
-        out.push(Candidate {
+        out.candidates.push(Candidate {
             label: format!(
                 "UNRESOLVABLE $ref at {pointer}: the generator cannot see the constraints behind it"
             ),
@@ -293,7 +457,7 @@ fn walk_object(
     node: &Value,
     pointer: &str,
     index: &SchemaIndex,
-    out: &mut Vec<Candidate>,
+    out: &mut Generated,
     seed: &Value,
     root: &Value,
 ) {
@@ -355,8 +519,30 @@ fn walk_object(
             );
         }
 
-        if let Some(child) = node.get(name) {
-            walk(sub, child, &child_pointer, index, out, seed, root);
+        match node.get(name) {
+            Some(child) => walk(sub, child, &child_pointer, index, out, seed, root),
+            None => {
+                // An OPTIONAL property the seed omits. Everything the
+                // schema declares beneath it — item bounds, closed item
+                // objects, string lengths — was unreachable, because
+                // every mutation below a missing property writes through
+                // a JSON Pointer that resolves to nothing and produces
+                // the seed back unchanged. The generator reported the
+                // schema covered and tested none of it.
+                //
+                // Synthesize a value, walk the subtree against a seed
+                // that carries it, and record the seed so the caller can
+                // check that the value really is legal.
+                if describes(schema, node, index, root)
+                    && let Some(value) = synthesize(sub, index, root)
+                {
+                    let mut augmented = seed.clone();
+                    insert_at(&mut augmented, pointer, name, value.clone());
+                    out.synthesized_seeds
+                        .push((child_pointer.clone(), augmented.clone()));
+                    walk(sub, &value, &child_pointer, index, out, &augmented, root);
+                }
+            }
         }
     }
 }
@@ -366,7 +552,7 @@ fn walk_array(
     node: &Value,
     pointer: &str,
     index: &SchemaIndex,
-    out: &mut Vec<Candidate>,
+    out: &mut Generated,
     seed: &Value,
     root: &Value,
 ) {
@@ -435,7 +621,7 @@ fn walk_array(
     }
 }
 
-fn walk_string(schema: &Value, pointer: &str, out: &mut Vec<Candidate>, seed: &Value) {
+fn walk_string(schema: &Value, pointer: &str, out: &mut Generated, seed: &Value) {
     if let Some(max) = schema.get("maxLength").and_then(Value::as_u64) {
         let over = "x".repeat(usize::try_from(max).unwrap_or(1024).saturating_add(1));
         push(
@@ -477,7 +663,7 @@ fn walk_string(schema: &Value, pointer: &str, out: &mut Vec<Candidate>, seed: &V
     }
 }
 
-fn walk_number(schema: &Value, pointer: &str, out: &mut Vec<Candidate>, seed: &Value) {
+fn walk_number(schema: &Value, pointer: &str, out: &mut Generated, seed: &Value) {
     if let Some(min) = schema.get("minimum").and_then(Value::as_i64) {
         push(
             out,
