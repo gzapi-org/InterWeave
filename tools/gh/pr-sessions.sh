@@ -259,21 +259,59 @@ fi
 # segments alone reported `dependabot/cargo/crates/some-crate/…` as a
 # session called "dependabot/nuget", and the footer then told you that
 # apparent owner was a parallel session to stay out of the way of. The
-# type segment is what separates the two populations, so it is matched
-# against the set this repo actually uses.
-#
-# The cost of the list is that a branch typed something new reads as
-# unconventional until the type is added here. That is the direction to
-# fail in: a visible unknown invites a look, a confident wrong owner
-# does not.
+# separator is therefore a deny-list of automation vendors, not an
+# allow-list of type words — see `conventional` below for why the
+# asymmetry is deliberate.
+# Rows whose branch does not parse as <host>/<clone>/<type>/<desc>
+# cannot be attributed to a session, so any scope filter removes them.
+# COUNTED, because removing them silently is exactly how this command
+# hid nine PRs and an unanswered P1: the answer looked complete and was
+# not. Reported in the footer whenever it is non-zero.
+UNATTRIBUTED=0
+if [[ "$FILTER" != "" ]]; then
+    UNATTRIBUTED="$(printf '%s' "$rows" | jq '
+      def bots: ["dependabot","renovate","github-actions","weblate","imgbot",
+                 "allcontributors","pre-commit-ci","snyk-bot"];
+      [ .[] | select((.headRefName | split("/")) as $p
+          | (($p | length) < 4)
+            or (($p[0] | length) == 0)
+            or (($p[1] | length) == 0)
+            or (bots | index($p[0]) != null)
+            or (($p[2] | test("^[a-z][a-z0-9._-]*$")) | not)) ] | length' 2>/dev/null || echo 0)"
+fi
+
 selected="$(printf '%s' "$rows" | jq --arg me "$ME" --arg filter "$FILTER" \
         --argjson limit "$CANDIDATES" --arg cutoff "$CUTOFF" \
         --argjson lastitem "${LAST_ITEM:-0}" '
-  def types: ["feat","fix","docs","chore","ci","test","refactor","perf",
-              "build","style","contracts","i18n","spike"];
+  # STRUCTURAL, not an allow-list of type words.
+  #
+  # CLAUDE.md §9 specifies `<host>/<clone>/<type>/<short-desc>` and puts
+  # no vocabulary on `<type>`. This function used to require one of
+  # thirteen conventional-commit words, so every `stage-4/...` and
+  # `conformance/...` branch was classified unconventional, given the
+  # session "(unconventional)", and then SILENTLY DROPPED by the default
+  # clone scope — which is how nine PRs, including one carrying an
+  # unanswered P1, became invisible to the command whose whole job is
+  # surfacing outstanding work.
+  #
+  # A branch is conventional if it has the right SHAPE. Anything that
+  # parses as a type token counts, because the session is `$p[0]/$p[1]`
+  # either way and that is all the scoping needs.
+  # Automation vendors, whose branch names also have four or more
+  # segments. A DENY-list is right here and an allow-list was wrong
+  # above, and the asymmetry is the point: the set of bots that open PRs
+  # on a repository is small, known, and changes rarely, while the set of
+  # legitimate `<type>` words is open-ended, and every omission silently
+  # deletes real work from this listing.
+  def bots: ["dependabot","renovate","github-actions","weblate","imgbot",
+             "allcontributors","pre-commit-ci","snyk-bot"];
   def conventional:
     (.headRefName | split("/")) as $p
-    | ($p | length) >= 4 and (types | index($p[2]) != null);
+    | ($p | length) >= 4
+      and ($p[0] | length) > 0
+      and ($p[1] | length) > 0
+      and (bots | index($p[0]) == null)
+      and ($p[2] | test("^[a-z][a-z0-9._-]*$"));
   def session:
     (.headRefName | split("/")) as $p
     | if conventional then ($p[0] + "/" + $p[1]) else "(unconventional)" end;
@@ -447,6 +485,13 @@ fi
 printf '%s\n' "$out"
 
 echo
+# An unattributable branch is dropped by any scope filter, and a drop
+# nobody mentions reads as "there was nothing there". Say the number.
+if [[ "${UNATTRIBUTED:-0}" -gt 0 ]]; then
+    echo "  NOTE: $UNATTRIBUTED PR(s) have a branch that does not parse as" >&2
+    echo "  <host>/<clone>/<type>/<short-desc>, so they cannot be scoped to a" >&2
+    echo "  session and are not listed. Pass /all to see every PR regardless." >&2
+fi
 if [[ "$DEFAULTED_TO_MINE" -eq 1 ]]; then
     echo "  Scoped to this clone ($ME) — pass /all for every session."
 elif [[ "$GROUPED" -eq 0 ]]; then
