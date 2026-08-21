@@ -77,6 +77,19 @@ pub enum StoreError {
         /// What was supplied.
         got: String,
     },
+    /// A file or directory holding message content is reachable by
+    /// someone other than its owner.
+    ///
+    /// Refused rather than repaired, for the reason the identity key is:
+    /// content that has been broadly readable should be treated as
+    /// exposed, and quietly narrowing the mode would hide that it ever
+    /// was.
+    PermissionsTooOpen {
+        /// Which file or directory.
+        what: String,
+        /// The mode it carries.
+        mode: u32,
+    },
     /// One peer used an `app_message_id` it had already used, for
     /// different content.
     ///
@@ -137,6 +150,10 @@ impl core::fmt::Display for StoreError {
             Self::MalformedAppMessageId { got } => write!(
                 f,
                 "app_message_id must be 32 lowercase hex characters, got {got:?}"
+            ),
+            Self::PermissionsTooOpen { what, mode } => write!(
+                f,
+                "{what} is mode {mode:04o}; message content must be owner-only"
             ),
             Self::IdentityConflict {
                 app_message_id,

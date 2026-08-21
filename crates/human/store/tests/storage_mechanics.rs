@@ -72,7 +72,7 @@ fn memory() -> HumanStore {
 #[test]
 fn a_fresh_store_has_exactly_the_allowed_tables() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("human.sqlite3");
+    let path = dir.path().join("state").join("human.sqlite3");
     let store = HumanStore::open(&path, StoreOptions::default()).expect("opens");
     drop(store);
 
@@ -104,7 +104,7 @@ fn opening_a_database_with_a_history_table_is_refused() {
     // The failure this guards against is a plausible-sounding addition,
     // so it is caught at open rather than left to review.
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("human.sqlite3");
+    let path = dir.path().join("state").join("human.sqlite3");
     drop(HumanStore::open(&path, StoreOptions::default()).expect("first open"));
 
     let conn = rusqlite::Connection::open(&path).expect("reopen");
@@ -123,7 +123,7 @@ fn opening_a_database_with_a_history_table_is_refused() {
 #[test]
 fn a_newer_schema_is_refused_rather_than_downgraded() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("human.sqlite3");
+    let path = dir.path().join("state").join("human.sqlite3");
     drop(HumanStore::open(&path, StoreOptions::default()).expect("first open"));
 
     let conn = rusqlite::Connection::open(&path).expect("reopen");
@@ -142,7 +142,7 @@ fn a_newer_schema_is_refused_rather_than_downgraded() {
 #[test]
 fn reopening_is_idempotent() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("human.sqlite3");
+    let path = dir.path().join("state").join("human.sqlite3");
     for _ in 0..3 {
         drop(HumanStore::open(&path, StoreOptions::default()).expect("reopen"));
     }
@@ -190,7 +190,7 @@ fn a_full_medium_degrades_the_store_and_refuses_new_unread() {
     // A real SQLITE_FULL from a real page quota, not an injected fake:
     // the degradation path must be the one production takes.
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("human.sqlite3");
+    let path = dir.path().join("state").join("human.sqlite3");
     let mut store = HumanStore::open(
         &path,
         StoreOptions {
@@ -513,4 +513,108 @@ fn debug_output_never_carries_a_message_body() {
     assert!(printed[2].contains(ID_A));
     assert!(printed[4].contains(ID_B));
     assert_eq!(out_row.get(), pending[0].row_id.get());
+}
+
+#[test]
+fn the_files_holding_message_content_are_owner_only() {
+    // The store's documentation promised owner-only and checked nothing.
+    // SQLite creates the database — and later the WAL and SHM — with the
+    // process umask, which is 0644 on a default system: message content
+    // readable by every local account.
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    let mut store = HumanStore::open(&path, StoreOptions::default()).expect("opens");
+
+    // Force the WAL and SHM into existence.
+    store
+        .commit_unread_inbound(&inbound(ID_A, b"body".to_vec()))
+        .expect("commit");
+
+    for suffix in ["", "-wal", "-shm"] {
+        let mut companion = path.as_os_str().to_owned();
+        companion.push(suffix);
+        let companion = std::path::PathBuf::from(companion);
+        if !companion.exists() {
+            continue;
+        }
+        let mode = std::fs::metadata(&companion)
+            .expect("stat")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "{} is mode {:04o}",
+            companion.display(),
+            mode & 0o777
+        );
+    }
+
+    let mode = std::fs::metadata(path.parent().expect("parent"))
+        .expect("stat")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o077, 0, "the state directory is mode {mode:04o}");
+}
+
+#[test]
+fn an_already_open_state_directory_is_refused_rather_than_tightened() {
+    // Created owner-only says nothing about one that was already there —
+    // restored, copied, or made by an older build. Refused rather than
+    // narrowed, for the reason the identity key is: content that has been
+    // broadly readable should be treated as exposed, and quietly fixing
+    // the mode would hide that it ever was.
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).expect("mkdir");
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    match HumanStore::open(&state.join("human.sqlite3"), StoreOptions::default()) {
+        Err(StoreError::PermissionsTooOpen { mode, .. }) => assert_eq!(mode, 0o755),
+        other => panic!("expected a permissions refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_unexpected_content_table_is_refused_even_with_an_innocent_name() {
+    // The forbidden-name list can only catch what it names, while the
+    // module claims REQUIRED_TABLES is the whole content surface. A table
+    // called `chat_archive` passed while being exactly the archive
+    // ADR-0044 forbids.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
+
+    for ddl in [
+        "CREATE TABLE chat_archive (row_id INTEGER PRIMARY KEY, payload BLOB)",
+        "CREATE VIEW everything AS SELECT * FROM kept_inbound",
+        "CREATE TRIGGER copy_it AFTER INSERT ON kept_inbound BEGIN SELECT 1; END",
+    ] {
+        let conn = rusqlite::Connection::open(&path).expect("reopen");
+        conn.execute_batch(ddl).expect("create");
+        drop(conn);
+
+        let refused = HumanStore::open(&path, StoreOptions::default());
+        assert!(
+            matches!(refused, Err(StoreError::Migration(_))),
+            "{ddl} must be refused, got {refused:?}"
+        );
+
+        let conn = rusqlite::Connection::open(&path).expect("reopen");
+        let (kind, name) = ddl
+            .strip_prefix("CREATE ")
+            .and_then(|r| r.split_once(' '))
+            .map(|(k, rest)| (k, rest.split_whitespace().next().unwrap_or("")))
+            .expect("parsed");
+        conn.execute_batch(&format!("DROP {kind} {name}"))
+            .expect("drop");
+    }
+
+    // And with them gone it opens again, so the refusal was about the
+    // extra object and not about the store having been touched.
+    HumanStore::open(&path, StoreOptions::default()).expect("opens once they are gone");
 }

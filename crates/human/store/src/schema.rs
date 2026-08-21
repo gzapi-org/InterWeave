@@ -41,6 +41,18 @@ pub const REQUIRED_TABLES: &[&str] = &[
     "settings",
 ];
 
+/// Tables whose SQLite-generated indexes are legitimate.
+///
+/// An autoindex is named `sqlite_autoindex_<table>_<n>` and is caught by
+/// the `sqlite_` prefix; this covers any index SQLite names after the
+/// table it backs.
+const INTERNAL_INDEX_OWNERS: &[&str] = &[
+    "pending_outbound",
+    "unread_inbound",
+    "kept_inbound",
+    "settings",
+];
+
 /// Table names that would make this a conversation archive.
 ///
 /// Named explicitly rather than inferred, because the failure this
@@ -231,25 +243,63 @@ fn migration_1(tx: &Transaction<'_>) -> Result<(), StoreError> {
 /// Returns [`StoreError::Migration`] naming the missing or forbidden
 /// table.
 pub fn verify_shape(conn: &Connection) -> Result<(), StoreError> {
-    let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type = 'table'")?;
-    let names: Vec<String> = stmt
-        .query_map([], |r| r.get::<_, String>(0))?
+    let mut stmt = conn.prepare("SELECT type, name FROM sqlite_master")?;
+    let objects: Vec<(String, String)> = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
         .collect::<Result<_, _>>()?;
 
+    let tables: Vec<&String> = objects
+        .iter()
+        .filter(|(kind, _)| kind == "table")
+        .map(|(_, name)| name)
+        .collect();
+
     for required in REQUIRED_TABLES {
-        if !names.iter().any(|n| n == required) {
+        if !tables.iter().any(|n| *n == required) {
             return Err(StoreError::Migration(format!(
                 "table `{required}` is missing"
             )));
         }
     }
-    for name in &names {
+
+    // AN ALLOWLIST, not a list of names someone thought of.
+    //
+    // The named-enemies list still runs, because a `messages` table
+    // deserves the message that says why it is forbidden. But it can only
+    // ever catch what it names, and the doc comment above claims
+    // REQUIRED_TABLES is "the whole content surface" — a table called
+    // `chat_archive` passed while being exactly the archive ADR-0044
+    // forbids. Anything not on the list is refused now, so an addition
+    // has to be a decision made here rather than one nobody noticed.
+    //
+    // Views and triggers are refused for the same reason and are worse:
+    // a view is a content surface with no storage of its own, and a
+    // trigger can copy a row somewhere on its way out.
+    for (kind, name) in &objects {
         let lowered = name.to_ascii_lowercase();
         if FORBIDDEN_TABLES.contains(&lowered.as_str()) {
             return Err(StoreError::Migration(format!(
                 "table `{name}` is a general message archive; ADR-0044 allows only \
                  pending_outbound, unread_inbound, and kept_inbound to hold content"
             )));
+        }
+        // SQLite's own bookkeeping, which the store does not create and
+        // cannot remove: `sqlite_sequence` exists because the content
+        // tables are AUTOINCREMENT, and autoindexes back the UNIQUE
+        // constraints those tables declare.
+        if lowered.starts_with("sqlite_") {
+            continue;
+        }
+        match kind.as_str() {
+            "table" if REQUIRED_TABLES.contains(&name.as_str()) => {}
+            "index" if INTERNAL_INDEX_OWNERS.iter().any(|t| lowered.contains(t)) => {}
+            _ => {
+                return Err(StoreError::Migration(format!(
+                    "{kind} `{name}` is not part of this store's schema; ADR-0044 makes \
+                     pending_outbound, unread_inbound, kept_inbound and settings the whole \
+                     content surface, and anything else must be an explicit decision"
+                )));
+            }
         }
     }
     Ok(())

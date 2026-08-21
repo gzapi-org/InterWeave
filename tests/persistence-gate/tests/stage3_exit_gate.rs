@@ -210,7 +210,7 @@ fn a_full_human_store_degrades_without_touching_the_rest_of_the_profile() {
     write_atomic(&p.config_file(), CONFIG).expect("config");
 
     let db = p.state_dir().join("human.sqlite3");
-    std::fs::create_dir_all(p.state_dir()).expect("state dir");
+    create_private_dir(p.state_dir()).expect("state dir");
     let mut store = HumanStore::open(
         &db,
         StoreOptions {

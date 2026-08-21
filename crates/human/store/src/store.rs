@@ -71,8 +71,60 @@ impl HumanStore {
         // not depend on configuration to protect its own files.
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             create_private_dir(parent)?;
+            // CREATED owner-only says nothing about one that was already
+            // there. A pre-existing state directory — restored, copied,
+            // made by an older build, or simply made by hand — carries
+            // whatever mode it has, and the store's documentation
+            // promised a protection it had not checked.
+            //
+            // Refused rather than tightened, for the reason the identity
+            // key is: content that has been broadly readable should be
+            // treated as exposed, and quietly narrowing the mode would
+            // hide that it ever was.
+            require_owner_only(parent, "the state directory")?;
         }
+        // CREATE IT OWNER-ONLY OURSELVES. SQLite creates the database with
+        // the process umask, which is 0644 on a default system — message
+        // content readable by every local account. Creating the file
+        // first, empty and 0600, means SQLite opens an existing file
+        // rather than making one, and it copies the database's mode onto
+        // the WAL and SHM companions it creates later.
+        //
+        // `create_new` so this cannot truncate an existing store, and a
+        // lost race is not an error: the other process created it and the
+        // check below decides whether what it created is acceptable.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)
+            {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(StoreError::Io(e)),
+            }
+        }
+
         let conn = Connection::open(path)?;
+        // The database and its WAL/SHM companions hold the same message
+        // content as the directory, and SQLite creates the companions
+        // itself with the process umask. Checked after the connection so
+        // they exist to be checked.
+        for (suffix, what) in [
+            ("", "the database"),
+            ("-wal", "the write-ahead log"),
+            ("-shm", "the shared-memory index"),
+        ] {
+            let mut companion = path.as_os_str().to_owned();
+            companion.push(suffix);
+            let companion = std::path::PathBuf::from(companion);
+            if companion.exists() {
+                require_owner_only(&companion, what)?;
+            }
+        }
         Self::from_connection(conn, options)
     }
 
@@ -705,6 +757,30 @@ fn create_private_dir(dir: &std::path::Path) -> Result<(), StoreError> {
         // Refusing beats creating a directory of message content this
         // build cannot protect.
         let _ = dir;
+        Err(StoreError::UnsupportedPlatform)
+    }
+}
+
+/// Refuse anything holding message content that others can reach.
+fn require_owner_only(path: &std::path::Path, what: &str) -> Result<(), StoreError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(path)
+            .map_err(StoreError::Io)?
+            .permissions()
+            .mode();
+        if mode & 0o077 != 0 {
+            return Err(StoreError::PermissionsTooOpen {
+                what: what.to_owned(),
+                mode: mode & 0o777,
+            });
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, what);
         Err(StoreError::UnsupportedPlatform)
     }
 }
