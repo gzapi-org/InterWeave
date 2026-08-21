@@ -500,16 +500,26 @@ impl ConnectionPolicy {
         backoff_ms: u64,
     ) -> bool {
         let key = (peer.clone(), address.to_owned());
-        if !self.addresses.contains_key(&key) {
-            // A failure that cannot be recorded is worse than one that
-            // can: it is the entry that would have suppressed a retry.
-            // Prune first, then evict a benign entry to hold it.
+        // A failure that cannot be recorded is worse than one that can:
+        // it is the entry that would have suppressed a retry. Prune
+        // first, then evict a benign entry to hold it.
+        //
+        // But when there is nothing evictable the answer is to NOT
+        // record it. Inserting anyway — which is what discarding this
+        // result did — grows a map whose whole purpose is being bounded:
+        // enough concurrent failures fill the table with live punitive
+        // entries, after which every further failed address is appended
+        // without limit. The peer branch below already refuses on the
+        // same terms; this one only looked like it did.
+        let room = self.addresses.contains_key(&key) || {
             self.prune(now_ms);
-            let _ = self.make_room_for_address(now_ms);
+            self.make_room_for_address(now_ms)
+        };
+        if room {
+            let entry = self.addresses.entry(key).or_default();
+            entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
+            entry.last_touched_ms = now_ms;
         }
-        let entry = self.addresses.entry(key).or_default();
-        entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
-        entry.last_touched_ms = now_ms;
 
         // Scoped to THIS peer. A global scan would let any unrelated
         // peer's past success spare this one from backoff indefinitely,
@@ -545,22 +555,35 @@ impl ConnectionPolicy {
     /// address for a trusted peer must not thereby suppress that peer's
     /// real routes — which is exactly what would happen if this counted
     /// as a peer failure (ADR-0011).
+    ///
+    /// Returns whether the quarantine was actually recorded. It is not
+    /// when the address table is full of entries that are all themselves
+    /// live suppressions: the alternative is to insert regardless and
+    /// let a bounded map grow without limit, or to evict a live
+    /// quarantine — which would let anyone able to provoke evictions
+    /// launder their own failed identity check. A caller that needs the
+    /// address suppressed has to see that it was not.
+    #[must_use]
     pub fn record_identity_mismatch(
         &mut self,
         expected_peer: &TransportIdentity,
         address: &str,
         now_ms: u64,
-    ) {
+    ) -> bool {
         let key = (expected_peer.clone(), address.to_owned());
-        if !self.addresses.contains_key(&key) {
+        let room = self.addresses.contains_key(&key) || {
             self.prune(now_ms);
-            let _ = self.make_room_for_address(now_ms);
+            self.make_room_for_address(now_ms)
+        };
+        if !room {
+            return false;
         }
         let entry = self.addresses.entry(key).or_default();
         entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
         entry.quarantined_until_ms = Some(now_ms.saturating_add(IDENTITY_MISMATCH_QUARANTINE_MS));
         entry.last_touched_ms = now_ms;
         // The peer map is untouched, on purpose.
+        true
     }
 
     /// Addresses worth trying for a peer, known-good first.
@@ -708,7 +731,10 @@ mod tests {
         // The attack this split exists to defeat: injecting one bogus
         // address for a trusted peer must not suppress its real routes.
         let mut p = policy();
-        p.record_identity_mismatch(&peer(), A1, 1_000);
+        assert!(
+            p.record_identity_mismatch(&peer(), A1, 1_000),
+            "the quarantine must actually be recorded"
+        );
 
         assert_eq!(
             p.admit(
@@ -826,7 +852,10 @@ mod tests {
         // quarantined by it.
         let mut p = policy();
         let other = TransportIdentity::parse(P2).expect("valid identity");
-        p.record_identity_mismatch(&peer(), A1, 0);
+        assert!(
+            p.record_identity_mismatch(&peer(), A1, 0),
+            "the quarantine must actually be recorded"
+        );
         assert!(
             p.admit(
                 &request_for(&other, A1),
@@ -840,7 +869,10 @@ mod tests {
     #[test]
     fn a_success_clears_the_peer_but_not_unrelated_quarantines() {
         let mut p = policy();
-        p.record_identity_mismatch(&peer(), A1, 0);
+        assert!(
+            p.record_identity_mismatch(&peer(), A1, 0),
+            "the quarantine must actually be recorded"
+        );
         p.record_address_failure(&peer(), A2, 0, 30_000);
         assert!(p.peer(&peer()).is_some());
 
@@ -870,7 +902,10 @@ mod tests {
     #[test]
     fn quarantined_addresses_are_omitted_from_the_preference_list() {
         let mut p = policy();
-        p.record_identity_mismatch(&peer(), A1, 0);
+        assert!(
+            p.record_identity_mismatch(&peer(), A1, 0),
+            "the quarantine must actually be recorded"
+        );
         let order = p.preferred_addresses(&peer(), &[A1.to_owned(), A2.to_owned()], 10);
         assert_eq!(order, vec![A2.to_owned()]);
         // And return once the quarantine lapses.
@@ -908,7 +943,10 @@ mod tests {
         let mut p = ConnectionPolicy::new(64, 64);
         p.max_addresses = 8;
 
-        p.record_identity_mismatch(&peer(), "/ip4/10.0.0.1/tcp/1", 1_000);
+        assert!(
+            p.record_identity_mismatch(&peer(), "/ip4/10.0.0.1/tcp/1", 1_000),
+            "the quarantine must actually be recorded"
+        );
         assert!(
             !p.address(&peer(), "/ip4/10.0.0.1/tcp/1")
                 .expect("quarantined")
@@ -942,7 +980,10 @@ mod tests {
         let mut p = ConnectionPolicy::new(64, 64);
         p.max_addresses = 4;
         for i in 0..4 {
-            p.record_identity_mismatch(&peer(), &format!("/ip4/10.0.0.9/tcp/{i}"), 1_000);
+            assert!(
+                p.record_identity_mismatch(&peer(), &format!("/ip4/10.0.0.9/tcp/{i}"), 1_000),
+                "the quarantine must actually be recorded"
+            );
         }
         assert_eq!(p.address_entries(), 4);
 
@@ -966,12 +1007,88 @@ mod tests {
     }
 
     #[test]
+    fn a_full_table_of_live_suppressions_stops_growing() {
+        // The bound is the point of the map, and it was enforced
+        // everywhere except the one path that mattered: the eviction
+        // result was computed and then discarded, so a failure with
+        // nothing evictable was appended anyway.
+        //
+        // Enough concurrent failures fill the table with live punitive
+        // entries, and from then on every further failed address grows a
+        // structure that is documented as bounded — which is precisely
+        // the shape a remote peer would drive.
+        let mut p = ConnectionPolicy::new(64, 64);
+        p.max_addresses = 4;
+        for i in 0..4 {
+            assert!(
+                p.record_identity_mismatch(&peer(), &format!("/ip4/10.0.0.9/tcp/{i}"), 1_000),
+                "the table fills with live quarantines"
+            );
+        }
+        assert_eq!(p.address_entries(), 4);
+
+        // Every entry is punitive and live, so nothing can be evicted.
+        for i in 0..32 {
+            let _ =
+                p.record_address_failure(&peer(), &format!("/ip4/10.0.0.8/tcp/{i}"), 1_100, 500);
+        }
+        assert_eq!(
+            p.address_entries(),
+            4,
+            "a failure that cannot evict must not be recorded either"
+        );
+
+        for i in 0..32 {
+            assert!(
+                !p.record_identity_mismatch(&peer(), &format!("/ip4/10.0.0.7/tcp/{i}"), 1_100),
+                "a quarantine that cannot be held is reported, not silently inserted"
+            );
+        }
+        assert_eq!(p.address_entries(), 4, "still bounded");
+
+        // The suppressions the table already holds are intact — refusing
+        // is what protects them.
+        for i in 0..4 {
+            let held = p
+                .address(&peer(), &format!("/ip4/10.0.0.9/tcp/{i}"))
+                .expect("the original quarantines survive");
+            assert!(!held.is_dialable_at(1_100));
+        }
+    }
+
+    #[test]
+    fn peer_backoff_still_advances_when_the_address_table_is_full() {
+        // Declining to record the ADDRESS must not also cost the
+        // peer-level suppression: the dial did fail, and the return
+        // value is what a caller uses to learn the peer is now backed
+        // off.
+        let mut p = ConnectionPolicy::new(64, 64);
+        p.max_addresses = 2;
+        for i in 0..2 {
+            assert!(
+                p.record_identity_mismatch(&peer(), &format!("/ip4/10.0.0.9/tcp/{i}"), 1_000),
+                "fill with live quarantines"
+            );
+        }
+
+        let advanced = p.record_address_failure(&peer(), "/ip4/10.0.0.5/tcp/1", 1_100, 500);
+        assert!(
+            advanced,
+            "no eligible known-good address remains, so the peer backs off"
+        );
+        assert_eq!(p.address_entries(), 2, "and the table did not grow");
+    }
+
+    #[test]
     fn pruning_drops_idle_entries_and_keeps_punitive_ones() {
         let mut p = ConnectionPolicy::new(64, 64);
         p.idle_ttl_ms = 1_000;
 
         p.record_success(&peer(), "/ip4/10.0.0.1/tcp/1", 0);
-        p.record_identity_mismatch(&peer(), "/ip4/10.0.0.2/tcp/1", 0);
+        assert!(
+            p.record_identity_mismatch(&peer(), "/ip4/10.0.0.2/tcp/1", 0),
+            "the quarantine must actually be recorded"
+        );
         assert_eq!(p.address_entries(), 2);
 
         // Well past the idle TTL but inside the quarantine window.
