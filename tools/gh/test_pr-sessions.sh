@@ -176,6 +176,42 @@ default_pr_list() {
     ]')"
 }
 
+# CLAUDE.md §9 puts no vocabulary on <type>. These are the shapes the
+# repository actually uses and an allow-list of conventional-commit words
+# silently dropped: `stage-4`, `conformance`, `spike-006`.
+#
+# "Silently" is the defect. The rows did not appear as unconventional,
+# they vanished — so `/unresolved` answered "nothing outstanding" while
+# nine PRs and an unanswered P1 sat outside the filter.
+typed_pr_list() {
+    write_pr_list "$(jq -n --arg me "$ME" '[
+      {number: 40, state: "MERGED", headRefName: ($me + "/stage-4/libp2p-substrate"),
+       title: "substrate", updatedAt: "2026-08-09T10:00:00Z", isDraft: false,
+       mergedAt: "2026-08-09T11:00:00Z"},
+      {number: 39, state: "MERGED", headRefName: ($me + "/conformance/negative-boundary"),
+       title: "conformance", updatedAt: "2026-08-08T10:00:00Z", isDraft: false,
+       mergedAt: "2026-08-08T11:00:00Z"},
+      {number: 38, state: "OPEN", headRefName: ($me + "/spike-006/identity"),
+       title: "spike", updatedAt: "2026-08-07T10:00:00Z", isDraft: false, mergedAt: null},
+      {number: 37, state: "OPEN", headRefName: "no-slashes-at-all",
+       title: "unattributable", updatedAt: "2026-08-06T10:00:00Z", isDraft: false,
+       mergedAt: null}
+    ]')"
+}
+
+typed_graphql() {
+    write_graphql "$(jq -n '{
+      data: {repository: {
+        p40: {number: 40, author: {login: "andreabenetton"},
+              reviewThreads: {nodes: [
+                {isResolved: false, comments: {nodes: [{author: {login: "some-reviewer"}}]}}
+              ]}},
+        p39: {number: 39, author: {login: "andreabenetton"}, reviewThreads: {nodes: []}},
+        p38: {number: 38, author: {login: "andreabenetton"}, reviewThreads: {nodes: []}}
+      }}
+    }')"
+}
+
 # #30 — one unresolved thread, reviewer spoke last  → "1!"
 # #29 — one unresolved thread, PR AUTHOR spoke last → "1"  (no bang)
 # #28 — threads exist but all resolved              → "-"
@@ -460,6 +496,29 @@ truncated_graphql
 run /unresolved
 assert_contains "  and /unresolved KEEPS the row" "#30"
 default_graphql
+
+echo "pr-sessions: a <type> outside the conventional-commit vocabulary is still a session branch"
+typed_pr_list; typed_graphql
+run
+assert_rc           "exits 0" 0
+assert_contains     "shows a stage-N branch"      "#40"
+assert_contains     "shows a conformance branch"  "#39"
+assert_contains     "shows a spike-NNN branch"    "#38"
+assert_contains     "splits session from work"    "stage-4/libp2p-substrate"
+
+echo "pr-sessions: /unresolved finds a thread on a stage-N branch"
+typed_pr_list; typed_graphql
+run /unresolved
+assert_rc           "exits 0" 0
+assert_contains     "the stage-N PR is listed"    "#40"
+assert_not_contains "the clean one is not"        "#39"
+
+echo "pr-sessions: an unattributable branch is reported, not silently dropped"
+typed_pr_list; typed_graphql
+run
+assert_rc       "exits 0" 0
+assert_contains "says how many could not be scoped" "cannot be scoped"
+assert_not_contains "and does not list it"          "#37"
 
 echo
 if [[ "$failures" -eq 0 ]]; then
