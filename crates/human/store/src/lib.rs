@@ -48,8 +48,8 @@ pub mod schema;
 pub mod store;
 
 pub use records::{
-    AppMessageId, InboundOrigin, NewInbound, NewOutbound, OutboundDestination, PendingOutbound,
-    ReadEphemeral, RowId, StoredInbound,
+    AppMessageId, BackupCursor, BackupTable, Cursor, InboundOrigin, NewInbound, NewOutbound,
+    OutboundDestination, Page, PageLimits, PendingOutbound, ReadEphemeral, RowId, StoredInbound,
 };
 pub use schema::{REQUIRED_TABLES, SCHEMA_VERSION};
 pub use store::{HumanStore, StoreOptions};
@@ -76,6 +76,17 @@ pub enum StoreError {
     MalformedAppMessageId {
         /// What was supplied.
         got: String,
+    },
+    /// A convenience read found more rows than it will materialize.
+    ///
+    /// The unpaged accessors exist for the small case and say so. A
+    /// corpus large enough to need a second page must be walked with the
+    /// paged API, because turning a bounded per-message design into an
+    /// unbounded one-call allocation is exactly what those accessors
+    /// would otherwise do — silently, and only in the field.
+    TooManyRows {
+        /// The paged accessor to use instead.
+        use_instead: &'static str,
     },
     /// A file or directory holding message content is reachable by
     /// someone other than its owner.
@@ -150,6 +161,10 @@ impl core::fmt::Display for StoreError {
             Self::MalformedAppMessageId { got } => write!(
                 f,
                 "app_message_id must be 32 lowercase hex characters, got {got:?}"
+            ),
+            Self::TooManyRows { use_instead } => write!(
+                f,
+                "more rows than this accessor materializes; walk them with {use_instead}"
             ),
             Self::PermissionsTooOpen { what, mode } => write!(
                 f,

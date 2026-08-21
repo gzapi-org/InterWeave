@@ -24,8 +24,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::StoreError;
 use crate::records::{
-    AppMessageId, InboundOrigin, NewInbound, NewOutbound, OutboundDestination, PendingOutbound,
-    ReadEphemeral, RowId, StoredInbound,
+    AppMessageId, BackupCursor, BackupTable, Cursor, InboundOrigin, NewInbound, NewOutbound,
+    OutboundDestination, Page, PageLimits, PendingOutbound, ReadEphemeral, RowId, StoredInbound,
 };
 use crate::schema::{migrate, verify_shape};
 
@@ -347,13 +347,38 @@ impl HumanStore {
     /// Returns a storage error, or [`StoreError::Corrupt`] if a stored
     /// row no longer parses.
     pub fn pending_outbound(&self) -> Result<Vec<PendingOutbound>, StoreError> {
+        let page = self.pending_outbound_page(None, PageLimits::default())?;
+        if page.next.is_some() {
+            return Err(StoreError::TooManyRows {
+                use_instead: "pending_outbound_page",
+            });
+        }
+        Ok(page.items)
+    }
+
+    /// One page of pending outbound, resuming after `after`.
+    ///
+    /// # Errors
+    /// Returns a storage error, or [`StoreError::Corrupt`] if a stored
+    /// row no longer parses.
+    pub fn pending_outbound_page(
+        &self,
+        after: Option<Cursor>,
+        limits: PageLimits,
+    ) -> Result<Page<PendingOutbound>, StoreError> {
+        let (sort_key, row_id) = cursor_bounds(after);
+        // One past the page, so a full page can tell "exactly this many"
+        // from "more to come" without a second query.
+        let fetch = i64::try_from(limits.max_records.saturating_add(1)).unwrap_or(i64::MAX);
         let mut stmt = self.conn.prepare(
             "SELECT row_id, app_message_id, destination_peer, destination_endpoint, channel_id,
                     media_type, payload, created_at, last_attempt_at, attempts
                FROM pending_outbound
-              ORDER BY created_at, row_id",
+              WHERE (created_at, row_id) > (?1, ?2)
+              ORDER BY created_at, row_id
+              LIMIT ?3",
         )?;
-        let rows = stmt.query_map([], |r| {
+        let rows = stmt.query_map(params![sort_key, row_id, fetch], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
@@ -369,9 +394,22 @@ impl HumanStore {
         })?;
 
         let mut out = Vec::new();
+        let mut bytes = 0usize;
+        let mut more = false;
         for row in rows {
             let (id, amid, peer, endpoint, channel, media_type, payload, created, last, attempts) =
                 row?;
+            // The first row of a page always goes in, even alone over
+            // budget: stalling the enumeration on one large message is
+            // worse than one page being one message too big.
+            if !out.is_empty()
+                && (out.len() >= limits.max_records
+                    || bytes.saturating_add(payload.len()) > limits.max_bytes)
+            {
+                more = true;
+                break;
+            }
+            bytes = bytes.saturating_add(payload.len());
             let destination = match channel {
                 Some(c) => OutboundDestination::Broadcast(
                     ChannelId::parse(c).map_err(|e| StoreError::Corrupt(e.to_string()))?,
@@ -397,7 +435,13 @@ impl HumanStore {
                 attempts: u32::try_from(attempts).unwrap_or(u32::MAX),
             });
         }
-        Ok(out)
+        Ok(Page {
+            next: more.then(|| Cursor {
+                sort_key: out.last().map_or(0, |r| r.created_at),
+                row_id: out.last().map_or(RowId::new(0), |r| r.row_id),
+            }),
+            items: out,
+        })
     }
 
     // ---------------------------------------------------------------
@@ -644,7 +688,20 @@ impl HumanStore {
     /// Returns a storage error, or [`StoreError::Corrupt`] for an
     /// unparseable stored row.
     pub fn unread_inbound(&self) -> Result<Vec<StoredInbound>, StoreError> {
-        self.read_inbound_table("unread_inbound")
+        self.all_of("unread_inbound", "unread_inbound_page")
+    }
+
+    /// One page of unread inbound, resuming after `after`.
+    ///
+    /// # Errors
+    /// Returns a storage error, or [`StoreError::Corrupt`] for an
+    /// unparseable stored row.
+    pub fn unread_inbound_page(
+        &self,
+        after: Option<Cursor>,
+        limits: PageLimits,
+    ) -> Result<Page<StoredInbound>, StoreError> {
+        self.read_inbound_table("unread_inbound", after, limits)
     }
 
     /// Every inbound message the receiver kept, oldest first.
@@ -653,25 +710,64 @@ impl HumanStore {
     /// Returns a storage error, or [`StoreError::Corrupt`] for an
     /// unparseable stored row.
     pub fn kept_inbound(&self) -> Result<Vec<StoredInbound>, StoreError> {
-        self.read_inbound_table("kept_inbound")
+        self.all_of("kept_inbound", "kept_inbound_page")
     }
 
-    fn read_inbound_table(&self, table: &str) -> Result<Vec<StoredInbound>, StoreError> {
+    /// One page of kept inbound, resuming after `after`.
+    ///
+    /// # Errors
+    /// Returns a storage error, or [`StoreError::Corrupt`] for an
+    /// unparseable stored row.
+    pub fn kept_inbound_page(
+        &self,
+        after: Option<Cursor>,
+        limits: PageLimits,
+    ) -> Result<Page<StoredInbound>, StoreError> {
+        self.read_inbound_table("kept_inbound", after, limits)
+    }
+
+    /// The whole table, for the small case, refusing a second page.
+    fn all_of(
+        &self,
+        table: &str,
+        use_instead: &'static str,
+    ) -> Result<Vec<StoredInbound>, StoreError> {
+        let page = self.read_inbound_table(table, None, PageLimits::default())?;
+        if page.next.is_some() {
+            return Err(StoreError::TooManyRows { use_instead });
+        }
+        Ok(page.items)
+    }
+
+    fn read_inbound_table(
+        &self,
+        table: &str,
+        after: Option<Cursor>,
+        limits: PageLimits,
+    ) -> Result<Page<StoredInbound>, StoreError> {
         // `table` is one of two literals chosen by this module, never
         // caller input; SQLite does not bind identifiers.
         let kept = table == "kept_inbound";
         let sql = if kept {
             "SELECT row_id, app_message_id, source_peer, source_endpoint, channel_id,
                     media_type, payload, received_at, read_at, kept_at
-               FROM kept_inbound ORDER BY received_at, row_id"
+               FROM kept_inbound
+              WHERE (received_at, row_id) > (?1, ?2)
+              ORDER BY received_at, row_id
+              LIMIT ?3"
         } else {
             "SELECT row_id, app_message_id, source_peer, source_endpoint, channel_id,
                     media_type, payload, received_at, NULL, NULL
-               FROM unread_inbound ORDER BY received_at, row_id"
+               FROM unread_inbound
+              WHERE (received_at, row_id) > (?1, ?2)
+              ORDER BY received_at, row_id
+              LIMIT ?3"
         };
 
+        let (sort_key, row_id) = cursor_bounds(after);
+        let fetch = i64::try_from(limits.max_records.saturating_add(1)).unwrap_or(i64::MAX);
         let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt.query_map([], |r| {
+        let rows = stmt.query_map(params![sort_key, row_id, fetch], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
@@ -687,9 +783,19 @@ impl HumanStore {
         })?;
 
         let mut out = Vec::new();
+        let mut bytes = 0usize;
+        let mut more = false;
         for row in rows {
             let (id, amid, peer, endpoint, channel, media_type, payload, received, read, keptat) =
                 row?;
+            if !out.is_empty()
+                && (out.len() >= limits.max_records
+                    || bytes.saturating_add(payload.len()) > limits.max_bytes)
+            {
+                more = true;
+                break;
+            }
+            bytes = bytes.saturating_add(payload.len());
             out.push(StoredInbound {
                 row_id: RowId::new(id),
                 app_message_id: AppMessageId::parse(amid)?,
@@ -712,7 +818,13 @@ impl HumanStore {
                 kept_at: keptat.map(|v| u64::try_from(v).unwrap_or(0)),
             });
         }
-        Ok(out)
+        Ok(Page {
+            next: more.then(|| Cursor {
+                sort_key: out.last().map_or(0, |r| r.received_at),
+                row_id: out.last().map_or(RowId::new(0), |r| r.row_id),
+            }),
+            items: out,
+        })
     }
 
     // ---------------------------------------------------------------
@@ -733,6 +845,56 @@ impl HumanStore {
         let mut out = self.unread_inbound()?;
         out.extend(self.kept_inbound()?);
         Ok(out)
+    }
+
+    /// One page of backup-eligible content, resuming after `after`.
+    ///
+    /// Walks unread and then kept. The cursor names which table it is in
+    /// because the two have independent row-id spaces, so a position on
+    /// its own would let a resumed backup duplicate or skip.
+    ///
+    /// Pending outbound is deliberately absent, for the reason
+    /// [`Self::backup_eligible_content`] gives.
+    ///
+    /// # Errors
+    /// Returns a storage error, or [`StoreError::Corrupt`] for an
+    /// unparseable stored row.
+    pub fn backup_eligible_page(
+        &self,
+        after: Option<BackupCursor>,
+        limits: PageLimits,
+    ) -> Result<Page<StoredInbound, BackupCursor>, StoreError> {
+        let position = after.unwrap_or(BackupCursor {
+            table: BackupTable::Unread,
+            within: None,
+        });
+
+        match position.table {
+            BackupTable::Unread => {
+                let page = self.unread_inbound_page(position.within, limits)?;
+                Ok(Page {
+                    items: page.items,
+                    // Exhausting unread hands back the START of kept
+                    // rather than `None`: reporting the enumeration
+                    // finished halfway is how a backup silently loses the
+                    // kept half.
+                    next: Some(BackupCursor {
+                        table: page.next.map_or(BackupTable::Kept, |_| BackupTable::Unread),
+                        within: page.next,
+                    }),
+                })
+            }
+            BackupTable::Kept => {
+                let page = self.kept_inbound_page(position.within, limits)?;
+                Ok(Page {
+                    items: page.items,
+                    next: page.next.map(|within| BackupCursor {
+                        table: BackupTable::Kept,
+                        within: Some(within),
+                    }),
+                })
+            }
+        }
     }
 
     fn reject_if_degraded(&self) -> Result<(), StoreError> {
@@ -798,6 +960,19 @@ fn parse_media_type(stored: Option<String>) -> Result<Option<MediaType>, StoreEr
         .map(MediaType::parse)
         .transpose()
         .map_err(|e| StoreError::Corrupt(e.to_string()))
+}
+
+/// The `(sort_key, row_id)` a cursor resumes after.
+///
+/// `None` starts before every row. `-1` rather than `0` because a
+/// timestamp of zero is legal and `> (0, 0)` would skip it.
+fn cursor_bounds(after: Option<Cursor>) -> (i64, i64) {
+    after.map_or((-1, -1), |c| {
+        (
+            i64::try_from(c.sort_key).unwrap_or(i64::MAX),
+            c.row_id.get(),
+        )
+    })
 }
 
 fn check_payload(payload: &[u8]) -> Result<(), StoreError> {

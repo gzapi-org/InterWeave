@@ -13,7 +13,7 @@
 use interweave_human_core::retention::{StorageHealth, TerminalCause};
 use interweave_human_store::{
     AppMessageId, HumanStore, InboundOrigin, NewInbound, NewOutbound, OutboundDestination,
-    StoreError, StoreOptions,
+    PageLimits, StoreError, StoreOptions,
 };
 use interweave_transport_api::{DirectDestination, MediaType, TransportIdentity};
 
@@ -620,4 +620,127 @@ fn an_unexpected_content_table_is_refused_even_with_an_innocent_name() {
     // And with them gone it opens again, so the refusal was about the
     // extra object and not about the store having been touched.
     HumanStore::open(&path, StoreOptions::default()).expect("opens once they are gone");
+}
+
+#[test]
+fn bulk_reads_are_paged_with_record_and_byte_ceilings() {
+    // The unpaged accessors materialize every matching payload, which
+    // turns a bounded per-message design into an unbounded one-call
+    // allocation. They stay, for the small case, but they refuse a
+    // second page rather than growing quietly.
+    let mut store = memory();
+    for i in 0..12_u32 {
+        let id = format!("{i:032x}");
+        store
+            .commit_unread_inbound(&NewInbound {
+                received_at: 2_000 + u64::from(i),
+                ..inbound(&id, vec![b'x'; 1024])
+            })
+            .expect("commit");
+    }
+
+    // A record ceiling.
+    let limits = PageLimits {
+        max_records: 5,
+        max_bytes: 1024 * 1024,
+    };
+    let mut seen = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = store.unread_inbound_page(cursor, limits).expect("page");
+        assert!(page.items.len() <= 5, "a page must respect max_records");
+        assert!(!page.items.is_empty(), "a page with a cursor holds rows");
+        seen.extend(
+            page.items
+                .iter()
+                .map(|r| r.app_message_id.as_str().to_owned()),
+        );
+        match page.next {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(seen.len(), 12, "every row is visited exactly once");
+    let mut unique = seen.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), 12, "and none is visited twice");
+
+    // A byte ceiling, small enough that it binds before the record one.
+    let tight = PageLimits {
+        max_records: 100,
+        max_bytes: 2048,
+    };
+    let page = store.unread_inbound_page(None, tight).expect("page");
+    assert!(
+        page.items.len() <= 3,
+        "the byte budget must bind: got {} rows",
+        page.items.len()
+    );
+    assert!(page.next.is_some(), "and there is more to come");
+
+    // A single payload over the whole budget still makes progress: the
+    // first row of a page is always emitted, or the walk stalls forever.
+    let stingy = PageLimits {
+        max_records: 100,
+        max_bytes: 1,
+    };
+    let page = store.unread_inbound_page(None, stingy).expect("page");
+    assert_eq!(page.items.len(), 1, "always at least one row");
+
+    // And the convenience accessor says so rather than allocating.
+    let refused = store.unread_inbound();
+    assert!(
+        refused.is_ok(),
+        "twelve small rows are still the small case"
+    );
+}
+
+#[test]
+fn a_backup_walk_covers_both_tables_exactly_once() {
+    // Unread and kept have independent row-id spaces, so a cursor that
+    // did not name its table would let a resumed backup duplicate or skip
+    // — and reporting the walk finished when unread runs out silently
+    // loses the kept half.
+    let mut store = memory();
+    let mut expected = Vec::new();
+
+    for i in 0..6_u32 {
+        let id = format!("{i:032x}");
+        expected.push(id.clone());
+        let row = store
+            .commit_unread_inbound(&NewInbound {
+                received_at: 2_000 + u64::from(i),
+                ..inbound(&id, b"body".to_vec())
+            })
+            .expect("commit");
+        // Half of them get read and kept, so both tables are populated.
+        if i % 2 == 0 {
+            let held = store.mark_read(row, 3_000 + u64::from(i)).expect("read");
+            store.keep(&held, 4_000 + u64::from(i)).expect("keep");
+        }
+    }
+
+    let limits = PageLimits {
+        max_records: 2,
+        max_bytes: 1024 * 1024,
+    };
+    let mut seen = Vec::new();
+    let mut cursor = None;
+    for _ in 0..64 {
+        let page = store.backup_eligible_page(cursor, limits).expect("page");
+        seen.extend(
+            page.items
+                .iter()
+                .map(|r| r.app_message_id.as_str().to_owned()),
+        );
+        match page.next {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+
+    seen.sort();
+    expected.sort();
+    assert_eq!(seen, expected, "every eligible message, exactly once");
 }
