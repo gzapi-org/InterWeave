@@ -36,6 +36,9 @@ pub const MAX_ADDRESSES: usize = 64;
 pub const MAX_PROTOCOL_OBSERVATIONS: usize = 16;
 /// Maximum length of one opaque address string.
 pub const MAX_ADDRESS_BYTES: usize = 256;
+
+/// Longest protocol identifier, in bytes.
+pub const MAX_PROTOCOL_ID_BYTES: usize = 256;
 /// Maximum length of a provider name.
 pub const MAX_PROVIDER_NAME_BYTES: usize = 64;
 
@@ -71,6 +74,16 @@ pub enum DiscoveryError {
         /// When it claims to expire.
         expires_at: u64,
     },
+    /// A protocol identifier carried a byte outside printable ASCII.
+    ///
+    /// The schema says `^[\x20-\x7E]+$` and means it: these strings are
+    /// compared exactly and never parsed, so control bytes and arbitrary
+    /// UTF-8 buy nothing and give a provider room to smuggle content
+    /// through a field nothing inspects.
+    NonPrintableProtocolId {
+        /// Byte offset of the first offending byte.
+        at: usize,
+    },
 }
 
 impl core::fmt::Display for DiscoveryError {
@@ -82,6 +95,10 @@ impl core::fmt::Display for DiscoveryError {
             Self::InvalidLength { field, got, max } => {
                 write!(f, "{field} is {got} bytes; the limit is 1..={max}")
             }
+            Self::NonPrintableProtocolId { at } => write!(
+                f,
+                "a protocol_id byte at offset {at} is outside printable ASCII"
+            ),
             Self::ExpiryBeforeObservation {
                 observed_at,
                 expires_at,
@@ -102,6 +119,11 @@ impl core::error::Error for DiscoveryError {}
 /// answer, and a routing decision that consulted this instead would let a
 /// peer advertise its way into a role.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+// CLOSED, like the candidate that carries it. The item schema declares
+// `additionalProperties: false`, and an observation is exactly the
+// bounded advisory record a provider would be tempted to hang an
+// EndpointId or a role off.
+#[serde(deny_unknown_fields)]
 pub struct ProtocolObservation {
     /// The exact protocol string observed, e.g. an Identify entry.
     pub protocol_id: String,
@@ -154,7 +176,16 @@ pub struct CandidatePeer {
     )]
     pub expires_at: Option<u64>,
     /// Bounded advisory protocol facts.
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    ///
+    /// Judged as it arrived, for the same reason `addresses` is: the
+    /// `uniqueItems` and `maxItems` in the schema are properties of the
+    /// ARRAY, and collecting into a set during deserialization erases
+    /// both before anything can check them.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeSet::is_empty",
+        deserialize_with = "wire_observation_set"
+    )]
     pub protocol_observations: BTreeSet<ProtocolObservation>,
 }
 
@@ -180,6 +211,34 @@ where
     let set: BTreeSet<String> = items.into_iter().collect();
     if set.len() != count {
         return Err(D::Error::custom("addresses must be unique on the wire"));
+    }
+    Ok(set)
+}
+
+/// Read the wire array of observations, judge it, then collect.
+///
+/// The mirror of [`wire_address_set`], and needed for the same reason:
+/// seventeen observations or two identical ones both become a set that
+/// no longer resembles what was sent, and every later check then runs
+/// against the wrong collection.
+fn wire_observation_set<'de, D>(deserializer: D) -> Result<BTreeSet<ProtocolObservation>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    let items = Vec::<ProtocolObservation>::deserialize(deserializer)?;
+    if items.len() > MAX_PROTOCOL_OBSERVATIONS {
+        return Err(D::Error::custom(format!(
+            "at most {MAX_PROTOCOL_OBSERVATIONS} protocol observations, got {}",
+            items.len()
+        )));
+    }
+    let count = items.len();
+    let set: BTreeSet<ProtocolObservation> = items.into_iter().collect();
+    if set.len() != count {
+        return Err(D::Error::custom(
+            "protocol observations must be unique on the wire",
+        ));
     }
     Ok(set)
 }
@@ -228,6 +287,26 @@ impl CandidatePeer {
                 got: self.protocol_observations.len(),
                 max: MAX_PROTOCOL_OBSERVATIONS,
             });
+        }
+        // Each identifier, not just how many there are. Checking only the
+        // count let a provider store sixteen strings of any length and any
+        // byte content in another node's bounded cache — the cap was
+        // enforced on the collection and on nothing inside it.
+        for o in &self.protocol_observations {
+            if o.protocol_id.is_empty() || o.protocol_id.len() > MAX_PROTOCOL_ID_BYTES {
+                return Err(DiscoveryError::InvalidLength {
+                    field: "protocol_observations[].protocol_id",
+                    got: o.protocol_id.len(),
+                    max: MAX_PROTOCOL_ID_BYTES,
+                });
+            }
+            if let Some(at) = o
+                .protocol_id
+                .bytes()
+                .position(|b| !(0x20..=0x7E).contains(&b))
+            {
+                return Err(DiscoveryError::NonPrintableProtocolId { at });
+            }
         }
         if self.source.is_empty() || self.source.len() > MAX_PROVIDER_NAME_BYTES {
             return Err(DiscoveryError::InvalidLength {
@@ -416,6 +495,104 @@ mod tests {
     #[test]
     fn a_well_formed_candidate_validates() {
         assert_eq!(candidate().validate(), Ok(()));
+    }
+
+    fn observation(protocol_id: &str) -> ProtocolObservation {
+        ProtocolObservation {
+            protocol_id: protocol_id.to_owned(),
+            supported: true,
+            observed_at: 1_000,
+        }
+    }
+
+    #[test]
+    fn every_protocol_identifier_is_bounded_not_just_their_number() {
+        // The cap was enforced on the collection and on nothing inside
+        // it, so a provider could park sixteen strings of any length in
+        // another node's bounded cache and pass validation.
+        let mut c = candidate();
+        c.protocol_observations = [observation(&"x".repeat(MAX_PROTOCOL_ID_BYTES + 1))]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            c.validate(),
+            Err(DiscoveryError::InvalidLength {
+                field: "protocol_observations[].protocol_id",
+                got: MAX_PROTOCOL_ID_BYTES + 1,
+                max: MAX_PROTOCOL_ID_BYTES,
+            })
+        );
+
+        let mut empty = candidate();
+        empty.protocol_observations = [observation("")].into_iter().collect();
+        assert!(matches!(
+            empty.validate(),
+            Err(DiscoveryError::InvalidLength { got: 0, .. })
+        ));
+
+        let mut ok = candidate();
+        ok.protocol_observations = [observation("/interweave/direct/2.0.0")]
+            .into_iter()
+            .collect();
+        assert_eq!(ok.validate(), Ok(()));
+    }
+
+    #[test]
+    fn a_protocol_identifier_outside_printable_ascii_is_refused() {
+        // These strings are compared exactly and never parsed, so a
+        // control byte or arbitrary UTF-8 buys a provider nothing except
+        // room to carry content through a field nothing inspects.
+        for (id, at) in [("\u{1}nope", 0), ("ok\u{7f}", 2), ("caf\u{e9}", 3)] {
+            let mut c = candidate();
+            c.protocol_observations = [observation(id)].into_iter().collect();
+            assert_eq!(
+                c.validate(),
+                Err(DiscoveryError::NonPrintableProtocolId { at }),
+                "{id:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn observations_are_judged_as_the_array_that_arrived() {
+        // `uniqueItems` and `maxItems` are properties of the ARRAY.
+        // Collecting into a set first destroys the duplicate and shrinks
+        // the count, so both checks then run against a collection that
+        // no longer resembles what was sent.
+        let one = r#"{"protocol_id":"a","supported":true,"observed_at":1}"#;
+        let dup = format!(
+            r#"{{"peer_id":"{P1}","addresses":["/a"],"source":"s","observed_at":1,"protocol_observations":[{one},{one}]}}"#
+        );
+        assert!(
+            serde_json::from_str::<CandidatePeer>(&dup).is_err(),
+            "a duplicate observation must not collapse into a valid set"
+        );
+
+        let many: Vec<String> = (0..=MAX_PROTOCOL_OBSERVATIONS)
+            .map(|i| format!(r#"{{"protocol_id":"p{i}","supported":true,"observed_at":1}}"#))
+            .collect();
+        let over = format!(
+            r#"{{"peer_id":"{P1}","addresses":["/a"],"source":"s","observed_at":1,"protocol_observations":[{}]}}"#,
+            many.join(",")
+        );
+        assert!(
+            serde_json::from_str::<CandidatePeer>(&over).is_err(),
+            "more observations than the cap must be refused on the wire"
+        );
+    }
+
+    #[test]
+    fn an_observation_is_a_closed_object() {
+        // The item schema says `additionalProperties: false`, and an
+        // observation is exactly the bounded advisory record someone
+        // would hang an EndpointId or a role off.
+        let doc = format!(
+            r#"{{"peer_id":"{P1}","addresses":["/a"],"source":"s","observed_at":1,"protocol_observations":[{{"protocol_id":"a","supported":true,"observed_at":1,"endpoint":"human"}}]}}"#
+        );
+        assert!(
+            serde_json::from_str::<CandidatePeer>(&doc).is_err(),
+            "an unknown property on an observation must be refused"
+        );
     }
 
     #[test]
