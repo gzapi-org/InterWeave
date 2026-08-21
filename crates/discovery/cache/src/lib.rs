@@ -31,8 +31,8 @@ pub mod record;
 
 pub use cache::{CacheHealth, FORMAT_VERSION, PeerCache, SOURCE};
 pub use limits::{
-    CacheLimits, DEFAULT_TTL_MS, MAX_ADDRESSES_PER_PEER, MAX_CAPABILITIES_PER_PEER, MAX_PEERS,
-    WRITE_DEBOUNCE_MS,
+    CacheLimits, DEFAULT_TTL_MS, MAX_ADDRESS_BYTES, MAX_ADDRESSES_PER_PEER, MAX_CACHE_FILE_BYTES,
+    MAX_CAPABILITIES_PER_PEER, MAX_LABEL_BYTES, MAX_PEERS, WRITE_DEBOUNCE_MS,
 };
 pub use record::{AddressObservation, PeerRecord, ProtocolCapabilityObservation};
 

@@ -26,7 +26,7 @@ use interweave_transport_api::TransportIdentity;
 use serde::{Deserialize, Serialize};
 
 use crate::CacheError;
-use crate::limits::CacheLimits;
+use crate::limits::{CacheLimits, MAX_ADDRESS_BYTES, MAX_CACHE_FILE_BYTES, MAX_LABEL_BYTES};
 use crate::record::{AddressObservation, PeerRecord, ProtocolCapabilityObservation};
 
 /// The provider name this cache reports on every candidate it emits.
@@ -71,6 +71,95 @@ pub struct PeerCache {
     last_write_ms: Option<u64>,
 }
 
+/// Read at most `limit` bytes of UTF-8 from `path`.
+///
+/// `Ok(None)` when the file is absent. An error when it is larger than
+/// `limit` or is not UTF-8 — both are "this is not the format", which
+/// for disposable advisory state means quarantine rather than repair.
+fn read_capped(path: &Path, limit: u64) -> Result<Option<String>, std::io::Error> {
+    use std::io::Read as _;
+
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    // One byte past the limit is all it takes to know it is over, and it
+    // is the only byte past the limit this ever holds.
+    let mut buf = Vec::new();
+    file.take(limit.saturating_add(1)).read_to_end(&mut buf)?;
+    if buf.len() as u64 > limit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("larger than the {limit}-byte ceiling for this format"),
+        ));
+    }
+    String::from_utf8(buf)
+        .map(Some)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+}
+
+/// Whether one on-disk record is inside the bounded format.
+///
+/// Returns the reason it is not, for the quarantine message. Checks the
+/// things a `String`/`Vec` shape cannot: a canonical PeerId, bounded
+/// labels, the per-peer counts, and timestamps that do not contradict
+/// each other.
+fn validate_record(record: &PeerRecord, limits: CacheLimits) -> Result<(), String> {
+    let id = &record.peer_id;
+    TransportIdentity::parse(id.clone())
+        .map_err(|e| format!("peer id {id:?} is not canonical: {e}"))?;
+
+    if record.addresses.len() > limits.max_addresses_per_peer {
+        return Err(format!(
+            "peer {id} has {} addresses; the cache retains {}",
+            record.addresses.len(),
+            limits.max_addresses_per_peer
+        ));
+    }
+    for a in &record.addresses {
+        if a.address.is_empty() || a.address.len() > MAX_ADDRESS_BYTES {
+            return Err(format!(
+                "peer {id} has a {}-byte address; the limit is 1..={MAX_ADDRESS_BYTES}",
+                a.address.len()
+            ));
+        }
+    }
+
+    if record.capabilities.len() > limits.max_capabilities_per_peer {
+        return Err(format!(
+            "peer {id} has {} capability observations; the cache retains {}",
+            record.capabilities.len(),
+            limits.max_capabilities_per_peer
+        ));
+    }
+    for c in &record.capabilities {
+        for (what, value) in [
+            ("protocol_family", &c.protocol_family),
+            ("network_hash", &c.network_hash),
+            ("role", &c.role),
+        ] {
+            if value.is_empty() || value.len() > MAX_LABEL_BYTES {
+                return Err(format!(
+                    "peer {id} has a {}-byte {what}; the limit is 1..={MAX_LABEL_BYTES}",
+                    value.len()
+                ));
+            }
+        }
+    }
+
+    // A record that last succeeded before it first succeeded is not
+    // merely odd: `last_success_ms` is what the TTL runs from, so the
+    // pair decides whether this entry is live.
+    if record.last_success_ms < record.first_success_ms {
+        return Err(format!(
+            "peer {id} last succeeded at {} but first succeeded at {}",
+            record.last_success_ms, record.first_success_ms
+        ));
+    }
+    Ok(())
+}
+
 impl PeerCache {
     /// Load the cache at `path`, or start empty.
     ///
@@ -97,9 +186,32 @@ impl PeerCache {
             last_write_ms: None,
         };
 
-        let text = match fs::read_to_string(path) {
-            Ok(text) => text,
+        // SIZE BEFORE BYTES. This is disposable advisory state that a
+        // restore, a copy, or a local edit can replace, and it was being
+        // read whole into memory before anything asked how big it was —
+        // so the file decided the allocation.
+        match fs::metadata(path) {
+            Ok(meta) if meta.len() > MAX_CACHE_FILE_BYTES => {
+                cache.quarantine(&format!(
+                    "{} bytes exceeds the {MAX_CACHE_FILE_BYTES}-byte ceiling for this format",
+                    meta.len()
+                ))?;
+                return Ok(cache);
+            }
+            Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(cache),
+            Err(e) => {
+                cache.quarantine(&e.to_string())?;
+                return Ok(cache);
+            }
+        }
+
+        // And read through the ceiling anyway, because the file may grow
+        // between the two calls and a check that can be raced is not a
+        // bound. One byte over the limit is enough to know.
+        let text = match read_capped(path, MAX_CACHE_FILE_BYTES) {
+            Ok(Some(text)) => text,
+            Ok(None) => return Ok(cache),
             Err(e) => {
                 cache.quarantine(&e.to_string())?;
                 return Ok(cache);
@@ -108,6 +220,28 @@ impl PeerCache {
 
         match serde_json::from_str::<CacheFile>(&text) {
             Ok(file) if file.version == FORMAT_VERSION => {
+                // EVERY RECORD, BEFORE INSERTION. Syntax and a version
+                // number say the file is JSON of about the right shape;
+                // they say nothing about whether a peer id is canonical,
+                // an address is bounded, or a count is inside the limits
+                // this cache advertises. A record that fails is not
+                // skipped — the file is quarantined, because a cache
+                // half of which was rejected is not the cache the caller
+                // thinks it loaded.
+                if file.peers.len() > limits.max_peers {
+                    cache.quarantine(&format!(
+                        "{} peers exceeds the {} the cache retains",
+                        file.peers.len(),
+                        limits.max_peers
+                    ))?;
+                    return Ok(cache);
+                }
+                for record in &file.peers {
+                    if let Err(reason) = validate_record(record, limits) {
+                        cache.quarantine(&reason)?;
+                        return Ok(cache);
+                    }
+                }
                 for record in file.peers {
                     cache.peers.insert(record.peer_id.clone(), record);
                 }
