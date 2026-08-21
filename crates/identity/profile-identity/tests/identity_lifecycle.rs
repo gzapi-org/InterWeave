@@ -425,23 +425,102 @@ fn saving_over_an_established_identity_is_refused() {
 
 #[test]
 fn replacing_an_identity_is_available_but_has_to_be_asked_for() {
-    // Rotation is legitimate; it just cannot happen by accident. The
-    // guarded call does what the unguarded one used to.
+    // Rotation is legitimate; it just cannot happen by accident, and it
+    // cannot happen to a profile the caller has not actually read.
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("identity.key");
 
-    ProfileIdentity::generate().save(&path).expect("first save");
+    let established = ProfileIdentity::generate();
+    established.save(&path).expect("first save");
+    let established_peer = established.transport_identity().expect("peer id");
 
     let replacement = ProfileIdentity::generate();
-    replacement
-        .replace_saved(&path)
+
+    // Naming the wrong current identity means operating on a profile the
+    // caller has not read. The answer is to stop, not to overwrite.
+    let stranger = ProfileIdentity::generate()
+        .transport_identity()
+        .expect("peer id");
+    assert!(
+        matches!(
+            replacement.replace_saved(&path, &stranger),
+            Err(IdentityError::PeerIdMismatch { .. })
+        ),
+        "a rotation must name the identity it is replacing"
+    );
+    assert_eq!(
+        ProfileIdentity::load(&path)
+            .expect("loads")
+            .transport_identity()
+            .expect("peer id")
+            .as_str(),
+        established_peer.as_str(),
+        "and the refused rotation changed nothing"
+    );
+
+    let rotation = replacement
+        .replace_saved(&path, &established_peer)
         .expect("an explicit replacement is allowed");
+
+    // Both halves, because a rotation is only meaningful as a pair: the
+    // old PeerId is what every existing trust relationship names.
+    assert_eq!(rotation.previous.as_str(), established_peer.as_str());
+    assert_eq!(
+        rotation.current.as_str(),
+        replacement.transport_identity().expect("peer id").as_str()
+    );
 
     let loaded = ProfileIdentity::load(&path).expect("loads");
     assert_eq!(
         loaded.transport_identity().expect("peer id").as_str(),
-        replacement.transport_identity().expect("peer id").as_str(),
+        rotation.current.as_str(),
         "the replacement is what is now stored"
+    );
+}
+
+#[test]
+fn a_restore_must_name_the_profile_it_is_restoring() {
+    // A checksum-valid phrase for a different key is still
+    // checksum-valid. Without the comparison a restore installs a
+    // stranger's identity and reports success — and a restore is exactly
+    // the operation performed by someone who has lost their state and
+    // cannot tell.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("identity.key");
+
+    let original = ProfileIdentity::generate();
+    let phrase = original.recovery_phrase().expect("phrase");
+    let original_peer = original.transport_identity().expect("peer id");
+
+    let stranger = ProfileIdentity::generate()
+        .transport_identity()
+        .expect("peer id");
+    assert!(
+        matches!(
+            ProfileIdentity::restore(&path, &phrase, &stranger),
+            Err(IdentityError::PeerIdMismatch { .. })
+        ),
+        "a phrase reconstructing someone else must be refused"
+    );
+    assert!(
+        !path.exists(),
+        "and a refused restore must not have written anything"
+    );
+
+    let restored = ProfileIdentity::restore(&path, &phrase, &original_peer)
+        .expect("the right phrase for the right profile");
+    assert_eq!(
+        restored.transport_identity().expect("peer id").as_str(),
+        original_peer.as_str()
+    );
+    assert_eq!(
+        ProfileIdentity::load(&path)
+            .expect("loads")
+            .transport_identity()
+            .expect("peer id")
+            .as_str(),
+        original_peer.as_str(),
+        "and it is on disk, not merely returned"
     );
 }
 

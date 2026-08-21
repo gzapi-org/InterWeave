@@ -47,6 +47,19 @@ use libp2p_identity::{Keypair, PeerId, ed25519};
 pub use record::{ALGORITHM, FORMAT, RecoveryRecord};
 pub use recovery::{ENTROPY_BYTES, PHRASE_WORDS, RecoveryPhrase};
 
+/// What a rotation changed.
+///
+/// Both PeerIds, because a rotation is only meaningful as a pair: the
+/// old one is what every existing trust relationship names, and a caller
+/// that cannot say what it was cannot tell anyone what stopped working.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rotation {
+    /// The identity that was stored before.
+    pub previous: TransportIdentity,
+    /// The identity stored now.
+    pub current: TransportIdentity,
+}
+
 /// What can go wrong with a profile identity.
 #[derive(Debug)]
 pub enum IdentityError {
@@ -308,14 +321,67 @@ impl ProfileIdentity {
     /// Separated from [`Self::save`] because the consequence is
     /// different in kind: the profile's persistent PeerId changes, and
     /// every trust relationship established against the old one stops
-    /// resolving. Nothing here makes that safe — it makes it *stated*,
-    /// so a rotation cannot happen because a save was pointed at an
-    /// occupied path.
+    /// resolving. Nothing here makes that safe — it makes it *stated*.
+    ///
+    /// `replacing` is the identity the caller believes is stored, and it
+    /// is checked against the file. A rotation is only ever intentional
+    /// about a specific key: naming the wrong one means the caller is
+    /// operating on a profile it has not actually read, and the answer
+    /// to that is to stop, not to overwrite. The returned [`Rotation`]
+    /// carries both PeerIds so what changed can be recorded, announced,
+    /// or shown to a human before anything else acts on it.
     ///
     /// # Errors
-    /// Returns [`IdentityError::Storage`] if the write fails.
-    pub fn replace_saved(&self, path: &Path) -> Result<(), IdentityError> {
-        self.write_to(path)
+    /// Returns [`IdentityError::NotFound`] if nothing is stored there,
+    /// [`IdentityError::PeerIdMismatch`] if the stored identity is not
+    /// `replacing`, or [`IdentityError::Storage`] if the write fails.
+    pub fn replace_saved(
+        &self,
+        path: &Path,
+        replacing: &TransportIdentity,
+    ) -> Result<Rotation, IdentityError> {
+        let stored = Self::load(path)?.transport_identity()?;
+        if stored.as_str() != replacing.as_str() {
+            return Err(IdentityError::PeerIdMismatch {
+                got: stored.as_str().to_owned(),
+                expected: replacing.as_str().to_owned(),
+            });
+        }
+        let current = self.transport_identity()?;
+        self.write_to(path)?;
+        Ok(Rotation {
+            previous: stored,
+            current,
+        })
+    }
+
+    /// Restore a profile from its recovery phrase, into `path`.
+    ///
+    /// The whole point of a restore is that the caller knows which
+    /// profile they are restoring, so `expected` is required and checked
+    /// before anything touches the filesystem. A checksum-valid phrase
+    /// for a different key is still checksum-valid; without the
+    /// comparison this would cheerfully install a stranger's identity
+    /// and report success.
+    ///
+    /// Installs over whatever is there, because that is what restoring
+    /// means — but only once the phrase has been shown to reconstruct
+    /// the identity the caller named.
+    ///
+    /// # Errors
+    /// Returns [`IdentityError::PeerIdMismatch`] if the phrase
+    /// reconstructs a different identity, the phrase errors of
+    /// [`Self::from_phrase`], or [`IdentityError::Storage`] if the write
+    /// fails.
+    pub fn restore(
+        path: &Path,
+        phrase: &RecoveryPhrase,
+        expected: &TransportIdentity,
+    ) -> Result<Self, IdentityError> {
+        Self::verify_phrase(phrase, expected)?;
+        let restored = Self::from_phrase(phrase)?;
+        restored.write_to(path)?;
+        Ok(restored)
     }
 
     fn write_to(&self, path: &Path) -> Result<(), IdentityError> {
