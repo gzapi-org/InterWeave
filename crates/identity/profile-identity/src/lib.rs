@@ -47,6 +47,32 @@ use libp2p_identity::{Keypair, PeerId, ed25519};
 pub use record::{ALGORITHM, FORMAT, RecoveryRecord};
 pub use recovery::{ENTROPY_BYTES, PHRASE_WORDS, RecoveryPhrase};
 
+/// Run `f` holding the exclusive marker for `path`.
+///
+/// EVERY path that overwrites a stored identity goes through here.
+/// Rotation and restore both replace the same file, so exclusion that
+/// covered only one of them would be a guarantee against rotations
+/// rather than a guarantee about the file — and the caller cannot tell
+/// those apart from the outside.
+///
+/// `save` is deliberately not here: it creates and never replaces, and
+/// its own `link` fails while any file exists, so it cannot interleave
+/// with a replacement in the first place.
+///
+/// The marker is released whatever happened. One left behind by a failed
+/// operation would block every later one for a reason that has nothing
+/// to do with the key.
+fn holding_marker<T>(
+    path: &Path,
+    f: impl FnOnce(&Path) -> Result<T, IdentityError>,
+) -> Result<T, IdentityError> {
+    let marker = marker_path(path);
+    acquire_marker(path, &marker)?;
+    let outcome = f(&marker);
+    let _ = std::fs::remove_file(&marker);
+    outcome
+}
+
 /// Take the rotation marker, or say why not.
 ///
 /// # Why `ENOENT` is not "there is no identity"
@@ -433,15 +459,7 @@ impl ProfileIdentity {
         // It also pins the inode that was at `path` when it succeeded,
         // which is what makes the identity read below the one actually
         // being replaced rather than whatever is there a moment later.
-        let marker = marker_path(path);
-        acquire_marker(path, &marker)?;
-
-        let outcome = self.rotate_holding(path, &marker, replacing);
-        // Released whatever happened. A marker left behind by a failed
-        // rotation would block every later one for a reason that has
-        // nothing to do with the key.
-        let _ = std::fs::remove_file(&marker);
-        outcome
+        holding_marker(path, |marker| self.rotate_holding(path, marker, replacing))
     }
 
     /// The rotation itself, with the marker held.
@@ -493,7 +511,24 @@ impl ProfileIdentity {
     ) -> Result<Self, IdentityError> {
         Self::verify_phrase(phrase, expected)?;
         let restored = Self::from_phrase(phrase)?;
-        restored.write_to(path)?;
+
+        // A restore onto an empty profile is a CREATION, and the
+        // exclusive create is what makes two of them safe — the same
+        // guarantee `save` gives, for the same reason.
+        match restored.save(path) {
+            Ok(()) => return Ok(restored),
+            Err(IdentityError::AlreadyExists) => {}
+            Err(other) => return Err(other),
+        }
+
+        // A restore over an existing profile REPLACES it, so it takes the
+        // marker a rotation takes. Without this the two overwrite the
+        // same path with no exclusion between them: a restore landing
+        // inside a rotation is either lost, or replaces the identity that
+        // rotation's `Rotation.current` says is stored — which turns the
+        // compare-and-swap into a claim that holds only against other
+        // rotations.
+        holding_marker(path, |_| restored.write_to(path))?;
         Ok(restored)
     }
 

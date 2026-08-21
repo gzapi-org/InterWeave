@@ -718,3 +718,84 @@ fn an_interrupted_rotation_is_reported_rather_than_ignored() {
         .replace_saved(&path, &established_peer)
         .expect("rotation works once the marker is gone");
 }
+
+#[test]
+fn restore_and_rotation_exclude_each_other() {
+    // Rotation took the marker and restore wrote straight to the path, so
+    // the two could interleave on the same file with no exclusion between
+    // them. A restore landing inside a rotation is either lost, or
+    // replaces the identity that rotation's `Rotation.current` says is
+    // stored — which makes the compare-and-swap a guarantee against other
+    // rotations rather than a guarantee about the file, and a caller
+    // cannot tell those apart from outside.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("identity.key");
+
+    let established = ProfileIdentity::generate();
+    established.save(&path).expect("save");
+    let established_peer = established.transport_identity().expect("peer id");
+
+    let other = ProfileIdentity::generate();
+    let phrase = other.recovery_phrase().expect("phrase");
+    let other_peer = other.transport_identity().expect("peer id");
+
+    // With the marker held, a restore over an existing identity is
+    // refused rather than racing.
+    let marker = dir.path().join("identity.key.rotating");
+    std::fs::hard_link(&path, &marker).expect("hold the marker");
+    assert!(
+        matches!(
+            ProfileIdentity::restore(&path, &phrase, &other_peer),
+            Err(IdentityError::RotationInProgress { .. })
+        ),
+        "a restore must not overwrite a profile mid-rotation"
+    );
+    assert_eq!(
+        ProfileIdentity::load(&path)
+            .expect("loads")
+            .transport_identity()
+            .expect("peer id")
+            .as_str(),
+        established_peer.as_str(),
+        "and the identity it would have replaced is untouched"
+    );
+
+    std::fs::remove_file(&marker).expect("release");
+    ProfileIdentity::restore(&path, &phrase, &other_peer).expect("restore once nothing holds it");
+    assert_eq!(
+        ProfileIdentity::load(&path)
+            .expect("loads")
+            .transport_identity()
+            .expect("peer id")
+            .as_str(),
+        other_peer.as_str()
+    );
+    assert!(
+        !marker.exists(),
+        "a completed restore must not leave the marker behind"
+    );
+}
+
+#[test]
+fn a_restore_into_an_empty_profile_is_a_creation() {
+    // Nothing to exclude and nothing to replace: the common case is a
+    // person who has lost everything, and requiring a key to already be
+    // there would make restore useless exactly when it is needed.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("identity.key");
+
+    let original = ProfileIdentity::generate();
+    let phrase = original.recovery_phrase().expect("phrase");
+    let peer = original.transport_identity().expect("peer id");
+
+    ProfileIdentity::restore(&path, &phrase, &peer).expect("restore onto an empty profile");
+    assert_eq!(
+        ProfileIdentity::load(&path)
+            .expect("loads")
+            .transport_identity()
+            .expect("peer id")
+            .as_str(),
+        peer.as_str()
+    );
+    assert!(!dir.path().join("identity.key.rotating").exists());
+}
