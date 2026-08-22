@@ -92,6 +92,21 @@ Do not replace a real-network/process/platform requirement with mocks merely to 
 
 `tests/support` is test-only and must never be a production dependency.
 
+#### A comment that claims an invariant owes a test
+
+**Every comment containing "never", "only", "bounded", "exactly", or "fails closed" must point to a test that would fail if that statement stopped being true.**
+
+A comment is not enforcement. Writing the reasoning down is the step that *feels* like doing the work, which is exactly why it substitutes for it so easily: the claim reads as settled, review reads it as settled, and nothing anywhere fails when it stops being true. This repository has already shipped a helper whose own documentation explained that a caller who skipped it would get "a gate that looks like it is working" — and that helper was called by nothing.
+
+So the rule is mechanical, and the check is mechanical too:
+
+- Find the test that fails if the sentence becomes false. Not a test of the same function — a test of **that claim**.
+- If there is no such test, either write it or delete the claim. A weaker true comment beats a strong unenforced one.
+- **Break the code and watch the test fail.** A test written from the same belief as the comment agrees with the comment for free; the mutation is what proves the test is load-bearing. Every one of the recurring defects here passed its tests, because the test fed the function the shape the author already had in mind.
+- Feed the test what the **caller actually holds**, not what the function was designed for. `source_bucket` was correct for every input its tests supplied and wrong for the string a listener hands over, three separate times.
+
+The words are a trigger, not the whole set — an invariant phrased without them owes the same test. The list exists so the rule can be applied without judgement, on sight.
+
 ### Fixtures vs test data
 
 - `fixtures/` = normative/frozen deterministic vectors. Changes require explicit protocol/spec review. Every vector file declares its algorithm and is recomputed by `tools/checks/verify_fixture_vectors.py`; a drifted vector is a protocol break, not a test failure.
