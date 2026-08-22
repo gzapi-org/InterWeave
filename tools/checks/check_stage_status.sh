@@ -117,6 +117,44 @@ for rel in $FILES; do
   fi
 done
 
+# EMPTY — no file may say the repository holds no production code once
+# it does.
+#
+# This is the same drift `check_component_status.sh` catches one level
+# down, and it went unnoticed for longer because nothing here looks at
+# it: IMPLEMENTATION.md still opened with "there are no production Rust
+# crates" across five completed stages, README.md called the repository
+# a skeleton, and the Cargo.toml's first line said the same. A reader
+# arriving at any of the three was told not to look.
+#
+# The trigger is the manifest itself. `xtask` and `tests/support` are
+# scaffolding and do not make the claim false; anything else does.
+#
+# Read with awk rather than a sed range: `members = [...]` may be one
+# line or many, and a range whose end pattern never matches runs to end
+# of file -- which swept up `status = "stage-N-..."` and made the
+# scaffolding-only tree look populated. `planned_members` further down
+# is an inventory, not a roster, so the scan stops at the first `]`.
+members="$(awk '
+    /^members[[:space:]]*=[[:space:]]*\[/ { inside = 1 }
+    inside { print }
+    inside && /\]/ { exit }
+  ' "$MANIFEST" \
+           | grep -Eo '"[^"]+"' | tr -d '"' \
+           | grep -Ev '^(xtask|tests/support)$' || true)"
+if [ -n "$members" ]; then
+  count="$(printf '%s\n' "$members" | wc -l | tr -d ' ')"
+  EMPTY_CLAIM='no production Rust (crates|implementation)|workspace skeleton only|remains an architecture/skeleton repository'
+  for rel in README.md IMPLEMENTATION.md CLAUDE.md Cargo.toml; do
+    f="$ROOT/$rel"
+    [ -f "$f" ] || continue
+    hit="$(grep -Eoi "$EMPTY_CLAIM" "$f" | head -1 || true)"
+    if [ -n "$hit" ]; then
+      report "$rel: says \"$hit\" while [workspace].members holds $count production package(s)"
+    fi
+  done
+fi
+
 # The comment above the status field must not contradict it either. This
 # is the one that went wrong last time: the value was updated and the
 # comment three lines above it was not.

@@ -5,7 +5,7 @@ The repository now has two deliberately separate halves:
 - [`architecture/`](./architecture/README.md) is the frozen specification/source of truth.
 - `apps/`, `crates/`, `tests/`, `fixtures/`, `test-data/`, `packaging/`, `spikes/`, and `xtask/` are tracked implementation landing zones.
 
-There are no production Rust crates, application binaries, Android Gradle project, installers, or service units yet.
+There are production Rust crates under `crates/` and `tests/`, activated one canonical stage at a time. There is no application binary, Android Gradle project, installer, or service unit yet: `apps/` and `packaging/` stay empty until the stage that needs them opens.
 
 **Stages 0-4 are complete; Stage 5 is open.** The virtual root [`Cargo.toml`](./Cargo.toml) lists the active members and is authoritative — deliberately not restated here, because the copy of this sentence that named a roster went stale twice while the manifest stayed correct. `workspace.metadata.interweave.status` records the open stage in one machine-readable place. `workspace.metadata.interweave` records the remaining planned member/test paths without making them buildable; when a canonical bottom-up stage starts, add a crate manifest only for the crate/package being implemented and add that path to `[workspace].members` in the same change.
 

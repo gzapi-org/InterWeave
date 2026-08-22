@@ -157,9 +157,9 @@ Useful focused documents:
 
 ## Development policy
 
-Until a bottom-up stage is explicitly opened, this repository remains an architecture/skeleton repository. Contributors and coding agents should follow [`CLAUDE.md`](./CLAUDE.md) and [`IMPLEMENTATION.md`](./IMPLEMENTATION.md).
+Implementation is under way, one canonical bottom-up stage at a time; `[workspace].members` in [`Cargo.toml`](./Cargo.toml) is the authoritative roster and `workspace.metadata.interweave.status` records the open stage. Contributors and coding agents should follow [`CLAUDE.md`](./CLAUDE.md) and [`IMPLEMENTATION.md`](./IMPLEMENTATION.md).
 
-When implementation begins:
+In every stage:
 
 - activate only the package(s) required by the current canonical stage;
 - keep application binaries as thin composition roots;

@@ -20,10 +20,11 @@ bad()  { printf '  \342\234\227 %s\n' "$1"; fails=$((fails + 1)); }
 
 # Build a tree with a given status and three prose files.
 make_tree() {
-  local dir="$1" status="$2" readme="$3" impl="$4" claude="$5" comment="${6:-}"
+  local dir="$1" status="$2" readme="$3" impl="$4" claude="$5" comment="${6:-}" \
+        members="${7:-\"xtask\"}"
   mkdir -p "$dir"
   {
-    printf '[workspace]\nmembers = ["xtask"]\n\n'
+    printf '[workspace]\nmembers = [%s]\n\n' "$members"
     printf '[workspace.metadata.interweave]\n'
     [ -n "$comment" ] && printf '# %s\n' "$comment"
     printf 'status = "%s"\n' "$status"
@@ -90,6 +91,41 @@ make_tree "$TMP/roster" "stage-3-persistence" \
   "Stage 3 is open. Its members are \`xtask\` the command runner and tests/support." \
   "Stage 3 is open." "Stage 3 is open."
 expect "README restates the member list" "$TMP/roster" 1
+
+echo "check_stage_status: an empty-repository claim over real members fails"
+# IMPLEMENTATION.md opened with "there are no production Rust crates"
+# across five completed stages; README.md called the repository a
+# skeleton and Cargo.toml's first line said the same. A reader arriving
+# at any of the three was told not to look.
+make_tree "$TMP/empty-claim" "stage-3-persistence" \
+  "Stage 3 is open." \
+  "Stage 3 is open. There are no production Rust crates yet." \
+  "Stage 3 is open." "" '"xtask", "crates/api/transport-api"'
+expect "IMPLEMENTATION.md denies code that exists" "$TMP/empty-claim" 1
+
+make_tree "$TMP/empty-readme" "stage-3-persistence" \
+  "Stage 3 is open. This repository remains an architecture/skeleton repository." \
+  "Stage 3 is open." "Stage 3 is open." "" '"xtask", "crates/api/transport-api"'
+expect "README.md calls a populated workspace a skeleton" "$TMP/empty-readme" 1
+
+echo "check_stage_status: scaffolding members do not make the claim false"
+# Before any stage opens, `xtask` and `tests/support` are the only
+# members and the statement is TRUE. A check that fired here would be
+# one nobody could satisfy at the start of the project.
+make_tree "$TMP/scaffold" "stage-3-persistence" \
+  "Stage 3 is open." \
+  "Stage 3 is open. There are no production Rust crates yet." \
+  "Stage 3 is open." "" '"xtask", "tests/support"'
+expect "xtask and tests/support alone are not production code" "$TMP/scaffold" 0
+
+echo "check_stage_status: the Cargo.toml's own first line is checked too"
+make_tree "$TMP/manifest-claim" "stage-3-persistence" \
+  "Stage 3 is open." "Stage 3 is open." "Stage 3 is open." "" \
+  '"xtask", "crates/api/transport-api"'
+printf '# Implementation workspace skeleton only.\n%s' \
+  "$(cat "$TMP/manifest-claim/Cargo.toml")" > "$TMP/manifest-claim/Cargo.toml.new"
+mv "$TMP/manifest-claim/Cargo.toml.new" "$TMP/manifest-claim/Cargo.toml"
+expect "the manifest may not deny its own members" "$TMP/manifest-claim" 1
 
 echo "check_stage_status: a malformed status is an invocation error"
 mkdir -p "$TMP/bad"
