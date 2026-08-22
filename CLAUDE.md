@@ -416,6 +416,18 @@ Not on that list: "different concerns", "different packages", "different root ca
 
 **Arm `--auto` only when the branch is finished.** Arming is standing consent: it lands the PR at the FIRST moment every required check is green, not when you decide you are done. Arm while more commits are coming and the PR can merge before your next commit exists. Arming late costs nothing, so there is no trade to make.
 
+#### A security-boundary change waits for its review
+
+**Do not arm `--auto` on a change to a security boundary until the automated review has reported on the current head.** Green checks are not a review: §9 already says the merge is not evidence that anything was reviewed, and the queue lands a PR the moment the last check passes.
+
+The gap is not theoretical and it is measured in seconds. PR #28 merged at 06:56:03 UTC and the review that found a P1 in it arrived at 06:56:15 — twelve seconds later, against a branch that no longer existed. The finding then cost a fresh branch, a second PR, and a reply on a merged thread, all to land a two-line fix that would have been one more commit had anyone waited.
+
+A **security boundary** here means identity and key handling, trust policy, wire or configuration parsing, persistence, admission and resource accounting, and anything cryptographic. Documentation and mechanical changes are not on that list and should not wait.
+
+The mechanics: open the PR, run `tools/gh/pr-review-status.sh <n> --wait` in the background, and arm only once it reports a review of the current head. A review that arrives while you are still committing is a review of the wrong tree, which is a reason to arm late rather than a reason not to wait. If a finding lands on a PR that is already queued, `gh api graphql -f query='mutation{dequeuePullRequest(input:{id:"<pr node id>"}){mergeQueueEntry{state}}}'` takes it out of the queue so the fix goes on the same head — `gh pr merge --disable-auto` clears the standing consent but does NOT dequeue.
+
+Zero unresolved P1 or P2 findings is also a precondition for declaring a stage complete. Nothing enforces that; it is the same class of obligation as Phase 6, which no red check announces either.
+
 ### Concurrent sessions, worktrees, and subagent dispatch
 
 Multiple sessions may work this repository in parallel, possibly on different hosts. **Isolation is required**, and the model is **one full `git clone` per session**. Sessions coordinate **only** through `origin`.
