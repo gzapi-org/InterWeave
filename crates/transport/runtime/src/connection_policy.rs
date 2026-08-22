@@ -795,6 +795,97 @@ mod tests {
     }
 
     #[test]
+    fn address_poisoning_cannot_suppress_a_known_good_route() {
+        // STAGE 5's REQUIRED POISONING TEST.
+        //
+        // The existing mismatch test uses a second address with no
+        // recorded state, which is a weaker claim than the gate makes: an
+        // address nobody has dialled and an address that has WORKED are
+        // different things, and only the second is what a trusted peer is
+        // actually reachable on. Peer-wide punitive backoff would
+        // suppress both, so proving the healthy route survives needs the
+        // route to be genuinely known-good.
+        //
+        // The attack: an attacker who can inject one address for a
+        // trusted peer — through discovery, a bootstrap list, or a
+        // manipulated Identify — makes it authenticate the wrong key. If
+        // that counted as a peer failure, one bogus address would take
+        // the peer offline.
+        let mut p = policy();
+        let good = "/ip4/10.0.0.1/tcp/4001";
+        let poisoned = "/ip4/198.51.100.9/tcp/4001";
+
+        p.record_success(&peer(), good, 1_000);
+        assert!(
+            p.address(&peer(), good)
+                .is_some_and(AddressState::is_known_good),
+            "the route has to be known-good for this test to mean anything"
+        );
+
+        assert!(
+            p.record_identity_mismatch(&peer(), poisoned, 2_000),
+            "the quarantine is recorded"
+        );
+
+        // The poisoned address is suppressed.
+        assert_eq!(
+            p.admit(
+                &request(DialOrigin::ConnectionManager, poisoned),
+                ConnectionClass::DataPlaneTrusted,
+                2_000
+            ),
+            Err(DialDenial::AddressQuarantined)
+        );
+
+        // The known-good route is untouched: admitted, still known-good,
+        // and no peer-wide backoff was created to shape it.
+        assert!(
+            p.admit(
+                &request(DialOrigin::ConnectionManager, good),
+                ConnectionClass::DataPlaneTrusted,
+                2_000
+            )
+            .is_ok(),
+            "one poisoned address must not suppress a route that works"
+        );
+        assert!(
+            p.peer(&peer()).is_none(),
+            "a mismatch must not create peer-scoped backoff"
+        );
+        assert!(
+            p.address(&peer(), good)
+                .is_some_and(AddressState::is_known_good),
+            "and must not downgrade what the route had earned"
+        );
+
+        // Preference is unchanged too: the working route still sorts
+        // first, and the poisoned one is excluded rather than merely
+        // ranked lower.
+        let preferred =
+            p.preferred_addresses(&peer(), &[poisoned.to_owned(), good.to_owned()], 2_000);
+        assert_eq!(preferred, vec![good.to_owned()]);
+
+        // Repeating the attack does not accumulate into a peer-level
+        // suppression by another name.
+        for i in 0..16 {
+            let _ = p.record_identity_mismatch(
+                &peer(),
+                &format!("/ip4/198.51.100.{i}/tcp/4001"),
+                2_000,
+            );
+        }
+        assert!(
+            p.admit(
+                &request(DialOrigin::ConnectionManager, good),
+                ConnectionClass::DataPlaneTrusted,
+                2_000
+            )
+            .is_ok(),
+            "sixteen poisoned addresses must still not suppress the working one"
+        );
+    }
+
+    #[test]
     fn an_identity_mismatch_quarantines_the_address_and_spares_the_peer() {
         // The attack this split exists to defeat: injecting one bogus
         // address for a trusted peer must not suppress its real routes.
