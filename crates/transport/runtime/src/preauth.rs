@@ -105,6 +105,12 @@ pub const DEFAULT_MAX_GLOBAL_ATTEMPTS_PER_WINDOW: u32 = 600;
 /// nothing at all. Every argument in this module about an attacker not
 /// escaping the count depends on getting this right.
 ///
+/// [`PreAuthGate::admit`] applies this to whatever it is given, so the rule
+/// holds for every caller rather than for the ones who remembered. It is
+/// public because a caller may want the same key for its own logging or
+/// metrics, and because two different answers to "which bucket is this"
+/// would be worse than none.
+///
 /// Anything that is not an IP literal — a relay's PeerId, a unix socket,
 /// a test label — is its own bucket, unchanged. `SECURITY.md` requires a
 /// relayed path with no original source IP to consume a
@@ -220,9 +226,11 @@ impl HandshakeSlot {
         self.started_at_ms
     }
 
-    /// The unauthenticated source this handshake came from.
+    /// The bucket this handshake was accounted under.
     ///
-    /// Diagnostics only. It is not an identity (see the module docs).
+    /// The BUCKET, not the address the caller passed: `admit` normalizes,
+    /// so an IPv6 peer's slot reports the /64 it was counted against.
+    /// Diagnostics only, and not an identity (see the module docs).
     #[must_use]
     pub fn source(&self) -> &str {
         &self.source
@@ -318,6 +326,20 @@ impl PreAuthGate {
         if self.shutting_down {
             return Err(PreAuthDenial::ShuttingDown);
         }
+
+        // NORMALIZED HERE, not by the caller. Publishing `source_bucket`
+        // and asking every call site to remember it left the /64 rule as
+        // advice, and advice is what a caller passing a raw transport
+        // address silently ignores: `2001:db8::1` and `2001:db8::2` would
+        // be two buckets, and the per-source limits this whole module is
+        // built on would mean nothing.
+        //
+        // The gate owns the key it accounts on, so there is no call
+        // sequence that produces unbucketed accounting. Idempotent, so a
+        // caller that does bucket first loses nothing.
+        let source = source_bucket(source);
+        let source = source.as_str();
+
         if source.is_empty() || source.len() > MAX_SOURCE_BYTES {
             return Err(PreAuthDenial::SourceNotAccountable);
         }
@@ -874,17 +896,39 @@ mod tests {
         let relay = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
         assert_eq!(source_bucket(relay), relay);
 
-        // And the bucketing is what the gate actually accounts on.
+        // And the GATE applies it, given raw addresses — which is the
+        // only version of this property that matters. Publishing the
+        // helper and asking callers to remember it left the rule as
+        // advice, and a caller passing a transport address straight
+        // through would have had one bucket per host.
         let mut g = gate();
-        let bucket = source_bucket("2001:db8:1:2::1");
-        g.admit(&bucket, 0).expect("first");
-        g.admit(&source_bucket("2001:db8:1:2::2"), 0)
-            .expect("same bucket, second slot");
+        g.admit("2001:db8:1:2::1", 0).expect("first");
+        g.admit("2001:db8:1:2::2", 0)
+            .expect("same /64, second slot");
         assert_eq!(
-            g.admit(&source_bucket("2001:db8:1:2::3"), 0),
+            g.admit("2001:db8:1:2::3", 0),
             Err(PreAuthDenial::TooManyFromSource),
             "a /64 cannot buy more slots by changing the low bits"
         );
+        assert_eq!(g.tracked_sources(), 1, "one /64 is one tracked source");
+
+        // A different /64 is genuinely separate.
+        g.admit("2001:db8:1:3::1", 0).expect("another prefix");
+        assert_eq!(g.tracked_sources(), 2);
+
+        // The slot reports the bucket it was counted against, so a
+        // diagnostic cannot suggest accounting that did not happen.
+        let mut g = gate();
+        let slot = g.admit("2001:db8:1:2::abcd", 0).expect("admitted");
+        assert_eq!(slot.source(), "2001:db8:1:2::/64");
+
+        // Bucketing twice changes nothing, so a caller that already
+        // applied the helper is not penalised.
+        let mut g = gate();
+        g.admit(&source_bucket("2001:db8:1:2::1"), 0)
+            .expect("first");
+        g.admit("2001:db8:1:2::2", 0)
+            .expect("still the same bucket");
         assert_eq!(g.tracked_sources(), 1);
     }
 
