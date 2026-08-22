@@ -119,6 +119,7 @@ pub const MAX_ALLOWED_PEERS: usize = 4096;
 
 /// The profile trust block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TrustConfig {
     /// The only v1 policy.
     pub policy: TrustPolicyKind,
@@ -147,6 +148,7 @@ pub enum RegistrationPolicy {
 
 /// The endpoint-directory block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DirectoryConfig {
     /// Whether the directory answers remote queries.
     #[serde(default = "default_true")]
@@ -174,6 +176,7 @@ impl Default for DirectoryConfig {
 
 /// One configured endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EndpointConfig {
     /// The route label.
     pub id: EndpointId,
@@ -196,6 +199,7 @@ pub struct EndpointConfig {
 
 /// The endpoints block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EndpointsConfig {
     /// Registration policy.
     #[serde(default)]
@@ -213,6 +217,7 @@ pub struct EndpointsConfig {
 
 /// A profile's configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProfileConfig {
     /// Always 2 for this contract.
     pub schema_version: u32,
@@ -470,6 +475,80 @@ mod tests {
 
     fn peer(s: &str) -> TransportIdentity {
         TransportIdentity::parse(s).expect("valid identity")
+    }
+
+    #[test]
+    fn a_misspelled_field_is_refused_rather_than_ignored() {
+        // THE FAILURE MODE IS NOT "unexpected configuration". Serde
+        // ignores unknown fields by default, and every security-relevant
+        // field here defaults toward the PERMISSIVE answer: `enabled` to
+        // true, both narrowing filters to inherit-profile-trust,
+        // `allowed_client_kinds` to empty meaning no restriction. So a
+        // typo does not disable a bound, it removes one -- the operator
+        // wrote a narrowing and got the wide default, with no diagnostic
+        // anywhere.
+        let base = format!(
+            r#"{{"schema_version":2,
+                 "trust":{{"policy":"static-allowlist","allowed_peers":["{P1}"]}},
+                 "endpoints":{{"entries":[{{"id":"human","enabled":false"#
+        );
+
+        // Same document, correct spelling: parses, and the endpoint is
+        // off. This is the control -- without it the assertions below
+        // could be failing for the shape.
+        let good = format!("{base}}}]}}}}");
+        let cfg: ProfileConfig = serde_json::from_str(&good).expect("the correct spelling parses");
+        assert!(!cfg.endpoints.entries[0].enabled);
+
+        // `enabeld: false` used to leave `enabled` at its `true`
+        // default: an endpoint the operator believed was off, accepting
+        // traffic.
+        let typo = format!(
+            r#"{{"schema_version":2,
+                 "trust":{{"policy":"static-allowlist","allowed_peers":["{P1}"]}},
+                 "endpoints":{{"entries":[{{"id":"human","enabeld":false}}]}}}}"#
+        );
+        let err = serde_json::from_str::<ProfileConfig>(&typo)
+            .expect_err("an unknown endpoint field must be refused")
+            .to_string();
+        assert!(err.contains("enabeld"), "the message must name it: {err}");
+
+        // `inboud` used to leave `inbound` inheriting full profile
+        // trust: the operator wrote a narrowing filter and got none.
+        let typo = format!(
+            r#"{{"schema_version":2,
+                 "trust":{{"policy":"static-allowlist","allowed_peers":["{P1}"]}},
+                 "endpoints":{{"entries":[{{"id":"human",
+                   "inboud":{{"static_subset":["{P1}"]}}}}]}}}}"#
+        );
+        assert!(
+            serde_json::from_str::<ProfileConfig>(&typo).is_err(),
+            "a misspelled narrowing filter must not silently widen"
+        );
+
+        // Every closed object, not only the endpoint. `additionalProperties:
+        // false` is the contract's answer at each level.
+        for doc in [
+            r#"{"schema_version":2,"trusst":{},
+                "trust":{"policy":"static-allowlist"},"endpoints":{}}"#
+                .to_owned(),
+            format!(
+                r#"{{"schema_version":2,
+                        "trust":{{"policy":"static-allowlist","allowd_peers":["{P1}"]}},
+                        "endpoints":{{}}}}"#
+            ),
+            r#"{"schema_version":2,"trust":{"policy":"static-allowlist"},
+                "endpoints":{"registration_polcy":"configured-only"}}"#
+                .to_owned(),
+            r#"{"schema_version":2,"trust":{"policy":"static-allowlist"},
+                "endpoints":{"directory":{"enabld":false}}}"#
+                .to_owned(),
+        ] {
+            assert!(
+                serde_json::from_str::<ProfileConfig>(&doc).is_err(),
+                "an unknown field must be refused at every level: {doc}"
+            );
+        }
     }
 
     fn endpoint(id: &str) -> EndpointConfig {
