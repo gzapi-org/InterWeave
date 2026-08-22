@@ -145,6 +145,26 @@ pub fn source_bucket(source: &str) -> String {
     let Ok(ip) = ip else {
         return source.to_owned();
     };
+    // A DUAL-STACK LISTENER REPORTS AN IPv4 CLIENT AS IPv6. Bind a
+    // socket to `::` without `IPV6_V6ONLY` and `peer_addr()` renders an
+    // IPv4 peer as `[::ffff:198.51.100.7]:49152`. That parses as
+    // `IpAddr::V6`, and every IPv4-mapped address shares the `::/64`
+    // prefix — so the /64 rule below would have collapsed the ENTIRE
+    // IPv4 Internet into one bucket, and the first IPv4 client to spend
+    // the per-source allowance would deny every other IPv4 client.
+    //
+    // The /64 rule is right for IPv6 for the reason stated below and
+    // catastrophic here, so the mapping has to be undone before the
+    // rule chooses. Only `::ffff:a.b.c.d` is unmapped: the deprecated
+    // IPv4-COMPATIBLE form `::a.b.c.d` overlaps real addresses such as
+    // `::1`, and `to_ipv4()` would turn the loopback into `0.0.0.1`.
+    let ip = match ip {
+        std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => std::net::IpAddr::V4(v4),
+            None => std::net::IpAddr::V6(v6),
+        },
+        v4 => v4,
+    };
     match ip {
         std::net::IpAddr::V4(v4) => v4.to_string(),
         std::net::IpAddr::V6(v6) => {
@@ -997,6 +1017,55 @@ mod tests {
             Err(PreAuthDenial::TooManyFromSource)
         );
         assert_eq!(g.tracked_sources(), 1);
+    }
+
+    #[test]
+    fn a_dual_stack_listener_does_not_merge_the_ipv4_internet() {
+        // The third round of the same mistake, and the widest: a socket
+        // bound to `::` without `IPV6_V6ONLY` accepts IPv4 too, and
+        // reports those peers as `[::ffff:198.51.100.7]:49152`. That is
+        // an `IpAddr::V6`, and EVERY IPv4-mapped address sits in `::/64`
+        // — so the prefix rule that is correct for native IPv6 put the
+        // whole IPv4 Internet in one bucket. One client spending the
+        // per-source allowance denied every other IPv4 client, which is
+        // a worse outcome than having no per-source accounting at all.
+        assert_eq!(source_bucket("[::ffff:198.51.100.7]:49152"), "198.51.100.7");
+        assert_eq!(source_bucket("[::ffff:198.51.100.8]:49152"), "198.51.100.8");
+        assert_eq!(source_bucket("::ffff:198.51.100.7"), "198.51.100.7");
+
+        // The mapped form and the plain form are the SAME client, so
+        // they must not be two budgets either.
+        assert_eq!(
+            source_bucket("[::ffff:198.51.100.7]:49152"),
+            source_bucket("198.51.100.7:49152")
+        );
+
+        // Only the mapped form is unwrapped. `::1` is IPv4-COMPATIBLE
+        // shaped, and unwrapping that class would rewrite the loopback
+        // as `0.0.0.1` — a native IPv6 address must keep the /64 rule.
+        assert_eq!(source_bucket("::1"), "::/64");
+        assert_eq!(source_bucket("2001:db8:1:2::1"), "2001:db8:1:2::/64");
+
+        // And the gate is what has to apply it. Two unrelated IPv4
+        // clients, arriving the way a dual-stack listener reports them:
+        // each gets its own allowance, neither can deny the other.
+        let mut g = gate();
+        g.admit("[::ffff:198.51.100.7]:49152", 0)
+            .expect("client a, first");
+        g.admit("[::ffff:198.51.100.7]:49153", 0)
+            .expect("client a, second");
+        assert_eq!(
+            g.admit("[::ffff:198.51.100.7]:49154", 0),
+            Err(PreAuthDenial::TooManyFromSource),
+            "one mapped client is still capped"
+        );
+        g.admit("[::ffff:198.51.100.8]:49152", 0)
+            .expect("a DIFFERENT IPv4 client is not denied by the first one");
+        assert_eq!(
+            g.tracked_sources(),
+            2,
+            "two IPv4 clients are two buckets, not one"
+        );
     }
 
     #[test]
