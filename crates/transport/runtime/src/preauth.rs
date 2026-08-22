@@ -186,6 +186,20 @@ pub fn source_bucket(source: &str) -> String {
 /// rather than whatever a typo produced.
 pub const MAX_CONFIGURED_LIMIT: usize = 65_536;
 
+/// Largest start-rate allowance the gate will accept, per window.
+///
+/// The two attempt ceilings are what bound CPU: every start admitted is
+/// a Noise handshake this process performs for a party that has proved
+/// nothing. Leaving them uncapped while capping the counts and the
+/// durations was a bound with a hole in it -- `u32::MAX` starts inside
+/// the one-hour maximum window is `u32::MAX` handshakes, so the gate
+/// validated its configuration and then defended nothing.
+///
+/// The number is two orders of magnitude above the specified 600/minute
+/// global policy: wide enough that a deployment which genuinely needs
+/// to be louder can be, narrow enough that it is still a rate.
+pub const MAX_CONFIGURED_ATTEMPTS: u32 = 60_000;
+
 /// Longest rate window or handshake timeout the gate will accept, in
 /// milliseconds -- one hour.
 ///
@@ -349,10 +363,18 @@ impl PreAuthLimitsBuilder {
         if self.rate_window_ms == 0 || self.rate_window_ms > MAX_CONFIGURED_DURATION_MS {
             return Err(E::RateWindowOutOfRange);
         }
-        if self.max_attempts_per_window == 0 {
+        // BOTH ENDS. Zero refuses every connection; the top end is the
+        // one that fails open, because these two are the only bounds on
+        // how many Noise handshakes an anonymous party can make this
+        // process compute.
+        if self.max_attempts_per_window == 0
+            || self.max_attempts_per_window > MAX_CONFIGURED_ATTEMPTS
+        {
             return Err(E::AttemptsPerWindowOutOfRange);
         }
-        if self.max_global_attempts_per_window == 0 {
+        if self.max_global_attempts_per_window == 0
+            || self.max_global_attempts_per_window > MAX_CONFIGURED_ATTEMPTS
+        {
             return Err(E::GlobalAttemptsPerWindowOutOfRange);
         }
 
@@ -395,9 +417,10 @@ pub enum InvalidPreAuthLimits {
     /// Zero is the fail-open case: every window is elapsed on arrival,
     /// so both start-rate counters reset before they are read.
     RateWindowOutOfRange,
-    /// `max_attempts_per_window` is zero.
+    /// `max_attempts_per_window` is zero or above [`MAX_CONFIGURED_ATTEMPTS`].
     AttemptsPerWindowOutOfRange,
-    /// `max_global_attempts_per_window` is zero.
+    /// `max_global_attempts_per_window` is zero or above
+    /// [`MAX_CONFIGURED_ATTEMPTS`].
     GlobalAttemptsPerWindowOutOfRange,
     /// One bucket may hold at least the whole in-flight budget.
     PerSourcePendingExceedsTotal,
@@ -1387,6 +1410,40 @@ mod tests {
         for (b, want) in zeroed {
             assert_eq!(b.build(), Err(want), "a zero must not build");
         }
+
+        // THE TOP END OF THE ATTEMPT CEILINGS, which is the one that
+        // fails open. Capping the counts and the durations while
+        // leaving these two unbounded was a validated configuration
+        // that defended nothing: `u32::MAX` starts inside the one-hour
+        // maximum window is `u32::MAX` Noise handshakes this process
+        // performs for parties that have proved nothing, and CPU is the
+        // resource this layer exists to bound.
+        for over in [
+            PreAuthLimitsBuilder {
+                max_attempts_per_window: MAX_CONFIGURED_ATTEMPTS + 1,
+                max_global_attempts_per_window: u32::MAX,
+                ..builder()
+            },
+            PreAuthLimitsBuilder {
+                max_global_attempts_per_window: u32::MAX,
+                ..builder()
+            },
+        ] {
+            assert!(
+                over.build().is_err(),
+                "an unbounded start rate is not a start rate"
+            );
+        }
+        assert!(
+            PreAuthLimitsBuilder {
+                max_attempts_per_window: MAX_CONFIGURED_ATTEMPTS,
+                max_global_attempts_per_window: MAX_CONFIGURED_ATTEMPTS,
+                ..builder()
+            }
+            .build()
+            .is_ok(),
+            "the ceiling itself is legal"
+        );
 
         // And the top end, because `max_sources` is memory an operator
         // asks for and an unauthenticated party then fills.
