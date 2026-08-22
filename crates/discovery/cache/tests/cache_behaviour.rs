@@ -12,9 +12,9 @@
 use std::path::Path;
 
 use interweave_discovery_cache::{
-    CacheError, CacheHealth, CacheLimits, DEFAULT_TTL_MS, MAX_ADDRESSES_PER_PEER,
-    MAX_CACHE_FILE_BYTES, MAX_CAPABILITIES_PER_PEER, MAX_PEERS, PeerCache,
-    ProtocolCapabilityObservation,
+    CacheError, CacheHealth, CacheLimits, CacheLimitsBuilder, DEFAULT_TTL_MS, InvalidCacheLimits,
+    MAX_ADDRESS_BYTES, MAX_ADDRESSES_PER_PEER, MAX_CACHE_FILE_BYTES, MAX_CAPABILITIES_PER_PEER,
+    MAX_LABEL_BYTES, MAX_PEERS, PeerCache, ProtocolCapabilityObservation,
 };
 use interweave_transport_api::TransportIdentity;
 
@@ -192,10 +192,12 @@ fn the_peer_cap_evicts_expired_records_before_live_ones() {
     // Evicting a working peer while an expired one sits in the file is
     // strictly worse, so freshness beats age.
     let dir = tempfile::tempdir().expect("tempdir");
-    let limits = CacheLimits {
+    let limits = CacheLimitsBuilder {
         max_peers: 1,
-        ..CacheLimits::default()
-    };
+        ..Default::default()
+    }
+    .build()
+    .expect("one peer is a narrowing");
     let mut cache = PeerCache::load(&dir.path().join("peers.json"), limits).expect("load");
 
     // A is old enough to have expired; B is brand new but is inserted
@@ -706,4 +708,140 @@ fn nothing_the_cache_accepts_can_produce_a_file_it_refuses() {
         reloaded.health()
     );
     assert_eq!(reloaded.len(), 1);
+}
+
+#[test]
+fn limits_may_narrow_the_frozen_format_and_never_widen_it() {
+    // THE LOOP THIS CLOSES. The runtime honoured whatever limits it was
+    // handed, while `load` measured the file against
+    // MAX_CACHE_FILE_BYTES, which is computed from the FROZEN constants
+    // and not from the instance's limits. So a caller asking for more
+    // peers than the format holds got a cache that accepted the
+    // records, serialized them, flushed an ordinary file -- and
+    // quarantined that same file on the next start. The cache deleted
+    // its own contents on restart, with nothing to show for it but a
+    // size complaint about a file it had written itself.
+    for (proposed, want) in [
+        (
+            CacheLimitsBuilder {
+                max_peers: MAX_PEERS + 1,
+                ..Default::default()
+            },
+            InvalidCacheLimits::PeersOutOfRange,
+        ),
+        (
+            CacheLimitsBuilder {
+                max_addresses_per_peer: MAX_ADDRESSES_PER_PEER + 1,
+                ..Default::default()
+            },
+            InvalidCacheLimits::AddressesPerPeerOutOfRange,
+        ),
+        (
+            CacheLimitsBuilder {
+                max_capabilities_per_peer: MAX_CAPABILITIES_PER_PEER + 1,
+                ..Default::default()
+            },
+            InvalidCacheLimits::CapabilitiesPerPeerOutOfRange,
+        ),
+        (
+            CacheLimitsBuilder {
+                max_peers: 0,
+                ..Default::default()
+            },
+            InvalidCacheLimits::PeersOutOfRange,
+        ),
+        (
+            CacheLimitsBuilder {
+                ttl_ms: 0,
+                ..Default::default()
+            },
+            InvalidCacheLimits::ZeroTtl,
+        ),
+    ] {
+        assert_eq!(
+            proposed.build(),
+            Err(want),
+            "the disk format is not this type's to widen"
+        );
+    }
+
+    // Narrowing is the whole point and stays legal.
+    let narrowed = CacheLimitsBuilder {
+        max_peers: 4,
+        max_addresses_per_peer: 2,
+        max_capabilities_per_peer: 1,
+        ..Default::default()
+    }
+    .build()
+    .expect("fewer than the format allows is a narrowing");
+    assert_eq!(narrowed.max_peers(), 4);
+
+    // The frozen format itself narrows nothing and must survive its own
+    // validator -- otherwise `Default`, which bypasses the builder,
+    // would be minting a value the builder refuses.
+    assert_eq!(
+        CacheLimitsBuilder::default().build(),
+        Ok(CacheLimits::default())
+    );
+}
+
+#[test]
+fn a_full_cache_serializes_inside_what_a_load_will_read() {
+    // Every other bound in the crate is on a VALUE; the one in `flush`
+    // is on the result, and it is what makes "a cache never writes a
+    // file it cannot read" a checked statement rather than an argued
+    // one. The derivation behind MAX_CACHE_FILE_BYTES has been wrong
+    // once already -- it undercounted a legal record by a third, and
+    // then did not count JSON escaping.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("peers.json");
+    let mut cache = PeerCache::load(&path, CacheLimits::default()).expect("load");
+
+    // A worst case the public API can actually reach: every peer at the
+    // address and capability caps, with every string at its own bound.
+    let address = format!("/x/{}", "a".repeat(MAX_ADDRESS_BYTES - 3));
+    let label = "b".repeat(MAX_LABEL_BYTES);
+    for i in 0..MAX_PEERS {
+        let p = peer(&format!(
+            "Qm{}",
+            format!("{i:044}").replace('0', "a")[..44].to_owned()
+        ));
+        for a in 0..MAX_ADDRESSES_PER_PEER {
+            let mut addr = address.clone();
+            addr.replace_range(3..4, &char::from(b'a' + a as u8).to_string());
+            cache
+                .record_success(&p, &addr, 1_000)
+                .expect("within the bounded format");
+        }
+        for c in 0..MAX_CAPABILITIES_PER_PEER / 2 {
+            // Every string at its own ceiling, and distinct, so the
+            // records do not merge and the cap is genuinely filled.
+            let mut family = label.clone();
+            family.replace_range(0..2, &format!("{c:02}"));
+            cache
+                .record_capability(
+                    &p,
+                    ProtocolCapabilityObservation {
+                        protocol_family: family,
+                        wire_major: 1,
+                        network_hash: label.clone(),
+                        role: label.clone(),
+                        supported: c % 2 == 0,
+                        observed_at_ms: 1_000,
+                    },
+                )
+                .expect("within the bounded format");
+        }
+    }
+
+    cache.flush(2_000).expect("a legal cache must publish");
+    let written = std::fs::metadata(&path).expect("written").len();
+    assert!(
+        written <= MAX_CACHE_FILE_BYTES,
+        "flushed {written} bytes against a {MAX_CACHE_FILE_BYTES}-byte load ceiling"
+    );
+
+    // And it loads back, which is the property the ceiling is for.
+    let reloaded = PeerCache::load(&path, CacheLimits::default()).expect("loads");
+    assert_eq!(reloaded.len(), MAX_PEERS, "no record was quarantined");
 }
