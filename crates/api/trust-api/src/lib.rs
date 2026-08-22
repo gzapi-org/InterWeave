@@ -256,16 +256,12 @@ pub enum EndpointTrustPolicy {
     },
 }
 
-/// The wire shape, matching the frozen `oneOf`.
+/// The wire shape for WRITING, matching the frozen `oneOf`.
 ///
-/// CLOSED. Serde's derived struct-variant deserializer ignores unknown
-/// fields by default, so `{"static_subset": [...], "policy":
-/// "static-subset"}` was accepted while the frozen policy schema sets
-/// `additionalProperties: false`. Rejecting the old tagged-only form was
-/// not enough: a document carrying BOTH still parsed, which is exactly
-/// the shape a client migrating from the tagged representation emits.
-#[derive(Serialize, Deserialize)]
-#[serde(untagged, deny_unknown_fields)]
+/// Serialize only. Reading goes through the hand-written
+/// [`Deserialize`] impl below, for reasons that impl explains.
+#[derive(Serialize)]
+#[serde(untagged)]
 enum EndpointTrustPolicyRepr {
     Inherit(InheritLiteral),
     Subset {
@@ -294,20 +290,139 @@ impl Serialize for EndpointTrustPolicy {
     }
 }
 
-impl<'de> Deserialize<'de> for EndpointTrustPolicy {
+/// The frozen `static_subset` array, judged as it arrived.
+///
+/// The policy schema puts `maxItems: 4096` and `uniqueItems: true` on
+/// this array, and a `BTreeSet` erases both before anything can look:
+/// duplicates collapse, and the count that survives is the SET's, not
+/// the array's. So ten thousand copies of one trusted PeerId arrived as
+/// a set of one, passed the subset check several layers later, and left
+/// the parser having read the whole input on the way -- which is the
+/// resource the ceiling exists to bound.
+///
+/// A repeat is REFUSED rather than tolerated, because the schema calls
+/// it invalid. Quietly accepting a document a conformant validator
+/// rejects is the divergence the negative-conformance suite exists to
+/// find.
+struct BoundedSubset(BTreeSet<TransportIdentity>);
+
+impl<'de> Deserialize<'de> for BoundedSubset {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        Ok(match EndpointTrustPolicyRepr::deserialize(d)? {
-            EndpointTrustPolicyRepr::Inherit(InheritLiteral::InheritProfileTrust) => {
-                Self::InheritProfileTrust
+        struct Bounded;
+
+        impl<'de> serde::de::Visitor<'de> for Bounded {
+            type Value = BoundedSubset;
+
+            fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                write!(
+                    f,
+                    "at most {} distinct peer ids",
+                    EndpointTrustPolicy::MAX_STATIC_SUBSET
+                )
             }
-            EndpointTrustPolicyRepr::Subset { static_subset } => Self::StaticSubset {
-                allowed_peers: static_subset,
-            },
-        })
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                let max = EndpointTrustPolicy::MAX_STATIC_SUBSET;
+                let mut out = BTreeSet::new();
+                let mut count = 0usize;
+                while let Some(peer) = seq.next_element::<TransportIdentity>()? {
+                    count = count.saturating_add(1);
+                    if count > max {
+                        return Err(serde::de::Error::custom(format!(
+                            "a static subset holds at most {max} peers, got more"
+                        )));
+                    }
+                    if !out.insert(peer) {
+                        return Err(serde::de::Error::custom(
+                            "a static subset is uniqueItems; a peer id is repeated",
+                        ));
+                    }
+                }
+                Ok(BoundedSubset(out))
+            }
+        }
+
+        d.deserialize_seq(Bounded)
+    }
+}
+
+impl<'de> Deserialize<'de> for EndpointTrustPolicy {
+    /// Read the frozen `oneOf` WITHOUT `#[serde(untagged)]`.
+    ///
+    /// Untagged was the obvious spelling and it defeats the bound it is
+    /// carrying: serde buffers the entire input into an in-memory
+    /// `Content` tree before it tries the first variant, so a ceiling
+    /// inside a variant refuses an array whose cost has already been
+    /// paid in full. It also discards the variant's error and reports
+    /// only "data did not match any variant", which turns every
+    /// diagnostic here into a shrug.
+    ///
+    /// Dispatching on the input's own shape -- a string or a map -- is
+    /// what makes the array bound a bound on the READ.
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Policy;
+
+        impl<'de> serde::de::Visitor<'de> for Policy {
+            type Value = EndpointTrustPolicy;
+
+            fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                f.write_str(r#""inherit_profile_trust" or {"static_subset": [...]}"#)
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                if v == "inherit_profile_trust" {
+                    Ok(EndpointTrustPolicy::InheritProfileTrust)
+                } else {
+                    Err(E::invalid_value(serde::de::Unexpected::Str(v), &self))
+                }
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                // CLOSED, matching `additionalProperties: false` on the
+                // frozen policy object. A document carrying both
+                // `static_subset` and a leftover `policy` tag is exactly
+                // what a client migrating from the older tagged form
+                // emits, and it used to parse.
+                const FIELDS: &[&str] = &["static_subset"];
+                let mut allowed: Option<BTreeSet<TransportIdentity>> = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    if key == "static_subset" {
+                        if allowed.is_some() {
+                            return Err(serde::de::Error::duplicate_field("static_subset"));
+                        }
+                        allowed = Some(map.next_value::<BoundedSubset>()?.0);
+                    } else {
+                        return Err(serde::de::Error::unknown_field(&key, FIELDS));
+                    }
+                }
+                let allowed_peers =
+                    allowed.ok_or_else(|| serde::de::Error::missing_field("static_subset"))?;
+                Ok(EndpointTrustPolicy::StaticSubset { allowed_peers })
+            }
+        }
+
+        d.deserialize_any(Policy)
     }
 }
 
 impl EndpointTrustPolicy {
+    /// Largest `static_subset` the wire form will parse.
+    ///
+    /// The same number as [`PeerTrustPolicy::MAX_ALLOWED_PEERS`], and
+    /// not a coincidence: a subset that named more peers than the
+    /// profile allowlist may hold could not be a subset of it. Stated
+    /// as its own bound because the subset relation is checked by
+    /// configuration validation, several layers after the array has
+    /// been read -- so relying on it to bound the read is relying on a
+    /// check that has not run yet.
+    pub const MAX_STATIC_SUBSET: usize = PeerTrustPolicy::MAX_ALLOWED_PEERS;
+
     /// Whether this filter alone admits the peer, IGNORING profile trust.
     ///
     /// Private, and that is the point. Exposed, it is a
@@ -684,6 +799,79 @@ mod tests {
         assert!(
             serde_json::from_str::<EndpointTrustPolicy>(r#""inherit_profile_trust""#).is_ok(),
             "and so must the bare literal"
+        );
+    }
+
+    #[test]
+    fn a_static_subset_is_judged_as_the_array_the_schema_describes() {
+        // `endpoint-config.schema.json` puts `maxItems: 4096` and
+        // `uniqueItems: true` on this array. Deserializing it straight
+        // into a `BTreeSet` erased both before anything could look, so a
+        // conformant validator and this crate disagreed about the same
+        // document -- which is the whole thing negative conformance is
+        // for.
+
+        // Duplicates are invalid, not merely redundant. Two copies is
+        // the smallest possible case and the one a set makes vanish.
+        let doc = format!(r#"{{"static_subset":["{P1}","{P1}"]}}"#);
+        let err = serde_json::from_str::<EndpointTrustPolicy>(&doc)
+            .expect_err("uniqueItems is a constraint, not a preference")
+            .to_string();
+        assert!(err.contains("repeated"), "unexpected message: {err}");
+
+        // The ceiling is on the ARRAY. Repeats are how it was evaded:
+        // as a set they collapse to one entry and the subset check that
+        // runs several layers later sees nothing wrong -- while the
+        // parser has already read and allocated the whole input, which
+        // is the resource the ceiling exists to bound.
+        let over = vec![format!(r#""{P1}""#); EndpointTrustPolicy::MAX_STATIC_SUBSET + 1].join(",");
+        assert!(
+            serde_json::from_str::<EndpointTrustPolicy>(&format!(
+                r#"{{"static_subset":[{over}]}}"#
+            ))
+            .is_err()
+        );
+
+        // And it stops READING at the limit rather than rejecting after.
+        // Proved by what follows: broken JSON that a reader reaching the
+        // end would choke on, so the ceiling's own message is evidence
+        // the reader never got there.
+        let distinct: Vec<String> = (0..=EndpointTrustPolicy::MAX_STATIC_SUBSET)
+            .map(|i| format!(r#""{}""#, synthetic_peer(i).as_str()))
+            .collect();
+        let err = serde_json::from_str::<EndpointTrustPolicy>(&format!(
+            r#"{{"static_subset":[{}, {{{{{{ ]}}"#,
+            distinct.join(",")
+        ))
+        .expect_err("an over-length subset must be refused")
+        .to_string();
+        assert!(
+            err.contains("at most"),
+            "expected the ceiling to stop the read, got: {err}"
+        );
+
+        // Exactly the ceiling, distinct, is legal -- so the cases above
+        // failed for the length and the repetition, not for the shape.
+        let at_cap: Vec<String> = (0..EndpointTrustPolicy::MAX_STATIC_SUBSET)
+            .map(|i| format!(r#""{}""#, synthetic_peer(i).as_str()))
+            .collect();
+        let policy = serde_json::from_str::<EndpointTrustPolicy>(&format!(
+            r#"{{"static_subset":[{}]}}"#,
+            at_cap.join(",")
+        ))
+        .expect("the ceiling itself is legal");
+        match policy {
+            EndpointTrustPolicy::StaticSubset { allowed_peers } => {
+                assert_eq!(allowed_peers.len(), EndpointTrustPolicy::MAX_STATIC_SUBSET);
+            }
+            EndpointTrustPolicy::InheritProfileTrust => panic!("wrong variant"),
+        }
+
+        // The bound is the profile ceiling, because a subset cannot name
+        // more peers than the set it is a subset of.
+        assert_eq!(
+            EndpointTrustPolicy::MAX_STATIC_SUBSET,
+            PeerTrustPolicy::MAX_ALLOWED_PEERS
         );
     }
 
