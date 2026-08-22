@@ -145,6 +145,26 @@ pub fn source_bucket(source: &str) -> String {
     let Ok(ip) = ip else {
         return source.to_owned();
     };
+    // A DUAL-STACK LISTENER REPORTS AN IPv4 CLIENT AS IPv6. Bind a
+    // socket to `::` without `IPV6_V6ONLY` and `peer_addr()` renders an
+    // IPv4 peer as `[::ffff:198.51.100.7]:49152`. That parses as
+    // `IpAddr::V6`, and every IPv4-mapped address shares the `::/64`
+    // prefix — so the /64 rule below would have collapsed the ENTIRE
+    // IPv4 Internet into one bucket, and the first IPv4 client to spend
+    // the per-source allowance would deny every other IPv4 client.
+    //
+    // The /64 rule is right for IPv6 for the reason stated below and
+    // catastrophic here, so the mapping has to be undone before the
+    // rule chooses. Only `::ffff:a.b.c.d` is unmapped: the deprecated
+    // IPv4-COMPATIBLE form `::a.b.c.d` overlaps real addresses such as
+    // `::1`, and `to_ipv4()` would turn the loopback into `0.0.0.1`.
+    let ip = match ip {
+        std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => std::net::IpAddr::V4(v4),
+            None => std::net::IpAddr::V6(v6),
+        },
+        v4 => v4,
+    };
     match ip {
         std::net::IpAddr::V4(v4) => v4.to_string(),
         std::net::IpAddr::V6(v6) => {
@@ -158,27 +178,98 @@ pub fn source_bucket(source: &str) -> String {
     }
 }
 
-/// What the gate enforces.
+/// Largest value any configured ceiling in this module may take.
+///
+/// The gate holds one entry per tracked source, so `max_sources` is
+/// memory an operator can ask for and an unauthenticated party then
+/// fills. A stated ceiling makes the worst case a number someone chose
+/// rather than whatever a typo produced.
+pub const MAX_CONFIGURED_LIMIT: usize = 65_536;
+
+/// Longest rate window or handshake timeout the gate will accept, in
+/// milliseconds -- one hour.
+///
+/// A window this long is already far outside the specified policy; the
+/// bound exists so that `saturating_add` arithmetic on deadlines cannot
+/// be handed a value that makes every deadline effectively infinite.
+pub const MAX_CONFIGURED_DURATION_MS: u64 = 3_600_000;
+
+/// What the gate enforces, after validation.
+///
+/// # Why the fields are private
+///
+/// A limit set out of range does not fail loudly; it changes what the
+/// gate does while leaving it looking like a gate. The worst of them
+/// fails OPEN: with `rate_window_ms` at zero, every window in
+/// [`PreAuthGate::admit`] is elapsed on arrival, so both counters reset
+/// before they are read and neither start-rate bound exists any more.
+/// The listener would report the same limits, refuse nothing, and pass
+/// every test that does not set the clock.
+///
+/// Making the fields public put that one edit away from any caller. The
+/// only door is now [`PreAuthLimitsBuilder::build`], so a
+/// `PreAuthLimits` value IS the proof that its numbers were checked --
+/// there is no unvalidated one to pass to the gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PreAuthLimits {
+    max_pending_total: usize,
+    max_pending_per_source: usize,
+    handshake_timeout_ms: u64,
+    max_sources: usize,
+    rate_window_ms: u64,
+    max_attempts_per_window: u32,
+    max_global_attempts_per_window: u32,
+}
+
+impl PreAuthLimits {
     /// Handshakes in flight across all sources.
-    pub max_pending_total: usize,
-    /// Handshakes in flight from one source.
-    pub max_pending_per_source: usize,
+    #[must_use]
+    pub const fn max_pending_total(&self) -> usize {
+        self.max_pending_total
+    }
+
+    /// Handshakes in flight from one source bucket.
+    #[must_use]
+    pub const fn max_pending_per_source(&self) -> usize {
+        self.max_pending_per_source
+    }
+
     /// How long a handshake may take before its slot is reclaimed.
-    pub handshake_timeout_ms: u64,
-    /// Sources tracked at once.
-    pub max_sources: usize,
+    #[must_use]
+    pub const fn handshake_timeout_ms(&self) -> u64 {
+        self.handshake_timeout_ms
+    }
+
+    /// Source buckets tracked at once.
+    #[must_use]
+    pub const fn max_sources(&self) -> usize {
+        self.max_sources
+    }
+
     /// Length of the rate-accounting window.
-    pub rate_window_ms: u64,
+    #[must_use]
+    pub const fn rate_window_ms(&self) -> u64 {
+        self.rate_window_ms
+    }
+
     /// Starts one source bucket may make within a window.
-    pub max_attempts_per_window: u32,
+    #[must_use]
+    pub const fn max_attempts_per_window(&self) -> u32 {
+        self.max_attempts_per_window
+    }
+
     /// Starts all sources together may make within a window.
-    pub max_global_attempts_per_window: u32,
+    #[must_use]
+    pub const fn max_global_attempts_per_window(&self) -> u32 {
+        self.max_global_attempts_per_window
+    }
 }
 
 impl Default for PreAuthLimits {
     fn default() -> Self {
+        // The specified policy, which is valid by construction. The test
+        // `the_specified_defaults_are_valid` is what keeps that true if
+        // a default is ever retuned.
         Self {
             max_pending_total: DEFAULT_MAX_PENDING_TOTAL,
             max_pending_per_source: DEFAULT_MAX_PENDING_PER_SOURCE,
@@ -190,6 +281,154 @@ impl Default for PreAuthLimits {
         }
     }
 }
+
+/// Unvalidated limits, on their way to becoming [`PreAuthLimits`].
+///
+/// Public fields on purpose: this type is plainly the untrusted side of
+/// the boundary, and [`Self::build`] is where it stops being untrusted.
+/// [`Default`] is the specified policy, so `..Default::default()`
+/// narrows one bound without restating the other six.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreAuthLimitsBuilder {
+    /// Handshakes in flight across all sources.
+    pub max_pending_total: usize,
+    /// Handshakes in flight from one source bucket.
+    pub max_pending_per_source: usize,
+    /// How long a handshake may take before its slot is reclaimed.
+    pub handshake_timeout_ms: u64,
+    /// Source buckets tracked at once.
+    pub max_sources: usize,
+    /// Length of the rate-accounting window.
+    pub rate_window_ms: u64,
+    /// Starts one source bucket may make within a window.
+    pub max_attempts_per_window: u32,
+    /// Starts all sources together may make within a window.
+    pub max_global_attempts_per_window: u32,
+}
+
+impl Default for PreAuthLimitsBuilder {
+    fn default() -> Self {
+        let d = PreAuthLimits::default();
+        Self {
+            max_pending_total: d.max_pending_total,
+            max_pending_per_source: d.max_pending_per_source,
+            handshake_timeout_ms: d.handshake_timeout_ms,
+            max_sources: d.max_sources,
+            rate_window_ms: d.rate_window_ms,
+            max_attempts_per_window: d.max_attempts_per_window,
+            max_global_attempts_per_window: d.max_global_attempts_per_window,
+        }
+    }
+}
+
+impl PreAuthLimitsBuilder {
+    /// Check the numbers and produce limits the gate will accept.
+    ///
+    /// # Errors
+    /// Returns the first [`InvalidPreAuthLimits`] that applies.
+    pub const fn build(self) -> Result<PreAuthLimits, InvalidPreAuthLimits> {
+        use InvalidPreAuthLimits as E;
+
+        // EVERY BOUND IS POSITIVE. A zero here does not turn a bound
+        // off in a way an operator would notice: it either refuses
+        // everything or, for the two window fields, refuses nothing.
+        if self.max_pending_total == 0 || self.max_pending_total > MAX_CONFIGURED_LIMIT {
+            return Err(E::PendingTotalOutOfRange);
+        }
+        if self.max_pending_per_source == 0 || self.max_pending_per_source > MAX_CONFIGURED_LIMIT {
+            return Err(E::PendingPerSourceOutOfRange);
+        }
+        if self.max_sources == 0 || self.max_sources > MAX_CONFIGURED_LIMIT {
+            return Err(E::SourcesOutOfRange);
+        }
+        if self.handshake_timeout_ms == 0 || self.handshake_timeout_ms > MAX_CONFIGURED_DURATION_MS
+        {
+            return Err(E::HandshakeTimeoutOutOfRange);
+        }
+        // THE ONE THAT FAILS OPEN. See `PreAuthLimits`.
+        if self.rate_window_ms == 0 || self.rate_window_ms > MAX_CONFIGURED_DURATION_MS {
+            return Err(E::RateWindowOutOfRange);
+        }
+        if self.max_attempts_per_window == 0 {
+            return Err(E::AttemptsPerWindowOutOfRange);
+        }
+        if self.max_global_attempts_per_window == 0 {
+            return Err(E::GlobalAttemptsPerWindowOutOfRange);
+        }
+
+        // CROSS-FIELD. Per-source accounting exists so that one bucket
+        // cannot spend the whole budget; a per-source ceiling at or
+        // above the global one is per-source accounting that never
+        // binds, which is the same outcome as not having it.
+        if self.max_pending_per_source > self.max_pending_total {
+            return Err(E::PerSourcePendingExceedsTotal);
+        }
+        if self.max_attempts_per_window > self.max_global_attempts_per_window {
+            return Err(E::PerSourceAttemptsExceedGlobal);
+        }
+
+        Ok(PreAuthLimits {
+            max_pending_total: self.max_pending_total,
+            max_pending_per_source: self.max_pending_per_source,
+            handshake_timeout_ms: self.handshake_timeout_ms,
+            max_sources: self.max_sources,
+            rate_window_ms: self.rate_window_ms,
+            max_attempts_per_window: self.max_attempts_per_window,
+            max_global_attempts_per_window: self.max_global_attempts_per_window,
+        })
+    }
+}
+
+/// Why a set of proposed limits was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidPreAuthLimits {
+    /// `max_pending_total` is zero or above [`MAX_CONFIGURED_LIMIT`].
+    PendingTotalOutOfRange,
+    /// `max_pending_per_source` is zero or above [`MAX_CONFIGURED_LIMIT`].
+    PendingPerSourceOutOfRange,
+    /// `max_sources` is zero or above [`MAX_CONFIGURED_LIMIT`].
+    SourcesOutOfRange,
+    /// `handshake_timeout_ms` is zero or above [`MAX_CONFIGURED_DURATION_MS`].
+    HandshakeTimeoutOutOfRange,
+    /// `rate_window_ms` is zero or above [`MAX_CONFIGURED_DURATION_MS`].
+    ///
+    /// Zero is the fail-open case: every window is elapsed on arrival,
+    /// so both start-rate counters reset before they are read.
+    RateWindowOutOfRange,
+    /// `max_attempts_per_window` is zero.
+    AttemptsPerWindowOutOfRange,
+    /// `max_global_attempts_per_window` is zero.
+    GlobalAttemptsPerWindowOutOfRange,
+    /// One bucket may hold at least the whole in-flight budget.
+    PerSourcePendingExceedsTotal,
+    /// One bucket may make at least every start in the window.
+    PerSourceAttemptsExceedGlobal,
+}
+
+impl std::fmt::Display for InvalidPreAuthLimits {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let what = match self {
+            Self::PendingTotalOutOfRange => "max_pending_total is out of range",
+            Self::PendingPerSourceOutOfRange => "max_pending_per_source is out of range",
+            Self::SourcesOutOfRange => "max_sources is out of range",
+            Self::HandshakeTimeoutOutOfRange => "handshake_timeout_ms is out of range",
+            Self::RateWindowOutOfRange => "rate_window_ms is out of range",
+            Self::AttemptsPerWindowOutOfRange => "max_attempts_per_window is out of range",
+            Self::GlobalAttemptsPerWindowOutOfRange => {
+                "max_global_attempts_per_window is out of range"
+            }
+            Self::PerSourcePendingExceedsTotal => {
+                "max_pending_per_source exceeds max_pending_total"
+            }
+            Self::PerSourceAttemptsExceedGlobal => {
+                "max_attempts_per_window exceeds max_global_attempts_per_window"
+            }
+        };
+        f.write_str(what)
+    }
+}
+
+impl std::error::Error for InvalidPreAuthLimits {}
 
 /// Why a pre-authentication attempt was refused.
 ///
@@ -533,8 +772,15 @@ impl PreAuthGate {
 mod tests {
     use super::*;
 
-    fn limits() -> PreAuthLimits {
-        PreAuthLimits {
+    /// The narrowed policy the cases below run against.
+    ///
+    /// A builder rather than a literal so every test config goes
+    /// through the same door a caller has to use. Private fields are
+    /// still visible to this child module, so a struct literal would
+    /// have compiled and quietly skipped the validation the rest of
+    /// the world cannot skip.
+    fn builder() -> PreAuthLimitsBuilder {
+        PreAuthLimitsBuilder {
             max_pending_total: 6,
             max_pending_per_source: 2,
             handshake_timeout_ms: 1_000,
@@ -545,6 +791,12 @@ mod tests {
             // what they say they test; the global budget has its own.
             max_global_attempts_per_window: 1_000,
         }
+    }
+
+    fn limits() -> PreAuthLimits {
+        builder()
+            .build()
+            .expect("the narrowed test policy is legal")
     }
 
     fn gate() -> PreAuthGate {
@@ -759,11 +1011,15 @@ mod tests {
         // reason alone — the first version of this test asked at a time
         // by which everything had already timed out, and passed for the
         // wrong reason.
-        let mut g = PreAuthGate::new(PreAuthLimits {
-            handshake_timeout_ms: 60_000,
-            rate_window_ms: 1_000,
-            ..limits()
-        });
+        let mut g = PreAuthGate::new(
+            PreAuthLimitsBuilder {
+                handshake_timeout_ms: 60_000,
+                rate_window_ms: 1_000,
+                ..builder()
+            }
+            .build()
+            .expect("a legal narrowing"),
+        );
         let mut held = Vec::new();
         for i in 0..3 {
             held.push(g.admit(&format!("10.0.0.{i}"), 0).expect("tracked"));
@@ -833,11 +1089,15 @@ mod tests {
         // ceiling and never exhausts its own rate, so an attacker with
         // enough addresses starts unlimited Noise handshakes — and the
         // CPU they cost is what this layer is for.
-        let mut g = PreAuthGate::new(PreAuthLimits {
-            max_global_attempts_per_window: 10,
-            max_sources: 64,
-            ..limits()
-        });
+        let mut g = PreAuthGate::new(
+            PreAuthLimitsBuilder {
+                max_global_attempts_per_window: 10,
+                max_sources: 64,
+                ..builder()
+            }
+            .build()
+            .expect("a legal narrowing"),
+        );
 
         // Ten starts spread thin: every one from a different bucket, each
         // completing at once, so nothing else can be what refuses them.
@@ -873,14 +1133,18 @@ mod tests {
         // Charging on refusal would let a source that is already over its
         // own limit burn the shared budget for everyone else, turning a
         // per-source refusal into a global outage.
-        let mut g = PreAuthGate::new(PreAuthLimits {
-            max_global_attempts_per_window: 10,
-            max_attempts_per_window: 1,
-            // Room for the nine other buckets below, so the source table
-            // is not what refuses them.
-            max_sources: 64,
-            ..limits()
-        });
+        let mut g = PreAuthGate::new(
+            PreAuthLimitsBuilder {
+                max_global_attempts_per_window: 10,
+                max_attempts_per_window: 1,
+                // Room for the nine other buckets below, so the source table
+                // is not what refuses them.
+                max_sources: 64,
+                ..builder()
+            }
+            .build()
+            .expect("a legal narrowing"),
+        );
 
         g.admit("10.0.0.1", 0).expect("its one start");
         for _ in 0..50 {
@@ -997,6 +1261,249 @@ mod tests {
             Err(PreAuthDenial::TooManyFromSource)
         );
         assert_eq!(g.tracked_sources(), 1);
+    }
+
+    #[test]
+    fn a_zero_rate_window_would_disable_both_start_bounds() {
+        // FIRST, PROVE THE DANGER IS REAL. This child module can still
+        // reach the private fields, so it can build the value the
+        // outside world no longer can -- and show what the gate does
+        // with it. Without this half, the assertion below is a claim
+        // about a constructor rather than about a security bound.
+        let broken = PreAuthLimits {
+            rate_window_ms: 0,
+            ..limits()
+        };
+        let mut g = PreAuthGate::new(broken);
+        // Four starts is the per-source ceiling in `limits()`. Complete
+        // each one so the pending count is never what refuses, leaving
+        // the start rate as the only bound in play.
+        for _ in 0..40 {
+            let slot = g
+                .admit("10.0.0.1", 0)
+                .expect("with a zero window nothing is ever rate limited");
+            g.completed(&slot);
+        }
+        assert!(
+            g.admit("10.0.0.1", 0).is_ok(),
+            "ten times the per-window allowance at one instant, refused never"
+        );
+
+        // The same traffic against a legal window IS refused, so the
+        // line above is about the zero and not about the loop.
+        let mut sane = PreAuthGate::new(limits());
+        for _ in 0..4 {
+            let slot = sane.admit("10.0.0.1", 0).expect("within the window");
+            sane.completed(&slot);
+        }
+        assert_eq!(sane.admit("10.0.0.1", 0), Err(PreAuthDenial::RateLimited));
+
+        // SECOND, PROVE THE DOOR IS SHUT. Every window in `admit` is
+        // elapsed on arrival at zero, so both counters reset before
+        // they are read: the bound is not merely loose, it is absent,
+        // and it is the one misconfiguration here that fails OPEN.
+        assert_eq!(
+            PreAuthLimitsBuilder {
+                rate_window_ms: 0,
+                ..builder()
+            }
+            .build(),
+            Err(InvalidPreAuthLimits::RateWindowOutOfRange)
+        );
+    }
+
+    #[test]
+    fn the_specified_defaults_are_valid() {
+        // `Default` bypasses the builder, so retuning a default could
+        // otherwise mint a `PreAuthLimits` the builder would refuse --
+        // an invalid value of a type whose whole claim is that there
+        // are none.
+        let d = PreAuthLimits::default();
+        assert_eq!(
+            PreAuthLimitsBuilder::default().build(),
+            Ok(d),
+            "the specified policy must survive its own validator"
+        );
+    }
+
+    #[test]
+    fn every_bound_is_positive_and_ceilinged() {
+        use InvalidPreAuthLimits as E;
+
+        // Zero, one field at a time. Each of these either refuses
+        // every connection or, for the two durations, stops refusing
+        // anything -- and both look like a working gate from outside.
+        let zeroed: [(PreAuthLimitsBuilder, E); 7] = [
+            (
+                PreAuthLimitsBuilder {
+                    max_pending_total: 0,
+                    ..builder()
+                },
+                E::PendingTotalOutOfRange,
+            ),
+            (
+                PreAuthLimitsBuilder {
+                    max_pending_per_source: 0,
+                    ..builder()
+                },
+                E::PendingPerSourceOutOfRange,
+            ),
+            (
+                PreAuthLimitsBuilder {
+                    max_sources: 0,
+                    ..builder()
+                },
+                E::SourcesOutOfRange,
+            ),
+            (
+                PreAuthLimitsBuilder {
+                    handshake_timeout_ms: 0,
+                    ..builder()
+                },
+                E::HandshakeTimeoutOutOfRange,
+            ),
+            (
+                PreAuthLimitsBuilder {
+                    rate_window_ms: 0,
+                    ..builder()
+                },
+                E::RateWindowOutOfRange,
+            ),
+            (
+                PreAuthLimitsBuilder {
+                    max_attempts_per_window: 0,
+                    ..builder()
+                },
+                E::AttemptsPerWindowOutOfRange,
+            ),
+            (
+                PreAuthLimitsBuilder {
+                    max_global_attempts_per_window: 0,
+                    ..builder()
+                },
+                E::GlobalAttemptsPerWindowOutOfRange,
+            ),
+        ];
+        for (b, want) in zeroed {
+            assert_eq!(b.build(), Err(want), "a zero must not build");
+        }
+
+        // And the top end, because `max_sources` is memory an operator
+        // asks for and an unauthenticated party then fills.
+        assert_eq!(
+            PreAuthLimitsBuilder {
+                max_sources: MAX_CONFIGURED_LIMIT + 1,
+                ..builder()
+            }
+            .build(),
+            Err(E::SourcesOutOfRange)
+        );
+        assert!(
+            PreAuthLimitsBuilder {
+                max_sources: MAX_CONFIGURED_LIMIT,
+                ..builder()
+            }
+            .build()
+            .is_ok(),
+            "the ceiling itself is legal"
+        );
+        assert_eq!(
+            PreAuthLimitsBuilder {
+                rate_window_ms: MAX_CONFIGURED_DURATION_MS + 1,
+                ..builder()
+            }
+            .build(),
+            Err(E::RateWindowOutOfRange)
+        );
+    }
+
+    #[test]
+    fn a_per_source_bound_at_the_global_one_is_not_a_per_source_bound() {
+        use InvalidPreAuthLimits as E;
+
+        // The point of per-source accounting is that one bucket cannot
+        // spend the whole budget. A per-source ceiling above the global
+        // one never binds before the global one does, so the gate keeps
+        // its shape and loses the property.
+        assert_eq!(
+            PreAuthLimitsBuilder {
+                max_pending_total: 8,
+                max_pending_per_source: 9,
+                ..builder()
+            }
+            .build(),
+            Err(E::PerSourcePendingExceedsTotal)
+        );
+        assert_eq!(
+            PreAuthLimitsBuilder {
+                max_attempts_per_window: 100,
+                max_global_attempts_per_window: 99,
+                ..builder()
+            }
+            .build(),
+            Err(E::PerSourceAttemptsExceedGlobal)
+        );
+
+        // Equal is allowed: one bucket may reach the global ceiling,
+        // which is a narrow policy rather than an absent one.
+        assert!(
+            PreAuthLimitsBuilder {
+                max_pending_total: 8,
+                max_pending_per_source: 8,
+                ..builder()
+            }
+            .build()
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_dual_stack_listener_does_not_merge_the_ipv4_internet() {
+        // The third round of the same mistake, and the widest: a socket
+        // bound to `::` without `IPV6_V6ONLY` accepts IPv4 too, and
+        // reports those peers as `[::ffff:198.51.100.7]:49152`. That is
+        // an `IpAddr::V6`, and EVERY IPv4-mapped address sits in `::/64`
+        // — so the prefix rule that is correct for native IPv6 put the
+        // whole IPv4 Internet in one bucket. One client spending the
+        // per-source allowance denied every other IPv4 client, which is
+        // a worse outcome than having no per-source accounting at all.
+        assert_eq!(source_bucket("[::ffff:198.51.100.7]:49152"), "198.51.100.7");
+        assert_eq!(source_bucket("[::ffff:198.51.100.8]:49152"), "198.51.100.8");
+        assert_eq!(source_bucket("::ffff:198.51.100.7"), "198.51.100.7");
+
+        // The mapped form and the plain form are the SAME client, so
+        // they must not be two budgets either.
+        assert_eq!(
+            source_bucket("[::ffff:198.51.100.7]:49152"),
+            source_bucket("198.51.100.7:49152")
+        );
+
+        // Only the mapped form is unwrapped. `::1` is IPv4-COMPATIBLE
+        // shaped, and unwrapping that class would rewrite the loopback
+        // as `0.0.0.1` — a native IPv6 address must keep the /64 rule.
+        assert_eq!(source_bucket("::1"), "::/64");
+        assert_eq!(source_bucket("2001:db8:1:2::1"), "2001:db8:1:2::/64");
+
+        // And the gate is what has to apply it. Two unrelated IPv4
+        // clients, arriving the way a dual-stack listener reports them:
+        // each gets its own allowance, neither can deny the other.
+        let mut g = gate();
+        g.admit("[::ffff:198.51.100.7]:49152", 0)
+            .expect("client a, first");
+        g.admit("[::ffff:198.51.100.7]:49153", 0)
+            .expect("client a, second");
+        assert_eq!(
+            g.admit("[::ffff:198.51.100.7]:49154", 0),
+            Err(PreAuthDenial::TooManyFromSource),
+            "one mapped client is still capped"
+        );
+        g.admit("[::ffff:198.51.100.8]:49152", 0)
+            .expect("a DIFFERENT IPv4 client is not denied by the first one");
+        assert_eq!(
+            g.tracked_sources(),
+            2,
+            "two IPv4 clients are two buckets, not one"
+        );
     }
 
     #[test]

@@ -116,14 +116,248 @@ pub const MAX_ADVERTISED_CEILING: u32 = 32;
 pub const DEFAULT_MAX_ADVERTISED: u32 = 16;
 /// Maximum peers in the profile allowlist.
 pub const MAX_ALLOWED_PEERS: usize = 4096;
+/// Maximum client kinds one endpoint may list.
+pub const MAX_CLIENT_KINDS: usize = 16;
+/// Longest client-kind label, in characters.
+///
+/// Characters and not bytes: the contract states the bound as JSON
+/// Schema `maxLength`, which counts code points.
+pub const MAX_CLIENT_KIND_CHARS: usize = 64;
+
+/// One label in an endpoint's `allowed_client_kinds`.
+///
+/// # Hygiene, and a bounded string
+///
+/// This is an accidental-misbinding guard and NEVER authentication
+/// (ADR-0017, `contracts/ENDPOINTS.md`): a local client asserts its own
+/// kind, so the field decides nothing an attacker could not simply
+/// claim. That is exactly why it is a validated type rather than a
+/// `String` -- a field with no authority is the one nobody thinks to
+/// bound, and it still arrives from configuration and still occupies
+/// memory.
+///
+/// The contract states `minLength: 1, maxLength: 64`. The bound is on
+/// CHARACTERS, because that is what JSON Schema counts.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct ClientKind(String);
+
+impl ClientKind {
+    /// Parse a client-kind label.
+    ///
+    /// # Errors
+    /// Returns [`InvalidClientKind`] outside `1..=`[`MAX_CLIENT_KIND_CHARS`].
+    pub fn parse(s: impl Into<String>) -> Result<Self, InvalidClientKind> {
+        let s = s.into();
+        let chars = s.chars().count();
+        if chars == 0 || chars > MAX_CLIENT_KIND_CHARS {
+            return Err(InvalidClientKind { chars });
+        }
+        Ok(Self(s))
+    }
+
+    /// The label.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl core::fmt::Display for ClientKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for ClientKind {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // Through `parse`, so the wire path and the Rust path enforce
+        // the same rule. A derived `Deserialize` on a newtype accepts
+        // anything the inner type accepts, which for `String` is
+        // everything.
+        Self::parse(String::deserialize(d)?).map_err(serde::de::Error::custom)
+    }
+}
+
+/// A client-kind label outside the contract's length bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidClientKind {
+    /// The length supplied, in characters.
+    pub chars: usize,
+}
+
+impl core::fmt::Display for InvalidClientKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "a client kind is 1..={MAX_CLIENT_KIND_CHARS} characters, got {}",
+            self.chars
+        )
+    }
+}
+
+impl core::error::Error for InvalidClientKind {}
+
+/// Read a bounded, unique array without materializing it first.
+///
+/// `Vec::deserialize` parses and allocates the whole array before a
+/// length check can run, so a ceiling applied afterwards rejects the
+/// RESULT while the input has already been paid for -- and that cost is
+/// the thing the ceiling exists to bound. One element past the limit is
+/// enough to know.
+fn bounded_unique_seq<'de, D, T>(
+    deserializer: D,
+    max: usize,
+    what: &'static str,
+) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Ord + Clone,
+{
+    struct Bounded<T> {
+        max: usize,
+        what: &'static str,
+        _item: core::marker::PhantomData<T>,
+    }
+
+    impl<'de, T: Deserialize<'de> + Ord + Clone> serde::de::Visitor<'de> for Bounded<T> {
+        type Value = Vec<T>;
+
+        fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(f, "at most {} distinct {}", self.max, self.what)
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut out: Vec<T> = Vec::new();
+            let mut seen: BTreeSet<T> = BTreeSet::new();
+            while let Some(item) = seq.next_element::<T>()? {
+                if out.len() >= self.max {
+                    return Err(serde::de::Error::custom(format!(
+                        "at most {} {}, got more",
+                        self.max, self.what
+                    )));
+                }
+                if !seen.insert(item.clone()) {
+                    return Err(serde::de::Error::custom(format!(
+                        "{} are uniqueItems; an entry is repeated",
+                        self.what
+                    )));
+                }
+                out.push(item);
+            }
+            Ok(out)
+        }
+    }
+
+    deserializer.deserialize_seq(Bounded {
+        max,
+        what,
+        _item: core::marker::PhantomData,
+    })
+}
+
+/// The endpoint's `allowed_client_kinds` array, judged as it arrived.
+fn wire_client_kinds<'de, D>(deserializer: D) -> Result<Vec<ClientKind>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    bounded_unique_seq(deserializer, MAX_CLIENT_KINDS, "client kinds")
+}
+
+/// The endpoint entry array, judged as it arrived.
+///
+/// [`ProfileConfig::validate`] also reports [`ConfigError::TooManyEndpoints`],
+/// because a Rust caller can build the vector directly. The read path
+/// needs its own bound for a different reason: validation runs after
+/// the whole document has been parsed.
+fn wire_entries<'de, D>(deserializer: D) -> Result<Vec<EndpointConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Bounded;
+
+    impl<'de> serde::de::Visitor<'de> for Bounded {
+        type Value = Vec<EndpointConfig>;
+
+        fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(f, "at most {MAX_ENDPOINTS} endpoint entries")
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            // Duplicate ids are NOT rejected here. `validate` reports
+            // them as `DuplicateEndpointId`, naming the offending id,
+            // and an operator fixing a sixty-entry file needs that
+            // message rather than a parse failure at an offset.
+            let mut out = Vec::new();
+            while let Some(entry) = seq.next_element::<EndpointConfig>()? {
+                if out.len() >= MAX_ENDPOINTS {
+                    return Err(serde::de::Error::custom(format!(
+                        "at most {MAX_ENDPOINTS} endpoints, got more"
+                    )));
+                }
+                out.push(entry);
+            }
+            Ok(out)
+        }
+    }
+
+    deserializer.deserialize_seq(Bounded)
+}
+
+/// The profile allowlist, counted as the array the file supplied.
+///
+/// A `BTreeSet` collapses repeats before anything can count them, so
+/// any number of copies of one PeerId arrived as a set of one and
+/// passed the ceiling -- having been read in full on the way.
+fn wire_allowed_peers<'de, D>(deserializer: D) -> Result<BTreeSet<TransportIdentity>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Bounded;
+
+    impl<'de> serde::de::Visitor<'de> for Bounded {
+        type Value = BTreeSet<TransportIdentity>;
+
+        fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(f, "at most {MAX_ALLOWED_PEERS} peer ids")
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut out = BTreeSet::new();
+            let mut count = 0usize;
+            while let Some(peer) = seq.next_element::<TransportIdentity>()? {
+                count = count.saturating_add(1);
+                if count > MAX_ALLOWED_PEERS {
+                    return Err(serde::de::Error::custom(format!(
+                        "at most {MAX_ALLOWED_PEERS} allowed peers, got more"
+                    )));
+                }
+                out.insert(peer);
+            }
+            Ok(out)
+        }
+    }
+
+    deserializer.deserialize_seq(Bounded)
+}
 
 /// The profile trust block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TrustConfig {
     /// The only v1 policy.
     pub policy: TrustPolicyKind,
     /// The data-plane allowlist.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "wire_allowed_peers")]
     pub allowed_peers: BTreeSet<TransportIdentity>,
 }
 
@@ -147,6 +381,7 @@ pub enum RegistrationPolicy {
 
 /// The endpoint-directory block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DirectoryConfig {
     /// Whether the directory answers remote queries.
     #[serde(default = "default_true")]
@@ -174,6 +409,7 @@ impl Default for DirectoryConfig {
 
 /// One configured endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EndpointConfig {
     /// The route label.
     pub id: EndpointId,
@@ -184,8 +420,12 @@ pub struct EndpointConfig {
     #[serde(default)]
     pub advertise: bool,
     /// Client kinds permitted to lease it. Hygiene only, never authority.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub allowed_client_kinds: Vec<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "wire_client_kinds"
+    )]
+    pub allowed_client_kinds: Vec<ClientKind>,
     /// Inbound narrowing filter.
     #[serde(default)]
     pub inbound: EndpointTrustPolicy,
@@ -196,6 +436,7 @@ pub struct EndpointConfig {
 
 /// The endpoints block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EndpointsConfig {
     /// Registration policy.
     #[serde(default)]
@@ -207,12 +448,13 @@ pub struct EndpointsConfig {
     #[serde(default)]
     pub directory: DirectoryConfig,
     /// The configured endpoints.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "wire_entries")]
     pub entries: Vec<EndpointConfig>,
 }
 
 /// A profile's configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProfileConfig {
     /// Always 2 for this contract.
     pub schema_version: u32,
@@ -285,6 +527,20 @@ pub enum ConfigError {
         /// The configured value.
         got: u32,
     },
+    /// An endpoint lists more client kinds than the contract allows.
+    TooManyClientKinds {
+        /// Which endpoint.
+        endpoint: EndpointId,
+        /// Kinds supplied.
+        got: usize,
+    },
+    /// An endpoint lists the same client kind twice.
+    DuplicateClientKind {
+        /// Which endpoint.
+        endpoint: EndpointId,
+        /// The repeated kind.
+        kind: ClientKind,
+    },
 }
 
 /// Which narrowing filter a violation came from.
@@ -354,6 +610,16 @@ impl core::fmt::Display for ConfigError {
             Self::MaxAdvertisedAboveCeiling { got } => write!(
                 f,
                 "directory.max_advertised is {got}; the ceiling is {MAX_ADVERTISED_CEILING}"
+            ),
+            Self::TooManyClientKinds { endpoint, got } => write!(
+                f,
+                "endpoint '{}' lists {got} client kinds; the maximum is {MAX_CLIENT_KINDS}",
+                endpoint.as_str()
+            ),
+            Self::DuplicateClientKind { endpoint, kind } => write!(
+                f,
+                "endpoint '{}' lists client kind '{kind}' more than once",
+                endpoint.as_str()
             ),
         }
     }
@@ -434,7 +700,29 @@ impl ProfileConfig {
             }
         }
 
-        // Rule 5 — advertised entries fit the directory bound. A DISABLED
+        // Rule 5 — an endpoint's client kinds fit the contract's array
+        // bounds. The read path enforces these too; this covers the
+        // caller who built the struct in Rust, and it names the
+        // offending endpoint rather than failing at a byte offset.
+        for e in entries {
+            if e.allowed_client_kinds.len() > MAX_CLIENT_KINDS {
+                errors.push(ConfigError::TooManyClientKinds {
+                    endpoint: e.id.clone(),
+                    got: e.allowed_client_kinds.len(),
+                });
+            }
+            let mut seen_kinds: BTreeSet<&ClientKind> = BTreeSet::new();
+            for kind in &e.allowed_client_kinds {
+                if !seen_kinds.insert(kind) {
+                    errors.push(ConfigError::DuplicateClientKind {
+                        endpoint: e.id.clone(),
+                        kind: kind.clone(),
+                    });
+                }
+            }
+        }
+
+        // Rule 6 — advertised entries fit the directory bound. A DISABLED
         // entry does not count: it advertises nothing, so counting it
         // would reject a configuration that behaves correctly.
         let max_advertised = self.endpoints.directory.max_advertised;
@@ -470,6 +758,203 @@ mod tests {
 
     fn peer(s: &str) -> TransportIdentity {
         TransportIdentity::parse(s).expect("valid identity")
+    }
+
+    #[test]
+    fn a_misspelled_field_is_refused_rather_than_ignored() {
+        // THE FAILURE MODE IS NOT "unexpected configuration". Serde
+        // ignores unknown fields by default, and every security-relevant
+        // field here defaults toward the PERMISSIVE answer: `enabled` to
+        // true, both narrowing filters to inherit-profile-trust,
+        // `allowed_client_kinds` to empty meaning no restriction. So a
+        // typo does not disable a bound, it removes one -- the operator
+        // wrote a narrowing and got the wide default, with no diagnostic
+        // anywhere.
+        let base = format!(
+            r#"{{"schema_version":2,
+                 "trust":{{"policy":"static-allowlist","allowed_peers":["{P1}"]}},
+                 "endpoints":{{"entries":[{{"id":"human","enabled":false"#
+        );
+
+        // Same document, correct spelling: parses, and the endpoint is
+        // off. This is the control -- without it the assertions below
+        // could be failing for the shape.
+        let good = format!("{base}}}]}}}}");
+        let cfg: ProfileConfig = serde_json::from_str(&good).expect("the correct spelling parses");
+        assert!(!cfg.endpoints.entries[0].enabled);
+
+        // `enabeld: false` used to leave `enabled` at its `true`
+        // default: an endpoint the operator believed was off, accepting
+        // traffic.
+        let typo = format!(
+            r#"{{"schema_version":2,
+                 "trust":{{"policy":"static-allowlist","allowed_peers":["{P1}"]}},
+                 "endpoints":{{"entries":[{{"id":"human","enabeld":false}}]}}}}"#
+        );
+        let err = serde_json::from_str::<ProfileConfig>(&typo)
+            .expect_err("an unknown endpoint field must be refused")
+            .to_string();
+        assert!(err.contains("enabeld"), "the message must name it: {err}");
+
+        // `inboud` used to leave `inbound` inheriting full profile
+        // trust: the operator wrote a narrowing filter and got none.
+        let typo = format!(
+            r#"{{"schema_version":2,
+                 "trust":{{"policy":"static-allowlist","allowed_peers":["{P1}"]}},
+                 "endpoints":{{"entries":[{{"id":"human",
+                   "inboud":{{"static_subset":["{P1}"]}}}}]}}}}"#
+        );
+        assert!(
+            serde_json::from_str::<ProfileConfig>(&typo).is_err(),
+            "a misspelled narrowing filter must not silently widen"
+        );
+
+        // Every closed object, not only the endpoint. `additionalProperties:
+        // false` is the contract's answer at each level.
+        for doc in [
+            r#"{"schema_version":2,"trusst":{},
+                "trust":{"policy":"static-allowlist"},"endpoints":{}}"#
+                .to_owned(),
+            format!(
+                r#"{{"schema_version":2,
+                        "trust":{{"policy":"static-allowlist","allowd_peers":["{P1}"]}},
+                        "endpoints":{{}}}}"#
+            ),
+            r#"{"schema_version":2,"trust":{"policy":"static-allowlist"},
+                "endpoints":{"registration_polcy":"configured-only"}}"#
+                .to_owned(),
+            r#"{"schema_version":2,"trust":{"policy":"static-allowlist"},
+                "endpoints":{"directory":{"enabld":false}}}"#
+                .to_owned(),
+        ] {
+            assert!(
+                serde_json::from_str::<ProfileConfig>(&doc).is_err(),
+                "an unknown field must be refused at every level: {doc}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_client_kind_array_is_judged_as_the_array_the_contract_describes() {
+        // `endpoint-config.schema.json`: maxItems 16, uniqueItems, and
+        // each item 1..=64 characters. The field was a raw `Vec<String>`
+        // with none of that enforced -- and being "hygiene, not
+        // authority" is precisely why nobody bounded it, while it still
+        // arrives from configuration and still occupies memory.
+        let doc = |kinds: &str| {
+            format!(
+                r#"{{"schema_version":2,
+                     "trust":{{"policy":"static-allowlist","allowed_peers":["{P1}"]}},
+                     "endpoints":{{"entries":[
+                       {{"id":"human","allowed_client_kinds":{kinds}}}]}}}}"#
+            )
+        };
+
+        let cfg: ProfileConfig =
+            serde_json::from_str(&doc(r#"["human-client"]"#)).expect("a legal single kind parses");
+        assert_eq!(
+            cfg.endpoints.entries[0].allowed_client_kinds[0].as_str(),
+            "human-client"
+        );
+
+        // Seventeen distinct kinds: one past the ceiling.
+        let over: Vec<String> = (0..=MAX_CLIENT_KINDS)
+            .map(|i| format!(r#""k{i}""#))
+            .collect();
+        assert!(
+            serde_json::from_str::<ProfileConfig>(&doc(&format!("[{}]", over.join(",")))).is_err()
+        );
+        // Exactly the ceiling is legal, so the case above failed for the
+        // count and not for the shape.
+        let at_cap: Vec<String> = (0..MAX_CLIENT_KINDS)
+            .map(|i| format!(r#""k{i}""#))
+            .collect();
+        assert!(
+            serde_json::from_str::<ProfileConfig>(&doc(&format!("[{}]", at_cap.join(",")))).is_ok()
+        );
+
+        // uniqueItems.
+        let err = serde_json::from_str::<ProfileConfig>(&doc(r#"["human-client","human-client"]"#))
+            .expect_err("a repeated kind is invalid")
+            .to_string();
+        assert!(err.contains("repeated"), "unexpected message: {err}");
+
+        // Item bounds, both ends. The empty string is the one a derived
+        // `Vec<String>` accepted most cheerfully.
+        assert!(serde_json::from_str::<ProfileConfig>(&doc(r#"[""]"#)).is_err());
+        let long = "k".repeat(MAX_CLIENT_KIND_CHARS + 1);
+        assert!(serde_json::from_str::<ProfileConfig>(&doc(&format!(r#"["{long}"]"#))).is_err());
+        let at_len = "k".repeat(MAX_CLIENT_KIND_CHARS);
+        assert!(serde_json::from_str::<ProfileConfig>(&doc(&format!(r#"["{at_len}"]"#))).is_ok());
+
+        // CHARACTERS, not bytes: JSON Schema `maxLength` counts code
+        // points, so 64 multi-byte characters is legal and a byte
+        // ceiling would have refused it.
+        let wide = "é".repeat(MAX_CLIENT_KIND_CHARS);
+        assert_eq!(
+            wide.len(),
+            MAX_CLIENT_KIND_CHARS * 2,
+            "the bytes exceed the bound"
+        );
+        assert!(
+            serde_json::from_str::<ProfileConfig>(&doc(&format!(r#"["{wide}"]"#))).is_ok(),
+            "the contract bounds characters"
+        );
+
+        // And the Rust path, which no deserializer sees.
+        let mut e = endpoint("human");
+        e.allowed_client_kinds = vec![
+            ClientKind::parse("human-client").expect("legal"),
+            ClientKind::parse("human-client").expect("legal"),
+        ];
+        assert!(
+            config(vec![e])
+                .validate()
+                .iter()
+                .any(|err| matches!(err, ConfigError::DuplicateClientKind { .. }))
+        );
+    }
+
+    #[test]
+    fn the_allowlist_and_entry_arrays_are_bounded_on_the_read() {
+        // Both ceilings existed only in `validate`, which runs after the
+        // whole document has been parsed -- so the array was read and
+        // allocated in full and then judged. For the allowlist the
+        // ceiling was also evadable: a `BTreeSet` collapses repeats
+        // before anything counts them, so any number of copies of one
+        // PeerId arrived as a set of one.
+        let repeated = vec![format!(r#""{P1}""#); MAX_ALLOWED_PEERS + 1].join(",");
+        let doc = format!(
+            r#"{{"schema_version":2,
+                 "trust":{{"policy":"static-allowlist","allowed_peers":[{repeated}]}},
+                 "endpoints":{{}}}}"#
+        );
+        assert!(
+            serde_json::from_str::<ProfileConfig>(&doc).is_err(),
+            "an over-length allowlist must be refused before its duplicates vanish"
+        );
+
+        let entries: Vec<String> = (0..=MAX_ENDPOINTS)
+            .map(|i| format!(r#"{{"id":"e{i}"}}"#))
+            .collect();
+        let doc = format!(
+            r#"{{"schema_version":2,"trust":{{"policy":"static-allowlist"}},
+                 "endpoints":{{"entries":[{}]}}}}"#,
+            entries.join(",")
+        );
+        assert!(serde_json::from_str::<ProfileConfig>(&doc).is_err());
+
+        // Exactly the ceiling parses.
+        let entries: Vec<String> = (0..MAX_ENDPOINTS)
+            .map(|i| format!(r#"{{"id":"e{i}"}}"#))
+            .collect();
+        let doc = format!(
+            r#"{{"schema_version":2,"trust":{{"policy":"static-allowlist"}},
+                 "endpoints":{{"entries":[{}]}}}}"#,
+            entries.join(",")
+        );
+        let cfg: ProfileConfig = serde_json::from_str(&doc).expect("the ceiling itself is legal");
+        assert_eq!(cfg.endpoints.entries.len(), MAX_ENDPOINTS);
     }
 
     fn endpoint(id: &str) -> EndpointConfig {

@@ -38,8 +38,10 @@
           "properties": {
             "static_subset": {
               "type": "array",
+              "maxItems": 4096,
               "uniqueItems": true,
-              "items": { "$ref": "urn:interweave:schemas:common:peer-id" }
+              "items": { "$ref": "urn:interweave:schemas:common:peer-id" },
+              "description": "A subset of PeerTrustPolicy, so it cannot legally exceed that policy's 4096-peer ceiling. The bound is stated here rather than left implied: a validator that checks only the subset relation accepts an arbitrarily large array first and judges it second."
             }
           }
         }
