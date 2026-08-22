@@ -822,3 +822,62 @@ fn a_backup_walk_covers_both_tables_exactly_once() {
     expected.sort();
     assert_eq!(seen, expected, "every eligible message, exactly once");
 }
+
+#[test]
+fn a_negative_stored_timestamp_is_corruption_and_not_a_zero() {
+    // `unwrap_or(0)` looked like a harmless normalization. It is not:
+    // SQL keeps ordering by the RAW value, so a negative `created_at`
+    // sorts first and the cursor built from it carries zero -- and the
+    // next page asks for rows after zero, walking straight past every
+    // other malformed row. One corrupt value silently truncated the
+    // result set, and the caller was handed a short list with no error.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    let mut store = HumanStore::open(&path, StoreOptions::default()).expect("opens");
+    store
+        .commit_pending_outbound(&outbound(ID_A, b"body".to_vec()))
+        .expect("queued");
+    store
+        .commit_pending_outbound(&outbound(ID_B, b"body".to_vec()))
+        .expect("queued");
+    drop(store);
+
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    conn.execute(
+        "UPDATE pending_outbound SET created_at = -1 WHERE app_message_id = ?1",
+        [ID_A],
+    )
+    .expect("corrupt one row");
+    drop(conn);
+
+    let store = HumanStore::open(&path, StoreOptions::default()).expect("reopens");
+    match store.pending_outbound() {
+        Err(StoreError::Corrupt(what)) => {
+            assert!(what.contains("created_at"), "must name the field: {what}");
+        }
+        other => panic!("expected Corrupt, got {other:?}"),
+    }
+
+    // And a negative counter, on the same footing.
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    conn.execute(
+        "UPDATE pending_outbound SET created_at = 1000, attempts = -3 WHERE app_message_id = ?1",
+        [ID_A],
+    )
+    .expect("corrupt the counter");
+    drop(conn);
+    let store = HumanStore::open(&path, StoreOptions::default()).expect("reopens");
+    match store.pending_outbound() {
+        Err(StoreError::Corrupt(what)) => assert!(what.contains("attempts"), "{what}"),
+        other => panic!("expected Corrupt, got {other:?}"),
+    }
+
+    // Repaired, it reads normally -- so the refusals were about the
+    // values and not about the database having been reopened.
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    conn.execute_batch("UPDATE pending_outbound SET attempts = 0")
+        .expect("repair");
+    drop(conn);
+    let store = HumanStore::open(&path, StoreOptions::default()).expect("reopens");
+    assert_eq!(store.pending_outbound().expect("reads").len(), 2);
+}
