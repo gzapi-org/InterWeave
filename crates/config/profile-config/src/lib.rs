@@ -36,7 +36,7 @@ pub mod persist;
 pub use paths::{NAMESPACE, PROFILES, ProfilePaths, XdgRoots, absolute_or_none};
 pub use persist::{
     OWNER_ONLY_DIR, OWNER_ONLY_FILE, create_private_dir, create_private_exclusive, is_owner_only,
-    write_atomic, write_private_atomic,
+    require_private_dir, write_atomic, write_private_atomic,
 };
 
 /// What can go wrong resolving paths or writing to disk.
@@ -75,6 +75,23 @@ pub enum PersistError {
     /// operation, so two processes racing to create the same identity
     /// cannot both believe they won.
     AlreadyExists,
+    /// A directory that must be owner-only is not.
+    ///
+    /// Reported before key-equivalent material is written into it. A
+    /// `0600` file inside a directory another account can write is a
+    /// file that account can replace, and a `0600` file inside one it
+    /// can traverse still leaks its existence, size, and mtime. The
+    /// mode on the file is only half the guarantee.
+    ///
+    /// Refused rather than repaired: a directory that has been open was
+    /// open, and quietly narrowing it would hide that it ever was.
+    DirectoryNotPrivate {
+        /// The directory.
+        path: std::path::PathBuf,
+        /// The mode it carries, or the owning uid if that is the
+        /// problem.
+        detail: String,
+    },
 }
 
 impl core::fmt::Display for PersistError {
@@ -95,6 +112,11 @@ impl core::fmt::Display for PersistError {
                 "owner-only file permissions cannot be enforced on this platform"
             ),
             Self::AlreadyExists => write!(f, "a file already exists at that path"),
+            Self::DirectoryNotPrivate { path, detail } => write!(
+                f,
+                "{} must be owner-only before key-equivalent material is written into it: {detail}",
+                path.display()
+            ),
         }
     }
 }

@@ -64,7 +64,7 @@ fn an_identity_survives_a_restart_byte_for_byte() {
     // format plus the loader — not of the library boundary the spike
     // measured.
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("identity.key");
+    let path = dir.path().join("state").join("identity.key");
 
     let original = ProfileIdentity::generate();
     let before = original.transport_identity().expect("peer id");
@@ -87,7 +87,7 @@ fn a_missing_key_is_an_error_and_never_a_new_identity() {
     // every trust relationship anyone had with it, and looks exactly like
     // a successful start.
     let dir = tempfile::tempdir().expect("tempdir");
-    let err = ProfileIdentity::load(&dir.path().join("identity.key"))
+    let err = ProfileIdentity::load(&dir.path().join("state").join("identity.key"))
         .expect_err("a missing key must not be a fresh identity");
     assert!(matches!(err, IdentityError::NotFound), "unexpected: {err}");
 }
@@ -97,7 +97,7 @@ fn a_missing_key_is_an_error_and_never_a_new_identity() {
 fn a_world_readable_key_is_refused_rather_than_repaired() {
     use std::os::unix::fs::PermissionsExt as _;
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("identity.key");
+    let path = dir.path().join("state").join("identity.key");
     ProfileIdentity::generate().save(&path).expect("save");
     assert!(ProfileIdentity::load(&path).is_ok());
 
@@ -120,7 +120,7 @@ fn a_world_readable_key_is_refused_rather_than_repaired() {
 #[test]
 fn the_saved_key_is_owner_only() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("identity.key");
+    let path = dir.path().join("state").join("identity.key");
     ProfileIdentity::generate().save(&path).expect("save");
     assert!(interweave_profile_config::is_owner_only(&path).expect("mode"));
 }
@@ -152,7 +152,7 @@ fn verify_touches_no_file() {
     // The read-only half of recovery. A verification that failed must
     // leave the running identity exactly as it was.
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("identity.key");
+    let path = dir.path().join("state").join("identity.key");
     let identity = ProfileIdentity::generate();
     identity.save(&path).expect("save");
     let before = std::fs::read(&path).expect("read");
@@ -168,14 +168,14 @@ fn verify_touches_no_file() {
 #[test]
 fn a_restored_identity_round_trips_to_the_same_file() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("identity.key");
+    let path = dir.path().join("state").join("identity.key");
     let original = ProfileIdentity::generate();
     original.save(&path).expect("save");
     let bytes_before = std::fs::read(&path).expect("read");
 
     let restored = ProfileIdentity::from_phrase(&original.recovery_phrase().expect("phrase"))
         .expect("restore");
-    let path2 = dir.path().join("restored.key");
+    let path2 = dir.path().join("state").join("restored.key");
     restored.save(&path2).expect("save");
 
     assert_eq!(
@@ -188,7 +188,7 @@ fn a_restored_identity_round_trips_to_the_same_file() {
 #[test]
 fn a_corrupt_key_file_is_an_error_not_a_new_identity() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("identity.key");
+    let path = dir.path().join("state").join("identity.key");
     interweave_profile_config::write_private_atomic(&path, b"not a protobuf").expect("write");
     let err = ProfileIdentity::load(&path).expect_err("corrupt must not silently regenerate");
     assert!(
@@ -277,7 +277,7 @@ fn the_stored_file_is_not_the_mnemonic() {
     // it were ever the words, the phrase would be sitting in a file the
     // recovery contract says it must never be written to.
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("identity.key");
+    let path = dir.path().join("state").join("identity.key");
     let identity = ProfileIdentity::generate();
     identity.save(&path).expect("save");
 
@@ -414,7 +414,7 @@ fn saving_over_an_established_identity_is_refused() {
     // established profile silently acquiring a new identity — arriving
     // through the other door.
     let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("identity.key");
+    let path = dir.path().join("state").join("identity.key");
 
     let established = ProfileIdentity::generate();
     established.save(&path).expect("the first save creates it");
@@ -442,7 +442,7 @@ fn replacing_an_identity_is_available_but_has_to_be_asked_for() {
     // Rotation is legitimate; it just cannot happen by accident, and it
     // cannot happen to a profile the caller has not actually read.
     let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("identity.key");
+    let path = dir.path().join("state").join("identity.key");
 
     let established = ProfileIdentity::generate();
     established.save(&path).expect("first save");
@@ -500,7 +500,7 @@ fn a_restore_must_name_the_profile_it_is_restoring() {
     // the operation performed by someone who has lost their state and
     // cannot tell.
     let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("identity.key");
+    let path = dir.path().join("state").join("identity.key");
 
     let original = ProfileIdentity::generate();
     let phrase = original.recovery_phrase().expect("phrase");
@@ -552,7 +552,7 @@ fn concurrent_creation_produces_exactly_one_winner() {
     use std::sync::{Arc, Barrier};
 
     let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("identity.key");
+    let path = dir.path().join("state").join("identity.key");
 
     const RACERS: usize = 8;
     let barrier = Arc::new(Barrier::new(RACERS));
@@ -613,7 +613,7 @@ fn concurrent_rotation_produces_exactly_one_winner() {
     use std::sync::{Arc, Barrier};
 
     let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("identity.key");
+    let path = dir.path().join("state").join("identity.key");
 
     let established = ProfileIdentity::generate();
     established.save(&path).expect("first save");
@@ -672,7 +672,10 @@ fn concurrent_rotation_produces_exactly_one_winner() {
 
     // And the marker is released, so the profile is not wedged.
     assert!(
-        !dir.path().join("identity.key.rotating").exists(),
+        !dir.path()
+            .join("state")
+            .join("identity.key.rotating")
+            .exists(),
         "a completed rotation must not leave its marker behind"
     );
     let next = ProfileIdentity::generate();
@@ -687,13 +690,13 @@ fn an_interrupted_rotation_is_reported_rather_than_ignored() {
     // decision, which is the right amount of friction for an operation
     // that invalidates every trust relationship.
     let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("identity.key");
+    let path = dir.path().join("state").join("identity.key");
 
     let established = ProfileIdentity::generate();
     established.save(&path).expect("save");
     let established_peer = established.transport_identity().expect("peer id");
 
-    let marker = dir.path().join("identity.key.rotating");
+    let marker = dir.path().join("state").join("identity.key.rotating");
     std::fs::hard_link(&path, &marker).expect("simulate an interrupted rotation");
 
     let replacement = ProfileIdentity::generate();
@@ -729,7 +732,7 @@ fn restore_and_rotation_exclude_each_other() {
     // rotations rather than a guarantee about the file, and a caller
     // cannot tell those apart from outside.
     let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("identity.key");
+    let path = dir.path().join("state").join("identity.key");
 
     let established = ProfileIdentity::generate();
     established.save(&path).expect("save");
@@ -741,7 +744,7 @@ fn restore_and_rotation_exclude_each_other() {
 
     // With the marker held, a restore over an existing identity is
     // refused rather than racing.
-    let marker = dir.path().join("identity.key.rotating");
+    let marker = dir.path().join("state").join("identity.key.rotating");
     std::fs::hard_link(&path, &marker).expect("hold the marker");
     assert!(
         matches!(
@@ -782,7 +785,7 @@ fn a_restore_into_an_empty_profile_is_a_creation() {
     // person who has lost everything, and requiring a key to already be
     // there would make restore useless exactly when it is needed.
     let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("identity.key");
+    let path = dir.path().join("state").join("identity.key");
 
     let original = ProfileIdentity::generate();
     let phrase = original.recovery_phrase().expect("phrase");
@@ -797,5 +800,10 @@ fn a_restore_into_an_empty_profile_is_a_creation() {
             .as_str(),
         peer.as_str()
     );
-    assert!(!dir.path().join("identity.key.rotating").exists());
+    assert!(
+        !dir.path()
+            .join("state")
+            .join("identity.key.rotating")
+            .exists()
+    );
 }

@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 
 use interweave_profile_config::{
     OWNER_ONLY_DIR, OWNER_ONLY_FILE, PersistError, ProfilePaths, XdgRoots, absolute_or_none,
-    create_private_dir, is_owner_only, write_atomic, write_private_atomic,
+    create_private_dir, create_private_exclusive, is_owner_only, write_atomic,
+    write_private_atomic,
 };
 
 fn roots(base: &Path) -> XdgRoots {
@@ -137,7 +138,9 @@ fn a_missing_runtime_dir_is_fatal_rather_than_defaulted() {
 #[cfg(unix)]
 fn a_private_write_is_owner_only_from_the_moment_it_exists() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("identity.key");
+    // Under a subdirectory the write creates itself: `tempdir()` is
+    // 0755, and a private write now refuses a parent that open.
+    let path = dir.path().join("state").join("identity.key");
     write_private_atomic(&path, b"not a real key").expect("write");
 
     assert_eq!(mode_of(&path), OWNER_ONLY_FILE);
@@ -162,7 +165,7 @@ fn is_owner_only_rejects_a_key_file_someone_else_can_read() {
     // restored from a backup or copied from somewhere less careful.
     use std::os::unix::fs::PermissionsExt as _;
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("identity.key");
+    let path = dir.path().join("state").join("identity.key");
     write_private_atomic(&path, b"not a real key").expect("write");
 
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("loosen");
@@ -240,5 +243,118 @@ fn a_relative_xdg_value_is_dropped_rather_than_resolved() {
     assert_eq!(
         absolute_or_none(Some(OsString::from("/absolute"))),
         Some(PathBuf::from("/absolute"))
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn key_material_refuses_a_parent_directory_that_is_not_private() {
+    // The module said "the directory matters as much as the file" and
+    // then called `create_dir_all`, which makes a 0755 directory when
+    // the path is new and does nothing at all when it is not. A 0600
+    // key inside a directory another account can write is a key that
+    // account can REPLACE; inside one they can traverse it still leaks
+    // its existence, size, and mtime. The mode on the file was half the
+    // guarantee, stated as the whole one.
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let open = dir.path().join("open");
+    std::fs::create_dir(&open).expect("mkdir");
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    for mode in [0o755, 0o701, 0o770] {
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(mode)).expect("chmod");
+        let path = open.join("identity.key");
+        assert!(
+            matches!(
+                write_private_atomic(&path, b"not a real key"),
+                Err(PersistError::DirectoryNotPrivate { .. })
+            ),
+            "mode {mode:o} must be refused"
+        );
+        assert!(
+            matches!(
+                create_private_exclusive(&path, b"not a real key"),
+                Err(PersistError::DirectoryNotPrivate { .. })
+            ),
+            "mode {mode:o} must be refused on the exclusive path too"
+        );
+        assert!(!path.exists(), "nothing may be written into it");
+    }
+
+    // Narrowed, both paths work -- so the refusals were about the
+    // directory and not about the write.
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(OWNER_ONLY_DIR))
+        .expect("chmod");
+    write_private_atomic(&open.join("a.key"), b"not a real key").expect("0700 is acceptable");
+    create_private_exclusive(&open.join("b.key"), b"not a real key").expect("0700 is acceptable");
+
+    // Non-secret configuration keeps the old behaviour: it is not key
+    // material and an XDG config directory is legitimately 0755.
+    let plain = dir.path().join("plain");
+    std::fs::create_dir(&plain).expect("mkdir");
+    std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    write_atomic(&plain.join("config.toml"), b"schema_version = 2").expect("config is not secret");
+}
+
+#[test]
+#[cfg(unix)]
+fn a_symlinked_parent_is_refused_however_private_its_target() {
+    // Following the link asks the question about somewhere other than
+    // where the write lands: the target can be a perfectly good 0700
+    // directory while the LINK sits somewhere anyone can repoint.
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).expect("mkdir");
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(OWNER_ONLY_DIR))
+        .expect("chmod");
+
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+    assert!(matches!(
+        write_private_atomic(&link.join("identity.key"), b"not a real key"),
+        Err(PersistError::DirectoryNotPrivate { .. })
+    ));
+}
+
+#[test]
+#[cfg(unix)]
+fn a_squatted_temporary_name_is_an_error_and_not_a_write_elsewhere() {
+    // The temporary was opened with `create(true).truncate(true)`, which
+    // FOLLOWS a symlink -- so a name someone could predict was a name
+    // they could point at a file they wanted truncated and filled with
+    // whatever this process was about to write. `create_new` refuses
+    // both an existing file and a link.
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = dir.path().join("state");
+    std::fs::create_dir(&state).expect("mkdir");
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(OWNER_ONLY_DIR))
+        .expect("chmod");
+
+    // The name is unguessable now, which is the other half of the fix,
+    // so the test occupies the name the writer will use by driving the
+    // same helper the writer drives. Squatting the target itself is the
+    // observable version of the same refusal.
+    let victim = dir.path().join("victim");
+    std::fs::write(&victim, b"precious").expect("write");
+    let path = state.join("identity.key");
+    std::os::unix::fs::symlink(&victim, &path).expect("symlink the TARGET");
+
+    // The exclusive path must not follow it, and must not truncate the
+    // victim on the way to finding out.
+    assert!(matches!(
+        create_private_exclusive(&path, b"not a real key"),
+        Err(PersistError::AlreadyExists)
+    ));
+    assert_eq!(
+        std::fs::read(&victim).expect("read"),
+        b"precious",
+        "the link target must be untouched"
     );
 }

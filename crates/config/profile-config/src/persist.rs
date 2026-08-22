@@ -91,11 +91,31 @@ fn write_atomic_with_mode(
     mode: Option<u32>,
 ) -> Result<(), PersistError> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent).map_err(PersistError::Io)?;
+    // PRIVATE MATERIAL GETS A PRIVATE PARENT, created as one and then
+    // checked. `create_dir_all` produces a `0755` directory when the
+    // path does not exist yet, and does nothing at all when it does --
+    // so the module's own statement that "the directory matters as much
+    // as the file" was an argument the code did not make.
+    if mode.is_some() {
+        create_private_dir(parent)?;
+        require_private_dir(parent)?;
+    } else {
+        fs::create_dir_all(parent).map_err(PersistError::Io)?;
+    }
 
     let temp = temp_beside(path);
 
     let mut file = open_for_write(&temp, mode)?;
+    // The owner check needs a file this process made; the temporary is
+    // the first one there is. Done before any content is written, so a
+    // parent belonging to someone else never receives bytes.
+    if mode.is_some()
+        && let Err(e) = require_same_owner(parent, &file)
+    {
+        drop(file);
+        let _ = fs::remove_file(&temp);
+        return Err(e);
+    }
     file.write_all(contents).map_err(PersistError::Io)?;
     file.sync_all().map_err(PersistError::Io)?;
     drop(file);
@@ -140,10 +160,16 @@ fn write_atomic_with_mode(
 /// cannot be enforced. Nothing at `path` is touched in any case.
 pub fn create_private_exclusive(path: &Path, contents: &[u8]) -> Result<(), PersistError> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent).map_err(PersistError::Io)?;
+    create_private_dir(parent)?;
+    require_private_dir(parent)?;
 
     let temp = temp_beside(path);
     let mut file = open_for_write(&temp, Some(OWNER_ONLY_FILE))?;
+    if let Err(e) = require_same_owner(parent, &file) {
+        drop(file);
+        let _ = fs::remove_file(&temp);
+        return Err(e);
+    }
     let written = file
         .write_all(contents)
         .and_then(|()| file.sync_all())
@@ -185,24 +211,128 @@ pub fn create_private_exclusive(path: &Path, contents: &[u8]) -> Result<(), Pers
 /// installed key. The rename is atomic; the name was not private, so
 /// atomicity protected nothing.
 ///
-/// Process id and a per-process counter are enough: the id separates
-/// processes and the counter separates writers inside one.
+/// Process id and a per-process counter separate writers. They do not
+/// make the name UNGUESSABLE, and the temporary is opened with
+/// `create_new`, so a name another account can predict is a name they
+/// can occupy first and turn every write into a failure. The parent is
+/// required to be owner-only before any of this runs, which is the real
+/// defence; the random component means the predictable-name attack does
+/// not become live the moment someone relaxes that requirement.
+///
+/// The entropy is `RandomState`, which std seeds per process from the
+/// OS. It is not a CSPRNG and does not need to be: the requirement is
+/// that another account cannot compute the name, not that the name
+/// resists cryptanalysis.
 fn temp_beside(path: &Path) -> std::path::PathBuf {
+    use std::hash::{BuildHasher as _, Hasher as _};
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
+    static SEED: std::sync::OnceLock<std::collections::hash_map::RandomState> =
+        std::sync::OnceLock::new();
+
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let mut h = SEED
+        .get_or_init(std::collections::hash_map::RandomState::new)
+        .build_hasher();
+    h.write_u64(n);
+    h.write_u32(std::process::id());
 
     let mut temp = path.as_os_str().to_owned();
     temp.push(format!(
-        ".{}.{}.tmp",
+        ".{}.{n}.{:016x}.tmp",
         std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
+        h.finish()
     ));
     std::path::PathBuf::from(temp)
 }
 
+/// Refuse a directory that is not owner-only.
+///
+/// Ownership is a separate question and is answered by
+/// [`require_same_owner`], which needs a file this process created to
+/// compare against.
+///
+/// # Errors
+/// Returns [`PersistError::DirectoryNotPrivate`] if the mode is wider
+/// than [`OWNER_ONLY_DIR`] or the path is a symbolic link,
+/// [`PersistError::Io`] if it cannot be inspected, or
+/// [`PersistError::UnsupportedPlatform`] where this cannot be checked.
+pub fn require_private_dir(dir: &Path) -> Result<(), PersistError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // `symlink_metadata`, not `metadata`: a symlink pointing at a
+        // directory that IS `0700` says nothing about who can move the
+        // link, and following it is how this check gets satisfied by
+        // somewhere other than where the write lands.
+        let meta = fs::symlink_metadata(dir).map_err(PersistError::Io)?;
+        if meta.file_type().is_symlink() {
+            return Err(PersistError::DirectoryNotPrivate {
+                path: dir.to_path_buf(),
+                detail: "it is a symbolic link".to_owned(),
+            });
+        }
+        let mode = meta.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Err(PersistError::DirectoryNotPrivate {
+                path: dir.to_path_buf(),
+                detail: format!("mode is {mode:04o}, wider than {OWNER_ONLY_DIR:04o}"),
+            });
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Err(PersistError::UnsupportedPlatform)
+    }
+}
+
+/// Refuse a directory owned by somebody else.
+///
+/// # Why the comparison is against a file we just made
+///
+/// The obvious spelling is `getuid()`, and this crate is
+/// `forbid(unsafe_code)` with no libc dependency -- so the effective
+/// uid is not directly reachable. It does not need to be: `ours` was
+/// created by this process moments ago, so its owner IS the identity
+/// the kernel would have returned, read through a safe API. A parent
+/// whose uid differs is a directory somebody else can rewrite,
+/// whatever its mode says.
+///
+/// # Errors
+/// Returns [`PersistError::DirectoryNotPrivate`] on a mismatch and
+/// [`PersistError::Io`] if either cannot be inspected.
+fn require_same_owner(dir: &Path, ours: &fs::File) -> Result<(), PersistError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let mine = ours.metadata().map_err(PersistError::Io)?.uid();
+        let theirs = fs::symlink_metadata(dir).map_err(PersistError::Io)?.uid();
+        if mine != theirs {
+            return Err(PersistError::DirectoryNotPrivate {
+                path: dir.to_path_buf(),
+                detail: format!("owned by uid {theirs}, not {mine}"),
+            });
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let (_, _) = (dir, ours);
+        Err(PersistError::UnsupportedPlatform)
+    }
+}
+
 fn open_for_write(path: &Path, mode: Option<u32>) -> Result<fs::File, PersistError> {
     let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    // `create_new`, not `create().truncate()`. `O_CREAT|O_EXCL` refuses
+    // to follow a symlink and refuses an existing file, so a temporary
+    // name someone pre-created -- as a link into a file they want
+    // overwritten, or simply to be in the way -- is an error here
+    // instead of a write somewhere else.
+    options.write(true).create_new(true);
 
     #[cfg(unix)]
     if let Some(mode) = mode {
