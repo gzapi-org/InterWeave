@@ -162,7 +162,7 @@ endpoints:
     enabled: bool = true
     advertise: bool = false
     # Hygiene guard only; client.kind is not cryptographic authentication.
-    allowed_client_kinds: list[string, max=8]
+    allowed_client_kinds: list[string[1..64], max=16, unique]
     inbound:
       policy: enum[inherit-profile-trust,static-subset] = inherit-profile-trust
       allowed_peers: list[PeerId, max=4096]
