@@ -6,8 +6,9 @@
 //!
 //! `architecture/transport/libp2p/SECURITY.md` specifies the listener
 //! policy: 64 pending handshakes globally and 8 per source bucket, a
-//! 10-second handshake timeout, and 30 starts per minute per bucket.
-//! Those are the defaults below, and a limit that disagrees with that
+//! 10-second handshake timeout, 30 starts per minute per bucket and 600
+//! globally, with IPv4 bucketed by address and IPv6 by /64. Those are
+//! the defaults below, and a limit that disagrees with that
 //! document is a bug in this file rather than a tuning preference.
 //!
 //! # The window this covers
@@ -64,12 +65,12 @@ pub const DEFAULT_MAX_PENDING_TOTAL: usize = 64;
 /// stingy default refuses legitimate users at no attacker's cost.
 pub const DEFAULT_MAX_PENDING_PER_SOURCE: usize = 8;
 
-/// Default time a handshake may take before its slot is reclaimed.
+/// Default time a handshake may take before it is reported for closing.
 ///
 /// A handshake that never completes is indistinguishable from one that
 /// is merely slow, and the difference does not matter: either way the
-/// slot must come back, or an attacker who opens connections and then
-/// says nothing holds the budget for free.
+/// connection must be closed, or an attacker who opens connections and
+/// then says nothing holds the budget for free.
 pub const DEFAULT_HANDSHAKE_TIMEOUT_MS: u64 = 10_000;
 
 /// Default number of sources tracked at once.
@@ -94,6 +95,39 @@ pub const DEFAULT_MAX_ATTEMPTS_PER_WINDOW: u32 = 30;
 /// nothing for the twenty-first — and Noise handshakes are the CPU cost
 /// this layer exists to bound, whoever asked for them.
 pub const DEFAULT_MAX_GLOBAL_ATTEMPTS_PER_WINDOW: u32 = 600;
+
+/// The bucket an IP address is accounted under.
+///
+/// IPv4 buckets by address; IPv6 buckets by /64. That asymmetry is
+/// `SECURITY.md`'s and it is not cosmetic: a residential IPv6 allocation
+/// is routinely a /64 or larger, so keying on the full address hands one
+/// party 2^64 buckets for free and makes per-source accounting mean
+/// nothing at all. Every argument in this module about an attacker not
+/// escaping the count depends on getting this right.
+///
+/// Anything that is not an IP literal — a relay's PeerId, a unix socket,
+/// a test label — is its own bucket, unchanged. `SECURITY.md` requires a
+/// relayed path with no original source IP to consume a
+/// per-authenticated-relay bucket, which is exactly what passing the
+/// relay's identity here produces: one abusive relay exhausts its own
+/// bucket instead of minting a new one per circuit.
+#[must_use]
+pub fn source_bucket(source: &str) -> String {
+    let Ok(ip) = source.parse::<std::net::IpAddr>() else {
+        return source.to_owned();
+    };
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.to_string(),
+        std::net::IpAddr::V6(v6) => {
+            let o = v6.octets();
+            // The /64 prefix, with the interface identifier zeroed.
+            let prefix = std::net::Ipv6Addr::from([
+                o[0], o[1], o[2], o[3], o[4], o[5], o[6], o[7], 0, 0, 0, 0, 0, 0, 0, 0,
+            ]);
+            format!("{prefix}/64")
+        }
+    }
+}
 
 /// What the gate enforces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -815,6 +849,43 @@ mod tests {
                 .expect("the global budget was not spent on refusals");
             g.completed(&slot);
         }
+    }
+
+    #[test]
+    fn ipv6_is_bucketed_by_prefix_so_an_address_range_is_not_free() {
+        // A residential IPv6 allocation is routinely a /64 or larger.
+        // Keying on the full address hands one party 2^64 buckets, and
+        // every argument in this module about not escaping the count
+        // depends on this not happening.
+        let a = source_bucket("2001:db8:1:2::1");
+        let b = source_bucket("2001:db8:1:2:ffff:ffff:ffff:ffff");
+        assert_eq!(a, b, "one /64 is one bucket");
+
+        let elsewhere = source_bucket("2001:db8:1:3::1");
+        assert_ne!(a, elsewhere, "a different /64 is a different bucket");
+
+        // IPv4 keys on the address itself.
+        assert_eq!(source_bucket("198.51.100.7"), "198.51.100.7");
+        assert_ne!(source_bucket("198.51.100.7"), source_bucket("198.51.100.8"));
+
+        // Anything that is not an IP is its own bucket, unchanged — which
+        // is what makes a relay's identity a per-relay bucket rather than
+        // one per circuit.
+        let relay = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+        assert_eq!(source_bucket(relay), relay);
+
+        // And the bucketing is what the gate actually accounts on.
+        let mut g = gate();
+        let bucket = source_bucket("2001:db8:1:2::1");
+        g.admit(&bucket, 0).expect("first");
+        g.admit(&source_bucket("2001:db8:1:2::2"), 0)
+            .expect("same bucket, second slot");
+        assert_eq!(
+            g.admit(&source_bucket("2001:db8:1:2::3"), 0),
+            Err(PreAuthDenial::TooManyFromSource),
+            "a /64 cannot buy more slots by changing the low bits"
+        );
+        assert_eq!(g.tracked_sources(), 1);
     }
 
     #[test]
