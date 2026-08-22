@@ -111,15 +111,38 @@ pub const DEFAULT_MAX_GLOBAL_ATTEMPTS_PER_WINDOW: u32 = 600;
 /// metrics, and because two different answers to "which bucket is this"
 /// would be worse than none.
 ///
-/// Anything that is not an IP literal — a relay's PeerId, a unix socket,
-/// a test label — is its own bucket, unchanged. `SECURITY.md` requires a
+/// Accepts a socket address or a bare IP, since a listener has the
+/// first and a policy layer usually has the second.
+///
+/// It does NOT parse a multiaddr: that grammar is libp2p's, and putting
+/// it here would push a backend concept into a crate that has none
+/// (CLAUDE.md §4). A backend holding `/ip4/198.51.100.7/tcp/4001` has
+/// the socket address already and passes that.
+///
+/// Anything else — a relay's PeerId, a unix socket, a test label — is
+/// its own bucket, unchanged. `SECURITY.md` requires a
 /// relayed path with no original source IP to consume a
 /// per-authenticated-relay bucket, which is exactly what passing the
 /// relay's identity here produces: one abusive relay exhausts its own
 /// bucket instead of minting a new one per circuit.
 #[must_use]
 pub fn source_bucket(source: &str) -> String {
-    let Ok(ip) = source.parse::<std::net::IpAddr>() else {
+    // A SOCKET ADDRESS FIRST, because that is what a listener has.
+    // `TcpStream::peer_addr()` renders as `198.51.100.7:49152` or
+    // `[2001:db8::1]:49152`, neither of which parses as an `IpAddr` — so
+    // the fallback below would have kept the port in the key, and a
+    // remote client would get a fresh bucket on every reconnect simply
+    // by being assigned a new ephemeral port. The pending and rate
+    // limits would then bound nothing at all.
+    //
+    // Which makes this the same defect as leaving the /64 rule to
+    // callers, one layer further out: normalization that does not
+    // recognise its real input is normalization that does not run.
+    let ip = source
+        .parse::<std::net::SocketAddr>()
+        .map(|sock| sock.ip())
+        .or_else(|_| source.parse::<std::net::IpAddr>());
+    let Ok(ip) = ip else {
         return source.to_owned();
     };
     match ip {
@@ -929,6 +952,50 @@ mod tests {
             .expect("first");
         g.admit("2001:db8:1:2::2", 0)
             .expect("still the same bucket");
+        assert_eq!(g.tracked_sources(), 1);
+    }
+
+    #[test]
+    fn an_ephemeral_port_does_not_buy_a_new_bucket() {
+        // What a listener actually has is `TcpStream::peer_addr()`, which
+        // renders as `198.51.100.7:49152` — and an `IpAddr` parse rejects
+        // that, so the port would have stayed in the key. A client gets a
+        // new ephemeral port on every reconnect, so every reconnect would
+        // have been a fresh bucket and the per-source limits would have
+        // bounded nothing.
+        assert_eq!(source_bucket("198.51.100.7:49152"), "198.51.100.7");
+        assert_eq!(source_bucket("198.51.100.7:1"), "198.51.100.7");
+        assert_eq!(
+            source_bucket("[2001:db8:1:2::1]:49152"),
+            "2001:db8:1:2::/64"
+        );
+
+        // Bare addresses still work: a policy layer usually has one of
+        // those rather than a socket.
+        assert_eq!(source_bucket("198.51.100.7"), "198.51.100.7");
+        assert_eq!(source_bucket("2001:db8:1:2::1"), "2001:db8:1:2::/64");
+
+        // And the gate is what applies it, given exactly what a listener
+        // would hand over.
+        let mut g = gate();
+        g.admit("198.51.100.7:49152", 0).expect("first connection");
+        g.admit("198.51.100.7:51000", 0).expect("second, new port");
+        assert_eq!(
+            g.admit("198.51.100.7:53000", 0),
+            Err(PreAuthDenial::TooManyFromSource),
+            "reconnecting from a new port must not reset the per-source count"
+        );
+        assert_eq!(g.tracked_sources(), 1, "one host is one bucket");
+
+        // The v6 case combines both normalizations: drop the port, then
+        // the interface identifier.
+        let mut g = gate();
+        g.admit("[2001:db8:1:2::1]:40000", 0).expect("first");
+        g.admit("[2001:db8:1:2::99]:41000", 0).expect("same /64");
+        assert_eq!(
+            g.admit("[2001:db8:1:2::ff]:42000", 0),
+            Err(PreAuthDenial::TooManyFromSource)
+        );
         assert_eq!(g.tracked_sources(), 1);
     }
 
