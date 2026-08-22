@@ -313,7 +313,7 @@ A session cannot see its own permission prompts, so do not try to verify this ga
 
 `main` is protected by the `main protection` ruleset: pull request required, direct pushes and force-pushes blocked, branch deletion blocked, **merge commits only** (squash and rebase disabled), and a **merge queue** (`ALLGREEN`, merge method `MERGE`). Required approving reviews are 0 and unresolved review threads do not block — so **the merge is not evidence that anything was reviewed**.
 
->  **CI exists and gates `main`** — `.github/workflows/ci.yml` runs every tree check and every self-test on `pull_request`, `merge_group`, and pushes to `main`. It reports two contexts, which are the job `name:` values verbatim: **`tree checks`** and **`tool self-tests`**. Both are in the ruleset's `required_status_checks`, so the queue now gates correctness and not merely ordering. The policy is **non-strict**: a branch need not be up to date with `main` to merge, which is why folding `origin/main` in and re-testing locally (Phase 3) is still on you rather than on the platform.
+>  **CI exists and gates `main`** — `.github/workflows/ci.yml` runs fmt, clippy, the workspace tests, every tree check, and every self-test on `pull_request`, `merge_group`, and pushes to `main`. It reports three contexts, which are the job `name:` values verbatim: **`rust`**, **`tree checks`**, and **`tool self-tests`**. All three are in the ruleset's `required_status_checks`, so the queue gates correctness and not merely ordering. `tools/checks/check_required_contexts.sh` keeps this paragraph and the workflow in agreement; the ruleset itself needs admin API access and is checked by hand. The policy is **non-strict**: a branch need not be up to date with `main` to merge, which is why folding `origin/main` in and re-testing locally (Phase 3) is still on you rather than on the platform.
 >
 > A job's `name:` *is* its required-check context, so renaming a job silently un-gates `main` — the ruleset goes on requiring a context nothing reports, and the queue waits forever. Rename a job only together with the ruleset.
 >
@@ -503,6 +503,7 @@ For repository-wide changes, verify at minimum:
 - `tools/checks/verify_fixture_vectors.py` is clean — every frozen vector recomputes from its declared algorithm;
 - `tools/checks/check_stage_status.sh` is clean — every human-facing statement of the open stage agrees with `workspace.metadata.interweave.status`;
 - `tools/checks/check_component_status.sh` is clean — no component README calls itself an unimplemented placeholder while its own directory holds a manifest and source;
+- `tools/checks/check_required_contexts.sh` is clean — the workflow's job names and §9's list of required contexts are the same set;
 - `tools/checks/check_dependencies.sh` is clean — the graph satisfies `deny.toml`: no advisory or yanked version, every licence on the allow-list, no wildcard requirement or shipped executable, and crates.io as the only source;
 - no forbidden production artifacts were introduced outside the active stage;
 - `git fsck --full` passes before archive handoff when a full repository ZIP is requested.
