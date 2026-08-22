@@ -2,6 +2,14 @@
 // Copyright 2026 Andrea Benetton
 //! Bounds on work done for a peer that has not authenticated yet.
 //!
+//! # The numbers here are not this crate's to choose
+//!
+//! `architecture/transport/libp2p/SECURITY.md` specifies the listener
+//! policy: 64 pending handshakes globally and 8 per source bucket, a
+//! 10-second handshake timeout, and 30 starts per minute per bucket.
+//! Those are the defaults below, and a limit that disagrees with that
+//! document is a bug in this file rather than a tuning preference.
+//!
 //! # The window this covers
 //!
 //! Between accepting a TCP connection and completing Noise, the remote
@@ -45,12 +53,16 @@ pub const MAX_SOURCE_BYTES: usize = 128;
 /// Default ceiling on handshakes in flight across all sources.
 pub const DEFAULT_MAX_PENDING_TOTAL: usize = 64;
 
-/// Default ceiling on handshakes in flight from one source.
+/// Default ceiling on handshakes in flight from one source bucket.
 ///
 /// Well under the global cap on purpose: the point of per-source
-/// accounting is that one source cannot spend the whole budget, and a
+/// accounting is that one bucket cannot spend the whole budget, and a
 /// per-source limit equal to the total would make the split decorative.
-pub const DEFAULT_MAX_PENDING_PER_SOURCE: usize = 4;
+///
+/// Eight rather than a tighter number this crate might prefer, because a
+/// bucket is not a peer — everything behind one NAT shares it, so a
+/// stingy default refuses legitimate users at no attacker's cost.
+pub const DEFAULT_MAX_PENDING_PER_SOURCE: usize = 8;
 
 /// Default time a handshake may take before its slot is reclaimed.
 ///
@@ -58,16 +70,21 @@ pub const DEFAULT_MAX_PENDING_PER_SOURCE: usize = 4;
 /// is merely slow, and the difference does not matter: either way the
 /// slot must come back, or an attacker who opens connections and then
 /// says nothing holds the budget for free.
-pub const DEFAULT_HANDSHAKE_TIMEOUT_MS: u64 = 15_000;
+pub const DEFAULT_HANDSHAKE_TIMEOUT_MS: u64 = 10_000;
 
 /// Default number of sources tracked at once.
 pub const DEFAULT_MAX_SOURCES: usize = 256;
 
-/// Default rate-accounting window.
-pub const DEFAULT_RATE_WINDOW_MS: u64 = 10_000;
+/// Default rate-accounting window: one minute.
+///
+/// The window length and the count are one statement, not two tunables —
+/// "30 starts per minute" says nothing on its own about how many are
+/// allowed in ten seconds, and picking a shorter window with a
+/// proportional count permits a burst the specification does not.
+pub const DEFAULT_RATE_WINDOW_MS: u64 = 60_000;
 
-/// Default attempts one source may make within a window.
-pub const DEFAULT_MAX_ATTEMPTS_PER_WINDOW: u32 = 32;
+/// Default starts one source bucket may make within a window.
+pub const DEFAULT_MAX_ATTEMPTS_PER_WINDOW: u32 = 30;
 
 /// What the gate enforces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -579,6 +596,23 @@ mod tests {
         let mut g = gate();
         g.shutting_down = true;
         assert_eq!(g.admit("10.0.0.1", 0), Err(PreAuthDenial::ShuttingDown));
+    }
+
+    #[test]
+    fn the_defaults_are_the_ones_the_specification_states() {
+        // These numbers are not this crate's to choose. `SECURITY.md`
+        // fixes the listener policy, and the first version of this module
+        // invented four of them instead of reading it — which is how a
+        // 10-second timeout became 15 and 30 starts/minute became 192.
+        //
+        // Pinned here so the next disagreement is a failing test rather
+        // than a review comment.
+        let d = PreAuthLimits::default();
+        assert_eq!(d.max_pending_total, 64, "64 pending handshakes globally");
+        assert_eq!(d.max_pending_per_source, 8, "8 per source bucket");
+        assert_eq!(d.handshake_timeout_ms, 10_000, "10-second timeout");
+        assert_eq!(d.rate_window_ms, 60_000, "the rate window is a minute");
+        assert_eq!(d.max_attempts_per_window, 30, "30 starts/minute per bucket");
     }
 
     #[test]
