@@ -583,6 +583,84 @@ fn an_already_open_state_directory_is_refused_rather_than_tightened() {
 }
 
 #[test]
+fn a_new_column_inside_a_permitted_table_is_a_retention_violation() {
+    // The name allowlist catches the clumsy version and misses the one
+    // that fits inside a permitted name:
+    //
+    //     ALTER TABLE unread_inbound ADD COLUMN archive_payload BLOB;
+    //
+    // is a second durable content surface, in the table whose whole
+    // contract is that its body disappears when the message is read.
+    // Under ADR-0044 an unknown column is not forward compatibility --
+    // it is somewhere a body can be kept.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
+
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    conn.execute_batch("ALTER TABLE unread_inbound ADD COLUMN archive_payload BLOB")
+        .expect("the DDL itself is legal SQLite");
+    drop(conn);
+
+    let refused = HumanStore::open(&path, StoreOptions::default());
+    assert!(
+        matches!(refused, Err(StoreError::Migration(_))),
+        "an added column must be refused, got {refused:?}"
+    );
+
+    // Dropping it restores the shape, so the refusal was about the
+    // column and not about the database having been reopened.
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    conn.execute_batch("ALTER TABLE unread_inbound DROP COLUMN archive_payload")
+        .expect("drop");
+    drop(conn);
+    HumanStore::open(&path, StoreOptions::default()).expect("opens once it is gone");
+}
+
+#[test]
+fn the_unique_key_and_the_autoincrement_are_part_of_the_verified_shape() {
+    // Both are invisible to a `SELECT type, name FROM sqlite_master`
+    // check and both are load-bearing. The peer-scoped UNIQUE is what
+    // stops one peer colliding with another's message id (migration 2);
+    // AUTOINCREMENT is what stops a deleted row's id being handed to
+    // the next insert, which in a store that deletes constantly means
+    // handing a caller someone else's body.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
+
+    // Rebuild `unread_inbound` with every column identical, the UNIQUE
+    // widened back to the id alone, and AUTOINCREMENT dropped. A
+    // column-only check would pass this.
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    conn.execute_batch(
+        "
+        PRAGMA writable_schema = OFF;
+        ALTER TABLE unread_inbound RENAME TO unread_inbound_old;
+        CREATE TABLE unread_inbound (
+            row_id          INTEGER PRIMARY KEY,
+            app_message_id  TEXT    NOT NULL UNIQUE,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            media_type      TEXT,
+            payload         BLOB    NOT NULL,
+            received_at     INTEGER NOT NULL
+        );
+        DROP TABLE unread_inbound_old;
+        ",
+    )
+    .expect("the rebuild is legal SQLite");
+    drop(conn);
+
+    let refused = HumanStore::open(&path, StoreOptions::default());
+    assert!(
+        matches!(refused, Err(StoreError::Migration(_))),
+        "a widened unique key with no autoincrement must be refused, got {refused:?}"
+    );
+}
+
+#[test]
 fn an_unexpected_content_table_is_refused_even_with_an_innocent_name() {
     // The forbidden-name list can only catch what it names, while the
     // module claims REQUIRED_TABLES is the whole content surface. A table
