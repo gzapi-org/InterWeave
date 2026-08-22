@@ -203,8 +203,40 @@ fn generated_root() -> Generated {
 /// honest.
 #[must_use]
 pub fn mutations_and_seeds(schema: &Value, seed: &Value, index: &SchemaIndex) -> Generated {
+    mutations_and_seeds_with(schema, seed, index, &[])
+}
+
+/// A source of `n` distinct valid values for one named schema.
+pub type ItemFactory = fn(usize) -> Vec<Value>;
+
+/// Factories keyed by the `$id` of the schema they produce values for.
+pub type Factories<'a> = &'a [(&'a str, ItemFactory)];
+
+/// Like [`mutations_and_seeds`], with a way to build values the schema
+/// describes but does not let a generator construct.
+///
+/// # Why this exists rather than a skip
+///
+/// A `maxItems` over items pinned by a `pattern` cannot be exceeded by
+/// anything this module invents: 4097 distinct PeerIds are 4097 valid
+/// base58 strings, and interpreting the grammar here would be a second,
+/// worse implementation of it. The alternative was to record the
+/// ceiling as uncovered, which is honest and leaves a real bound
+/// untested forever.
+///
+/// A factory is keyed by the item schema's `$id`, so it is scoped to a
+/// named type rather than to a call site: `common:peer-id` means the
+/// same thing wherever it appears, and one factory covers every array
+/// of them.
+#[must_use]
+pub fn mutations_and_seeds_with(
+    schema: &Value,
+    seed: &Value,
+    index: &SchemaIndex,
+    factories: Factories<'_>,
+) -> Generated {
     let mut out = generated_root();
-    walk(schema, seed, "", index, &mut out, seed, schema);
+    walk(schema, seed, "", index, &mut out, seed, schema, factories);
     out
 }
 
@@ -346,6 +378,7 @@ fn synthesize(schema: &Value, index: &SchemaIndex, root: &Value) -> Option<Value
 }
 
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 fn walk(
     schema: &Value,
     node: &Value,
@@ -354,6 +387,7 @@ fn walk(
     out: &mut Generated,
     seed: &Value,
     root: &Value,
+    factories: Factories<'_>,
 ) {
     let Some(schema) = resolve(schema, index, root) else {
         // An unresolved `$ref`. Reported as a candidate so it fails
@@ -426,14 +460,14 @@ fn walk(
     for keyword in ["oneOf", "anyOf", "allOf"] {
         if let Some(branches) = schema.get(keyword).and_then(Value::as_array) {
             for branch in branches {
-                walk(branch, node, pointer, index, out, seed, root);
+                walk(branch, node, pointer, index, out, seed, root, factories);
             }
         }
     }
 
     match declared {
-        Some("object") => walk_object(schema, node, pointer, index, out, seed, root),
-        Some("array") => walk_array(schema, node, pointer, index, out, seed, root),
+        Some("object") => walk_object(schema, node, pointer, index, out, seed, root, factories),
+        Some("array") => walk_array(schema, node, pointer, index, out, seed, root, factories),
         Some("string") => walk_string(schema, pointer, out, seed),
         Some("integer" | "number") => walk_number(schema, pointer, out, seed),
         _ => {}
@@ -460,6 +494,7 @@ fn kind_of(v: &Value) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk_object(
     schema: &Value,
     node: &Value,
@@ -468,6 +503,7 @@ fn walk_object(
     out: &mut Generated,
     seed: &Value,
     root: &Value,
+    factories: Factories<'_>,
 ) {
     // A closed object that accepts an extra property is not merely
     // permissive: it SILENTLY IGNORES a field the sender may believe is
@@ -528,7 +564,16 @@ fn walk_object(
         }
 
         match node.get(name) {
-            Some(child) => walk(sub, child, &child_pointer, index, out, seed, root),
+            Some(child) => walk(
+                sub,
+                child,
+                &child_pointer,
+                index,
+                out,
+                seed,
+                root,
+                factories,
+            ),
             None => {
                 // An OPTIONAL property the seed omits. Everything the
                 // schema declares beneath it — item bounds, closed item
@@ -548,7 +593,16 @@ fn walk_object(
                     insert_at(&mut augmented, pointer, name, value.clone());
                     out.synthesized_seeds
                         .push((child_pointer.clone(), augmented.clone()));
-                    walk(sub, &value, &child_pointer, index, out, &augmented, root);
+                    walk(
+                        sub,
+                        &value,
+                        &child_pointer,
+                        index,
+                        out,
+                        &augmented,
+                        root,
+                        factories,
+                    );
                 }
             }
         }
@@ -571,8 +625,20 @@ fn distinct_items(
     n: usize,
     index: &SchemaIndex,
     root: &Value,
+    factories: Factories<'_>,
 ) -> Option<Vec<Value>> {
     let item = items.and_then(|i| resolve(i, index, root))?;
+
+    // A registered factory first: it is the caller stating that it can
+    // build this named type and the generator cannot.
+    if let Some(id) = item.get("$id").and_then(Value::as_str)
+        && let Some((_, make)) = factories.iter().find(|(k, _)| *k == id)
+    {
+        let built = make(n);
+        if built.len() == n {
+            return Some(built);
+        }
+    }
 
     // Named members are already distinct and already valid.
     if let Some(members) = item.get("enum").and_then(Value::as_array)
@@ -705,6 +771,7 @@ fn varied_string(schema: &Value, n: usize) -> Option<Vec<String>> {
     Some(out)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk_array(
     schema: &Value,
     node: &Value,
@@ -713,6 +780,7 @@ fn walk_array(
     out: &mut Generated,
     seed: &Value,
     root: &Value,
+    factories: Factories<'_>,
 ) {
     let items = schema.get("items");
     let first = node.as_array().and_then(|a| a.first()).cloned();
@@ -749,7 +817,7 @@ fn walk_array(
         // it break nothing but the length. That is the `words` case: a
         // BIP-39 phrase may legally repeat a word.
         let over = if unique {
-            distinct_items(items, first.as_ref(), n, index, root)
+            distinct_items(items, first.as_ref(), n, index, root, factories)
         } else {
             first
                 .clone()
@@ -816,6 +884,7 @@ fn walk_array(
             out,
             seed,
             root,
+            factories,
         );
     }
 }

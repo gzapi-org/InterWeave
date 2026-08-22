@@ -43,11 +43,35 @@ use interweave_human_chat_protocol::HumanChatV2;
 use interweave_ipc_protocol::{Hello, decode_frame, encode_frame};
 use interweave_transport_api::DirectDestination;
 use interweave_transport_contract_tests::{
-    Candidate, SchemaIndex, index_from, mutations, mutations_and_seeds,
+    Candidate, Factories, SchemaIndex, index_from, mutations, mutations_and_seeds_with,
 };
 use serde_json::{Value, json};
 
 const PEER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+
+/// `n` distinct canonical PeerIds.
+///
+/// The generator cannot build these: the schema pins them with a
+/// `pattern`, and interpreting base58 there would be a second and worse
+/// implementation of the grammar. Without this the 4096-peer ceiling on
+/// a static subset has no mutation at all -- a real bound, testable
+/// only by someone who knows what a PeerId looks like.
+fn distinct_peer_ids(n: usize) -> Vec<Value> {
+    // `Qm` plus 44 base58 characters is the v0 multihash form the
+    // peer-id pattern accepts. The digits are varied and `0` is not in
+    // the base58 alphabet, so it is mapped away.
+    (0..n)
+        .map(|i| {
+            let tail = format!("{i:044}").replace('0', "a");
+            json!(format!("Qm{}", &tail[..44]))
+        })
+        .collect()
+}
+
+const FACTORIES: Factories<'static> = &[(
+    "urn:interweave:schemas:common:peer-id",
+    distinct_peer_ids as fn(usize) -> Vec<Value>,
+)];
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -202,6 +226,23 @@ fn parse_direct_destination(doc: &Value) -> bool {
     serde_json::from_value::<DirectDestination>(doc.clone()).is_ok()
 }
 
+/// One configured endpoint: deserialization plus the cross-field rules.
+///
+/// The entry is judged inside a minimal profile, because half of what
+/// the contract says about an endpoint is relational -- a static subset
+/// may only NARROW profile trust, and nothing about the object alone
+/// can decide that. Wrapping it is what puts those rules in front of
+/// the mutations.
+fn parse_endpoint_config(doc: &Value) -> bool {
+    let profile = json!({
+        "schema_version": 2,
+        "trust": {"policy": "static-allowlist", "allowed_peers": [PEER]},
+        "endpoints": {"entries": [doc.clone()]}
+    });
+    serde_json::from_value::<interweave_profile_config::ProfileConfig>(profile)
+        .is_ok_and(|c| c.is_valid())
+}
+
 /// The identity recovery record: deserialization plus its own shape check.
 ///
 /// `restore()` is deliberately not called — it would reconstruct a key,
@@ -267,6 +308,20 @@ fn boundaries() -> Vec<Boundary> {
                 "words": (0..24).map(|_| "abandon").collect::<Vec<_>>()
             }),
             parse: parse_recovery_record,
+            responsible: everything,
+        },
+        Boundary {
+            name: "endpoints.endpoint-config",
+            schema: "endpoints/endpoint-config.schema.json",
+            seed: json!({
+                "id": "human",
+                "enabled": true,
+                "advertise": false,
+                "allowed_client_kinds": ["human-client"],
+                "inbound": "inherit_profile_trust",
+                "outbound": {"static_subset": [PEER]}
+            }),
+            parse: parse_endpoint_config,
             responsible: everything,
         },
         Boundary {
@@ -354,7 +409,7 @@ fn run(boundary: &Boundary, index: &SchemaIndex) -> Outcome {
         boundary.name
     );
 
-    let generated = mutations_and_seeds(&schema, &boundary.seed, index);
+    let generated = mutations_and_seeds_with(&schema, &boundary.seed, index, FACTORIES);
 
     // An OPTIONAL property the seed omits hides every constraint beneath
     // it, so the generator synthesizes one and walks the subtree against
@@ -571,7 +626,7 @@ fn constraints_under_an_omitted_optional_property_are_still_generated() {
         "the point of this test is that the seed omits it"
     );
 
-    let generated = mutations_and_seeds(&schema, &seed, &index);
+    let generated = mutations_and_seeds_with(&schema, &seed, &index, FACTORIES);
     let labels: Vec<&str> = generated
         .candidates
         .iter()
