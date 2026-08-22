@@ -84,8 +84,23 @@ pub enum ConnectionClass {
 /// "skip the gate" would recreate the hole the gate exists to close.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DialOrigin {
+    /// A person or an admin API asked for this exact peer.
+    ///
+    /// Distinct from [`Self::ConnectionManager`] because the roadmap
+    /// requires every origin to be representable AND observable: folding
+    /// a human's explicit request into the scheduler's own dials means a
+    /// denial cannot say which of the two it refused, and those are the
+    /// two a person most needs told apart.
+    Manual,
     /// The ordinary candidate dial scheduler.
     ConnectionManager,
+    /// Re-establishing a peer a discovery provider reported.
+    ///
+    /// Advisory input, never authority: a candidate is a reason to
+    /// consider dialling and nothing more, and naming the origin is what
+    /// lets the gate — and anything reading its decisions — see how much
+    /// of the dial volume is discovery-driven.
+    DiscoveryReconnect,
     /// A Kademlia iterative query asked the Swarm to dial.
     KademliaQuery,
     /// Establishing or renewing a relay reservation.
@@ -106,8 +121,28 @@ impl DialOrigin {
     /// staying unauthorized for a Kademlia query to the same address.
     #[must_use]
     pub const fn is_data_plane(self) -> bool {
-        matches!(self, Self::ConnectionManager | Self::KademliaQuery)
+        matches!(
+            self,
+            Self::Manual | Self::ConnectionManager | Self::DiscoveryReconnect | Self::KademliaQuery
+        )
     }
+
+    /// Every origin, so an exhaustive check cannot silently miss one.
+    ///
+    /// A test that lists origins by hand proves what its author
+    /// remembered. Adding a variant without adding it here fails to
+    /// compile, which is the property worth having when the rule being
+    /// tested is "no origin skips the gate".
+    pub const ALL: [Self; 8] = [
+        Self::Manual,
+        Self::ConnectionManager,
+        Self::DiscoveryReconnect,
+        Self::KademliaQuery,
+        Self::RelayReservation,
+        Self::RelayCircuit,
+        Self::AutonatProbe,
+        Self::DcutrHolePunch,
+    ];
 }
 
 /// One dial the gate is asked to admit.
@@ -659,16 +694,43 @@ mod tests {
     }
 
     #[test]
+    fn every_origin_is_classified_and_the_classification_is_pinned() {
+        // Driving the other tests off `is_data_plane()` makes them blind
+        // to it being WRONG: a misclassified origin simply moves to the
+        // other loop, where it also passes. So the split is asserted
+        // here, on its own terms, origin by origin.
+        //
+        // The distinction is ADR-0036's: an infrastructure-only peer may
+        // be dialled for a relay reservation while staying unauthorized
+        // for anything carrying application traffic. Putting a data-plane
+        // origin on the reachability side is precisely how it would
+        // acquire that authority by accident.
+        for origin in DialOrigin::ALL {
+            let expected = match origin {
+                DialOrigin::Manual
+                | DialOrigin::ConnectionManager
+                | DialOrigin::DiscoveryReconnect
+                | DialOrigin::KademliaQuery => true,
+                DialOrigin::RelayReservation
+                | DialOrigin::RelayCircuit
+                | DialOrigin::AutonatProbe
+                | DialOrigin::DcutrHolePunch => false,
+            };
+            assert_eq!(
+                origin.is_data_plane(),
+                expected,
+                "{origin:?} is on the wrong side of the data-plane split"
+            );
+        }
+    }
+
+    #[test]
     fn an_unauthorized_peer_is_refused_whatever_the_origin() {
         let p = policy();
-        for origin in [
-            DialOrigin::ConnectionManager,
-            DialOrigin::KademliaQuery,
-            DialOrigin::RelayReservation,
-            DialOrigin::AutonatProbe,
-            DialOrigin::DcutrHolePunch,
-            DialOrigin::RelayCircuit,
-        ] {
+        // EVERY origin, from the enum rather than from memory. A
+        // hand-written list proves what its author remembered, and the
+        // rule under test is "no origin skips the gate".
+        for origin in DialOrigin::ALL {
             assert_eq!(
                 p.admit(&request(origin, A1), ConnectionClass::Unauthorized, 0),
                 Err(DialDenial::Unauthorized),
