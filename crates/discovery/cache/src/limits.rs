@@ -42,17 +42,50 @@ pub const MAX_LABEL_BYTES: usize = 128;
 
 /// Largest cache file this build will read, in bytes.
 ///
-/// DERIVED, not chosen. One peer at every other limit is roughly
-/// 64 bytes of PeerId, 8 addresses of 256 plus a timestamp each, and 16
-/// capability observations of three 128-byte labels plus scalars — under
-/// 8 KiB once JSON overhead is counted generously. At [`MAX_PEERS`] that
-/// is 8 MiB, and a file larger than the format's own worst case is not a
-/// big cache, it is not this format.
+/// COMPUTED from the other limits, not chosen to look round. The first
+/// version of this was a hand-derived 8 MiB that undercounted a legal
+/// peer by a third: at every documented maximum one record serializes to
+/// roughly 11 KiB, so a full cache is over 11 MiB — `flush` would write
+/// a perfectly legal file that the next `load` quarantined, and the
+/// cache would delete its own contents on restart for no reason a user
+/// could see.
 ///
-/// The point is that the size is checked BEFORE the bytes are read. The
-/// cache is advisory and disposable, so a file that cannot be true is
-/// quarantined rather than parsed.
-pub const MAX_CACHE_FILE_BYTES: u64 = 8 * 1024 * 1024;
+/// Deriving it means the two can no longer disagree. Raising
+/// [`MAX_ADDRESSES_PER_PEER`] or [`MAX_LABEL_BYTES`] moves this with
+/// them.
+pub const MAX_CACHE_FILE_BYTES: u64 = {
+    // Field names, quotes, commas, braces, and the indentation of a
+    // pretty-printed file. Generous per item rather than exact: this is
+    // a ceiling, and being loose costs nothing while being tight costs a
+    // legal file.
+    const STRUCTURE_PER_ITEM: u64 = 128;
+    const STRUCTURE_PER_CAPABILITY: u64 = 256;
+    const PEER_ID_BYTES: u64 = 64;
+    const TIMESTAMP_BYTES: u64 = 24;
+
+    // JSON ESCAPING, which the first version of this budgeted at 1×.
+    //
+    // A stored byte is not a serialized byte. Within printable ASCII the
+    // worst case is `"` and `\`, which encode as two bytes each — so a
+    // value contributes at most twice its length. That bound only holds
+    // because [`is_bounded_label`] refuses everything else: a control
+    // character encodes as six (`\u0000`), and a cache of those would
+    // serialize to three times this ceiling while passing every input
+    // check.
+    const ESCAPE_FACTOR: u64 = 2;
+
+    let per_address =
+        ESCAPE_FACTOR * MAX_ADDRESS_BYTES as u64 + TIMESTAMP_BYTES + STRUCTURE_PER_ITEM;
+    let per_capability =
+        ESCAPE_FACTOR * 3 * MAX_LABEL_BYTES as u64 + 2 * TIMESTAMP_BYTES + STRUCTURE_PER_CAPABILITY;
+    let per_peer = PEER_ID_BYTES
+        + 3 * TIMESTAMP_BYTES
+        + MAX_ADDRESSES_PER_PEER as u64 * per_address
+        + MAX_CAPABILITIES_PER_PEER as u64 * per_capability
+        + STRUCTURE_PER_ITEM;
+
+    MAX_PEERS as u64 * per_peer + 4096
+};
 
 /// Minimum interval between writes to disk.
 ///

@@ -12,8 +12,9 @@
 use std::path::Path;
 
 use interweave_discovery_cache::{
-    CacheHealth, CacheLimits, DEFAULT_TTL_MS, MAX_ADDRESSES_PER_PEER, MAX_CACHE_FILE_BYTES,
-    MAX_CAPABILITIES_PER_PEER, PeerCache, ProtocolCapabilityObservation,
+    CacheError, CacheHealth, CacheLimits, DEFAULT_TTL_MS, MAX_ADDRESSES_PER_PEER,
+    MAX_CACHE_FILE_BYTES, MAX_CAPABILITIES_PER_PEER, MAX_PEERS, PeerCache,
+    ProtocolCapabilityObservation,
 };
 use interweave_transport_api::TransportIdentity;
 
@@ -85,7 +86,9 @@ fn a_successful_dial_round_trips_through_the_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("peers.json");
     let mut cache = empty(&path);
-    cache.record_success(&peer(PEER_A), "/ip4/10.0.0.1/tcp/4001", 1_000);
+    cache
+        .record_success(&peer(PEER_A), "/ip4/10.0.0.1/tcp/4001", 1_000)
+        .expect("within the bounded format");
     cache.flush(1_000).expect("flush");
 
     let reloaded = empty(&path);
@@ -108,7 +111,9 @@ fn an_expired_record_is_ignored_on_read_without_being_written() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("peers.json");
     let mut cache = empty(&path);
-    cache.record_success(&peer(PEER_A), "/ip4/10.0.0.1/tcp/4001", 1_000);
+    cache
+        .record_success(&peer(PEER_A), "/ip4/10.0.0.1/tcp/4001", 1_000)
+        .expect("within the bounded format");
 
     let expired_at = 1_000 + DEFAULT_TTL_MS;
     assert!(cache.candidates(expired_at - 1).len() == 1);
@@ -128,7 +133,9 @@ fn a_failure_is_recorded_without_shortening_the_ttl() {
     // addresses are worth keeping until they expire on their own.
     let dir = tempfile::tempdir().expect("tempdir");
     let mut cache = empty(&dir.path().join("peers.json"));
-    cache.record_success(&peer(PEER_A), "/ip4/10.0.0.1/tcp/4001", 1_000);
+    cache
+        .record_success(&peer(PEER_A), "/ip4/10.0.0.1/tcp/4001", 1_000)
+        .expect("within the bounded format");
     cache.record_failure(&peer(PEER_A), 2_000);
 
     let record = cache.peer(&peer(PEER_A), 3_000).expect("still cached");
@@ -145,7 +152,9 @@ fn the_address_cap_drops_the_least_recently_successful() {
 
     // Nine addresses, oldest first, into a cap of eight.
     for i in 0..=u64::try_from(MAX_ADDRESSES_PER_PEER).expect("small") {
-        cache.record_success(&p, &format!("/ip4/10.0.0.{i}/tcp/4001"), 1_000 + i);
+        cache
+            .record_success(&p, &format!("/ip4/10.0.0.{i}/tcp/4001"), 1_000 + i)
+            .expect("within the bounded format");
     }
     let record = cache.peer(&p, 2_000).expect("cached");
     assert_eq!(record.addresses.len(), MAX_ADDRESSES_PER_PEER);
@@ -166,8 +175,12 @@ fn re_observing_an_address_refreshes_it_rather_than_duplicating_it() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut cache = empty(&dir.path().join("peers.json"));
     let p = peer(PEER_A);
-    cache.record_success(&p, "/ip4/10.0.0.1/tcp/4001", 1_000);
-    cache.record_success(&p, "/ip4/10.0.0.1/tcp/4001", 9_000);
+    cache
+        .record_success(&p, "/ip4/10.0.0.1/tcp/4001", 1_000)
+        .expect("within the bounded format");
+    cache
+        .record_success(&p, "/ip4/10.0.0.1/tcp/4001", 9_000)
+        .expect("within the bounded format");
 
     let record = cache.peer(&p, 10_000).expect("cached");
     assert_eq!(record.addresses.len(), 1);
@@ -187,9 +200,13 @@ fn the_peer_cap_evicts_expired_records_before_live_ones() {
 
     // A is old enough to have expired; B is brand new but is inserted
     // second, so an insertion-ordered cap would evict B.
-    cache.record_success(&peer(PEER_A), "/ip4/10.0.0.1/tcp/4001", 1_000);
+    cache
+        .record_success(&peer(PEER_A), "/ip4/10.0.0.1/tcp/4001", 1_000)
+        .expect("within the bounded format");
     let much_later = 1_000 + DEFAULT_TTL_MS + 1;
-    cache.record_success(&peer(PEER_B), "/ip4/10.0.0.2/tcp/4001", much_later);
+    cache
+        .record_success(&peer(PEER_B), "/ip4/10.0.0.2/tcp/4001", much_later)
+        .expect("within the bounded format");
 
     assert_eq!(cache.len(), 1);
     assert!(
@@ -205,10 +222,16 @@ fn a_fresh_capability_observation_supersedes_the_earlier_one() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut cache = empty(&dir.path().join("peers.json"));
     let p = peer(PEER_A);
-    cache.record_success(&p, "/ip4/10.0.0.1/tcp/4001", 1_000);
+    cache
+        .record_success(&p, "/ip4/10.0.0.1/tcp/4001", 1_000)
+        .expect("within the bounded format");
 
-    cache.record_capability(&p, capability("interweave/kad", true, 1_000));
-    cache.record_capability(&p, capability("interweave/kad", false, 2_000));
+    cache
+        .record_capability(&p, capability("interweave/kad", true, 1_000))
+        .expect("within the bounded format");
+    cache
+        .record_capability(&p, capability("interweave/kad", false, 2_000))
+        .expect("within the bounded format");
 
     let record = cache.peer(&p, 3_000).expect("cached");
     assert_eq!(record.capabilities.len(), 1, "superseded, not appended");
@@ -222,7 +245,9 @@ fn a_capability_observation_without_a_record_is_dropped() {
     // protocol fact, for a peer no successful dial ever reached.
     let dir = tempfile::tempdir().expect("tempdir");
     let mut cache = empty(&dir.path().join("peers.json"));
-    cache.record_capability(&peer(PEER_A), capability("interweave/kad", true, 1_000));
+    cache
+        .record_capability(&peer(PEER_A), capability("interweave/kad", true, 1_000))
+        .expect("within the bounded format");
     assert!(cache.is_empty());
 }
 
@@ -233,11 +258,15 @@ fn the_capability_cap_holds_across_positive_and_negative_observations() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut cache = empty(&dir.path().join("peers.json"));
     let p = peer(PEER_A);
-    cache.record_success(&p, "/ip4/10.0.0.1/tcp/4001", 1_000);
+    cache
+        .record_success(&p, "/ip4/10.0.0.1/tcp/4001", 1_000)
+        .expect("within the bounded format");
 
     for i in 0..=u64::try_from(MAX_CAPABILITIES_PER_PEER).expect("small") {
         let supported = i % 2 == 0;
-        cache.record_capability(&p, capability(&format!("family/{i}"), supported, 1_000 + i));
+        cache
+            .record_capability(&p, capability(&format!("family/{i}"), supported, 1_000 + i))
+            .expect("within the bounded format");
     }
     let record = cache.peer(&p, 2_000).expect("cached");
     assert_eq!(record.capabilities.len(), MAX_CAPABILITIES_PER_PEER);
@@ -258,8 +287,12 @@ fn capability_freshness_never_outlives_the_enclosing_record() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut cache = empty(&dir.path().join("peers.json"));
     let p = peer(PEER_A);
-    cache.record_success(&p, "/ip4/10.0.0.1/tcp/4001", 1_000);
-    cache.record_capability(&p, capability("interweave/kad", true, 1_000));
+    cache
+        .record_success(&p, "/ip4/10.0.0.1/tcp/4001", 1_000)
+        .expect("within the bounded format");
+    cache
+        .record_capability(&p, capability("interweave/kad", true, 1_000))
+        .expect("within the bounded format");
 
     let expired_at = 1_000 + DEFAULT_TTL_MS;
     let record = cache.peer(&p, expired_at - 1).expect("still fresh");
@@ -283,13 +316,17 @@ fn writes_are_debounced() {
     let path = dir.path().join("peers.json");
     let mut cache = empty(&path);
 
-    cache.record_success(&peer(PEER_A), "/ip4/10.0.0.1/tcp/4001", 0);
+    cache
+        .record_success(&peer(PEER_A), "/ip4/10.0.0.1/tcp/4001", 0)
+        .expect("within the bounded format");
     assert!(
         cache.flush_if_due(0).expect("flush"),
         "the first write is due"
     );
 
-    cache.record_success(&peer(PEER_B), "/ip4/10.0.0.2/tcp/4001", 100);
+    cache
+        .record_success(&peer(PEER_B), "/ip4/10.0.0.2/tcp/4001", 100)
+        .expect("within the bounded format");
     assert!(
         !cache.flush_if_due(100).expect("flush"),
         "a burst of dials must not rewrite the file per connection"
@@ -321,8 +358,12 @@ fn the_persisted_file_holds_no_application_or_trust_state() {
     let path = dir.path().join("peers.json");
     let mut cache = empty(&path);
     let p = peer(PEER_A);
-    cache.record_success(&p, "/ip4/10.0.0.1/tcp/4001", 1_000);
-    cache.record_capability(&p, capability("interweave/kad", true, 1_000));
+    cache
+        .record_success(&p, "/ip4/10.0.0.1/tcp/4001", 1_000)
+        .expect("within the bounded format");
+    cache
+        .record_capability(&p, capability("interweave/kad", true, 1_000))
+        .expect("within the bounded format");
     cache.record_failure(&p, 1_500);
     cache.flush(2_000).expect("flush");
 
@@ -351,7 +392,9 @@ fn the_write_is_atomic_and_leaves_no_temporary_behind() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("peers.json");
     let mut cache = empty(&path);
-    cache.record_success(&peer(PEER_A), "/ip4/10.0.0.1/tcp/4001", 1_000);
+    cache
+        .record_success(&peer(PEER_A), "/ip4/10.0.0.1/tcp/4001", 1_000)
+        .expect("within the bounded format");
     cache.flush(1_000).expect("flush");
 
     let leftovers: Vec<_> = std::fs::read_dir(dir.path())
@@ -487,7 +530,9 @@ fn a_valid_file_still_loads() {
     let path = dir.path().join("peers.json");
 
     let mut cache = PeerCache::load(&path, CacheLimits::default()).expect("empty");
-    cache.record_success(&peer(PEER_A), "/ip4/10.0.0.1/tcp/4001", 1_000);
+    cache
+        .record_success(&peer(PEER_A), "/ip4/10.0.0.1/tcp/4001", 1_000)
+        .expect("within the bounded format");
     cache.flush(1_000_000).expect("writes");
 
     let reloaded = PeerCache::load(&path, CacheLimits::default()).expect("loads");
@@ -523,4 +568,142 @@ fn record_json(
         addrs.join(","),
         caps.join(",")
     )
+}
+
+#[test]
+fn a_cache_full_of_legal_records_fits_under_its_own_ceiling() {
+    // The ceiling was hand-derived once and undercounted a legal peer by
+    // a third, so `flush` could write a perfectly legal file that the
+    // next `load` quarantined — the cache deleting its own contents on
+    // restart for no reason a user could see.
+    //
+    // Measured with the real encoder rather than recomputed here. A test
+    // that repeated the arithmetic would agree with a wrong constant.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("peers.json");
+    let limits = CacheLimits::default();
+
+    let mut cache = PeerCache::load(&path, limits).expect("empty");
+    let who = peer(PEER_A);
+
+    // One peer at every documented maximum.
+    // The WORST legal characters, not comfortable ones: `"` and `\`
+    // each encode as two JSON bytes, so a record of them is twice the
+    // size of the same record made of letters. A maximal test built from
+    // `a` would measure the easy case and miss the ceiling entirely.
+    let worst = |n: usize| "\"\\".repeat(n / 2);
+    for i in 0..MAX_ADDRESSES_PER_PEER {
+        cache
+            .record_success(&who, &format!("{}{i:04}", worst(252)), 1_000)
+            .expect("within the bounded format");
+    }
+    for i in 0..MAX_CAPABILITIES_PER_PEER {
+        cache
+            .record_capability(
+                &who,
+                ProtocolCapabilityObservation {
+                    protocol_family: format!("{}{i:04}", "f".repeat(120)),
+                    wire_major: u32::MAX,
+                    network_hash: "h".repeat(128),
+                    role: "r".repeat(128),
+                    supported: true,
+                    observed_at_ms: u64::MAX,
+                },
+            )
+            .expect("within the bounded format");
+    }
+    cache.flush(1_000_000).expect("writes");
+
+    let one_peer = std::fs::metadata(&path).expect("stat").len();
+    let full_cache = one_peer * MAX_PEERS as u64;
+    assert!(
+        full_cache <= MAX_CACHE_FILE_BYTES,
+        "a full cache serializes to ~{full_cache} bytes but the ceiling is \
+         {MAX_CACHE_FILE_BYTES}; `flush` would write a legal file that `load` quarantines"
+    );
+
+    // And it really does come back, rather than passing the arithmetic
+    // and failing the round trip.
+    let reloaded = PeerCache::load(&path, limits).expect("loads");
+    assert!(
+        matches!(reloaded.health(), CacheHealth::Healthy),
+        "a maximal record must load: {:?}",
+        reloaded.health()
+    );
+    assert_eq!(reloaded.len(), 1);
+}
+
+#[test]
+fn nothing_the_cache_accepts_can_produce_a_file_it_refuses() {
+    // The load path validated every record and the write path validated
+    // nothing, so a caller could record a 257-byte address, persist it
+    // successfully, and have the cache quarantine its own file on the
+    // next start — discarding everything it held because of a value it
+    // had already agreed to store.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("peers.json");
+    let limits = CacheLimits::default();
+    let mut cache = PeerCache::load(&path, limits).expect("empty");
+    let who = peer(PEER_A);
+
+    // Refused on the way in, rather than on the way back.
+    assert!(matches!(
+        cache.record_success(&who, &"x".repeat(257), 1_000),
+        Err(CacheError::OutOfBounds { got: 257, .. })
+    ));
+    assert!(matches!(
+        cache.record_success(&who, "", 1_000),
+        Err(CacheError::OutOfBounds { got: 0, .. })
+    ));
+
+    // A control character passes every LENGTH check and encodes as six
+    // JSON bytes, so a cache of them serializes to three times the
+    // ceiling — `flush` succeeding and the next `load` quarantining. The
+    // character set is part of the size bound, not a separate opinion.
+    assert!(matches!(
+        cache.record_success(&who, "/ip4/10.0.0.1/tcp/\u{0}4001", 1_000),
+        Err(CacheError::OutOfBounds { .. })
+    ));
+    assert!(matches!(
+        cache.record_success(&who, "/ip4/10.0.0.1/tcp/caf\u{e9}", 1_000),
+        Err(CacheError::OutOfBounds { .. })
+    ));
+
+    cache
+        .record_success(&who, "/ip4/10.0.0.1/tcp/4001", 1_000)
+        .expect("a legal address");
+    for (family, hash, role) in [
+        ("f".repeat(129), "h".to_owned(), "r".to_owned()),
+        ("f".to_owned(), "h".repeat(129), "r".to_owned()),
+        ("f".to_owned(), "h".to_owned(), "r".repeat(129)),
+    ] {
+        assert!(
+            matches!(
+                cache.record_capability(
+                    &who,
+                    ProtocolCapabilityObservation {
+                        protocol_family: family,
+                        wire_major: 1,
+                        network_hash: hash,
+                        role,
+                        supported: true,
+                        observed_at_ms: 1_000,
+                    },
+                ),
+                Err(CacheError::OutOfBounds { got: 129, .. })
+            ),
+            "each label is bounded, not merely one of them"
+        );
+    }
+
+    // What did get in round-trips, which is the whole invariant: every
+    // file `flush` writes is one `load` accepts.
+    cache.flush(1_000_000).expect("writes");
+    let reloaded = PeerCache::load(&path, limits).expect("loads");
+    assert!(
+        matches!(reloaded.health(), CacheHealth::Healthy),
+        "the cache must accept its own output: {:?}",
+        reloaded.health()
+    );
+    assert_eq!(reloaded.len(), 1);
 }

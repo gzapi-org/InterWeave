@@ -235,26 +235,40 @@ fn no_secret_material_reaches_debug_output() {
     // reports, or traces. A derived Debug puts it in all three.
     let identity = ProfileIdentity::generate();
     let phrase = identity.recovery_phrase().expect("phrase");
-    let words = phrase.expose_words();
-    let first_word = words.split_whitespace().next().expect("a word");
 
+    // EXACT, not "does not contain a word".
+    //
+    // A substring test against the redaction text is unsound, because the
+    // redaction text is English and so is the BIP-39 wordlist: `act` is a
+    // word and `redacted` contains it, `word` is a word and `words`
+    // contains it. That made this assertion fail roughly once in a
+    // thousand runs on the phrase alone, for a phrase that had leaked
+    // nothing — a flake that reads as a security failure, which is the
+    // worst kind to hand someone at 3am.
+    //
+    // The real contract is stronger and simpler anyway: this Debug prints
+    // one fixed string with no phrase-derived content in it at all.
+    // Pinning that makes leakage unrepresentable rather than unlikely.
     let phrase_debug = format!("{phrase:?}");
-    assert!(
-        !phrase_debug.contains(first_word) || first_word.len() < 3,
-        "the phrase reached Debug output: {phrase_debug}"
+    assert_eq!(
+        phrase_debug, "RecoveryPhrase(<24 words redacted>)",
+        "the phrase Debug must be a fixed redaction and nothing else"
     );
-    assert!(phrase_debug.contains("redacted"), "{phrase_debug}");
 
-    // The identity prints its PeerId, which is public, and nothing else.
-    let id_debug = format!("{identity:?}");
-    for word in words.split_whitespace() {
-        assert!(
-            !id_debug.contains(&format!(" {word} ")),
-            "identity Debug leaked a phrase word: {id_debug}"
-        );
-    }
+    // Exact here too, and for a sharper version of the same reason: the
+    // type's own name contains a BIP-39 word (`ProfileIdentity` contains
+    // `file`), so a substring scan over 24 words would fail on about one
+    // identity in eighty while nothing had leaked.
+    //
+    // Naming the whole output states the contract instead of sampling
+    // it: the PeerId, which is public by construction, and nothing else.
     let peer = identity.transport_identity().expect("peer id");
-    assert!(id_debug.contains(peer.as_str()), "{id_debug}");
+    let id_debug = format!("{identity:?}");
+    assert_eq!(
+        id_debug,
+        format!("ProfileIdentity({})", peer.as_str()),
+        "the identity Debug must be its PeerId and nothing else"
+    );
 }
 
 #[test]
@@ -583,4 +597,205 @@ fn concurrent_creation_produces_exactly_one_winner() {
         winners[0],
         "the stored identity is the one the winner wrote"
     );
+}
+
+#[test]
+fn concurrent_rotation_produces_exactly_one_winner() {
+    // The same window the creation race had, one operation over.
+    // Reading the stored identity, checking it, and then writing lets two
+    // processes both name the identity that really is stored, both pass
+    // the check, and both report a successful rotation — while the later
+    // write silently replaces the earlier one, leaving the first caller
+    // reporting an identity that is no longer there.
+    //
+    // That is exactly the guarantee `replacing` exists to provide, so a
+    // check that cannot hold it is worse than no check: it reads as one.
+    use std::sync::{Arc, Barrier};
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("identity.key");
+
+    let established = ProfileIdentity::generate();
+    established.save(&path).expect("first save");
+    let established_peer = established.transport_identity().expect("peer id");
+
+    const RACERS: usize = 8;
+    let barrier = Arc::new(Barrier::new(RACERS));
+    let mut handles = Vec::new();
+    for _ in 0..RACERS {
+        let barrier = Arc::clone(&barrier);
+        let path = path.clone();
+        let replacing = established_peer.clone();
+        handles.push(std::thread::spawn(move || {
+            let replacement = ProfileIdentity::generate();
+            barrier.wait();
+            replacement.replace_saved(&path, &replacing)
+        }));
+    }
+
+    let mut winners = Vec::new();
+    let mut refused = 0;
+    for h in handles {
+        match h.join().expect("thread did not panic") {
+            Ok(rotation) => winners.push(rotation),
+            // Either it could not take the marker, or it took it after
+            // the winner and found an identity it had not named. Both are
+            // a refusal; neither is a second rotation.
+            Err(
+                IdentityError::RotationInProgress { .. } | IdentityError::PeerIdMismatch { .. },
+            ) => {
+                refused += 1;
+            }
+            Err(other) => panic!("unexpected error: {other}"),
+        }
+    }
+
+    assert_eq!(winners.len(), 1, "exactly one rotation may succeed");
+    assert_eq!(
+        refused,
+        RACERS - 1,
+        "and every other caller is told it lost"
+    );
+
+    // The winner's report is TRUE: what it says is stored really is.
+    let rotation = &winners[0];
+    assert_eq!(rotation.previous.as_str(), established_peer.as_str());
+    assert_eq!(
+        ProfileIdentity::load(&path)
+            .expect("loads")
+            .transport_identity()
+            .expect("peer id")
+            .as_str(),
+        rotation.current.as_str(),
+        "the successful rotation must describe the identity actually on disk"
+    );
+
+    // And the marker is released, so the profile is not wedged.
+    assert!(
+        !dir.path().join("identity.key.rotating").exists(),
+        "a completed rotation must not leave its marker behind"
+    );
+    let next = ProfileIdentity::generate();
+    next.replace_saved(&path, &rotation.current)
+        .expect("a later rotation still works");
+}
+
+#[test]
+fn an_interrupted_rotation_is_reported_rather_than_ignored() {
+    // A marker left by a rotation that died is indistinguishable from one
+    // held right now, so both are reported. Removing it is a person's
+    // decision, which is the right amount of friction for an operation
+    // that invalidates every trust relationship.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("identity.key");
+
+    let established = ProfileIdentity::generate();
+    established.save(&path).expect("save");
+    let established_peer = established.transport_identity().expect("peer id");
+
+    let marker = dir.path().join("identity.key.rotating");
+    std::fs::hard_link(&path, &marker).expect("simulate an interrupted rotation");
+
+    let replacement = ProfileIdentity::generate();
+    match replacement.replace_saved(&path, &established_peer) {
+        Err(IdentityError::RotationInProgress { marker: reported }) => {
+            assert_eq!(reported, marker, "the error names what has to be removed");
+        }
+        other => panic!("expected RotationInProgress, got {other:?}"),
+    }
+
+    // Nothing changed, and clearing the marker restores the operation.
+    assert_eq!(
+        ProfileIdentity::load(&path)
+            .expect("loads")
+            .transport_identity()
+            .expect("peer id")
+            .as_str(),
+        established_peer.as_str()
+    );
+    std::fs::remove_file(&marker).expect("clear it");
+    replacement
+        .replace_saved(&path, &established_peer)
+        .expect("rotation works once the marker is gone");
+}
+
+#[test]
+fn restore_and_rotation_exclude_each_other() {
+    // Rotation took the marker and restore wrote straight to the path, so
+    // the two could interleave on the same file with no exclusion between
+    // them. A restore landing inside a rotation is either lost, or
+    // replaces the identity that rotation's `Rotation.current` says is
+    // stored — which makes the compare-and-swap a guarantee against other
+    // rotations rather than a guarantee about the file, and a caller
+    // cannot tell those apart from outside.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("identity.key");
+
+    let established = ProfileIdentity::generate();
+    established.save(&path).expect("save");
+    let established_peer = established.transport_identity().expect("peer id");
+
+    let other = ProfileIdentity::generate();
+    let phrase = other.recovery_phrase().expect("phrase");
+    let other_peer = other.transport_identity().expect("peer id");
+
+    // With the marker held, a restore over an existing identity is
+    // refused rather than racing.
+    let marker = dir.path().join("identity.key.rotating");
+    std::fs::hard_link(&path, &marker).expect("hold the marker");
+    assert!(
+        matches!(
+            ProfileIdentity::restore(&path, &phrase, &other_peer),
+            Err(IdentityError::RotationInProgress { .. })
+        ),
+        "a restore must not overwrite a profile mid-rotation"
+    );
+    assert_eq!(
+        ProfileIdentity::load(&path)
+            .expect("loads")
+            .transport_identity()
+            .expect("peer id")
+            .as_str(),
+        established_peer.as_str(),
+        "and the identity it would have replaced is untouched"
+    );
+
+    std::fs::remove_file(&marker).expect("release");
+    ProfileIdentity::restore(&path, &phrase, &other_peer).expect("restore once nothing holds it");
+    assert_eq!(
+        ProfileIdentity::load(&path)
+            .expect("loads")
+            .transport_identity()
+            .expect("peer id")
+            .as_str(),
+        other_peer.as_str()
+    );
+    assert!(
+        !marker.exists(),
+        "a completed restore must not leave the marker behind"
+    );
+}
+
+#[test]
+fn a_restore_into_an_empty_profile_is_a_creation() {
+    // Nothing to exclude and nothing to replace: the common case is a
+    // person who has lost everything, and requiring a key to already be
+    // there would make restore useless exactly when it is needed.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("identity.key");
+
+    let original = ProfileIdentity::generate();
+    let phrase = original.recovery_phrase().expect("phrase");
+    let peer = original.transport_identity().expect("peer id");
+
+    ProfileIdentity::restore(&path, &phrase, &peer).expect("restore onto an empty profile");
+    assert_eq!(
+        ProfileIdentity::load(&path)
+            .expect("loads")
+            .transport_identity()
+            .expect("peer id")
+            .as_str(),
+        peer.as_str()
+    );
+    assert!(!dir.path().join("identity.key.rotating").exists());
 }

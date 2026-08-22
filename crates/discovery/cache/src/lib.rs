@@ -43,6 +43,20 @@ pub enum CacheError {
     Io(std::io::Error),
     /// The cache could not be serialised.
     Serialize(serde_json::Error),
+    /// A value offered to the cache is outside the bounded format.
+    ///
+    /// Refused at the point it enters. The load path validates every
+    /// record, so accepting an over-long address here would mean `flush`
+    /// writing a file the next `load` quarantines — the cache deleting
+    /// its own contents on restart, for a value it had already accepted.
+    OutOfBounds {
+        /// Which field.
+        field: &'static str,
+        /// Bytes supplied.
+        got: usize,
+        /// Bytes permitted.
+        max: usize,
+    },
 }
 
 impl From<std::io::Error> for CacheError {
@@ -62,6 +76,9 @@ impl core::fmt::Display for CacheError {
         match self {
             Self::Io(e) => write!(f, "peer cache i/o: {e}"),
             Self::Serialize(e) => write!(f, "peer cache serialisation: {e}"),
+            Self::OutOfBounds { field, got, max } => {
+                write!(f, "{field} is {got} bytes; the limit is 1..={max}")
+            }
         }
     }
 }
@@ -71,6 +88,7 @@ impl core::error::Error for CacheError {
         match self {
             Self::Io(e) => Some(e),
             Self::Serialize(e) => Some(e),
+            Self::OutOfBounds { .. } => None,
         }
     }
 }
