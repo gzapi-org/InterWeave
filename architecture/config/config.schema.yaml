@@ -159,8 +159,11 @@ endpoints:
   entries: list[EndpointConfig, max=64]
   EndpointConfig:
     id: string[regex=^[a-z][a-z0-9._-]{0,63}$]
-    enabled: bool = true
-    advertise: bool = false
+    # Required, both of them: the contract schema lists them in
+    # `required`, and a default of true for `enabled` turns an omission
+    # into a live endpoint.
+    enabled: bool
+    advertise: bool
     # Hygiene guard only; client.kind is not cryptographic authentication.
     allowed_client_kinds: list[string[1..64], max=16, unique]
     inbound:

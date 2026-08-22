@@ -436,10 +436,18 @@ pub struct EndpointConfig {
     /// The route label.
     pub id: EndpointId,
     /// Whether it accepts traffic.
-    #[serde(default = "default_true")]
+    ///
+    /// REQUIRED, as the contract declares it. A default of `true` here
+    /// meant an endpoint the operator never mentioned was on, and an
+    /// endpoint they misspelled was on -- the permissive answer arrived
+    /// by omission, which is the shape this whole boundary is meant to
+    /// refuse.
     pub enabled: bool,
     /// Whether it may appear in the directory.
-    #[serde(default)]
+    ///
+    /// Also required. `false` is the safe default and defaulting is
+    /// still wrong: it is the schema's job to say the field must be
+    /// present, and half-honouring `required` is how the two drift.
     pub advertise: bool,
     /// Client kinds permitted to lease it. Hygiene only, never authority.
     #[serde(
@@ -795,7 +803,7 @@ mod tests {
         let base = format!(
             r#"{{"schema_version":2,
                  "trust":{{"policy":"static-allowlist","allowed_peers":["{P1}"]}},
-                 "endpoints":{{"entries":[{{"id":"human","enabled":false"#
+                 "endpoints":{{"entries":[{{"id":"human","advertise":false,"enabled":false"#
         );
 
         // Same document, correct spelling: parses, and the endpoint is
@@ -811,7 +819,7 @@ mod tests {
         let typo = format!(
             r#"{{"schema_version":2,
                  "trust":{{"policy":"static-allowlist","allowed_peers":["{P1}"]}},
-                 "endpoints":{{"entries":[{{"id":"human","enabeld":false}}]}}}}"#
+                 "endpoints":{{"entries":[{{"id":"human","enabled":true,"advertise":false,"enabeld":false}}]}}}}"#
         );
         let err = serde_json::from_str::<ProfileConfig>(&typo)
             .expect_err("an unknown endpoint field must be refused")
@@ -823,7 +831,7 @@ mod tests {
         let typo = format!(
             r#"{{"schema_version":2,
                  "trust":{{"policy":"static-allowlist","allowed_peers":["{P1}"]}},
-                 "endpoints":{{"entries":[{{"id":"human",
+                 "endpoints":{{"entries":[{{"id":"human","enabled":true,"advertise":false,
                    "inboud":{{"static_subset":["{P1}"]}}}}]}}}}"#
         );
         assert!(
@@ -868,7 +876,8 @@ mod tests {
                 r#"{{"schema_version":2,
                      "trust":{{"policy":"static-allowlist","allowed_peers":["{P1}"]}},
                      "endpoints":{{"entries":[
-                       {{"id":"human","allowed_client_kinds":{kinds}}}]}}}}"#
+                       {{"id":"human","enabled":true,"advertise":false,
+                         "allowed_client_kinds":{kinds}}}]}}}}"#
             )
         };
 
@@ -957,7 +966,7 @@ mod tests {
         );
 
         let entries: Vec<String> = (0..=MAX_ENDPOINTS)
-            .map(|i| format!(r#"{{"id":"e{i}"}}"#))
+            .map(|i| format!(r#"{{"id":"e{i}","enabled":true,"advertise":false}}"#))
             .collect();
         let doc = format!(
             r#"{{"schema_version":2,"trust":{{"policy":"static-allowlist"}},
@@ -968,7 +977,7 @@ mod tests {
 
         // Exactly the ceiling parses.
         let entries: Vec<String> = (0..MAX_ENDPOINTS)
-            .map(|i| format!(r#"{{"id":"e{i}"}}"#))
+            .map(|i| format!(r#"{{"id":"e{i}","enabled":true,"advertise":false}}"#))
             .collect();
         let doc = format!(
             r#"{{"schema_version":2,"trust":{{"policy":"static-allowlist"}},
