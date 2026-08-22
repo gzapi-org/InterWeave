@@ -64,6 +64,13 @@ pub struct Generated {
     /// validates these, so a bad synthesis fails loudly rather than
     /// quietly weakening the suite it was added to strengthen.
     pub synthesized_seeds: Vec<(String, Value)>,
+    /// Constraints the generator declined to build a mutation for.
+    ///
+    /// Empty is the only acceptable value, and the caller asserts that.
+    /// A generator that quietly skips what it cannot construct reports
+    /// full coverage while testing nothing — the exact blind spot this
+    /// module exists to remove, reintroduced one `continue` at a time.
+    pub uncovered: Vec<String>,
 }
 
 /// Resolve a schema node through any `$ref` it carries.
@@ -184,6 +191,7 @@ fn generated_root() -> Generated {
     Generated {
         candidates,
         synthesized_seeds: Vec::new(),
+        uncovered: Vec::new(),
     }
 }
 
@@ -547,6 +555,156 @@ fn walk_object(
     }
 }
 
+/// `n` distinct values, each individually valid against `items`.
+///
+/// The point is that the ONLY thing wrong with the resulting array is
+/// its length. A list of strings against an object item schema fails on
+/// type; a list of one value repeated fails on `uniqueItems`. Either
+/// way the cardinality ceiling is never the reason, so an implementation
+/// missing it still passes.
+///
+/// Returns `None` rather than something weaker when the item schema
+/// offers nothing to vary. The caller records that as uncovered.
+fn distinct_items(
+    items: Option<&Value>,
+    seeded: Option<&Value>,
+    n: usize,
+    index: &SchemaIndex,
+    root: &Value,
+) -> Option<Vec<Value>> {
+    let item = items.and_then(|i| resolve(i, index, root))?;
+
+    // Named members are already distinct and already valid.
+    if let Some(members) = item.get("enum").and_then(Value::as_array)
+        && members.len() >= n
+    {
+        return Some(members.iter().take(n).cloned().collect());
+    }
+
+    // The seed's own item where there is one: it is valid by
+    // construction, which a synthesized value only claims to be.
+    let base = seeded.cloned().or_else(|| synthesize(item, index, root))?;
+    match &base {
+        Value::String(_) => {
+            let vary = varied_string(item, n)?;
+            Some(vary.into_iter().map(Value::String).collect())
+        }
+        Value::Object(map) => {
+            // A property whose subschema is a free-form string is the
+            // handle. `const`, `enum`, and `pattern` are all reasons a
+            // value cannot be varied without becoming invalid for a
+            // second, unstated reason.
+            let props = item.get("properties").and_then(Value::as_object)?;
+            // A string handle first because it reads best in a failure
+            // message; a numeric one otherwise. `protocol_observations`
+            // pins its only string with a `pattern` and leaves
+            // `observed_at` free, which is why both are tried.
+            let (name, values) = map
+                .keys()
+                .find_map(|name| {
+                    let sub = props.get(name).and_then(|s| resolve(s, index, root))?;
+                    varied_string(sub, n)
+                        .map(|v| (name.clone(), v.into_iter().map(Value::String).collect()))
+                })
+                .or_else(|| {
+                    map.keys().find_map(|name| {
+                        let sub = props.get(name).and_then(|s| resolve(s, index, root))?;
+                        varied_number(sub, n).map(|v| (name.clone(), v))
+                    })
+                })?;
+            let values: Vec<Value> = values;
+            Some(
+                values
+                    .into_iter()
+                    .map(|v| {
+                        let mut copy = map.clone();
+                        copy.insert(name.clone(), v);
+                        Value::Object(copy)
+                    })
+                    .collect(),
+            )
+        }
+        Value::Number(_) => Some((0..n).map(|i| json!(i)).collect()),
+        _ => None,
+    }
+}
+
+/// `n` distinct numbers satisfying an unpinned numeric subschema.
+///
+/// Honours `minimum`/`maximum`, and refuses a range too narrow to hold
+/// `n` distinct values -- a bound the caller then reports rather than
+/// working around.
+fn varied_number(schema: &Value, n: usize) -> Option<Vec<Value>> {
+    if !matches!(
+        schema.get("type").and_then(Value::as_str)?,
+        "integer" | "number"
+    ) {
+        return None;
+    }
+    if schema.get("const").is_some() || schema.get("enum").is_some() {
+        return None;
+    }
+    let min = schema.get("minimum").and_then(Value::as_i64).unwrap_or(0);
+    let max = schema
+        .get("maximum")
+        .and_then(Value::as_i64)
+        .unwrap_or(i64::MAX);
+    // Saturating, because an absent `maximum` is `i64::MAX` and the
+    // checked form overflowed there -- turning "unbounded above" into
+    // "no room", which is the opposite answer.
+    let span = max.saturating_sub(min).saturating_add(1);
+    if span < i64::try_from(n).ok()? {
+        return None;
+    }
+    Some(
+        (0..n)
+            .map(|i| json!(min.saturating_add(i64::try_from(i).unwrap_or(0))))
+            .collect(),
+    )
+}
+
+/// `n` distinct strings satisfying a free-form string subschema.
+///
+/// Refuses anything the schema pins down: a `pattern` cannot be
+/// satisfied by construction here, and `const`/`enum` mean there is no
+/// freedom to use. Length bounds are honoured, and a schema too narrow
+/// to hold `n` distinct values of its own is also a refusal.
+fn varied_string(schema: &Value, n: usize) -> Option<Vec<String>> {
+    if schema.get("type").and_then(Value::as_str)? != "string" {
+        return None;
+    }
+    if schema.get("pattern").is_some()
+        || schema.get("const").is_some()
+        || schema.get("enum").is_some()
+        || schema.get("format").is_some()
+    {
+        return None;
+    }
+    let min = schema
+        .get("minLength")
+        .and_then(Value::as_u64)
+        .and_then(|v| usize::try_from(v).ok())
+        .unwrap_or(0);
+    let max = schema
+        .get("maxLength")
+        .and_then(Value::as_u64)
+        .and_then(|v| usize::try_from(v).ok())
+        .unwrap_or(usize::MAX);
+
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut v = format!("v{i}");
+        while v.len() < min {
+            v.push('x');
+        }
+        if v.len() > max {
+            return None;
+        }
+        out.push(v);
+    }
+    Some(out)
+}
+
 fn walk_array(
     schema: &Value,
     node: &Value,
@@ -574,29 +732,70 @@ fn walk_array(
 
     if let Some(max) = schema.get("maxItems").and_then(Value::as_u64) {
         let n = usize::try_from(max).unwrap_or(usize::MAX).saturating_add(1);
-        // Distinct members where the schema names them, so the ONLY
-        // violation is the count.
-        let over: Vec<Value> = match items
-            .and_then(|i| resolve(i, index, root))
-            .and_then(|i| i.get("enum"))
-            .and_then(Value::as_array)
-        {
-            Some(members) if members.len() >= n => members.iter().take(n).cloned().collect(),
-            _ => (0..n).map(|i| json!(format!("item{i}"))).collect(),
+        let unique = schema.get("uniqueItems") == Some(&json!(true));
+
+        // THE ONLY VIOLATION MUST BE THE COUNT. The old fallback built
+        // `["item0", "item1", ...]` whatever the item schema said, so
+        // for an array of OBJECTS the document was rejected on item
+        // type and an implementation that checked the item shape and
+        // forgot the ceiling entirely still passed. The repeated-item
+        // mutation did not close the gap either: where `uniqueItems`
+        // holds it violates that as well, so a parser enforcing
+        // uniqueness and not the count also passed. Between them the
+        // ceiling was never the reason for a single rejection.
+        //
+        // Without `uniqueItems`, repetition IS the clean mutation --
+        // the seed's own item is valid by construction, and n copies of
+        // it break nothing but the length. That is the `words` case: a
+        // BIP-39 phrase may legally repeat a word.
+        let over = if unique {
+            distinct_items(items, first.as_ref(), n, index, root)
+        } else {
+            first
+                .clone()
+                .or_else(|| items.and_then(|i| synthesize(i, index, root)))
+                .map(|item| std::iter::repeat_n(item, n).collect())
         };
-        push(
-            out,
-            seed,
-            "",
-            format!("{pointer} has {n} items, over maxItems"),
-            |d| {
-                set_at(d, pointer, json!(over.clone()));
-            },
-        );
+
+        // UNREACHABLE IS NOT UNCOVERED. `uniqueItems` over a finite
+        // enum caps the array at the number of members, so a `maxItems`
+        // above that cannot be violated by any document a validator
+        // would otherwise accept -- `ipc.hello` allows 8 capabilities
+        // from a five-member closed set. There is nothing to test, and
+        // reporting it as a gap would train the reader to ignore the
+        // list.
+        let capped_by_uniqueness = unique
+            && items
+                .and_then(|i| resolve(i, index, root))
+                .and_then(|i| i.get("enum"))
+                .and_then(Value::as_array)
+                .is_some_and(|members| members.len() < n);
+
+        match over {
+            Some(over) => push(
+                out,
+                seed,
+                "",
+                format!("{pointer} has {n} items, over maxItems"),
+                |d| {
+                    set_at(d, pointer, json!(over.clone()));
+                },
+            ),
+            None if capped_by_uniqueness => {}
+            // NOT SILENT. A generator that skips a constraint it cannot
+            // build for reports full coverage while testing nothing,
+            // which is the failure this whole module exists to avoid.
+            None => out.uncovered.push(format!(
+                "{pointer}: maxItems {max} has no independent mutation -- no way to \
+                 build {n} individually valid items was found"
+            )),
+        }
 
         // And the same count reached by repetition, which a set-typed
-        // field collapses to one before any cap is consulted.
-        if let Some(item) = first.clone() {
+        // field collapses to one before any cap is consulted. Only
+        // where `uniqueItems` holds: elsewhere it is the mutation
+        // above, and pushing it twice would say nothing new.
+        if unique && let Some(item) = first.clone() {
             let repeated: Vec<Value> = std::iter::repeat_n(item, n).collect();
             push(
                 out,

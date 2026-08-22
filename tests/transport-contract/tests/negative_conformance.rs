@@ -377,6 +377,15 @@ fn run(boundary: &Boundary, index: &SchemaIndex) -> Outcome {
         );
     }
 
+    // A constraint the generator declined to build a mutation for is a
+    // constraint nothing tests, and a silent skip reads as coverage.
+    assert!(
+        generated.uncovered.is_empty(),
+        "{}: the generator could not build an independent mutation for {:?}",
+        boundary.name,
+        generated.uncovered
+    );
+
     let candidates: Vec<Candidate> = generated.candidates;
     assert!(
         candidates.len() > 5,
