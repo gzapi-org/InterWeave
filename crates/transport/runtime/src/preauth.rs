@@ -86,6 +86,15 @@ pub const DEFAULT_RATE_WINDOW_MS: u64 = 60_000;
 /// Default starts one source bucket may make within a window.
 pub const DEFAULT_MAX_ATTEMPTS_PER_WINDOW: u32 = 30;
 
+/// Default starts ALL sources together may make within a window.
+///
+/// Per-source accounting alone does not bound the total. A bucket whose
+/// handshakes complete quickly never reaches the pending ceiling and
+/// never exhausts its own rate, so an attacker with twenty buckets pays
+/// nothing for the twenty-first — and Noise handshakes are the CPU cost
+/// this layer exists to bound, whoever asked for them.
+pub const DEFAULT_MAX_GLOBAL_ATTEMPTS_PER_WINDOW: u32 = 600;
+
 /// What the gate enforces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PreAuthLimits {
@@ -99,8 +108,10 @@ pub struct PreAuthLimits {
     pub max_sources: usize,
     /// Length of the rate-accounting window.
     pub rate_window_ms: u64,
-    /// Attempts one source may make within a window.
+    /// Starts one source bucket may make within a window.
     pub max_attempts_per_window: u32,
+    /// Starts all sources together may make within a window.
+    pub max_global_attempts_per_window: u32,
 }
 
 impl Default for PreAuthLimits {
@@ -112,6 +123,7 @@ impl Default for PreAuthLimits {
             max_sources: DEFAULT_MAX_SOURCES,
             rate_window_ms: DEFAULT_RATE_WINDOW_MS,
             max_attempts_per_window: DEFAULT_MAX_ATTEMPTS_PER_WINDOW,
+            max_global_attempts_per_window: DEFAULT_MAX_GLOBAL_ATTEMPTS_PER_WINDOW,
         }
     }
 }
@@ -128,8 +140,16 @@ pub enum PreAuthDenial {
     TooManyPending,
     /// This source already holds its share of in-flight handshakes.
     TooManyFromSource,
-    /// This source has made too many attempts in the current window.
+    /// This source bucket has made too many starts in the current window.
     RateLimited,
+    /// All sources together have made too many starts in the window.
+    ///
+    /// Distinct from [`Self::RateLimited`] because the two say different
+    /// things to an operator: one bucket is misbehaving, or the listener
+    /// as a whole is past the rate it will start handshakes at. The
+    /// second is the only bound that holds against an attacker with many
+    /// source addresses.
+    GloballyRateLimited,
     /// The source label is longer than the gate will account for.
     ///
     /// Fails CLOSED. An unaccountable source is one that could bypass
@@ -205,6 +225,8 @@ pub struct PreAuthGate {
     sources: BTreeMap<String, SourceState>,
     pending_total: usize,
     next_id: u64,
+    global_window_start_ms: u64,
+    global_attempts_in_window: u32,
     /// Whether the runtime is draining.
     pub shutting_down: bool,
 }
@@ -224,6 +246,8 @@ impl PreAuthGate {
             sources: BTreeMap::new(),
             pending_total: 0,
             next_id: 0,
+            global_window_start_ms: 0,
+            global_attempts_in_window: 0,
             shutting_down: false,
         }
     }
@@ -263,11 +287,25 @@ impl PreAuthGate {
             return Err(PreAuthDenial::TooManyPending);
         }
 
+        // THE GLOBAL START RATE, which per-source accounting does not
+        // imply. A bucket whose handshakes complete quickly never reaches
+        // the pending ceiling and never exhausts its own rate, so without
+        // this an attacker with enough source addresses starts unlimited
+        // Noise handshakes — and the CPU they cost is the thing this
+        // layer exists to bound.
+        let window_ms = self.limits.rate_window_ms;
+        if now_ms >= self.global_window_start_ms.saturating_add(window_ms) {
+            self.global_window_start_ms = now_ms;
+            self.global_attempts_in_window = 0;
+        }
+        if self.global_attempts_in_window >= self.limits.max_global_attempts_per_window {
+            return Err(PreAuthDenial::GloballyRateLimited);
+        }
+
         if !self.sources.contains_key(source) && !self.make_room_for_source(now_ms) {
             return Err(PreAuthDenial::NoAccountingCapacity);
         }
 
-        let window_ms = self.limits.rate_window_ms;
         let max_attempts = self.limits.max_attempts_per_window;
         let max_per_source = self.limits.max_pending_per_source;
         let state = self.sources.entry(source.to_owned()).or_default();
@@ -288,6 +326,9 @@ impl PreAuthGate {
         }
         state.attempts_in_window = state.attempts_in_window.saturating_add(1);
         state.last_touched_ms = now_ms;
+        // Charged only once every other check has passed, so a refusal
+        // does not spend budget on a handshake that never started.
+        self.global_attempts_in_window = self.global_attempts_in_window.saturating_add(1);
 
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
@@ -379,6 +420,9 @@ mod tests {
             max_sources: 3,
             rate_window_ms: 10_000,
             max_attempts_per_window: 4,
+            // High enough that the per-source cases below are testing
+            // what they say they test; the global budget has its own.
+            max_global_attempts_per_window: 1_000,
         }
     }
 
@@ -602,7 +646,7 @@ mod tests {
     fn the_defaults_are_the_ones_the_specification_states() {
         // These numbers are not this crate's to choose. `SECURITY.md`
         // fixes the listener policy, and the first version of this module
-        // invented four of them instead of reading it — which is how a
+        // invented five of them instead of reading it — which is how a
         // 10-second timeout became 15 and 30 starts/minute became 192.
         //
         // Pinned here so the next disagreement is a failing test rather
@@ -613,6 +657,80 @@ mod tests {
         assert_eq!(d.handshake_timeout_ms, 10_000, "10-second timeout");
         assert_eq!(d.rate_window_ms, 60_000, "the rate window is a minute");
         assert_eq!(d.max_attempts_per_window, 30, "30 starts/minute per bucket");
+        assert_eq!(
+            d.max_global_attempts_per_window, 600,
+            "600 starts/minute globally"
+        );
+    }
+
+    #[test]
+    fn the_global_start_rate_binds_across_unrelated_sources() {
+        // Per-source accounting does not imply a global bound. A bucket
+        // whose handshakes complete promptly never reaches the pending
+        // ceiling and never exhausts its own rate, so an attacker with
+        // enough addresses starts unlimited Noise handshakes — and the
+        // CPU they cost is what this layer is for.
+        let mut g = PreAuthGate::new(PreAuthLimits {
+            max_global_attempts_per_window: 10,
+            max_sources: 64,
+            ..limits()
+        });
+
+        // Ten starts spread thin: every one from a different bucket, each
+        // completing at once, so nothing else can be what refuses them.
+        for i in 0..10 {
+            let slot = g
+                .admit(&format!("10.0.0.{i}"), 0)
+                .expect("within the global budget");
+            g.completed(&slot);
+        }
+        assert_eq!(g.pending(), 0, "nothing is in flight");
+
+        assert_eq!(
+            g.admit("10.0.1.1", 0),
+            Err(PreAuthDenial::GloballyRateLimited),
+            "a fresh bucket with an empty pending count is still refused"
+        );
+
+        // Distinct from the per-source refusal, because the two say
+        // different things to whoever is reading the logs.
+        assert_ne!(
+            g.admit("10.0.1.2", 0),
+            Err(PreAuthDenial::RateLimited),
+            "the global budget is not reported as one bucket misbehaving"
+        );
+
+        // And it is a window, not a total.
+        g.admit("10.0.1.3", 10_000)
+            .expect("the next window starts clean");
+    }
+
+    #[test]
+    fn a_refused_attempt_does_not_spend_the_global_budget() {
+        // Charging on refusal would let a source that is already over its
+        // own limit burn the shared budget for everyone else, turning a
+        // per-source refusal into a global outage.
+        let mut g = PreAuthGate::new(PreAuthLimits {
+            max_global_attempts_per_window: 10,
+            max_attempts_per_window: 1,
+            // Room for the nine other buckets below, so the source table
+            // is not what refuses them.
+            max_sources: 64,
+            ..limits()
+        });
+
+        g.admit("10.0.0.1", 0).expect("its one start");
+        for _ in 0..50 {
+            assert_eq!(g.admit("10.0.0.1", 0), Err(PreAuthDenial::RateLimited));
+        }
+
+        // Nine of the ten global starts must still be there.
+        for i in 1..10 {
+            let slot = g
+                .admit(&format!("10.0.{i}.1"), 0)
+                .expect("the global budget was not spent on refusals");
+            g.completed(&slot);
+        }
     }
 
     #[test]
