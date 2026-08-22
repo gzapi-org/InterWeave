@@ -170,7 +170,7 @@ fn an_infrastructure_peer_cannot_reach_the_data_plane_by_any_origin() {
     let policy = ConnectionPolicy::new(16, 64);
     let address = "/ip4/192.0.2.1/tcp/4001".to_owned();
 
-    for origin in [DialOrigin::ConnectionManager, DialOrigin::KademliaQuery] {
+    for origin in DialOrigin::ALL.into_iter().filter(|o| o.is_data_plane()) {
         let request = DialRequest {
             peer: Some(peer(P2)),
             address: address.clone(),
@@ -186,12 +186,7 @@ fn an_infrastructure_peer_cannot_reach_the_data_plane_by_any_origin() {
 
     // The reachability origins do work, so the refusals above are about
     // the data plane and not about the peer being unreachable.
-    for origin in [
-        DialOrigin::RelayReservation,
-        DialOrigin::RelayCircuit,
-        DialOrigin::AutonatProbe,
-        DialOrigin::DcutrHolePunch,
-    ] {
+    for origin in DialOrigin::ALL.into_iter().filter(|o| !o.is_data_plane()) {
         let request = DialRequest {
             peer: Some(peer(P2)),
             address: address.clone(),

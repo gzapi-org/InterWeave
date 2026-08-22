@@ -84,8 +84,23 @@ pub enum ConnectionClass {
 /// "skip the gate" would recreate the hole the gate exists to close.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DialOrigin {
+    /// A person or an admin API asked for this exact peer.
+    ///
+    /// Distinct from [`Self::ConnectionManager`] because the roadmap
+    /// requires every origin to be representable AND observable: folding
+    /// a human's explicit request into the scheduler's own dials means a
+    /// denial cannot say which of the two it refused, and those are the
+    /// two a person most needs told apart.
+    Manual,
     /// The ordinary candidate dial scheduler.
     ConnectionManager,
+    /// Re-establishing a peer a discovery provider reported.
+    ///
+    /// Advisory input, never authority: a candidate is a reason to
+    /// consider dialling and nothing more, and naming the origin is what
+    /// lets the gate — and anything reading its decisions — see how much
+    /// of the dial volume is discovery-driven.
+    DiscoveryReconnect,
     /// A Kademlia iterative query asked the Swarm to dial.
     KademliaQuery,
     /// Establishing or renewing a relay reservation.
@@ -106,8 +121,28 @@ impl DialOrigin {
     /// staying unauthorized for a Kademlia query to the same address.
     #[must_use]
     pub const fn is_data_plane(self) -> bool {
-        matches!(self, Self::ConnectionManager | Self::KademliaQuery)
+        matches!(
+            self,
+            Self::Manual | Self::ConnectionManager | Self::DiscoveryReconnect | Self::KademliaQuery
+        )
     }
+
+    /// Every origin, so an exhaustive check cannot silently miss one.
+    ///
+    /// A test that lists origins by hand proves what its author
+    /// remembered. Adding a variant without adding it here fails to
+    /// compile, which is the property worth having when the rule being
+    /// tested is "no origin skips the gate".
+    pub const ALL: [Self; 8] = [
+        Self::Manual,
+        Self::ConnectionManager,
+        Self::DiscoveryReconnect,
+        Self::KademliaQuery,
+        Self::RelayReservation,
+        Self::RelayCircuit,
+        Self::AutonatProbe,
+        Self::DcutrHolePunch,
+    ];
 }
 
 /// One dial the gate is asked to admit.
@@ -659,16 +694,43 @@ mod tests {
     }
 
     #[test]
+    fn every_origin_is_classified_and_the_classification_is_pinned() {
+        // Driving the other tests off `is_data_plane()` makes them blind
+        // to it being WRONG: a misclassified origin simply moves to the
+        // other loop, where it also passes. So the split is asserted
+        // here, on its own terms, origin by origin.
+        //
+        // The distinction is ADR-0036's: an infrastructure-only peer may
+        // be dialled for a relay reservation while staying unauthorized
+        // for anything carrying application traffic. Putting a data-plane
+        // origin on the reachability side is precisely how it would
+        // acquire that authority by accident.
+        for origin in DialOrigin::ALL {
+            let expected = match origin {
+                DialOrigin::Manual
+                | DialOrigin::ConnectionManager
+                | DialOrigin::DiscoveryReconnect
+                | DialOrigin::KademliaQuery => true,
+                DialOrigin::RelayReservation
+                | DialOrigin::RelayCircuit
+                | DialOrigin::AutonatProbe
+                | DialOrigin::DcutrHolePunch => false,
+            };
+            assert_eq!(
+                origin.is_data_plane(),
+                expected,
+                "{origin:?} is on the wrong side of the data-plane split"
+            );
+        }
+    }
+
+    #[test]
     fn an_unauthorized_peer_is_refused_whatever_the_origin() {
         let p = policy();
-        for origin in [
-            DialOrigin::ConnectionManager,
-            DialOrigin::KademliaQuery,
-            DialOrigin::RelayReservation,
-            DialOrigin::AutonatProbe,
-            DialOrigin::DcutrHolePunch,
-            DialOrigin::RelayCircuit,
-        ] {
+        // EVERY origin, from the enum rather than from memory. A
+        // hand-written list proves what its author remembered, and the
+        // rule under test is "no origin skips the gate".
+        for origin in DialOrigin::ALL {
             assert_eq!(
                 p.admit(&request(origin, A1), ConnectionClass::Unauthorized, 0),
                 Err(DialDenial::Unauthorized),
@@ -729,6 +791,97 @@ mod tests {
                 0
             ),
             Err(DialDenial::ShuttingDown)
+        );
+    }
+
+    #[test]
+    fn address_poisoning_cannot_suppress_a_known_good_route() {
+        // STAGE 5's REQUIRED POISONING TEST.
+        //
+        // The existing mismatch test uses a second address with no
+        // recorded state, which is a weaker claim than the gate makes: an
+        // address nobody has dialled and an address that has WORKED are
+        // different things, and only the second is what a trusted peer is
+        // actually reachable on. Peer-wide punitive backoff would
+        // suppress both, so proving the healthy route survives needs the
+        // route to be genuinely known-good.
+        //
+        // The attack: an attacker who can inject one address for a
+        // trusted peer — through discovery, a bootstrap list, or a
+        // manipulated Identify — makes it authenticate the wrong key. If
+        // that counted as a peer failure, one bogus address would take
+        // the peer offline.
+        let mut p = policy();
+        let good = "/ip4/10.0.0.1/tcp/4001";
+        let poisoned = "/ip4/198.51.100.9/tcp/4001";
+
+        p.record_success(&peer(), good, 1_000);
+        assert!(
+            p.address(&peer(), good)
+                .is_some_and(AddressState::is_known_good),
+            "the route has to be known-good for this test to mean anything"
+        );
+
+        assert!(
+            p.record_identity_mismatch(&peer(), poisoned, 2_000),
+            "the quarantine is recorded"
+        );
+
+        // The poisoned address is suppressed.
+        assert_eq!(
+            p.admit(
+                &request(DialOrigin::ConnectionManager, poisoned),
+                ConnectionClass::DataPlaneTrusted,
+                2_000
+            ),
+            Err(DialDenial::AddressQuarantined)
+        );
+
+        // The known-good route is untouched: admitted, still known-good,
+        // and no peer-wide backoff was created to shape it.
+        assert!(
+            p.admit(
+                &request(DialOrigin::ConnectionManager, good),
+                ConnectionClass::DataPlaneTrusted,
+                2_000
+            )
+            .is_ok(),
+            "one poisoned address must not suppress a route that works"
+        );
+        assert!(
+            p.peer(&peer()).is_none(),
+            "a mismatch must not create peer-scoped backoff"
+        );
+        assert!(
+            p.address(&peer(), good)
+                .is_some_and(AddressState::is_known_good),
+            "and must not downgrade what the route had earned"
+        );
+
+        // Preference is unchanged too: the working route still sorts
+        // first, and the poisoned one is excluded rather than merely
+        // ranked lower.
+        let preferred =
+            p.preferred_addresses(&peer(), &[poisoned.to_owned(), good.to_owned()], 2_000);
+        assert_eq!(preferred, vec![good.to_owned()]);
+
+        // Repeating the attack does not accumulate into a peer-level
+        // suppression by another name.
+        for i in 0..16 {
+            let _ = p.record_identity_mismatch(
+                &peer(),
+                &format!("/ip4/198.51.100.{i}/tcp/4001"),
+                2_000,
+            );
+        }
+        assert!(
+            p.admit(
+                &request(DialOrigin::ConnectionManager, good),
+                ConnectionClass::DataPlaneTrusted,
+                2_000
+            )
+            .is_ok(),
+            "sixteen poisoned addresses must still not suppress the working one"
         );
     }
 

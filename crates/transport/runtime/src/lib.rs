@@ -13,6 +13,7 @@ pub mod dedup;
 pub mod endpoint_registry;
 pub mod fingerprint;
 pub mod ingress;
+pub mod preauth;
 pub mod reply_token;
 
 pub use connection_policy::{
