@@ -1410,3 +1410,105 @@ async fn a_handshake_killed_by_the_timeout_gives_its_slot_back() {
     dialer.shutdown().await.expect("shuts down");
     listener.shutdown().await.expect("shuts down");
 }
+
+#[tokio::test]
+async fn a_draining_runtime_refuses_new_work_and_keeps_what_it_has() {
+    // ADR-0011's drain state, which the manager has always published
+    // and nothing ever entered: `begin_shutdown` had no caller, so the
+    // flag every admission checks was permanently false.
+    //
+    // Draining is not stopping. A node leaving service stops taking on
+    // new work before it drops the work it has, so the connection that
+    // is already up must survive the command that refuses the next one.
+    let (dialer_id, dialer_peer) = who();
+    let (other_id, other_peer) = who();
+    let mut listener = SwarmRuntime::start(
+        &identity(),
+        SubstrateConfig::default(),
+        trusting(&[&dialer_peer, &other_peer]),
+    )
+    .expect("starts");
+    let bound = listener
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
+        .await
+        .expect("binds");
+    let listener_peer = listener.local_peer().clone();
+
+    let mut dialer = SwarmRuntime::start(
+        &dialer_id,
+        SubstrateConfig::default(),
+        trusting(&[&listener_peer]),
+    )
+    .expect("starts");
+    assert!(
+        dialer
+            .dial(listener_peer.clone(), bound.clone())
+            .await
+            .expect("the command reaches the task")
+            .is_ok()
+    );
+    assert_eq!(wait_connected(&mut dialer).await, listener_peer);
+    // WAIT FOR THE LISTENER TO SAY SO TOO. The dialer's `Connected` is
+    // about its own outbound connection; the listener records the
+    // inbound one on a separate event, and draining before that arrives
+    // refuses a connection this test believes is already established --
+    // which is correct behaviour and a race in the test rather than in
+    // the code. It cost a debugging session to find, and the assertion
+    // it was hiding is the one this test exists for.
+    assert_eq!(wait_connected(&mut listener).await, dialer_peer);
+
+    listener
+        .drain()
+        .await
+        .expect("the command reaches the task");
+
+    // NEW INBOUND IS NOT RETAINED. The second peer completes a
+    // handshake and is dropped, because a draining node keeps nothing
+    // new.
+    let mut other = SwarmRuntime::start(
+        &other_id,
+        SubstrateConfig::default(),
+        trusting(&[&listener_peer]),
+    )
+    .expect("starts");
+    assert!(
+        other
+            .dial(listener_peer, bound)
+            .await
+            .expect("the command reaches the task")
+            .is_ok()
+    );
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match tokio::time::timeout_at(deadline, other.next_event())
+            .await
+            .expect("the close arrives within the deadline")
+        {
+            Some(interweave_transport_libp2p::SwarmEvent::Disconnected { .. }) => break,
+            Some(_) => {}
+            None => panic!("the substrate stopped before the connection closed"),
+        }
+    }
+
+    // And the draining node dials nothing new either.
+    let stranger = TransportIdentity::parse(ABSENT).expect("canonical");
+    match listener
+        .dial(stranger, "/ip4/192.0.2.1/tcp/4001".parse().expect("valid"))
+        .await
+        .expect("the command reaches the task")
+    {
+        Err(DialRefusal::Policy(DialDenial::ShuttingDown)) => {}
+        other => panic!("a draining runtime must refuse an outbound dial, got {other:?}"),
+    }
+
+    // AND THE ESTABLISHED ONE IS UNTOUCHED.
+    if let Ok(Some(interweave_transport_libp2p::SwarmEvent::Disconnected { .. })) =
+        tokio::time::timeout(std::time::Duration::from_millis(300), dialer.next_event()).await
+    {
+        panic!("draining must not drop a connection that was already up");
+    }
+
+    other.shutdown().await.expect("shuts down");
+    dialer.shutdown().await.expect("shuts down");
+    listener.shutdown().await.expect("shuts down");
+}

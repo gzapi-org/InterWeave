@@ -522,12 +522,6 @@ pub struct HandshakeSlot {
 }
 
 impl HandshakeSlot {
-    /// When the handshake started.
-    #[must_use]
-    pub const fn started_at_ms(&self) -> u64 {
-        self.started_at_ms
-    }
-
     /// The bucket this handshake was accounted under.
     ///
     /// The BUCKET, not the address the caller passed: `admit` normalizes,

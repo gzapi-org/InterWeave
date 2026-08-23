@@ -56,9 +56,7 @@ use std::sync::{Arc, RwLock};
 use interweave_transport_api::TransportIdentity;
 use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 
-use crate::connection_policy::{
-    ConnectionClass, ConnectionPolicy, DialDenial, DialOrigin, DialRequest,
-};
+use crate::connection_policy::{ConnectionClass, ConnectionPolicy, DialDenial, DialRequest};
 
 /// Who this profile trusts, and for what.
 ///
@@ -232,7 +230,6 @@ impl PolicySnapshot {
             connections: Arc::clone(&self.connections),
             peer: request.peer.clone(),
             address: request.address.clone(),
-            origin: request.origin,
             settled: false,
             connection_kept: false,
         };
@@ -364,7 +361,6 @@ pub struct DialTicket {
     connections: Arc<AtomicUsize>,
     peer: Option<TransportIdentity>,
     address: String,
-    origin: DialOrigin,
     settled: bool,
     connection_kept: bool,
 }
@@ -380,12 +376,6 @@ impl DialTicket {
     #[must_use]
     pub fn address(&self) -> &str {
         &self.address
-    }
-
-    /// Why the dial was requested.
-    #[must_use]
-    pub const fn origin(&self) -> DialOrigin {
-        self.origin
     }
 }
 
@@ -936,6 +926,8 @@ impl ConnectionManager {
 
 #[cfg(test)]
 mod tests {
+    use crate::connection_policy::DialOrigin;
+
     use super::*;
 
     const P1: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";

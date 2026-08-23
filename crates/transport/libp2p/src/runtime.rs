@@ -225,6 +225,11 @@ pub enum SwarmCommand {
         /// Answered with the number of connections closed by the change.
         reply: oneshot::Sender<usize>,
     },
+    /// Refuse new connectivity while keeping what is already up.
+    Drain {
+        /// Answered once the manager is draining.
+        reply: oneshot::Sender<()>,
+    },
     /// Stop, closing listeners and connections.
     Shutdown {
         /// Answered once the Swarm has been dropped.
@@ -774,6 +779,24 @@ impl SwarmRuntime {
         self.events.recv().await
     }
 
+    /// Refuse new connectivity, keeping the connections already up.
+    ///
+    /// After this, outbound admission answers
+    /// [`DialDenial::ShuttingDown`] and no inbound connection is
+    /// retained. Existing connections are untouched: a node leaving
+    /// service stops taking new work before it drops the work it has.
+    ///
+    /// # Errors
+    /// Returns [`SubstrateError::Stopped`] if the task is gone.
+    pub async fn drain(&self) -> Result<(), SubstrateError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(SwarmCommand::Drain { reply })
+            .await
+            .map_err(|_| SubstrateError::Stopped)?;
+        answer.await.map_err(|_| SubstrateError::Stopped)
+    }
+
     /// Stop the substrate and WAIT for its task to finish.
     ///
     /// The waiting is the point. "Shut down without leaked tasks" is only
@@ -1149,6 +1172,15 @@ fn handle_command(
                 }
             }
             let _ = reply.send(closed);
+        }
+        SwarmCommand::Drain { reply } => {
+            // DRAINING IS NOT STOPPING. Existing connections stay up --
+            // a node going out of service should stop taking on new
+            // work before it drops the work it has. `begin_shutdown`
+            // publishes the flag every snapshot reads live, so a holder
+            // that took its snapshot a moment ago is draining too.
+            manager.begin_shutdown();
+            let _ = reply.send(());
         }
         SwarmCommand::Shutdown { reply } => {
             let _ = reply.send(());
