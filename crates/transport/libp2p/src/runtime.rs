@@ -43,8 +43,8 @@ use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::TransportIdentity;
 use interweave_transport_runtime::preauth::PreAuthLimits;
 use interweave_transport_runtime::{
-    ConnectionClass, ConnectionManager, ConnectionPolicy, ConnectionSlot, DialDenial, DialOrigin,
-    DialRequest, DialTicket,
+    ConnectionManager, ConnectionPolicy, ConnectionSlot, DialDenial, DialOrigin, DialRequest,
+    DialTicket, TrustSources,
 };
 use libp2p::core::transport::ListenerId;
 use libp2p::swarm::{DialError, SwarmEvent as Libp2pSwarmEvent};
@@ -181,6 +181,13 @@ pub enum SwarmCommand {
         /// Answered when the dial is admitted or refused locally.
         reply: oneshot::Sender<Result<(), DialRefusal>>,
     },
+    /// Replace the trust sources, evicting what they no longer permit.
+    SetTrust {
+        /// Who this profile trusts, and for what.
+        trust: Box<TrustSources>,
+        /// Answered with the number of connections closed by the change.
+        reply: oneshot::Sender<usize>,
+    },
     /// Stop, closing listeners and connections.
     Shutdown {
         /// Answered once the Swarm has been dropped.
@@ -310,6 +317,7 @@ impl SwarmRuntime {
     pub fn start(
         identity: &ProfileIdentity,
         config: SubstrateConfig,
+        trust: TrustSources,
     ) -> Result<Self, SubstrateError> {
         // BEFORE anything is built. `mpsc::channel(0)` panics, and a
         // half-constructed Swarm would still have opened sockets.
@@ -345,6 +353,12 @@ impl SwarmRuntime {
         // line of substrate code rather than being wired in later.
         let policy = ConnectionPolicy::new(config.max_pending_dials, config.max_connections);
         let mut manager = ConnectionManager::new(policy, config.max_pending_dials);
+        // TRUST IS A CONSTRUCTOR ARGUMENT, not a later call. A runtime
+        // that could be started without saying who it trusts would have
+        // a window in which it trusted nobody -- or, in the version this
+        // replaces, everybody -- and nothing in the type system to say
+        // which.
+        let _ = manager.set_trust(trust, &[]);
 
         // A MONOTONIC CLOCK, because the policy is a state machine over
         // time and it had been given a literal `0` on every call. Every
@@ -365,7 +379,12 @@ impl SwarmRuntime {
         // slot it occupies under `max_connections`. Bounded by that
         // ceiling rather than by the peer set, because the entry is
         // created by a remote party connecting.
-        let mut open: HashMap<libp2p::swarm::ConnectionId, ConnectionSlot> = HashMap::new();
+        //
+        // The peer is kept alongside the slot because a trust change
+        // has to find the connections it revokes, and "which peer is on
+        // this connection" is not a question the Swarm will answer
+        // after the fact.
+        let mut open: HashMap<libp2p::swarm::ConnectionId, OpenConnection> = HashMap::new();
 
         // Listen replies wait for the address the OS actually assigned.
         // `listen_on` returns a ListenerId and nothing else; the bound
@@ -447,15 +466,26 @@ impl SwarmRuntime {
                                 break;
                             }
                             Some(command) => {
+                                let mut refuse = Vec::new();
                                 handle_command(
                                     &mut swarm,
                                     &mut manager,
+                                    &open,
+                                    &mut refuse,
                                     &mut listens,
                                     &mut in_flight,
                                     config.max_pending_listens,
                                     now_ms(started),
                                     command,
                                 );
+                                // A revocation names connections; this
+                                // is what closes them. Deferred out of
+                                // `handle_command` so that function
+                                // borrows the table it reads rather
+                                // than the Swarm it would mutate.
+                                for id in refuse {
+                                    swarm.close_connection(id);
+                                }
                             }
                         }
                     }
@@ -570,6 +600,27 @@ impl SwarmRuntime {
         answer.await.map_err(|_| SubstrateError::Stopped)
     }
 
+    /// Replace the trust sources, evicting connections they no longer
+    /// permit.
+    ///
+    /// Returns how many connections the change closed. ADR-0012 makes
+    /// that the observable part: a revocation whose only effect was on
+    /// the next dial would leave the revoked peer connected.
+    ///
+    /// # Errors
+    /// Returns [`SubstrateError::Stopped`] if the task is gone.
+    pub async fn set_trust(&self, trust: TrustSources) -> Result<usize, SubstrateError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(SwarmCommand::SetTrust {
+                trust: Box::new(trust),
+                reply,
+            })
+            .await
+            .map_err(|_| SubstrateError::Stopped)?;
+        answer.await.map_err(|_| SubstrateError::Stopped)
+    }
+
     /// The next event, or `None` once the substrate has stopped.
     pub async fn next_event(&mut self) -> Option<SwarmEvent> {
         self.events.recv().await
@@ -634,30 +685,55 @@ fn settle_outcome(
     event: &Libp2pSwarmEvent<SubstrateBehaviourEvent>,
     manager: &mut ConnectionManager,
     in_flight: &mut HashMap<libp2p::swarm::ConnectionId, DialTicket>,
-    open: &mut HashMap<libp2p::swarm::ConnectionId, ConnectionSlot>,
+    open: &mut HashMap<libp2p::swarm::ConnectionId, OpenConnection>,
     refuse: &mut Vec<libp2p::swarm::ConnectionId>,
     now_ms: u64,
 ) {
     match event {
-        Libp2pSwarmEvent::ConnectionEstablished { connection_id, .. } => {
+        Libp2pSwarmEvent::ConnectionEstablished {
+            connection_id,
+            peer_id,
+            ..
+        } => {
+            // The peer is AUTHENTICATED by this point -- Noise has run
+            // -- which is what makes classifying it here meaningful and
+            // classifying it any earlier impossible.
+            let Ok(peer) = to_transport_identity(peer_id) else {
+                // A PeerId the neutral grammar rejects cannot be
+                // classified, recorded, or revoked later. Refusing is
+                // the only answer that does not leave an unaccountable
+                // connection open.
+                refuse.push(*connection_id);
+                return;
+            };
             match in_flight.remove(connection_id) {
                 // Outbound: the slot was reserved when the dial was
                 // admitted, and the connection takes it over.
                 Some(ticket) => {
-                    open.insert(*connection_id, manager.record_success(ticket, now_ms));
+                    let slot = manager.record_success(ticket, now_ms);
+                    open.insert(*connection_id, OpenConnection { peer, slot });
                 }
-                // INBOUND HAS NO ADMISSION, so its slot is reserved
-                // here or the connection is not kept. `max_connections`
-                // bounds sockets this process holds open, and a node
-                // that accepts is the one most exposed to reaching it.
-                None => match manager.admit_inbound() {
-                    Some(slot) => {
-                        open.insert(*connection_id, slot);
-                    }
-                    None => {
+                // INBOUND HAS NO ADMISSION. ADR-0011: the same current
+                // authorization that governs outbound applies before an
+                // inbound data-plane connection is retained -- arriving
+                // is not an authorization. The ceiling is the second
+                // question, because a connection this profile will not
+                // keep should not spend a slot to find that out.
+                None => {
+                    let class = manager.classify(&peer);
+                    if !manager.retain_inbound(class) {
                         refuse.push(*connection_id);
+                        return;
                     }
-                },
+                    match manager.admit_inbound() {
+                        Some(slot) => {
+                            open.insert(*connection_id, OpenConnection { peer, slot });
+                        }
+                        None => {
+                            refuse.push(*connection_id);
+                        }
+                    }
+                }
             }
         }
         Libp2pSwarmEvent::ConnectionClosed { connection_id, .. } => {
@@ -665,8 +741,8 @@ fn settle_outcome(
             // that was actually counted: a refused inbound reports a
             // close too, and releasing a slot it never held would let
             // the ceiling drift upward one refusal at a time.
-            if let Some(slot) = open.remove(connection_id) {
-                manager.record_connection_closed(slot);
+            if let Some(connection) = open.remove(connection_id) {
+                manager.record_connection_closed(connection.slot);
             }
         }
         Libp2pSwarmEvent::OutgoingConnectionError {
@@ -708,6 +784,17 @@ fn now_ms(started: std::time::Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+/// A connection this process holds open.
+///
+/// The slot is the accounting; the peer is what makes a revocation
+/// actionable. Kept together because releasing one without the other is
+/// exactly the drift that turns a ceiling into a leak.
+#[derive(Debug)]
+struct OpenConnection {
+    peer: TransportIdentity,
+    slot: ConnectionSlot,
+}
+
 /// Listen commands whose bound address has not arrived yet.
 type PendingListens = HashMap<ListenerId, oneshot::Sender<Result<Multiaddr, String>>>;
 
@@ -715,6 +802,8 @@ type PendingListens = HashMap<ListenerId, oneshot::Sender<Result<Multiaddr, Stri
 fn handle_command(
     swarm: &mut GatedSwarm,
     manager: &mut ConnectionManager,
+    open: &HashMap<libp2p::swarm::ConnectionId, OpenConnection>,
+    refuse: &mut Vec<libp2p::swarm::ConnectionId>,
     listens: &mut PendingListens,
     in_flight: &mut HashMap<libp2p::swarm::ConnectionId, DialTicket>,
     max_pending_listens: usize,
@@ -767,25 +856,22 @@ fn handle_command(
             // costs nothing, which is the whole point of checking here
             // rather than after the connection fails.
             //
-            // The class is the one this command can justify. It used to
-            // be hardcoded `DataPlaneTrusted` for every dial regardless
-            // of origin, which is the ADR-0036 separation stated in the
-            // policy and then discarded by its only caller: an
-            // infrastructure-only peer would have been dialable for
-            // application traffic. Until a trust source is wired in,
-            // the command path asserts only what a local operator
-            // request means, and the gate decides.
-            let ticket =
-                match manager
-                    .handle()
-                    .admit(&request, ConnectionClass::DataPlaneTrusted, now_ms)
-                {
-                    Ok(t) => t,
-                    Err(denial) => {
-                        let _ = reply.send(Err(DialRefusal::Policy(denial)));
-                        return;
-                    }
-                };
+            // THE CLASS IS NOT THIS SITE'S TO ASSERT. It used to be a
+            // hardcoded `DataPlaneTrusted` on every dial, which is the
+            // ADR-0036 separation stated in the policy and discarded by
+            // its only caller: an infrastructure-only peer was dialable
+            // for application traffic, and an empty allowlist -- the
+            // default that admits nobody -- admitted everyone. The gate
+            // classifies from the trust sources it publishes, and there
+            // is no longer an argument through which a call site could
+            // say otherwise.
+            let ticket = match manager.handle().admit(&request, now_ms) {
+                Ok(t) => t,
+                Err(denial) => {
+                    let _ = reply.send(Err(DialRefusal::Policy(denial)));
+                    return;
+                }
+            };
             // DERIVED FROM THE ADMISSION, not paired with it. The
             // destination is read back out of the ticket rather than
             // rebuilt from the command's own `peer`/`address`, so there
@@ -822,6 +908,26 @@ fn handle_command(
                 }
             };
             let _ = reply.send(answer);
+        }
+        SwarmCommand::SetTrust { trust, reply } => {
+            // EVICTION IS THE POINT. ADR-0012: removing a peer must
+            // take away the connectivity it already has, not merely
+            // what it would be granted next time. A trust change that
+            // only affected future dials would leave a revoked peer
+            // with a live session for as long as it kept talking.
+            let live: Vec<TransportIdentity> = open.values().map(|c| c.peer.clone()).collect();
+            let revoked = manager.set_trust(*trust, &live);
+
+            let mut closed = 0_usize;
+            for entry in &revoked {
+                for (id, connection) in open.iter() {
+                    if connection.peer == entry.peer {
+                        refuse.push(*id);
+                        closed = closed.saturating_add(1);
+                    }
+                }
+            }
+            let _ = reply.send(closed);
         }
         SwarmCommand::Shutdown { reply } => {
             let _ = reply.send(());

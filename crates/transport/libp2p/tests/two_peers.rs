@@ -19,7 +19,21 @@ use interweave_transport_api::TransportIdentity;
 use interweave_transport_libp2p::{
     MAX_CONFIGURED_CAPACITY, SubstrateConfig, SubstrateError, SwarmEvent, SwarmRuntime,
 };
+use interweave_transport_runtime::TrustSources;
+use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 use libp2p::Multiaddr;
+
+/// Trust exactly these peers on the application data plane.
+///
+/// There is no allow-all: ADR-0012's default admits nobody, so a test
+/// that connects has to say who it trusts -- and one that connects
+/// without saying so now fails, which is the point.
+fn trusting(peers: &[&TransportIdentity]) -> TrustSources {
+    TrustSources {
+        peers: PeerTrustPolicy::new(peers.iter().map(|p| (*p).clone())).expect("a handful"),
+        infrastructure: InfrastructureSet::default(),
+    }
+}
 
 /// Every wait is bounded. A hung substrate must fail the suite rather
 /// than hold CI until the job timeout, where the cause is invisible.
@@ -62,10 +76,18 @@ async fn two_peers_connect_authenticate_identify_and_shut_down() {
     let listener_peer = listener_identity.transport_identity().expect("peer id");
     let dialer_peer = dialer_identity.transport_identity().expect("peer id");
 
-    let mut listener =
-        SwarmRuntime::start(&listener_identity, SubstrateConfig::default()).expect("listener");
-    let mut dialer =
-        SwarmRuntime::start(&dialer_identity, SubstrateConfig::default()).expect("dialer");
+    let mut listener = SwarmRuntime::start(
+        &listener_identity,
+        SubstrateConfig::default(),
+        trusting(&[&dialer_peer]),
+    )
+    .expect("listener");
+    let mut dialer = SwarmRuntime::start(
+        &dialer_identity,
+        SubstrateConfig::default(),
+        trusting(&[&listener_peer]),
+    )
+    .expect("dialer");
 
     assert_eq!(listener.local_peer(), &listener_peer);
     assert_eq!(dialer.local_peer(), &dialer_peer);
@@ -141,7 +163,8 @@ async fn identity_survives_a_restart_of_the_substrate() {
     first.save(&path).expect("save");
     let expected = first.transport_identity().expect("peer id");
 
-    let runtime = SwarmRuntime::start(&first, SubstrateConfig::default()).expect("start");
+    let runtime =
+        SwarmRuntime::start(&first, SubstrateConfig::default(), trusting(&[])).expect("start");
     assert_eq!(runtime.local_peer(), &expected);
     runtime.shutdown().await.expect("stops");
     drop(first);
@@ -149,7 +172,8 @@ async fn identity_survives_a_restart_of_the_substrate() {
     // A whole new process would reload from disk; this reloads the same
     // way and asserts the PeerId is the same one, not merely a valid one.
     let reloaded = ProfileIdentity::load(&path).expect("load");
-    let again = SwarmRuntime::start(&reloaded, SubstrateConfig::default()).expect("restart");
+    let again =
+        SwarmRuntime::start(&reloaded, SubstrateConfig::default(), trusting(&[])).expect("restart");
     assert_eq!(
         again.local_peer(),
         &expected,
@@ -164,7 +188,8 @@ async fn shutdown_is_awaited_and_the_task_really_ends() {
     // asserts the join completes, and then that the runtime is genuinely
     // unusable rather than merely marked stopped.
     let identity = ProfileIdentity::generate();
-    let mut runtime = SwarmRuntime::start(&identity, SubstrateConfig::default()).expect("start");
+    let mut runtime =
+        SwarmRuntime::start(&identity, SubstrateConfig::default(), trusting(&[])).expect("start");
     let address = listening_on_loopback(&mut runtime).await;
     assert!(!address.to_string().is_empty());
 
@@ -197,6 +222,7 @@ async fn a_dial_the_policy_refuses_never_opens_a_socket() {
             max_pending_dials: 0,
             ..SubstrateConfig::default()
         },
+        trusting(&[]),
     )
     .expect("start");
 
@@ -227,12 +253,16 @@ async fn a_dial_the_policy_refuses_never_opens_a_socket() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dial_to_nowhere_reports_failure_without_stopping_the_substrate() {
     let identity = ProfileIdentity::generate();
-    let mut runtime = SwarmRuntime::start(&identity, SubstrateConfig::default()).expect("start");
-
     // Port 1 on loopback: reserved, and nothing is listening.
     let nowhere: Multiaddr = "/ip4/127.0.0.1/tcp/1".parse().expect("multiaddr");
     let target = TransportIdentity::parse("12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5")
         .expect("canonical peer id");
+    // Trusted, so the refusal under test is the NETWORK's and not the
+    // gate's: an unauthorized peer never reaches a socket at all, which
+    // is a different test one file over.
+    let mut runtime =
+        SwarmRuntime::start(&identity, SubstrateConfig::default(), trusting(&[&target]))
+            .expect("start");
 
     runtime
         .dial(target, nowhere)
@@ -269,10 +299,20 @@ async fn dialling_an_address_where_a_different_peer_answers_does_not_connect() {
         .transport_identity()
         .expect("peer id");
 
-    let mut impostor =
-        SwarmRuntime::start(&impostor_identity, SubstrateConfig::default()).expect("impostor");
-    let mut dialer =
-        SwarmRuntime::start(&dialer_identity, SubstrateConfig::default()).expect("dialer");
+    let mut impostor = SwarmRuntime::start(
+        &impostor_identity,
+        SubstrateConfig::default(),
+        trusting(&[]),
+    )
+    .expect("impostor");
+    // The dialer trusts the peer it is ASKING FOR, which is the one the
+    // gate classifies. That it is not the peer that answers is the test.
+    let mut dialer = SwarmRuntime::start(
+        &dialer_identity,
+        SubstrateConfig::default(),
+        trusting(&[&expected_but_absent]),
+    )
+    .expect("dialer");
 
     let address = listening_on_loopback(&mut impostor).await;
 
@@ -315,7 +355,15 @@ async fn listen_resolves_to_the_address_it_bound() {
     // documentation false and forced every caller to consume an event to
     // learn what it had just been told.
     let identity = ProfileIdentity::generate();
-    let runtime = SwarmRuntime::start(&identity, SubstrateConfig::default()).expect("start");
+    let other_identity = ProfileIdentity::generate();
+    let peer = identity.transport_identity().expect("peer id");
+    let other_peer = other_identity.transport_identity().expect("peer id");
+    let runtime = SwarmRuntime::start(
+        &identity,
+        SubstrateConfig::default(),
+        trusting(&[&other_peer]),
+    )
+    .expect("start");
 
     let requested: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse().expect("multiaddr");
     let bound = runtime.listen(requested).await.expect("listen");
@@ -331,10 +379,12 @@ async fn listen_resolves_to_the_address_it_bound() {
     assert_ne!(port, 0, "the ASSIGNED port, not the one that was asked for");
 
     // And the address is real: a second runtime can dial it.
-    let peer = runtime.local_peer().clone();
-    let other_identity = ProfileIdentity::generate();
-    let mut other =
-        SwarmRuntime::start(&other_identity, SubstrateConfig::default()).expect("start");
+    let mut other = SwarmRuntime::start(
+        &other_identity,
+        SubstrateConfig::default(),
+        trusting(&[&peer]),
+    )
+    .expect("start");
     other
         .dial(peer.clone(), bound)
         .await
@@ -364,15 +414,22 @@ async fn shutdown_completes_while_the_event_channel_is_full() {
     let dialer_identity = ProfileIdentity::generate();
     let listener_peer = listener_identity.transport_identity().expect("peer id");
 
+    let dialer_peer = dialer_identity.transport_identity().expect("peer id");
     let mut listener = SwarmRuntime::start(
         &listener_identity,
         SubstrateConfig {
             event_capacity: 1,
             ..SubstrateConfig::default()
         },
+        trusting(&[&dialer_peer]),
     )
     .expect("listener");
-    let dialer = SwarmRuntime::start(&dialer_identity, SubstrateConfig::default()).expect("dialer");
+    let dialer = SwarmRuntime::start(
+        &dialer_identity,
+        SubstrateConfig::default(),
+        trusting(&[&listener_peer]),
+    )
+    .expect("dialer");
 
     let address = listening_on_loopback(&mut listener).await;
 
@@ -419,6 +476,7 @@ async fn listen_completes_while_the_event_channel_is_full() {
             event_capacity: 1,
             ..SubstrateConfig::default()
         },
+        trusting(&[]),
     )
     .expect("runtime");
 
@@ -478,7 +536,7 @@ async fn a_zero_capacity_configuration_is_an_error_not_a_panic() {
             },
         ),
     ] {
-        match SwarmRuntime::start(&identity, config) {
+        match SwarmRuntime::start(&identity, config, trusting(&[])) {
             Err(SubstrateError::InvalidConfig { field: got, .. }) => assert_eq!(got, field),
             other => panic!("{field}: expected InvalidConfig, got {other:?}"),
         }
@@ -502,7 +560,8 @@ async fn a_zero_capacity_configuration_is_an_error_not_a_panic() {
             ..SubstrateConfig::default()
         },
     ] {
-        let runtime = SwarmRuntime::start(&identity, config).expect("a zero cap is a policy");
+        let runtime =
+            SwarmRuntime::start(&identity, config, trusting(&[])).expect("a zero cap is a policy");
         runtime.shutdown().await.expect("stops");
     }
 
@@ -513,7 +572,7 @@ async fn a_zero_capacity_configuration_is_an_error_not_a_panic() {
         ..SubstrateConfig::default()
     };
     assert!(matches!(
-        SwarmRuntime::start(&identity, huge),
+        SwarmRuntime::start(&identity, huge, trusting(&[])),
         Err(SubstrateError::InvalidConfig { .. })
     ));
 }
@@ -531,6 +590,7 @@ async fn pending_listeners_are_bounded_and_abandoned_ones_are_closed() {
             max_pending_listens: 2,
             ..SubstrateConfig::default()
         },
+        trusting(&[]),
     )
     .expect("runtime");
 

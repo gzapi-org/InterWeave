@@ -13,10 +13,12 @@
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::TransportIdentity;
 use interweave_transport_libp2p::{DialRefusal, SubstrateConfig, SwarmRuntime};
+use interweave_transport_runtime::TrustSources;
 use interweave_transport_runtime::preauth::PreAuthLimitsBuilder;
 use interweave_transport_runtime::{
-    ConnectionClass, ConnectionManager, ConnectionPolicy, DialDenial, DialOrigin, DialRequest,
+    ConnectionManager, ConnectionPolicy, DialDenial, DialOrigin, DialRequest,
 };
+use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 use libp2p::Multiaddr;
 
 /// A peer id nothing is listening for, so a dial to it always fails.
@@ -24,6 +26,35 @@ const ABSENT: &str = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
 
 fn identity() -> ProfileIdentity {
     ProfileIdentity::generate()
+}
+
+/// A fresh identity and the peer id it will present.
+///
+/// Both are needed at once now: a runtime is started with the peers it
+/// trusts, and the peer id has to exist before the runtime that trusts
+/// it does.
+fn who() -> (ProfileIdentity, TransportIdentity) {
+    let id = identity();
+    let peer = id.transport_identity().expect("peer id");
+    (id, peer)
+}
+
+/// Trust exactly these peers on the application data plane.
+///
+/// There is no allow-all constructor, by ADR-0012's design: the default
+/// admits nobody. Every test below that connects therefore says who it
+/// trusts, and one that forgot would fail with `Unauthorized` rather
+/// than quietly proving something else.
+fn trusting(peers: &[&TransportIdentity]) -> TrustSources {
+    TrustSources {
+        peers: PeerTrustPolicy::new(peers.iter().map(|p| (*p).clone())).expect("a handful"),
+        infrastructure: InfrastructureSet::default(),
+    }
+}
+
+/// Trust nobody, which is what a freshly configured profile does.
+fn trusting_nobody() -> TrustSources {
+    TrustSources::default()
 }
 
 fn config() -> SubstrateConfig {
@@ -43,7 +74,9 @@ async fn the_pending_dial_ceiling_is_enforced_by_the_substrate() {
     // Two slots, three dials to an address that will not answer within
     // the test: the third must be refused by policy rather than by the
     // network.
-    let runtime = SwarmRuntime::start(&identity(), config()).expect("starts");
+    let absent_peer = TransportIdentity::parse(ABSENT).expect("canonical");
+    let runtime =
+        SwarmRuntime::start(&identity(), config(), trusting(&[&absent_peer])).expect("starts");
 
     // TEST-NET-1 (RFC 5737). Routed nowhere, so the dial stays pending
     // rather than failing fast the way a closed loopback port does.
@@ -106,6 +139,10 @@ fn a_denied_autonomous_dial_leaves_retry_state_exactly_as_it_was() {
     let policy = ConnectionPolicy::new(8, 8);
     let mut manager = ConnectionManager::new(policy, 8);
     let peer = TransportIdentity::parse(ABSENT).expect("canonical");
+    // Trusted, so every refusal below is the BACKOFF refusing and not
+    // the classification: an unauthorized peer is denied for a reason
+    // that would make this test pass without proving anything.
+    let _ = manager.set_trust(trusting(&[&peer]), &[]);
 
     // Put the peer into backoff through an ordinary failure.
     let ticket = manager
@@ -117,7 +154,6 @@ fn a_denied_autonomous_dial_leaves_retry_state_exactly_as_it_was() {
                 address: "/ip4/192.0.2.1/tcp/4001".to_owned(),
                 origin: DialOrigin::ConnectionManager,
             },
-            ConnectionClass::DataPlaneTrusted,
             1_000,
         )
         .expect("admitted");
@@ -146,7 +182,6 @@ fn a_denied_autonomous_dial_leaves_retry_state_exactly_as_it_was() {
                 address: "/ip4/192.0.2.1/tcp/4001".to_owned(),
                 origin,
             },
-            ConnectionClass::DataPlaneTrusted,
             2_000,
         );
         assert!(
@@ -201,14 +236,25 @@ async fn the_dial_goes_to_the_admitted_address() {
     // crate-private in libp2p, so the only honest way to observe where
     // a dial went is the connection it made. Build the dial from
     // anything but the ticket's own address and no connection happens.
-    let listener = SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+    let (dialer_id, dialer_peer) = who();
+    let listener = SwarmRuntime::start(
+        &identity(),
+        SubstrateConfig::default(),
+        trusting(&[&dialer_peer]),
+    )
+    .expect("starts");
     let bound = listener
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
         .await
         .expect("binds");
     let listener_peer = listener.local_peer().clone();
 
-    let mut dialer = SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+    let mut dialer = SwarmRuntime::start(
+        &dialer_id,
+        SubstrateConfig::default(),
+        trusting(&[&listener_peer]),
+    )
+    .expect("starts");
     let answer = dialer
         .dial(listener_peer.clone(), bound)
         .await
@@ -232,7 +278,14 @@ async fn an_established_connection_counts_against_the_connection_ceiling() {
     // configured limit against a permanent zero. One slot, one
     // connection, and the next dial must be refused by capacity rather
     // than by the network.
-    let listener = SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+    let (dialer_id, dialer_peer) = who();
+    let absent = TransportIdentity::parse(ABSENT).expect("canonical");
+    let listener = SwarmRuntime::start(
+        &identity(),
+        SubstrateConfig::default(),
+        trusting(&[&dialer_peer]),
+    )
+    .expect("starts");
     let bound = listener
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
         .await
@@ -240,11 +293,12 @@ async fn an_established_connection_counts_against_the_connection_ceiling() {
     let listener_peer = listener.local_peer().clone();
 
     let mut dialer = SwarmRuntime::start(
-        &identity(),
+        &dialer_id,
         SubstrateConfig {
             max_connections: 1,
             ..SubstrateConfig::default()
         },
+        trusting(&[&listener_peer, &absent]),
     )
     .expect("starts");
 
@@ -258,7 +312,6 @@ async fn an_established_connection_counts_against_the_connection_ceiling() {
     // TEST-NET-1 again: this must be refused before a socket is opened,
     // so where it points is irrelevant to the assertion and relevant to
     // the test not depending on the network.
-    let absent = TransportIdentity::parse(ABSENT).expect("canonical");
     let second = dialer
         .dial(absent, "/ip4/192.0.2.1/tcp/4001".parse().expect("valid"))
         .await
@@ -284,17 +337,21 @@ async fn an_identity_mismatch_quarantines_the_address_and_not_the_peer() {
     // backoff, `record_identity_mismatch` sets ADDRESS quarantine. The
     // generic path that discarded the error therefore produces
     // `PeerBackoff` here, and this asserts the other one.
-    let listener = SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+    let wrong = TransportIdentity::parse(ABSENT).expect("canonical");
+    let listener = SwarmRuntime::start(&identity(), SubstrateConfig::default(), trusting_nobody())
+        .expect("starts");
     let bound = listener
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
         .await
         .expect("binds");
 
-    let dialer = SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+    // The dialer trusts the peer it believes is there, so the refusal
+    // under test is the identity check rather than the gate.
+    let dialer = SwarmRuntime::start(&identity(), SubstrateConfig::default(), trusting(&[&wrong]))
+        .expect("starts");
     // The listener is real and answering -- with a key that is not this
     // one. That is what makes libp2p report `WrongPeerId` rather than a
     // transport error.
-    let wrong = TransportIdentity::parse(ABSENT).expect("canonical");
     let first = dialer
         .dial(wrong.clone(), bound.clone())
         .await
@@ -338,7 +395,14 @@ async fn a_closed_connection_gives_its_slot_back() {
     // concurrency bound: a node would dial `max_connections` peers over
     // its whole run and then never dial again, however many of those
     // connections had long since closed.
-    let listener = SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+    let (dialer_id, dialer_peer) = who();
+    let absent = TransportIdentity::parse(ABSENT).expect("canonical");
+    let listener = SwarmRuntime::start(
+        &identity(),
+        SubstrateConfig::default(),
+        trusting(&[&dialer_peer]),
+    )
+    .expect("starts");
     let bound = listener
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
         .await
@@ -346,11 +410,12 @@ async fn a_closed_connection_gives_its_slot_back() {
     let listener_peer = listener.local_peer().clone();
 
     let mut dialer = SwarmRuntime::start(
-        &identity(),
+        &dialer_id,
         SubstrateConfig {
             max_connections: 1,
             ..SubstrateConfig::default()
         },
+        trusting(&[&listener_peer, &absent]),
     )
     .expect("starts");
 
@@ -376,7 +441,6 @@ async fn a_closed_connection_gives_its_slot_back() {
         }
     }
 
-    let absent = TransportIdentity::parse(ABSENT).expect("canonical");
     let again = dialer
         .dial(absent, "/ip4/192.0.2.1/tcp/4001".parse().expect("valid"))
         .await
@@ -395,6 +459,7 @@ async fn a_second_dial_cannot_slip_under_the_ceiling_while_the_first_is_pending(
     // every dial admitted before the first one connected saw a count of
     // zero. One slot admitted as many concurrent dials as the pending
     // budget allowed -- and every one of them opened a socket.
+    let absent = TransportIdentity::parse(ABSENT).expect("canonical");
     let runtime = SwarmRuntime::start(
         &identity(),
         SubstrateConfig {
@@ -402,13 +467,13 @@ async fn a_second_dial_cannot_slip_under_the_ceiling_while_the_first_is_pending(
             max_pending_dials: 8,
             ..SubstrateConfig::default()
         },
+        trusting(&[&absent]),
     )
     .expect("starts");
 
     // TEST-NET-1: routed nowhere, so the first dial is still pending
     // when the second is asked for.
     let unreachable: Multiaddr = "/ip4/192.0.2.1/tcp/4001".parse().expect("valid");
-    let absent = TransportIdentity::parse(ABSENT).expect("canonical");
 
     let first = runtime
         .dial(absent.clone(), unreachable.clone())
@@ -433,12 +498,17 @@ async fn an_inbound_connection_over_the_ceiling_is_not_kept() {
     // Inbound arrives with no admission to reserve its slot, so a bound
     // that counted only outbound would bound nothing on the node that
     // accepts -- which is the node an attacker gets to choose.
+    let (first_id, first_peer) = who();
+    let (second_id, second_peer) = who();
     let listener = SwarmRuntime::start(
         &identity(),
         SubstrateConfig {
             max_connections: 1,
             ..SubstrateConfig::default()
         },
+        // BOTH trusted, so what refuses the second connection is the
+        // ceiling and not the trust policy.
+        trusting(&[&first_peer, &second_peer]),
     )
     .expect("starts");
     let bound = listener
@@ -447,7 +517,12 @@ async fn an_inbound_connection_over_the_ceiling_is_not_kept() {
         .expect("binds");
     let listener_peer = listener.local_peer().clone();
 
-    let mut first = SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+    let mut first = SwarmRuntime::start(
+        &first_id,
+        SubstrateConfig::default(),
+        trusting(&[&listener_peer]),
+    )
+    .expect("starts");
     assert!(
         first
             .dial(listener_peer.clone(), bound.clone())
@@ -461,7 +536,12 @@ async fn an_inbound_connection_over_the_ceiling_is_not_kept() {
     // as far as the handshake -- refusing earlier is a Stage 6 concern,
     // and pre-auth admission is a separate bound -- and must not be
     // KEPT.
-    let mut second = SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+    let mut second = SwarmRuntime::start(
+        &second_id,
+        SubstrateConfig::default(),
+        trusting(&[&listener_peer]),
+    )
+    .expect("starts");
     assert!(
         second
             .dial(listener_peer, bound)
@@ -522,7 +602,13 @@ async fn a_poisoned_address_does_not_suppress_the_peer_s_good_route() {
     // between what libp2p reports for a wrong key and what it reports
     // for an unreachable address, and a mock would be asserting the
     // shape of the author's own assumption.
-    let good = SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+    let (dialer_id, dialer_peer) = who();
+    let good = SwarmRuntime::start(
+        &identity(),
+        SubstrateConfig::default(),
+        trusting(&[&dialer_peer]),
+    )
+    .expect("starts");
     let good_address = good
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
         .await
@@ -530,7 +616,8 @@ async fn a_poisoned_address_does_not_suppress_the_peer_s_good_route() {
     let trusted = good.local_peer().clone();
 
     // The impostor: a real listener, answering, with a different key.
-    let impostor = SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+    let impostor = SwarmRuntime::start(&identity(), SubstrateConfig::default(), trusting_nobody())
+        .expect("starts");
     let poisoned_address = impostor
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
         .await
@@ -541,7 +628,14 @@ async fn a_poisoned_address_does_not_suppress_the_peer_s_good_route() {
         "the impostor is a different identity, which is the whole scenario"
     );
 
-    let mut dialer = SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+    // The dialer trusts the peer it is looking for, and nothing else:
+    // the impostor is refused by the identity check, not by trust.
+    let mut dialer = SwarmRuntime::start(
+        &dialer_id,
+        SubstrateConfig::default(),
+        trusting(&[&trusted]),
+    )
+    .expect("starts");
 
     // The good route works first, so "known-good" is a fact about this
     // run rather than an assumption.
@@ -613,12 +707,19 @@ async fn a_source_past_its_pre_auth_rate_is_refused_before_noise() {
     .build()
     .expect("two starts a minute is a narrowing of the specified policy");
 
+    // Every dialer is TRUSTED by the listener, so the refusal under
+    // test is the rate and not the trust policy -- and so the two that
+    // get in stay in, which is the second half of the assertion.
+    let dialers: Vec<(ProfileIdentity, TransportIdentity)> = (0..3).map(|_| who()).collect();
+    let trusted: Vec<&TransportIdentity> = dialers.iter().map(|(_, p)| p).collect();
+
     let listener = SwarmRuntime::start(
         &identity(),
         SubstrateConfig {
             preauth: limits,
             ..SubstrateConfig::default()
         },
+        trusting(&trusted),
     )
     .expect("starts");
     let bound = listener
@@ -629,9 +730,10 @@ async fn a_source_past_its_pre_auth_rate_is_refused_before_noise() {
 
     // The two the window allows.
     let mut admitted = Vec::new();
-    for _ in 0..2u8 {
+    for (id, _) in dialers.iter().take(2) {
         let mut peer =
-            SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+            SwarmRuntime::start(id, SubstrateConfig::default(), trusting(&[&listener_peer]))
+                .expect("starts");
         assert!(
             peer.dial(listener_peer.clone(), bound.clone())
                 .await
@@ -645,7 +747,12 @@ async fn a_source_past_its_pre_auth_rate_is_refused_before_noise() {
     // The third start from that bucket. The dial is admitted locally --
     // this node's own policy has nothing against it -- and refused by
     // the LISTENER, before a handshake is attempted.
-    let mut refused = SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+    let mut refused = SwarmRuntime::start(
+        &dialers[2].0,
+        SubstrateConfig::default(),
+        trusting(&[&listener_peer]),
+    )
+    .expect("starts");
     assert!(
         refused
             .dial(listener_peer, bound)
@@ -698,12 +805,16 @@ async fn a_completed_handshake_gives_its_pre_auth_slot_back() {
     .build()
     .expect("one at a time is a narrowing of the specified policy");
 
+    let dialers: Vec<(ProfileIdentity, TransportIdentity)> = (0..3).map(|_| who()).collect();
+    let trusted: Vec<&TransportIdentity> = dialers.iter().map(|(_, p)| p).collect();
+
     let listener = SwarmRuntime::start(
         &identity(),
         SubstrateConfig {
             preauth: limits,
             ..SubstrateConfig::default()
         },
+        trusting(&trusted),
     )
     .expect("starts");
     let bound = listener
@@ -716,9 +827,10 @@ async fn a_completed_handshake_gives_its_pre_auth_slot_back() {
     // begins, so the ceiling of one is never the thing being tested --
     // the release is.
     let mut peers = Vec::new();
-    for attempt in 0..3u8 {
+    for (attempt, (id, _)) in dialers.iter().enumerate() {
         let mut peer =
-            SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+            SwarmRuntime::start(id, SubstrateConfig::default(), trusting(&[&listener_peer]))
+                .expect("starts");
         assert!(
             peer.dial(listener_peer.clone(), bound.clone())
                 .await
@@ -754,12 +866,14 @@ async fn a_handshake_abandoned_mid_flight_does_not_hold_its_slot() {
     .build()
     .expect("one at a time is a narrowing of the specified policy");
 
+    let (dialer_id, dialer_peer) = who();
     let listener = SwarmRuntime::start(
         &identity(),
         SubstrateConfig {
             preauth: limits,
             ..SubstrateConfig::default()
         },
+        trusting(&[&dialer_peer]),
     )
     .expect("starts");
     let bound = listener
@@ -783,8 +897,12 @@ async fn a_handshake_abandoned_mid_flight_does_not_hold_its_slot() {
     // the handshake timeout would not be released within this window.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
-        let mut peer =
-            SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+        let mut peer = SwarmRuntime::start(
+            &dialer_id,
+            SubstrateConfig::default(),
+            trusting(&[&listener_peer]),
+        )
+        .expect("starts");
         let dialed = peer
             .dial(listener_peer.clone(), bound.clone())
             .await
@@ -846,6 +964,7 @@ async fn a_handshake_that_never_speaks_is_dropped_on_the_timeout() {
             preauth: limits,
             ..SubstrateConfig::default()
         },
+        trusting_nobody(),
     )
     .expect("starts");
     let bound = listener
@@ -873,5 +992,157 @@ async fn a_handshake_that_never_speaks_is_dropped_on_the_timeout() {
         "the connection must be closed, not merely idle"
     );
 
+    listener.shutdown().await.expect("shuts down");
+}
+
+#[tokio::test]
+async fn an_untrusted_peer_is_never_dialed() {
+    // The default this substrate had inverted. Every dial passed a
+    // hardcoded `ConnectionClass::DataPlaneTrusted`, so the trust
+    // policy was consulted by nobody and an empty allowlist -- ADR-0012's
+    // configuration that admits NOBODY -- admitted everybody.
+    let listener = SwarmRuntime::start(&identity(), SubstrateConfig::default(), trusting_nobody())
+        .expect("starts");
+    let bound = listener
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
+        .await
+        .expect("binds");
+    let listener_peer = listener.local_peer().clone();
+
+    let mut dialer =
+        SwarmRuntime::start(&identity(), SubstrateConfig::default(), trusting_nobody())
+            .expect("starts");
+
+    match dialer
+        .dial(listener_peer, bound)
+        .await
+        .expect("the command reaches the task")
+    {
+        Err(DialRefusal::Policy(DialDenial::Unauthorized)) => {}
+        other => panic!("an unclassified peer must not be dialed, got {other:?}"),
+    }
+
+    // And nothing was attempted: a refusal that opened a socket first
+    // would be an authorization oracle and a resource cost both.
+    let quiet =
+        tokio::time::timeout(std::time::Duration::from_millis(500), dialer.next_event()).await;
+    assert!(quiet.is_err(), "no network activity may follow: {quiet:?}");
+
+    dialer.shutdown().await.expect("shuts down");
+    listener.shutdown().await.expect("shuts down");
+}
+
+#[tokio::test]
+async fn an_untrusted_inbound_connection_is_not_retained() {
+    // ADR-0011: the same current authorization that governs outbound
+    // applies before an inbound data-plane connection is RETAINED.
+    // Arriving is not an authorization, and a listener that kept
+    // whoever completed a handshake would make the allowlist a rule
+    // about dialing rather than about who this profile talks to.
+    let (dialer_id, dialer_peer) = who();
+    let listener = SwarmRuntime::start(&identity(), SubstrateConfig::default(), trusting_nobody())
+        .expect("starts");
+    let bound = listener
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
+        .await
+        .expect("binds");
+    let listener_peer = listener.local_peer().clone();
+    let _ = dialer_peer;
+
+    // The dialer trusts the listener, so the dial goes out; the
+    // listener does not trust the dialer, so the connection must not
+    // survive.
+    let mut dialer = SwarmRuntime::start(
+        &dialer_id,
+        SubstrateConfig::default(),
+        trusting(&[&listener_peer]),
+    )
+    .expect("starts");
+    assert!(
+        dialer
+            .dial(listener_peer, bound)
+            .await
+            .expect("the command reaches the task")
+            .is_ok()
+    );
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match tokio::time::timeout_at(deadline, dialer.next_event())
+            .await
+            .expect("the close arrives within the deadline")
+        {
+            Some(interweave_transport_libp2p::SwarmEvent::Disconnected { .. }) => break,
+            Some(_) => {}
+            None => panic!("the substrate stopped before the connection closed"),
+        }
+    }
+
+    dialer.shutdown().await.expect("shuts down");
+    listener.shutdown().await.expect("shuts down");
+}
+
+#[tokio::test]
+async fn revoking_trust_closes_the_connection_it_revoked() {
+    // ADR-0012: removing a peer must evict its active data-plane
+    // connectivity. A revocation that only changed what the next dial
+    // was told would leave the revoked peer with a live session for as
+    // long as it kept talking -- which is exactly the session an
+    // operator revokes trust to end.
+    let (dialer_id, dialer_peer) = who();
+    let listener = SwarmRuntime::start(
+        &identity(),
+        SubstrateConfig::default(),
+        trusting(&[&dialer_peer]),
+    )
+    .expect("starts");
+    let bound = listener
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
+        .await
+        .expect("binds");
+    let listener_peer = listener.local_peer().clone();
+
+    let mut dialer = SwarmRuntime::start(
+        &dialer_id,
+        SubstrateConfig::default(),
+        trusting(&[&listener_peer]),
+    )
+    .expect("starts");
+    assert!(
+        dialer
+            .dial(listener_peer.clone(), bound)
+            .await
+            .expect("the command reaches the task")
+            .is_ok()
+    );
+    assert_eq!(
+        wait_connected(&mut dialer).await,
+        listener_peer,
+        "connected first, so the eviction below has something to evict"
+    );
+
+    // Give the listener a moment to record the inbound connection, so
+    // the revocation has something to find rather than racing it.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let closed = listener
+        .set_trust(trusting_nobody())
+        .await
+        .expect("the command reaches the task");
+    assert_eq!(closed, 1, "the revoked peer's connection must be named");
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match tokio::time::timeout_at(deadline, dialer.next_event())
+            .await
+            .expect("the close arrives within the deadline")
+        {
+            Some(interweave_transport_libp2p::SwarmEvent::Disconnected { .. }) => break,
+            Some(_) => {}
+            None => panic!("the substrate stopped before the connection closed"),
+        }
+    }
+
+    dialer.shutdown().await.expect("shuts down");
     listener.shutdown().await.expect("shuts down");
 }
