@@ -722,17 +722,17 @@ fn handle_command(
             // application traffic. Until a trust source is wired in,
             // the command path asserts only what a local operator
             // request means, and the gate decides.
-            let ticket = match manager.handle().load().admit(
-                &request,
-                ConnectionClass::DataPlaneTrusted,
-                now_ms,
-            ) {
-                Ok(t) => t,
-                Err(denial) => {
-                    let _ = reply.send(Err(DialRefusal::Policy(denial)));
-                    return;
-                }
-            };
+            let ticket =
+                match manager
+                    .handle()
+                    .admit(&request, ConnectionClass::DataPlaneTrusted, now_ms)
+                {
+                    Ok(t) => t,
+                    Err(denial) => {
+                        let _ = reply.send(Err(DialRefusal::Policy(denial)));
+                        return;
+                    }
+                };
             // DERIVED FROM THE ADMISSION, not paired with it. The
             // destination is read back out of the ticket rather than
             // rebuilt from the command's own `peer`/`address`, so there

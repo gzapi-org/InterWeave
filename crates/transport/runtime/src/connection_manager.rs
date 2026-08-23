@@ -50,7 +50,7 @@
 //! only policy authority for outbound Swarm dials" — a caller cannot
 //! forget to ask, because it cannot call without the answer.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use interweave_transport_api::TransportIdentity;
@@ -73,7 +73,18 @@ pub struct PolicySnapshot {
     /// why resources are exact and policy is not.
     pending: Arc<AtomicUsize>,
     max_pending_dials: usize,
-    shutting_down: bool,
+    /// Live drain state, SHARED with the manager.
+    ///
+    /// Photographed, it was the one piece of policy a holder could keep
+    /// admitting against after it had been revoked. Draining is not the
+    /// kind of policy that may be eventually consistent: the whole point
+    /// of it is that no new dial starts.
+    shutting_down: Arc<AtomicBool>,
+    /// The revision the manager has currently published, SHARED.
+    ///
+    /// What bounds staleness to zero rather than to "however long a
+    /// holder keeps its `Arc`". See [`Self::admit`].
+    published_revision: Arc<AtomicU64>,
 }
 
 impl PolicySnapshot {
@@ -103,8 +114,23 @@ impl PolicySnapshot {
         class: ConnectionClass,
         now_ms: u64,
     ) -> Result<DialTicket, DialDenial> {
-        if self.shutting_down {
+        // LIVE, not photographed. A holder that took a snapshot before
+        // `begin_shutdown` would otherwise go on admitting dials for as
+        // long as it kept the `Arc`, and draining would mean nothing.
+        if self.shutting_down.load(Ordering::Acquire) {
             return Err(DialDenial::ShuttingDown);
+        }
+
+        // SUPERSEDED SNAPSHOTS DO NOT DECIDE. Everything below reads the
+        // photographed policy, so a retained `Arc` would answer with the
+        // authorization, backoff and quarantine state of whenever it was
+        // taken -- forever, and with no way for the manager to reach it.
+        // Refusing here makes the tolerance for stale policy zero rather
+        // than unbounded, and the refusal is recoverable: reload the
+        // handle and ask again, which is what `SnapshotHandle::admit`
+        // does.
+        if self.revision != self.published_revision.load(Ordering::Acquire) {
+            return Err(DialDenial::PolicySuperseded);
         }
 
         // THE POLICY HALF, from the photograph. Backoff, class, origin,
@@ -223,7 +249,49 @@ impl SnapshotHandle {
     pub fn load(&self) -> Arc<PolicySnapshot> {
         Arc::clone(&self.current.read().unwrap_or_else(|e| e.into_inner()))
     }
+
+    /// Decide one dial against the CURRENT snapshot.
+    ///
+    /// The way callers should ask. `load().admit(..)` is still correct
+    /// and still safe -- a superseded snapshot refuses rather than
+    /// deciding -- but a publication landing between the load and the
+    /// decision would surface as a `PolicySuperseded` refusal of a dial
+    /// that nothing was actually wrong with. Reloading and asking again
+    /// is the whole remedy, and it belongs here rather than in every
+    /// call site.
+    ///
+    /// Bounded to [`ADMIT_RELOAD_ATTEMPTS`] tries, not a loop: the
+    /// manager publishes on every recorded outcome, so an unbounded
+    /// retry is a spin whose length a busy network chooses. Exhausting
+    /// them refuses, which is the fail-closed direction.
+    ///
+    /// # Errors
+    /// The [`DialDenial`] that applied, or [`DialDenial::PolicySuperseded`]
+    /// if publication outran every attempt.
+    pub fn admit(
+        &self,
+        request: &DialRequest,
+        class: ConnectionClass,
+        now_ms: u64,
+    ) -> Result<DialTicket, DialDenial> {
+        let mut last = DialDenial::PolicySuperseded;
+        for _ in 0..ADMIT_RELOAD_ATTEMPTS {
+            match self.load().admit(request, class, now_ms) {
+                Err(DialDenial::PolicySuperseded) => last = DialDenial::PolicySuperseded,
+                other => return other,
+            }
+        }
+        Err(last)
+    }
 }
+
+/// How many times [`SnapshotHandle::admit`] reloads before refusing.
+///
+/// Small on purpose. Each attempt costs a read lock and an atomic load,
+/// and losing three races in a row means publication is saturating the
+/// manager -- a condition a caller should be told about rather than
+/// spin through.
+pub const ADMIT_RELOAD_ATTEMPTS: usize = 3;
 
 /// Default ceiling on peers awaiting a retry.
 ///
@@ -251,7 +319,8 @@ pub struct ConnectionManager {
     revision: u64,
     pending: Arc<AtomicUsize>,
     max_pending_dials: usize,
-    shutting_down: bool,
+    shutting_down: Arc<AtomicBool>,
+    published_revision: Arc<AtomicU64>,
     retries: std::collections::BTreeMap<TransportIdentity, Retry>,
     max_retry_entries: usize,
     published: Arc<RwLock<Arc<PolicySnapshot>>>,
@@ -262,19 +331,23 @@ impl ConnectionManager {
     #[must_use]
     pub fn new(policy: ConnectionPolicy, max_pending_dials: usize) -> Self {
         let pending = Arc::new(AtomicUsize::new(0));
+        let shutting_down = Arc::new(AtomicBool::new(false));
+        let published_revision = Arc::new(AtomicU64::new(0));
         let first = Arc::new(PolicySnapshot {
             policy: policy.clone(),
             revision: 0,
             pending: Arc::clone(&pending),
             max_pending_dials,
-            shutting_down: false,
+            shutting_down: Arc::clone(&shutting_down),
+            published_revision: Arc::clone(&published_revision),
         });
         Self {
             policy,
             revision: 0,
             pending,
             max_pending_dials,
-            shutting_down: false,
+            shutting_down,
+            published_revision,
             retries: std::collections::BTreeMap::new(),
             max_retry_entries: DEFAULT_MAX_RETRY_ENTRIES,
             published: Arc::new(RwLock::new(first)),
@@ -310,9 +383,15 @@ impl ConnectionManager {
             revision: self.revision,
             pending: Arc::clone(&self.pending),
             max_pending_dials: self.max_pending_dials,
-            shutting_down: self.shutting_down,
+            shutting_down: Arc::clone(&self.shutting_down),
+            published_revision: Arc::clone(&self.published_revision),
         });
         *self.published.write().unwrap_or_else(|e| e.into_inner()) = next;
+        // AFTER the install, so the window between them is one in which
+        // both the old and the new snapshot refuse rather than one in
+        // which the old one is still trusted.
+        self.published_revision
+            .store(self.revision, Ordering::Release);
     }
 
     /// Record an authenticated success and clear this peer's retry.
@@ -401,12 +480,13 @@ impl ConnectionManager {
     /// refuse, and "it connected to us" is not an authorization.
     #[must_use]
     pub fn retain_inbound(&self, class: ConnectionClass) -> bool {
-        !self.shutting_down && matches!(class, ConnectionClass::DataPlaneTrusted)
+        !self.shutting_down.load(Ordering::Acquire)
+            && matches!(class, ConnectionClass::DataPlaneTrusted)
     }
 
     /// Begin draining. Admission refuses from the next snapshot on.
     pub fn begin_shutdown(&mut self) {
-        self.shutting_down = true;
+        self.shutting_down.store(true, Ordering::Release);
         self.policy.shutting_down = true;
         self.publish();
     }
@@ -724,6 +804,76 @@ mod tests {
             Some(DialDenial::ShuttingDown),
             "the same handle, no refresh, current answer"
         );
+    }
+
+    #[test]
+    fn a_snapshot_taken_before_shutdown_stops_admitting() {
+        // The holder that DID cache the snapshot -- the case the test
+        // above does not cover, because it reloads. Draining was a
+        // photographed bool, so an `Arc` taken one instant before
+        // `begin_shutdown` went on admitting dials for as long as
+        // anything kept it, and the manager had no way to reach it.
+        let mut m = manager(8);
+        let stale = m.handle().load();
+        drop(
+            stale
+                .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
+                .expect("permitted while running"),
+        );
+
+        m.begin_shutdown();
+
+        assert_eq!(
+            stale
+                .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
+                .err(),
+            Some(DialDenial::ShuttingDown),
+            "the snapshot it already held, and it refuses"
+        );
+    }
+
+    #[test]
+    fn a_superseded_snapshot_decides_nothing() {
+        // Everything except drain and the pending count is read from the
+        // photograph, so a retained `Arc` would answer with whatever
+        // authorization, backoff and quarantine state was current when
+        // it was taken -- indefinitely. Publication now makes the old
+        // snapshot refuse instead, which bounds policy staleness to the
+        // interval between load and decision rather than to the holder's
+        // lifetime.
+        let mut m = manager(8);
+        let stale = m.handle().load();
+        let revision = stale.revision();
+
+        // Any mutation publishes. This one is a success, so nothing
+        // about it would have denied the dial below on the merits.
+        let ticket = m
+            .handle()
+            .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
+            .expect("admitted");
+        m.record_success(ticket, 0);
+        assert!(m.revision() > revision, "the mutation published");
+
+        assert_eq!(
+            stale
+                .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
+                .err(),
+            Some(DialDenial::PolicySuperseded),
+            "an obsolete photograph is not an authorization"
+        );
+        assert_eq!(
+            stale.pending_dials(),
+            0,
+            "and a refusal reserves nothing, superseded or not"
+        );
+
+        // The remedy, and the reason the refusal is recoverable: ask
+        // through the handle and it reloads.
+        let fresh = m
+            .handle()
+            .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
+            .expect("the current snapshot admits");
+        drop(fresh);
     }
 
     #[test]
