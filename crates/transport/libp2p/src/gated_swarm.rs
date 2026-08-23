@@ -177,6 +177,15 @@ impl GatedSwarm {
         self.inner.listen_on(address)
     }
 
+    /// Close one connection.
+    ///
+    /// Ungated on purpose: refusing a connection is never the operation
+    /// admission exists to constrain, and the ceiling needs a way to
+    /// decline an inbound connection it cannot account for.
+    pub fn close_connection(&mut self, id: ConnectionId) -> bool {
+        self.inner.close_connection(id)
+    }
+
     /// Stop a listener.
     pub fn remove_listener(&mut self, id: ListenerId) -> bool {
         self.inner.remove_listener(id)

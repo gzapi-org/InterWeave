@@ -42,8 +42,8 @@ use std::time::Duration;
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::TransportIdentity;
 use interweave_transport_runtime::{
-    ConnectionClass, ConnectionManager, ConnectionPolicy, DialDenial, DialOrigin, DialRequest,
-    DialTicket,
+    ConnectionClass, ConnectionManager, ConnectionPolicy, ConnectionSlot, DialDenial, DialOrigin,
+    DialRequest, DialTicket,
 };
 use libp2p::core::transport::ListenerId;
 use libp2p::swarm::{DialError, SwarmEvent as Libp2pSwarmEvent};
@@ -344,6 +344,12 @@ impl SwarmRuntime {
         // carries back.
         let mut in_flight: HashMap<libp2p::swarm::ConnectionId, DialTicket> = HashMap::new();
 
+        // Every connection this process holds open, each holding the
+        // slot it occupies under `max_connections`. Bounded by that
+        // ceiling rather than by the peer set, because the entry is
+        // created by a remote party connecting.
+        let mut open: HashMap<libp2p::swarm::ConnectionId, ConnectionSlot> = HashMap::new();
+
         // Listen replies wait for the address the OS actually assigned.
         // `listen_on` returns a ListenerId and nothing else; the bound
         // address arrives later as `NewListenAddr`. A reply sent before
@@ -445,7 +451,22 @@ impl SwarmRuntime {
                         // can connect. Done here rather than inside
                         // `translate`, which is a pure shape conversion
                         // and must not also own resource accounting.
-                        settle_outcome(&event, &mut manager, &mut in_flight, now_ms(started));
+                        let mut refuse = Vec::new();
+                        settle_outcome(
+                            &event,
+                            &mut manager,
+                            &mut in_flight,
+                            &mut open,
+                            &mut refuse,
+                            now_ms(started),
+                        );
+                        // An inbound connection the ceiling cannot
+                        // account for is closed rather than kept.
+                        // Deferred out of `settle_outcome` so that
+                        // function stays free of the Swarm.
+                        for id in refuse {
+                            swarm.close_connection(id);
+                        }
 
                         let mut abandoned = Vec::new();
                         if let Some(event) = translate(event, &mut listens, &mut abandoned) {
@@ -596,25 +617,40 @@ fn settle_outcome(
     event: &Libp2pSwarmEvent<SubstrateBehaviourEvent>,
     manager: &mut ConnectionManager,
     in_flight: &mut HashMap<libp2p::swarm::ConnectionId, DialTicket>,
+    open: &mut HashMap<libp2p::swarm::ConnectionId, ConnectionSlot>,
+    refuse: &mut Vec<libp2p::swarm::ConnectionId>,
     now_ms: u64,
 ) {
     match event {
         Libp2pSwarmEvent::ConnectionEstablished { connection_id, .. } => {
-            if let Some(ticket) = in_flight.remove(connection_id) {
-                manager.record_success(ticket, now_ms);
+            match in_flight.remove(connection_id) {
+                // Outbound: the slot was reserved when the dial was
+                // admitted, and the connection takes it over.
+                Some(ticket) => {
+                    open.insert(*connection_id, manager.record_success(ticket, now_ms));
+                }
+                // INBOUND HAS NO ADMISSION, so its slot is reserved
+                // here or the connection is not kept. `max_connections`
+                // bounds sockets this process holds open, and a node
+                // that accepts is the one most exposed to reaching it.
+                None => match manager.admit_inbound() {
+                    Some(slot) => {
+                        open.insert(*connection_id, slot);
+                    }
+                    None => {
+                        refuse.push(*connection_id);
+                    }
+                },
             }
-            // COUNTED WHETHER OR NOT WE DIALLED IT. `max_connections`
-            // bounds sockets, and an inbound one costs the same as an
-            // outbound one. The ticket lookup above answers a different
-            // question -- which admission this settles -- and an
-            // inbound connection has no admission to settle.
-            manager.record_connection_opened();
         }
-        Libp2pSwarmEvent::ConnectionClosed { .. } => {
-            // The other half of the pair. Without it the count only
-            // ever rises and the ceiling becomes a lifetime quota
-            // rather than a concurrency bound.
-            manager.record_connection_closed();
+        Libp2pSwarmEvent::ConnectionClosed { connection_id, .. } => {
+            // The other half of the pair, and only for a connection
+            // that was actually counted: a refused inbound reports a
+            // close too, and releasing a slot it never held would let
+            // the ceiling drift upward one refusal at a time.
+            if let Some(slot) = open.remove(connection_id) {
+                manager.record_connection_closed(slot);
+            }
         }
         Libp2pSwarmEvent::OutgoingConnectionError {
             connection_id,

@@ -387,3 +387,101 @@ async fn a_closed_connection_gives_its_slot_back() {
 
     dialer.shutdown().await.expect("shuts down");
 }
+
+#[tokio::test]
+async fn a_second_dial_cannot_slip_under_the_ceiling_while_the_first_is_pending() {
+    // The ceiling counted connections only once they ESTABLISHED, so
+    // every dial admitted before the first one connected saw a count of
+    // zero. One slot admitted as many concurrent dials as the pending
+    // budget allowed -- and every one of them opened a socket.
+    let runtime = SwarmRuntime::start(
+        &identity(),
+        SubstrateConfig {
+            max_connections: 1,
+            max_pending_dials: 8,
+            ..SubstrateConfig::default()
+        },
+    )
+    .expect("starts");
+
+    // TEST-NET-1: routed nowhere, so the first dial is still pending
+    // when the second is asked for.
+    let unreachable: Multiaddr = "/ip4/192.0.2.1/tcp/4001".parse().expect("valid");
+    let absent = TransportIdentity::parse(ABSENT).expect("canonical");
+
+    let first = runtime
+        .dial(absent.clone(), unreachable.clone())
+        .await
+        .expect("the command reaches the task");
+    assert!(first.is_ok(), "the only connection slot: {first:?}");
+
+    let second = runtime
+        .dial(absent, "/ip4/192.0.2.2/tcp/4001".parse().expect("valid"))
+        .await
+        .expect("the command reaches the task");
+    match second {
+        Err(DialRefusal::Policy(DialDenial::ConnectionLimitReached)) => {}
+        other => panic!("nothing has connected yet, and that is the point: {other:?}"),
+    }
+
+    runtime.shutdown().await.expect("shuts down");
+}
+
+#[tokio::test]
+async fn an_inbound_connection_over_the_ceiling_is_not_kept() {
+    // Inbound arrives with no admission to reserve its slot, so a bound
+    // that counted only outbound would bound nothing on the node that
+    // accepts -- which is the node an attacker gets to choose.
+    let listener = SwarmRuntime::start(
+        &identity(),
+        SubstrateConfig {
+            max_connections: 1,
+            ..SubstrateConfig::default()
+        },
+    )
+    .expect("starts");
+    let bound = listener
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
+        .await
+        .expect("binds");
+    let listener_peer = listener.local_peer().clone();
+
+    let mut first = SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+    assert!(
+        first
+            .dial(listener_peer.clone(), bound.clone())
+            .await
+            .expect("the command reaches the task")
+            .is_ok()
+    );
+    let _ = wait_connected(&mut first).await;
+
+    // The ceiling is now full on the listener. The second peer connects
+    // as far as the handshake -- refusing earlier is a Stage 6 concern,
+    // and pre-auth admission is a separate bound -- and must not be
+    // KEPT.
+    let mut second = SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+    assert!(
+        second
+            .dial(listener_peer, bound)
+            .await
+            .expect("the command reaches the task")
+            .is_ok()
+    );
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match tokio::time::timeout_at(deadline, second.next_event())
+            .await
+            .expect("the close arrives within the deadline")
+        {
+            Some(interweave_transport_libp2p::SwarmEvent::Disconnected { .. }) => break,
+            Some(_) => {}
+            None => panic!("the substrate stopped before the connection closed"),
+        }
+    }
+
+    second.shutdown().await.expect("shuts down");
+    first.shutdown().await.expect("shuts down");
+    listener.shutdown().await.expect("shuts down");
+}
