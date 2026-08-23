@@ -348,6 +348,34 @@ impl ConnectionManager {
         self.publish();
     }
 
+    /// Record that a connection is now established.
+    ///
+    /// Counted for INBOUND as well as outbound: `max_connections` is a
+    /// resource ceiling on sockets this process holds open, and half of
+    /// them are ones it did not dial. Counting only what the dialer
+    /// admitted would leave the ceiling reading zero on a node that
+    /// accepts, which is the node most exposed to reaching it.
+    pub fn record_connection_opened(&mut self) {
+        self.policy.connections = self.policy.connections.saturating_add(1);
+        self.publish();
+    }
+
+    /// Record that an established connection has gone.
+    ///
+    /// Saturating rather than wrapping: the count is derived from the
+    /// substrate's own paired events, and a close without a matching
+    /// open would otherwise make the ceiling unreachable forever.
+    pub fn record_connection_closed(&mut self) {
+        self.policy.connections = self.policy.connections.saturating_sub(1);
+        self.publish();
+    }
+
+    /// Connections currently counted against `max_connections`.
+    #[must_use]
+    pub const fn connections(&self) -> usize {
+        self.policy.connections
+    }
+
     /// Record that the peer at this address authenticated a different
     /// identity.
     pub fn record_identity_mismatch(&mut self, ticket: DialTicket, now_ms: u64) -> bool {
