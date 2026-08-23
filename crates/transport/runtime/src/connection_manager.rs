@@ -483,6 +483,16 @@ struct Retry {
     attempts: u32,
 }
 
+/// Default ceiling on addresses remembered for one peer.
+///
+/// Small, because the list is written by the peer itself: Identify
+/// reports whatever addresses it cares to claim, and a peer that
+/// claimed a thousand would otherwise cost this profile a thousand
+/// entries and a thousand dial candidates. Eight is enough for a host
+/// with several interfaces and a relayed address, which is the case
+/// the bound exists to serve rather than to punish.
+pub const DEFAULT_MAX_ADDRESSES_PER_PEER: usize = 8;
+
 /// A peer whose authorization was reduced by a trust change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Revoked {
@@ -532,6 +542,15 @@ pub struct ConnectionManager {
     shutting_down: Arc<AtomicBool>,
     published_revision: Arc<AtomicU64>,
     retries: std::collections::BTreeMap<TransportIdentity, Retry>,
+    /// Candidate addresses per peer.
+    ///
+    /// Bounded twice over: entries exist only for peers the trust
+    /// sources classify as something other than `Unauthorized`, so the
+    /// number of keys is bounded by the allowlist rather than by
+    /// whoever connects, and each key holds at most
+    /// `max_addresses_per_peer`.
+    book: std::collections::BTreeMap<TransportIdentity, std::collections::BTreeSet<String>>,
+    max_addresses_per_peer: usize,
     max_retry_entries: usize,
     published: Arc<RwLock<Arc<PolicySnapshot>>>,
 }
@@ -568,6 +587,8 @@ impl ConnectionManager {
             shutting_down,
             published_revision,
             retries: std::collections::BTreeMap::new(),
+            book: std::collections::BTreeMap::new(),
+            max_addresses_per_peer: DEFAULT_MAX_ADDRESSES_PER_PEER,
             max_retry_entries: DEFAULT_MAX_RETRY_ENTRIES,
             published: Arc::new(RwLock::new(first)),
         }
@@ -644,6 +665,75 @@ impl ConnectionManager {
                 })
             })
             .collect()
+    }
+
+    /// Remember an address as a candidate for `peer`.
+    ///
+    /// Returns whether it was remembered. Refused for a peer this
+    /// profile does not classify: an address book keyed by anyone who
+    /// can send an Identify message is a map an unauthorized party
+    /// grows, and the trust allowlist is what bounds the key set.
+    ///
+    /// Addresses reaching here from Identify are ADVISORY -- the peer
+    /// asserted them about itself. Remembering one is not trust, not
+    /// proof of reachability, and not permission to dial: every dial
+    /// still passes admission, which is where a quarantined address is
+    /// refused.
+    ///
+    /// When the per-peer list is full, an address the policy will not
+    /// currently dial makes way for the new one. A dialable address is
+    /// never displaced, so a peer cannot flush its own known-good route
+    /// by asserting eight new ones -- and the displaced address keeps
+    /// its quarantine, which lives in the policy rather than here, so
+    /// eviction launders nothing.
+    pub fn learn_address(&mut self, peer: &TransportIdentity, address: &str, now_ms: u64) -> bool {
+        if matches!(self.classify(peer), ConnectionClass::Unauthorized) {
+            return false;
+        }
+        let max = self.max_addresses_per_peer;
+        let policy = &self.policy;
+        let known = self.book.entry(peer.clone()).or_default();
+        if known.contains(address) {
+            return true;
+        }
+        if known.len() >= max {
+            let evictable = known
+                .iter()
+                .find(|a| !policy.is_address_dialable(peer, a, now_ms))
+                .cloned();
+            match evictable {
+                Some(stale) => {
+                    known.remove(&stale);
+                }
+                None => return false,
+            }
+        }
+        known.insert(address.to_owned());
+        true
+    }
+
+    /// Addresses to try for `peer`, known-good first.
+    ///
+    /// The order [`ConnectionPolicy::preferred_addresses`] computes,
+    /// which until now nothing asked for: a peer with a working route
+    /// and a quarantined one was dialed at whichever address the caller
+    /// happened to hold.
+    #[must_use]
+    pub fn dial_candidates(&self, peer: &TransportIdentity, now_ms: u64) -> Vec<String> {
+        let known: Vec<String> = self
+            .book
+            .get(peer)
+            .map(|a| a.iter().cloned().collect())
+            .unwrap_or_default();
+        self.policy.preferred_addresses(peer, &known, now_ms)
+    }
+
+    /// How many addresses are remembered for `peer`.
+    #[must_use]
+    pub fn known_addresses(&self, peer: &TransportIdentity) -> usize {
+        self.book
+            .get(peer)
+            .map_or(0, std::collections::BTreeSet::len)
     }
 
     /// The class this profile currently grants `peer`.
@@ -1282,6 +1372,94 @@ mod tests {
         assert!(
             m.set_trust(trusting(&[P1], &[P1]), &live).is_empty(),
             "promotion to the data plane is not a revocation"
+        );
+    }
+
+    const A1: &str = "/ip4/192.0.2.1/tcp/4001";
+    const A2: &str = "/ip4/192.0.2.2/tcp/4001";
+
+    #[test]
+    fn an_unauthorized_peer_gets_no_address_book_entry() {
+        // The book is written by whoever sends an Identify message, so
+        // its key set has to be bounded by something this profile
+        // decided. That something is the trust allowlist: an
+        // unclassified peer is not dialable, so remembering where to
+        // dial it is storage an unauthorized party would be choosing.
+        let mut m = untrusting(8);
+        assert!(!m.learn_address(&peer(P1), A1, 0));
+        assert_eq!(m.known_addresses(&peer(P1)), 0);
+
+        let _ = m.set_trust(trusting(&[P1], &[]), &[]);
+        assert!(m.learn_address(&peer(P1), A1, 0));
+        assert_eq!(m.known_addresses(&peer(P1)), 1);
+    }
+
+    #[test]
+    fn the_address_book_is_bounded_per_peer() {
+        let mut m = manager(8);
+        for i in 0..DEFAULT_MAX_ADDRESSES_PER_PEER {
+            assert!(m.learn_address(&peer(P1), &format!("/ip4/198.51.100.{i}/tcp/1"), 0));
+        }
+        assert_eq!(m.known_addresses(&peer(P1)), DEFAULT_MAX_ADDRESSES_PER_PEER);
+        assert!(
+            !m.learn_address(&peer(P1), A2, 0),
+            "a full book of dialable addresses refuses rather than displacing one"
+        );
+        assert_eq!(m.known_addresses(&peer(P1)), DEFAULT_MAX_ADDRESSES_PER_PEER);
+    }
+
+    #[test]
+    fn a_quarantined_address_makes_way_and_a_working_one_does_not() {
+        // The peer writes this list. If a new assertion could displace
+        // any entry, a peer that had one known-good route and then
+        // claimed eight new addresses would have flushed the route that
+        // works -- which is the poisoning attack one layer up, done
+        // through the book instead of through backoff.
+        let mut m = manager(8);
+        for i in 0..DEFAULT_MAX_ADDRESSES_PER_PEER {
+            assert!(m.learn_address(&peer(P1), &format!("/ip4/198.51.100.{i}/tcp/1"), 0));
+        }
+        // One of them turns out to be serving somebody else.
+        let ticket = m
+            .handle()
+            .admit(&request(P1, "/ip4/198.51.100.3/tcp/1"), 0)
+            .expect("admitted");
+        assert!(m.record_identity_mismatch(ticket, 0));
+
+        assert!(
+            m.learn_address(&peer(P1), A2, 0),
+            "the quarantined entry is the one that makes way"
+        );
+        let candidates = m.dial_candidates(&peer(P1), 0);
+        assert!(
+            !candidates.iter().any(|a| a == "/ip4/198.51.100.3/tcp/1"),
+            "and the quarantined address is not offered while it is quarantined"
+        );
+        assert!(candidates.iter().any(|a| a == A2));
+    }
+
+    #[test]
+    fn a_known_good_address_is_offered_first() {
+        // `preferred_addresses` has existed since Stage 2 and was
+        // called by nobody, so a peer with a working route and a failing
+        // one was dialed at whichever address the caller happened to
+        // hold.
+        let mut m = manager(8);
+        assert!(m.learn_address(&peer(P1), A1, 0));
+        assert!(m.learn_address(&peer(P1), A2, 0));
+
+        // A2 works; A1 does not.
+        let good = m.handle().admit(&request(P1, A2), 0).expect("admitted");
+        drop(m.record_success(good, 0));
+        let bad = m.handle().admit(&request(P1, A1), 1_000).expect("admitted");
+        m.record_failure(bad, 1_000);
+
+        assert_eq!(
+            m.dial_candidates(&peer(P1), 2_000)
+                .first()
+                .map(String::as_str),
+            Some(A2),
+            "the route that authenticated comes first"
         );
     }
 

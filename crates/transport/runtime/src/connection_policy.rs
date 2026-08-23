@@ -630,6 +630,22 @@ impl ConnectionPolicy {
         true
     }
 
+    /// Whether this address is dialable for this peer right now.
+    ///
+    /// An address with no history is dialable: absence of a record is
+    /// absence of a reason to refuse, not a reason in itself.
+    #[must_use]
+    pub fn is_address_dialable(
+        &self,
+        peer: &TransportIdentity,
+        address: &str,
+        now_ms: u64,
+    ) -> bool {
+        self.addresses
+            .get(&(peer.clone(), address.to_owned()))
+            .is_none_or(|s| s.is_dialable_at(now_ms))
+    }
+
     /// Addresses worth trying for a peer, known-good first.
     ///
     /// Preference, not exclusion: a never-successful address is still
