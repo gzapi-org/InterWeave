@@ -42,14 +42,29 @@ pub struct Request {
     pub body: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The coarse wire reasons this spike can produce.
+///
+/// `DIRECT.md` lists seven and is explicit that they are DISTINCT on the
+/// wire. Collapsing reservation overflow into `no_route` -- which the
+/// first version of this harness did -- means the spike reports
+/// `Overloaded` in its own counters while the peer is told something
+/// else, so it verifies neither the mapping nor the behaviour.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Reason {
+    /// Endpoint unknown, offline, disabled, or policy-denied -- one
+    /// answer, so the reply cannot be used as an endpoint oracle.
+    NoRoute,
+    /// A bounded budget is exhausted. Distinct from `no_route`: the route
+    /// may be perfectly good and the caller should retry later.
+    Overloaded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Response {
     /// Bounded remote endpoint queue admission. NOT application processing.
     AcceptedV2 { resolved_endpoint: String },
-    /// The coarse class, kept coarse: unknown, offline, disabled and
-    /// policy-denied are one answer on the wire so the reply cannot be
-    /// used as an endpoint oracle.
-    NoRoute,
+    /// Refused, with the coarse reason.
+    Rejected { reason: Reason },
 }
 
 #[derive(NetworkBehaviour)]
@@ -156,61 +171,6 @@ pub fn describe_inbound(f: &InboundFailure) -> String {
         InboundFailure::UnsupportedProtocols => "UnsupportedProtocols".to_owned(),
         InboundFailure::ResponseOmission => "ResponseOmission".to_owned(),
         InboundFailure::Io(e) => format!("Io({e})"),
-    }
-}
-
-/// The reservation half of the race, driven by whatever the scheduler
-/// hands us.
-pub struct RaceState {
-    pub reservations: ReservationMap,
-    pub owners: usize,
-    pub waiters: usize,
-    pub overloaded: usize,
-    pub conflicts: usize,
-    pub enqueued: usize,
-}
-
-impl RaceState {
-    pub fn new(max_global: usize, max_per_peer: usize) -> Self {
-        Self {
-            reservations: ReservationMap::new(max_global, max_per_peer),
-            owners: 0,
-            waiters: 0,
-            overloaded: 0,
-            conflicts: 0,
-            enqueued: 0,
-        }
-    }
-
-    /// One arriving request, admitted exactly as the daemon would.
-    pub fn arrive(&mut self, source: &TransportIdentity, request: &Request) -> Response {
-        let key = key(source, &request.message_id);
-        let fingerprint = direct_content_fingerprint_v1(None, &request.body).expect("fingerprint");
-        match self.reservations.acquire(&key, fingerprint) {
-            Ok(Reservation::Owner) => {
-                self.owners += 1;
-                // THE ENQUEUE. Exactly one per key is the whole claim.
-                self.enqueued += 1;
-                Response::AcceptedV2 {
-                    resolved_endpoint: "chat".to_owned(),
-                }
-            }
-            Ok(Reservation::Waiter) => {
-                self.waiters += 1;
-                // Shares the owner's outcome, and does NOT enqueue.
-                Response::AcceptedV2 {
-                    resolved_endpoint: "chat".to_owned(),
-                }
-            }
-            Err(ReservationFailure::Overloaded) => {
-                self.overloaded += 1;
-                Response::NoRoute
-            }
-            Err(ReservationFailure::Conflict) => {
-                self.conflicts += 1;
-                Response::NoRoute
-            }
-        }
     }
 }
 
@@ -516,9 +476,42 @@ pub async fn a5_timeout() {
     );
 }
 
-/// A6 — the race the architecture depends on.
+/// A6 — the race the architecture depends on, run as a race.
+///
+/// `DIRECT.md`: "Matching concurrent duplicates attach as waiters and
+/// receive the same eventual response." The first version of this
+/// experiment admitted every copy on one mutable state in one pass and
+/// had the waiter manufacture its own `AcceptedV2` immediately. That
+/// proved a retained map entry returns `Waiter` -- a fact about a
+/// `BTreeMap` -- and said nothing about waiters sharing an
+/// ASYNCHRONOUSLY produced owner result, which is the whole claim.
+///
+/// So the owner's admission is genuinely asynchronous here: it parks its
+/// response channel, a timer stands in for bounded endpoint-queue
+/// admission, every matching copy that arrives meanwhile parks alongside
+/// it, and one outcome answers all of them.
 pub async fn a6_same_key_race() {
+    for outcome in [
+        Response::AcceptedV2 {
+            resolved_endpoint: "chat".to_owned(),
+        },
+        // THE REJECTION HALF. A waiter that manufactured an acceptance
+        // would look identical to a correct implementation on the happy
+        // path and would fabricate deliveries on this one.
+        Response::Rejected {
+            reason: Reason::NoRoute,
+        },
+    ] {
+        println!("  -- owner outcome: {outcome:?}");
+        same_key_race_once(&outcome).await;
+    }
+}
+
+async fn same_key_race_once(owner_outcome: &Response) {
     const COPIES: usize = 24;
+    /// Long enough that every copy arrives while admission is still
+    /// pending, which is the interleaving under test.
+    const ADMISSION: Duration = Duration::from_millis(400);
 
     let mut server = node(full_direct(), Duration::from_secs(20));
     let mut client = node(full_direct(), Duration::from_secs(20));
@@ -527,8 +520,6 @@ pub async fn a6_same_key_race() {
     let client_peer = *client.local_peer_id();
     connect(&mut client, &mut server, addr).await;
 
-    // The SAME message id and the SAME body, twenty-four times, as fast
-    // as the scheduler will take them.
     for _ in 0..COPIES {
         client
             .behaviour_mut()
@@ -537,39 +528,93 @@ pub async fn a6_same_key_race() {
     }
 
     let source = identity(&client_peer);
-    let mut race = RaceState::new(64, 8);
-    let mut answered = 0;
+    let key = key(&source, "m-race");
+    let fingerprint = direct_content_fingerprint_v1(None, b"identical").expect("fingerprint");
+    let mut reservations = ReservationMap::new(64, 8);
+
+    // Channels waiting on ONE outcome: the owner's and every waiter's.
+    let mut parked: Vec<ResponseChannel<Response>> = Vec::new();
+    let mut admission_due: Option<tokio::time::Instant> = None;
+    let mut enqueues = 0_usize;
+    let mut waiters = 0_usize;
+    let mut refused = 0_usize;
+    let mut answered: Vec<Response> = Vec::new();
+
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    while answered < COPIES {
+    while answered.len() < COPIES {
         tokio::select! {
             () = tokio::time::sleep_until(deadline) => break,
+            // The owner's admission completing, asynchronously, while
+            // the Swarm keeps running.
+            () = async {
+                match admission_due {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                admission_due = None;
+                // ONE outcome, to everyone parked on this key.
+                for channel in parked.drain(..) {
+                    let _ = server.behaviour_mut().direct.send_response(channel, owner_outcome.clone());
+                }
+                reservations.release(&key);
+            }
             e = server.select_next_some() => {
                 if let SwarmEvent::Behaviour(BehaviourEvent::Direct(RrEvent::Message {
-                    message: RrMessage::Request { request, channel, .. }, ..
+                    message: RrMessage::Request { channel, .. }, ..
                 })) = e {
-                    let response = race.arrive(&source, &request);
-                    let _ = server.behaviour_mut().direct.send_response(channel, response);
+                    match reservations.acquire(&key, fingerprint) {
+                        Ok(Reservation::Owner) => {
+                            enqueues += 1;
+                            // The one local enqueue. Its result is not
+                            // known yet, which is the point.
+                            admission_due = Some(tokio::time::Instant::now() + ADMISSION);
+                            parked.push(channel);
+                        }
+                        Ok(Reservation::Waiter) => {
+                            waiters += 1;
+                            // ATTACHED, not answered.
+                            parked.push(channel);
+                        }
+                        Err(ReservationFailure::Overloaded) => {
+                            refused += 1;
+                            let _ = server.behaviour_mut().direct.send_response(
+                                channel, Response::Rejected { reason: Reason::Overloaded });
+                        }
+                        Err(ReservationFailure::Conflict) => {
+                            refused += 1;
+                            let _ = server.behaviour_mut().direct.send_response(
+                                channel, Response::Rejected { reason: Reason::NoRoute });
+                        }
+                    }
                 }
             }
             e = client.select_next_some() => {
                 if let SwarmEvent::Behaviour(BehaviourEvent::Direct(RrEvent::Message {
-                    message: RrMessage::Response { .. }, ..
+                    message: RrMessage::Response { response, .. }, ..
                 })) = e {
-                    answered += 1;
+                    answered.push(response);
                 }
             }
         }
     }
+
     note("copies sent", COPIES);
-    note("responses received", answered);
-    note("owners (local enqueues)", race.enqueued);
-    note("waiters (shared the owner's result)", race.waiters);
-    note("overloaded", race.overloaded);
-    note("conflicts", race.conflicts);
-    note("reservations still held", race.reservations.len());
+    note("responses received", answered.len());
+    note("local enqueues (owners)", enqueues);
+    note("waiters attached to the owner", waiters);
+    note("refused outright", refused);
+    note(
+        "every response is the owner's outcome",
+        answered.len() == COPIES && answered.iter().all(|r| r == owner_outcome),
+    );
+    note("reservations still held", reservations.len());
 }
 
 /// A7 — more distinct in-flight keys than the map will hold.
+///
+/// Reservations are held for the whole experiment, so the budget is
+/// genuinely exhausted rather than churned through.
 pub async fn a7_reservation_overflow() {
     const KEYS: usize = 16;
     const PER_PEER: usize = 4;
@@ -588,35 +633,65 @@ pub async fn a7_reservation_overflow() {
         );
     }
 
-    // Reservations are NEVER released here: the point is what happens
-    // when more distinct keys are in flight than the per-peer budget.
     let source = identity(&client_peer);
-    let mut race = RaceState::new(64, PER_PEER);
-    let mut answered = 0;
+    let mut reservations = ReservationMap::new(64, PER_PEER);
+    let mut owners = 0_usize;
+    let mut overloaded = 0_usize;
+    let mut answered: Vec<Response> = Vec::new();
+
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    while answered < KEYS {
+    while answered.len() < KEYS {
         tokio::select! {
             () = tokio::time::sleep_until(deadline) => break,
             e = server.select_next_some() => {
                 if let SwarmEvent::Behaviour(BehaviourEvent::Direct(RrEvent::Message {
                     message: RrMessage::Request { request, channel, .. }, ..
                 })) = e {
-                    let response = race.arrive(&source, &request);
+                    let key = key(&source, &request.message_id);
+                    let fingerprint =
+                        direct_content_fingerprint_v1(None, &request.body).expect("fingerprint");
+                    // Held for the rest of the experiment, deliberately.
+                    let response = match reservations.acquire(&key, fingerprint) {
+                        Ok(Reservation::Owner) => {
+                            owners += 1;
+                            Response::AcceptedV2 { resolved_endpoint: "chat".to_owned() }
+                        }
+                        Ok(Reservation::Waiter) => {
+                            // Impossible here: every key is distinct.
+                            Response::AcceptedV2 { resolved_endpoint: "chat".to_owned() }
+                        }
+                        // OVERFLOW IS `overloaded`, not `no_route`. They
+                        // are different wire reasons and an operator acts
+                        // on them differently: one says retry later, the
+                        // other says there is nowhere to deliver.
+                        Err(ReservationFailure::Overloaded) => {
+                            overloaded += 1;
+                            Response::Rejected { reason: Reason::Overloaded }
+                        }
+                        Err(ReservationFailure::Conflict) => {
+                            Response::Rejected { reason: Reason::NoRoute }
+                        }
+                    };
                     let _ = server.behaviour_mut().direct.send_response(channel, response);
                 }
             }
             e = client.select_next_some() => {
                 if let SwarmEvent::Behaviour(BehaviourEvent::Direct(RrEvent::Message {
-                    message: RrMessage::Response { .. }, ..
+                    message: RrMessage::Response { response, .. }, ..
                 })) = e {
-                    answered += 1;
+                    answered.push(response);
                 }
             }
         }
     }
+    let overloaded_on_the_wire = answered
+        .iter()
+        .filter(|r| **r == Response::Rejected { reason: Reason::Overloaded })
+        .count();
     note("distinct keys sent", KEYS);
     note("per-peer budget", PER_PEER);
-    note("admitted (owners)", race.owners);
-    note("refused as overloaded", race.overloaded);
-    note("reservations held", race.reservations.len());
+    note("admitted (owners)", owners);
+    note("refused as overloaded", overloaded);
+    note("peers told `overloaded` on the wire", overloaded_on_the_wire);
+    note("reservations held", reservations.len());
 }

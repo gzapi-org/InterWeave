@@ -11,11 +11,16 @@ Do not treat the experiment in [`harness/`](./harness) as production implementat
 ## What was pinned
 
 ```text
-libp2p 0.56   features: tcp, noise, yamux, identify, tokio, macros,
-                        ed25519, request-response, gossipsub, cbor
+libp2p =0.56.0   features: tcp, noise, yamux, identify, tokio, macros,
+                           ed25519, request-response, gossipsub, cbor
 ```
 
-The version the substrate ships. A spike measuring a version the product does not use measures nothing — SPIKE-006 learned that the expensive way, having first been run against a `libp2p-identity` the substrate could not have linked.
+The version the substrate ships, pinned exactly and with `Cargo.lock`
+committed beside it. A floating `"0.56"` resolves a later patch release,
+and the two findings below — duplicate-cache ordering and timeout
+attribution — are precisely the kind of behaviour a patch release may
+change. A result that cannot be rebuilt is not evidence, so this spike's
+lock is the one exception to `spikes/**/Cargo.lock` being ignored. A spike measuring a version the product does not use measures nothing — SPIKE-006 learned that the expensive way, having first been run against a `libp2p-identity` the substrate could not have linked.
 
 Protocol names are `/spike-002/…`, never `/interweave/…`: a spike that speaks the production protocol name is one `git mv` away from being mistaken for it.
 
@@ -69,18 +74,31 @@ Second half of the same finding: after the timeout the responder still **holds**
 
 ### A6. The concurrency claim survives the real scheduler
 
-Twenty-four copies of one message — same `message_id`, same body, same destination selector — sent back to back and admitted through the **production** `ReservationMap`:
+`DIRECT.md`: *"Matching concurrent duplicates attach as waiters and receive the same eventual response."* Both halves of that sentence matter, and the first version of this experiment tested only the first — see the note at the end of this section.
+
+Twenty-four copies of one message — same `message_id`, same body, same destination selector — sent back to back and admitted through the **production** `ReservationMap`. The owner parks its response channel and its endpoint-queue admission completes **asynchronously**, so every other copy arrives while the outcome is still unknown:
 
 ```text
-copies sent                                    24
-responses received                             24
-owners (local enqueues)                        1
-waiters (shared the owner's result)            23
-overloaded                                     0
-conflicts                                      0
+owner outcome: AcceptedV2 { resolved_endpoint: "chat" }
+  copies sent                                    24
+  responses received                             24
+  local enqueues (owners)                        1
+  waiters attached to the owner                  23
+  every response is the owner's outcome          true
+  reservations still held                        0
+
+owner outcome: Rejected { reason: NoRoute }
+  copies sent                                    24
+  responses received                             24
+  local enqueues (owners)                        1
+  waiters attached to the owner                  23
+  every response is the owner's outcome          true
+  reservations still held                        0
 ```
 
-**One enqueue.** Twenty-three concurrent retransmissions became waiters on the owner's outcome, which is what ADR-0019's dedup design claims and what `RISKS.md` required a spike to demonstrate against real request-response scheduling rather than against a hand-driven loop.
+**One enqueue, and twenty-three channels held open until it resolved.** The rejection half is not decoration: a waiter that manufactured its own `AcceptedV2` would be indistinguishable from a correct implementation on the happy path, and would fabricate twenty-three deliveries on this one.
+
+> **The first version of this experiment did not prove this.** It admitted all twenty-four copies in one synchronous pass over one mutable state, and each waiter immediately produced its own `AcceptedV2` before the next Swarm event was polled; the owner's reservation was never completed or released. That demonstrated only that a retained map entry returns `Waiter` — a fact about a `BTreeMap` — and nothing about waiters sharing an asynchronously produced result. It was caught in review, and it is recorded here because the corrected experiment is the one the PASS rests on.
 
 ### A7. The reservation map stays bounded under overflow
 
@@ -89,10 +107,11 @@ Sixteen distinct in-flight keys from one peer against a per-peer budget of four:
 ```text
 admitted (owners)                              4
 refused as overloaded                          12
+peers told `overloaded` on the wire            12
 reservations held                              4
 ```
 
-The map holds exactly its budget and the excess is refused as `Overloaded`, which reaches the wire as the coarse `no_route` class. One peer cannot grow the map past its share.
+The map holds exactly its budget and the excess is refused. `DIRECT.md` lists `overloaded` as a **distinct** coarse reason from `no_route`, and the two mean different things to whoever receives them: one says the route is fine and to retry later, the other says there is nowhere to deliver. The first version of this harness collapsed overflow into `no_route` while its own counter printed `Overloaded` — the spike would have reported a mapping it was not performing. Both the counter and the wire now say `overloaded`.
 
 ## B — GossipSub
 

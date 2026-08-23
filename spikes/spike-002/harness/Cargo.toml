@@ -37,7 +37,12 @@ license = "Apache-2.0"
 # `request-response` and `gossipsub` are the two subjects. They are
 # absent from the production feature list and must stay absent until
 # Stage 6 and Stage 7 open respectively.
-libp2p = { version = "0.56", default-features = false, features = [
+# PINNED EXACTLY, and the lock is committed beside it. A floating
+# `"0.56"` resolves a later patch release, and the two findings this
+# spike records -- duplicate-cache ordering and timeout attribution --
+# are precisely the kind of behaviour a patch release may change. A
+# result that cannot be rebuilt is not evidence.
+libp2p = { version = "=0.56.0", default-features = false, features = [
     "tcp",
     "noise",
     "yamux",
@@ -49,10 +54,10 @@ libp2p = { version = "0.56", default-features = false, features = [
     "gossipsub",
     "cbor",
 ] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
-futures = "0.3"
-serde = { version = "1", features = ["derive"] }
-sha2 = "0.10"
+tokio = { version = "=1.48.0", features = ["rt-multi-thread", "macros", "sync", "time"] }
+futures = "=0.3.31"
+serde = { version = "=1.0.228", features = ["derive"] }
+sha2 = "=0.10.9"
 
 # The PRODUCTION dedup and reservation machinery, by path and on purpose.
 # The question this spike asks about concurrency is whether those exact

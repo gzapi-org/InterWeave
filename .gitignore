@@ -128,3 +128,12 @@ __pycache__/
 # own target/ and lock file; neither is evidence.
 spikes/**/target/
 spikes/**/Cargo.lock
+# ...EXCEPT where the resolved graph IS the evidence.
+#
+# A spike whose finding is version-sensitive cannot be reproduced from a
+# floating requirement: `version = "0.56"` resolves a later 0.56.x, and
+# the recorded result then describes a graph nobody can rebuild. SPIKE-002
+# measures duplicate-cache ordering and timeout attribution, both of which
+# are exactly the kind of behaviour a patch release may change, so its
+# lock is committed and its direct requirements are pinned with `=`.
+!spikes/spike-002/harness/Cargo.lock
