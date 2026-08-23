@@ -1,5 +1,5 @@
-# Implementation workspace skeleton only.
-# No production crate is a workspace member until its implementation phase begins.
+# Implementation workspace, populated one canonical stage at a time.
+# No production crate is a workspace member until its implementation stage begins.
 #
 # `members` grows one stage at a time (CLAUDE.md §3): a package is added here in
 # the same change that creates its manifest and the tests proving its stage

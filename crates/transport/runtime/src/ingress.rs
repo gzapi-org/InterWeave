@@ -186,6 +186,43 @@ impl IngressLimiter {
     }
 }
 
+/// Hard architectural ceiling on subscriptions held by one profile.
+///
+/// `resource-limits.md` states 128 default and 1024 as the ceiling. The
+/// ceiling is what this type enforces, because a narrower deployment
+/// value is configuration and this is the bound below which the design
+/// stops being bounded.
+pub const MAX_SUBSCRIPTIONS: usize = 1_024;
+
+/// Hard ceiling on local sessions holding a join on ONE channel.
+///
+/// Derived rather than chosen: the same document caps IPC connections
+/// (data and admin combined) at 64, and a join is held by a local
+/// session. More joins on one channel than there can be sessions is a
+/// number that cannot be reached honestly, so reaching it means
+/// `release_session` has been missed somewhere and the set is leaking.
+pub const MAX_SESSIONS_PER_CHANNEL: usize = 64;
+
+/// Why a join was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptionDenial {
+    /// The profile already holds [`MAX_SUBSCRIPTIONS`] channels.
+    TooManySubscriptions,
+    /// This channel already has [`MAX_SESSIONS_PER_CHANNEL`] joins.
+    TooManySessions,
+}
+
+impl core::fmt::Display for SubscriptionDenial {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::TooManySubscriptions => "the profile holds its maximum subscriptions",
+            Self::TooManySessions => "the channel holds its maximum local joins",
+        })
+    }
+}
+
+impl core::error::Error for SubscriptionDenial {}
+
 /// Local join references for broadcast channels.
 ///
 /// A **client** join, which is not the same as the daemon's topic
@@ -193,6 +230,20 @@ impl IngressLimiter {
 /// while zero clients hold a join; inbound messages then have no local
 /// consumer and are dropped rather than buffered, which is the no-buffer
 /// rule holding at this layer too.
+///
+/// # Both maps are bounded
+///
+/// `join` used to be infallible and both collections grew without a
+/// ceiling: a local client could name channels until the process ran
+/// out of memory, and a session set could accumulate entries a missed
+/// `release_session` never removed. The adversary is a local client
+/// rather than the network, which changes who can reach it and not
+/// whether the structure is bounded -- and this crate's own rule is
+/// that a map an outside party can grow is a bound or it is a leak.
+///
+/// It is enforced now rather than when the subscription port is
+/// activated, because "the caller will remember the limit" is how the
+/// dial gate, the source bucket, and the peer cache each lost theirs.
 #[derive(Debug, Default)]
 pub struct SubscriptionRegistry {
     joins: BTreeMap<ChannelId, BTreeSet<String>>,
@@ -201,20 +252,69 @@ pub struct SubscriptionRegistry {
 
 impl SubscriptionRegistry {
     /// Build a registry with the profile's warm-mesh channels.
-    #[must_use]
-    pub fn new(desired: BTreeSet<ChannelId>) -> Self {
-        Self {
+    ///
+    /// # Errors
+    /// Returns [`SubscriptionDenial::TooManySubscriptions`] if more than
+    /// [`MAX_SUBSCRIPTIONS`] channels are desired. A warm mesh costs the
+    /// same resources as a joined one.
+    pub fn new(desired: BTreeSet<ChannelId>) -> Result<Self, SubscriptionDenial> {
+        if desired.len() > MAX_SUBSCRIPTIONS {
+            return Err(SubscriptionDenial::TooManySubscriptions);
+        }
+        Ok(Self {
             joins: BTreeMap::new(),
             desired,
-        }
+        })
     }
 
     /// Record that a session joined a channel.
-    pub fn join(&mut self, channel: ChannelId, session: impl Into<String>) {
+    ///
+    /// Idempotent: re-joining a channel this session already holds
+    /// succeeds without consuming anything, so a client that retries
+    /// cannot exhaust a bound by repeating itself.
+    ///
+    /// # Errors
+    /// Returns [`SubscriptionDenial`] naming the bound that is full.
+    pub fn join(
+        &mut self,
+        channel: ChannelId,
+        session: impl Into<String>,
+    ) -> Result<(), SubscriptionDenial> {
+        let session = session.into();
+        // COUNTED AGAINST BOTH MAPS BEFORE EITHER IS TOUCHED. Inserting
+        // the channel and then refusing the session would leave an
+        // empty entry behind, which is the subscription ceiling being
+        // consumed by a join that did not happen.
+        match self.joins.get(&channel) {
+            Some(sessions) => {
+                if sessions.contains(&session) {
+                    return Ok(());
+                }
+                if sessions.len() >= MAX_SESSIONS_PER_CHANNEL {
+                    return Err(SubscriptionDenial::TooManySessions);
+                }
+            }
+            None => {
+                // A desired channel is already counted, so joining one
+                // does not consume a second slot.
+                let held = self.subscriptions();
+                if !self.desired.contains(&channel) && held >= MAX_SUBSCRIPTIONS {
+                    return Err(SubscriptionDenial::TooManySubscriptions);
+                }
+            }
+        }
+        self.joins.entry(channel).or_default().insert(session);
+        Ok(())
+    }
+
+    /// Channels this profile holds, joined or merely desired.
+    #[must_use]
+    pub fn subscriptions(&self) -> usize {
         self.joins
-            .entry(channel)
-            .or_default()
-            .insert(session.into());
+            .keys()
+            .filter(|c| !self.desired.contains(*c))
+            .count()
+            + self.desired.len()
     }
 
     /// Record that a session left a channel.
@@ -289,6 +389,99 @@ mod tests {
 
     fn ch(n: &str) -> ChannelId {
         ChannelId::parse(n).expect("valid channel")
+    }
+
+    #[test]
+    fn a_local_client_cannot_grow_the_registry_without_a_ceiling() {
+        // Both maps grew without a bound: a client could name channels
+        // until the process ran out of memory, and a session set could
+        // accumulate entries a missed `release_session` never removed.
+        // A local client rather than the network is the party who can
+        // reach it, which changes who -- not whether the structure is
+        // bounded.
+        let mut r = SubscriptionRegistry::default();
+        for i in 0..MAX_SUBSCRIPTIONS {
+            r.join(ch(&format!("c{i}")), "a")
+                .expect("within the ceiling");
+        }
+        assert_eq!(r.subscriptions(), MAX_SUBSCRIPTIONS);
+        assert_eq!(
+            r.join(ch("one-too-many"), "a"),
+            Err(SubscriptionDenial::TooManySubscriptions)
+        );
+        // And the refusal left nothing behind. An entry inserted before
+        // the check would consume a slot for a join that did not happen.
+        assert_eq!(r.subscriptions(), MAX_SUBSCRIPTIONS);
+
+        // Another session joining a channel already held is free: the
+        // ceiling is on channels, not on joins.
+        r.join(ch("c0"), "b").expect("an existing channel");
+
+        // Leaving frees the slot, so the bound is a ceiling and not a
+        // lifetime budget.
+        r.leave(&ch("c1"), "a");
+        r.join(ch("one-too-many"), "a")
+            .expect("a released slot is reusable");
+    }
+
+    #[test]
+    fn one_channel_cannot_hold_more_joins_than_there_can_be_sessions() {
+        // The number is derived, not chosen: IPC connections cap at 64,
+        // and a join is held by a local session. Exceeding it means
+        // `release_session` was missed somewhere and the set is leaking.
+        let mut r = SubscriptionRegistry::default();
+        for i in 0..MAX_SESSIONS_PER_CHANNEL {
+            r.join(ch("general"), format!("s{i}"))
+                .expect("within the ceiling");
+        }
+        assert_eq!(
+            r.join(ch("general"), "one-too-many"),
+            Err(SubscriptionDenial::TooManySessions)
+        );
+
+        // Re-joining is idempotent and costs nothing, so a client that
+        // retries cannot exhaust a bound by repeating itself.
+        r.join(ch("general"), "s0").expect("already joined");
+        assert_eq!(
+            r.subscribers(&ch("general")).len(),
+            MAX_SESSIONS_PER_CHANNEL
+        );
+
+        // A different channel is unaffected: the bound is per channel.
+        r.join(ch("builds"), "one-too-many")
+            .expect("a different channel has its own allowance");
+    }
+
+    #[test]
+    fn a_desired_channel_is_counted_once_and_not_twice() {
+        // A warm mesh costs the same resources as a joined one, so
+        // `desired` counts against the ceiling -- and a client joining
+        // a channel the profile already desires must not consume a
+        // second slot, which would make the effective ceiling depend on
+        // how the channel was reached.
+        let desired: std::collections::BTreeSet<ChannelId> = (0..MAX_SUBSCRIPTIONS)
+            .map(|i| ch(&format!("d{i}")))
+            .collect();
+        let mut r = SubscriptionRegistry::new(desired).expect("exactly the ceiling");
+        assert_eq!(r.subscriptions(), MAX_SUBSCRIPTIONS);
+
+        r.join(ch("d0"), "a")
+            .expect("joining a desired channel adds no subscription");
+        assert_eq!(r.subscriptions(), MAX_SUBSCRIPTIONS);
+        assert_eq!(
+            r.join(ch("new"), "a"),
+            Err(SubscriptionDenial::TooManySubscriptions)
+        );
+
+        // And the constructor refuses more than it can hold rather than
+        // accepting a registry that is over its own bound from birth.
+        let too_many: std::collections::BTreeSet<ChannelId> = (0..=MAX_SUBSCRIPTIONS)
+            .map(|i| ch(&format!("d{i}")))
+            .collect();
+        assert_eq!(
+            SubscriptionRegistry::new(too_many).err(),
+            Some(SubscriptionDenial::TooManySubscriptions)
+        );
     }
 
     #[test]
@@ -396,7 +589,7 @@ mod tests {
     #[test]
     fn publishing_requires_the_callers_own_join() {
         let mut r = SubscriptionRegistry::default();
-        r.join(ch("general"), "a");
+        r.join(ch("general"), "a").expect("within the bounds");
         assert!(r.may_publish(&ch("general"), "a"));
         // Another client's join does not authorize this one's traffic.
         assert!(!r.may_publish(&ch("general"), "b"));
@@ -407,7 +600,7 @@ mod tests {
     fn a_warm_mesh_with_no_local_consumer_delivers_to_nobody() {
         let mut desired = BTreeSet::new();
         desired.insert(ch("general"));
-        let r = SubscriptionRegistry::new(desired);
+        let r = SubscriptionRegistry::new(desired).expect("within the bounds");
         // The backend keeps the subscription...
         assert!(r.backend_should_subscribe(&ch("general")));
         // ...and there is no one to deliver to, and nothing is stored.
@@ -419,9 +612,9 @@ mod tests {
     #[test]
     fn a_session_disconnect_drops_all_its_joins() {
         let mut r = SubscriptionRegistry::default();
-        r.join(ch("general"), "a");
-        r.join(ch("builds"), "a");
-        r.join(ch("general"), "b");
+        r.join(ch("general"), "a").expect("within the bounds");
+        r.join(ch("builds"), "a").expect("within the bounds");
+        r.join(ch("general"), "b").expect("within the bounds");
         r.release_session("a");
         assert_eq!(r.subscribers(&ch("general")), vec!["b".to_owned()]);
         assert!(r.subscribers(&ch("builds")).is_empty());
@@ -432,7 +625,7 @@ mod tests {
     #[test]
     fn leaving_the_last_join_releases_the_channel() {
         let mut r = SubscriptionRegistry::default();
-        r.join(ch("general"), "a");
+        r.join(ch("general"), "a").expect("within the bounds");
         r.leave(&ch("general"), "a");
         assert!(!r.backend_should_subscribe(&ch("general")));
         assert!(r.subscribers(&ch("general")).is_empty());

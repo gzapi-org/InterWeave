@@ -231,6 +231,176 @@ fn migration_1(tx: &Transaction<'_>) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// One column, exactly as `PRAGMA table_info` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Column {
+    name: String,
+    /// The DECLARED type. SQLite does not enforce it, which is why it
+    /// is checked: a rebuilt table whose `payload` became `TEXT` would
+    /// still work and would still be a different schema.
+    decl_type: String,
+    not_null: bool,
+    /// Part of the primary key.
+    primary_key: bool,
+}
+
+/// One table's complete expected shape.
+struct TableShape {
+    name: &'static str,
+    /// Ordered, because `table_info` is ordered and a reordering is a
+    /// different table. `(name, declared type, NOT NULL, primary key)`.
+    columns: &'static [(&'static str, &'static str, bool, bool)],
+    /// Every UNIQUE key, as its ordered column list. Includes the
+    /// implicit index behind a `TEXT PRIMARY KEY`.
+    unique_keys: &'static [&'static [&'static str]],
+    /// Whether the rowid primary key is AUTOINCREMENT.
+    ///
+    /// Not visible through any pragma, and load-bearing: a bare
+    /// `INTEGER PRIMARY KEY` reuses the highest deleted row's id, which
+    /// in a store that deletes constantly hands a caller someone else's
+    /// body. See [`migration_1`].
+    autoincrement: bool,
+}
+
+const fn col(
+    name: &'static str,
+    decl_type: &'static str,
+    not_null: bool,
+) -> (&'static str, &'static str, bool, bool) {
+    (name, decl_type, not_null, false)
+}
+
+/// The rowid primary key.
+///
+/// `not_null` is false because SQLite does not mark a PRIMARY KEY
+/// column NOT NULL unless it is declared so. Asserting the truth rather
+/// than the tidy answer keeps this a description of the schema.
+const fn pk(
+    name: &'static str,
+    decl_type: &'static str,
+) -> (&'static str, &'static str, bool, bool) {
+    (name, decl_type, false, true)
+}
+
+/// The complete schema this build understands, column by column.
+///
+/// # Why names were not enough
+///
+/// [`verify_shape`] used to read `SELECT type, name FROM sqlite_master`
+/// and allowlist the names. That refuses a `chat_archive` TABLE and
+/// accepts
+///
+/// ```sql
+/// ALTER TABLE unread_inbound ADD COLUMN archive_payload BLOB;
+/// ```
+///
+/// which is the same retention violation inside a permitted name: a
+/// second durable content surface, in the table whose whole contract is
+/// that its body disappears when the message is read. Under ADR-0044 an
+/// unknown column is not forward compatibility, it is a place a body
+/// can be kept, so it is refused.
+const EXPECTED_SCHEMA: &[TableShape] = &[
+    TableShape {
+        name: "pending_outbound",
+        columns: &[
+            pk("row_id", "INTEGER"),
+            col("app_message_id", "TEXT", true),
+            col("destination_peer", "TEXT", true),
+            col("destination_endpoint", "TEXT", false),
+            col("channel_id", "TEXT", false),
+            col("media_type", "TEXT", false),
+            col("payload", "BLOB", true),
+            col("created_at", "INTEGER", true),
+            col("last_attempt_at", "INTEGER", false),
+            col("attempts", "INTEGER", true),
+        ],
+        unique_keys: &[&["app_message_id"]],
+        autoincrement: true,
+    },
+    TableShape {
+        name: "unread_inbound",
+        columns: &[
+            pk("row_id", "INTEGER"),
+            col("app_message_id", "TEXT", true),
+            col("source_peer", "TEXT", true),
+            col("source_endpoint", "TEXT", false),
+            col("channel_id", "TEXT", false),
+            col("media_type", "TEXT", false),
+            col("payload", "BLOB", true),
+            col("received_at", "INTEGER", true),
+        ],
+        // SCOPED TO THE PEER. A bare UNIQUE on the id alone let one peer
+        // collide with another's message; see `migration_2`.
+        unique_keys: &[&["source_peer", "app_message_id"]],
+        autoincrement: true,
+    },
+    TableShape {
+        name: "kept_inbound",
+        columns: &[
+            pk("row_id", "INTEGER"),
+            col("app_message_id", "TEXT", true),
+            col("source_peer", "TEXT", true),
+            col("source_endpoint", "TEXT", false),
+            col("channel_id", "TEXT", false),
+            col("media_type", "TEXT", false),
+            col("payload", "BLOB", true),
+            col("received_at", "INTEGER", true),
+            col("read_at", "INTEGER", true),
+            col("kept_at", "INTEGER", true),
+        ],
+        unique_keys: &[&["source_peer", "app_message_id"]],
+        autoincrement: true,
+    },
+    TableShape {
+        name: "settings",
+        columns: &[pk("key", "TEXT"), col("value", "TEXT", true)],
+        unique_keys: &[&["key"]],
+        autoincrement: false,
+    },
+];
+
+/// Read one table's columns as `PRAGMA table_info` reports them.
+fn actual_columns(conn: &Connection, table: &str) -> Result<Vec<Column>, StoreError> {
+    // `PRAGMA table_info(?)` does not accept a bound parameter, and the
+    // name here is a compile-time constant from EXPECTED_SCHEMA rather
+    // than anything a caller supplied.
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let rows = stmt.query_map([], |r| {
+        Ok(Column {
+            name: r.get::<_, String>(1)?,
+            decl_type: r.get::<_, String>(2)?.to_ascii_uppercase(),
+            not_null: r.get::<_, i64>(3)? != 0,
+            primary_key: r.get::<_, i64>(5)? != 0,
+        })
+    })?;
+    rows.collect::<Result<_, _>>().map_err(StoreError::from)
+}
+
+/// Read one table's UNIQUE keys as ordered column lists.
+fn actual_unique_keys(conn: &Connection, table: &str) -> Result<Vec<Vec<String>>, StoreError> {
+    let mut list = conn.prepare(&format!("PRAGMA index_list({table})"))?;
+    let indexes: Vec<(String, i64)> = list
+        .query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, i64>(2)?)))?
+        .collect::<Result<_, _>>()?;
+
+    let mut keys = Vec::new();
+    for (name, unique) in indexes {
+        if unique == 0 {
+            continue;
+        }
+        let mut info = conn.prepare(&format!("PRAGMA index_info(\"{name}\")"))?;
+        let mut cols: Vec<(i64, Option<String>)> = info
+            .query_map([], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(2)?))
+            })?
+            .collect::<Result<_, _>>()?;
+        cols.sort_by_key(|(seq, _)| *seq);
+        keys.push(cols.into_iter().filter_map(|(_, c)| c).collect());
+    }
+    keys.sort();
+    Ok(keys)
+}
+
 /// Prove the opened database is the store this build understands.
 ///
 /// Two questions, and the second is the one that matters: every required
@@ -258,6 +428,59 @@ pub fn verify_shape(conn: &Connection) -> Result<(), StoreError> {
         if !tables.iter().any(|n| *n == required) {
             return Err(StoreError::Migration(format!(
                 "table `{required}` is missing"
+            )));
+        }
+    }
+
+    // EVERY COLUMN, not merely every table name. Refusing a
+    // `chat_archive` table while accepting
+    // `ALTER TABLE unread_inbound ADD COLUMN archive_payload BLOB`
+    // catches the clumsy version of the retention violation and misses
+    // the one that fits inside a permitted name.
+    for shape in EXPECTED_SCHEMA {
+        let actual = actual_columns(conn, shape.name)?;
+        let matches = actual.len() == shape.columns.len()
+            && actual.iter().zip(shape.columns).all(|(a, e)| {
+                a.name == e.0 && a.decl_type == e.1 && a.not_null == e.2 && a.primary_key == e.3
+            });
+        if !matches {
+            return Err(StoreError::Migration(format!(
+                "table `{}` does not have the shape this build wrote: expected {:?}, found {:?}",
+                shape.name, shape.columns, actual
+            )));
+        }
+
+        let mut expected_keys: Vec<Vec<String>> = shape
+            .unique_keys
+            .iter()
+            .map(|k| k.iter().map(|c| (*c).to_owned()).collect())
+            .collect();
+        expected_keys.sort();
+        let actual_keys = actual_unique_keys(conn, shape.name)?;
+        if actual_keys != expected_keys {
+            return Err(StoreError::Migration(format!(
+                "table `{}` has unique keys {actual_keys:?}; this build wrote {expected_keys:?}",
+                shape.name
+            )));
+        }
+
+        // AUTOINCREMENT is invisible to every pragma and is what stops
+        // a deleted row's id being handed to the next insert.
+        let sql: Option<String> = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [shape.name],
+                |r| r.get(0),
+            )
+            .ok()
+            .flatten();
+        let has = sql
+            .as_deref()
+            .is_some_and(|q| q.to_ascii_uppercase().contains("AUTOINCREMENT"));
+        if has != shape.autoincrement {
+            return Err(StoreError::Migration(format!(
+                "table `{}` autoincrement is {has}; this build wrote {}",
+                shape.name, shape.autoincrement
             )));
         }
     }

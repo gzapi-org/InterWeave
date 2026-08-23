@@ -94,22 +94,70 @@ pub const MAX_CACHE_FILE_BYTES: u64 = {
 pub const WRITE_DEBOUNCE_MS: u64 = 5_000;
 
 /// The bounds one cache instance runs under.
+///
+/// # Why the fields are private
+///
+/// These limits govern what the RUNTIME will hold, while
+/// [`MAX_CACHE_FILE_BYTES`] governs what a LOAD will read -- and the
+/// second is computed from the frozen format constants, not from these.
+/// Public fields let a caller ask for more peers or more addresses per
+/// peer than the format allows, at which point the cache accepts the
+/// records, serializes them, flushes a perfectly ordinary file, and
+/// quarantines that same file on the next start because it is over the
+/// format ceiling. A cache that deletes its own contents on restart,
+/// with nothing in the logs but a size complaint about a file it wrote
+/// itself.
+///
+/// So the only door is [`CacheLimitsBuilder::build`], and it permits
+/// NARROWING only. A deployment may hold fewer peers than the format
+/// allows; it may not hold more, because "more" is not this type's to
+/// grant -- it is a change to the frozen disk format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CacheLimits {
+    ttl_ms: u64,
+    max_peers: usize,
+    max_addresses_per_peer: usize,
+    max_capabilities_per_peer: usize,
+    write_debounce_ms: u64,
+}
+
+impl CacheLimits {
     /// Time-to-live after the last successful observation.
-    pub ttl_ms: u64,
+    #[must_use]
+    pub const fn ttl_ms(&self) -> u64 {
+        self.ttl_ms
+    }
+
     /// Maximum peers retained.
-    pub max_peers: usize,
+    #[must_use]
+    pub const fn max_peers(&self) -> usize {
+        self.max_peers
+    }
+
     /// Maximum addresses per peer.
-    pub max_addresses_per_peer: usize,
+    #[must_use]
+    pub const fn max_addresses_per_peer(&self) -> usize {
+        self.max_addresses_per_peer
+    }
+
     /// Maximum capability observations per peer.
-    pub max_capabilities_per_peer: usize,
+    #[must_use]
+    pub const fn max_capabilities_per_peer(&self) -> usize {
+        self.max_capabilities_per_peer
+    }
+
     /// Minimum interval between writes.
-    pub write_debounce_ms: u64,
+    #[must_use]
+    pub const fn write_debounce_ms(&self) -> u64 {
+        self.write_debounce_ms
+    }
 }
 
 impl Default for CacheLimits {
     fn default() -> Self {
+        // The frozen format itself, which narrows nothing and is
+        // therefore valid. `the_format_defaults_are_valid` keeps that
+        // true if a constant is ever retuned.
         Self {
             ttl_ms: DEFAULT_TTL_MS,
             max_peers: MAX_PEERS,
@@ -119,3 +167,106 @@ impl Default for CacheLimits {
         }
     }
 }
+
+/// Proposed limits, on their way to becoming [`CacheLimits`].
+///
+/// Public fields on purpose: this is plainly the unchecked side of the
+/// boundary. [`Default`] is the frozen format, so `..Default::default()`
+/// narrows one bound without restating the other four.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheLimitsBuilder {
+    /// Time-to-live after the last successful observation.
+    pub ttl_ms: u64,
+    /// Maximum peers retained. At most [`MAX_PEERS`].
+    pub max_peers: usize,
+    /// Maximum addresses per peer. At most [`MAX_ADDRESSES_PER_PEER`].
+    pub max_addresses_per_peer: usize,
+    /// Maximum capability observations per peer. At most
+    /// [`MAX_CAPABILITIES_PER_PEER`].
+    pub max_capabilities_per_peer: usize,
+    /// Minimum interval between writes.
+    pub write_debounce_ms: u64,
+}
+
+impl Default for CacheLimitsBuilder {
+    fn default() -> Self {
+        let d = CacheLimits::default();
+        Self {
+            ttl_ms: d.ttl_ms,
+            max_peers: d.max_peers,
+            max_addresses_per_peer: d.max_addresses_per_peer,
+            max_capabilities_per_peer: d.max_capabilities_per_peer,
+            write_debounce_ms: d.write_debounce_ms,
+        }
+    }
+}
+
+impl CacheLimitsBuilder {
+    /// Narrow the frozen format, or say why the request is not a
+    /// narrowing.
+    ///
+    /// # Errors
+    /// Returns the first [`InvalidCacheLimits`] that applies.
+    pub const fn build(self) -> Result<CacheLimits, InvalidCacheLimits> {
+        use InvalidCacheLimits as E;
+
+        if self.max_peers == 0 || self.max_peers > MAX_PEERS {
+            return Err(E::PeersOutOfRange);
+        }
+        if self.max_addresses_per_peer == 0 || self.max_addresses_per_peer > MAX_ADDRESSES_PER_PEER
+        {
+            return Err(E::AddressesPerPeerOutOfRange);
+        }
+        if self.max_capabilities_per_peer == 0
+            || self.max_capabilities_per_peer > MAX_CAPABILITIES_PER_PEER
+        {
+            return Err(E::CapabilitiesPerPeerOutOfRange);
+        }
+        // A zero TTL expires every record the instant it is written, so
+        // the cache holds nothing and every start is cold. That is a
+        // misconfiguration rather than a policy.
+        if self.ttl_ms == 0 {
+            return Err(E::ZeroTtl);
+        }
+
+        Ok(CacheLimits {
+            ttl_ms: self.ttl_ms,
+            max_peers: self.max_peers,
+            max_addresses_per_peer: self.max_addresses_per_peer,
+            max_capabilities_per_peer: self.max_capabilities_per_peer,
+            write_debounce_ms: self.write_debounce_ms,
+        })
+    }
+}
+
+/// Why proposed cache limits were refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidCacheLimits {
+    /// `max_peers` is zero or above the frozen [`MAX_PEERS`].
+    PeersOutOfRange,
+    /// `max_addresses_per_peer` is zero or above the frozen bound.
+    AddressesPerPeerOutOfRange,
+    /// `max_capabilities_per_peer` is zero or above the frozen bound.
+    CapabilitiesPerPeerOutOfRange,
+    /// `ttl_ms` is zero, so nothing is ever retained.
+    ZeroTtl,
+}
+
+impl core::fmt::Display for InvalidCacheLimits {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::PeersOutOfRange => {
+                "max_peers must be 1..=MAX_PEERS; the disk format cannot hold more"
+            }
+            Self::AddressesPerPeerOutOfRange => {
+                "max_addresses_per_peer must be 1..=MAX_ADDRESSES_PER_PEER"
+            }
+            Self::CapabilitiesPerPeerOutOfRange => {
+                "max_capabilities_per_peer must be 1..=MAX_CAPABILITIES_PER_PEER"
+            }
+            Self::ZeroTtl => "ttl_ms of zero retains nothing",
+        })
+    }
+}
+
+impl core::error::Error for InvalidCacheLimits {}

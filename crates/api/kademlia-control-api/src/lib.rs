@@ -23,7 +23,7 @@
 
 #![forbid(unsafe_code)]
 
-use interweave_discovery_api::CandidatePeer;
+use interweave_discovery_api::{CandidatePeer, MAX_ADDRESS_BYTES, MAX_ADDRESSES};
 use interweave_transport_api::TransportIdentity;
 use serde::{Deserialize, Serialize};
 
@@ -67,6 +67,85 @@ pub enum QueryClass {
     Exploration,
 }
 
+/// Read a bounded sequence without materializing it first.
+///
+/// `Vec::deserialize` parses and allocates the whole array before a
+/// length check can run, so a ceiling applied afterwards rejects the
+/// RESULT while the input has already been paid for. One element past
+/// the limit is enough to know.
+fn bounded_seq<'de, D, T>(
+    deserializer: D,
+    max: usize,
+    what: &'static str,
+) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct Bounded<T> {
+        max: usize,
+        what: &'static str,
+        _item: core::marker::PhantomData<T>,
+    }
+
+    impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for Bounded<T> {
+        type Value = Vec<T>;
+
+        fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(f, "at most {} {}", self.max, self.what)
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut out = Vec::new();
+            while let Some(item) = seq.next_element::<T>()? {
+                if out.len() >= self.max {
+                    return Err(serde::de::Error::custom(format!(
+                        "at most {} {}, got more",
+                        self.max, self.what
+                    )));
+                }
+                out.push(item);
+            }
+            Ok(out)
+        }
+    }
+
+    deserializer.deserialize_seq(Bounded {
+        max,
+        what,
+        _item: core::marker::PhantomData,
+    })
+}
+
+/// The addresses on a routing offer, bounded and length-checked.
+fn wire_offered_addresses<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let out: Vec<String> = bounded_seq(deserializer, MAX_ADDRESSES, "offered addresses")?;
+    if let Some(long) = out.iter().find(|a| a.len() > MAX_ADDRESS_BYTES) {
+        return Err(serde::de::Error::custom(format!(
+            "an offered address is {} bytes; the limit is {MAX_ADDRESS_BYTES}",
+            long.len()
+        )));
+    }
+    if out.iter().any(String::is_empty) {
+        return Err(serde::de::Error::custom("an offered address is empty"));
+    }
+    Ok(out)
+}
+
+/// One query's results, bounded by the ceiling the doc comment claims.
+fn wire_query_results<'de, D>(deserializer: D) -> Result<Vec<CandidatePeer>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    bounded_seq(deserializer, MAX_RESULTS_PER_QUERY, "query results")
+}
+
 /// A command the provider issues to the driver.
 ///
 /// Deliberately small and deliberately incomplete: see the module note on
@@ -85,10 +164,19 @@ pub enum KademliaCommand {
     /// checks, trust policy, exact protocol-support evidence, and the
     /// table bounds — a hint never goes directly into the routing table.
     OfferRoutingPeer {
+        /// Opaque addresses to try.
+        ///
+        /// Bounded and length-checked on the way in: this is the port a
+        /// remote-influenced hint crosses, and a `Vec<String>` with no
+        /// ceiling is the routing table's memory decided by whoever
+        /// sent the hint. Each address obeys the same
+        /// [`MAX_ADDRESS_BYTES`] the candidate contract states, so an
+        /// offer cannot carry something the candidate it becomes could
+        /// not hold.
+        #[serde(deserialize_with = "wire_offered_addresses")]
+        addresses: Vec<String>,
         /// The peer being offered.
         peer: TransportIdentity,
-        /// Opaque addresses to try.
-        addresses: Vec<String>,
     },
     /// Start one query of the given class.
     StartQuery {
@@ -111,10 +199,17 @@ pub enum KademliaCommand {
 pub enum KademliaEvent {
     /// A query returned peers, already normalized as discovery candidates.
     QueryResults {
+        /// The observed candidates.
+        ///
+        /// Bounded by [`MAX_RESULTS_PER_QUERY`] on the read, because the
+        /// doc comment here used to SAY "bounded by
+        /// `max_results_per_query`" while the type was a bare `Vec` and
+        /// nothing checked it -- a claim in prose above code that did
+        /// not make it.
+        #[serde(deserialize_with = "wire_query_results")]
+        candidates: Vec<CandidatePeer>,
         /// Which class produced them.
         class: QueryClass,
-        /// The observed candidates, bounded by `max_results_per_query`.
-        candidates: Vec<CandidatePeer>,
     },
     /// A peer entered the routing table.
     RoutingPeerAdded {
@@ -321,6 +416,70 @@ impl core::error::Error for LimitViolation {}
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_port_bounds_what_crosses_it_rather_than_describing_a_bound() {
+        // `candidates` carried the doc comment "bounded by
+        // `max_results_per_query`" above a bare `Vec` that nothing
+        // checked, and `addresses` had neither a count nor a length.
+        // This is the port a remote-influenced routing hint crosses, so
+        // an unbounded vector here is the routing table's memory
+        // decided by whoever sent the hint.
+        let peer = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+
+        let addrs = |n: usize| {
+            (0..n)
+                .map(|i| format!(r#""/ip4/10.0.0.1/tcp/{i}""#))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let offer = |body: String| {
+            serde_json::from_str::<KademliaCommand>(&format!(
+                r#"{{"command":"offer_routing_peer","peer":"{peer}","addresses":[{body}]}}"#
+            ))
+        };
+        assert!(offer(addrs(MAX_ADDRESSES)).is_ok(), "the ceiling is legal");
+        assert!(
+            offer(addrs(MAX_ADDRESSES + 1)).is_err(),
+            "one past the ceiling is not"
+        );
+
+        // Each address is length-checked too, so an offer cannot carry
+        // something the candidate it becomes could not hold.
+        let long = "a".repeat(MAX_ADDRESS_BYTES + 1);
+        assert!(offer(format!(r#""{long}""#)).is_err());
+        assert!(offer(r#""""#.to_owned()).is_err(), "an empty address");
+
+        // WHAT THIS BOUND DOES NOT BUY, stated rather than assumed.
+        // `KademliaCommand` is `#[serde(tag = "command")]`, and an
+        // internally tagged enum buffers the whole map into a `Content`
+        // tree to find the tag before any variant deserializer runs --
+        // so the ceiling refuses an array whose parse cost is already
+        // paid. That is acceptable HERE and would not be on a wire
+        // contract: this port is crossed as a Rust value in-process,
+        // and its serde impl exists for fixtures and diagnostics. The
+        // bound that matters is on the `Vec` the driver then holds.
+        let err = serde_json::from_str::<KademliaCommand>(&format!(
+            r#"{{"command":"offer_routing_peer","peer":"{peer}","addresses":[{}]}}"#,
+            addrs(MAX_ADDRESSES + 1)
+        ))
+        .expect_err("over-length")
+        .to_string();
+        assert!(err.contains("at most"), "expected the ceiling, got: {err}");
+
+        // Query results, against the ceiling the comment claimed.
+        let one = format!(
+            r#"{{"peer_id":"{peer}","addresses":["/ip4/10.0.0.1/tcp/1"],"source":"kademlia","observed_at":1}}"#
+        );
+        let results = |n: usize| {
+            serde_json::from_str::<KademliaEvent>(&format!(
+                r#"{{"event":"query_results","class":"bootstrap","candidates":[{}]}}"#,
+                vec![one.clone(); n].join(",")
+            ))
+        };
+        assert!(results(MAX_RESULTS_PER_QUERY).is_ok());
+        assert!(results(MAX_RESULTS_PER_QUERY + 1).is_err());
+    }
     use super::*;
     use interweave_discovery_api::ProviderHealth;
 

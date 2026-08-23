@@ -29,6 +29,23 @@ use crate::records::{
 };
 use crate::schema::{migrate, verify_shape};
 
+/// A stored timestamp, refusing a negative one rather than flattening it.
+///
+/// `unwrap_or(0)` looked like a harmless normalization and was not. A
+/// negative `received_at` read back as zero while SQL kept ordering by
+/// the raw value, so the row sorted first and the cursor built from it
+/// carried zero -- and the next page asked for rows after zero, walking
+/// straight past every other malformed row. A corrupt value became a
+/// silently truncated result set.
+fn stored_ms(field: &'static str, value: i64) -> Result<u64, StoreError> {
+    u64::try_from(value).map_err(|_| StoreError::Corrupt(format!("{field} is negative: {value}")))
+}
+
+/// A stored non-negative counter, refusing a negative one.
+fn stored_count(field: &'static str, value: i64) -> Result<u32, StoreError> {
+    u32::try_from(value).map_err(|_| StoreError::Corrupt(format!("{field} is not a u32: {value}")))
+}
+
 /// How the store is opened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct StoreOptions {
@@ -430,9 +447,9 @@ impl HumanStore {
                 destination,
                 media_type: parse_media_type(media_type)?,
                 payload,
-                created_at: u64::try_from(created).unwrap_or(0),
-                last_attempt_at: last.map(|v| u64::try_from(v).unwrap_or(0)),
-                attempts: u32::try_from(attempts).unwrap_or(u32::MAX),
+                created_at: stored_ms("created_at", created)?,
+                last_attempt_at: last.map(|v| stored_ms("last_attempt_at", v)).transpose()?,
+                attempts: stored_count("attempts", attempts)?,
             });
         }
         Ok(Page {
@@ -549,7 +566,7 @@ impl HumanStore {
                 },
                 media_type: parse_media_type(row.4)?,
                 payload: row.5,
-                received_at: u64::try_from(row.6).unwrap_or(0),
+                received_at: stored_ms("received_at", row.6)?,
                 read_at: at_ms,
             };
 
@@ -813,9 +830,9 @@ impl HumanStore {
                 },
                 media_type: parse_media_type(media_type)?,
                 payload,
-                received_at: u64::try_from(received).unwrap_or(0),
-                read_at: read.map(|v| u64::try_from(v).unwrap_or(0)),
-                kept_at: keptat.map(|v| u64::try_from(v).unwrap_or(0)),
+                received_at: stored_ms("received_at", received)?,
+                read_at: read.map(|v| stored_ms("read_at", v)).transpose()?,
+                kept_at: keptat.map(|v| stored_ms("kept_at", v)).transpose()?,
             });
         }
         Ok(Page {

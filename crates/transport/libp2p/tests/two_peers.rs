@@ -135,7 +135,7 @@ async fn identity_survives_a_restart_of_the_substrate() {
     // and the Stage 4 substrate together — which is the pairing that
     // actually has to hold.
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("identity.key");
+    let path = dir.path().join("state").join("identity.key");
 
     let first = ProfileIdentity::generate();
     first.save(&path).expect("save");

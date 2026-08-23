@@ -29,5 +29,8 @@ pub use endpoint_registry::{
     ActiveLease, ClaimFailure, EndpointRegistry, LocalSessionId, RegisteredEndpoint, ResolveFailure,
 };
 pub use fingerprint::{ContentFingerprint, FingerprintError, direct_content_fingerprint_v1};
-pub use ingress::{IngressDenial, IngressLimiter, SubscriptionRegistry};
+pub use ingress::{
+    IngressDenial, IngressLimiter, MAX_SESSIONS_PER_CHANNEL, MAX_SUBSCRIPTIONS, SubscriptionDenial,
+    SubscriptionRegistry,
+};
 pub use reply_token::{DuplicateToken, ReplyResolution, ReplyRoute, ReplyTokenTable};

@@ -147,11 +147,11 @@ fn validate_record(record: &PeerRecord, limits: CacheLimits) -> Result<(), Strin
     TransportIdentity::parse(id.clone())
         .map_err(|e| format!("peer id {id:?} is not canonical: {e}"))?;
 
-    if record.addresses.len() > limits.max_addresses_per_peer {
+    if record.addresses.len() > limits.max_addresses_per_peer() {
         return Err(format!(
             "peer {id} has {} addresses; the cache retains {}",
             record.addresses.len(),
-            limits.max_addresses_per_peer
+            limits.max_addresses_per_peer()
         ));
     }
     for a in &record.addresses {
@@ -163,11 +163,11 @@ fn validate_record(record: &PeerRecord, limits: CacheLimits) -> Result<(), Strin
         }
     }
 
-    if record.capabilities.len() > limits.max_capabilities_per_peer {
+    if record.capabilities.len() > limits.max_capabilities_per_peer() {
         return Err(format!(
             "peer {id} has {} capability observations; the cache retains {}",
             record.capabilities.len(),
-            limits.max_capabilities_per_peer
+            limits.max_capabilities_per_peer()
         ));
     }
     for c in &record.capabilities {
@@ -265,11 +265,11 @@ impl PeerCache {
                 // skipped — the file is quarantined, because a cache
                 // half of which was rejected is not the cache the caller
                 // thinks it loaded.
-                if file.peers.len() > limits.max_peers {
+                if file.peers.len() > limits.max_peers() {
                     cache.quarantine(&format!(
                         "{} peers exceeds the {} the cache retains",
                         file.peers.len(),
-                        limits.max_peers
+                        limits.max_peers()
                     ))?;
                     return Ok(cache);
                 }
@@ -347,7 +347,7 @@ impl PeerCache {
         // it had already agreed to store.
         bounded("address", address, MAX_ADDRESS_BYTES)?;
         let key = peer.as_str().to_owned();
-        let limit = self.limits.max_addresses_per_peer;
+        let limit = self.limits.max_addresses_per_peer();
 
         let record = self.peers.entry(key.clone()).or_insert_with(|| PeerRecord {
             peer_id: key,
@@ -439,7 +439,7 @@ impl PeerCache {
             .sort_by_key(|o| core::cmp::Reverse(o.observed_at_ms));
         record
             .capabilities
-            .truncate(self.limits.max_capabilities_per_peer);
+            .truncate(self.limits.max_capabilities_per_peer());
         self.dirty = true;
         Ok(())
     }
@@ -458,7 +458,7 @@ impl PeerCache {
     pub fn candidates(&self, now_ms: u64) -> Vec<CandidatePeer> {
         self.peers
             .values()
-            .filter(|r| r.is_fresh_at(now_ms, self.limits.ttl_ms))
+            .filter(|r| r.is_fresh_at(now_ms, self.limits.ttl_ms()))
             .filter_map(|r| {
                 let peer = TransportIdentity::parse(r.peer_id.clone()).ok()?;
                 Some(CandidatePeer {
@@ -466,7 +466,7 @@ impl PeerCache {
                     addresses: r.addresses.iter().map(|a| a.address.clone()).collect(),
                     source: SOURCE.to_owned(),
                     observed_at: r.last_success_ms,
-                    expires_at: Some(r.expires_at_ms(self.limits.ttl_ms)),
+                    expires_at: Some(r.expires_at_ms(self.limits.ttl_ms())),
                     protocol_observations: Default::default(),
                 })
             })
@@ -478,14 +478,14 @@ impl PeerCache {
     pub fn peer(&self, peer: &TransportIdentity, now_ms: u64) -> Option<&PeerRecord> {
         self.peers
             .get(peer.as_str())
-            .filter(|r| r.is_fresh_at(now_ms, self.limits.ttl_ms))
+            .filter(|r| r.is_fresh_at(now_ms, self.limits.ttl_ms()))
     }
 
     /// Drop every expired record.
     ///
     /// Separate from reading, so the read path stays read-only.
     pub fn compact(&mut self, now_ms: u64) -> usize {
-        let ttl = self.limits.ttl_ms;
+        let ttl = self.limits.ttl_ms();
         let before = self.peers.len();
         self.peers.retain(|_, r| r.is_fresh_at(now_ms, ttl));
         let dropped = before - self.peers.len();
@@ -502,10 +502,10 @@ impl PeerCache {
     /// strictly worse. Among live entries the least recently successful
     /// goes — the one whose route is least likely to still work.
     fn enforce_peer_cap(&mut self, now_ms: u64) {
-        if self.peers.len() <= self.limits.max_peers {
+        if self.peers.len() <= self.limits.max_peers() {
             return;
         }
-        let ttl = self.limits.ttl_ms;
+        let ttl = self.limits.ttl_ms();
         let mut ranked: Vec<(bool, u64, String)> = self
             .peers
             .values()
@@ -520,7 +520,7 @@ impl PeerCache {
         // Expired (false) first, then oldest success first.
         ranked.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
 
-        let excess = self.peers.len() - self.limits.max_peers;
+        let excess = self.peers.len() - self.limits.max_peers();
         for (_, _, key) in ranked.into_iter().take(excess) {
             self.peers.remove(&key);
         }
@@ -532,7 +532,7 @@ impl PeerCache {
         self.dirty
             && self
                 .last_write_ms
-                .is_none_or(|last| now_ms.saturating_sub(last) >= self.limits.write_debounce_ms)
+                .is_none_or(|last| now_ms.saturating_sub(last) >= self.limits.write_debounce_ms())
     }
 
     /// Write if the debounce interval has elapsed.
@@ -567,6 +567,21 @@ impl PeerCache {
             peers: self.peers.values().cloned().collect(),
         };
         let json = serde_json::to_vec_pretty(&file)?;
+
+        // MEASURED BEFORE IT IS PUBLISHED. Every other bound in this
+        // crate is on a value; this is the one on the result, and it is
+        // what makes "a cache never writes a file it cannot read" true
+        // rather than merely argued. The per-value bounds imply it for a
+        // cache built through the public API, and implication is not the
+        // same as a check -- the derivation behind MAX_CACHE_FILE_BYTES
+        // has already been wrong once.
+        let size = json.len() as u64;
+        if size > MAX_CACHE_FILE_BYTES {
+            return Err(CacheError::TooLargeToPublish {
+                got: size,
+                max: MAX_CACHE_FILE_BYTES,
+            });
+        }
 
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(parent)?;

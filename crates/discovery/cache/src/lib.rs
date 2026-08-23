@@ -31,8 +31,9 @@ pub mod record;
 
 pub use cache::{CacheHealth, FORMAT_VERSION, PeerCache, SOURCE};
 pub use limits::{
-    CacheLimits, DEFAULT_TTL_MS, MAX_ADDRESS_BYTES, MAX_ADDRESSES_PER_PEER, MAX_CACHE_FILE_BYTES,
-    MAX_CAPABILITIES_PER_PEER, MAX_LABEL_BYTES, MAX_PEERS, WRITE_DEBOUNCE_MS,
+    CacheLimits, CacheLimitsBuilder, DEFAULT_TTL_MS, InvalidCacheLimits, MAX_ADDRESS_BYTES,
+    MAX_ADDRESSES_PER_PEER, MAX_CACHE_FILE_BYTES, MAX_CAPABILITIES_PER_PEER, MAX_LABEL_BYTES,
+    MAX_PEERS, WRITE_DEBOUNCE_MS,
 };
 pub use record::{AddressObservation, PeerRecord, ProtocolCapabilityObservation};
 
@@ -57,6 +58,19 @@ pub enum CacheError {
         /// Bytes permitted.
         max: usize,
     },
+    /// The serialized cache exceeds what a load will read.
+    ///
+    /// The last guard before publication, and the one that closes the
+    /// loop: every other bound is on a value, and this is on the RESULT.
+    /// Without it a cache could write a file the next `load` quarantines
+    /// -- deleting its own contents on restart, with nothing to show for
+    /// it but a size complaint about a file it wrote itself.
+    TooLargeToPublish {
+        /// Serialized bytes.
+        got: u64,
+        /// Bytes a load will read.
+        max: u64,
+    },
 }
 
 impl From<std::io::Error> for CacheError {
@@ -79,6 +93,10 @@ impl core::fmt::Display for CacheError {
             Self::OutOfBounds { field, got, max } => {
                 write!(f, "{field} is {got} bytes; the limit is 1..={max}")
             }
+            Self::TooLargeToPublish { got, max } => write!(
+                f,
+                "the serialized cache is {got} bytes; a load reads at most {max}"
+            ),
         }
     }
 }
@@ -88,7 +106,7 @@ impl core::error::Error for CacheError {
         match self {
             Self::Io(e) => Some(e),
             Self::Serialize(e) => Some(e),
-            Self::OutOfBounds { .. } => None,
+            Self::OutOfBounds { .. } | Self::TooLargeToPublish { .. } => None,
         }
     }
 }

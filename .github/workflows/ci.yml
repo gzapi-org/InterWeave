@@ -127,6 +127,9 @@ jobs:
       - name: Component READMEs agree with their own directories
         run: bash tools/checks/check_component_status.sh
 
+      - name: Required check contexts match the workflow's job names
+        run: bash tools/checks/check_required_contexts.sh
+
       # Installed from the upstream release binary, verified by checksum,
       # rather than through a third-party action.
       #

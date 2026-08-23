@@ -87,6 +87,11 @@ fn tree_checks() -> Vec<Task> {
             &["tools/checks/check_component_status.sh"],
         ),
         Task::new(
+            "required check contexts match the workflow's job names",
+            "bash",
+            &["tools/checks/check_required_contexts.sh"],
+        ),
+        Task::new(
             "dependency policy — advisories, licences, bans, sources",
             "bash",
             &["tools/checks/check_dependencies.sh"],

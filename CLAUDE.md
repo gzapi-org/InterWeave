@@ -12,7 +12,7 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
 - `.claude/` is committed shared agent configuration: `settings.json` and `statusline.sh` (§9), plus `skills/` — task-scoped procedures loaded on demand, see §10. Only `settings.local.json` and `CLAUDE.local.md` are per-developer and gitignored.
 - Stages 0-4 are **complete** and **Stage 5 is open**. Read `[workspace].members` for the current list rather than trusting a roster written here, and `[workspace.metadata.interweave].status` for the open stage. The Stage-1 contract crates under `crates/api/` remain types and validation only — no I/O, no runtime, no backend — and the Stage-2 crates remain pure state machines. Stage 3 landed the first file I/O and the Ed25519 identity; Stage 4 landed the libp2p substrate — TCP, Noise, Yamux, Identify — with every other behaviour left out of the feature list rather than merely unused. Stage 5 builds the root connection and dial-admission funnel, and activates no new package: it is the gate that §3's hard sequencing rule requires before Kademlia, AutoNAT, Relay or DCUtR exist at all. No further package joins until the stage that needs it opens (§3).
 - The toolchain is pinned in `rust-toolchain.toml`; edition, MSRV, lints, shared dependency versions, and the release profile are declared once in the root `Cargo.toml` and inherited.
-- There is no production Rust implementation yet.
+- Production Rust exists and grows one stage at a time; `apps/` and `packaging/` are still empty, so there is no binary, installer, or service unit yet.
 - Display name is **InterWeave**. Machine/wire namespace is lowercase `interweave` per ADR-0047.
 - Do not reintroduce the former pre-InterWeave namespace into current production constants, fixtures, paths, package names, or documentation except when discussing history explicitly.
 
@@ -91,6 +91,21 @@ Put a test at the **lowest layer that completely proves the behavior**:
 Do not replace a real-network/process/platform requirement with mocks merely to make a test easier.
 
 `tests/support` is test-only and must never be a production dependency.
+
+#### A comment that claims an invariant owes a test
+
+**Every comment containing "never", "only", "bounded", "exactly", or "fails closed" must point to a test that would fail if that statement stopped being true.**
+
+A comment is not enforcement. Writing the reasoning down is the step that *feels* like doing the work, which is exactly why it substitutes for it so easily: the claim reads as settled, review reads it as settled, and nothing anywhere fails when it stops being true. This repository has already shipped a helper whose own documentation explained that a caller who skipped it would get "a gate that looks like it is working" — and that helper was called by nothing.
+
+So the rule is mechanical, and the check is mechanical too:
+
+- Find the test that fails if the sentence becomes false. Not a test of the same function — a test of **that claim**.
+- If there is no such test, either write it or delete the claim. A weaker true comment beats a strong unenforced one.
+- **Break the code and watch the test fail.** A test written from the same belief as the comment agrees with the comment for free; the mutation is what proves the test is load-bearing. Every one of the recurring defects here passed its tests, because the test fed the function the shape the author already had in mind.
+- Feed the test what the **caller actually holds**, not what the function was designed for. `source_bucket` was correct for every input its tests supplied and wrong for the string a listener hands over, three separate times.
+
+The words are a trigger, not the whole set — an invariant phrased without them owes the same test. The list exists so the rule can be applied without judgement, on sight.
 
 ### Fixtures vs test data
 
@@ -298,7 +313,7 @@ A session cannot see its own permission prompts, so do not try to verify this ga
 
 `main` is protected by the `main protection` ruleset: pull request required, direct pushes and force-pushes blocked, branch deletion blocked, **merge commits only** (squash and rebase disabled), and a **merge queue** (`ALLGREEN`, merge method `MERGE`). Required approving reviews are 0 and unresolved review threads do not block — so **the merge is not evidence that anything was reviewed**.
 
->  **CI exists and gates `main`** — `.github/workflows/ci.yml` runs every tree check and every self-test on `pull_request`, `merge_group`, and pushes to `main`. It reports two contexts, which are the job `name:` values verbatim: **`tree checks`** and **`tool self-tests`**. Both are in the ruleset's `required_status_checks`, so the queue now gates correctness and not merely ordering. The policy is **non-strict**: a branch need not be up to date with `main` to merge, which is why folding `origin/main` in and re-testing locally (Phase 3) is still on you rather than on the platform.
+>  **CI exists and gates `main`** — `.github/workflows/ci.yml` runs fmt, clippy, the workspace tests, every tree check, and every self-test on `pull_request`, `merge_group`, and pushes to `main`. It reports three contexts, which are the job `name:` values verbatim: **`rust`**, **`tree checks`**, and **`tool self-tests`**. All three are in the ruleset's `required_status_checks`, so the queue gates correctness and not merely ordering. `tools/checks/check_required_contexts.sh` keeps this paragraph and the workflow in agreement; the ruleset itself needs admin API access and is checked by hand. The policy is **non-strict**: a branch need not be up to date with `main` to merge, which is why folding `origin/main` in and re-testing locally (Phase 3) is still on you rather than on the platform.
 >
 > A job's `name:` *is* its required-check context, so renaming a job silently un-gates `main` — the ruleset goes on requiring a context nothing reports, and the queue waits forever. Rename a job only together with the ruleset.
 >
@@ -401,6 +416,20 @@ Not on that list: "different concerns", "different packages", "different root ca
 
 **Arm `--auto` only when the branch is finished.** Arming is standing consent: it lands the PR at the FIRST moment every required check is green, not when you decide you are done. Arm while more commits are coming and the PR can merge before your next commit exists. Arming late costs nothing, so there is no trade to make.
 
+#### A security-boundary change waits for its review
+
+**Do not arm `--auto` on a change to a security boundary until the automated review has reported on the current head.** Green checks are not a review: §9 already says the merge is not evidence that anything was reviewed, and the queue lands a PR the moment the last check passes.
+
+The gap is not theoretical and it is measured in seconds. PR #28 merged at 06:56:03 UTC and the review that found a P1 in it arrived at 06:56:15 — twelve seconds later, against a branch that no longer existed. The finding then cost a fresh branch, a second PR, and a reply on a merged thread, all to land a two-line fix that would have been one more commit had anyone waited.
+
+A **security boundary** here means identity and key handling, trust policy, wire or configuration parsing, persistence, admission and resource accounting, and anything cryptographic. Documentation and mechanical changes are not on that list and should not wait.
+
+The mechanics, and the step that is easy to miss: **a push does not re-trigger automated review, so waiting for one you never asked for is waiting forever.** Open the PR, request a review explicitly, and only then run `tools/gh/pr-review-status.sh <n> --wait` in the background, arming once it reports a review of the current head.
+
+`pr-review-status.sh` tells you which of those two states you are in. Exit 5 — `NO REVIEW COMING` — means the head advanced past the last review and none was requested; it returns immediately rather than sitting out the timeout, so a fast `--wait` there is the answer and not a failure. Ask for the review, then wait again. Note that an `@codex review` comment is not a GitHub review *request*, so the tool still reports exit 5 while one is genuinely in flight; poll the reviews for one whose commit is your head. A review that arrives while you are still committing is a review of the wrong tree, which is a reason to arm late rather than a reason not to wait. If a finding lands on a PR that is already queued, `gh api graphql -f query='mutation{dequeuePullRequest(input:{id:"<pr node id>"}){mergeQueueEntry{state}}}'` takes it out of the queue so the fix goes on the same head — `gh pr merge --disable-auto` clears the standing consent but does NOT dequeue.
+
+Zero unresolved P1 or P2 findings is also a precondition for declaring a stage complete. Nothing enforces that; it is the same class of obligation as Phase 6, which no red check announces either.
+
 ### Concurrent sessions, worktrees, and subagent dispatch
 
 Multiple sessions may work this repository in parallel, possibly on different hosts. **Isolation is required**, and the model is **one full `git clone` per session**. Sessions coordinate **only** through `origin`.
@@ -488,6 +517,7 @@ For repository-wide changes, verify at minimum:
 - `tools/checks/verify_fixture_vectors.py` is clean — every frozen vector recomputes from its declared algorithm;
 - `tools/checks/check_stage_status.sh` is clean — every human-facing statement of the open stage agrees with `workspace.metadata.interweave.status`;
 - `tools/checks/check_component_status.sh` is clean — no component README calls itself an unimplemented placeholder while its own directory holds a manifest and source;
+- `tools/checks/check_required_contexts.sh` is clean — the workflow's job names and §9's list of required contexts are the same set;
 - `tools/checks/check_dependencies.sh` is clean — the graph satisfies `deny.toml`: no advisory or yanked version, every licence on the allow-list, no wildcard requirement or shipped executable, and crates.io as the only source;
 - no forbidden production artifacts were introduced outside the active stage;
 - `git fsck --full` passes before archive handoff when a full repository ZIP is requested.
