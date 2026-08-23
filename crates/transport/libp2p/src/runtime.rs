@@ -47,7 +47,6 @@ use interweave_transport_runtime::{
 };
 use libp2p::core::transport::ListenerId;
 use libp2p::swarm::SwarmEvent as Libp2pSwarmEvent;
-use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
 use libp2p::{Multiaddr, PeerId, identify, noise, tcp, yamux};
 use tokio::sync::{mpsc, oneshot};
 
@@ -706,25 +705,23 @@ fn handle_command(
                     return;
                 }
             };
-            // BOUND TO THE EXPECTED IDENTITY. Dialling a bare address
-            // tells libp2p nothing about who should be there, so a server
-            // at that address can complete a Noise handshake with any key
-            // and the connection is accepted. Building the dial with the
-            // PeerId makes the mismatch libp2p's problem: it refuses the
-            // connection instead of reporting `Connected` for a peer
-            // nobody asked for.
-            let Ok(expected) = peer.as_str().parse::<PeerId>() else {
-                let _ = reply.send(Err(DialRefusal::Backend(format!(
-                    "expected peer {} is not a libp2p PeerId",
-                    peer.as_str()
-                ))));
-                return;
+            // DERIVED FROM THE ADMISSION, not paired with it. The
+            // destination is read back out of the ticket rather than
+            // rebuilt from the command's own `peer`/`address`, so there
+            // is no second copy of the destination that could disagree
+            // with the one the gate admitted.
+            let admitted = match AdmittedDial::from_ticket(ticket) {
+                Ok(a) => a,
+                Err(boxed) => {
+                    let undialable = *boxed;
+                    // The refusal is still an admission that reserved a
+                    // slot, so it is settled here rather than dropped
+                    // on the floor.
+                    manager.record_failure(undialable.ticket, now_ms);
+                    let _ = reply.send(Err(DialRefusal::Backend(undialable.reason)));
+                    return;
+                }
             };
-            let opts = DialOpts::peer_id(expected)
-                .addresses(vec![address])
-                .condition(PeerCondition::Always)
-                .build();
-            let admitted = AdmittedDial::new(ticket, opts);
             let id = admitted.connection_id();
             let answer = match swarm.dial(admitted) {
                 Ok(ticket) => {
