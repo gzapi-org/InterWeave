@@ -485,3 +485,110 @@ async fn an_inbound_connection_over_the_ceiling_is_not_kept() {
     first.shutdown().await.expect("shuts down");
     listener.shutdown().await.expect("shuts down");
 }
+
+/// Wait for the runtime to report a dial failure.
+async fn wait_dial_failed(runtime: &mut SwarmRuntime) -> String {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match tokio::time::timeout_at(deadline, runtime.next_event())
+            .await
+            .expect("a dial failure arrives within the deadline")
+        {
+            Some(interweave_transport_libp2p::SwarmEvent::DialFailed { detail, .. }) => {
+                return detail;
+            }
+            Some(_) => {}
+            None => panic!("the substrate stopped before failing"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_poisoned_address_does_not_suppress_the_peer_s_good_route() {
+    // THE POISONING TEST STAGE 5 REQUIRES, in the plan's own words: for
+    // a trusted PeerId with both a known-good address and an
+    // attacker-supplied wrong-key address, the wrong address must be
+    // quarantined without suppressing the known-good route through
+    // peer-wide punitive backoff.
+    //
+    // The attack it describes is cheap. Anyone who can get one bogus
+    // address associated with a trusted peer -- a stale record, a
+    // hostile directory answer, a peer that moved -- could otherwise
+    // put that peer into peer-scoped backoff on demand and keep it
+    // there, cutting a route that was working the whole time.
+    //
+    // Over real sockets, because the distinction being tested is
+    // between what libp2p reports for a wrong key and what it reports
+    // for an unreachable address, and a mock would be asserting the
+    // shape of the author's own assumption.
+    let good = SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+    let good_address = good
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
+        .await
+        .expect("binds");
+    let trusted = good.local_peer().clone();
+
+    // The impostor: a real listener, answering, with a different key.
+    let impostor = SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+    let poisoned_address = impostor
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
+        .await
+        .expect("binds");
+    assert_ne!(
+        impostor.local_peer(),
+        &trusted,
+        "the impostor is a different identity, which is the whole scenario"
+    );
+
+    let mut dialer = SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+
+    // The good route works first, so "known-good" is a fact about this
+    // run rather than an assumption.
+    assert!(
+        dialer
+            .dial(trusted.clone(), good_address.clone())
+            .await
+            .expect("the command reaches the task")
+            .is_ok()
+    );
+    assert_eq!(wait_connected(&mut dialer).await, trusted);
+
+    // Now the poisoned one, dialed as the SAME trusted peer.
+    assert!(
+        dialer
+            .dial(trusted.clone(), poisoned_address.clone())
+            .await
+            .expect("the command reaches the task")
+            .is_ok(),
+        "admitted -- the address has no history yet, and finding out is the point"
+    );
+    let detail = wait_dial_failed(&mut dialer).await;
+    assert!(
+        detail.contains("Unexpected peer ID"),
+        "the impostor must fail the IDENTITY check, not the transport -- a          connection refused or a timeout would quarantine nothing and would          make the assertions below pass for the wrong reason: {detail}"
+    );
+
+    // THE CLAUSE. The poisoned address is refused from now on...
+    match dialer
+        .dial(trusted.clone(), poisoned_address)
+        .await
+        .expect("the command reaches the task")
+    {
+        Err(DialRefusal::Policy(DialDenial::AddressQuarantined)) => {}
+        other => panic!("the poisoned address must be quarantined, got {other:?}"),
+    }
+
+    // ...and the route that has been working all along is untouched.
+    let again = dialer
+        .dial(trusted, good_address)
+        .await
+        .expect("the command reaches the task");
+    assert!(
+        again.is_ok(),
+        "one poisoned address must not cost the peer its good route, got {again:?}"
+    );
+
+    dialer.shutdown().await.expect("shuts down");
+    impostor.shutdown().await.expect("shuts down");
+    good.shutdown().await.expect("shuts down");
+}
