@@ -58,6 +58,21 @@
 #   -q, --quiet            no progress lines on stderr
 #   -h, --help             this text
 #
+# A CLEAN REVIEW IS NOT A REVIEW OBJECT. When the automated reviewer
+# finds nothing it posts an ordinary issue COMMENT — "Didn't find any
+# major issues" — and creates no review. Counting only review objects
+# therefore reported `head reviewed? no` on exactly the PRs that passed,
+# and then exit 5, "no review is coming", about a review that had
+# already happened and succeeded. CLAUDE.md §9 tells a session to wait
+# for the review before arming a security-boundary change, so that
+# false negative turned the happy path into an indefinite wait.
+#
+# Those comments name what they looked at — `**Reviewed commit:** <sha>`
+# — so this reads the sha rather than inferring coverage from a
+# timestamp. Inferring would be the confident wrong answer this script
+# exists to avoid: a verdict comment can arrive after a push and still
+# describe the commit before it.
+#
 # Exit codes:
 #   0  the current head has at least one independent review
 #   1  it does not — nothing yet, or --wait expired still waiting
@@ -154,6 +169,8 @@ note() { (( QUIET )) || echo "pr-review-status: $*" >&2; }
 # them every 30 seconds would be rude to the rate limiter for output
 # nobody sees.
 probe_ok=0
+verdicts='[]'
+verdict_count=0
 probe() {
     local meta reviews
     meta="$(gh pr view "$PR" --repo "$REPO" \
@@ -186,8 +203,37 @@ probe() {
     ind_count="$(jq 'length' <<<"$independent")"
     self_count="$(jq 'length' <<<"$self")"
 
+    # VERDICT COMMENTS. Unreadable rather than empty, for the same
+    # reason the reviews call is: a swallowed failure here would report
+    # a clean review as no review.
+    local comments_raw comments
+    comments_raw="$(gh api --paginate "repos/$REPO/issues/$PR/comments" 2>/dev/null)" || return 1
+    comments="$(jq -s 'add // []' <<<"$comments_raw" 2>/dev/null)" || return 1
+
+    # A non-author comment that names the commit it reviewed. The sha is
+    # abbreviated in the body, so match on prefix in BOTH directions --
+    # neither string is reliably the longer one.
+    verdicts="$(jq --arg a "$author" '
+        [ .[]
+          | select(.user.login != $a)
+          | (.body // "") as $b
+          | ($b | capture("Reviewed commit:[^`]*`(?<sha>[0-9a-f]{7,40})`"; "i") // empty) as $m
+          | {login: .user.login, at: .created_at, sha: $m.sha}
+        ]' <<<"$comments" 2>/dev/null)" || verdicts='[]'
+    verdict_count="$(jq 'length' <<<"$verdicts")"
+
     head_reviewed=no
     newest_ind_commit=""
+
+    # Either kind of evidence counts, and a verdict comment is checked
+    # even when there are no review objects at all: a PR whose only
+    # review was clean has none.
+    if [[ "$(jq -r --arg h "$head" \
+          'any(.[]; (.sha as $s | ($h | startswith($s)) or ($s | startswith($h))))' \
+          <<<"$verdicts")" == "true" ]]; then
+        head_reviewed=yes
+    fi
+
     if (( ind_count > 0 )); then
         newest_ind_commit="$(jq -r 'sort_by(.submitted_at) | last | .commit_id' <<<"$independent")"
         # COVERAGE IS "ANY review targets head", NOT "the newest one
@@ -214,8 +260,11 @@ probe() {
 # moved past it, and no pending request. Any one of those missing and
 # waiting is still the right move.
 no_review_coming() {
+    # A prior VERDICT comment is equally evidence that this PR is one
+    # the reviewer answers, so it satisfies the "not a fresh PR" term
+    # just as a review object does.
     [[ "$head_reviewed" == "no" ]] \
-        && (( ind_count > 0 )) \
+        && (( ind_count + verdict_count > 0 )) \
         && (( requested == 0 ))
 }
 
@@ -249,6 +298,14 @@ render() {
     if (( ind_count > 0 )); then
         jq -r '.[] | "      - \(.user.login)  \(.state)  commit=\(.commit_id[0:8])  \(.submitted_at)"' \
             <<<"$independent"
+    fi
+    printf '  verdict comments    : %s' "$verdict_count"
+    if (( verdict_count > 0 )); then
+        printf '   (a clean review leaves no review object)'
+    fi
+    printf '\n'
+    if (( verdict_count > 0 )); then
+        jq -r '.[] | "      - \(.login)  commit=\(.sha[0:8])  \(.at)"' <<<"$verdicts"
     fi
     printf '  self reviews        : %s   (thread replies etc. — not coverage)\n' "$self_count"
     printf '  review requested?   : %s\n' "$( (( requested > 0 )) && echo yes || echo no )"
