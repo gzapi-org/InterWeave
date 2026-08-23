@@ -170,12 +170,6 @@ impl GatedSwarm {
         Self { inner, admitted }
     }
 
-    /// The local identity.
-    #[must_use]
-    pub fn local_peer_id(&self) -> &PeerId {
-        self.inner.local_peer_id()
-    }
-
     /// Begin listening.
     ///
     /// # Errors

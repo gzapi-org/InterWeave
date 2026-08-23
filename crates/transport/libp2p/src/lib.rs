@@ -18,6 +18,13 @@
 //! could be started without them would have a window in which it
 //! trusted everybody.
 //!
+//! [`outbound_gate::OutboundAdmission`] closes the third door: libp2p
+//! routes a behaviour's own dials through
+//! `handle_pending_outbound_connection` rather than through
+//! [`GatedSwarm`], so that hook refuses any dial the root admission did
+//! not just issue a ticket for. It exists before any behaviour that
+//! dials, which is the order CLAUDE.md §3 requires.
+//!
 //! # What is absent, and why it is absent rather than merely unused
 //!
 //! GossipSub, direct v2, Kademlia, AutoNAT, Circuit Relay and DCUtR are
