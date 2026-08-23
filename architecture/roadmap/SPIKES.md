@@ -31,6 +31,17 @@ Under [ADR-0046](../adr/0046-bottom-up-implementation-order.md) and the [`BOTTOM
 
 Using the exact target rust-libp2p version, verify that an invalid signed-source/sequence claim cannot create a lasting duplicate-cache entry that suppresses a later valid message with the same `GossipSubMessageIdV1`. Also verify that two authenticated publishers carrying the same application-envelope `message_id` produce distinct mesh IDs and both reach application validation. If library ordering differs from this requirement, document and prototype an equivalent pre-cache authenticity gate before Phase 2 is accepted.
 
+**Result (2026-08-23): PASS**, against `libp2p 0.56` — the version the substrate ships. Evidence and the reproducing harness are in [`spikes/spike-002/`](../../spikes/spike-002/README.md). Every architectural decision this spike could have disturbed held: twenty-four concurrent same-key retransmissions through real request-response scheduling produced **one** local enqueue and twenty-three waiters; the bounded reservation map admitted exactly its per-peer budget and refused the rest as `Overloaded`; `AcceptedV2` was withheld across an await while another peer was served normally and still arrived afterwards; two publishers reusing one application-envelope `message_id` produced distinct mesh IDs and both reached validation; and an invalid signed-source claim was rejected without leaving a duplicate-cache entry, so a genuine message with the same mesh ID was still delivered. No pre-cache authenticity gate is required.
+
+Four findings constrain the Stage 6 implementation:
+
+1. **Timeout attribution is a race.** Both sides run the same `request_timeout`, so whichever fires first decides what the other is told: a responder whose inbound timeout closes the substream first leaves the requester reading `Io(Eof)` rather than `OutboundFailure::Timeout`. Both were observed across runs of the same experiment. Stage 6 must not branch on `Timeout` alone to mean "no answer in time".
+2. **A withheld response outlives its channel.** After a timeout the responder still holds a `ResponseChannel` whose `is_open()` is `false`; a late `send_response` has nowhere to go. Producing a response is not evidence the peer heard it.
+3. **`OutboundFailure::UnsupportedProtocols`** is the clean, pre-timeout signal for a major-version mismatch.
+4. **One connection serves both protocol families**, so no connection-per-protocol accounting is needed.
+
+The GossipSub ordering experiment required one stated substitution: the public API does not let a caller choose a sequence number, so a source+sequence collision between a forged and a genuine message cannot be arranged through it. That experiment derives the mesh ID from the payload to force the collision the ordering question is about, and changes nothing else in the receive path; the source+sequence rule itself is exercised unmodified by the companion experiment.
+
 ---
 
 ## SPIKE-003 — Kademlia integration validation
