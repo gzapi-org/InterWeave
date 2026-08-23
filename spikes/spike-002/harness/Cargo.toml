@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# SPIKE-002 harness — EVIDENCE ONLY, and deliberately not a workspace
+# member. Nothing depends on it, and its results reach production as
+# permanent tests rather than as code (CLAUDE.md §4, spikes/README.md).
+#
+# Staying outside the workspace matters MORE here than it did for
+# SPIKE-006, and not only for the reasons that applied there. This
+# harness enables `request-response` and `gossipsub` on the same
+# `libp2p` dependency the substrate uses, and Cargo unifies features
+# across one build of one workspace. As a member, it would switch both
+# protocols on inside `interweave-transport-libp2p` — undoing the whole
+# point of CLAUDE.md §3's "absent from the feature list rather than
+# merely unused", and doing it invisibly, because nothing in the
+# production crate would have changed.
+#
+# An EMPTY workspace table is what keeps it out: the package is its own
+# workspace root, so it is never built by `cargo xtask ci`, never enters
+# the root `Cargo.lock`, and is one deliberate `path =` away from
+# production rather than one accident away.
+[workspace]
+
+[package]
+name = "spike-002-harness"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+# 0.56, because that is what the substrate ships. A spike measuring a
+# version the product does not use measures nothing (SPIKE-006 learned
+# this the expensive way, having first been run against a version the
+# substrate could not have linked).
+#
+# `request-response` and `gossipsub` are the two subjects. They are
+# absent from the production feature list and must stay absent until
+# Stage 6 and Stage 7 open respectively.
+libp2p = { version = "0.56", default-features = false, features = [
+    "tcp",
+    "noise",
+    "yamux",
+    "identify",
+    "tokio",
+    "macros",
+    "ed25519",
+    "request-response",
+    "gossipsub",
+    "cbor",
+] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+
+# The PRODUCTION dedup and reservation machinery, by path and on purpose.
+# The question this spike asks about concurrency is whether those exact
+# structures survive the real request-response scheduler, so measuring a
+# copy of them would measure a copy. The dependency runs spike -> product,
+# which is the direction CLAUDE.md §4 permits; the reverse is what it
+# forbids.
+interweave-transport-runtime = { path = "../../../crates/transport/runtime" }
+interweave-transport-api = { path = "../../../crates/api/transport-api" }
