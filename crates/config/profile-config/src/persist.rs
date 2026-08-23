@@ -90,7 +90,7 @@ fn write_atomic_with_mode(
     contents: &[u8],
     mode: Option<u32>,
 ) -> Result<(), PersistError> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = parent_dir(path);
     // PRIVATE MATERIAL GETS A PRIVATE PARENT, created as one and then
     // checked. `create_dir_all` produces a `0755` directory when the
     // path does not exist yet, and does nothing at all when it does --
@@ -159,7 +159,7 @@ fn write_atomic_with_mode(
 /// [`PersistError::UnsupportedPlatform`] where owner-only permissions
 /// cannot be enforced. Nothing at `path` is touched in any case.
 pub fn create_private_exclusive(path: &Path, contents: &[u8]) -> Result<(), PersistError> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = parent_dir(path);
     create_private_dir(parent)?;
     require_private_dir(parent)?;
 
@@ -197,6 +197,26 @@ pub fn create_private_exclusive(path: &Path, contents: &[u8]) -> Result<(), Pers
     }
 
     Ok(())
+}
+
+/// The directory `path` names a file in, as a path that can be opened.
+///
+/// `Path::parent` returns `Some("")` for a bare relative filename --
+/// NOT `None` -- so `unwrap_or_else(|| Path::new("."))` never fired for
+/// exactly the case it was written for. The empty path cannot be
+/// inspected, so `symlink_metadata("")` failed with ENOENT and
+/// `save(Path::new("identity.key"))` reported a missing directory
+/// instead of checking the one it was about to write into.
+///
+/// Normalising fixes the wrong error, not the refusal: with the current
+/// directory as the parent, a private write still requires that
+/// directory to be owner-only, which for key material is the answer.
+/// The difference is that it now says so.
+fn parent_dir(path: &Path) -> &Path {
+    match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    }
 }
 
 /// A temporary path beside `path`, unique to this writer.
