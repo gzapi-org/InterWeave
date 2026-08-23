@@ -73,6 +73,17 @@ pub struct PolicySnapshot {
     /// why resources are exact and policy is not.
     pending: Arc<AtomicUsize>,
     max_pending_dials: usize,
+    /// Live established-connection count, SHARED with the manager.
+    ///
+    /// A connection is a resource, so it obeys the resource rule and
+    /// not the policy one: reserved when the dial is admitted, held by
+    /// the ticket, and carried over to the connection when it
+    /// establishes. Counting only at establishment let every dial
+    /// admitted before the first one connected observe a count of zero,
+    /// so a ceiling of one admitted as many concurrent dials as the
+    /// pending budget allowed.
+    connections: Arc<AtomicUsize>,
+    max_connections: usize,
     /// Live drain state, SHARED with the manager.
     ///
     /// Photographed, it was the one piece of policy a holder could keep
@@ -144,35 +155,88 @@ impl PolicySnapshot {
         // a third sees a count above the limit that briefly existed.
         // Reserving only from a value that is under the limit means the
         // count is never above it, at any instant, for any observer.
-        let mut current = self.pending.load(Ordering::Acquire);
-        loop {
-            if current >= self.max_pending_dials {
-                return Err(DialDenial::TooManyPendingDials);
-            }
-            match self.pending.compare_exchange_weak(
-                current,
-                current + 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => break,
-                Err(seen) => current = seen,
-            }
-        }
+        reserve(&self.pending, self.max_pending_dials)
+            .map_err(|()| DialDenial::TooManyPendingDials)?;
 
-        Ok(DialTicket {
+        // THE CONNECTION IT WILL BECOME, reserved now. Held by the
+        // ticket and handed to the connection on success, so the
+        // ceiling counts what is on its way as well as what is open.
+        let ticket = DialTicket {
             pending: Arc::clone(&self.pending),
+            connections: Arc::clone(&self.connections),
             peer: request.peer.clone(),
             address: request.address.clone(),
             origin: request.origin,
             settled: false,
-        })
+            connection_kept: false,
+        };
+        if reserve(&self.connections, self.max_connections).is_err() {
+            // `ticket` releases the pending slot as it drops here, and
+            // holds no connection slot to release.
+            let mut ticket = ticket;
+            ticket.connection_kept = true;
+            return Err(DialDenial::ConnectionLimitReached);
+        }
+
+        Ok(ticket)
+    }
+
+    /// Established connections right now.
+    #[must_use]
+    pub fn connections(&self) -> usize {
+        self.connections.load(Ordering::Acquire)
     }
 
     /// Pending dials right now, across every holder of this snapshot.
     #[must_use]
     pub fn pending_dials(&self) -> usize {
         self.pending.load(Ordering::Acquire)
+    }
+}
+
+/// Take one unit of a bounded resource, or report that it is full.
+///
+/// A compare-exchange loop rather than a fetch_add-then-check: adding
+/// first and backing out on overflow means two concurrent reservations
+/// can both observe the ceiling exceeded and both retreat, or worse, a
+/// third sees a count above the limit that briefly existed. Taking only
+/// from a value that is under the limit means the count is never above
+/// it, at any instant, for any observer.
+fn reserve(counter: &AtomicUsize, ceiling: usize) -> Result<(), ()> {
+    let mut current = counter.load(Ordering::Acquire);
+    loop {
+        if current >= ceiling {
+            return Err(());
+        }
+        match counter.compare_exchange_weak(
+            current,
+            current + 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return Ok(()),
+            Err(seen) => current = seen,
+        }
+    }
+}
+
+/// One established connection's place under `max_connections`.
+///
+/// Released on drop, so a connection that goes away cannot leave its
+/// slot behind however it went away -- an error path, a panic, or a
+/// runtime dropped mid-flight.
+#[derive(Debug)]
+#[must_use = "dropping the slot releases it; hold it for the life of the connection"]
+pub struct ConnectionSlot {
+    connections: Arc<AtomicUsize>,
+    released: bool,
+}
+
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        if !self.released {
+            self.connections.fetch_sub(1, Ordering::AcqRel);
+        }
     }
 }
 
@@ -187,10 +251,12 @@ impl PolicySnapshot {
 #[must_use = "a ticket is permission to dial; drop it only if the dial is abandoned"]
 pub struct DialTicket {
     pending: Arc<AtomicUsize>,
+    connections: Arc<AtomicUsize>,
     peer: Option<TransportIdentity>,
     address: String,
     origin: DialOrigin,
     settled: bool,
+    connection_kept: bool,
 }
 
 impl DialTicket {
@@ -215,6 +281,11 @@ impl DialTicket {
 
 impl Drop for DialTicket {
     fn drop(&mut self) {
+        if !self.connection_kept {
+            // The dial never became a connection, so the slot it was
+            // holding for one goes back.
+            self.connections.fetch_sub(1, Ordering::AcqRel);
+        }
         if !self.settled {
             // Saturating in spirit: the count is only ever incremented
             // by a successful reservation, so it cannot underflow unless
@@ -319,6 +390,8 @@ pub struct ConnectionManager {
     revision: u64,
     pending: Arc<AtomicUsize>,
     max_pending_dials: usize,
+    connections: Arc<AtomicUsize>,
+    max_connections: usize,
     shutting_down: Arc<AtomicBool>,
     published_revision: Arc<AtomicU64>,
     retries: std::collections::BTreeMap<TransportIdentity, Retry>,
@@ -331,6 +404,8 @@ impl ConnectionManager {
     #[must_use]
     pub fn new(policy: ConnectionPolicy, max_pending_dials: usize) -> Self {
         let pending = Arc::new(AtomicUsize::new(0));
+        let connections = Arc::new(AtomicUsize::new(0));
+        let max_connections = policy.max_connections;
         let shutting_down = Arc::new(AtomicBool::new(false));
         let published_revision = Arc::new(AtomicU64::new(0));
         let first = Arc::new(PolicySnapshot {
@@ -338,6 +413,8 @@ impl ConnectionManager {
             revision: 0,
             pending: Arc::clone(&pending),
             max_pending_dials,
+            connections: Arc::clone(&connections),
+            max_connections,
             shutting_down: Arc::clone(&shutting_down),
             published_revision: Arc::clone(&published_revision),
         });
@@ -346,6 +423,8 @@ impl ConnectionManager {
             revision: 0,
             pending,
             max_pending_dials,
+            connections,
+            max_connections,
             shutting_down,
             published_revision,
             retries: std::collections::BTreeMap::new(),
@@ -383,6 +462,8 @@ impl ConnectionManager {
             revision: self.revision,
             pending: Arc::clone(&self.pending),
             max_pending_dials: self.max_pending_dials,
+            connections: Arc::clone(&self.connections),
+            max_connections: self.max_connections,
             shutting_down: Arc::clone(&self.shutting_down),
             published_revision: Arc::clone(&self.published_revision),
         });
@@ -395,13 +476,19 @@ impl ConnectionManager {
     }
 
     /// Record an authenticated success and clear this peer's retry.
-    pub fn record_success(&mut self, ticket: DialTicket, now_ms: u64) {
+    ///
+    /// Returns the connection slot the admission reserved, now owned by
+    /// the connection itself. Holding it is what keeps the ceiling
+    /// honest for the connection's whole life; dropping it says the
+    /// connection is gone.
+    pub fn record_success(&mut self, ticket: DialTicket, now_ms: u64) -> ConnectionSlot {
         if let Some(peer) = ticket.peer().cloned() {
             self.policy.record_success(&peer, ticket.address(), now_ms);
             self.retries.remove(&peer);
         }
-        self.settle(ticket);
+        let slot = self.keep_connection(ticket);
         self.publish();
+        slot
     }
 
     /// Record a failed dial and schedule the next attempt.
@@ -427,32 +514,10 @@ impl ConnectionManager {
         self.publish();
     }
 
-    /// Record that a connection is now established.
-    ///
-    /// Counted for INBOUND as well as outbound: `max_connections` is a
-    /// resource ceiling on sockets this process holds open, and half of
-    /// them are ones it did not dial. Counting only what the dialer
-    /// admitted would leave the ceiling reading zero on a node that
-    /// accepts, which is the node most exposed to reaching it.
-    pub fn record_connection_opened(&mut self) {
-        self.policy.connections = self.policy.connections.saturating_add(1);
-        self.publish();
-    }
-
-    /// Record that an established connection has gone.
-    ///
-    /// Saturating rather than wrapping: the count is derived from the
-    /// substrate's own paired events, and a close without a matching
-    /// open would otherwise make the ceiling unreachable forever.
-    pub fn record_connection_closed(&mut self) {
-        self.policy.connections = self.policy.connections.saturating_sub(1);
-        self.publish();
-    }
-
-    /// Connections currently counted against `max_connections`.
+    /// Established connections right now, dialed and accepted.
     #[must_use]
-    pub const fn connections(&self) -> usize {
-        self.policy.connections
+    pub fn connections(&self) -> usize {
+        self.connections.load(Ordering::Acquire)
     }
 
     /// Record that the peer at this address authenticated a different
@@ -470,6 +535,49 @@ impl ConnectionManager {
     fn settle(&self, mut ticket: DialTicket) {
         ticket.settled = true;
         self.pending.fetch_sub(1, Ordering::AcqRel);
+        // `connection_kept` stays false, so the ticket's connection
+        // reservation is released as it drops. A dial that failed holds
+        // no connection.
+    }
+
+    /// Settle the dial and TRANSFER its connection reservation.
+    fn keep_connection(&self, mut ticket: DialTicket) -> ConnectionSlot {
+        ticket.connection_kept = true;
+        let slot = ConnectionSlot {
+            connections: Arc::clone(&self.connections),
+            released: false,
+        };
+        self.settle(ticket);
+        slot
+    }
+
+    /// Reserve a slot for an INBOUND connection, or refuse to keep it.
+    ///
+    /// Inbound arrives without an admission, so there is no ticket to
+    /// carry the reservation. `None` means the ceiling is full or the
+    /// runtime is draining, and the connection must be closed rather
+    /// than kept: a bound that counts only what this node dialed is not
+    /// a bound on what it holds open.
+    pub fn admit_inbound(&mut self) -> Option<ConnectionSlot> {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return None;
+        }
+        reserve(&self.connections, self.max_connections).ok()?;
+        let slot = ConnectionSlot {
+            connections: Arc::clone(&self.connections),
+            released: false,
+        };
+        self.publish();
+        Some(slot)
+    }
+
+    /// Record that an established connection has gone.
+    ///
+    /// Takes the slot rather than a count, so releasing it is the same
+    /// act as saying it closed and neither can happen without the other.
+    pub fn record_connection_closed(&mut self, slot: ConnectionSlot) {
+        drop(slot);
+        self.publish();
     }
 
     /// Whether an inbound connection from this peer is kept.
@@ -572,6 +680,11 @@ mod tests {
 
     fn manager(max_pending: usize) -> ConnectionManager {
         ConnectionManager::new(ConnectionPolicy::new(64, 64), max_pending)
+    }
+
+    /// A manager whose connection ceiling is the thing under test.
+    fn manager_holding(max_connections: usize) -> ConnectionManager {
+        ConnectionManager::new(ConnectionPolicy::new(64, max_connections), 64)
     }
 
     fn request(peer_id: &str, address: &str) -> DialRequest {
@@ -768,7 +881,7 @@ mod tests {
                 40_000,
             )
             .expect("past the backoff");
-        m.record_success(t, 40_000);
+        drop(m.record_success(t, 40_000));
         assert_eq!(m.scheduled_retries(), 0, "a success clears the schedule");
 
         // PROMPTLY, in ADR-0011's word: the handle sees the new policy
@@ -851,7 +964,7 @@ mod tests {
             .handle()
             .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
             .expect("admitted");
-        m.record_success(ticket, 0);
+        drop(m.record_success(ticket, 0));
         assert!(m.revision() > revision, "the mutation published");
 
         assert_eq!(
@@ -874,6 +987,38 @@ mod tests {
             .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
             .expect("the current snapshot admits");
         drop(fresh);
+    }
+
+    #[test]
+    fn concurrent_dials_cannot_exceed_the_connection_ceiling() {
+        // Counting connections only once they establish let every dial
+        // admitted before the first one connected see a count of zero,
+        // so a ceiling of one admitted as many concurrent dials as the
+        // pending budget allowed. The slot is reserved by the
+        // admission and carried by the ticket, so the second dial is
+        // refused while the first is still in flight.
+        let m = manager_holding(1);
+        let first = m
+            .handle()
+            .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
+            .expect("the only connection slot");
+        assert_eq!(m.connections(), 1, "reserved at admission, not at connect");
+
+        assert_eq!(
+            m.handle()
+                .admit(&request(P1, "/b"), ConnectionClass::DataPlaneTrusted, 0)
+                .err(),
+            Some(DialDenial::ConnectionLimitReached),
+            "nothing has connected yet, and that is the point"
+        );
+
+        drop(first);
+        assert_eq!(m.connections(), 0, "an abandoned dial frees its slot");
+        drop(
+            m.handle()
+                .admit(&request(P1, "/b"), ConnectionClass::DataPlaneTrusted, 0)
+                .expect("and the ceiling is usable again"),
+        );
     }
 
     #[test]
