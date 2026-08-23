@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
-//! The Stage 4 network behaviour: Identify, and nothing else.
+//! The network behaviour: pre-auth admission and Identify.
 //!
 //! One behaviour, deliberately. Every additional protocol here is a
 //! protocol that starts doing things on its own — Kademlia dials to fill

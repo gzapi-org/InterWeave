@@ -2,10 +2,17 @@
 // Copyright 2026 Andrea Benetton
 //! The authenticated transport substrate.
 //!
-//! Stage 4 of the canonical plan: TCP, Noise, Yamux, Identify, and
-//! nothing else. Two peers can listen, dial, authenticate each other's
-//! PeerId, exchange Identify, and shut down. No application protocol
-//! runs over it yet.
+//! Stage 4 of the canonical plan built the substrate: TCP, Noise,
+//! Yamux, Identify, and nothing else. Two peers can listen, dial,
+//! authenticate each other's PeerId, exchange Identify, and shut down.
+//! No application protocol runs over it yet.
+//!
+//! Stage 5 added the funnel around it. Outbound, [`GatedSwarm::dial`]
+//! takes an [`AdmittedDial`], which is derived from a ticket only the
+//! root `ConnectionManager` issues. Inbound,
+//! [`preauth_gate::PreAuthAdmission`] answers before the Noise upgrade
+//! begins, so the work an unauthenticated party can make this process
+//! do is bounded where libp2p can still say no.
 //!
 //! # What is absent, and why it is absent rather than merely unused
 //!
@@ -28,11 +35,16 @@
 //!
 //! [`SwarmRuntime`] runs every dial through
 //! [`interweave_transport_runtime::ConnectionPolicy`], which Stage 2
-//! implemented and tested. Stage 5 owns making that gate *root* — every
-//! behaviour-originated dial, the ConnectionManager, the address
-//! scheduler. What Stage 4 refuses to do is ship a dial path with no
-//! gate at all and add one later, which is the retrofit CLAUDE.md warns
-//! against.
+//! implemented and tested, and Stage 5 made that gate *root*: the raw
+//! `Swarm` is private to [`GatedSwarm`], so a call site that forgets to
+//! ask does not misbehave at runtime — it does not compile.
+//!
+//! What remains before a dialing behaviour may exist is the behaviour
+//! path: libp2p routes those through
+//! `NetworkBehaviour::handle_pending_outbound_connection`, and the same
+//! ticket has to be required there. Stage 4's behaviour set does not
+//! dial, so nothing is ungated today; Kademlia must not be enabled
+//! before that hook exists.
 
 #![forbid(unsafe_code)]
 
