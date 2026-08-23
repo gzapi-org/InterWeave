@@ -55,6 +55,11 @@ assert_lacks() {
     if [[ "$RUN_OUT" != *"$2"* ]]; then pass "$1"
     else fail "$1 — output unexpectedly contained '$2'" "$RUN_OUT"; fi
 }
+assert_rc_not() {
+    local label="$1" unwanted="$2"
+    if [[ "$RUN_RC" -ne "$unwanted" ]]; then pass "$label"
+    else fail "$label — expected any exit but $unwanted" "$RUN_OUT"; fi
+}
 
 SANDBOX="$(mktemp -d)"
 mkdir -p "$SANDBOX/bin" "$SANDBOX/state"
@@ -92,6 +97,30 @@ case "$1 ${2:-}" in
     echo '[]'; exit 0 ;;
 esac
 
+# gh api repos/o/r/issues/N/comments — where a CLEAN review lands.
+#
+# Served from its own state file so a case can have review objects,
+# verdict comments, both, or neither. `state/verdicts` holds
+#   <login>,<abbreviated-sha>,<created_at>
+# per line, and the body is rendered in the real shape so the script's
+# own parser is what is being tested rather than a convenient stand-in.
+if [[ "$1" == "api" && "$*" == *"/issues/"* && "$*" == *"/comments"* ]]; then
+  if [[ -f "$S/verdicts_fail" ]]; then exit 1; fi
+  {
+    printf '['
+    first=1
+    while IFS=, read -r login sha at; do
+      [[ -z "$login" ]] && continue
+      (( first )) || printf ','
+      first=0
+      printf '{"user":{"login":"%s"},"created_at":"%s","body":"Codex Review: no major issues. **Reviewed commit:** `%s`"}' \
+        "$login" "$at" "$sha"
+    done < "$S/verdicts" 2>/dev/null
+    printf ']\n'
+  }
+  exit 0
+fi
+
 # gh api repos/o/r/pulls/N/reviews
 if [[ "$1" == "api" && "$*" == *"/reviews"* ]]; then
   # Matched across ALL args, not positionally: the script passes
@@ -128,11 +157,27 @@ chmod +x "$SANDBOX/bin/gh"
 run() {
     : > "$SANDBOX/state/n"
     printf '%s\n' "$1" > "$SANDBOX/state/polls"
-    rm -f "$SANDBOX/state/reviews_fail"
+    rm -f "$SANDBOX/state/reviews_fail" "$SANDBOX/state/verdicts_fail"
     printf '%s\n' "$2" > "$SANDBOX/state/reviews"
+    # Empty by default: most cases predate verdict comments and must go
+    # on meaning what they meant.
+    : > "$SANDBOX/state/verdicts"
     shift 2
     RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
         timeout 20 bash "$UNDER_TEST" 77 o/r "$@" 2>&1)"
+    RUN_RC=$?
+    (( RUN_RC == 124 )) && RUN_OUT="TIMED OUT — the run did not return"$'\n'"$RUN_OUT"
+}
+
+# Same as `run`, with verdict comments. Separate rather than a fourth
+# positional so every existing call keeps its meaning unchanged.
+run_v() {
+    local verdicts="$3"
+    run "$1" "$2" "${@:4}"
+    : > "$SANDBOX/state/n"
+    printf '%s\n' "$verdicts" > "$SANDBOX/state/verdicts"
+    RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
+        timeout 20 bash "$UNDER_TEST" 77 o/r "${@:4}" 2>&1)"
     RUN_RC=$?
     (( RUN_RC == 124 )) && RUN_OUT="TIMED OUT — the run did not return"$'\n'"$RUN_OUT"
 }
@@ -252,8 +297,15 @@ echo "pr-review-status: a MERGED PR is never told that no review is coming"
 # sweep exists. Firing exit 5 on one sends the caller to request a review
 # instead of awaiting the sweep that was about to deliver it, and
 # contradicts the merged-PR exception in the same loop.
+# THIS ASSERTION USED TO DO NOTHING. It called `ok`/`bad`, which are
+# not functions here -- the helpers are `pass`/`fail`, reached through
+# `assert_*`. Bash printed "ok: command not found" to stderr, the
+# failure counter never moved, and the suite went on reporting "all
+# assertions passed" with this case vacuous. A self-test that cannot
+# fail is worse than an absent one: it is the guard reporting coverage
+# it does not have.
 run "MERGED:newsha:0" "reviewer-a,oldsha1,2026-08-12T10:00:00Z"
-[ "$RUN_RC" != "5" ] && ok "a merged PR does not exit 5" || bad "merged PR should not claim no review is coming"
+assert_rc_not "a merged PR does not exit 5" 5
 
 echo "pr-review-status: a stale review submitted LAST cannot mask head coverage"
 # A review created before the last push but submitted after a fresh one
@@ -265,6 +317,62 @@ run "OPEN:abc123:0" "reviewer-a,abc123,2026-08-12T10:00:00Z
 reviewer-b,oldsha1,2026-08-12T11:00:00Z"
 assert_rc       "head coverage is found despite a newer stale review" 0
 assert_contains "  and reports it reviewed"  "head reviewed?      : yes"
+
+echo "pr-review-status: a CLEAN review leaves no review object"
+# The reviewer creates a review only when it has something to say. A
+# clean pass is an ordinary issue comment naming the commit, so counting
+# review objects alone reported `head reviewed? no` on exactly the PRs
+# that passed -- and then exit 5, "no review is coming", about a review
+# that had already happened and succeeded. CLAUDE.md §9 tells a session
+# to wait for the review before arming a security-boundary change, so
+# the false negative turned the happy path into an indefinite wait.
+run_v "OPEN:abc1234:0" "" "bot,abc1234,2026-08-23T06:23:02Z"
+assert_rc "a verdict comment at the head exits 0" 0
+assert_contains "  and says the head is reviewed" "head reviewed?      : yes"
+assert_contains "  and shows where it came from" "verdict comments    : 1"
+
+echo "pr-review-status: the verdict must name THIS head"
+# Inferring coverage from "a comment arrived after the push" would be
+# the confident wrong answer this script exists to avoid: a verdict can
+# arrive after a push and still describe the commit before it.
+run_v "OPEN:9e9e9e9e:0" "" "bot,0d5a1234,2026-08-23T06:23:02Z"
+assert_rc "a verdict for an earlier commit is not coverage" 5
+assert_contains "  and names the cause" "NO REVIEW COMING"
+
+echo "pr-review-status: an abbreviated sha still matches"
+# The body carries ten characters, the PR carries forty.
+run_v "OPEN:cf434a7b3318cfe48f5dae7d3eefb2c9767169e8:0" "" "bot,cf434a7b33,2026-08-23T06:23:02Z"
+assert_rc "a ten-character verdict sha matches a full head" 0
+
+echo "pr-review-status: a verdict and a stale review object together"
+# The real shape of a PR that was reviewed twice with findings and once
+# clean. The stale review objects must not mask the clean verdict.
+run_v "OPEN:33333333:0" "bot,11111111,2026-08-23T05:30:00Z
+bot,22222222,2026-08-23T05:42:00Z" "bot,33333333,2026-08-23T06:23:00Z"
+assert_rc "the clean verdict is what covers the head" 0
+assert_contains "  reviews are still reported" "independent reviews : 2"
+
+echo "pr-review-status: the PR author cannot verdict their own PR"
+# Same rule as review objects. A session posting the shape of a verdict
+# comment would otherwise mark its own head reviewed.
+run_v "OPEN:abc1234:0" "" "me,abc1234,2026-08-23T06:23:02Z"
+assert_rc "a self-authored verdict is not coverage" 1
+assert_contains "  and is not counted" "verdict comments    : 0"
+
+echo "pr-review-status: a failed comments lookup is UNREADABLE, not empty"
+# Same contract as the reviews endpoint: swallowing the failure would
+# report a clean review as no review, which is the defect this whole
+# section exists to close.
+: > "$SANDBOX/state/n"
+printf '%s\n' "OPEN:abc123:0" > "$SANDBOX/state/polls"
+: > "$SANDBOX/state/reviews"
+: > "$SANDBOX/state/verdicts"
+touch "$SANDBOX/state/verdicts_fail"
+RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
+    timeout 20 bash "$UNDER_TEST" 77 o/r 2>&1)"
+RUN_RC=$?
+rm -f "$SANDBOX/state/verdicts_fail"
+assert_rc "a failing comments endpoint exits 2, not 1" 2
 
 echo "pr-review-status: a failed reviews lookup is UNREADABLE, not empty"
 # The script's whole job is answering "was this really reviewed". A rate
