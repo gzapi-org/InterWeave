@@ -54,10 +54,48 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use interweave_transport_api::TransportIdentity;
+use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 
 use crate::connection_policy::{
     ConnectionClass, ConnectionPolicy, DialDenial, DialOrigin, DialRequest,
 };
+
+/// Who this profile trusts, and for what.
+///
+/// The two sets are SEPARATE authorities and are kept separate here for
+/// the reason ADR-0036 states: infrastructure authorization is not a
+/// weaker data-plane trust, it is a different permission. Folding them
+/// into one set -- or into one ordered scale -- is how a relay this
+/// profile uses for reachability becomes a peer it will exchange
+/// application messages with.
+#[derive(Debug, Clone, Default)]
+pub struct TrustSources {
+    /// Peers authorized for the application data plane.
+    pub peers: PeerTrustPolicy,
+    /// Peers authorized for reachability control only.
+    pub infrastructure: InfrastructureSet,
+}
+
+impl TrustSources {
+    /// The class this profile grants `peer`, right now.
+    ///
+    /// Data-plane trust is checked first and wins, because it is the
+    /// broader authority: a peer in both sets may do everything the
+    /// infrastructure set would have permitted. A peer in neither is
+    /// [`ConnectionClass::Unauthorized`], which is the DEFAULT answer --
+    /// an empty configuration admits nobody (ADR-0012), and there is no
+    /// constructor here that says otherwise.
+    #[must_use]
+    pub fn classify(&self, peer: &TransportIdentity) -> ConnectionClass {
+        if self.peers.decide(peer).is_allowed() {
+            ConnectionClass::DataPlaneTrusted
+        } else if self.infrastructure.permits_control_connection(peer) {
+            ConnectionClass::ConnectivityInfrastructureOnly
+        } else {
+            ConnectionClass::Unauthorized
+        }
+    }
+}
 
 /// An immutable view of connection policy, safe to read from the Swarm.
 ///
@@ -66,6 +104,7 @@ use crate::connection_policy::{
 #[derive(Debug)]
 pub struct PolicySnapshot {
     policy: ConnectionPolicy,
+    trust: Arc<TrustSources>,
     revision: u64,
     /// Live pending-dial count, SHARED with the manager.
     ///
@@ -111,6 +150,19 @@ impl PolicySnapshot {
         self.revision
     }
 
+    /// The class this profile grants `peer`, as photographed.
+    ///
+    /// Photographed rather than live, and that is the correct side of
+    /// the resource/policy split: a classification is policy, so it may
+    /// be one publication stale, and a snapshot that is stale refuses
+    /// outright rather than deciding (see [`Self::admit`]). What it must
+    /// never be is ASSUMED, which is what a hardcoded
+    /// `DataPlaneTrusted` at the call site amounted to.
+    #[must_use]
+    pub fn classify(&self, peer: &TransportIdentity) -> ConnectionClass {
+        self.trust.classify(peer)
+    }
+
     /// Decide one outbound dial and reserve its slot.
     ///
     /// # Errors
@@ -119,12 +171,24 @@ impl PolicySnapshot {
     /// leaves retry state untouched — ADR-0011 requires that a refused
     /// autonomous dial cannot become a way to clear another origin's
     /// backoff.
-    pub fn admit(
-        &self,
-        request: &DialRequest,
-        class: ConnectionClass,
-        now_ms: u64,
-    ) -> Result<DialTicket, DialDenial> {
+    pub fn admit(&self, request: &DialRequest, now_ms: u64) -> Result<DialTicket, DialDenial> {
+        // CLASSIFIED HERE, not asserted by the caller. The class used to
+        // be a parameter, which made every call site an authority on
+        // what a peer is authorized for -- and the substrate's only
+        // call site passed a hardcoded `DataPlaneTrusted`, so the trust
+        // policy was consulted by nobody and an empty allowlist admitted
+        // everyone. A caller cannot pass a class it does not have,
+        // because there is nowhere to pass one.
+        //
+        // A dial that names no peer is `Unauthorized` for the same
+        // reason: there is no identity to authorize, and admitting what
+        // cannot be classified is how the classification stops meaning
+        // anything.
+        let class = match &request.peer {
+            Some(peer) => self.trust.classify(peer),
+            None => ConnectionClass::Unauthorized,
+        };
+
         // LIVE, not photographed. A holder that took a snapshot before
         // `begin_shutdown` would otherwise go on admitting dials for as
         // long as it kept the `Arc`, and draining would mean nothing.
@@ -385,15 +449,10 @@ impl SnapshotHandle {
     /// # Errors
     /// The [`DialDenial`] that applied, or [`DialDenial::PolicySuperseded`]
     /// if publication outran every attempt.
-    pub fn admit(
-        &self,
-        request: &DialRequest,
-        class: ConnectionClass,
-        now_ms: u64,
-    ) -> Result<DialTicket, DialDenial> {
+    pub fn admit(&self, request: &DialRequest, now_ms: u64) -> Result<DialTicket, DialDenial> {
         let mut last = DialDenial::PolicySuperseded;
         for _ in 0..ADMIT_RELOAD_ATTEMPTS {
-            match self.load().admit(request, class, now_ms) {
+            match self.load().admit(request, now_ms) {
                 Err(DialDenial::PolicySuperseded) => last = DialDenial::PolicySuperseded,
                 other => return other,
             }
@@ -424,6 +483,37 @@ struct Retry {
     attempts: u32,
 }
 
+/// A peer whose authorization was reduced by a trust change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Revoked {
+    /// The peer.
+    pub peer: TransportIdentity,
+    /// What it was authorized for.
+    pub was: ConnectionClass,
+    /// What it is authorized for now.
+    pub now: ConnectionClass,
+}
+
+/// Whether `now` still permits everything `was` did.
+///
+/// Not an ordering on the enum, deliberately: ADR-0036 says
+/// infrastructure authorization is a different permission rather than a
+/// lesser one, so this answers one narrow question -- did anything the
+/// peer was allowed to do stop being allowed -- and nothing else. A
+/// `PartialOrd` derive would have made `Infrastructure < DataPlane`
+/// available to every call site as a general fact, which it is not.
+const fn permits(now: ConnectionClass, was: ConnectionClass) -> bool {
+    matches!(
+        (was, now),
+        (ConnectionClass::Unauthorized, _)
+            | (_, ConnectionClass::DataPlaneTrusted)
+            | (
+                ConnectionClass::ConnectivityInfrastructureOnly,
+                ConnectionClass::ConnectivityInfrastructureOnly,
+            )
+    )
+}
+
 /// The root connection funnel.
 ///
 /// Owns connection policy and publishes it; schedules reconnection; and
@@ -433,6 +523,7 @@ struct Retry {
 #[derive(Debug)]
 pub struct ConnectionManager {
     policy: ConnectionPolicy,
+    trust: Arc<TrustSources>,
     revision: u64,
     pending: Arc<AtomicUsize>,
     max_pending_dials: usize,
@@ -454,8 +545,10 @@ impl ConnectionManager {
         let max_connections = policy.max_connections;
         let shutting_down = Arc::new(AtomicBool::new(false));
         let published_revision = Arc::new(AtomicU64::new(0));
+        let trust = Arc::new(TrustSources::default());
         let first = Arc::new(PolicySnapshot {
             policy: policy.clone(),
+            trust: Arc::clone(&trust),
             revision: 0,
             pending: Arc::clone(&pending),
             max_pending_dials,
@@ -466,6 +559,7 @@ impl ConnectionManager {
         });
         Self {
             policy,
+            trust,
             revision: 0,
             pending,
             max_pending_dials,
@@ -505,6 +599,7 @@ impl ConnectionManager {
         self.revision = self.revision.saturating_add(1);
         let next = Arc::new(PolicySnapshot {
             policy: self.policy.clone(),
+            trust: Arc::clone(&self.trust),
             revision: self.revision,
             pending: Arc::clone(&self.pending),
             max_pending_dials: self.max_pending_dials,
@@ -519,6 +614,42 @@ impl ConnectionManager {
         // which the old one is still trusted.
         self.published_revision
             .store(self.revision, Ordering::Release);
+    }
+
+    /// Replace the trust sources and publish them.
+    ///
+    /// Publishing is the whole mechanism: a revocation that did not
+    /// publish would leave the gate admitting against authorization
+    /// that had been withdrawn, and ADR-0012 requires a removal to take
+    /// effect on connectivity rather than merely on the next
+    /// configuration read.
+    ///
+    /// Returns the peers whose class DROPPED, so the caller can evict
+    /// what they are no longer authorized to hold. Reported rather than
+    /// acted on here because this crate owns no connections: a manager
+    /// that pretended to close them would be a manager whose promise
+    /// nothing kept.
+    pub fn set_trust(&mut self, trust: TrustSources, live: &[TransportIdentity]) -> Vec<Revoked> {
+        let previous = Arc::clone(&self.trust);
+        self.trust = Arc::new(trust);
+        self.publish();
+        live.iter()
+            .filter_map(|peer| {
+                let was = previous.classify(peer);
+                let now = self.trust.classify(peer);
+                (was != now && !permits(now, was)).then(|| Revoked {
+                    peer: peer.clone(),
+                    was,
+                    now,
+                })
+            })
+            .collect()
+    }
+
+    /// The class this profile currently grants `peer`.
+    #[must_use]
+    pub fn classify(&self, peer: &TransportIdentity) -> ConnectionClass {
+        self.trust.classify(peer)
     }
 
     /// Record an authenticated success and clear this peer's retry.
@@ -724,13 +855,27 @@ mod tests {
         TransportIdentity::parse(s).expect("valid identity")
     }
 
+    /// A manager that trusts the two peers these tests dial.
+    ///
+    /// Stated rather than assumed: the class is no longer something a
+    /// call site can pass, so a test that dials has to say who it
+    /// trusts, exactly as the substrate does.
     fn manager(max_pending: usize) -> ConnectionManager {
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(64, 64), max_pending);
+        let _ = m.set_trust(trusting(&[P1, P2], &[]), &[]);
+        m
+    }
+
+    /// A manager that trusts nobody, which is the default configuration.
+    fn untrusting(max_pending: usize) -> ConnectionManager {
         ConnectionManager::new(ConnectionPolicy::new(64, 64), max_pending)
     }
 
     /// A manager whose connection ceiling is the thing under test.
     fn manager_holding(max_connections: usize) -> ConnectionManager {
-        ConnectionManager::new(ConnectionPolicy::new(64, max_connections), 64)
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(64, max_connections), 64);
+        let _ = m.set_trust(trusting(&[P1, P2], &[]), &[]);
+        m
     }
 
     fn request(peer_id: &str, address: &str) -> DialRequest {
@@ -755,30 +900,16 @@ mod tests {
         assert_eq!(snap_a.revision(), snap_b.revision(), "the same photograph");
 
         let t1 = snap_a
-            .admit(
-                &request(P1, "/ip4/10.0.0.1/tcp/1"),
-                ConnectionClass::DataPlaneTrusted,
-                0,
-            )
+            .admit(&request(P1, "/ip4/10.0.0.1/tcp/1"), 0)
             .expect("first");
         // The SECOND holder sees the first holder's reservation, which
         // is the property under test: it did not photograph the count.
         let t2 = snap_b
-            .admit(
-                &request(P2, "/ip4/10.0.0.2/tcp/1"),
-                ConnectionClass::DataPlaneTrusted,
-                0,
-            )
+            .admit(&request(P2, "/ip4/10.0.0.2/tcp/1"), 0)
             .expect("second");
         assert_eq!(snap_a.pending_dials(), 2);
         assert_eq!(
-            snap_b
-                .admit(
-                    &request(P1, "/ip4/10.0.0.3/tcp/1"),
-                    ConnectionClass::DataPlaneTrusted,
-                    0
-                )
-                .err(),
+            snap_b.admit(&request(P1, "/ip4/10.0.0.3/tcp/1"), 0).err(),
             Some(DialDenial::TooManyPendingDials),
             "an older snapshot must not grant a slot that no longer exists"
         );
@@ -787,11 +918,7 @@ mod tests {
         drop(t1);
         assert_eq!(snap_a.pending_dials(), 1);
         let t3 = snap_b
-            .admit(
-                &request(P1, "/ip4/10.0.0.3/tcp/1"),
-                ConnectionClass::DataPlaneTrusted,
-                0,
-            )
+            .admit(&request(P1, "/ip4/10.0.0.3/tcp/1"), 0)
             .expect("the released slot is reusable");
         drop(t3);
         drop(t2);
@@ -806,14 +933,12 @@ mod tests {
         let m = manager(1);
         let snap = m.handle().load();
         {
-            let _t = snap
-                .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
-                .expect("admitted");
+            let _t = snap.admit(&request(P1, "/a"), 0).expect("admitted");
             assert_eq!(snap.pending_dials(), 1);
         }
         assert_eq!(snap.pending_dials(), 0, "the slot came back on drop");
         drop(
-            snap.admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
+            snap.admit(&request(P1, "/a"), 0)
                 .expect("and is usable again"),
         );
     }
@@ -831,7 +956,7 @@ mod tests {
         let t = m
             .handle()
             .load()
-            .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
+            .admit(&request(P1, "/a"), 0)
             .expect("admitted");
         m.record_failure(t, 0);
         assert_eq!(m.scheduled_retries(), 1);
@@ -848,7 +973,6 @@ mod tests {
                 address: "/a".to_owned(),
                 origin: DialOrigin::KademliaQuery,
             },
-            ConnectionClass::DataPlaneTrusted,
             1_000,
         );
         assert!(denied.is_err(), "backoff refuses it");
@@ -866,11 +990,7 @@ mod tests {
         let mut delays = Vec::new();
         let mut now = 0u64;
         for _ in 0..10 {
-            let t = m
-                .handle()
-                .load()
-                .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, now)
-                .ok();
+            let t = m.handle().load().admit(&request(P1, "/a"), now).ok();
             // Once backoff bites, drive the clock forward to the moment
             // the schedule says the peer is due -- which is the point of
             // the test: the two must agree.
@@ -912,7 +1032,7 @@ mod tests {
         let t = m
             .handle()
             .load()
-            .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
+            .admit(&request(P1, "/a"), 0)
             .expect("admitted");
         m.record_failure(t, 0);
         assert_eq!(m.scheduled_retries(), 1);
@@ -921,11 +1041,7 @@ mod tests {
         let stale = handle.load();
         let t = handle
             .load()
-            .admit(
-                &request(P1, "/a"),
-                ConnectionClass::DataPlaneTrusted,
-                40_000,
-            )
+            .admit(&request(P1, "/a"), 40_000)
             .expect("past the backoff");
         drop(m.record_success(t, 40_000));
         assert_eq!(m.scheduled_retries(), 0, "a success clears the schedule");
@@ -949,17 +1065,14 @@ mod tests {
         drop(
             handle
                 .load()
-                .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
+                .admit(&request(P1, "/a"), 0)
                 .expect("permitted while trusted"),
         );
 
         m.begin_shutdown();
 
         assert_eq!(
-            handle
-                .load()
-                .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
-                .err(),
+            handle.load().admit(&request(P1, "/a"), 0).err(),
             Some(DialDenial::ShuttingDown),
             "the same handle, no refresh, current answer"
         );
@@ -976,16 +1089,14 @@ mod tests {
         let stale = m.handle().load();
         drop(
             stale
-                .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
+                .admit(&request(P1, "/a"), 0)
                 .expect("permitted while running"),
         );
 
         m.begin_shutdown();
 
         assert_eq!(
-            stale
-                .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
-                .err(),
+            stale.admit(&request(P1, "/a"), 0).err(),
             Some(DialDenial::ShuttingDown),
             "the snapshot it already held, and it refuses"
         );
@@ -1006,17 +1117,12 @@ mod tests {
 
         // Any mutation publishes. This one is a success, so nothing
         // about it would have denied the dial below on the merits.
-        let ticket = m
-            .handle()
-            .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
-            .expect("admitted");
+        let ticket = m.handle().admit(&request(P1, "/a"), 0).expect("admitted");
         drop(m.record_success(ticket, 0));
         assert!(m.revision() > revision, "the mutation published");
 
         assert_eq!(
-            stale
-                .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
-                .err(),
+            stale.admit(&request(P1, "/a"), 0).err(),
             Some(DialDenial::PolicySuperseded),
             "an obsolete photograph is not an authorization"
         );
@@ -1030,7 +1136,7 @@ mod tests {
         // through the handle and it reloads.
         let fresh = m
             .handle()
-            .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
+            .admit(&request(P1, "/a"), 0)
             .expect("the current snapshot admits");
         drop(fresh);
     }
@@ -1052,9 +1158,7 @@ mod tests {
         });
 
         assert_eq!(
-            stale
-                .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
-                .err(),
+            stale.admit(&request(P1, "/a"), 0).err(),
             Some(DialDenial::PolicySuperseded),
             "a publication concurrent with the decision refuses it"
         );
@@ -1077,14 +1181,12 @@ mod tests {
         let m = manager_holding(1);
         let first = m
             .handle()
-            .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
+            .admit(&request(P1, "/a"), 0)
             .expect("the only connection slot");
         assert_eq!(m.connections(), 1, "reserved at admission, not at connect");
 
         assert_eq!(
-            m.handle()
-                .admit(&request(P1, "/b"), ConnectionClass::DataPlaneTrusted, 0)
-                .err(),
+            m.handle().admit(&request(P1, "/b"), 0).err(),
             Some(DialDenial::ConnectionLimitReached),
             "nothing has connected yet, and that is the point"
         );
@@ -1093,8 +1195,93 @@ mod tests {
         assert_eq!(m.connections(), 0, "an abandoned dial frees its slot");
         drop(
             m.handle()
-                .admit(&request(P1, "/b"), ConnectionClass::DataPlaneTrusted, 0)
+                .admit(&request(P1, "/b"), 0)
                 .expect("and the ceiling is usable again"),
+        );
+    }
+
+    fn trusting(data_plane: &[&str], infrastructure: &[&str]) -> TrustSources {
+        TrustSources {
+            peers: PeerTrustPolicy::new(data_plane.iter().map(|p| peer(p))).expect("small"),
+            infrastructure: InfrastructureSet::new(infrastructure.iter().map(|p| peer(p)))
+                .expect("small"),
+        }
+    }
+
+    #[test]
+    fn nobody_is_trusted_until_somebody_says_so() {
+        // ADR-0012's default, and the one a hardcoded
+        // `ConnectionClass::DataPlaneTrusted` at the dial site quietly
+        // inverted: an empty configuration admitted everyone for
+        // everything, and no test noticed because every test passed the
+        // class it wanted.
+        let m = untrusting(8);
+        assert_eq!(m.classify(&peer(P1)), ConnectionClass::Unauthorized);
+        assert_eq!(
+            m.handle().admit(&request(P1, "/a"), 0).err(),
+            Some(DialDenial::Unauthorized),
+            "an unclassified peer is not dialable"
+        );
+    }
+
+    #[test]
+    fn the_two_authorities_stay_separate() {
+        // ADR-0036: infrastructure authorization is a DIFFERENT
+        // permission, not a weaker data-plane trust. A relay this
+        // profile uses to be reachable must not thereby become a peer
+        // it will exchange application messages with.
+        let mut m = untrusting(8);
+        let _ = m.set_trust(trusting(&[P1], &[P2]), &[]);
+
+        assert_eq!(m.classify(&peer(P1)), ConnectionClass::DataPlaneTrusted);
+        assert_eq!(
+            m.classify(&peer(P2)),
+            ConnectionClass::ConnectivityInfrastructureOnly
+        );
+        assert_eq!(
+            m.handle().admit(&request(P2, "/a"), 0).err(),
+            Some(DialDenial::NotAuthorizedForDataPlane),
+            "the infrastructure peer is refused the data plane it was never granted"
+        );
+    }
+
+    #[test]
+    fn revoking_trust_names_the_connections_that_must_go() {
+        // ADR-0012 requires a removal to evict active connectivity, not
+        // merely to change what the next dial is told. This crate owns
+        // no connections, so it reports what the caller has to close --
+        // and reporting nothing, which is what an unpublished trust
+        // change amounted to, is how a revoked peer keeps its session.
+        let mut m = untrusting(8);
+        let live = [peer(P1), peer(P2)];
+        let _ = m.set_trust(trusting(&[P1, P2], &[]), &live);
+
+        let revoked = m.set_trust(trusting(&[P1], &[P2]), &live);
+        assert_eq!(
+            revoked,
+            vec![Revoked {
+                peer: peer(P2),
+                was: ConnectionClass::DataPlaneTrusted,
+                now: ConnectionClass::ConnectivityInfrastructureOnly,
+            }],
+            "P2 lost the data plane and must be evicted from it; P1 changed nothing"
+        );
+    }
+
+    #[test]
+    fn a_widened_authorization_evicts_nothing() {
+        // The other direction. Granting a peer MORE must not tear down
+        // the connection it already has: an eviction list computed from
+        // "the class changed" rather than "the class narrowed" would
+        // drop a live session every time an operator added a
+        // permission.
+        let mut m = untrusting(8);
+        let live = [peer(P1)];
+        let _ = m.set_trust(trusting(&[], &[P1]), &live);
+
+        assert!(
+            m.set_trust(trusting(&[P1], &[P1]), &live).is_empty(),
+            "promotion to the data plane is not a revocation"
         );
     }
 
@@ -1125,21 +1312,33 @@ mod tests {
         // with no schedule is one nothing is holding back.
         let mut m = ConnectionManager::new(ConnectionPolicy::new(4096, 64), 4096);
         m.max_retry_entries = 4;
-        for i in 0..8u32 {
-            let p = format!(
-                "Qm{}",
-                format!("{i:044}").replace('0', "a")[..44].to_owned()
-            );
+        let generated: Vec<String> = (0..8u32)
+            .map(|i| {
+                format!(
+                    "Qm{}",
+                    format!("{i:044}").replace('0', "a")[..44].to_owned()
+                )
+            })
+            .collect();
+        // Trusted first, because the gate classifies now and an
+        // unauthorized peer never reaches the retry table at all.
+        let _ = m.set_trust(
+            TrustSources {
+                peers: PeerTrustPolicy::new(generated.iter().map(|p| peer(p))).expect("small"),
+                infrastructure: InfrastructureSet::default(),
+            },
+            &[],
+        );
+        for (i, p) in (0..8u32).zip(generated.iter()) {
             let t = m
                 .handle()
                 .load()
                 .admit(
                     &DialRequest {
-                        peer: Some(peer(&p)),
+                        peer: Some(peer(p)),
                         address: format!("/ip4/10.0.0.{i}/tcp/1"),
                         origin: DialOrigin::ConnectionManager,
                     },
-                    ConnectionClass::DataPlaneTrusted,
                     u64::from(i) * 1_000,
                 )
                 .expect("admitted");
