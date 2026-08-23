@@ -180,6 +180,15 @@ pub enum DialDenial {
     TooManyPendingDials,
     /// The global connection budget is exhausted.
     ConnectionLimitReached,
+    /// The snapshot this was decided against is no longer the published
+    /// one.
+    ///
+    /// Not a decision about the dial: it says the policy consulted was
+    /// obsolete, and that a caller holding a stale snapshot must reload
+    /// and ask again. Distinct from every other variant precisely so an
+    /// operator is never told "backoff" by a photograph taken before the
+    /// backoff was cleared.
+    PolicySuperseded,
     /// Policy state is full of live suppressions and cannot take more.
     ///
     /// Fails CLOSED. The alternative is evicting a live quarantine to

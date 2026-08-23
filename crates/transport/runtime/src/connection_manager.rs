@@ -50,7 +50,7 @@
 //! only policy authority for outbound Swarm dials" — a caller cannot
 //! forget to ask, because it cannot call without the answer.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use interweave_transport_api::TransportIdentity;
@@ -73,7 +73,29 @@ pub struct PolicySnapshot {
     /// why resources are exact and policy is not.
     pending: Arc<AtomicUsize>,
     max_pending_dials: usize,
-    shutting_down: bool,
+    /// Live established-connection count, SHARED with the manager.
+    ///
+    /// A connection is a resource, so it obeys the resource rule and
+    /// not the policy one: reserved when the dial is admitted, held by
+    /// the ticket, and carried over to the connection when it
+    /// establishes. Counting only at establishment let every dial
+    /// admitted before the first one connected observe a count of zero,
+    /// so a ceiling of one admitted as many concurrent dials as the
+    /// pending budget allowed.
+    connections: Arc<AtomicUsize>,
+    max_connections: usize,
+    /// Live drain state, SHARED with the manager.
+    ///
+    /// Photographed, it was the one piece of policy a holder could keep
+    /// admitting against after it had been revoked. Draining is not the
+    /// kind of policy that may be eventually consistent: the whole point
+    /// of it is that no new dial starts.
+    shutting_down: Arc<AtomicBool>,
+    /// The revision the manager has currently published, SHARED.
+    ///
+    /// What bounds staleness to zero rather than to "however long a
+    /// holder keeps its `Arc`". See [`Self::admit`].
+    published_revision: Arc<AtomicU64>,
 }
 
 impl PolicySnapshot {
@@ -103,9 +125,26 @@ impl PolicySnapshot {
         class: ConnectionClass,
         now_ms: u64,
     ) -> Result<DialTicket, DialDenial> {
-        if self.shutting_down {
+        // LIVE, not photographed. A holder that took a snapshot before
+        // `begin_shutdown` would otherwise go on admitting dials for as
+        // long as it kept the `Arc`, and draining would mean nothing.
+        if self.shutting_down.load(Ordering::Acquire) {
             return Err(DialDenial::ShuttingDown);
         }
+
+        // SUPERSEDED SNAPSHOTS DO NOT DECIDE. Everything below reads the
+        // photographed policy, so a retained `Arc` would answer with the
+        // authorization, backoff and quarantine state of whenever it was
+        // taken -- forever, and with no way for the manager to reach it.
+        // Refusing here makes the tolerance for stale policy zero rather
+        // than unbounded, and the refusal is recoverable: reload the
+        // handle and ask again, which is what `SnapshotHandle::admit`
+        // does.
+        if self.revision != self.published_revision.load(Ordering::Acquire) {
+            return Err(DialDenial::PolicySuperseded);
+        }
+
+        during_admit();
 
         // THE POLICY HALF, from the photograph. Backoff, class, origin,
         // address quarantine, accounting capacity.
@@ -118,35 +157,132 @@ impl PolicySnapshot {
         // a third sees a count above the limit that briefly existed.
         // Reserving only from a value that is under the limit means the
         // count is never above it, at any instant, for any observer.
-        let mut current = self.pending.load(Ordering::Acquire);
-        loop {
-            if current >= self.max_pending_dials {
-                return Err(DialDenial::TooManyPendingDials);
-            }
-            match self.pending.compare_exchange_weak(
-                current,
-                current + 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => break,
-                Err(seen) => current = seen,
-            }
-        }
+        reserve(&self.pending, self.max_pending_dials)
+            .map_err(|()| DialDenial::TooManyPendingDials)?;
 
-        Ok(DialTicket {
+        // THE CONNECTION IT WILL BECOME, reserved now. Held by the
+        // ticket and handed to the connection on success, so the
+        // ceiling counts what is on its way as well as what is open.
+        let ticket = DialTicket {
             pending: Arc::clone(&self.pending),
+            connections: Arc::clone(&self.connections),
             peer: request.peer.clone(),
             address: request.address.clone(),
             origin: request.origin,
             settled: false,
-        })
+            connection_kept: false,
+        };
+        if reserve(&self.connections, self.max_connections).is_err() {
+            // `ticket` releases the pending slot as it drops here, and
+            // holds no connection slot to release.
+            let mut ticket = ticket;
+            ticket.connection_kept = true;
+            return Err(DialDenial::ConnectionLimitReached);
+        }
+
+        // REVALIDATED AFTER RESERVING, and this is not belt-and-braces.
+        // The freshness check above happens before the policy read and
+        // the two reservations; a publication landing in that window --
+        // a quarantine, a revocation, a drain -- would have been decided
+        // against by a snapshot that had already passed its only test.
+        // Checking again once the slots are held means any publication
+        // concurrent with the decision refuses it, and the rollback is
+        // what makes the refusal free.
+        if self.shutting_down.load(Ordering::Acquire)
+            || self.revision != self.published_revision.load(Ordering::Acquire)
+        {
+            drop(ticket);
+            return Err(DialDenial::PolicySuperseded);
+        }
+
+        Ok(ticket)
+    }
+
+    /// Established connections right now.
+    #[must_use]
+    pub fn connections(&self) -> usize {
+        self.connections.load(Ordering::Acquire)
     }
 
     /// Pending dials right now, across every holder of this snapshot.
     #[must_use]
     pub fn pending_dials(&self) -> usize {
         self.pending.load(Ordering::Acquire)
+    }
+}
+
+// A seam at the point a publication would be missed.
+//
+// The window this closes is real but a few nanoseconds wide, so a test
+// that tried to win the race by repetition would be a test that passes
+// on a broken implementation whenever the machine is busy. The hook
+// makes the interleaving exact: it fires once, between the freshness
+// check and everything that depends on it, which is precisely where a
+// concurrent publication does its damage.
+//
+// Compiled out of every non-test build.
+#[cfg(test)]
+thread_local! {
+    static DURING_ADMIT: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn during_admit() {
+    // TAKEN, not borrowed across the call: the hook publishes, and
+    // publishing must not re-enter a borrow this frame is holding.
+    let hook = DURING_ADMIT.with(|h| h.borrow_mut().take());
+    if let Some(f) = hook {
+        f();
+    }
+}
+
+#[cfg(not(test))]
+const fn during_admit() {}
+
+/// Take one unit of a bounded resource, or report that it is full.
+///
+/// A compare-exchange loop rather than a fetch_add-then-check: adding
+/// first and backing out on overflow means two concurrent reservations
+/// can both observe the ceiling exceeded and both retreat, or worse, a
+/// third sees a count above the limit that briefly existed. Taking only
+/// from a value that is under the limit means the count is never above
+/// it, at any instant, for any observer.
+fn reserve(counter: &AtomicUsize, ceiling: usize) -> Result<(), ()> {
+    let mut current = counter.load(Ordering::Acquire);
+    loop {
+        if current >= ceiling {
+            return Err(());
+        }
+        match counter.compare_exchange_weak(
+            current,
+            current + 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return Ok(()),
+            Err(seen) => current = seen,
+        }
+    }
+}
+
+/// One established connection's place under `max_connections`.
+///
+/// Released on drop, so a connection that goes away cannot leave its
+/// slot behind however it went away -- an error path, a panic, or a
+/// runtime dropped mid-flight.
+#[derive(Debug)]
+#[must_use = "dropping the slot releases it; hold it for the life of the connection"]
+pub struct ConnectionSlot {
+    connections: Arc<AtomicUsize>,
+    released: bool,
+}
+
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        if !self.released {
+            self.connections.fetch_sub(1, Ordering::AcqRel);
+        }
     }
 }
 
@@ -161,10 +297,12 @@ impl PolicySnapshot {
 #[must_use = "a ticket is permission to dial; drop it only if the dial is abandoned"]
 pub struct DialTicket {
     pending: Arc<AtomicUsize>,
+    connections: Arc<AtomicUsize>,
     peer: Option<TransportIdentity>,
     address: String,
     origin: DialOrigin,
     settled: bool,
+    connection_kept: bool,
 }
 
 impl DialTicket {
@@ -189,6 +327,11 @@ impl DialTicket {
 
 impl Drop for DialTicket {
     fn drop(&mut self) {
+        if !self.connection_kept {
+            // The dial never became a connection, so the slot it was
+            // holding for one goes back.
+            self.connections.fetch_sub(1, Ordering::AcqRel);
+        }
         if !self.settled {
             // Saturating in spirit: the count is only ever incremented
             // by a successful reservation, so it cannot underflow unless
@@ -223,7 +366,49 @@ impl SnapshotHandle {
     pub fn load(&self) -> Arc<PolicySnapshot> {
         Arc::clone(&self.current.read().unwrap_or_else(|e| e.into_inner()))
     }
+
+    /// Decide one dial against the CURRENT snapshot.
+    ///
+    /// The way callers should ask. `load().admit(..)` is still correct
+    /// and still safe -- a superseded snapshot refuses rather than
+    /// deciding -- but a publication landing between the load and the
+    /// decision would surface as a `PolicySuperseded` refusal of a dial
+    /// that nothing was actually wrong with. Reloading and asking again
+    /// is the whole remedy, and it belongs here rather than in every
+    /// call site.
+    ///
+    /// Bounded to [`ADMIT_RELOAD_ATTEMPTS`] tries, not a loop: the
+    /// manager publishes on every recorded outcome, so an unbounded
+    /// retry is a spin whose length a busy network chooses. Exhausting
+    /// them refuses, which is the fail-closed direction.
+    ///
+    /// # Errors
+    /// The [`DialDenial`] that applied, or [`DialDenial::PolicySuperseded`]
+    /// if publication outran every attempt.
+    pub fn admit(
+        &self,
+        request: &DialRequest,
+        class: ConnectionClass,
+        now_ms: u64,
+    ) -> Result<DialTicket, DialDenial> {
+        let mut last = DialDenial::PolicySuperseded;
+        for _ in 0..ADMIT_RELOAD_ATTEMPTS {
+            match self.load().admit(request, class, now_ms) {
+                Err(DialDenial::PolicySuperseded) => last = DialDenial::PolicySuperseded,
+                other => return other,
+            }
+        }
+        Err(last)
+    }
 }
+
+/// How many times [`SnapshotHandle::admit`] reloads before refusing.
+///
+/// Small on purpose. Each attempt costs a read lock and an atomic load,
+/// and losing three races in a row means publication is saturating the
+/// manager -- a condition a caller should be told about rather than
+/// spin through.
+pub const ADMIT_RELOAD_ATTEMPTS: usize = 3;
 
 /// Default ceiling on peers awaiting a retry.
 ///
@@ -251,7 +436,10 @@ pub struct ConnectionManager {
     revision: u64,
     pending: Arc<AtomicUsize>,
     max_pending_dials: usize,
-    shutting_down: bool,
+    connections: Arc<AtomicUsize>,
+    max_connections: usize,
+    shutting_down: Arc<AtomicBool>,
+    published_revision: Arc<AtomicU64>,
     retries: std::collections::BTreeMap<TransportIdentity, Retry>,
     max_retry_entries: usize,
     published: Arc<RwLock<Arc<PolicySnapshot>>>,
@@ -262,19 +450,29 @@ impl ConnectionManager {
     #[must_use]
     pub fn new(policy: ConnectionPolicy, max_pending_dials: usize) -> Self {
         let pending = Arc::new(AtomicUsize::new(0));
+        let connections = Arc::new(AtomicUsize::new(0));
+        let max_connections = policy.max_connections;
+        let shutting_down = Arc::new(AtomicBool::new(false));
+        let published_revision = Arc::new(AtomicU64::new(0));
         let first = Arc::new(PolicySnapshot {
             policy: policy.clone(),
             revision: 0,
             pending: Arc::clone(&pending),
             max_pending_dials,
-            shutting_down: false,
+            connections: Arc::clone(&connections),
+            max_connections,
+            shutting_down: Arc::clone(&shutting_down),
+            published_revision: Arc::clone(&published_revision),
         });
         Self {
             policy,
             revision: 0,
             pending,
             max_pending_dials,
-            shutting_down: false,
+            connections,
+            max_connections,
+            shutting_down,
+            published_revision,
             retries: std::collections::BTreeMap::new(),
             max_retry_entries: DEFAULT_MAX_RETRY_ENTRIES,
             published: Arc::new(RwLock::new(first)),
@@ -310,19 +508,33 @@ impl ConnectionManager {
             revision: self.revision,
             pending: Arc::clone(&self.pending),
             max_pending_dials: self.max_pending_dials,
-            shutting_down: self.shutting_down,
+            connections: Arc::clone(&self.connections),
+            max_connections: self.max_connections,
+            shutting_down: Arc::clone(&self.shutting_down),
+            published_revision: Arc::clone(&self.published_revision),
         });
         *self.published.write().unwrap_or_else(|e| e.into_inner()) = next;
+        // AFTER the install, so the window between them is one in which
+        // both the old and the new snapshot refuse rather than one in
+        // which the old one is still trusted.
+        self.published_revision
+            .store(self.revision, Ordering::Release);
     }
 
     /// Record an authenticated success and clear this peer's retry.
-    pub fn record_success(&mut self, ticket: DialTicket, now_ms: u64) {
+    ///
+    /// Returns the connection slot the admission reserved, now owned by
+    /// the connection itself. Holding it is what keeps the ceiling
+    /// honest for the connection's whole life; dropping it says the
+    /// connection is gone.
+    pub fn record_success(&mut self, ticket: DialTicket, now_ms: u64) -> ConnectionSlot {
         if let Some(peer) = ticket.peer().cloned() {
             self.policy.record_success(&peer, ticket.address(), now_ms);
             self.retries.remove(&peer);
         }
-        self.settle(ticket);
+        let slot = self.keep_connection(ticket);
         self.publish();
+        slot
     }
 
     /// Record a failed dial and schedule the next attempt.
@@ -348,6 +560,12 @@ impl ConnectionManager {
         self.publish();
     }
 
+    /// Established connections right now, dialed and accepted.
+    #[must_use]
+    pub fn connections(&self) -> usize {
+        self.connections.load(Ordering::Acquire)
+    }
+
     /// Record that the peer at this address authenticated a different
     /// identity.
     pub fn record_identity_mismatch(&mut self, ticket: DialTicket, now_ms: u64) -> bool {
@@ -363,6 +581,49 @@ impl ConnectionManager {
     fn settle(&self, mut ticket: DialTicket) {
         ticket.settled = true;
         self.pending.fetch_sub(1, Ordering::AcqRel);
+        // `connection_kept` stays false, so the ticket's connection
+        // reservation is released as it drops. A dial that failed holds
+        // no connection.
+    }
+
+    /// Settle the dial and TRANSFER its connection reservation.
+    fn keep_connection(&self, mut ticket: DialTicket) -> ConnectionSlot {
+        ticket.connection_kept = true;
+        let slot = ConnectionSlot {
+            connections: Arc::clone(&self.connections),
+            released: false,
+        };
+        self.settle(ticket);
+        slot
+    }
+
+    /// Reserve a slot for an INBOUND connection, or refuse to keep it.
+    ///
+    /// Inbound arrives without an admission, so there is no ticket to
+    /// carry the reservation. `None` means the ceiling is full or the
+    /// runtime is draining, and the connection must be closed rather
+    /// than kept: a bound that counts only what this node dialed is not
+    /// a bound on what it holds open.
+    pub fn admit_inbound(&mut self) -> Option<ConnectionSlot> {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return None;
+        }
+        reserve(&self.connections, self.max_connections).ok()?;
+        let slot = ConnectionSlot {
+            connections: Arc::clone(&self.connections),
+            released: false,
+        };
+        self.publish();
+        Some(slot)
+    }
+
+    /// Record that an established connection has gone.
+    ///
+    /// Takes the slot rather than a count, so releasing it is the same
+    /// act as saying it closed and neither can happen without the other.
+    pub fn record_connection_closed(&mut self, slot: ConnectionSlot) {
+        drop(slot);
+        self.publish();
     }
 
     /// Whether an inbound connection from this peer is kept.
@@ -373,12 +634,13 @@ impl ConnectionManager {
     /// refuse, and "it connected to us" is not an authorization.
     #[must_use]
     pub fn retain_inbound(&self, class: ConnectionClass) -> bool {
-        !self.shutting_down && matches!(class, ConnectionClass::DataPlaneTrusted)
+        !self.shutting_down.load(Ordering::Acquire)
+            && matches!(class, ConnectionClass::DataPlaneTrusted)
     }
 
     /// Begin draining. Admission refuses from the next snapshot on.
     pub fn begin_shutdown(&mut self) {
-        self.shutting_down = true;
+        self.shutting_down.store(true, Ordering::Release);
         self.policy.shutting_down = true;
         self.publish();
     }
@@ -464,6 +726,11 @@ mod tests {
 
     fn manager(max_pending: usize) -> ConnectionManager {
         ConnectionManager::new(ConnectionPolicy::new(64, 64), max_pending)
+    }
+
+    /// A manager whose connection ceiling is the thing under test.
+    fn manager_holding(max_connections: usize) -> ConnectionManager {
+        ConnectionManager::new(ConnectionPolicy::new(64, max_connections), 64)
     }
 
     fn request(peer_id: &str, address: &str) -> DialRequest {
@@ -660,7 +927,7 @@ mod tests {
                 40_000,
             )
             .expect("past the backoff");
-        m.record_success(t, 40_000);
+        drop(m.record_success(t, 40_000));
         assert_eq!(m.scheduled_retries(), 0, "a success clears the schedule");
 
         // PROMPTLY, in ADR-0011's word: the handle sees the new policy
@@ -695,6 +962,139 @@ mod tests {
                 .err(),
             Some(DialDenial::ShuttingDown),
             "the same handle, no refresh, current answer"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_taken_before_shutdown_stops_admitting() {
+        // The holder that DID cache the snapshot -- the case the test
+        // above does not cover, because it reloads. Draining was a
+        // photographed bool, so an `Arc` taken one instant before
+        // `begin_shutdown` went on admitting dials for as long as
+        // anything kept it, and the manager had no way to reach it.
+        let mut m = manager(8);
+        let stale = m.handle().load();
+        drop(
+            stale
+                .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
+                .expect("permitted while running"),
+        );
+
+        m.begin_shutdown();
+
+        assert_eq!(
+            stale
+                .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
+                .err(),
+            Some(DialDenial::ShuttingDown),
+            "the snapshot it already held, and it refuses"
+        );
+    }
+
+    #[test]
+    fn a_superseded_snapshot_decides_nothing() {
+        // Everything except drain and the pending count is read from the
+        // photograph, so a retained `Arc` would answer with whatever
+        // authorization, backoff and quarantine state was current when
+        // it was taken -- indefinitely. Publication now makes the old
+        // snapshot refuse instead, which bounds policy staleness to the
+        // interval between load and decision rather than to the holder's
+        // lifetime.
+        let mut m = manager(8);
+        let stale = m.handle().load();
+        let revision = stale.revision();
+
+        // Any mutation publishes. This one is a success, so nothing
+        // about it would have denied the dial below on the merits.
+        let ticket = m
+            .handle()
+            .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
+            .expect("admitted");
+        drop(m.record_success(ticket, 0));
+        assert!(m.revision() > revision, "the mutation published");
+
+        assert_eq!(
+            stale
+                .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
+                .err(),
+            Some(DialDenial::PolicySuperseded),
+            "an obsolete photograph is not an authorization"
+        );
+        assert_eq!(
+            stale.pending_dials(),
+            0,
+            "and a refusal reserves nothing, superseded or not"
+        );
+
+        // The remedy, and the reason the refusal is recoverable: ask
+        // through the handle and it reloads.
+        let fresh = m
+            .handle()
+            .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
+            .expect("the current snapshot admits");
+        drop(fresh);
+    }
+
+    #[test]
+    fn a_publication_during_admission_is_not_outrun() {
+        // THE WINDOW BETWEEN THE CHECK AND THE DECISION. The freshness
+        // test happens before the policy read and the two reservations;
+        // a quarantine, revocation or drain published in that gap would
+        // otherwise be applied by a snapshot that had already passed
+        // its only test, and the caller would get a ticket issued under
+        // policy that no longer exists.
+        let m = std::rc::Rc::new(std::cell::RefCell::new(manager(8)));
+        let stale = m.borrow().handle().load();
+
+        let publisher = std::rc::Rc::clone(&m);
+        DURING_ADMIT.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || publisher.borrow_mut().publish()));
+        });
+
+        assert_eq!(
+            stale
+                .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
+                .err(),
+            Some(DialDenial::PolicySuperseded),
+            "a publication concurrent with the decision refuses it"
+        );
+        // ROLLED BACK. A refusal that kept its reservations would leak
+        // one dial slot and one connection slot per lost race, and the
+        // ceilings would decay under exactly the load that makes the
+        // race likely.
+        assert_eq!(stale.pending_dials(), 0, "the pending slot came back");
+        assert_eq!(stale.connections(), 0, "and so did the connection slot");
+    }
+
+    #[test]
+    fn concurrent_dials_cannot_exceed_the_connection_ceiling() {
+        // Counting connections only once they establish let every dial
+        // admitted before the first one connected see a count of zero,
+        // so a ceiling of one admitted as many concurrent dials as the
+        // pending budget allowed. The slot is reserved by the
+        // admission and carried by the ticket, so the second dial is
+        // refused while the first is still in flight.
+        let m = manager_holding(1);
+        let first = m
+            .handle()
+            .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
+            .expect("the only connection slot");
+        assert_eq!(m.connections(), 1, "reserved at admission, not at connect");
+
+        assert_eq!(
+            m.handle()
+                .admit(&request(P1, "/b"), ConnectionClass::DataPlaneTrusted, 0)
+                .err(),
+            Some(DialDenial::ConnectionLimitReached),
+            "nothing has connected yet, and that is the point"
+        );
+
+        drop(first);
+        assert_eq!(m.connections(), 0, "an abandoned dial frees its slot");
+        drop(
+            m.handle()
+                .admit(&request(P1, "/b"), ConnectionClass::DataPlaneTrusted, 0)
+                .expect("and the ceiling is usable again"),
         );
     }
 

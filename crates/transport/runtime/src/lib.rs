@@ -18,7 +18,8 @@ pub mod preauth;
 pub mod reply_token;
 
 pub use connection_manager::{
-    ConnectionManager, DEFAULT_MAX_RETRY_ENTRIES, DialTicket, PolicySnapshot, SnapshotHandle,
+    ADMIT_RELOAD_ATTEMPTS, ConnectionManager, ConnectionSlot, DEFAULT_MAX_RETRY_ENTRIES,
+    DialTicket, PolicySnapshot, SnapshotHandle,
 };
 pub use connection_policy::{
     AddressState, ConnectionClass, ConnectionPolicy, DEFAULT_IDLE_TTL_MS,

@@ -35,7 +35,7 @@
 
 use futures::stream::SelectNextSome;
 use libp2p::core::transport::ListenerId;
-use libp2p::swarm::dial_opts::DialOpts;
+use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
 use libp2p::swarm::{ConnectionId, DialError, Swarm, SwarmEvent};
 use libp2p::{Multiaddr, PeerId, TransportError};
 
@@ -43,11 +43,25 @@ use interweave_transport_runtime::DialTicket;
 
 use crate::behaviour::{SubstrateBehaviour, SubstrateBehaviourEvent};
 
-/// A dial that has passed admission, carrying the proof.
+/// A dial DERIVED from an admission.
 ///
-/// Constructible only from a [`DialTicket`]. There is no other way to
-/// reach [`GatedSwarm::dial`], and no way to obtain a ticket except by
-/// being admitted.
+/// # Pairing is not binding
+///
+/// The first version of this took a [`DialTicket`] and a `DialOpts`
+/// side by side and checked neither against the other. A caller could
+/// be admitted for a trusted peer at a known-good address, then hand
+/// over options naming a different peer at a different address, and the
+/// wrapper would carry it through — proving only that SOME admission
+/// had happened, never that this dial was the one admitted. The outcome
+/// was then recorded against the peer that was never dialled, so the
+/// wrong address collected the success and the real one collected
+/// nothing.
+///
+/// A gate that proves an unrelated admission is not a gate. So the
+/// options are no longer accepted at all: they are BUILT here, from the
+/// ticket's own peer and address, and there is no constructor that
+/// takes them from outside. The dial and the admission cannot name
+/// different destinations because only one of them names anything.
 #[derive(Debug)]
 #[must_use = "an admitted dial holds a pending-dial slot until it is executed or dropped"]
 pub struct AdmittedDial {
@@ -55,10 +69,57 @@ pub struct AdmittedDial {
     ticket: DialTicket,
 }
 
+/// An admission that cannot be turned into a dial.
+///
+/// The ticket is returned so its slot is released by the caller rather
+/// than leaked -- a rejected conversion is still a reservation someone
+/// has to give back.
+#[derive(Debug)]
+pub struct UndialableAdmission {
+    /// Why the ticket could not become a dial.
+    pub reason: String,
+    /// The unspent admission.
+    pub ticket: DialTicket,
+}
+
 impl AdmittedDial {
-    /// Pair an admission with the dial it authorizes.
-    pub fn new(ticket: DialTicket, opts: DialOpts) -> Self {
-        Self { opts, ticket }
+    /// Build the dial this admission authorizes.
+    ///
+    /// # Errors
+    /// Returns [`UndialableAdmission`], carrying the ticket back, when
+    /// the admitted peer or address is not something libp2p can dial:
+    /// a ticket with no peer, a peer that is not a `PeerId`, or an
+    /// address that is not a `Multiaddr`. Those are refusals rather
+    /// than panics because the strings reach the policy layer from
+    /// configuration and from discovery.
+    pub fn from_ticket(ticket: DialTicket) -> Result<Self, Box<UndialableAdmission>> {
+        let Some(peer) = ticket.peer() else {
+            return Err(Box::new(UndialableAdmission {
+                reason: "the admission names no peer, so there is nothing to bind the dial to"
+                    .to_owned(),
+                ticket,
+            }));
+        };
+        let Ok(expected) = peer.as_str().parse::<PeerId>() else {
+            let reason = format!("admitted peer {} is not a libp2p PeerId", peer.as_str());
+            return Err(Box::new(UndialableAdmission { reason, ticket }));
+        };
+        let Ok(address) = ticket.address().parse::<Multiaddr>() else {
+            let reason = format!("admitted address {} is not a multiaddr", ticket.address());
+            return Err(Box::new(UndialableAdmission { reason, ticket }));
+        };
+
+        // BOUND TO THE EXPECTED IDENTITY. Dialling a bare address tells
+        // libp2p nothing about who should be there, so a server at that
+        // address can complete a Noise handshake with any key and the
+        // connection is accepted. Building the dial with the PeerId
+        // makes the mismatch libp2p's problem, and is what produces the
+        // `WrongPeerId` the runtime routes to quarantine.
+        let opts = DialOpts::peer_id(expected)
+            .addresses(vec![address])
+            .condition(PeerCondition::Always)
+            .build();
+        Ok(Self { opts, ticket })
     }
 
     /// The connection this dial will use, known before it is made.
@@ -116,6 +177,15 @@ impl GatedSwarm {
         self.inner.listen_on(address)
     }
 
+    /// Close one connection.
+    ///
+    /// Ungated on purpose: refusing a connection is never the operation
+    /// admission exists to constrain, and the ceiling needs a way to
+    /// decline an inbound connection it cannot account for.
+    pub fn close_connection(&mut self, id: ConnectionId) -> bool {
+        self.inner.close_connection(id)
+    }
+
     /// Stop a listener.
     pub fn remove_listener(&mut self, id: ListenerId) -> bool {
         self.inner.remove_listener(id)
@@ -151,5 +221,95 @@ impl GatedSwarm {
             // would make every successful dial carry its size.
             Err(e) => Err(Box::new((e, ticket))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::panic)]
+
+    use super::{AdmittedDial, PeerId};
+    use interweave_transport_api::TransportIdentity;
+    use interweave_transport_runtime::{
+        ConnectionClass, ConnectionManager, ConnectionPolicy, DialOrigin, DialRequest, DialTicket,
+    };
+
+    const ADMITTED: &str = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
+    const OTHER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+
+    /// A manager whose snapshot admits, kept alive by the caller so the
+    /// shared pending count outlives the tickets it issues.
+    fn manager() -> ConnectionManager {
+        ConnectionManager::new(ConnectionPolicy::new(8, 8), 8)
+    }
+
+    fn ticket_for(manager: &ConnectionManager, peer: Option<&str>, address: &str) -> DialTicket {
+        let request = DialRequest {
+            peer: peer.map(|p| TransportIdentity::parse(p).expect("canonical")),
+            address: address.to_owned(),
+            origin: DialOrigin::Manual,
+        };
+        manager
+            .handle()
+            .load()
+            .admit(&request, ConnectionClass::DataPlaneTrusted, 0)
+            .expect("a fresh policy admits")
+    }
+
+    #[test]
+    fn the_dial_names_the_peer_the_admission_named() {
+        // THE BINDING. The earlier constructor took the options from
+        // the caller, so a ticket admitted for one peer could carry a
+        // dial to another and the outcome was filed against the peer
+        // that was never dialled. Deriving them makes the two the same
+        // fact. Break `from_ticket` to read anything but the ticket and
+        // this fails.
+        let manager = manager();
+        let dial = AdmittedDial::from_ticket(ticket_for(
+            &manager,
+            Some(ADMITTED),
+            "/ip4/192.0.2.1/tcp/4001",
+        ))
+        .expect("dialable");
+
+        let expected: PeerId = ADMITTED.parse().expect("canonical");
+        let other: PeerId = OTHER.parse().expect("canonical");
+        assert_eq!(dial.opts.get_peer_id(), Some(expected));
+        assert_ne!(dial.opts.get_peer_id(), Some(other));
+    }
+
+    // The ADDRESS half of the binding is proved over a socket, in
+    // `tests/connectivity`: libp2p keeps `DialOpts::get_addresses`
+    // crate-private, so the only honest observation of where the dial
+    // went is the connection it makes. See
+    // `the_dial_goes_to_the_admitted_address`.
+
+    #[test]
+    fn an_admission_with_no_peer_is_refused_and_its_slot_returned() {
+        // A refusal that swallowed the ticket would leak a pending slot
+        // per malformed request, and the ceiling would decay to zero
+        // over the life of the process.
+        let manager = manager();
+        let handle = manager.handle();
+        let ticket = ticket_for(&manager, None, "/ip4/192.0.2.1/tcp/4001");
+        assert_eq!(handle.load().pending_dials(), 1);
+
+        let refused = AdmittedDial::from_ticket(ticket).expect_err("nothing to bind to");
+        assert!(refused.reason.contains("names no peer"), "{refused:?}");
+        assert_eq!(
+            handle.load().pending_dials(),
+            1,
+            "the slot is still held by the returned ticket, not silently freed"
+        );
+        drop(refused);
+        assert_eq!(handle.load().pending_dials(), 0, "and released on drop");
+    }
+
+    #[test]
+    fn an_admission_whose_address_is_not_a_multiaddr_is_refused() {
+        let manager = manager();
+        let refused = AdmittedDial::from_ticket(ticket_for(&manager, Some(ADMITTED), "127.0.0.1"))
+            .expect_err("not a multiaddr");
+        assert!(refused.reason.contains("not a multiaddr"), "{refused:?}");
     }
 }
