@@ -42,6 +42,7 @@ use libp2p::{Multiaddr, PeerId, TransportError};
 use interweave_transport_runtime::DialTicket;
 
 use crate::behaviour::{SubstrateBehaviour, SubstrateBehaviourEvent};
+use crate::outbound_gate::AdmittedDials;
 
 /// A dial DERIVED from an admission.
 ///
@@ -142,6 +143,13 @@ impl AdmittedDial {
 /// ungated `dial` and undo the whole point.
 pub struct GatedSwarm {
     inner: Swarm<SubstrateBehaviour>,
+    /// The other end of the outbound gate.
+    ///
+    /// Registering here is what lets an admitted dial through
+    /// `OutboundAdmission`, so the two halves cannot drift: a dial that
+    /// skipped this type would not be registered, and the behaviour
+    /// refuses it.
+    admitted: AdmittedDials,
 }
 
 impl core::fmt::Debug for GatedSwarm {
@@ -156,8 +164,10 @@ impl core::fmt::Debug for GatedSwarm {
 
 impl GatedSwarm {
     /// Wrap a built Swarm.
-    pub const fn new(inner: Swarm<SubstrateBehaviour>) -> Self {
-        Self { inner }
+    #[must_use]
+    pub fn new(inner: Swarm<SubstrateBehaviour>) -> Self {
+        let admitted = inner.behaviour().outbound.admitted();
+        Self { inner, admitted }
     }
 
     /// The local identity.
@@ -215,7 +225,19 @@ impl GatedSwarm {
         admitted: AdmittedDial,
     ) -> Result<DialTicket, Box<(DialError, DialTicket)>> {
         let AdmittedDial { opts, ticket } = admitted;
-        match self.inner.dial(opts) {
+        // REGISTERED FIRST, and consumed inside the call. libp2p runs
+        // `handle_pending_outbound_connection` synchronously within
+        // `dial`, so this id is announced and spent in one statement --
+        // the set is empty either side of it, and no other dial can
+        // arrive in between to find an admission lying around.
+        let id = opts.connection_id();
+        self.admitted.register(id);
+        let outcome = self.inner.dial(opts);
+        // A dial libp2p refuses before the hook runs leaves the
+        // registration behind. Unconditional because the successful
+        // path has already consumed it and removing nothing is free.
+        self.admitted.forget(id);
+        match outcome {
             Ok(()) => Ok(ticket),
             // Boxed: `DialError` is large, and an unboxed error variant
             // would make every successful dial carry its size.
