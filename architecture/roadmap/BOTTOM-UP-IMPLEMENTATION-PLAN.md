@@ -488,15 +488,30 @@ Every claim above was verified by breaking the code and watching the
 test fail, which is the only evidence that distinguishes a test of the
 behaviour from a test written from the same belief as the code.
 
-Stage 6 does not open on this alone: its prerequisite is SPIKE-002, and
-`workspace.metadata.interweave.status` stays on Stage 5 until that spike
-is run and closed.
+Stage 6 does not open on this alone: its prerequisite is SPIKE-002.
+That spike was run and closed **PASS** on 2026-08-23 — see
+[`spikes/spike-002/`](../../spikes/spike-002/README.md) — so the
+remaining step is the deliberate act of opening Stage 6 and moving
+`workspace.metadata.interweave.status` with it. Nothing is blocking
+that except the decision to take it.
 
 ## 9. Stage 6 — direct protocol v2
 
 ### Prerequisite
 
-Run and close **SPIKE-002** first.
+Run and close **SPIKE-002** first. **Closed 2026-08-23: PASS** —
+[`spikes/spike-002/`](../../spikes/spike-002/README.md). It cleared the
+withheld-`AcceptedV2` pattern, the bounded reservation map under real
+request-response scheduling, and the GossipSub authenticity-before-cache
+ordering, and it left four findings this stage inherits:
+
+1. timeout attribution is a race — a responder that times out first
+   leaves the requester reading `Io`, not `OutboundFailure::Timeout`;
+2. a `ResponseChannel` held across an await may no longer be answerable
+   when the answer is ready, and producing a response is not evidence
+   the peer heard it;
+3. `OutboundFailure::UnsupportedProtocols` is the major-version signal;
+4. one connection serves both protocol families.
 
 ### Implement
 
