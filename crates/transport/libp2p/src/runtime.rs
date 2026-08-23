@@ -329,6 +329,15 @@ impl SwarmRuntime {
             .with_behaviour(|key| SubstrateBehaviour::new(key.public(), config.preauth))
             .map_err(|e| SubstrateError::Transport(e.to_string()))?
             .with_swarm_config(|c| c.with_idle_connection_timeout(config.idle_timeout))
+            // THE HANDSHAKE TIMEOUT, taken from the same limits the
+            // pre-auth gate enforces rather than left to libp2p's
+            // default. The two happen to agree at ten seconds today,
+            // and a configuration that narrowed one without the other
+            // would produce a listener whose accounting and whose
+            // transport disagreed about when a handshake is over --
+            // slots reclaimed while the socket was still negotiating,
+            // or the reverse.
+            .with_connection_timeout(Duration::from_millis(config.preauth.handshake_timeout_ms()))
             .build();
         let mut swarm = GatedSwarm::new(swarm);
 

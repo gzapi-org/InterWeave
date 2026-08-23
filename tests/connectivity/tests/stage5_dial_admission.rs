@@ -824,3 +824,54 @@ fn socket_addr_of(address: &Multiaddr) -> std::net::SocketAddr {
     }
     std::net::SocketAddr::new(ip.expect("an ip component"), port.expect("a tcp component"))
 }
+
+#[tokio::test]
+async fn a_handshake_that_never_speaks_is_dropped_on_the_timeout() {
+    // SECURITY.md's handshake timeout, and the reason it is not
+    // optional: a party that completes the TCP handshake and then says
+    // nothing costs one socket and no bytes. Without a deadline the
+    // listener waits indefinitely, and every bound above this one --
+    // the pending ceiling, the per-source share -- is spent by
+    // connections that will never finish.
+    let limits = PreAuthLimitsBuilder {
+        handshake_timeout_ms: 1_000,
+        ..PreAuthLimitsBuilder::default()
+    }
+    .build()
+    .expect("a second is a narrowing of the specified ten");
+
+    let listener = SwarmRuntime::start(
+        &identity(),
+        SubstrateConfig {
+            preauth: limits,
+            ..SubstrateConfig::default()
+        },
+    )
+    .expect("starts");
+    let bound = listener
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
+        .await
+        .expect("binds");
+
+    let mut silent = tokio::net::TcpStream::connect(socket_addr_of(&bound))
+        .await
+        .expect("the listener is accepting");
+
+    // EOF is the listener hanging up. The read is given several times
+    // the timeout, so a failure here is "it never hung up" rather than
+    // "the machine was slow".
+    let mut buffer = [0_u8; 1];
+    let read = tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        tokio::io::AsyncReadExt::read(&mut silent, &mut buffer),
+    )
+    .await
+    .expect("the listener must hang up on a handshake that says nothing");
+    assert_eq!(
+        read.expect("a closed socket reads cleanly"),
+        0,
+        "the connection must be closed, not merely idle"
+    );
+
+    listener.shutdown().await.expect("shuts down");
+}
