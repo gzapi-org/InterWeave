@@ -175,3 +175,155 @@ fn a_denied_autonomous_dial_leaves_retry_state_exactly_as_it_was() {
         "the retry survived every refusal"
     );
 }
+
+/// Wait for the runtime to report a connection, or give up.
+///
+/// Bounded rather than `loop`: a test that hangs on a missing event is
+/// a test that reports nothing at all in CI.
+async fn wait_connected(runtime: &mut SwarmRuntime) -> TransportIdentity {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let next = tokio::time::timeout_at(deadline, runtime.next_event())
+            .await
+            .expect("a connection arrives within the deadline");
+        match next {
+            Some(interweave_transport_libp2p::SwarmEvent::Connected { peer }) => return peer,
+            Some(_) => {}
+            None => panic!("the substrate stopped before connecting"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_dial_goes_to_the_admitted_address() {
+    // THE ADDRESS HALF OF THE BINDING. `DialOpts::get_addresses` is
+    // crate-private in libp2p, so the only honest way to observe where
+    // a dial went is the connection it made. Build the dial from
+    // anything but the ticket's own address and no connection happens.
+    let listener = SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+    let bound = listener
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
+        .await
+        .expect("binds");
+    let listener_peer = listener.local_peer().clone();
+
+    let mut dialer = SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+    let answer = dialer
+        .dial(listener_peer.clone(), bound)
+        .await
+        .expect("the command reaches the task");
+    assert!(answer.is_ok(), "admitted and dialed: {answer:?}");
+
+    assert_eq!(
+        wait_connected(&mut dialer).await,
+        listener_peer,
+        "the dial reached the peer the admission named, at the address it named"
+    );
+
+    dialer.shutdown().await.expect("shuts down");
+    listener.shutdown().await.expect("shuts down");
+}
+
+#[tokio::test]
+async fn an_established_connection_counts_against_the_connection_ceiling() {
+    // `ConnectionPolicy::connections` was never incremented, so
+    // `max_connections` bounded nothing at all: the check compared a
+    // configured limit against a permanent zero. One slot, one
+    // connection, and the next dial must be refused by capacity rather
+    // than by the network.
+    let listener = SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+    let bound = listener
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
+        .await
+        .expect("binds");
+    let listener_peer = listener.local_peer().clone();
+
+    let mut dialer = SwarmRuntime::start(
+        &identity(),
+        SubstrateConfig {
+            max_connections: 1,
+            ..SubstrateConfig::default()
+        },
+    )
+    .expect("starts");
+
+    let first = dialer
+        .dial(listener_peer.clone(), bound)
+        .await
+        .expect("the command reaches the task");
+    assert!(first.is_ok(), "the only slot: {first:?}");
+    let _ = wait_connected(&mut dialer).await;
+
+    // TEST-NET-1 again: this must be refused before a socket is opened,
+    // so where it points is irrelevant to the assertion and relevant to
+    // the test not depending on the network.
+    let absent = TransportIdentity::parse(ABSENT).expect("canonical");
+    let second = dialer
+        .dial(absent, "/ip4/192.0.2.1/tcp/4001".parse().expect("valid"))
+        .await
+        .expect("the command reaches the task");
+    match second {
+        Err(DialRefusal::Policy(DialDenial::ConnectionLimitReached)) => {}
+        other => panic!("the established connection must fill the ceiling, got {other:?}"),
+    }
+
+    dialer.shutdown().await.expect("shuts down");
+    listener.shutdown().await.expect("shuts down");
+}
+
+#[tokio::test]
+async fn a_closed_connection_gives_its_slot_back() {
+    // A ceiling that only counts up is a LIFETIME QUOTA, not a
+    // concurrency bound: a node would dial `max_connections` peers over
+    // its whole run and then never dial again, however many of those
+    // connections had long since closed.
+    let listener = SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+    let bound = listener
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
+        .await
+        .expect("binds");
+    let listener_peer = listener.local_peer().clone();
+
+    let mut dialer = SwarmRuntime::start(
+        &identity(),
+        SubstrateConfig {
+            max_connections: 1,
+            ..SubstrateConfig::default()
+        },
+    )
+    .expect("starts");
+
+    let first = dialer
+        .dial(listener_peer.clone(), bound)
+        .await
+        .expect("the command reaches the task");
+    assert!(first.is_ok(), "the only slot: {first:?}");
+    let _ = wait_connected(&mut dialer).await;
+
+    // Take the far end away, so the connection closes for a reason the
+    // dialer did not choose -- which is how they close in practice.
+    listener.shutdown().await.expect("shuts down");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match tokio::time::timeout_at(deadline, dialer.next_event())
+            .await
+            .expect("the disconnection arrives within the deadline")
+        {
+            Some(interweave_transport_libp2p::SwarmEvent::Disconnected { .. }) => break,
+            Some(_) => {}
+            None => panic!("the substrate stopped before disconnecting"),
+        }
+    }
+
+    let absent = TransportIdentity::parse(ABSENT).expect("canonical");
+    let again = dialer
+        .dial(absent, "/ip4/192.0.2.1/tcp/4001".parse().expect("valid"))
+        .await
+        .expect("the command reaches the task");
+    assert!(
+        again.is_ok(),
+        "the freed slot must be usable again, got {again:?}"
+    );
+
+    dialer.shutdown().await.expect("shuts down");
+}

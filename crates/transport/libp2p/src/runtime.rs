@@ -603,6 +603,18 @@ fn settle_outcome(
             if let Some(ticket) = in_flight.remove(connection_id) {
                 manager.record_success(ticket, now_ms);
             }
+            // COUNTED WHETHER OR NOT WE DIALLED IT. `max_connections`
+            // bounds sockets, and an inbound one costs the same as an
+            // outbound one. The ticket lookup above answers a different
+            // question -- which admission this settles -- and an
+            // inbound connection has no admission to settle.
+            manager.record_connection_opened();
+        }
+        Libp2pSwarmEvent::ConnectionClosed { .. } => {
+            // The other half of the pair. Without it the count only
+            // ever rises and the ceiling becomes a lifetime quota
+            // rather than a concurrency bound.
+            manager.record_connection_closed();
         }
         Libp2pSwarmEvent::OutgoingConnectionError { connection_id, .. } => {
             if let Some(ticket) = in_flight.remove(connection_id) {
