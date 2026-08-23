@@ -12,7 +12,11 @@
 //! root `ConnectionManager` issues. Inbound,
 //! [`preauth_gate::PreAuthAdmission`] answers before the Noise upgrade
 //! begins, so the work an unauthenticated party can make this process
-//! do is bounded where libp2p can still say no.
+//! do is bounded where libp2p can still say no. Once a peer HAS
+//! authenticated it is classified from the profile's trust sources,
+//! which is why [`SwarmRuntime::start`] takes them: a runtime that
+//! could be started without them would have a window in which it
+//! trusted everybody.
 //!
 //! # What is absent, and why it is absent rather than merely unused
 //!
