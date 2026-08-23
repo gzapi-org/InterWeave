@@ -144,6 +144,8 @@ impl PolicySnapshot {
             return Err(DialDenial::PolicySuperseded);
         }
 
+        during_admit();
+
         // THE POLICY HALF, from the photograph. Backoff, class, origin,
         // address quarantine, accounting capacity.
         self.policy.admit(request, class, now_ms)?;
@@ -178,6 +180,21 @@ impl PolicySnapshot {
             return Err(DialDenial::ConnectionLimitReached);
         }
 
+        // REVALIDATED AFTER RESERVING, and this is not belt-and-braces.
+        // The freshness check above happens before the policy read and
+        // the two reservations; a publication landing in that window --
+        // a quarantine, a revocation, a drain -- would have been decided
+        // against by a snapshot that had already passed its only test.
+        // Checking again once the slots are held means any publication
+        // concurrent with the decision refuses it, and the rollback is
+        // what makes the refusal free.
+        if self.shutting_down.load(Ordering::Acquire)
+            || self.revision != self.published_revision.load(Ordering::Acquire)
+        {
+            drop(ticket);
+            return Err(DialDenial::PolicySuperseded);
+        }
+
         Ok(ticket)
     }
 
@@ -193,6 +210,35 @@ impl PolicySnapshot {
         self.pending.load(Ordering::Acquire)
     }
 }
+
+// A seam at the point a publication would be missed.
+//
+// The window this closes is real but a few nanoseconds wide, so a test
+// that tried to win the race by repetition would be a test that passes
+// on a broken implementation whenever the machine is busy. The hook
+// makes the interleaving exact: it fires once, between the freshness
+// check and everything that depends on it, which is precisely where a
+// concurrent publication does its damage.
+//
+// Compiled out of every non-test build.
+#[cfg(test)]
+thread_local! {
+    static DURING_ADMIT: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn during_admit() {
+    // TAKEN, not borrowed across the call: the hook publishes, and
+    // publishing must not re-enter a borrow this frame is holding.
+    let hook = DURING_ADMIT.with(|h| h.borrow_mut().take());
+    if let Some(f) = hook {
+        f();
+    }
+}
+
+#[cfg(not(test))]
+const fn during_admit() {}
 
 /// Take one unit of a bounded resource, or report that it is full.
 ///
@@ -987,6 +1033,37 @@ mod tests {
             .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
             .expect("the current snapshot admits");
         drop(fresh);
+    }
+
+    #[test]
+    fn a_publication_during_admission_is_not_outrun() {
+        // THE WINDOW BETWEEN THE CHECK AND THE DECISION. The freshness
+        // test happens before the policy read and the two reservations;
+        // a quarantine, revocation or drain published in that gap would
+        // otherwise be applied by a snapshot that had already passed
+        // its only test, and the caller would get a ticket issued under
+        // policy that no longer exists.
+        let m = std::rc::Rc::new(std::cell::RefCell::new(manager(8)));
+        let stale = m.borrow().handle().load();
+
+        let publisher = std::rc::Rc::clone(&m);
+        DURING_ADMIT.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || publisher.borrow_mut().publish()));
+        });
+
+        assert_eq!(
+            stale
+                .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
+                .err(),
+            Some(DialDenial::PolicySuperseded),
+            "a publication concurrent with the decision refuses it"
+        );
+        // ROLLED BACK. A refusal that kept its reservations would leak
+        // one dial slot and one connection slot per lost race, and the
+        // ceilings would decay under exactly the load that makes the
+        // race likely.
+        assert_eq!(stale.pending_dials(), 0, "the pending slot came back");
+        assert_eq!(stale.connections(), 0, "and so did the connection slot");
     }
 
     #[test]
