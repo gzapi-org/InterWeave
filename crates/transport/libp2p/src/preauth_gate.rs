@@ -136,14 +136,13 @@ impl NetworkBehaviour for PreAuthAdmission {
         remote_addr: &Multiaddr,
     ) -> Result<(), ConnectionDenied> {
         let now = self.now_ms();
-        // A BACKSTOP, not the bound. What actually ends a handshake
-        // that says nothing is the transport's connection timeout,
-        // which reports a listen failure and releases the slot. This
-        // sweep reclaims a slot whose event never arrived, and it runs
-        // here because an inbound connection is the only moment this
-        // behaviour is reliably polled.
-        let _ = self.gate.expire(now);
-
+        // NO DEADLINE SWEEP HERE, and the absence is deliberate. A
+        // behaviour cannot close a connection that has not established
+        // -- which is every connection this gate holds a slot for -- so
+        // a sweep could only build a list nothing drained. What ends a
+        // handshake that says nothing is the transport's connection
+        // timeout, configured from these same limits; the listen
+        // failure that follows releases the slot below.
         match self.gate.admit(&source_label(remote_addr), now) {
             Ok(slot) => {
                 self.in_flight.insert(connection_id, slot);

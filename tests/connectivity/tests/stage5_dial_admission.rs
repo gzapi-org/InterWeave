@@ -1343,3 +1343,70 @@ async fn a_revoked_peer_is_not_retried() {
 
     runtime.shutdown().await.expect("shuts down");
 }
+
+#[tokio::test]
+async fn a_handshake_killed_by_the_timeout_gives_its_slot_back() {
+    // The reclaim path for the case a deadline sweep would have
+    // covered, and the reason no sweep is needed: the transport timeout
+    // ends the connection, the listener reports the failure, and the
+    // slot is released on that report.
+    //
+    // Without it, one silent connection per timeout would cost the
+    // listener a slot permanently -- and with a ceiling of one, the
+    // second peer here would never get in.
+    let limits = PreAuthLimitsBuilder {
+        max_pending_total: 1,
+        max_pending_per_source: 1,
+        handshake_timeout_ms: 1_000,
+        ..PreAuthLimitsBuilder::default()
+    }
+    .build()
+    .expect("a second is a narrowing of the specified ten");
+
+    let (dialer_id, dialer_peer) = who();
+    let listener = SwarmRuntime::start(
+        &identity(),
+        SubstrateConfig {
+            preauth: limits,
+            ..SubstrateConfig::default()
+        },
+        trusting(&[&dialer_peer]),
+    )
+    .expect("starts");
+    let bound = listener
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
+        .await
+        .expect("binds");
+    let listener_peer = listener.local_peer().clone();
+
+    // A connection that completes TCP and then says nothing. It holds
+    // the only slot until the timeout takes it.
+    let silent = tokio::net::TcpStream::connect(socket_addr_of(&bound))
+        .await
+        .expect("the listener is accepting");
+
+    // A real peer, arriving after the timeout has had its chance.
+    tokio::time::sleep(std::time::Duration::from_millis(2_000)).await;
+    let mut dialer = SwarmRuntime::start(
+        &dialer_id,
+        SubstrateConfig::default(),
+        trusting(&[&listener_peer]),
+    )
+    .expect("starts");
+    assert!(
+        dialer
+            .dial(listener_peer.clone(), bound)
+            .await
+            .expect("the command reaches the task")
+            .is_ok()
+    );
+    assert_eq!(
+        wait_connected(&mut dialer).await,
+        listener_peer,
+        "the timed-out handshake must not still be holding the only slot"
+    );
+
+    drop(silent);
+    dialer.shutdown().await.expect("shuts down");
+    listener.shutdown().await.expect("shuts down");
+}
