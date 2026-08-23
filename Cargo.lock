@@ -1478,6 +1478,7 @@ dependencies = [
  "interweave-transport-api",
  "interweave-transport-libp2p",
  "interweave-transport-runtime",
+ "interweave-trust-api",
  "libp2p",
  "tokio",
 ]
@@ -1648,6 +1649,7 @@ dependencies = [
  "interweave-profile-identity",
  "interweave-transport-api",
  "interweave-transport-runtime",
+ "interweave-trust-api",
  "libp2p",
  "tempfile",
  "tokio",

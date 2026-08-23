@@ -13,7 +13,7 @@
 //! called by nothing, and then a bucket function that did not recognise
 //! the string its only real caller holds.
 //!
-//! So the raw `Swarm` is private to this type and [`Self::dial`] takes
+//! So the raw `Swarm` is private to this type and [`GatedSwarm::dial`] takes
 //! an [`AdmittedDial`], which cannot be built without a
 //! [`DialTicket`], which only [`PolicySnapshot::admit`] issues. A call
 //! site that forgets to ask does not misbehave at runtime — it does not
@@ -42,6 +42,7 @@ use libp2p::{Multiaddr, PeerId, TransportError};
 use interweave_transport_runtime::DialTicket;
 
 use crate::behaviour::{SubstrateBehaviour, SubstrateBehaviourEvent};
+use crate::outbound_gate::AdmittedDials;
 
 /// A dial DERIVED from an admission.
 ///
@@ -142,6 +143,13 @@ impl AdmittedDial {
 /// ungated `dial` and undo the whole point.
 pub struct GatedSwarm {
     inner: Swarm<SubstrateBehaviour>,
+    /// The other end of the outbound gate.
+    ///
+    /// Registering here is what lets an admitted dial through
+    /// `OutboundAdmission`, so the two halves cannot drift: a dial that
+    /// skipped this type would not be registered, and the behaviour
+    /// refuses it.
+    admitted: AdmittedDials,
 }
 
 impl core::fmt::Debug for GatedSwarm {
@@ -156,14 +164,10 @@ impl core::fmt::Debug for GatedSwarm {
 
 impl GatedSwarm {
     /// Wrap a built Swarm.
-    pub const fn new(inner: Swarm<SubstrateBehaviour>) -> Self {
-        Self { inner }
-    }
-
-    /// The local identity.
     #[must_use]
-    pub fn local_peer_id(&self) -> &PeerId {
-        self.inner.local_peer_id()
+    pub fn new(inner: Swarm<SubstrateBehaviour>) -> Self {
+        let admitted = inner.behaviour().outbound.admitted();
+        Self { inner, admitted }
     }
 
     /// Begin listening.
@@ -215,7 +219,19 @@ impl GatedSwarm {
         admitted: AdmittedDial,
     ) -> Result<DialTicket, Box<(DialError, DialTicket)>> {
         let AdmittedDial { opts, ticket } = admitted;
-        match self.inner.dial(opts) {
+        // REGISTERED FIRST, and consumed inside the call. libp2p runs
+        // `handle_pending_outbound_connection` synchronously within
+        // `dial`, so this id is announced and spent in one statement --
+        // the set is empty either side of it, and no other dial can
+        // arrive in between to find an admission lying around.
+        let id = opts.connection_id();
+        self.admitted.register(id);
+        let outcome = self.inner.dial(opts);
+        // A dial libp2p refuses before the hook runs leaves the
+        // registration behind. Unconditional because the successful
+        // path has already consumed it and removing nothing is free.
+        self.admitted.forget(id);
+        match outcome {
             Ok(()) => Ok(ticket),
             // Boxed: `DialError` is large, and an unboxed error variant
             // would make every successful dial carry its size.
@@ -231,8 +247,9 @@ mod tests {
     use super::{AdmittedDial, PeerId};
     use interweave_transport_api::TransportIdentity;
     use interweave_transport_runtime::{
-        ConnectionClass, ConnectionManager, ConnectionPolicy, DialOrigin, DialRequest, DialTicket,
+        ConnectionManager, ConnectionPolicy, DialOrigin, DialRequest, DialTicket, TrustSources,
     };
+    use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 
     const ADMITTED: &str = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
     const OTHER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
@@ -240,7 +257,21 @@ mod tests {
     /// A manager whose snapshot admits, kept alive by the caller so the
     /// shared pending count outlives the tickets it issues.
     fn manager() -> ConnectionManager {
-        ConnectionManager::new(ConnectionPolicy::new(8, 8), 8)
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        // The gate classifies from the trust sources now, so a fixture
+        // that dials has to say who it trusts. `None` below is the
+        // peerless case, which is unauthorized whatever this says.
+        let _ = m.set_trust(
+            TrustSources {
+                peers: PeerTrustPolicy::new([
+                    TransportIdentity::parse(ADMITTED).expect("canonical")
+                ])
+                .expect("one"),
+                infrastructure: InfrastructureSet::default(),
+            },
+            &[],
+        );
+        m
     }
 
     fn ticket_for(manager: &ConnectionManager, peer: Option<&str>, address: &str) -> DialTicket {
@@ -252,7 +283,7 @@ mod tests {
         manager
             .handle()
             .load()
-            .admit(&request, ConnectionClass::DataPlaneTrusted, 0)
+            .admit(&request, 0)
             .expect("a fresh policy admits")
     }
 
@@ -285,17 +316,36 @@ mod tests {
     // `the_dial_goes_to_the_admitted_address`.
 
     #[test]
-    fn an_admission_with_no_peer_is_refused_and_its_slot_returned() {
-        // A refusal that swallowed the ticket would leak a pending slot
-        // per malformed request, and the ceiling would decay to zero
-        // over the life of the process.
+    fn a_dial_that_names_no_peer_is_never_admitted() {
+        // Which is why `from_ticket`'s peerless branch cannot be
+        // reached through admission: there is no identity to classify,
+        // and the gate answers `Unauthorized` rather than issuing a
+        // ticket. The branch stays as a fail-closed guard on a type
+        // whose `peer()` is an Option; this is the test that says the
+        // guard is unreachable rather than untested.
+        let manager = manager();
+        let request = DialRequest {
+            peer: None,
+            address: "/ip4/192.0.2.1/tcp/4001".to_owned(),
+            origin: DialOrigin::Manual,
+        };
+        assert_eq!(
+            manager.handle().admit(&request, 0).err(),
+            Some(interweave_transport_runtime::DialDenial::Unauthorized),
+        );
+    }
+
+    #[test]
+    fn an_admission_whose_address_is_not_a_multiaddr_is_refused() {
+        // And the ticket comes BACK. A refusal that swallowed it would
+        // leak a pending slot and a connection slot per malformed
+        // address, and both ceilings would decay toward zero over the
+        // life of the process.
         let manager = manager();
         let handle = manager.handle();
-        let ticket = ticket_for(&manager, None, "/ip4/192.0.2.1/tcp/4001");
-        assert_eq!(handle.load().pending_dials(), 1);
-
-        let refused = AdmittedDial::from_ticket(ticket).expect_err("nothing to bind to");
-        assert!(refused.reason.contains("names no peer"), "{refused:?}");
+        let refused = AdmittedDial::from_ticket(ticket_for(&manager, Some(ADMITTED), "127.0.0.1"))
+            .expect_err("not a multiaddr");
+        assert!(refused.reason.contains("not a multiaddr"), "{refused:?}");
         assert_eq!(
             handle.load().pending_dials(),
             1,
@@ -303,13 +353,5 @@ mod tests {
         );
         drop(refused);
         assert_eq!(handle.load().pending_dials(), 0, "and released on drop");
-    }
-
-    #[test]
-    fn an_admission_whose_address_is_not_a_multiaddr_is_refused() {
-        let manager = manager();
-        let refused = AdmittedDial::from_ticket(ticket_for(&manager, Some(ADMITTED), "127.0.0.1"))
-            .expect_err("not a multiaddr");
-        assert!(refused.reason.contains("not a multiaddr"), "{refused:?}");
     }
 }

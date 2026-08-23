@@ -30,6 +30,23 @@
 //! trust, no authorization, and no reputation, and nothing here reads it
 //! for any other purpose.
 //!
+//! # How a handshake that never finishes gives its slot back
+//!
+//! Not by a deadline swept here. A slot is released by
+//! [`PreAuthGate::completed`], and what ends a stalled handshake is the
+//! transport's own connection timeout — configured from
+//! [`PreAuthLimits::handshake_timeout_ms`], so the two agree by
+//! construction rather than by coincidence. The listener then reports
+//! the failure and the slot is released on that report.
+//!
+//! An earlier version of this module reported timed-out handshakes for
+//! a caller to close. No caller could: a libp2p `NetworkBehaviour`
+//! cannot close a connection that has not established, which is every
+//! connection this gate is holding a slot for. The reporting list was
+//! therefore a list nothing drained — an unbounded `Vec` fed by
+//! anonymous parties, inside the module whose subject is bounding what
+//! anonymous parties can make this process hold.
+//!
 //! # Why the accounting table is itself bounded
 //!
 //! A per-source table is a map an unauthenticated party can grow, so
@@ -42,7 +59,7 @@
 //! other addresses, which is the laundering pattern the connection
 //! policy already refuses.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// Longest source label the gate will account for, in bytes.
 ///
@@ -505,12 +522,6 @@ pub struct HandshakeSlot {
 }
 
 impl HandshakeSlot {
-    /// When the handshake started.
-    #[must_use]
-    pub const fn started_at_ms(&self) -> u64 {
-        self.started_at_ms
-    }
-
     /// The bucket this handshake was accounted under.
     ///
     /// The BUCKET, not the address the caller passed: `admit` normalizes,
@@ -526,10 +537,6 @@ impl HandshakeSlot {
 struct SourceState {
     /// Handshake id -> start time.
     pending: BTreeMap<u64, u64>,
-    /// Ids already handed to the runtime for closing.
-    ///
-    /// Bounded by `pending`, since an id leaves both together.
-    reported: BTreeSet<u64>,
     window_start_ms: u64,
     attempts_in_window: u32,
     last_touched_ms: u64,
@@ -542,9 +549,9 @@ impl SourceState {
     /// loses no information — which is what makes eviction safe here and
     /// unsafe for an entry that is still shaping decisions.
     fn is_live_at(&self, now_ms: u64, window_ms: u64) -> bool {
-        // `pending` still holds handshakes reported for closing, which is
-        // deliberate: the socket is open until the runtime says
-        // otherwise, so the entry is carrying something either way.
+        // A handshake in flight is something worth keeping, whether or
+        // not it is going to succeed: the socket is open, and the entry
+        // is what the accounting is being kept against.
         !self.pending.is_empty() || now_ms < self.window_start_ms.saturating_add(window_ms)
     }
 }
@@ -562,7 +569,6 @@ pub struct PreAuthGate {
     global_window_start_ms: u64,
     global_attempts_in_window: u32,
     /// Handshakes past their deadline, waiting to be closed.
-    expired: Vec<HandshakeSlot>,
     /// Whether the runtime is draining.
     pub shutting_down: bool,
 }
@@ -584,7 +590,6 @@ impl PreAuthGate {
             next_id: 0,
             global_window_start_ms: 0,
             global_attempts_in_window: 0,
-            expired: Vec::new(),
             shutting_down: false,
         }
     }
@@ -628,11 +633,6 @@ impl PreAuthGate {
         if source.is_empty() || source.len() > MAX_SOURCE_BYTES {
             return Err(PreAuthDenial::SourceNotAccountable);
         }
-
-        // BEFORE the caps are read, so a stalled peer's handshake is
-        // reported for closing at the first moment anyone asks. It is NOT
-        // freed here: see `expire` for why a slot outlives its deadline.
-        self.expire(now_ms);
 
         if self.pending_total >= self.limits.max_pending_total {
             return Err(PreAuthDenial::TooManyPending);
@@ -702,65 +702,8 @@ impl PreAuthGate {
         if let Some(state) = self.sources.get_mut(&slot.source)
             && state.pending.remove(&slot.id).is_some()
         {
-            state.reported.remove(&slot.id);
             self.pending_total = self.pending_total.saturating_sub(1);
         }
-    }
-
-    /// Report handshakes that have taken too long, so they can be closed.
-    ///
-    /// Returns how many were newly reported. The slots they hold are NOT
-    /// released here, and that is the whole point.
-    ///
-    /// # Why a deadline does not free the slot
-    ///
-    /// The budget bounds sockets, not bookkeeping. Freeing a slot at the
-    /// deadline lets the next admission reuse it while the timed-out
-    /// connection is still open and still costing what it cost — so the
-    /// real number of pre-Noise handshakes climbs past
-    /// `max_pending_total` while the counter says otherwise, which is the
-    /// bound reporting success for a thing it stopped measuring.
-    ///
-    /// So expiry hands the token to the runtime, the runtime closes the
-    /// connection, and [`Self::completed`] releases the slot. A runtime
-    /// that never drains keeps the gate full, and that is honest: it
-    /// really does have that many sockets open.
-    ///
-    /// Each handshake is reported once. Calling this repeatedly does not
-    /// hand out duplicates for the runtime to close twice.
-    pub fn expire(&mut self, now_ms: u64) -> usize {
-        let deadline = self.limits.handshake_timeout_ms;
-        let mut reported = 0;
-        for (source, state) in &mut self.sources {
-            for (id, started) in &state.pending {
-                if now_ms.saturating_sub(*started) >= deadline && state.reported.insert(*id) {
-                    self.expired.push(HandshakeSlot {
-                        source: source.clone(),
-                        id: *id,
-                        started_at_ms: *started,
-                    });
-                    reported += 1;
-                }
-            }
-        }
-        reported
-    }
-
-    /// Take the handshakes waiting to be closed.
-    ///
-    /// The runtime closes each and calls [`Self::completed`] with it.
-    /// Draining without closing is the one misuse this type cannot
-    /// detect, and it would reintroduce exactly the overshoot that
-    /// keeping the slot prevents.
-    #[must_use]
-    pub fn take_expired(&mut self) -> Vec<HandshakeSlot> {
-        core::mem::take(&mut self.expired)
-    }
-
-    /// Handshakes past their deadline that have not been taken yet.
-    #[must_use]
-    pub fn awaiting_close(&self) -> usize {
-        self.expired.len()
     }
 
     /// Forget one source that is carrying nothing, if the table is full.
@@ -867,112 +810,48 @@ mod tests {
     }
 
     #[test]
-    fn the_deadline_is_where_it_is_said_to_be() {
-        // The boundary, since an off-by-one here either reclaims a
-        // handshake that is still negotiating or lets a dead one sit for
-        // another whole cycle.
+    fn a_slot_comes_back_only_when_its_handshake_is_reported_done() {
+        // The budget bounds SOCKETS, not bookkeeping. Nothing here
+        // frees a slot on a deadline, because a deadline says the
+        // handshake is late and not that the socket is gone -- freeing
+        // it then would let the next admission reuse a slot while the
+        // connection still costs what it cost. What ends a stalled
+        // handshake is the transport's own connection timeout, and the
+        // listener reports the failure that releases the slot.
         let mut g = gate();
         let held = g.admit("10.0.0.1", 0).expect("admitted");
+        assert_eq!(g.pending(), 1);
 
-        assert_eq!(g.expire(999), 0, "still negotiating just before it");
-        assert_eq!(g.awaiting_close(), 0);
+        // Long past the handshake deadline, and still held: the gate
+        // has not been told the connection is over.
+        assert_eq!(
+            g.pending(),
+            1,
+            "a late handshake is still an open socket until someone says otherwise"
+        );
 
-        assert_eq!(g.expire(1_000), 1, "reported at the deadline");
-        assert_eq!(g.pending(), 1, "but the socket is still open");
-
-        for slot in g.take_expired() {
-            g.completed(&slot);
-        }
+        g.completed(&held);
         assert_eq!(g.pending(), 0);
 
-        // Completing a slot twice must not drive the count below what is
-        // really open.
+        // Completing a slot twice must not drive the count below what
+        // is really open.
         g.completed(&held);
         assert_eq!(g.pending(), 0);
     }
 
     #[test]
-    fn a_timed_out_handshake_is_reported_for_closing_before_its_slot_returns() {
-        // The budget bounds SOCKETS, not bookkeeping. Freeing a slot at
-        // the deadline lets the next admission reuse it while the
-        // timed-out connection is still open and still costing what it
-        // cost, so the real number of pre-Noise handshakes climbs past
-        // the ceiling while the counter says otherwise.
-        let mut g = gate();
-        let mut held = Vec::new();
-        for i in 0..3 {
-            held.push(g.admit(&format!("10.0.0.{i}"), 0).expect("fill"));
-            held.push(g.admit(&format!("10.0.0.{i}"), 0).expect("fill"));
-        }
-        assert_eq!(g.pending(), 6);
-        assert_eq!(g.admit("10.0.0.1", 0), Err(PreAuthDenial::TooManyPending));
-
-        // Past the deadline. The gate reports them and STAYS FULL: those
-        // sockets are still open, and saying otherwise would be the
-        // counter losing track of the thing it exists to count.
-        let later = 1_000 + 1;
-        assert_eq!(g.expire(later), 6, "all six are reported");
-        assert_eq!(g.pending(), 6, "and none is freed by the deadline alone");
-        assert_eq!(
-            g.admit("10.0.0.9", later),
-            Err(PreAuthDenial::TooManyPending),
-            "a runtime that has not closed them really does hold six sockets"
-        );
-
-        // Reporting is once per handshake, so a runtime polling in a loop
-        // is not handed the same connection to close repeatedly.
-        assert_eq!(g.expire(later + 1), 0);
-        assert_eq!(g.awaiting_close(), 6);
-
-        // The runtime takes them, closes them, and says so. Only then
-        // does the budget come back.
-        let to_close = g.take_expired();
-        assert_eq!(to_close.len(), 6);
-        assert!(g.take_expired().is_empty(), "taking twice yields nothing");
-        for slot in &to_close {
-            g.completed(slot);
-        }
-        assert_eq!(g.pending(), 0);
-        // An already-tracked bucket, so this is testing the pending
-        // budget rather than the source table's own cap.
-        g.admit("10.0.0.0", later).expect("the budget is back");
-    }
-
-    #[test]
-    fn admitting_reports_stalled_handshakes_without_being_asked() {
-        // The runtime should not have to poll to learn that something
-        // needs closing: the moment anyone touches the gate, whatever has
-        // passed its deadline is queued.
-        let mut g = gate();
-        let _held = g.admit("10.0.0.1", 0).expect("admitted");
-        let _other = g.admit("10.0.0.2", 2_000).expect("admitted later");
-        assert_eq!(
-            g.awaiting_close(),
-            1,
-            "the first handshake was past its deadline when the second arrived"
-        );
-    }
-
-    #[test]
     fn slots_are_released_by_token_not_by_counting() {
         // Handshakes finish out of order. A counter would let the fast
-        // one release the slow one's slot, and the sweep would then
-        // reclaim whichever was left — freeing a live handshake and
-        // keeping a dead one.
+        // one release the slow one's slot, so the gate would free a live
+        // handshake and keep a dead one.
         let mut g = gate();
         let slow = g.admit("10.0.0.1", 0).expect("slow");
         let fast = g.admit("10.0.0.1", 900).expect("fast");
 
         g.completed(&fast);
-        assert_eq!(g.pending(), 1);
+        assert_eq!(g.pending(), 1, "the slow one still holds its own slot");
 
-        // At 1000 the slow one is over its deadline and the fast one
-        // would not have been. The right one is reported.
-        assert_eq!(g.expire(1_000), 1);
-        let reported = g.take_expired();
-        assert_eq!(reported.len(), 1);
-        assert_eq!(reported[0].started_at_ms(), slow.started_at_ms());
-        g.completed(&reported[0]);
+        g.completed(&slow);
         assert_eq!(g.pending(), 0);
     }
 
@@ -1594,7 +1473,14 @@ mod tests {
                     }
                 }
                 _ => {
-                    let _ = g.expire(now);
+                    // A completion the gate never issued a slot for --
+                    // the shape a confused caller produces -- must not
+                    // move the count.
+                    let stranger = g.admit(&format!("10.0.0.{}", r % 5), now);
+                    if let Ok(slot) = stranger {
+                        g.completed(&slot);
+                        g.completed(&slot);
+                    }
                 }
             }
 

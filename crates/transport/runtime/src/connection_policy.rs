@@ -297,13 +297,18 @@ pub struct ConnectionPolicy {
     pub max_peers: usize,
     /// How long a non-punitive entry survives without being touched.
     pub idle_ttl_ms: u64,
-    /// Currently pending dials.
-    pub pending_dials: usize,
-    /// Currently established connections.
-    pub connections: usize,
     /// Maximum pending dials.
+    ///
+    /// DECLARED here and enforced by the `ConnectionManager`, against a
+    /// live count rather than a photographed one. This type used to
+    /// carry the counters too, and nothing in any real path ever wrote
+    /// them: the checks compared a configured limit against a permanent
+    /// zero, which is a bound that reports success for a thing it never
+    /// measured. Resources are exact and policy is eventually
+    /// consistent, so the count cannot live in a value that is cloned
+    /// into snapshots.
     pub max_pending_dials: usize,
-    /// Maximum established connections.
+    /// Maximum established connections. Enforced by the manager, as above.
     pub max_connections: usize,
     /// Whether the runtime is draining.
     pub shutting_down: bool,
@@ -317,8 +322,6 @@ impl Default for ConnectionPolicy {
             max_addresses: DEFAULT_MAX_ADDRESS_ENTRIES,
             max_peers: DEFAULT_MAX_PEER_ENTRIES,
             idle_ttl_ms: DEFAULT_IDLE_TTL_MS,
-            pending_dials: 0,
-            connections: 0,
             max_pending_dials: 0,
             max_connections: 0,
             shutting_down: false,
@@ -483,13 +486,6 @@ impl ConnectionPolicy {
             return Err(DialDenial::AddressQuarantined);
         }
 
-        if self.pending_dials >= self.max_pending_dials {
-            return Err(DialDenial::TooManyPendingDials);
-        }
-        if self.connections >= self.max_connections {
-            return Err(DialDenial::ConnectionLimitReached);
-        }
-
         // A dial whose outcome could not be RECORDED is a dial whose
         // failure cannot suppress a retry, so admitting it would turn the
         // capacity bound into a way to dial without accounting. Only
@@ -628,6 +624,22 @@ impl ConnectionPolicy {
         entry.last_touched_ms = now_ms;
         // The peer map is untouched, on purpose.
         true
+    }
+
+    /// Whether this address is dialable for this peer right now.
+    ///
+    /// An address with no history is dialable: absence of a record is
+    /// absence of a reason to refuse, not a reason in itself.
+    #[must_use]
+    pub fn is_address_dialable(
+        &self,
+        peer: &TransportIdentity,
+        address: &str,
+        now_ms: u64,
+    ) -> bool {
+        self.addresses
+            .get(&(peer.clone(), address.to_owned()))
+            .is_none_or(|s| s.is_dialable_at(now_ms))
     }
 
     /// Addresses worth trying for a peer, known-good first.
@@ -774,17 +786,18 @@ mod tests {
 
     #[test]
     fn a_behaviour_originated_dial_is_gated_like_any_other() {
-        // There is no exempt origin. A Kademlia query cannot dial past a
-        // limit that stops the ordinary scheduler.
+        // There is no exempt origin. A Kademlia query is refused by a
+        // suppression that stops the ordinary scheduler, and it cannot
+        // clear one either.
         let mut p = policy();
-        p.pending_dials = p.max_pending_dials;
+        assert!(p.record_address_failure(&peer(), A1, 0, 30_000));
         assert_eq!(
             p.admit(
                 &request(DialOrigin::KademliaQuery, A1),
                 ConnectionClass::DataPlaneTrusted,
-                0
+                1_000
             ),
-            Err(DialDenial::TooManyPendingDials)
+            Err(DialDenial::PeerBackoff)
         );
     }
 
@@ -1086,11 +1099,16 @@ mod tests {
     }
 
     #[test]
-    fn an_unidentified_dial_is_still_gated_on_limits() {
-        // No PeerId yet, so no class-based answer — but an
-        // unauthenticated dial still consumes resources.
+    fn an_unidentified_dial_is_still_gated_on_what_this_type_owns() {
+        // No PeerId yet, so no address-scoped or peer-scoped answer --
+        // but a dial with no identity is still subject to the state
+        // this type does own. Drain is the one that applies to a
+        // request naming nobody.
+        //
+        // The resource half moved to the manager, where the counts are
+        // live: see `concurrent_dials_cannot_exceed_the_connection_ceiling`.
         let mut p = policy();
-        p.connections = p.max_connections;
+        p.shutting_down = true;
         let anonymous = DialRequest {
             peer: None,
             address: A1.to_owned(),
@@ -1098,7 +1116,7 @@ mod tests {
         };
         assert_eq!(
             p.admit(&anonymous, ConnectionClass::DataPlaneTrusted, 0),
-            Err(DialDenial::ConnectionLimitReached)
+            Err(DialDenial::ShuttingDown)
         );
     }
     #[test]
