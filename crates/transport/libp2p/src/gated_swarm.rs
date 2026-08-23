@@ -13,7 +13,7 @@
 //! called by nothing, and then a bucket function that did not recognise
 //! the string its only real caller holds.
 //!
-//! So the raw `Swarm` is private to this type and [`Self::dial`] takes
+//! So the raw `Swarm` is private to this type and [`GatedSwarm::dial`] takes
 //! an [`AdmittedDial`], which cannot be built without a
 //! [`DialTicket`], which only [`PolicySnapshot::admit`] issues. A call
 //! site that forgets to ask does not misbehave at runtime — it does not
