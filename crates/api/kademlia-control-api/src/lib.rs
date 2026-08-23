@@ -184,19 +184,27 @@ impl OfferedAddresses {
     /// # Errors
     /// Returns [`PortLimit`] naming the bound that was exceeded.
     pub fn new(addresses: impl IntoIterator<Item = String>) -> Result<Self, PortLimit> {
-        let addresses: Vec<String> = addresses.into_iter().collect();
-        if addresses.len() > MAX_ADDRESSES {
-            return Err(PortLimit::TooManyAddresses {
-                got: addresses.len(),
-            });
+        // READ AT MOST ONE PAST THE LIMIT. `collect()` first and check
+        // the length after is the same defect this crate already fixed
+        // on the wire path -- it materializes the whole input before the
+        // bound can look, so the ceiling rejects a `Vec` that has
+        // already been paid for, and against an unbounded iterator it
+        // never reaches the check at all. A caller passing a lazy,
+        // remote-influenced iterator is exactly the case this type
+        // exists for.
+        let mut out = Vec::new();
+        for address in addresses {
+            if out.len() >= MAX_ADDRESSES {
+                return Err(PortLimit::TooManyAddresses {
+                    got: MAX_ADDRESSES + 1,
+                });
+            }
+            if address.is_empty() || address.len() > MAX_ADDRESS_BYTES {
+                return Err(PortLimit::AddressOutOfBounds { got: address.len() });
+            }
+            out.push(address);
         }
-        if let Some(bad) = addresses
-            .iter()
-            .find(|a| a.is_empty() || a.len() > MAX_ADDRESS_BYTES)
-        {
-            return Err(PortLimit::AddressOutOfBounds { got: bad.len() });
-        }
-        Ok(Self(addresses))
+        Ok(Self(out))
     }
 
     /// The addresses.
@@ -245,13 +253,17 @@ impl ObservedCandidates {
     /// Returns [`PortLimit::TooManyResults`] above
     /// [`MAX_RESULTS_PER_QUERY`].
     pub fn new(candidates: impl IntoIterator<Item = CandidatePeer>) -> Result<Self, PortLimit> {
-        let candidates: Vec<CandidatePeer> = candidates.into_iter().collect();
-        if candidates.len() > MAX_RESULTS_PER_QUERY {
-            return Err(PortLimit::TooManyResults {
-                got: candidates.len(),
-            });
+        // One past the limit is enough to know; see [`OfferedAddresses::new`].
+        let mut out = Vec::new();
+        for candidate in candidates {
+            if out.len() >= MAX_RESULTS_PER_QUERY {
+                return Err(PortLimit::TooManyResults {
+                    got: MAX_RESULTS_PER_QUERY + 1,
+                });
+            }
+            out.push(candidate);
         }
-        Ok(Self(candidates))
+        Ok(Self(out))
     }
 
     /// The candidates.
@@ -587,6 +599,23 @@ mod tests {
             _ => panic!("wrong variant"),
         }
 
+        // AND IT STOPS READING. `collect()` then check is the same
+        // defect this crate fixed on the wire path and reintroduced in
+        // the constructor: it materializes the whole input before the
+        // bound can look. Proved by an iterator that PANICS one item
+        // past the point the check should have stopped at -- reaching
+        // it means the constructor read further than it needed to.
+        let over = (0..).map(|i| {
+            assert!(i <= MAX_ADDRESSES, "read past the limit at item {i}");
+            addr(i)
+        });
+        assert_eq!(
+            OfferedAddresses::new(over),
+            Err(PortLimit::TooManyAddresses {
+                got: MAX_ADDRESSES + 1
+            })
+        );
+
         // Results, same shape.
         let candidate = || {
             serde_json::from_str::<CandidatePeer>(&format!(
@@ -597,6 +626,20 @@ mod tests {
         assert!(ObservedCandidates::new((0..MAX_RESULTS_PER_QUERY).map(|_| candidate())).is_ok());
         assert_eq!(
             ObservedCandidates::new((0..=MAX_RESULTS_PER_QUERY).map(|_| candidate())),
+            Err(PortLimit::TooManyResults {
+                got: MAX_RESULTS_PER_QUERY + 1
+            })
+        );
+
+        let over = (0..).map(|i| {
+            assert!(
+                i <= MAX_RESULTS_PER_QUERY,
+                "read past the limit at item {i}"
+            );
+            candidate()
+        });
+        assert_eq!(
+            ObservedCandidates::new(over),
             Err(PortLimit::TooManyResults {
                 got: MAX_RESULTS_PER_QUERY + 1
             })
