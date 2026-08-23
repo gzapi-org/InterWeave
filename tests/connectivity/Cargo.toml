@@ -30,4 +30,7 @@ interweave-transport-api = { path = "../../crates/api/transport-api" }
 interweave-transport-libp2p = { path = "../../crates/transport/libp2p" }
 interweave-transport-runtime = { path = "../../crates/transport/runtime" }
 libp2p = { workspace = true }
-tokio = { workspace = true }
+# `net` beyond the workspace defaults: one test opens a raw TCP
+# connection and abandons it, which is the abandoned-handshake case a
+# SwarmRuntime cannot produce because it would complete the handshake.
+tokio = { workspace = true, features = ["net"] }

@@ -13,6 +13,7 @@
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::TransportIdentity;
 use interweave_transport_libp2p::{DialRefusal, SubstrateConfig, SwarmRuntime};
+use interweave_transport_runtime::preauth::PreAuthLimitsBuilder;
 use interweave_transport_runtime::{
     ConnectionClass, ConnectionManager, ConnectionPolicy, DialDenial, DialOrigin, DialRequest,
 };
@@ -591,4 +592,235 @@ async fn a_poisoned_address_does_not_suppress_the_peer_s_good_route() {
     dialer.shutdown().await.expect("shuts down");
     impostor.shutdown().await.expect("shuts down");
     good.shutdown().await.expect("shuts down");
+}
+
+#[tokio::test]
+async fn a_source_past_its_pre_auth_rate_is_refused_before_noise() {
+    // Stage 5's third exit clause: pre-Noise work is bounded. Until the
+    // gate was consulted from `handle_pending_inbound_connection`, the
+    // whole `preauth` module was a state machine nothing called -- the
+    // exact shape this repository has shipped before and the reason
+    // CLAUDE.md says a claim owes a test.
+    //
+    // Two starts per window from one bucket, then a third from the same
+    // bucket. Every peer here is on 127.0.0.1, which is one bucket by
+    // design: the accounting is by transport source, not by identity,
+    // precisely because an unauthenticated party has no identity yet.
+    let limits = PreAuthLimitsBuilder {
+        max_attempts_per_window: 2,
+        ..PreAuthLimitsBuilder::default()
+    }
+    .build()
+    .expect("two starts a minute is a narrowing of the specified policy");
+
+    let listener = SwarmRuntime::start(
+        &identity(),
+        SubstrateConfig {
+            preauth: limits,
+            ..SubstrateConfig::default()
+        },
+    )
+    .expect("starts");
+    let bound = listener
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
+        .await
+        .expect("binds");
+    let listener_peer = listener.local_peer().clone();
+
+    // The two the window allows.
+    let mut admitted = Vec::new();
+    for _ in 0..2u8 {
+        let mut peer =
+            SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+        assert!(
+            peer.dial(listener_peer.clone(), bound.clone())
+                .await
+                .expect("the command reaches the task")
+                .is_ok()
+        );
+        assert_eq!(wait_connected(&mut peer).await, listener_peer);
+        admitted.push(peer);
+    }
+
+    // The third start from that bucket. The dial is admitted locally --
+    // this node's own policy has nothing against it -- and refused by
+    // the LISTENER, before a handshake is attempted.
+    let mut refused = SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+    assert!(
+        refused
+            .dial(listener_peer, bound)
+            .await
+            .expect("the command reaches the task")
+            .is_ok(),
+        "the refusal belongs to the listener, not to the dialer's own gate"
+    );
+    let detail = wait_dial_failed(&mut refused).await;
+    assert!(
+        !detail.contains("Unexpected peer ID"),
+        "refused for the rate, not for identity: {detail}"
+    );
+
+    // AND THE ONES ALREADY IN are untouched: a rate limit refuses new
+    // work, it does not tear down what was already accepted. Asserted
+    // by watching for a disconnection that must not arrive, because
+    // "still connected" is not observable any other way and a loop that
+    // checked something else would be a loop that asserts nothing.
+    for peer in &mut admitted {
+        match tokio::time::timeout(std::time::Duration::from_millis(300), peer.next_event()).await {
+            Err(_) => {}
+            Ok(Some(interweave_transport_libp2p::SwarmEvent::Disconnected { .. })) => {
+                panic!("a rate limit must not close connections it already accepted");
+            }
+            Ok(_) => {}
+        }
+    }
+
+    refused.shutdown().await.expect("shuts down");
+    for peer in admitted {
+        peer.shutdown().await.expect("shuts down");
+    }
+    listener.shutdown().await.expect("shuts down");
+}
+
+#[tokio::test]
+async fn a_completed_handshake_gives_its_pre_auth_slot_back() {
+    // A ceiling on handshakes IN FLIGHT is a ceiling on concurrency. A
+    // slot that is not released when the handshake finishes turns it
+    // into a lifetime quota instead: the listener would accept exactly
+    // `max_pending_total` connections and then refuse everyone forever,
+    // and it would do so silently, because refusing is what the gate is
+    // supposed to do.
+    let limits = PreAuthLimitsBuilder {
+        max_pending_total: 1,
+        max_pending_per_source: 1,
+        ..PreAuthLimitsBuilder::default()
+    }
+    .build()
+    .expect("one at a time is a narrowing of the specified policy");
+
+    let listener = SwarmRuntime::start(
+        &identity(),
+        SubstrateConfig {
+            preauth: limits,
+            ..SubstrateConfig::default()
+        },
+    )
+    .expect("starts");
+    let bound = listener
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
+        .await
+        .expect("binds");
+    let listener_peer = listener.local_peer().clone();
+
+    // One at a time, three times over. Each completes before the next
+    // begins, so the ceiling of one is never the thing being tested --
+    // the release is.
+    let mut peers = Vec::new();
+    for attempt in 0..3u8 {
+        let mut peer =
+            SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+        assert!(
+            peer.dial(listener_peer.clone(), bound.clone())
+                .await
+                .expect("the command reaches the task")
+                .is_ok()
+        );
+        assert_eq!(
+            wait_connected(&mut peer).await,
+            listener_peer,
+            "handshake {attempt} must be admitted; a leaked slot refuses every one after the first"
+        );
+        peers.push(peer);
+    }
+
+    for peer in peers {
+        peer.shutdown().await.expect("shuts down");
+    }
+    listener.shutdown().await.expect("shuts down");
+}
+
+#[tokio::test]
+async fn a_handshake_abandoned_mid_flight_does_not_hold_its_slot() {
+    // The cheapest attack this gate exists to bound: open a connection,
+    // say nothing, drop it. libp2p never establishes it, so the release
+    // that runs on establishment never runs -- and if nothing else
+    // releases it, one socket and no bytes costs the listener a slot
+    // for the length of the handshake timeout, over and over.
+    let limits = PreAuthLimitsBuilder {
+        max_pending_total: 1,
+        max_pending_per_source: 1,
+        ..PreAuthLimitsBuilder::default()
+    }
+    .build()
+    .expect("one at a time is a narrowing of the specified policy");
+
+    let listener = SwarmRuntime::start(
+        &identity(),
+        SubstrateConfig {
+            preauth: limits,
+            ..SubstrateConfig::default()
+        },
+    )
+    .expect("starts");
+    let bound = listener
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
+        .await
+        .expect("binds");
+    let listener_peer = listener.local_peer().clone();
+
+    // A raw TCP connection that never speaks. Not a SwarmRuntime,
+    // because a runtime would complete the handshake and the abandoned
+    // case is the one that matters.
+    let socket = socket_addr_of(&bound);
+    let abandoned = tokio::net::TcpStream::connect(socket)
+        .await
+        .expect("the listener is accepting");
+    drop(abandoned);
+
+    // The slot must come back. Bounded retry rather than one attempt:
+    // the release is driven by an event the listener has to process,
+    // and the assertion is that it happens at all -- a slot held until
+    // the handshake timeout would not be released within this window.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let mut peer =
+            SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+        let dialed = peer
+            .dial(listener_peer.clone(), bound.clone())
+            .await
+            .expect("the command reaches the task");
+        assert!(dialed.is_ok(), "the dialer's own gate has no objection");
+        match tokio::time::timeout(std::time::Duration::from_millis(500), peer.next_event()).await {
+            Ok(Some(interweave_transport_libp2p::SwarmEvent::Connected { .. })) => {
+                peer.shutdown().await.expect("shuts down");
+                break;
+            }
+            _ => {
+                peer.shutdown().await.expect("shuts down");
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the abandoned handshake is still holding the only slot"
+                );
+            }
+        }
+    }
+
+    listener.shutdown().await.expect("shuts down");
+}
+
+/// The `SocketAddr` a bound loopback multiaddr names.
+fn socket_addr_of(address: &Multiaddr) -> std::net::SocketAddr {
+    use libp2p::multiaddr::Protocol;
+
+    let mut ip = None;
+    let mut port = None;
+    for component in address {
+        match component {
+            Protocol::Ip4(v4) => ip = Some(std::net::IpAddr::V4(v4)),
+            Protocol::Ip6(v6) => ip = Some(std::net::IpAddr::V6(v6)),
+            Protocol::Tcp(p) => port = Some(p),
+            _ => {}
+        }
+    }
+    std::net::SocketAddr::new(ip.expect("an ip component"), port.expect("a tcp component"))
 }

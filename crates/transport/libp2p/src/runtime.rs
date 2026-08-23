@@ -41,6 +41,7 @@ use std::time::Duration;
 
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::TransportIdentity;
+use interweave_transport_runtime::preauth::PreAuthLimits;
 use interweave_transport_runtime::{
     ConnectionClass, ConnectionManager, ConnectionPolicy, ConnectionSlot, DialDenial, DialOrigin,
     DialRequest, DialTicket,
@@ -84,6 +85,12 @@ pub struct SubstrateConfig {
     pub max_connections: usize,
     /// Idle connection timeout.
     pub idle_timeout: Duration,
+    /// Bounds on work done for a peer that has not authenticated.
+    ///
+    /// A `PreAuthLimits` value is proof its numbers were checked --
+    /// `PreAuthLimitsBuilder::build` is the only way to make one -- so
+    /// there is nothing for `validate` to re-check here.
+    pub preauth: PreAuthLimits,
     /// Maximum listeners with a caller still awaiting their address.
     ///
     /// The command channel bounds how many `Listen` commands can be
@@ -102,6 +109,7 @@ impl Default for SubstrateConfig {
             max_pending_dials: 32,
             max_connections: 256,
             idle_timeout: Duration::from_secs(60),
+            preauth: PreAuthLimits::default(),
             max_pending_listens: 64,
         }
     }
@@ -318,7 +326,7 @@ impl SwarmRuntime {
                 yamux::Config::default,
             )
             .map_err(|e| SubstrateError::Transport(e.to_string()))?
-            .with_behaviour(|key| SubstrateBehaviour::new(key.public()))
+            .with_behaviour(|key| SubstrateBehaviour::new(key.public(), config.preauth))
             .map_err(|e| SubstrateError::Transport(e.to_string()))?
             .with_swarm_config(|c| c.with_idle_connection_timeout(config.idle_timeout))
             .build();

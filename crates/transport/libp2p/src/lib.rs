@@ -38,10 +38,12 @@
 
 pub mod behaviour;
 pub mod gated_swarm;
+pub mod preauth_gate;
 pub mod runtime;
 
 pub use behaviour::{IDENTIFY_PROTOCOL, SubstrateBehaviour};
 pub use gated_swarm::{AdmittedDial, GatedSwarm};
+pub use preauth_gate::PreAuthAdmission;
 pub use runtime::{
     DEFAULT_COMMAND_CAPACITY, DEFAULT_EVENT_CAPACITY, DialRefusal, MAX_CONFIGURED_CAPACITY,
     SubstrateConfig, SubstrateError, SwarmCommand, SwarmEvent, SwarmRuntime,
