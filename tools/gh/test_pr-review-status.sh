@@ -326,7 +326,7 @@ echo "pr-review-status: a CLEAN review leaves no review object"
 # that had already happened and succeeded. CLAUDE.md §9 tells a session
 # to wait for the review before arming a security-boundary change, so
 # the false negative turned the happy path into an indefinite wait.
-run_v "OPEN:abc1234:0" "" "bot,abc1234,2026-08-23T06:23:02Z"
+run_v "OPEN:abc1234:0" "" "chatgpt-codex-connector,abc1234,2026-08-23T06:23:02Z"
 assert_rc "a verdict comment at the head exits 0" 0
 assert_contains "  and says the head is reviewed" "head reviewed?      : yes"
 assert_contains "  and shows where it came from" "verdict comments    : 1"
@@ -335,26 +335,50 @@ echo "pr-review-status: the verdict must name THIS head"
 # Inferring coverage from "a comment arrived after the push" would be
 # the confident wrong answer this script exists to avoid: a verdict can
 # arrive after a push and still describe the commit before it.
-run_v "OPEN:9e9e9e9e:0" "" "bot,0d5a1234,2026-08-23T06:23:02Z"
+run_v "OPEN:9e9e9e9e:0" "" "chatgpt-codex-connector,0d5a1234,2026-08-23T06:23:02Z"
 assert_rc "a verdict for an earlier commit is not coverage" 5
 assert_contains "  and names the cause" "NO REVIEW COMING"
 
 echo "pr-review-status: an abbreviated sha still matches"
 # The body carries ten characters, the PR carries forty.
-run_v "OPEN:cf434a7b3318cfe48f5dae7d3eefb2c9767169e8:0" "" "bot,cf434a7b33,2026-08-23T06:23:02Z"
+run_v "OPEN:cf434a7b3318cfe48f5dae7d3eefb2c9767169e8:0" "" "chatgpt-codex-connector,cf434a7b33,2026-08-23T06:23:02Z"
 assert_rc "a ten-character verdict sha matches a full head" 0
 
 echo "pr-review-status: a verdict and a stale review object together"
 # The real shape of a PR that was reviewed twice with findings and once
 # clean. The stale review objects must not mask the clean verdict.
 run_v "OPEN:33333333:0" "bot,11111111,2026-08-23T05:30:00Z
-bot,22222222,2026-08-23T05:42:00Z" "bot,33333333,2026-08-23T06:23:00Z"
+bot,22222222,2026-08-23T05:42:00Z" "chatgpt-codex-connector,33333333,2026-08-23T06:23:00Z"
 assert_rc "the clean verdict is what covers the head" 0
 assert_contains "  reviews are still reported" "independent reviews : 2"
+
+echo "pr-review-status: only a RECOGNISED reviewer can verdict"
+# On a public repository anyone may leave an issue comment. Accepting
+# any non-author comment containing the verdict phrase let a third party
+# mark a head reviewed by typing it -- satisfying the §9 prerequisite
+# for auto-merging a security-boundary change without the reviewer ever
+# having run. A spoof of the exact gate this feature exists to make
+# usable.
+run_v "OPEN:abc1234:0" "" "some-passer-by,abc1234,2026-08-23T06:23:02Z"
+assert_rc "a stranger's verdict is not coverage" 1
+assert_contains "  and is not counted" "verdict comments    : 0"
+
+echo "pr-review-status: the bot is recognised under both spellings"
+# The same account appears with and without the `[bot]` suffix
+# depending on the API surface. Listing both beats normalising, because
+# a normalisation that quietly stopped matching would fail OPEN.
+run_v "OPEN:abc1234:0" "" "chatgpt-codex-connector,abc1234,2026-08-23T06:23:02Z"
+assert_rc "the bare login is recognised" 0
+run_v "OPEN:abc1234:0" "" "chatgpt-codex-connector[bot],abc1234,2026-08-23T06:23:02Z"
+assert_rc "the [bot] suffix is recognised too" 0
 
 echo "pr-review-status: the PR author cannot verdict their own PR"
 # Same rule as review objects. A session posting the shape of a verdict
 # comment would otherwise mark its own head reviewed.
+# The author would have to also be a recognised reviewer for this to
+# be a real case, so the test forces it: even then, self-review is not
+# coverage.
+INTERWEAVE_VERDICT_AUTHORS='["me"]' \
 run_v "OPEN:abc1234:0" "" "me,abc1234,2026-08-23T06:23:02Z"
 assert_rc "a self-authored verdict is not coverage" 1
 assert_contains "  and is not counted" "verdict comments    : 0"

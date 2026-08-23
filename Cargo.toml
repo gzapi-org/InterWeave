@@ -25,6 +25,8 @@ members = [
     "tests/persistence-gate",
     "tests/support",
     "tests/transport-contract",
+    # Stage 5: the root dial-admission funnel, proved over real sockets.
+    "tests/connectivity",
     "xtask",
 ]
 
@@ -198,7 +200,6 @@ planned_test_packages = [
   "tests/direct-v2",
   "tests/pubsub",
   "tests/kademlia",
-  "tests/connectivity",
   "tests/endpoint-routing",
   "tests/human-chat",
   "tests/human-retention",

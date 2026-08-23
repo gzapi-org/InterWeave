@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# The Stage 5 exit gate: root connection and dial admission. TEST-ONLY;
+# nothing depends on this package.
+#
+# The clauses here are about what the SUBSTRATE does with policy, which
+# is why they run against a real Swarm over loopback rather than a mock.
+# A mocked transport proves that the translation layer compiles, and
+# that is precisely how `policy.admit(&request, class, 0)` -- a literal
+# zero where the clock belongs -- survived until Stage 5 opened.
+[package]
+name = "interweave-connectivity-tests"
+version = "0.0.0"
+publish = false
+description = "Stage 5 root dial-admission exit-gate tests for InterWeave."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+interweave-profile-identity = { path = "../../crates/identity/profile-identity" }
+interweave-transport-api = { path = "../../crates/api/transport-api" }
+interweave-transport-libp2p = { path = "../../crates/transport/libp2p" }
+interweave-transport-runtime = { path = "../../crates/transport/runtime" }
+libp2p = { workspace = true }
+tokio = { workspace = true }

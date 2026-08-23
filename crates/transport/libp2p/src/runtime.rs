@@ -39,19 +39,20 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
-use futures::StreamExt as _;
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::TransportIdentity;
 use interweave_transport_runtime::{
-    ConnectionClass, ConnectionPolicy, DialDenial, DialOrigin, DialRequest,
+    ConnectionClass, ConnectionManager, ConnectionPolicy, DialDenial, DialOrigin, DialRequest,
+    DialTicket,
 };
 use libp2p::core::transport::ListenerId;
 use libp2p::swarm::SwarmEvent as Libp2pSwarmEvent;
 use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
-use libp2p::{Multiaddr, PeerId, Swarm, identify, noise, tcp, yamux};
+use libp2p::{Multiaddr, PeerId, identify, noise, tcp, yamux};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::behaviour::{SubstrateBehaviour, SubstrateBehaviourEvent};
+use crate::gated_swarm::{AdmittedDial, GatedSwarm};
 
 /// Default depth of the command channel.
 pub const DEFAULT_COMMAND_CAPACITY: usize = 64;
@@ -310,7 +311,7 @@ impl SwarmRuntime {
         let keypair = identity.swarm_keypair();
         let local_peer = to_transport_identity(&PeerId::from_public_key(&keypair.public()))?;
 
-        let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
+        let swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
             .with_tcp(
                 tcp::Config::default().nodelay(true),
@@ -322,10 +323,27 @@ impl SwarmRuntime {
             .map_err(|e| SubstrateError::Transport(e.to_string()))?
             .with_swarm_config(|c| c.with_idle_connection_timeout(config.idle_timeout))
             .build();
+        let mut swarm = GatedSwarm::new(swarm);
 
         // The Stage 2 policy, driving a real dial path from the first
         // line of substrate code rather than being wired in later.
-        let mut policy = ConnectionPolicy::new(config.max_pending_dials, config.max_connections);
+        let policy = ConnectionPolicy::new(config.max_pending_dials, config.max_connections);
+        let mut manager = ConnectionManager::new(policy, config.max_pending_dials);
+
+        // A MONOTONIC CLOCK, because the policy is a state machine over
+        // time and it had been given a literal `0` on every call. Every
+        // backoff window, every quarantine, and every retry deadline was
+        // therefore evaluated at the same instant forever: an address
+        // quarantined for thirty minutes was quarantined until restart,
+        // and a peer in backoff never left it. `Instant` rather than
+        // wall time so a clock adjustment cannot move a deadline.
+        let started = std::time::Instant::now();
+
+        // Tickets for dials the Swarm has accepted and not yet reported
+        // on. Keyed by the connection id the dial was built with, which
+        // is knowable before dialling and is what the outcome event
+        // carries back.
+        let mut in_flight: HashMap<libp2p::swarm::ConnectionId, DialTicket> = HashMap::new();
 
         // Listen replies wait for the address the OS actually assigned.
         // `listen_on` returns a ListenerId and nothing else; the bound
@@ -409,15 +427,27 @@ impl SwarmRuntime {
                             Some(command) => {
                                 handle_command(
                                     &mut swarm,
-                                    &mut policy,
+                                    &mut manager,
                                     &mut listens,
+                                    &mut in_flight,
                                     config.max_pending_listens,
+                                    now_ms(started),
                                     command,
                                 );
                             }
                         }
                     }
                     event = swarm.select_next_some(), if room => {
+                        // SETTLE THE ADMISSION FIRST. Every dial holds a
+                        // pending slot until its outcome arrives, so an
+                        // outcome that did not release one is a slot
+                        // leaked for the life of the process -- the
+                        // ceiling decaying by one per dial until nothing
+                        // can connect. Done here rather than inside
+                        // `translate`, which is a pure shape conversion
+                        // and must not also own resource accounting.
+                        settle_outcome(&event, &mut manager, &mut in_flight, now_ms(started));
+
                         let mut abandoned = Vec::new();
                         if let Some(event) = translate(event, &mut listens, &mut abandoned) {
                             outbox.push_back(event);
@@ -552,14 +582,63 @@ impl Drop for SwarmRuntime {
     }
 }
 
+/// Release the admission a connection outcome belongs to.
+///
+/// The two events that end an outbound attempt are the established
+/// connection and the outgoing error. Both carry the `ConnectionId` the
+/// dial was built with, which is why the ticket is filed under it: no
+/// matching by address, no guessing from a peer that may appear twice.
+///
+/// An event for a connection this runtime did not dial -- anything
+/// inbound -- finds no ticket and does nothing, which is correct rather
+/// than merely harmless: inbound connections were never admitted
+/// through the dial gate and have no slot to return.
+fn settle_outcome(
+    event: &Libp2pSwarmEvent<SubstrateBehaviourEvent>,
+    manager: &mut ConnectionManager,
+    in_flight: &mut HashMap<libp2p::swarm::ConnectionId, DialTicket>,
+    now_ms: u64,
+) {
+    match event {
+        Libp2pSwarmEvent::ConnectionEstablished { connection_id, .. } => {
+            if let Some(ticket) = in_flight.remove(connection_id) {
+                manager.record_success(ticket, now_ms);
+            }
+        }
+        Libp2pSwarmEvent::OutgoingConnectionError { connection_id, .. } => {
+            if let Some(ticket) = in_flight.remove(connection_id) {
+                // ADDRESS-SCOPED, not peer-scoped. ADR-0011: a failure
+                // against one address must not advance a trusted peer
+                // into punitive backoff while a known-good route
+                // remains, and `record_failure` is the path that keeps
+                // that distinction.
+                manager.record_failure(ticket, now_ms);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Milliseconds since the runtime task started.
+///
+/// Monotonic and relative. The policy is a state machine over elapsed
+/// time, so an origin of zero is as good as any epoch and immune to a
+/// wall-clock adjustment moving a quarantine deadline.
+fn now_ms(started: std::time::Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
 /// Listen commands whose bound address has not arrived yet.
 type PendingListens = HashMap<ListenerId, oneshot::Sender<Result<Multiaddr, String>>>;
 
+#[allow(clippy::too_many_arguments)]
 fn handle_command(
-    swarm: &mut Swarm<SubstrateBehaviour>,
-    policy: &mut ConnectionPolicy,
+    swarm: &mut GatedSwarm,
+    manager: &mut ConnectionManager,
     listens: &mut PendingListens,
+    in_flight: &mut HashMap<libp2p::swarm::ConnectionId, DialTicket>,
     max_pending_listens: usize,
+    now_ms: u64,
     command: SwarmCommand,
 ) {
     match command {
@@ -598,15 +677,35 @@ fn handle_command(
             let request = DialRequest {
                 peer: Some(peer.clone()),
                 address: address.to_string(),
-                origin: DialOrigin::ConnectionManager,
+                // A COMMAND IS A PERSON OR AN ADMIN API. Reporting it as
+                // the scheduler's own dial made a denial unable to say
+                // which of the two it refused, and those are the two an
+                // operator most needs told apart.
+                origin: DialOrigin::Manual,
             };
             // ADMITTED BEFORE A SOCKET IS OPENED. A quarantined address
             // costs nothing, which is the whole point of checking here
             // rather than after the connection fails.
-            if let Err(denial) = policy.admit(&request, ConnectionClass::DataPlaneTrusted, 0) {
-                let _ = reply.send(Err(DialRefusal::Policy(denial)));
-                return;
-            }
+            //
+            // The class is the one this command can justify. It used to
+            // be hardcoded `DataPlaneTrusted` for every dial regardless
+            // of origin, which is the ADR-0036 separation stated in the
+            // policy and then discarded by its only caller: an
+            // infrastructure-only peer would have been dialable for
+            // application traffic. Until a trust source is wired in,
+            // the command path asserts only what a local operator
+            // request means, and the gate decides.
+            let ticket = match manager.handle().load().admit(
+                &request,
+                ConnectionClass::DataPlaneTrusted,
+                now_ms,
+            ) {
+                Ok(t) => t,
+                Err(denial) => {
+                    let _ = reply.send(Err(DialRefusal::Policy(denial)));
+                    return;
+                }
+            };
             // BOUND TO THE EXPECTED IDENTITY. Dialling a bare address
             // tells libp2p nothing about who should be there, so a server
             // at that address can complete a Noise handshake with any key
@@ -614,9 +713,6 @@ fn handle_command(
             // PeerId makes the mismatch libp2p's problem: it refuses the
             // connection instead of reporting `Connected` for a peer
             // nobody asked for.
-            //
-            // This is what the command's documentation always claimed and
-            // the code did not do.
             let Ok(expected) = peer.as_str().parse::<PeerId>() else {
                 let _ = reply.send(Err(DialRefusal::Backend(format!(
                     "expected peer {} is not a libp2p PeerId",
@@ -628,9 +724,24 @@ fn handle_command(
                 .addresses(vec![address])
                 .condition(PeerCondition::Always)
                 .build();
-            let answer = match swarm.dial(opts) {
-                Ok(()) => Ok(()),
-                Err(e) => Err(DialRefusal::Backend(e.to_string())),
+            let admitted = AdmittedDial::new(ticket, opts);
+            let id = admitted.connection_id();
+            let answer = match swarm.dial(admitted) {
+                Ok(ticket) => {
+                    // Held until the outcome event settles it. Dropping
+                    // it here would release the pending slot the instant
+                    // the dial began, and the ceiling would bound
+                    // nothing but the rate of the loop.
+                    in_flight.insert(id, ticket);
+                    Ok(())
+                }
+                Err(boxed) => {
+                    let (e, ticket) = *boxed;
+                    // A synchronous refusal produces no event, so the
+                    // admission is settled here or never.
+                    manager.record_failure(ticket, now_ms);
+                    Err(DialRefusal::Backend(e.to_string()))
+                }
             };
             let _ = reply.send(answer);
         }

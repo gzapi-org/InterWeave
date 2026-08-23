@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod connection_manager;
 pub mod connection_policy;
 pub mod dedup;
 pub mod endpoint_registry;
@@ -16,6 +17,9 @@ pub mod ingress;
 pub mod preauth;
 pub mod reply_token;
 
+pub use connection_manager::{
+    ConnectionManager, DEFAULT_MAX_RETRY_ENTRIES, DialTicket, PolicySnapshot, SnapshotHandle,
+};
 pub use connection_policy::{
     AddressState, ConnectionClass, ConnectionPolicy, DEFAULT_IDLE_TTL_MS,
     DEFAULT_MAX_ADDRESS_ENTRIES, DEFAULT_MAX_PEER_ENTRIES, DialDenial, DialOrigin, DialRequest,

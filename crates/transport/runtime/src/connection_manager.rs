@@ -1,0 +1,750 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Andrea Benetton
+//! The root connection funnel: who may dial, when, and how it is counted.
+//!
+//! # The gate cannot call the manager
+//!
+//! ADR-0011 is explicit that `ConnectionManager` publishes an
+//! **atomically readable policy snapshot** to the Swarm task, and that
+//! the gate **must not block on async policy calls while the Swarm is
+//! being polled**. That single sentence decides the shape of this
+//! module. The obvious design — a gate that asks the manager on each
+//! dial — is the one the architecture rules out, because the Swarm poll
+//! loop cannot await a policy answer without stalling every connection
+//! it is already driving.
+//!
+//! So the manager owns mutable state and publishes immutable
+//! [`PolicySnapshot`]s. The gate holds a [`SnapshotHandle`], loads the
+//! current snapshot, and decides locally.
+//!
+//! # Policy is eventually consistent; resources are exact
+//!
+//! Those are different guarantees and conflating them would be a bug in
+//! either direction.
+//!
+//! A snapshot is a photograph. Between publication and use, a peer's
+//! backoff may have advanced or its trust may have been revoked, so an
+//! admission can be made against slightly stale policy — bounded by how
+//! promptly the manager republishes, which is what ADR-0011's "promptly"
+//! asks for and why [`PolicySnapshot::revision`] exists to make staleness
+//! observable rather than invisible.
+//!
+//! The *resource* bounds cannot work that way. If two dials are admitted
+//! concurrently against a snapshot that says "31 of 32 pending", the
+//! limit has been exceeded and no later reconciliation un-spends the
+//! memory. The pending count is therefore a shared atomic that both the
+//! gate and the manager increment, and the ceiling is checked against
+//! the live value rather than the photographed one.
+//!
+//! # A dial that cannot be accounted for is not admitted
+//!
+//! [`PolicySnapshot::admit`] returns a [`DialTicket`], and the ticket
+//! holds the pending-dial slot it reserved. Dropping it without settling
+//! releases the slot. That is what makes the count self-correcting: a
+//! caller who admits a dial and then loses it cannot leak the slot,
+//! because there is no path that admits without producing a ticket and
+//! no way to hold a ticket without eventually dropping it.
+//!
+//! The backend is expected to require a `DialTicket` to reach
+//! `Swarm::dial`, which is the structural half of "root admission is the
+//! only policy authority for outbound Swarm dials" — a caller cannot
+//! forget to ask, because it cannot call without the answer.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
+
+use interweave_transport_api::TransportIdentity;
+
+use crate::connection_policy::{
+    ConnectionClass, ConnectionPolicy, DialDenial, DialOrigin, DialRequest,
+};
+
+/// An immutable view of connection policy, safe to read from the Swarm.
+///
+/// Cheap to clone (one `Arc` bump) and answers admission without a lock
+/// on anything the manager mutates.
+#[derive(Debug)]
+pub struct PolicySnapshot {
+    policy: ConnectionPolicy,
+    revision: u64,
+    /// Live pending-dial count, SHARED with the manager.
+    ///
+    /// Not a field of the photographed policy: see the module note on
+    /// why resources are exact and policy is not.
+    pending: Arc<AtomicUsize>,
+    max_pending_dials: usize,
+    shutting_down: bool,
+}
+
+impl PolicySnapshot {
+    /// Which publication this is.
+    ///
+    /// Monotonic. A holder that compares it against
+    /// [`ConnectionManager::revision`] can tell it is deciding on stale
+    /// policy; nothing here forces it to care, because a slightly stale
+    /// *policy* decision is permitted and a stale *resource* decision is
+    /// not possible.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Decide one outbound dial and reserve its slot.
+    ///
+    /// # Errors
+    /// Returns the [`DialDenial`] that applied. A denial reserves
+    /// nothing, and in particular a denied behaviour-originated dial
+    /// leaves retry state untouched — ADR-0011 requires that a refused
+    /// autonomous dial cannot become a way to clear another origin's
+    /// backoff.
+    pub fn admit(
+        &self,
+        request: &DialRequest,
+        class: ConnectionClass,
+        now_ms: u64,
+    ) -> Result<DialTicket, DialDenial> {
+        if self.shutting_down {
+            return Err(DialDenial::ShuttingDown);
+        }
+
+        // THE POLICY HALF, from the photograph. Backoff, class, origin,
+        // address quarantine, accounting capacity.
+        self.policy.admit(request, class, now_ms)?;
+
+        // THE RESOURCE HALF, against the live count. A compare-exchange
+        // loop rather than a fetch_add-then-check: adding first and
+        // backing out on overflow means two concurrent admissions can
+        // both observe the ceiling exceeded and both retreat, or worse,
+        // a third sees a count above the limit that briefly existed.
+        // Reserving only from a value that is under the limit means the
+        // count is never above it, at any instant, for any observer.
+        let mut current = self.pending.load(Ordering::Acquire);
+        loop {
+            if current >= self.max_pending_dials {
+                return Err(DialDenial::TooManyPendingDials);
+            }
+            match self.pending.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(seen) => current = seen,
+            }
+        }
+
+        Ok(DialTicket {
+            pending: Arc::clone(&self.pending),
+            peer: request.peer.clone(),
+            address: request.address.clone(),
+            origin: request.origin,
+            settled: false,
+        })
+    }
+
+    /// Pending dials right now, across every holder of this snapshot.
+    #[must_use]
+    pub fn pending_dials(&self) -> usize {
+        self.pending.load(Ordering::Acquire)
+    }
+}
+
+/// Permission to perform one outbound dial, holding its accounting slot.
+///
+/// `#[must_use]` because dropping it unexamined is how a caller admits a
+/// dial and never makes it, and the slot would then be released with the
+/// manager never learning the outcome. Dropping is SAFE — the slot comes
+/// back — but it is silent, so the type says out loud that something is
+/// expected to happen with it.
+#[derive(Debug)]
+#[must_use = "a ticket is permission to dial; drop it only if the dial is abandoned"]
+pub struct DialTicket {
+    pending: Arc<AtomicUsize>,
+    peer: Option<TransportIdentity>,
+    address: String,
+    origin: DialOrigin,
+    settled: bool,
+}
+
+impl DialTicket {
+    /// The peer this permission was granted for, if one was named.
+    #[must_use]
+    pub const fn peer(&self) -> Option<&TransportIdentity> {
+        self.peer.as_ref()
+    }
+
+    /// The address this permission was granted for.
+    #[must_use]
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
+    /// Why the dial was requested.
+    #[must_use]
+    pub const fn origin(&self) -> DialOrigin {
+        self.origin
+    }
+}
+
+impl Drop for DialTicket {
+    fn drop(&mut self) {
+        if !self.settled {
+            // Saturating in spirit: the count is only ever incremented
+            // by a successful reservation, so it cannot underflow unless
+            // a ticket is released twice — which `settled` prevents.
+            self.pending.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
+/// A handle the Swarm task holds to read current policy.
+///
+/// Cloneable and cheap. [`Self::load`] takes a read lock only long
+/// enough to clone an `Arc` — never across a decision, never across an
+/// await, and never while the manager is consulted. That is the
+/// non-blocking property ADR-0011 asks for, expressed with `std` rather
+/// than by adding a dependency for it.
+#[derive(Debug, Clone)]
+pub struct SnapshotHandle {
+    current: Arc<RwLock<Arc<PolicySnapshot>>>,
+}
+
+impl SnapshotHandle {
+    /// The current snapshot.
+    ///
+    /// Poisoning is RECOVERED rather than propagated, and that is safe
+    /// here for a specific reason: the protected value is a single
+    /// `Arc`, and publication replaces it in one move. There is no
+    /// half-written snapshot to observe, so a panic elsewhere in the
+    /// process must not also take out every dial decision. A lock whose
+    /// contents cannot be torn has nothing to protect a reader from.
+    #[must_use]
+    pub fn load(&self) -> Arc<PolicySnapshot> {
+        Arc::clone(&self.current.read().unwrap_or_else(|e| e.into_inner()))
+    }
+}
+
+/// Default ceiling on peers awaiting a retry.
+///
+/// The retry table is a map keyed by peer, so it is state a remote
+/// party influences by failing to connect. Bounded for the reason the
+/// address book and the pre-auth source table are.
+pub const DEFAULT_MAX_RETRY_ENTRIES: usize = 1_024;
+
+/// One peer's scheduled reconnection attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Retry {
+    due_at_ms: u64,
+    attempts: u32,
+}
+
+/// The root connection funnel.
+///
+/// Owns connection policy and publishes it; schedules reconnection; and
+/// decides whether an inbound connection is kept. Pure state: no
+/// sockets, no clock, no async. Time arrives as a parameter so every
+/// bound is testable by enumeration rather than by waiting.
+#[derive(Debug)]
+pub struct ConnectionManager {
+    policy: ConnectionPolicy,
+    revision: u64,
+    pending: Arc<AtomicUsize>,
+    max_pending_dials: usize,
+    shutting_down: bool,
+    retries: std::collections::BTreeMap<TransportIdentity, Retry>,
+    max_retry_entries: usize,
+    published: Arc<RwLock<Arc<PolicySnapshot>>>,
+}
+
+impl ConnectionManager {
+    /// Build a manager around a connection policy.
+    #[must_use]
+    pub fn new(policy: ConnectionPolicy, max_pending_dials: usize) -> Self {
+        let pending = Arc::new(AtomicUsize::new(0));
+        let first = Arc::new(PolicySnapshot {
+            policy: policy.clone(),
+            revision: 0,
+            pending: Arc::clone(&pending),
+            max_pending_dials,
+            shutting_down: false,
+        });
+        Self {
+            policy,
+            revision: 0,
+            pending,
+            max_pending_dials,
+            shutting_down: false,
+            retries: std::collections::BTreeMap::new(),
+            max_retry_entries: DEFAULT_MAX_RETRY_ENTRIES,
+            published: Arc::new(RwLock::new(first)),
+        }
+    }
+
+    /// A handle for the Swarm task.
+    #[must_use]
+    pub fn handle(&self) -> SnapshotHandle {
+        SnapshotHandle {
+            current: Arc::clone(&self.published),
+        }
+    }
+
+    /// The revision currently published.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Republish, so holders see current policy.
+    ///
+    /// PROMPTLY is the word ADR-0011 uses, and it is the caller's job:
+    /// every mutation below publishes before returning, so a holder is
+    /// never more than one in-flight decision behind. A mutation that
+    /// forgot to publish would leave the gate admitting against
+    /// authorization that had been revoked, which is the one staleness
+    /// that is not merely a timing detail.
+    fn publish(&mut self) {
+        self.revision = self.revision.saturating_add(1);
+        let next = Arc::new(PolicySnapshot {
+            policy: self.policy.clone(),
+            revision: self.revision,
+            pending: Arc::clone(&self.pending),
+            max_pending_dials: self.max_pending_dials,
+            shutting_down: self.shutting_down,
+        });
+        *self.published.write().unwrap_or_else(|e| e.into_inner()) = next;
+    }
+
+    /// Record an authenticated success and clear this peer's retry.
+    pub fn record_success(&mut self, ticket: DialTicket, now_ms: u64) {
+        if let Some(peer) = ticket.peer().cloned() {
+            self.policy.record_success(&peer, ticket.address(), now_ms);
+            self.retries.remove(&peer);
+        }
+        self.settle(ticket);
+        self.publish();
+    }
+
+    /// Record a failed dial and schedule the next attempt.
+    ///
+    /// A denied dial never reaches here: only an ADMITTED dial produces
+    /// a ticket, so there is no path by which a refusal advances retry
+    /// state. ADR-0011 requires exactly that, and expressing it through
+    /// the ticket makes it structural rather than a rule to remember.
+    pub fn record_failure(&mut self, ticket: DialTicket, now_ms: u64) {
+        if let Some(peer) = ticket.peer().cloned() {
+            // ONE delay, used for both. The address-scoped backoff and
+            // the reconnect schedule disagreeing would mean the manager
+            // retries a peer at a moment its own policy still refuses,
+            // producing a denial the retry counter then treats as
+            // another failure -- a peer talking itself into permanent
+            // backoff without the remote end doing anything.
+            let delay = self.retry_delay_ms(&peer);
+            self.policy
+                .record_address_failure(&peer, ticket.address(), now_ms, delay);
+            self.schedule_retry(peer, now_ms, delay);
+        }
+        self.settle(ticket);
+        self.publish();
+    }
+
+    /// Record that the peer at this address authenticated a different
+    /// identity.
+    pub fn record_identity_mismatch(&mut self, ticket: DialTicket, now_ms: u64) -> bool {
+        let mismatched = ticket.peer().cloned().is_some_and(|peer| {
+            self.policy
+                .record_identity_mismatch(&peer, ticket.address(), now_ms)
+        });
+        self.settle(ticket);
+        self.publish();
+        mismatched
+    }
+
+    fn settle(&self, mut ticket: DialTicket) {
+        ticket.settled = true;
+        self.pending.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    /// Whether an inbound connection from this peer is kept.
+    ///
+    /// ADR-0011: the same CURRENT authorization policy that governs
+    /// outbound applies before an inbound data-plane connection is
+    /// retained. Inbound is not a way in for a peer that outbound would
+    /// refuse, and "it connected to us" is not an authorization.
+    #[must_use]
+    pub fn retain_inbound(&self, class: ConnectionClass) -> bool {
+        !self.shutting_down && matches!(class, ConnectionClass::DataPlaneTrusted)
+    }
+
+    /// Begin draining. Admission refuses from the next snapshot on.
+    pub fn begin_shutdown(&mut self) {
+        self.shutting_down = true;
+        self.policy.shutting_down = true;
+        self.publish();
+    }
+
+    /// Peers whose retry is due, soonest first.
+    #[must_use]
+    pub fn due_retries(&self, now_ms: u64) -> Vec<TransportIdentity> {
+        let mut due: Vec<(&TransportIdentity, &Retry)> = self
+            .retries
+            .iter()
+            .filter(|(_, r)| now_ms >= r.due_at_ms)
+            .collect();
+        due.sort_by_key(|(_, r)| r.due_at_ms);
+        due.into_iter().map(|(p, _)| p.clone()).collect()
+    }
+
+    /// Peers awaiting a retry.
+    #[must_use]
+    pub fn scheduled_retries(&self) -> usize {
+        self.retries.len()
+    }
+
+    /// The delay before this peer is retried, given what it has already
+    /// cost.
+    ///
+    /// The cadence `CONNECTIVITY.md` states for a peer that is not yet
+    /// verified: 30 seconds, exponential, bounded by five minutes. The
+    /// numbers are restated here rather than referenced, and the test
+    /// names the document, so a drift fails rather than becoming a
+    /// discrepancy nobody compares.
+    fn retry_delay_ms(&self, peer: &TransportIdentity) -> u64 {
+        const BASE_MS: u64 = 30_000;
+        const CEILING_MS: u64 = 5 * 60 * 1_000;
+        let attempts = self.retries.get(peer).map_or(0, |r| r.attempts);
+        // Shifted by a CLAMPED exponent. `1u64 << 64` is undefined-ish
+        // in the sense that it panics in debug and wraps in release, and
+        // an attempt counter is driven by how often a remote end refuses
+        // to connect -- so the clamp is a bound on remote-influenced
+        // arithmetic, not a tidiness.
+        BASE_MS
+            .saturating_mul(1u64 << attempts.min(8))
+            .min(CEILING_MS)
+    }
+
+    fn schedule_retry(&mut self, peer: TransportIdentity, now_ms: u64, delay: u64) {
+        let attempts = self.retries.get(&peer).map_or(0, |r| r.attempts);
+
+        if !self.retries.contains_key(&peer) && self.retries.len() >= self.max_retry_entries {
+            // Full. Forget the entry that will wait longest, because it
+            // is the one whose loss costs the least — and refusing to
+            // record the newest failure instead would mean the peer that
+            // just failed is retried immediately and forever.
+            if let Some(furthest) = self
+                .retries
+                .iter()
+                .max_by_key(|(_, r)| r.due_at_ms)
+                .map(|(p, _)| p.clone())
+            {
+                self.retries.remove(&furthest);
+            }
+        }
+
+        self.retries.insert(
+            peer,
+            Retry {
+                due_at_ms: now_ms.saturating_add(delay),
+                attempts: attempts.saturating_add(1),
+            },
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const P1: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+    const P2: &str = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
+
+    fn peer(s: &str) -> TransportIdentity {
+        TransportIdentity::parse(s).expect("valid identity")
+    }
+
+    fn manager(max_pending: usize) -> ConnectionManager {
+        ConnectionManager::new(ConnectionPolicy::new(64, 64), max_pending)
+    }
+
+    fn request(peer_id: &str, address: &str) -> DialRequest {
+        DialRequest {
+            peer: Some(peer(peer_id)),
+            address: address.to_owned(),
+            origin: DialOrigin::ConnectionManager,
+        }
+    }
+
+    #[test]
+    fn the_pending_ceiling_holds_against_concurrent_admissions() {
+        // THE ONE THING A SNAPSHOT CANNOT DO. Policy may be a moment
+        // stale and nothing breaks; a resource bound read from a
+        // photograph does break, because two holders of the same
+        // snapshot both see "under the limit" and both admit. The count
+        // is therefore shared and reserved with a compare-exchange, so
+        // it is never above the ceiling for any observer at any instant.
+        let m = manager(2);
+        let snap_a = m.handle().load();
+        let snap_b = m.handle().load();
+        assert_eq!(snap_a.revision(), snap_b.revision(), "the same photograph");
+
+        let t1 = snap_a
+            .admit(
+                &request(P1, "/ip4/10.0.0.1/tcp/1"),
+                ConnectionClass::DataPlaneTrusted,
+                0,
+            )
+            .expect("first");
+        // The SECOND holder sees the first holder's reservation, which
+        // is the property under test: it did not photograph the count.
+        let t2 = snap_b
+            .admit(
+                &request(P2, "/ip4/10.0.0.2/tcp/1"),
+                ConnectionClass::DataPlaneTrusted,
+                0,
+            )
+            .expect("second");
+        assert_eq!(snap_a.pending_dials(), 2);
+        assert_eq!(
+            snap_b
+                .admit(
+                    &request(P1, "/ip4/10.0.0.3/tcp/1"),
+                    ConnectionClass::DataPlaneTrusted,
+                    0
+                )
+                .err(),
+            Some(DialDenial::TooManyPendingDials),
+            "an older snapshot must not grant a slot that no longer exists"
+        );
+
+        // Releasing frees the slot for either holder.
+        drop(t1);
+        assert_eq!(snap_a.pending_dials(), 1);
+        let t3 = snap_b
+            .admit(
+                &request(P1, "/ip4/10.0.0.3/tcp/1"),
+                ConnectionClass::DataPlaneTrusted,
+                0,
+            )
+            .expect("the released slot is reusable");
+        drop(t3);
+        drop(t2);
+    }
+
+    #[test]
+    fn an_abandoned_ticket_returns_its_slot() {
+        // A caller who admits a dial and then loses it must not leak the
+        // reservation. There is no path that admits without producing a
+        // ticket, so `Drop` is the backstop that makes the count
+        // self-correcting rather than a number that only grows.
+        let m = manager(1);
+        let snap = m.handle().load();
+        {
+            let _t = snap
+                .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
+                .expect("admitted");
+            assert_eq!(snap.pending_dials(), 1);
+        }
+        assert_eq!(snap.pending_dials(), 0, "the slot came back on drop");
+        drop(
+            snap.admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
+                .expect("and is usable again"),
+        );
+    }
+
+    #[test]
+    fn a_denied_dial_cannot_advance_or_reset_retry_state() {
+        // ADR-0011: "a denied dial must not silently reset
+        // ConnectionManager retry state." Expressed structurally rather
+        // than as a rule to remember -- recording an outcome requires a
+        // ticket, and a denial produces none, so there is no call a
+        // caller could make.
+        let mut m = manager(8);
+        let p = peer(P1);
+
+        let t = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
+            .expect("admitted");
+        m.record_failure(t, 0);
+        assert_eq!(m.scheduled_retries(), 1);
+        let after_first = m.due_retries(0);
+        assert!(after_first.is_empty(), "not due yet");
+
+        // A behaviour-originated dial for the same peer is now refused
+        // by backoff. The refusal must leave the schedule exactly as it
+        // was -- neither cleared nor advanced.
+        let before = m.revision();
+        let denied = m.handle().load().admit(
+            &DialRequest {
+                peer: Some(p.clone()),
+                address: "/a".to_owned(),
+                origin: DialOrigin::KademliaQuery,
+            },
+            ConnectionClass::DataPlaneTrusted,
+            1_000,
+        );
+        assert!(denied.is_err(), "backoff refuses it");
+        assert_eq!(m.scheduled_retries(), 1, "the schedule is untouched");
+        assert_eq!(m.revision(), before, "and nothing was republished");
+        assert!(m.due_retries(1_000).is_empty(), "and it is still not due");
+    }
+
+    #[test]
+    fn the_retry_cadence_is_the_one_connectivity_md_states() {
+        // `architecture/transport/libp2p/CONNECTIVITY.md`: 30 s,
+        // exponential, bounded by 5 min. Restated as numbers in this
+        // module, so this test is what turns a drift into a failure.
+        let mut m = manager(64);
+        let mut delays = Vec::new();
+        let mut now = 0u64;
+        for _ in 0..10 {
+            let t = m
+                .handle()
+                .load()
+                .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, now)
+                .ok();
+            // Once backoff bites, drive the clock forward to the moment
+            // the schedule says the peer is due -- which is the point of
+            // the test: the two must agree.
+            let Some(t) = t else {
+                now += 1_000;
+                continue;
+            };
+            let due_before = m.scheduled_retries();
+            m.record_failure(t, now);
+            assert!(m.scheduled_retries() >= due_before);
+            let next = m.due_retries(u64::MAX);
+            assert_eq!(next, vec![peer(P1)]);
+            // Advance to exactly when it becomes due and note the gap.
+            let mut probe = now;
+            while m.due_retries(probe).is_empty() {
+                probe += 1_000;
+            }
+            delays.push(probe - now);
+            now = probe;
+        }
+        assert_eq!(delays.first(), Some(&30_000), "the first wait is 30 s");
+        assert!(
+            delays.windows(2).all(|w| w[1] >= w[0]),
+            "the cadence never shortens: {delays:?}"
+        );
+        assert!(
+            delays.iter().all(|d| *d <= 5 * 60 * 1_000),
+            "and is bounded by five minutes: {delays:?}"
+        );
+        assert!(
+            delays.contains(&(5 * 60 * 1_000)),
+            "and actually reaches the ceiling: {delays:?}"
+        );
+    }
+
+    #[test]
+    fn a_success_clears_the_retry_and_republishes() {
+        let mut m = manager(8);
+        let t = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
+            .expect("admitted");
+        m.record_failure(t, 0);
+        assert_eq!(m.scheduled_retries(), 1);
+
+        let handle = m.handle();
+        let stale = handle.load();
+        let t = handle
+            .load()
+            .admit(
+                &request(P1, "/a"),
+                ConnectionClass::DataPlaneTrusted,
+                40_000,
+            )
+            .expect("past the backoff");
+        m.record_success(t, 40_000);
+        assert_eq!(m.scheduled_retries(), 0, "a success clears the schedule");
+
+        // PROMPTLY, in ADR-0011's word: the handle sees the new policy
+        // without being told, and the older snapshot is observably
+        // older rather than silently equivalent.
+        assert!(
+            handle.load().revision() > stale.revision(),
+            "the handle must see a newer revision"
+        );
+    }
+
+    #[test]
+    fn revoking_authorization_reaches_a_holder_that_never_asked() {
+        // The staleness that is not merely a timing detail. A holder
+        // caches the handle, not the snapshot, so a revocation lands on
+        // its next decision rather than whenever it thinks to refresh.
+        let mut m = manager(8);
+        let handle = m.handle();
+        drop(
+            handle
+                .load()
+                .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
+                .expect("permitted while trusted"),
+        );
+
+        m.begin_shutdown();
+
+        assert_eq!(
+            handle
+                .load()
+                .admit(&request(P1, "/a"), ConnectionClass::DataPlaneTrusted, 0)
+                .err(),
+            Some(DialDenial::ShuttingDown),
+            "the same handle, no refresh, current answer"
+        );
+    }
+
+    #[test]
+    fn inbound_is_judged_by_the_same_authorization_as_outbound() {
+        // ADR-0011: current authorization applies before an inbound
+        // data-plane connection is RETAINED. Arriving is not an
+        // authorization, and an infrastructure peer authorized for
+        // reachability is not thereby a data-plane peer.
+        let mut m = manager(8);
+        assert!(m.retain_inbound(ConnectionClass::DataPlaneTrusted));
+        assert!(!m.retain_inbound(ConnectionClass::ConnectivityInfrastructureOnly));
+        assert!(!m.retain_inbound(ConnectionClass::Unauthorized));
+
+        m.begin_shutdown();
+        assert!(
+            !m.retain_inbound(ConnectionClass::DataPlaneTrusted),
+            "a draining runtime keeps nothing new"
+        );
+    }
+
+    #[test]
+    fn the_retry_table_is_bounded_and_keeps_the_soonest() {
+        // A map keyed by peer is state a remote party grows by failing
+        // to connect. When it is full the entry that would wait longest
+        // is forgotten: refusing the NEWEST failure instead would leave
+        // the peer that just failed with no schedule at all, and a peer
+        // with no schedule is one nothing is holding back.
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(4096, 64), 4096);
+        m.max_retry_entries = 4;
+        for i in 0..8u32 {
+            let p = format!(
+                "Qm{}",
+                format!("{i:044}").replace('0', "a")[..44].to_owned()
+            );
+            let t = m
+                .handle()
+                .load()
+                .admit(
+                    &DialRequest {
+                        peer: Some(peer(&p)),
+                        address: format!("/ip4/10.0.0.{i}/tcp/1"),
+                        origin: DialOrigin::ConnectionManager,
+                    },
+                    ConnectionClass::DataPlaneTrusted,
+                    u64::from(i) * 1_000,
+                )
+                .expect("admitted");
+            m.record_failure(t, u64::from(i) * 1_000);
+        }
+        assert_eq!(m.scheduled_retries(), 4, "the table is bounded");
+    }
+}

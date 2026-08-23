@@ -168,6 +168,18 @@ note() { (( QUIET )) || echo "pr-review-status: $*" >&2; }
 # queries below are for the human reading the final answer, and running
 # them every 30 seconds would be rude to the rate limiter for output
 # nobody sees.
+# Accounts whose verdict comment counts as a review.
+#
+# A LIST, because the alternative is a negation and a negation is what
+# lets anybody in. Bots appear with a `[bot]` suffix in some API
+# surfaces and without it in others, so both spellings are listed rather
+# than normalised -- a normalisation that silently stopped matching
+# would fail open.
+#
+# Override with INTERWEAVE_VERDICT_AUTHORS (a JSON array) where a
+# repository uses a different reviewer.
+VERDICT_AUTHORS="${INTERWEAVE_VERDICT_AUTHORS:-[\"chatgpt-codex-connector\",\"chatgpt-codex-connector[bot]\"]}"
+
 probe_ok=0
 verdicts='[]'
 verdict_count=0
@@ -210,11 +222,23 @@ probe() {
     comments_raw="$(gh api --paginate "repos/$REPO/issues/$PR/comments" 2>/dev/null)" || return 1
     comments="$(jq -s 'add // []' <<<"$comments_raw" 2>/dev/null)" || return 1
 
-    # A non-author comment that names the commit it reviewed. The sha is
-    # abbreviated in the body, so match on prefix in BOTH directions --
-    # neither string is reliably the longer one.
-    verdicts="$(jq --arg a "$author" '
+    # A comment from a RECOGNISED REVIEWER that names the commit it
+    # reviewed. The sha is abbreviated in the body, so match on prefix
+    # in BOTH directions -- neither string is reliably the longer one.
+    #
+    # "not the PR author" is the right filter for a review OBJECT,
+    # because GitHub only lets a reviewer create one. It is the wrong
+    # filter for a comment: on a public repository anyone may leave one,
+    # so accepting any non-author comment containing the verdict phrase
+    # lets a third party mark a head reviewed by typing it. That would
+    # satisfy the §9 prerequisite for auto-merging a security-boundary
+    # change without the reviewer ever having run -- a spoof of the
+    # exact gate this function was added to make usable.
+    #
+    # So the account is checked against a list, not against a negation.
+    verdicts="$(jq --arg a "$author" --argjson allowed "$VERDICT_AUTHORS" '
         [ .[]
+          | select(.user.login as $l | $allowed | index($l))
           | select(.user.login != $a)
           | (.body // "") as $b
           | ($b | capture("Reviewed commit:[^`]*`(?<sha>[0-9a-f]{7,40})`"; "i") // empty) as $m
