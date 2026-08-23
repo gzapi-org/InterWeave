@@ -159,6 +159,76 @@ impl core::fmt::Display for PortLimit {
 
 impl core::error::Error for PortLimit {}
 
+/// One opaque address on a routing offer, bounded before it is owned.
+///
+/// # Why the length check is here and not in the collection
+///
+/// [`OfferedAddresses::new`] used to take `Item = String` and check
+/// `len()` in the loop. By then the allocation has already happened:
+/// `next()` must finish building the `String` before the loop can look
+/// at it, so a single oversized item was attacker-controlled memory
+/// spent before the ceiling ever ran.
+///
+/// [`Self::parse`] takes a `&str` and checks the borrowed slice, so the
+/// copy is made only for a value that is going to be kept. That is as
+/// early as this crate can act: a caller who has ALREADY allocated an
+/// oversized `String` has already paid for it, and no signature here
+/// can undo that. The bound has to sit where the bytes are first read,
+/// which is why this type exists to be threaded outward rather than
+/// constructed from strings at the last moment.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct OfferedAddress(String);
+
+impl OfferedAddress {
+    /// Check a borrowed address and take a copy only if it fits.
+    ///
+    /// # Errors
+    /// Returns [`PortLimit::AddressOutOfBounds`] outside
+    /// `1..=`[`MAX_ADDRESS_BYTES`].
+    pub fn parse(address: &str) -> Result<Self, PortLimit> {
+        if address.is_empty() || address.len() > MAX_ADDRESS_BYTES {
+            return Err(PortLimit::AddressOutOfBounds { got: address.len() });
+        }
+        Ok(Self(address.to_owned()))
+    }
+
+    /// The address.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl core::fmt::Display for OfferedAddress {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for OfferedAddress {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+
+        impl serde::de::Visitor<'_> for V {
+            type Value = OfferedAddress;
+
+            fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                write!(f, "an address of 1..={MAX_ADDRESS_BYTES} bytes")
+            }
+
+            // `visit_str` rather than deserializing a `String` first:
+            // for input the format can hand over borrowed, the length
+            // is judged before anything is copied.
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                OfferedAddress::parse(v).map_err(E::custom)
+            }
+        }
+
+        d.deserialize_str(V)
+    }
+}
+
 /// The addresses on a routing offer, bounded by construction.
 ///
 /// # Why this is a type and not a `Vec` with a checked deserializer
@@ -176,22 +246,24 @@ impl core::error::Error for PortLimit {}
 /// cannot become one of these by any route.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
-pub struct OfferedAddresses(Vec<String>);
+pub struct OfferedAddresses(Vec<OfferedAddress>);
 
 impl OfferedAddresses {
     /// Build from opaque addresses.
     ///
     /// # Errors
     /// Returns [`PortLimit`] naming the bound that was exceeded.
-    pub fn new(addresses: impl IntoIterator<Item = String>) -> Result<Self, PortLimit> {
+    pub fn new(addresses: impl IntoIterator<Item = OfferedAddress>) -> Result<Self, PortLimit> {
         // READ AT MOST ONE PAST THE LIMIT. `collect()` first and check
         // the length after is the same defect this crate already fixed
         // on the wire path -- it materializes the whole input before the
-        // bound can look, so the ceiling rejects a `Vec` that has
-        // already been paid for, and against an unbounded iterator it
-        // never reaches the check at all. A caller passing a lazy,
-        // remote-influenced iterator is exactly the case this type
-        // exists for.
+        // bound can look, so the ceiling rejects a `Vec` already paid
+        // for, and against an unbounded lazy iterator it never reaches
+        // the check at all.
+        //
+        // The per-item bound is not here: it lives in
+        // [`OfferedAddress::parse`], because by the time an item is
+        // yielded its allocation has happened.
         let mut out = Vec::new();
         for address in addresses {
             if out.len() >= MAX_ADDRESSES {
@@ -199,17 +271,34 @@ impl OfferedAddresses {
                     got: MAX_ADDRESSES + 1,
                 });
             }
-            if address.is_empty() || address.len() > MAX_ADDRESS_BYTES {
-                return Err(PortLimit::AddressOutOfBounds { got: address.len() });
-            }
             out.push(address);
+        }
+        Ok(Self(out))
+    }
+
+    /// Parse and bound a sequence of borrowed addresses.
+    ///
+    /// The convenience most callers want, and the one that keeps the
+    /// length check ahead of the copy.
+    ///
+    /// # Errors
+    /// Returns [`PortLimit`] naming the bound that was exceeded.
+    pub fn parse_all<'a>(addresses: impl IntoIterator<Item = &'a str>) -> Result<Self, PortLimit> {
+        let mut out = Vec::new();
+        for address in addresses {
+            if out.len() >= MAX_ADDRESSES {
+                return Err(PortLimit::TooManyAddresses {
+                    got: MAX_ADDRESSES + 1,
+                });
+            }
+            out.push(OfferedAddress::parse(address)?);
         }
         Ok(Self(out))
     }
 
     /// The addresses.
     #[must_use]
-    pub fn as_slice(&self) -> &[String] {
+    pub fn as_slice(&self) -> &[OfferedAddress] {
         &self.0
     }
 
@@ -566,22 +655,43 @@ mod tests {
         let addr = |i: usize| format!("/ip4/10.0.0.1/tcp/{i}");
 
         // The Rust path, which is the one that matters.
-        assert!(OfferedAddresses::new((0..MAX_ADDRESSES).map(addr)).is_ok());
+        let strs: Vec<String> = (0..MAX_ADDRESSES).map(addr).collect();
+        assert!(OfferedAddresses::parse_all(strs.iter().map(String::as_str)).is_ok());
+        let over_strs: Vec<String> = (0..=MAX_ADDRESSES).map(addr).collect();
         assert_eq!(
-            OfferedAddresses::new((0..=MAX_ADDRESSES).map(addr)),
+            OfferedAddresses::parse_all(over_strs.iter().map(String::as_str)),
             Err(PortLimit::TooManyAddresses {
                 got: MAX_ADDRESSES + 1
             })
         );
+
+        // THE LENGTH IS JUDGED ON THE BORROWED SLICE, before a copy is
+        // made. Checking it after the item is yielded is too late: by
+        // then `next()` has finished building the `String`, so a single
+        // oversized item is attacker-controlled memory already spent.
+        // `parse` is where a caller can still act, because it is the
+        // last point at which the value is not yet owned.
+        let long = "a".repeat(MAX_ADDRESS_BYTES + 1);
         assert_eq!(
-            OfferedAddresses::new(["a".repeat(MAX_ADDRESS_BYTES + 1)]),
+            OfferedAddress::parse(&long),
             Err(PortLimit::AddressOutOfBounds {
                 got: MAX_ADDRESS_BYTES + 1
             })
         );
         assert_eq!(
-            OfferedAddresses::new([String::new()]),
+            OfferedAddress::parse(""),
             Err(PortLimit::AddressOutOfBounds { got: 0 })
+        );
+        assert!(OfferedAddress::parse(&"a".repeat(MAX_ADDRESS_BYTES)).is_ok());
+
+        // And the collection cannot be built around it: there is no
+        // constructor taking a raw `String`, so an unchecked address
+        // has no route in.
+        assert_eq!(
+            OfferedAddresses::parse_all([long.as_str()]),
+            Err(PortLimit::AddressOutOfBounds {
+                got: MAX_ADDRESS_BYTES + 1
+            })
         );
 
         // There is no second door. `KademliaCommand::OfferRoutingPeer`
@@ -590,7 +700,7 @@ mod tests {
         // through the constructor.
         let cmd = KademliaCommand::OfferRoutingPeer {
             peer: TransportIdentity::parse(peer).expect("canonical"),
-            addresses: OfferedAddresses::new([addr(1)]).expect("one address"),
+            addresses: OfferedAddresses::parse_all([addr(1).as_str()]).expect("one address"),
         };
         match &cmd {
             KademliaCommand::OfferRoutingPeer { addresses, .. } => {
@@ -607,7 +717,7 @@ mod tests {
         // it means the constructor read further than it needed to.
         let over = (0..).map(|i| {
             assert!(i <= MAX_ADDRESSES, "read past the limit at item {i}");
-            addr(i)
+            OfferedAddress::parse(&addr(i)).expect("legal")
         });
         assert_eq!(
             OfferedAddresses::new(over),
