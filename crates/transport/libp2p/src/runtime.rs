@@ -91,6 +91,21 @@ pub struct SubstrateConfig {
     /// `PreAuthLimitsBuilder::build` is the only way to make one -- so
     /// there is nothing for `validate` to re-check here.
     pub preauth: PreAuthLimits,
+    /// How often the reconnect scheduler looks for due retries.
+    ///
+    /// A period, not a deadline: a retry becomes due when the policy
+    /// says so, and this is how long it may wait to be noticed. Short
+    /// enough that the backoff is what determines the delay, long
+    /// enough that an idle profile is not walking a table every
+    /// moment.
+    pub retry_tick: Duration,
+    /// Most peers the scheduler will dial in one tick.
+    ///
+    /// The retry table is bounded, so the whole of it could come due at
+    /// once -- and dialing all of it in one pass is a burst this
+    /// profile inflicts on itself. The rest stay due and are taken next
+    /// tick.
+    pub max_retries_per_tick: usize,
     /// Maximum listeners with a caller still awaiting their address.
     ///
     /// The command channel bounds how many `Listen` commands can be
@@ -110,6 +125,8 @@ impl Default for SubstrateConfig {
             max_connections: 256,
             idle_timeout: Duration::from_secs(60),
             preauth: PreAuthLimits::default(),
+            retry_tick: Duration::from_secs(1),
+            max_retries_per_tick: 4,
             max_pending_listens: 64,
         }
     }
@@ -135,6 +152,10 @@ impl SubstrateConfig {
             ("max_pending_dials", self.max_pending_dials, 0),
             ("max_connections", self.max_connections, 0),
             ("max_pending_listens", self.max_pending_listens, 0),
+            // A tick that dialed the whole table would be a burst; zero
+            // is a scheduler that never dials, which is the state this
+            // stage exists to leave.
+            ("max_retries_per_tick", self.max_retries_per_tick, 1),
         ];
         for (field, got, min) in depths {
             if got < min || got > MAX_CONFIGURED_CAPACITY {
@@ -181,6 +202,22 @@ pub enum SwarmCommand {
         /// Answered when the dial is admitted or refused locally.
         reply: oneshot::Sender<Result<(), DialRefusal>>,
     },
+    /// Remember an address as a candidate for a peer.
+    AddAddress {
+        /// The peer the address belongs to.
+        peer: TransportIdentity,
+        /// The candidate address.
+        address: Multiaddr,
+        /// Answered with whether it was remembered.
+        reply: oneshot::Sender<bool>,
+    },
+    /// Dial a peer at the best address already known for it.
+    DialPeer {
+        /// The peer to reach.
+        peer: TransportIdentity,
+        /// Answered when a dial is admitted, or with why none was.
+        reply: oneshot::Sender<Result<(), DialRefusal>>,
+    },
     /// Replace the trust sources, evicting what they no longer permit.
     SetTrust {
         /// Who this profile trusts, and for what.
@@ -198,6 +235,12 @@ pub enum SwarmCommand {
 /// Why a dial did not proceed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialRefusal {
+    /// Nothing is known about where to reach this peer.
+    ///
+    /// Distinct from a policy refusal on purpose: "I have no address"
+    /// and "I have one and will not use it" are different problems and
+    /// an operator fixes them differently.
+    NoKnownAddress,
     /// The local admission policy refused it.
     ///
     /// Refused BEFORE a socket is opened. That ordering is the whole
@@ -367,7 +410,7 @@ impl SwarmRuntime {
         // quarantined for thirty minutes was quarantined until restart,
         // and a peer in backoff never left it. `Instant` rather than
         // wall time so a clock adjustment cannot move a deadline.
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
 
         // Tickets for dials the Swarm has accepted and not yet reported
         // on. Keyed by the connection id the dial was built with, which
@@ -385,6 +428,12 @@ impl SwarmRuntime {
         // this connection" is not a question the Swarm will answer
         // after the fact.
         let mut open: HashMap<libp2p::swarm::ConnectionId, OpenConnection> = HashMap::new();
+
+        // The scheduler's heartbeat. `Delay` rather than `Burst` so a
+        // task that was busy does not then fire a backlog of ticks it
+        // slept through, each one walking the retry table again.
+        let mut retries = tokio::time::interval(config.retry_tick);
+        retries.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         // Listen replies wait for the address the OS actually assigned.
         // `listen_on` returns a ListenerId and nothing else; the bound
@@ -439,6 +488,56 @@ impl SwarmRuntime {
                 let room = outbox.len() < config.event_capacity.saturating_add(listens.len());
 
                 tokio::select! {
+                    // THE RECONNECT SCHEDULER. `due_retries` has
+                    // existed with nothing driving it, so a failed peer
+                    // was scheduled and then never retried: the backoff
+                    // computed a moment that nothing waited for.
+                    //
+                    // A tick rather than a timer per peer, because a
+                    // timer per peer is a structure a remote party
+                    // grows by failing to connect. The retry table is
+                    // already bounded; this walks it.
+                    _ = retries.tick() => {
+                        let now = now_ms(started);
+                        let due = manager.due_retries(now);
+                        for peer in due.into_iter().take(config.max_retries_per_tick) {
+                            // ADMITTED LIKE ANY OTHER DIAL, and
+                            // attributed to the scheduler rather than
+                            // to whoever asked first: a denial an
+                            // operator sees must say which of the two
+                            // it refused.
+                            let mut last: Option<DialRefusal> = None;
+                            for address in manager.dial_candidates(&peer, now) {
+                                match attempt_dial(
+                                    &mut swarm,
+                                    &mut manager,
+                                    &mut in_flight,
+                                    &peer,
+                                    &address,
+                                    DialOrigin::ConnectionManager,
+                                    now,
+                                ) {
+                                    Ok(()) => {
+                                        last = None;
+                                        break;
+                                    }
+                                    Err(refusal) => last = Some(refusal),
+                                }
+                            }
+                            // REPORTED, because nobody asked for this
+                            // dial and so nobody is holding a reply
+                            // channel for it. A scheduled retry that
+                            // failed silently would leave an operator
+                            // watching a peer that never reconnects
+                            // with nothing at all to look at.
+                            if let Some(refusal) = last {
+                                outbox.push_back(SwarmEvent::DialFailed {
+                                    peer: Some(peer.clone()),
+                                    detail: format!("scheduled retry: {refusal:?}"),
+                                });
+                            }
+                        }
+                    }
                     // `reserve` waits for capacity WITHOUT consuming an
                     // event, so nothing is lost when another branch wins.
                     permit = event_tx.reserve(), if !outbox.is_empty() => {
@@ -600,6 +699,55 @@ impl SwarmRuntime {
         answer.await.map_err(|_| SubstrateError::Stopped)
     }
 
+    /// Remember an address as a candidate for `peer`.
+    ///
+    /// Returns whether it was remembered: an unclassified peer gets no
+    /// book entry, and a peer whose eight slots are all dialable keeps
+    /// them.
+    ///
+    /// # Errors
+    /// Returns [`SubstrateError::Stopped`] if the task is gone.
+    pub async fn add_address(
+        &self,
+        peer: TransportIdentity,
+        address: Multiaddr,
+    ) -> Result<bool, SubstrateError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(SwarmCommand::AddAddress {
+                peer,
+                address,
+                reply,
+            })
+            .await
+            .map_err(|_| SubstrateError::Stopped)?;
+        answer.await.map_err(|_| SubstrateError::Stopped)
+    }
+
+    /// Dial `peer` at the best address known for it.
+    ///
+    /// Known-good routes are tried first, and each candidate is
+    /// admitted on its own: the ordering is a preference, and a
+    /// quarantined address is refused by the gate rather than skipped
+    /// by the sort.
+    ///
+    /// # Errors
+    /// Returns [`SubstrateError::Stopped`] if the task is gone. A
+    /// refusal is `Ok(Err(..))`, including
+    /// [`DialRefusal::NoKnownAddress`] when the book holds nothing for
+    /// this peer.
+    pub async fn dial_peer(
+        &self,
+        peer: TransportIdentity,
+    ) -> Result<Result<(), DialRefusal>, SubstrateError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(SwarmCommand::DialPeer { peer, reply })
+            .await
+            .map_err(|_| SubstrateError::Stopped)?;
+        answer.await.map_err(|_| SubstrateError::Stopped)
+    }
+
     /// Replace the trust sources, evicting connections they no longer
     /// permit.
     ///
@@ -670,6 +818,75 @@ impl Drop for SwarmRuntime {
     }
 }
 
+/// Admit one dial, bind it to its ticket, and hand it to the Swarm.
+///
+/// The single place a dial happens, whoever asked: the command path,
+/// the address-book path, and the retry scheduler all arrive here. A
+/// second copy of this sequence is how one of them would end up
+/// skipping the ticket, the binding, or the settlement.
+fn attempt_dial(
+    swarm: &mut GatedSwarm,
+    manager: &mut ConnectionManager,
+    in_flight: &mut HashMap<libp2p::swarm::ConnectionId, DialTicket>,
+    peer: &TransportIdentity,
+    address: &str,
+    origin: DialOrigin,
+    now_ms: u64,
+) -> Result<(), DialRefusal> {
+    let request = DialRequest {
+        peer: Some(peer.clone()),
+        address: address.to_owned(),
+        origin,
+    };
+    // ADMITTED BEFORE A SOCKET IS OPENED. A quarantined address costs
+    // nothing, which is the whole point of checking here rather than
+    // after the connection fails.
+    //
+    // THE CLASS IS NOT THIS SITE'S TO ASSERT. It used to be a hardcoded
+    // `DataPlaneTrusted` on every dial, which is the ADR-0036
+    // separation stated in the policy and discarded by its only caller.
+    // The gate classifies from the trust sources it publishes, and
+    // there is no longer an argument through which a call site could
+    // say otherwise.
+    let ticket = manager
+        .handle()
+        .admit(&request, now_ms)
+        .map_err(DialRefusal::Policy)?;
+
+    // DERIVED FROM THE ADMISSION, not paired with it. The destination
+    // is read back out of the ticket rather than rebuilt from the
+    // caller's own peer and address, so there is no second copy of the
+    // destination that could disagree with the one the gate admitted.
+    let admitted = match AdmittedDial::from_ticket(ticket) {
+        Ok(a) => a,
+        Err(boxed) => {
+            let undialable = *boxed;
+            // The refusal is still an admission that reserved a slot,
+            // so it is settled here rather than dropped on the floor.
+            manager.record_failure(undialable.ticket, now_ms);
+            return Err(DialRefusal::Backend(undialable.reason));
+        }
+    };
+    let id = admitted.connection_id();
+    match swarm.dial(admitted) {
+        Ok(ticket) => {
+            // Held until the outcome event settles it. Dropping it here
+            // would release the pending slot the instant the dial
+            // began, and the ceiling would bound nothing but the rate
+            // of the loop.
+            in_flight.insert(id, ticket);
+            Ok(())
+        }
+        Err(boxed) => {
+            let (e, ticket) = *boxed;
+            // A synchronous refusal produces no event, so the admission
+            // is settled here or never.
+            manager.record_failure(ticket, now_ms);
+            Err(DialRefusal::Backend(e.to_string()))
+        }
+    }
+}
+
 /// Release the admission a connection outcome belongs to.
 ///
 /// The two events that end an outbound attempt are the established
@@ -710,7 +927,13 @@ fn settle_outcome(
                 // Outbound: the slot was reserved when the dial was
                 // admitted, and the connection takes it over.
                 Some(ticket) => {
+                    // THE ADDRESS THAT WORKED. Learned from the ticket
+                    // rather than from anything the peer said, so a
+                    // route this profile has actually authenticated is
+                    // in the book even if the peer never advertises it.
+                    let address = ticket.address().to_owned();
                     let slot = manager.record_success(ticket, now_ms);
+                    let _ = manager.learn_address(&peer, &address, now_ms);
                     open.insert(*connection_id, OpenConnection { peer, slot });
                 }
                 // INBOUND HAS NO ADMISSION. ADR-0011: the same current
@@ -771,6 +994,21 @@ fn settle_outcome(
                 }
             }
         }
+        // ADVISORY, and bounded. These are addresses the peer asserted
+        // about itself: not authorization, not proof of reachability,
+        // and not permission to dial -- every dial still passes
+        // admission. Remembered only for a peer the trust sources
+        // classify, and at most eight of them, because the list is
+        // written by the party being described.
+        Libp2pSwarmEvent::Behaviour(SubstrateBehaviourEvent::Identify(
+            identify::Event::Received { peer_id, info, .. },
+        )) => {
+            if let Ok(peer) = to_transport_identity(peer_id) {
+                for address in &info.listen_addrs {
+                    let _ = manager.learn_address(&peer, &address.to_string(), now_ms);
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -780,7 +1018,7 @@ fn settle_outcome(
 /// Monotonic and relative. The policy is a state machine over elapsed
 /// time, so an origin of zero is as good as any epoch and immune to a
 /// wall-clock adjustment moving a quarantine deadline.
-fn now_ms(started: std::time::Instant) -> u64 {
+fn now_ms(started: tokio::time::Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
@@ -843,70 +1081,53 @@ fn handle_command(
             address,
             reply,
         } => {
-            let request = DialRequest {
-                peer: Some(peer.clone()),
-                address: address.to_string(),
-                // A COMMAND IS A PERSON OR AN ADMIN API. Reporting it as
-                // the scheduler's own dial made a denial unable to say
-                // which of the two it refused, and those are the two an
-                // operator most needs told apart.
-                origin: DialOrigin::Manual,
-            };
-            // ADMITTED BEFORE A SOCKET IS OPENED. A quarantined address
-            // costs nothing, which is the whole point of checking here
-            // rather than after the connection fails.
-            //
-            // THE CLASS IS NOT THIS SITE'S TO ASSERT. It used to be a
-            // hardcoded `DataPlaneTrusted` on every dial, which is the
-            // ADR-0036 separation stated in the policy and discarded by
-            // its only caller: an infrastructure-only peer was dialable
-            // for application traffic, and an empty allowlist -- the
-            // default that admits nobody -- admitted everyone. The gate
-            // classifies from the trust sources it publishes, and there
-            // is no longer an argument through which a call site could
-            // say otherwise.
-            let ticket = match manager.handle().admit(&request, now_ms) {
-                Ok(t) => t,
-                Err(denial) => {
-                    let _ = reply.send(Err(DialRefusal::Policy(denial)));
-                    return;
+            // A COMMAND IS A PERSON OR AN ADMIN API. Reporting it as
+            // the scheduler's own dial made a denial unable to say
+            // which of the two it refused, and those are the two an
+            // operator most needs told apart.
+            let answer = attempt_dial(
+                swarm,
+                manager,
+                in_flight,
+                &peer,
+                &address.to_string(),
+                DialOrigin::Manual,
+                now_ms,
+            );
+            let _ = reply.send(answer);
+        }
+        SwarmCommand::AddAddress {
+            peer,
+            address,
+            reply,
+        } => {
+            let _ = reply.send(manager.learn_address(&peer, &address.to_string(), now_ms));
+        }
+        SwarmCommand::DialPeer { peer, reply } => {
+            // KNOWN-GOOD FIRST, and every candidate still admitted
+            // individually: the ordering is a preference, and a
+            // quarantined address that sorts last is refused by the
+            // gate rather than by the sort.
+            let candidates = manager.dial_candidates(&peer, now_ms);
+            if candidates.is_empty() {
+                let _ = reply.send(Err(DialRefusal::NoKnownAddress));
+                return;
+            }
+            let mut answer = Err(DialRefusal::NoKnownAddress);
+            for address in &candidates {
+                answer = attempt_dial(
+                    swarm,
+                    manager,
+                    in_flight,
+                    &peer,
+                    address,
+                    DialOrigin::Manual,
+                    now_ms,
+                );
+                if answer.is_ok() {
+                    break;
                 }
-            };
-            // DERIVED FROM THE ADMISSION, not paired with it. The
-            // destination is read back out of the ticket rather than
-            // rebuilt from the command's own `peer`/`address`, so there
-            // is no second copy of the destination that could disagree
-            // with the one the gate admitted.
-            let admitted = match AdmittedDial::from_ticket(ticket) {
-                Ok(a) => a,
-                Err(boxed) => {
-                    let undialable = *boxed;
-                    // The refusal is still an admission that reserved a
-                    // slot, so it is settled here rather than dropped
-                    // on the floor.
-                    manager.record_failure(undialable.ticket, now_ms);
-                    let _ = reply.send(Err(DialRefusal::Backend(undialable.reason)));
-                    return;
-                }
-            };
-            let id = admitted.connection_id();
-            let answer = match swarm.dial(admitted) {
-                Ok(ticket) => {
-                    // Held until the outcome event settles it. Dropping
-                    // it here would release the pending slot the instant
-                    // the dial began, and the ceiling would bound
-                    // nothing but the rate of the loop.
-                    in_flight.insert(id, ticket);
-                    Ok(())
-                }
-                Err(boxed) => {
-                    let (e, ticket) = *boxed;
-                    // A synchronous refusal produces no event, so the
-                    // admission is settled here or never.
-                    manager.record_failure(ticket, now_ms);
-                    Err(DialRefusal::Backend(e.to_string()))
-                }
-            };
+            }
             let _ = reply.send(answer);
         }
         SwarmCommand::SetTrust { trust, reply } => {

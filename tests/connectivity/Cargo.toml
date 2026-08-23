@@ -34,4 +34,4 @@ libp2p = { workspace = true }
 # `net` beyond the workspace defaults: one test opens a raw TCP
 # connection and abandons it, which is the abandoned-handshake case a
 # SwarmRuntime cannot produce because it would complete the handshake.
-tokio = { workspace = true, features = ["net", "io-util"] }
+tokio = { workspace = true, features = ["net", "io-util", "test-util"] }

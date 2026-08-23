@@ -1146,3 +1146,200 @@ async fn revoking_trust_closes_the_connection_it_revoked() {
     dialer.shutdown().await.expect("shuts down");
     listener.shutdown().await.expect("shuts down");
 }
+
+#[tokio::test]
+async fn a_peer_can_be_dialed_by_identity_alone() {
+    // The address book, and the reason it has to exist before the
+    // scheduler does: a reconnect knows which peer it wants and has to
+    // find out for itself where that peer is.
+    let (dialer_id, dialer_peer) = who();
+    let listener = SwarmRuntime::start(
+        &identity(),
+        SubstrateConfig::default(),
+        trusting(&[&dialer_peer]),
+    )
+    .expect("starts");
+    let bound = listener
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
+        .await
+        .expect("binds");
+    let listener_peer = listener.local_peer().clone();
+
+    let mut dialer = SwarmRuntime::start(
+        &dialer_id,
+        SubstrateConfig::default(),
+        trusting(&[&listener_peer]),
+    )
+    .expect("starts");
+
+    // Nothing is known yet, and the refusal says so rather than
+    // pretending the policy objected.
+    match dialer
+        .dial_peer(listener_peer.clone())
+        .await
+        .expect("the command reaches the task")
+    {
+        Err(DialRefusal::NoKnownAddress) => {}
+        other => panic!("an empty book must say so, got {other:?}"),
+    }
+
+    assert!(
+        dialer
+            .add_address(listener_peer.clone(), bound)
+            .await
+            .expect("the command reaches the task"),
+        "a classified peer gets a book entry"
+    );
+    assert!(
+        dialer
+            .dial_peer(listener_peer.clone())
+            .await
+            .expect("the command reaches the task")
+            .is_ok()
+    );
+    assert_eq!(wait_connected(&mut dialer).await, listener_peer);
+
+    dialer.shutdown().await.expect("shuts down");
+    listener.shutdown().await.expect("shuts down");
+}
+
+#[tokio::test]
+async fn an_untrusted_peer_gets_no_address_book_entry() {
+    // The book's key set is bounded by the trust allowlist, because
+    // Identify lets any peer that connects describe itself. Asserted at
+    // the substrate because that is where the Identify messages arrive.
+    let dialer = SwarmRuntime::start(&identity(), SubstrateConfig::default(), trusting_nobody())
+        .expect("starts");
+    let stranger = TransportIdentity::parse(ABSENT).expect("canonical");
+    assert!(
+        !dialer
+            .add_address(stranger, "/ip4/192.0.2.1/tcp/4001".parse().expect("valid"))
+            .await
+            .expect("the command reaches the task"),
+        "an unclassified peer is not somewhere this profile stores addresses"
+    );
+    dialer.shutdown().await.expect("shuts down");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_peer_is_retried_without_anyone_asking() {
+    // `due_retries` computed a moment and nothing waited for it, so a
+    // peer that failed was scheduled and then never dialed again: the
+    // backoff was a number in a table.
+    //
+    // Paused time, because the first retry is thirty seconds out by
+    // CONNECTIVITY.md and a test that waited would be a test nobody
+    // runs. The clock is tokio's, so advancing it advances the
+    // substrate's own notion of now -- and the address below fails
+    // SYNCHRONOUSLY, with no socket, so there is no real I/O for the
+    // virtual clock to outrun.
+    let absent = TransportIdentity::parse(ABSENT).expect("canonical");
+    let mut runtime = SwarmRuntime::start(
+        &identity(),
+        SubstrateConfig::default(),
+        trusting(&[&absent]),
+    )
+    .expect("starts");
+
+    // UDP, on a Swarm whose only transport is TCP. libp2p refuses it
+    // without opening anything, which is what keeps this test free of
+    // wall-clock time.
+    let unsupported: Multiaddr = "/ip4/127.0.0.1/udp/1".parse().expect("valid");
+    assert!(
+        runtime
+            .add_address(absent.clone(), unsupported.clone())
+            .await
+            .expect("the command reaches the task")
+    );
+    assert!(
+        runtime
+            .dial(absent.clone(), unsupported)
+            .await
+            .expect("the command reaches the task")
+            .is_ok(),
+        "admitted -- libp2p discovers there is no transport for it afterwards"
+    );
+
+    // NOBODY ASKS AGAIN. This test issues exactly one dial, so a
+    // SECOND failure for that peer can only have come from the
+    // scheduler.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(600);
+    let mut failures = 0_u8;
+    while failures < 2 {
+        match tokio::time::timeout_at(deadline, runtime.next_event())
+            .await
+            .expect("a scheduled retry must arrive without another command")
+        {
+            Some(interweave_transport_libp2p::SwarmEvent::DialFailed { peer, .. }) => {
+                assert_eq!(peer.as_ref(), Some(&absent), "a failure for another peer");
+                failures = failures.saturating_add(1);
+            }
+            Some(_) => {}
+            None => panic!("the substrate stopped before retrying"),
+        }
+    }
+
+    runtime.shutdown().await.expect("shuts down");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_revoked_peer_is_not_retried() {
+    // The scheduler is a dial origin like any other, so a revocation
+    // has to stop it too. A retry that bypassed admission -- because it
+    // was "already scheduled" -- would keep dialing a peer the operator
+    // has withdrawn trust from, on a timer, indefinitely.
+    //
+    // The refusal is also REPORTED: nobody is holding a reply channel
+    // for a scheduled dial, so without an event an operator watching a
+    // peer that never reconnects would have nothing to look at.
+    let absent = TransportIdentity::parse(ABSENT).expect("canonical");
+    let mut runtime = SwarmRuntime::start(
+        &identity(),
+        SubstrateConfig::default(),
+        trusting(&[&absent]),
+    )
+    .expect("starts");
+
+    let unsupported: Multiaddr = "/ip4/127.0.0.1/udp/1".parse().expect("valid");
+    assert!(
+        runtime
+            .add_address(absent.clone(), unsupported.clone())
+            .await
+            .expect("the command reaches the task")
+    );
+    assert!(
+        runtime
+            .dial(absent.clone(), unsupported)
+            .await
+            .expect("the command reaches the task")
+            .is_ok()
+    );
+    let _ = wait_dial_failed(&mut runtime).await;
+
+    // Trust withdrawn while the retry is pending.
+    let _ = runtime
+        .set_trust(trusting_nobody())
+        .await
+        .expect("the command reaches the task");
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(600);
+    loop {
+        match tokio::time::timeout_at(deadline, runtime.next_event())
+            .await
+            .expect("the scheduler must report why it gave up")
+        {
+            Some(interweave_transport_libp2p::SwarmEvent::DialFailed { peer, detail }) => {
+                assert!(
+                    detail.contains("scheduled retry") && detail.contains("Unauthorized"),
+                    "a revoked peer must be refused by the gate, not dialed: {detail}"
+                );
+                assert_eq!(peer.as_ref(), Some(&absent));
+                break;
+            }
+            Some(_) => {}
+            None => panic!("the substrate stopped before the retry came due"),
+        }
+    }
+
+    runtime.shutdown().await.expect("shuts down");
+}
