@@ -461,6 +461,37 @@ For a trusted PeerId with both a known-good address and an attacker-supplied wro
 
 No Kademlia/AutoNAT/Relay/DCUtR is enabled before this gate passes.
 
+**Met.** `tests/connectivity/tests/stage5_dial_admission.rs` proves all
+four over loopback TCP, and the structural half is in the type system
+rather than in a convention:
+
+- **Root admission.** The raw `Swarm` is private to `GatedSwarm`, whose
+  `dial` takes an `AdmittedDial` that can only be *derived* from a
+  `DialTicket` — so a call site that forgets to ask does not misbehave,
+  it does not compile. The behaviour path is closed too:
+  `OutboundAdmission` refuses any dial whose connection id the root
+  admission did not just ticket, which is the hook Kademlia, AutoNAT,
+  Relay and DCUtR will each go through.
+- **Denied autonomous dials.** A refusal produces no ticket, and every
+  path that records an outcome requires one. Proved for each autonomous
+  origin in turn.
+- **Pre-Noise work.** `PreAuthAdmission` answers
+  `handle_pending_inbound_connection`, which runs *before* the upgrade
+  and whose `Err` aborts it; the handshake timeout comes from the same
+  limits, so the accounting and the transport agree about when a
+  handshake is over.
+- **Address poisoning.** A wrong-key address is quarantined and the
+  expected peer's own backoff is untouched, so the route that was
+  working stays dialable. Both halves are mutation-checked.
+
+Every claim above was verified by breaking the code and watching the
+test fail, which is the only evidence that distinguishes a test of the
+behaviour from a test written from the same belief as the code.
+
+Stage 6 does not open on this alone: its prerequisite is SPIKE-002, and
+`workspace.metadata.interweave.status` stays on Stage 5 until that spike
+is run and closed.
+
 ## 9. Stage 6 — direct protocol v2
 
 ### Prerequisite
