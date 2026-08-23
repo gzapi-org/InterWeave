@@ -55,6 +55,11 @@ assert_lacks() {
     if [[ "$RUN_OUT" != *"$2"* ]]; then pass "$1"
     else fail "$1 — output unexpectedly contained '$2'" "$RUN_OUT"; fi
 }
+assert_rc_not() {
+    local label="$1" unwanted="$2"
+    if [[ "$RUN_RC" -ne "$unwanted" ]]; then pass "$label"
+    else fail "$label — expected any exit but $unwanted" "$RUN_OUT"; fi
+}
 
 SANDBOX="$(mktemp -d)"
 mkdir -p "$SANDBOX/bin" "$SANDBOX/state"
@@ -252,8 +257,15 @@ echo "pr-review-status: a MERGED PR is never told that no review is coming"
 # sweep exists. Firing exit 5 on one sends the caller to request a review
 # instead of awaiting the sweep that was about to deliver it, and
 # contradicts the merged-PR exception in the same loop.
+# THIS ASSERTION USED TO DO NOTHING. It called `ok`/`bad`, which are
+# not functions here -- the helpers are `pass`/`fail`, reached through
+# `assert_*`. Bash printed "ok: command not found" to stderr, the
+# failure counter never moved, and the suite went on reporting "all
+# assertions passed" with this case vacuous. A self-test that cannot
+# fail is worse than an absent one: it is the guard reporting coverage
+# it does not have.
 run "MERGED:newsha:0" "reviewer-a,oldsha1,2026-08-12T10:00:00Z"
-[ "$RUN_RC" != "5" ] && ok "a merged PR does not exit 5" || bad "merged PR should not claim no review is coming"
+assert_rc_not "a merged PR does not exit 5" 5
 
 echo "pr-review-status: a stale review submitted LAST cannot mask head coverage"
 # A review created before the last push but submitted after a fresh one
