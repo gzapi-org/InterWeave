@@ -272,6 +272,66 @@ async fn an_established_connection_counts_against_the_connection_ceiling() {
 }
 
 #[tokio::test]
+async fn an_identity_mismatch_quarantines_the_address_and_not_the_peer() {
+    // ADR-0011: an address that authenticates somebody else is not an
+    // unreachable route to be retried on backoff -- it is quarantined,
+    // and the expected peer's own backoff is left alone so one injected
+    // address cannot suppress that peer's real routes.
+    //
+    // The two branches are distinguishable from outside precisely
+    // because they refuse differently: `record_failure` sets PEER
+    // backoff, `record_identity_mismatch` sets ADDRESS quarantine. The
+    // generic path that discarded the error therefore produces
+    // `PeerBackoff` here, and this asserts the other one.
+    let listener = SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+    let bound = listener
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
+        .await
+        .expect("binds");
+
+    let dialer = SwarmRuntime::start(&identity(), SubstrateConfig::default()).expect("starts");
+    // The listener is real and answering -- with a key that is not this
+    // one. That is what makes libp2p report `WrongPeerId` rather than a
+    // transport error.
+    let wrong = TransportIdentity::parse(ABSENT).expect("canonical");
+    let first = dialer
+        .dial(wrong.clone(), bound.clone())
+        .await
+        .expect("the command reaches the task");
+    assert!(
+        first.is_ok(),
+        "admitted, and it is the handshake that fails"
+    );
+
+    // The outcome arrives as an event; the policy is updated before it
+    // is translated, so seeing the failure means the recording happened.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut dialer = dialer;
+    loop {
+        match tokio::time::timeout_at(deadline, dialer.next_event())
+            .await
+            .expect("the failure arrives within the deadline")
+        {
+            Some(interweave_transport_libp2p::SwarmEvent::DialFailed { .. }) => break,
+            Some(_) => {}
+            None => panic!("the substrate stopped before failing"),
+        }
+    }
+
+    let second = dialer
+        .dial(wrong, bound)
+        .await
+        .expect("the command reaches the task");
+    match second {
+        Err(DialRefusal::Policy(DialDenial::AddressQuarantined)) => {}
+        other => panic!("a mismatched identity must quarantine the address, got {other:?}"),
+    }
+
+    dialer.shutdown().await.expect("shuts down");
+    listener.shutdown().await.expect("shuts down");
+}
+
+#[tokio::test]
 async fn a_closed_connection_gives_its_slot_back() {
     // A ceiling that only counts up is a LIFETIME QUOTA, not a
     // concurrency bound: a node would dial `max_connections` peers over

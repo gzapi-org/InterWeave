@@ -46,7 +46,7 @@ use interweave_transport_runtime::{
     DialTicket,
 };
 use libp2p::core::transport::ListenerId;
-use libp2p::swarm::SwarmEvent as Libp2pSwarmEvent;
+use libp2p::swarm::{DialError, SwarmEvent as Libp2pSwarmEvent};
 use libp2p::{Multiaddr, PeerId, identify, noise, tcp, yamux};
 use tokio::sync::{mpsc, oneshot};
 
@@ -616,14 +616,30 @@ fn settle_outcome(
             // rather than a concurrency bound.
             manager.record_connection_closed();
         }
-        Libp2pSwarmEvent::OutgoingConnectionError { connection_id, .. } => {
+        Libp2pSwarmEvent::OutgoingConnectionError {
+            connection_id,
+            error,
+            ..
+        } => {
             if let Some(ticket) = in_flight.remove(connection_id) {
-                // ADDRESS-SCOPED, not peer-scoped. ADR-0011: a failure
-                // against one address must not advance a trusted peer
-                // into punitive backoff while a known-good route
-                // remains, and `record_failure` is the path that keeps
-                // that distinction.
-                manager.record_failure(ticket, now_ms);
+                // NOT EVERY FAILURE IS THE ADDRESS'S FAULT. A peer that
+                // answered with a different key is not an unreachable
+                // route to be retried on backoff -- it is an address
+                // that is serving somebody else, and ADR-0011 puts that
+                // into quarantine rather than into the retry schedule.
+                // Passing it to `record_failure` like any timeout made
+                // `record_identity_mismatch` unreachable, so the
+                // quarantine existed only as a method nobody called.
+                if matches!(error, DialError::WrongPeerId { .. }) {
+                    let _ = manager.record_identity_mismatch(ticket, now_ms);
+                } else {
+                    // ADDRESS-SCOPED, not peer-scoped. ADR-0011: a
+                    // failure against one address must not advance a
+                    // trusted peer into punitive backoff while a
+                    // known-good route remains, and `record_failure` is
+                    // the path that keeps that distinction.
+                    manager.record_failure(ticket, now_ms);
+                }
             }
         }
         _ => {}
