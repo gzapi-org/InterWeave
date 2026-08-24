@@ -256,20 +256,60 @@ fn wire_address_set<'de, D>(deserializer: D) -> Result<BTreeSet<String>, D::Erro
 where
     D: serde::Deserializer<'de>,
 {
-    use serde::de::Error as _;
-    let items = Vec::<String>::deserialize(deserializer)?;
-    if items.len() > MAX_ADDRESSES {
-        return Err(D::Error::custom(format!(
-            "at most {MAX_ADDRESSES} addresses, got {}",
-            items.len()
-        )));
+    /// Stops at `MAX_ADDRESSES + 1` instead of materializing the input.
+    ///
+    /// `Vec::<String>::deserialize` parses and allocates the WHOLE
+    /// array before any length check can run, so a ceiling applied
+    /// afterwards rejects the result while the input has already been
+    /// paid for -- a semantic limit rather than the resource limit it
+    /// exists to be. One element past the limit is enough to know, and
+    /// it is the only element past the limit this ever holds.
+    ///
+    /// Each address is also length-checked as it arrives rather than
+    /// after the set is built: `MAX_ADDRESSES * MAX_ADDRESS_BYTES` is
+    /// the ceiling this imposes, and without the per-element check a
+    /// single enormous string inside a legal-length array is unbounded.
+    struct Bounded;
+
+    impl<'de> serde::de::Visitor<'de> for Bounded {
+        type Value = BTreeSet<String>;
+
+        fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(f, "at most {MAX_ADDRESSES} unique addresses")
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            use serde::de::Error as _;
+            let mut out = BTreeSet::new();
+            // COUNTED, not measured by the set. Duplicates collapse, and
+            // the ceiling is on the array that was sent.
+            let mut count = 0_usize;
+            while let Some(address) = seq.next_element::<String>()? {
+                count = count.saturating_add(1);
+                if count > MAX_ADDRESSES {
+                    return Err(A::Error::custom(format!(
+                        "at most {MAX_ADDRESSES} addresses, got more"
+                    )));
+                }
+                if address.len() > MAX_ADDRESS_BYTES {
+                    return Err(A::Error::custom(format!(
+                        "address must be at most {MAX_ADDRESS_BYTES} bytes, got {}",
+                        address.len()
+                    )));
+                }
+                out.insert(address);
+            }
+            if out.len() != count {
+                return Err(A::Error::custom("addresses must be unique on the wire"));
+            }
+            Ok(out)
+        }
     }
-    let count = items.len();
-    let set: BTreeSet<String> = items.into_iter().collect();
-    if set.len() != count {
-        return Err(D::Error::custom("addresses must be unique on the wire"));
-    }
-    Ok(set)
+
+    deserializer.deserialize_seq(Bounded)
 }
 
 /// Read the wire array of observations, judge it, then collect.
@@ -282,22 +322,50 @@ fn wire_observation_set<'de, D>(deserializer: D) -> Result<BTreeSet<ProtocolObse
 where
     D: serde::Deserializer<'de>,
 {
-    use serde::de::Error as _;
-    let items = Vec::<ProtocolObservation>::deserialize(deserializer)?;
-    if items.len() > MAX_PROTOCOL_OBSERVATIONS {
-        return Err(D::Error::custom(format!(
-            "at most {MAX_PROTOCOL_OBSERVATIONS} protocol observations, got {}",
-            items.len()
-        )));
+    /// The mirror of [`wire_address_set`]'s visitor, bounded for the
+    /// same reason: materializing the array first pays for input the
+    /// ceiling exists to refuse. Each observation's own `protocol_id`
+    /// is length-checked by [`ProtocolId::parse`] during element
+    /// deserialization, so the per-element bound is already in place
+    /// here and only the count needs stopping early.
+    struct Bounded;
+
+    impl<'de> serde::de::Visitor<'de> for Bounded {
+        type Value = BTreeSet<ProtocolObservation>;
+
+        fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(
+                f,
+                "at most {MAX_PROTOCOL_OBSERVATIONS} unique protocol observations"
+            )
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            use serde::de::Error as _;
+            let mut out = BTreeSet::new();
+            let mut count = 0_usize;
+            while let Some(observation) = seq.next_element::<ProtocolObservation>()? {
+                count = count.saturating_add(1);
+                if count > MAX_PROTOCOL_OBSERVATIONS {
+                    return Err(A::Error::custom(format!(
+                        "at most {MAX_PROTOCOL_OBSERVATIONS} protocol observations, got more"
+                    )));
+                }
+                out.insert(observation);
+            }
+            if out.len() != count {
+                return Err(A::Error::custom(
+                    "protocol observations must be unique on the wire",
+                ));
+            }
+            Ok(out)
+        }
     }
-    let count = items.len();
-    let set: BTreeSet<ProtocolObservation> = items.into_iter().collect();
-    if set.len() != count {
-        return Err(D::Error::custom(
-            "protocol observations must be unique on the wire",
-        ));
-    }
-    Ok(set)
+
+    deserializer.deserialize_seq(Bounded)
 }
 
 /// An optional integer that may be ABSENT but never explicitly `null`.
@@ -878,5 +946,77 @@ mod tests {
             "source":"peer-cache","observed_at":1,"expires_at":null}}"#
         );
         assert!(serde_json::from_str::<CandidatePeer>(&json).is_err());
+    }
+
+    #[test]
+    fn an_oversized_address_array_is_refused_without_materializing_it() {
+        // The ceiling used to be applied AFTER `Vec::<String>::deserialize`
+        // had parsed and allocated the whole array, so a document with a
+        // million addresses was fully paid for and then rejected -- a
+        // semantic limit, not the resource limit it exists to be.
+        //
+        // Far past the cap, so a visitor that stopped at MAX + 1 and one
+        // that materialized everything are distinguishable in cost even
+        // though both refuse.
+        let addresses: Vec<String> = (0..MAX_ADDRESSES * 50)
+            .map(|i| format!("/ip4/192.0.2.1/tcp/{i}"))
+            .collect();
+        let json = format!(
+            r#"{{"peer_id":"{P1}","addresses":{},"source":"mdns","observed_at":1}}"#,
+            serde_json::to_string(&addresses).expect("json")
+        );
+        let error = serde_json::from_str::<CandidatePeer>(&json)
+            .expect_err("an over-long address array is refused");
+        assert!(
+            error.to_string().contains("at most"),
+            "refused by the ceiling rather than incidentally: {error}"
+        );
+    }
+
+    #[test]
+    fn an_oversized_observation_array_is_refused_without_materializing_it() {
+        let observations: Vec<String> = (0..MAX_PROTOCOL_OBSERVATIONS * 50)
+            .map(|i| format!(r#"{{"protocol_id":"/spike/{i}","supported":true,"observed_at":1}}"#))
+            .collect();
+        let json = format!(
+            r#"{{"peer_id":"{P1}","addresses":[],"source":"mdns","observed_at":1,"protocol_observations":[{}]}}"#,
+            observations.join(",")
+        );
+        let error = serde_json::from_str::<CandidatePeer>(&json)
+            .expect_err("an over-long observation array is refused");
+        assert!(
+            error.to_string().contains("at most"),
+            "refused by the ceiling rather than incidentally: {error}"
+        );
+    }
+
+    #[test]
+    fn an_oversized_address_inside_a_legal_array_is_still_refused() {
+        // The count bound alone is not a resource bound: one enormous
+        // string inside a short array is unbounded input the array
+        // ceiling never sees. Checked per element as it arrives.
+        let huge = "/ip4/192.0.2.1/tcp/".to_owned() + &"9".repeat(MAX_ADDRESS_BYTES);
+        let json = format!(
+            r#"{{"peer_id":"{P1}","addresses":["{huge}"],"source":"mdns","observed_at":1}}"#
+        );
+        let error = serde_json::from_str::<CandidatePeer>(&json)
+            .expect_err("an over-long address is refused");
+        assert!(
+            error.to_string().contains("bytes"),
+            "refused for its length: {error}"
+        );
+    }
+
+    #[test]
+    fn duplicate_addresses_are_still_refused_by_the_visitor() {
+        // The uniqueness check moved into the visitor with the count.
+        // Losing it there would be silent: a `BTreeSet` collapses
+        // duplicates, so the result looks perfectly well-formed.
+        let json = format!(
+            r#"{{"peer_id":"{P1}","addresses":["/ip4/192.0.2.1/tcp/1","/ip4/192.0.2.1/tcp/1"],"source":"mdns","observed_at":1}}"#
+        );
+        let error =
+            serde_json::from_str::<CandidatePeer>(&json).expect_err("duplicates are refused");
+        assert!(error.to_string().contains("unique"), "{error}");
     }
 }
