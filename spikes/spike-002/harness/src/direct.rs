@@ -517,8 +517,14 @@ pub async fn a5_timeout() {
             }
         }
     }
-    note("requester sees", outbound.unwrap_or_else(|| "nothing".to_owned()));
-    note("responder sees", inbound.unwrap_or_else(|| "nothing".to_owned()));
+    note(
+        "requester sees",
+        outbound.unwrap_or_else(|| "nothing".to_owned()),
+    );
+    note(
+        "responder sees",
+        inbound.unwrap_or_else(|| "nothing".to_owned()),
+    );
     // The responder is still holding a channel it can no longer answer:
     // `is_open` is false, so a late `send_response` has nowhere to go.
     note("responder still holds a channel", kept.is_some());
@@ -738,13 +744,20 @@ pub async fn a7_reservation_overflow() {
     }
     let overloaded_on_the_wire = answered
         .iter()
-        .filter(|r| **r == Response::Rejected { reason: Reason::Overloaded })
+        .filter(|r| {
+            **r == Response::Rejected {
+                reason: Reason::Overloaded,
+            }
+        })
         .count();
     note("distinct keys sent", KEYS);
     note("per-peer budget", PER_PEER);
     note("admitted (owners)", owners);
     note("refused as overloaded", overloaded);
-    note("peers told `overloaded` on the wire", overloaded_on_the_wire);
+    note(
+        "peers told `overloaded` on the wire",
+        overloaded_on_the_wire,
+    );
     note("reservations held", reservations.len());
 }
 
@@ -882,8 +895,14 @@ pub async fn a8_cancellation_race() {
         "server learned the owner's connection died",
         owner_inbound_failure.unwrap_or_else(|| "no InboundFailure event arrived".to_owned()),
     );
-    note("surviving waiters that still received an answer", waiter_answers);
-    note("reservations held after the race settled", reservations.len());
+    note(
+        "surviving waiters that still received an answer",
+        waiter_answers,
+    );
+    note(
+        "reservations held after the race settled",
+        reservations.len(),
+    );
     note(
         "a NEW request for the same key is admitted afterward",
         reservations.acquire(&key, fingerprint).is_ok(),

@@ -17,9 +17,7 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 
 use futures::StreamExt;
-use libp2p::gossipsub::{
-    self, IdentTopic, MessageAuthenticity, MessageId, ValidationMode,
-};
+use libp2p::gossipsub::{self, IdentTopic, MessageAuthenticity, MessageId, ValidationMode};
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{Multiaddr, PeerId, Swarm, noise, tcp, yamux};
 
@@ -104,7 +102,11 @@ fn gossipsub_message_id_v1(source: Option<&PeerId>, sequence: u64) -> [u8; 32] {
     let source_bytes = source.map_or_else(Vec::new, |p| p.to_bytes());
     let mut hasher = Sha256::new();
     hasher.update(DOMAIN);
-    hasher.update(u16::try_from(source_bytes.len()).unwrap_or(u16::MAX).to_be_bytes());
+    hasher.update(
+        u16::try_from(source_bytes.len())
+            .unwrap_or(u16::MAX)
+            .to_be_bytes(),
+    );
     hasher.update(&source_bytes);
     hasher.update(sequence.to_be_bytes());
     hasher.finalize().into()
@@ -119,8 +121,14 @@ pub fn b0_message_id_matches_the_golden_vectors() {
     // PUBSUB.md.
     const ZERO_SEED_PEER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
     let vectors: [(u64, &str); 3] = [
-        (0, "7f037dd538d9cccfb1949ca26b875c469173e6b248f1b68553ccaeb16bf9cf89"),
-        (1, "daa108a21185fe3cd017c553e3041986ae124061356366be4cc7105fa28182df"),
+        (
+            0,
+            "7f037dd538d9cccfb1949ca26b875c469173e6b248f1b68553ccaeb16bf9cf89",
+        ),
+        (
+            1,
+            "daa108a21185fe3cd017c553e3041986ae124061356366be4cc7105fa28182df",
+        ),
         (
             u64::MAX,
             "1eaa16ade59e3214aa5080e1bce06cae5e27733f823081ee26a9d9bfae3aabb0",
@@ -133,7 +141,10 @@ pub fn b0_message_id_matches_the_golden_vectors() {
         let hex = got.iter().map(|b| format!("{b:02x}")).collect::<String>();
         let ok = hex == expected;
         all &= ok;
-        note(&format!("sequence {sequence} matches the frozen vector"), ok);
+        note(
+            &format!("sequence {sequence} matches the frozen vector"),
+            ok,
+        );
     }
     note("the id function under test IS GossipSubMessageIdV1", all);
 }
@@ -294,7 +305,10 @@ pub async fn b1_distinct_mesh_ids() {
         pump(&mut nodes, Duration::from_secs(3), &mut received).await;
     }
 
-    let received: Vec<_> = received.into_iter().filter(|(node, ..)| *node == 0).collect();
+    let received: Vec<_> = received
+        .into_iter()
+        .filter(|(node, ..)| *node == 0)
+        .collect();
     let ids: Vec<&MessageId> = received.iter().map(|(_, _, _, id)| id).collect();
     let distinct = {
         let mut seen: Vec<&MessageId> = Vec::new();
@@ -409,16 +423,17 @@ pub async fn b2_authenticity_before_cache() {
         // different payload from the victim first: if the receiver does
         // not get this, the mesh is not up and the rest of the
         // experiment measures the wiring rather than the ordering.
+        let control_payload = b"control-message".to_vec();
         let control = nodes[2]
             .behaviour_mut()
             .gossipsub
-            .publish(topic.clone(), b"control-message".to_vec());
+            .publish(topic.clone(), control_payload.clone());
         note("control publish accepted", control.is_ok());
         let mut control_seen = Vec::new();
         pump(&mut nodes, Duration::from_secs(2), &mut control_seen).await;
         note(
             "control delivered to the strict receiver",
-            control_seen.iter().filter(|(n, ..)| *n == 0).count(),
+            arrived(&control_seen, 0, &control_payload),
         );
         note(
             "receiver's connected peers",
@@ -431,14 +446,28 @@ pub async fn b2_authenticity_before_cache() {
             .publish(topic.clone(), payload.clone());
         note("forged publish accepted by its own node", forged.is_ok());
         pump(&mut nodes, Duration::from_secs(2), &mut after_forgery).await;
-        let forged_strict = after_forgery.iter().filter(|(n, ..)| *n == 0).count();
-        let forged_permissive = after_forgery.iter().filter(|(n, ..)| *n == 3).count();
         // THE EVIDENCE THAT IT ARRIVED. A permissive receiver on the same
         // mesh delivering the forged message proves it left the forger
         // and reached a receive path; the strict receiver's silence is
         // then attributable to validation rather than to non-arrival.
-        note("forged message delivered to the PERMISSIVE receiver", forged_permissive);
-        note("forged message delivered to the STRICT receiver", forged_strict);
+        //
+        // FILTERED BY THE EXACT CONTESTED PAYLOAD, not merely "some
+        // event landed at this index in this window". The control
+        // publication above is delivered asynchronously and can be
+        // delayed into THIS pump call's window rather than its own --
+        // `pump` polls every node for a fixed duration regardless of
+        // what has already arrived, so a late control delivery would
+        // otherwise be counted as if it were the forged message and
+        // the verdict below would pass without the contested payload
+        // ever having arrived at all.
+        note(
+            "forged message delivered to the PERMISSIVE receiver",
+            arrived(&after_forgery, 3, &payload),
+        );
+        note(
+            "forged message delivered to the STRICT receiver",
+            arrived(&after_forgery, 0, &payload),
+        );
 
         let genuine = nodes[2]
             .behaviour_mut()
@@ -448,16 +477,43 @@ pub async fn b2_authenticity_before_cache() {
         pump(&mut nodes, Duration::from_secs(3), &mut after_genuine).await;
     }
 
-    let forged_strict = after_forgery.iter().filter(|(n, ..)| *n == 0).count();
-    let forged_permissive = after_forgery.iter().filter(|(n, ..)| *n == 3).count();
-    let genuine_strict = after_genuine.iter().filter(|(n, ..)| *n == 0).count();
-    note("genuine message delivered to the strict receiver", genuine_strict);
+    // Forged and genuine share ONE payload and ONE mesh id by
+    // construction -- that collision is the ordering question this
+    // experiment asks. Payload equality cannot tell the two apart from
+    // each other, but it is exactly what rules out everything ELSE: the
+    // control message's distinct payload, and anything a delayed or
+    // duplicate delivery from an unrelated step might otherwise
+    // contribute to a window it does not belong to.
+    let forged_strict = arrived(&after_forgery, 0, &payload);
+    let forged_permissive = arrived(&after_forgery, 3, &payload);
+    let genuine_strict = arrived(&after_genuine, 0, &payload);
+    note(
+        "genuine message delivered to the strict receiver",
+        genuine_strict,
+    );
     note(
         "VERDICT: authenticity precedes the duplicate cache",
-        forged_permissive > 0 && forged_strict == 0 && genuine_strict > 0,
+        forged_permissive && !forged_strict && genuine_strict,
     );
     note(
         "  (arrived at a receive path, rejected by strict, left nothing behind)",
         "",
     );
+}
+
+/// Whether the EXACT contested payload was delivered to node `at`.
+///
+/// Filtered by payload, not merely by whether some event landed in the
+/// index/window pair: `pump` polls every node for a fixed duration
+/// regardless of what has already arrived, so a message published in
+/// an EARLIER step -- the control message, most obviously -- can be
+/// delivered late, into a LATER pump call's window, and get counted as
+/// if it were the message that call was measuring. Forged and genuine
+/// share one payload and one mesh id by construction, so this cannot
+/// tell the two apart from each other; it is what rules out everything
+/// else.
+fn arrived(events: &[(usize, Option<PeerId>, Vec<u8>, MessageId)], at: usize, want: &[u8]) -> bool {
+    events
+        .iter()
+        .any(|(node, _source, data, _id)| *node == at && data == want)
 }

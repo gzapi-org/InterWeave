@@ -175,12 +175,14 @@ Setup: a forger publishing with `MessageAuthenticity::Author(victim_peer)` — c
 A fourth node makes the answer mean something: a **permissive** receiver wired directly to the forger, so its path to the forged message does not pass through the node under test.
 
 ```text
-control delivered to the strict receiver            1   <- the mesh is live
+control delivered to the strict receiver            true   <- the mesh is live
 forged publish accepted by its own node             true
-forged message delivered to the PERMISSIVE receiver 1   <- it ARRIVED at a receive path
-forged message delivered to the STRICT receiver     0   <- and was rejected there
-genuine message delivered to the strict receiver    1   <- NOT suppressed
+forged message delivered to the PERMISSIVE receiver true   <- it ARRIVED at a receive path
+forged message delivered to the STRICT receiver     false  <- and was rejected there
+genuine message delivered to the strict receiver    true   <- NOT suppressed
 ```
+
+**A second gap, found by review after the first fix: these counts were never checked against the message that arrived.** `pump` polls every node for a fixed duration regardless of what has already been published, and the first version of these counters treated any event delivered to a given index during a given window as the message that window was measuring. The control publication above is delivered asynchronously; had it been delayed into the `after_forgery` window instead of its own, it would have been counted as the forged message arriving, and the verdict could have read PASS without the contested payload ever having been involved. The counts now filter on the exact contested payload (`arrived`, in the harness), which cannot tell the forged and genuine deliveries apart from each other — they share one payload and one mesh id by construction — but rules out everything else, which is what the gap was actually about.
 
 **That permissive receiver is the control this experiment turned out to need, and it failed the first time it was run.** Without it, "the forged message was not delivered" is equally explained by the forgery never reaching anyone — the experiment would close the spike without the invalid message ever touching a receive path. When it was first added it reported **zero**, because the star topology put it downstream of the strict receiver, which rejects the forgery and therefore never forwards it: a control that could only fail for the same reason as the thing it was controlling. Wiring it directly to the forger is what makes the numbers above evidence.
 
