@@ -50,7 +50,8 @@
 //! only policy authority for outbound Swarm dials" — a caller cannot
 //! forget to ask, because it cannot call without the answer.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Weak;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use interweave_transport_api::TransportIdentity;
@@ -128,11 +129,25 @@ pub struct PolicySnapshot {
     /// kind of policy that may be eventually consistent: the whole point
     /// of it is that no new dial starts.
     shutting_down: Arc<AtomicBool>,
-    /// The revision the manager has currently published, SHARED.
+    /// A WEAK reference back to the single cell that holds whichever
+    /// snapshot is currently published.
     ///
-    /// What bounds staleness to zero rather than to "however long a
-    /// holder keeps its `Arc`". See [`Self::admit`].
-    published_revision: Arc<AtomicU64>,
+    /// Not `published_revision: Arc<AtomicU64>`, which this replaces.
+    /// That was a second piece of shared state, written in a SEPARATE
+    /// step from installing the new snapshot in the cell -- between
+    /// the two, an old snapshot's own revision could still equal the
+    /// not-yet-updated atomic, so it read as fresh and decided against
+    /// policy that had already been superseded. Reading the live
+    /// revision back out of the SAME cell every other reader consults
+    /// leaves nothing that can disagree with it, because there is only
+    /// one write.
+    ///
+    /// Weak, not `Arc`: the cell holds an `Arc<PolicySnapshot>`, so a
+    /// strong reference back to the cell from inside the snapshot it
+    /// contains would be a genuine reference cycle -- neither side
+    /// could ever be dropped. A weak reference breaks it; the manager
+    /// itself holds the one strong reference that keeps the cell alive.
+    current: Weak<RwLock<Arc<PolicySnapshot>>>,
 }
 
 impl PolicySnapshot {
@@ -146,6 +161,21 @@ impl PolicySnapshot {
     #[must_use]
     pub const fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// Whether this is the snapshot currently published.
+    ///
+    /// Reads `self.revision` against the CURRENTLY installed snapshot's
+    /// own revision field, fetched fresh through the one cell every
+    /// snapshot and every handle shares. `false` if the manager itself
+    /// is gone: nothing can publish again, so there is no "current" to
+    /// be, and refusing is the fail-closed answer to a question that no
+    /// longer has one.
+    #[must_use]
+    fn is_current(&self) -> bool {
+        self.current.upgrade().is_some_and(|cell| {
+            self.revision == cell.read().unwrap_or_else(|e| e.into_inner()).revision
+        })
     }
 
     /// The class this profile grants `peer`, as photographed.
@@ -202,7 +232,13 @@ impl PolicySnapshot {
         // than unbounded, and the refusal is recoverable: reload the
         // handle and ask again, which is what `SnapshotHandle::admit`
         // does.
-        if self.revision != self.published_revision.load(Ordering::Acquire) {
+        //
+        // ONE READ of the ONE place that says what is current: the cell
+        // this snapshot came from, upgraded and read fresh. Comparing
+        // against a second value published in a separate step is what
+        // let an old snapshot pass this check during the instant between
+        // that value's two writes; there is only one write now.
+        if !self.is_current() {
             return Err(DialDenial::PolicySuperseded);
         }
 
@@ -249,9 +285,7 @@ impl PolicySnapshot {
         // Checking again once the slots are held means any publication
         // concurrent with the decision refuses it, and the rollback is
         // what makes the refusal free.
-        if self.shutting_down.load(Ordering::Acquire)
-            || self.revision != self.published_revision.load(Ordering::Acquire)
-        {
+        if self.shutting_down.load(Ordering::Acquire) || !self.is_current() {
             drop(ticket);
             return Err(DialDenial::PolicySuperseded);
         }
@@ -535,7 +569,6 @@ pub struct ConnectionManager {
     connections: Arc<AtomicUsize>,
     max_connections: usize,
     shutting_down: Arc<AtomicBool>,
-    published_revision: Arc<AtomicU64>,
     retries: std::collections::BTreeMap<TransportIdentity, Retry>,
     /// Candidate addresses per peer.
     ///
@@ -558,19 +591,30 @@ impl ConnectionManager {
         let connections = Arc::new(AtomicUsize::new(0));
         let max_connections = policy.max_connections;
         let shutting_down = Arc::new(AtomicBool::new(false));
-        let published_revision = Arc::new(AtomicU64::new(0));
         let trust = Arc::new(TrustSources::default());
-        let first = Arc::new(PolicySnapshot {
-            policy: policy.clone(),
-            trust: Arc::clone(&trust),
-            revision: 0,
-            pending: Arc::clone(&pending),
-            max_pending_dials,
-            connections: Arc::clone(&connections),
-            max_connections,
-            shutting_down: Arc::clone(&shutting_down),
-            published_revision: Arc::clone(&published_revision),
+
+        // BUILT WITH `Arc::new_cyclic`, because the first snapshot has
+        // to hold a weak reference to the very cell it is about to be
+        // installed in -- and that cell does not exist until this call
+        // returns. The closure receives a `Weak` to what the `Arc`
+        // will become, which can be cloned and stored before the outer
+        // `Arc` finishes constructing, and is not usable (upgrading
+        // returns `None`) until it does. Nothing here upgrades it
+        // early; it is only stored.
+        let published: Arc<RwLock<Arc<PolicySnapshot>>> = Arc::new_cyclic(|weak| {
+            RwLock::new(Arc::new(PolicySnapshot {
+                policy: policy.clone(),
+                trust: Arc::clone(&trust),
+                revision: 0,
+                pending: Arc::clone(&pending),
+                max_pending_dials,
+                connections: Arc::clone(&connections),
+                max_connections,
+                shutting_down: Arc::clone(&shutting_down),
+                current: weak.clone(),
+            }))
         });
+
         Self {
             policy,
             trust,
@@ -580,12 +624,11 @@ impl ConnectionManager {
             connections,
             max_connections,
             shutting_down,
-            published_revision,
             retries: std::collections::BTreeMap::new(),
             book: std::collections::BTreeMap::new(),
             max_addresses_per_peer: DEFAULT_MAX_ADDRESSES_PER_PEER,
             max_retry_entries: DEFAULT_MAX_RETRY_ENTRIES,
-            published: Arc::new(RwLock::new(first)),
+            published,
         }
     }
 
@@ -622,14 +665,14 @@ impl ConnectionManager {
             connections: Arc::clone(&self.connections),
             max_connections: self.max_connections,
             shutting_down: Arc::clone(&self.shutting_down),
-            published_revision: Arc::clone(&self.published_revision),
+            current: Arc::downgrade(&self.published),
         });
+        // ONE WRITE. The revision a reader compares itself against IS
+        // this cell's own content now, not a second value kept in step
+        // with it by hand -- there is no longer a window between "the
+        // new snapshot is installed" and "the fact that it is current
+        // becomes visible", because those are the same write.
         *self.published.write().unwrap_or_else(|e| e.into_inner()) = next;
-        // AFTER the install, so the window between them is one in which
-        // both the old and the new snapshot refuse rather than one in
-        // which the old one is still trusted.
-        self.published_revision
-            .store(self.revision, Ordering::Release);
     }
 
     /// Replace the trust sources and publish them.
@@ -1473,6 +1516,57 @@ mod tests {
             .admit(&request(P1, "/a"), 0)
             .expect("the current snapshot admits");
         drop(fresh);
+    }
+
+    #[test]
+    fn currency_is_read_from_the_same_cell_the_snapshot_came_from() {
+        // The atomicity this rests on, asserted as a property rather
+        // than by trying to observe a window that no longer exists.
+        //
+        // The predecessor kept the current revision in a SECOND shared
+        // value, written after the new snapshot was installed. Between
+        // those two writes an old snapshot's own revision still equalled
+        // the not-yet-updated value, so it read as current and decided
+        // against policy already superseded. There is now one write and
+        // one place to read: whatever the published cell holds IS the
+        // answer, so "installed" and "current" cannot disagree because
+        // they are the same fact.
+        //
+        // Observable consequence: for ANY snapshot, currency is exactly
+        // "is this the Arc the cell holds", checkable from outside by
+        // comparing revisions -- and no sequence of publishes can
+        // produce a moment where an older snapshot answers otherwise,
+        // because there is no intermediate state to catch it in.
+        let mut m = manager(8);
+        let handle = m.handle();
+
+        let mut held = Vec::new();
+        for _ in 0..4 {
+            held.push(handle.load());
+            let ticket = m.handle().admit(&request(P1, "/a"), 0).expect("admitted");
+            drop(m.record_success(ticket, 0));
+        }
+        let newest = handle.load();
+
+        // Every snapshot taken before the latest publish refuses, and
+        // the one the cell currently holds admits -- with no ordering
+        // of the publishes in between able to change either answer.
+        for (age, stale) in held.iter().enumerate() {
+            assert!(
+                stale.revision() < newest.revision(),
+                "snapshot {age} should predate the newest"
+            );
+            assert_eq!(
+                stale.admit(&request(P2, "/b"), 0).err(),
+                Some(DialDenial::PolicySuperseded),
+                "snapshot {age} is not the published one and must not decide"
+            );
+        }
+        drop(
+            newest
+                .admit(&request(P2, "/b"), 0)
+                .expect("the snapshot the cell holds is the one that decides"),
+        );
     }
 
     #[test]
