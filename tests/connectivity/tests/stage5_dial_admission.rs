@@ -46,10 +46,10 @@ fn who() -> (ProfileIdentity, TransportIdentity) {
 /// trusts, and one that forgot would fail with `Unauthorized` rather
 /// than quietly proving something else.
 fn trusting(peers: &[&TransportIdentity]) -> TrustSources {
-    TrustSources {
-        peers: PeerTrustPolicy::new(peers.iter().map(|p| (*p).clone())).expect("a handful"),
-        infrastructure: InfrastructureSet::default(),
-    }
+    TrustSources::new(
+        PeerTrustPolicy::new(peers.iter().map(|p| (*p).clone())).expect("a handful"),
+        InfrastructureSet::default(),
+    )
 }
 
 /// Trust nobody, which is what a freshly configured profile does.

@@ -29,10 +29,10 @@ use libp2p::Multiaddr;
 /// that connects has to say who it trusts -- and one that connects
 /// without saying so now fails, which is the point.
 fn trusting(peers: &[&TransportIdentity]) -> TrustSources {
-    TrustSources {
-        peers: PeerTrustPolicy::new(peers.iter().map(|p| (*p).clone())).expect("a handful"),
-        infrastructure: InfrastructureSet::default(),
-    }
+    TrustSources::new(
+        PeerTrustPolicy::new(peers.iter().map(|p| (*p).clone())).expect("a handful"),
+        InfrastructureSet::default(),
+    )
 }
 
 /// Every wait is bounded. A hung substrate must fail the suite rather

@@ -401,6 +401,13 @@ impl SwarmRuntime {
         // line of substrate code rather than being wired in later.
         let policy = ConnectionPolicy::new(config.max_pending_dials, config.max_connections);
         let mut manager = ConnectionManager::new(policy, config.max_pending_dials);
+        // THE LOCAL IDENTITY FIRST, from the keypair rather than from
+        // anything a caller supplied. A configuration that lists this
+        // profile's own PeerId -- a copied allowlist, a template filled
+        // in wrong -- would otherwise be classified as an ordinary
+        // trusted remote and reach admission, retries and the address
+        // book for a peer that cannot be dialed.
+        manager.bind_local_peer(local_peer.clone());
         // TRUST IS A CONSTRUCTOR ARGUMENT, not a later call. A runtime
         // that could be started without saying who it trusts would have
         // a window in which it trusted nobody -- or, in the version this

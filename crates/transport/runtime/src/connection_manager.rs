@@ -73,9 +73,35 @@ pub struct TrustSources {
     pub peers: PeerTrustPolicy,
     /// Peers authorized for reachability control only.
     pub infrastructure: InfrastructureSet,
+    /// This profile's own identity, when the manager knows it.
+    ///
+    /// Private, and set only by [`ConnectionManager::set_trust`] from
+    /// the authoritative value the runtime holds -- never by whoever
+    /// supplies the two sets. A caller that could name the local peer
+    /// could also name a different one, which is the confusion this
+    /// exists to prevent rather than a flexibility worth offering.
+    local_peer: Option<TransportIdentity>,
 }
 
 impl TrustSources {
+    /// Build the trust sources from the two authorities a
+    /// configuration supplies.
+    ///
+    /// A constructor rather than a struct literal because the local
+    /// identity is deliberately not one of the inputs: it is bound by
+    /// [`ConnectionManager::bind_local_peer`] from the value the
+    /// runtime derived from its own keypair. A caller that could pass
+    /// it could also pass a different one, and "who am I" is not a
+    /// question configuration gets to answer.
+    #[must_use]
+    pub fn new(peers: PeerTrustPolicy, infrastructure: InfrastructureSet) -> Self {
+        Self {
+            peers,
+            infrastructure,
+            local_peer: None,
+        }
+    }
+
     /// The class this profile grants `peer`, right now.
     ///
     /// Data-plane trust is checked first and wins, because it is the
@@ -84,8 +110,19 @@ impl TrustSources {
     /// [`ConnectionClass::Unauthorized`], which is the DEFAULT answer --
     /// an empty configuration admits nobody (ADR-0012), and there is no
     /// constructor here that says otherwise.
+    ///
+    /// THE LOCAL PEER IS NEVER ANY OTHER CLASS. A configuration listing
+    /// this profile's own identity is a mistake -- a copied allowlist,
+    /// a template filled in wrong -- and treating it as an ordinary
+    /// trusted remote would let self-directed admission, retries and
+    /// address-book entries all proceed for a peer that cannot be
+    /// dialed. Answered here rather than at each call site because
+    /// there are three of them and a fourth is one commit away.
     #[must_use]
     pub fn classify(&self, peer: &TransportIdentity) -> ConnectionClass {
+        if self.local_peer.as_ref() == Some(peer) {
+            return ConnectionClass::Unauthorized;
+        }
         if self.peers.decide(peer).is_allowed() {
             ConnectionClass::DataPlaneTrusted
         } else if self.infrastructure.permits_control_connection(peer) {
@@ -569,6 +606,10 @@ pub struct ConnectionManager {
     connections: Arc<AtomicUsize>,
     max_connections: usize,
     shutting_down: Arc<AtomicBool>,
+    /// This profile's own identity, once the runtime has said what it
+    /// is. `None` until then, which is the honest answer for a manager
+    /// constructed by a test that never had one.
+    local_peer: Option<TransportIdentity>,
     retries: std::collections::BTreeMap<TransportIdentity, Retry>,
     /// Candidate addresses per peer.
     ///
@@ -624,6 +665,7 @@ impl ConnectionManager {
             connections,
             max_connections,
             shutting_down,
+            local_peer: None,
             retries: std::collections::BTreeMap::new(),
             book: std::collections::BTreeMap::new(),
             max_addresses_per_peer: DEFAULT_MAX_ADDRESSES_PER_PEER,
@@ -675,6 +717,26 @@ impl ConnectionManager {
         *self.published.write().unwrap_or_else(|e| e.into_inner()) = next;
     }
 
+    /// Tell the manager which identity is this profile's own.
+    ///
+    /// Called by the runtime, from the value it derived from the
+    /// keypair -- the authoritative one. Every classification from here
+    /// on answers [`ConnectionClass::Unauthorized`] for that identity,
+    /// whatever a configured allowlist says, so a mistaken self-entry
+    /// cannot reach admission, retries, or the address book.
+    ///
+    /// Rebinds the currently published trust immediately rather than
+    /// waiting for the next [`Self::set_trust`], so there is no window
+    /// in which the local peer is bound in the manager but not in what
+    /// the gate is reading.
+    pub fn bind_local_peer(&mut self, local: TransportIdentity) {
+        self.local_peer = Some(local);
+        let mut trust = (*self.trust).clone();
+        trust.local_peer = self.local_peer.clone();
+        self.trust = Arc::new(trust);
+        self.publish();
+    }
+
     /// Replace the trust sources and publish them.
     ///
     /// Publishing is the whole mechanism: a revocation that did not
@@ -690,6 +752,13 @@ impl ConnectionManager {
     /// nothing kept.
     pub fn set_trust(&mut self, trust: TrustSources, live: &[TransportIdentity]) -> Vec<Revoked> {
         let previous = Arc::clone(&self.trust);
+        // REBOUND ON EVERY CHANGE, from the manager's own copy rather
+        // than from what the caller supplied. A `TrustSources` handed in
+        // by configuration cannot name the local peer -- the field is
+        // private -- so a later trust update cannot unbind it either,
+        // whether by omission or by naming a different identity.
+        let mut trust = trust;
+        trust.local_peer = self.local_peer.clone();
         self.trust = Arc::new(trust);
         self.publish();
         live.iter()
@@ -1629,11 +1698,10 @@ mod tests {
     }
 
     fn trusting(data_plane: &[&str], infrastructure: &[&str]) -> TrustSources {
-        TrustSources {
-            peers: PeerTrustPolicy::new(data_plane.iter().map(|p| peer(p))).expect("small"),
-            infrastructure: InfrastructureSet::new(infrastructure.iter().map(|p| peer(p)))
-                .expect("small"),
-        }
+        TrustSources::new(
+            PeerTrustPolicy::new(data_plane.iter().map(|p| peer(p))).expect("small"),
+            InfrastructureSet::new(infrastructure.iter().map(|p| peer(p))).expect("small"),
+        )
     }
 
     #[test]
@@ -1649,6 +1717,55 @@ mod tests {
             m.handle().admit(&request(P1, "/a"), 0).err(),
             Some(DialDenial::Unauthorized),
             "an unclassified peer is not dialable"
+        );
+    }
+
+    #[test]
+    fn the_local_identity_is_never_classified_as_a_remote_peer() {
+        // A configuration that lists this profile's own PeerId is a
+        // mistake -- a copied allowlist, a template filled in wrong --
+        // and classifying it as an ordinary trusted remote would let
+        // self-directed admission, retries and address-book entries all
+        // proceed for a peer that cannot be dialed.
+        let mut m = untrusting(8);
+        m.bind_local_peer(peer(P1));
+        // P1 is listed in BOTH sets, as emphatically as a configuration
+        // can say it.
+        let _ = m.set_trust(trusting(&[P1, P2], &[P1]), &[]);
+
+        assert_eq!(
+            m.classify(&peer(P1)),
+            ConnectionClass::Unauthorized,
+            "the local identity outranks anything the configuration says"
+        );
+        assert_eq!(
+            m.classify(&peer(P2)),
+            ConnectionClass::DataPlaneTrusted,
+            "and other peers are unaffected"
+        );
+        assert_eq!(
+            m.handle().admit(&request(P1, "/a"), 0).err(),
+            Some(DialDenial::Unauthorized),
+            "so a self-dial is refused rather than admitted"
+        );
+    }
+
+    #[test]
+    fn a_later_trust_change_cannot_unbind_the_local_identity() {
+        // The binding has to survive every update, not merely the
+        // first: a caller supplies the two sets and cannot name the
+        // local peer, so a subsequent set_trust must not drop it by
+        // omission.
+        let mut m = untrusting(8);
+        m.bind_local_peer(peer(P1));
+        let _ = m.set_trust(trusting(&[P1], &[]), &[]);
+        assert_eq!(m.classify(&peer(P1)), ConnectionClass::Unauthorized);
+
+        let _ = m.set_trust(trusting(&[P1, P2], &[]), &[]);
+        assert_eq!(
+            m.classify(&peer(P1)),
+            ConnectionClass::Unauthorized,
+            "still the local identity after a second trust change"
         );
     }
 
@@ -1865,10 +1982,10 @@ mod tests {
         // Trusted first, because the gate classifies now and an
         // unauthorized peer never reaches the retry table at all.
         let _ = m.set_trust(
-            TrustSources {
-                peers: PeerTrustPolicy::new(generated.iter().map(|p| peer(p))).expect("small"),
-                infrastructure: InfrastructureSet::default(),
-            },
+            TrustSources::new(
+                PeerTrustPolicy::new(generated.iter().map(|p| peer(p))).expect("small"),
+                InfrastructureSet::default(),
+            ),
             &[],
         );
         for (i, p) in (0..8u32).zip(generated.iter()) {
