@@ -36,7 +36,16 @@ Every experiment prints what it observed. The output below is a real run.
 
 ### A1, A3. The shape works, and two families share one connection
 
-Explicit destination and omitted destination both survive the round trip, and the two protocol families (`/spike-002/direct/2.0.0`, `/spike-002/endpoints/1.0.0`) are answered over **one** connection — `network_info().num_peers() == 1` on the responder while both were in flight. Stage 6 does not need a connection per protocol family.
+Explicit destination and omitted destination both survive the round trip, and the two protocol families (`/spike-002/direct/2.0.0`, `/spike-002/endpoints/1.0.0`) are answered over **one** connection:
+
+```text
+distinct connections the two families arrived on   1
+established connections on the responder           1
+```
+
+The first number is the load-bearing one. An earlier version of this experiment reported `network_info().num_peers()`, which is `1` whether one connection carried both families or each opened its own — so it would have said "one connection" in exactly the case it existed to detect. The connection IDs the requests actually arrived on are recorded now, and the established-connection counter corroborates them.
+
+Stage 6 does not need a connection per protocol family.
 
 ### A2. An unsupported major is reported cleanly
 
@@ -115,9 +124,23 @@ The map holds exactly its budget and the excess is refused. `DIRECT.md` lists `o
 
 ## B — GossipSub
 
+### B0. The ID function under test is the frozen one
+
+`PUBSUB.md` freezes `GossipSubMessageIdV1` as a domain-separated, length-prefixed SHA-256 — not merely "source and sequence". An earlier version of this harness returned raw `source || u64be(sequence)`, which separates two publishers and would have passed B1 while saying nothing about the calculation Stage 7 ships.
+
+The harness now computes the frozen function and checks it against the repository's own golden vectors before using it:
+
+```text
+sequence 0 matches the frozen vector                    true
+sequence 1 matches the frozen vector                    true
+sequence 18446744073709551615 matches the frozen vector true
+```
+
+Those are `fixtures/gossipsub/gossipsub-message-id-v1.json`, the same values quoted in `PUBSUB.md`. A spike that reimplements a frozen calculation and does not check it is a spike measuring its own reimplementation.
+
 ### B1. Two publishers, one application-envelope message id
 
-Both publishers sent an identical application envelope carrying the same `message_id`. The receiver's message-ID function is the frozen shape — authenticated source PeerId plus 64-bit wire sequence number, never the envelope:
+Both publishers sent an identical application envelope carrying the same `message_id`. The receiver's message-ID function is `GossipSubMessageIdV1` itself, verified above — authenticated source PeerId plus 64-bit wire sequence number, never the envelope:
 
 ```text
 messages delivered to the receiver             2
@@ -133,15 +156,17 @@ The question `PUBSUB.md` requires an implementation to answer against the exact 
 
 Setup: a forger publishing with `MessageAuthenticity::Author(victim_peer)` — claiming the victim's PeerId with no signature — a victim signing as itself, and a receiver in `ValidationMode::Strict`.
 
+A fourth node makes the answer mean something: a **permissive** receiver wired directly to the forger, so its path to the forged message does not pass through the node under test.
+
 ```text
-control publish accepted                       true
-control delivered to the receiver              1     <- the mesh is live
-receiver's connected peers                     2
-forged publish accepted by its own node        true  <- it did leave the forger
-forged message delivered to the receiver       0     <- and was rejected there
-genuine publish accepted by its own node       true
-genuine message delivered afterwards           1     <- NOT suppressed
+control delivered to the strict receiver            1   <- the mesh is live
+forged publish accepted by its own node             true
+forged message delivered to the PERMISSIVE receiver 1   <- it ARRIVED at a receive path
+forged message delivered to the STRICT receiver     0   <- and was rejected there
+genuine message delivered to the strict receiver    1   <- NOT suppressed
 ```
+
+**That permissive receiver is the control this experiment turned out to need, and it failed the first time it was run.** Without it, "the forged message was not delivered" is equally explained by the forgery never reaching anyone — the experiment would close the spike without the invalid message ever touching a receive path. When it was first added it reported **zero**, because the star topology put it downstream of the strict receiver, which rejects the forgery and therefore never forwards it: a control that could only fail for the same reason as the thing it was controlling. Wiring it directly to the forger is what makes the numbers above evidence.
 
 **Answer: yes, authenticity precedes the cache.** The forged message was rejected and left nothing behind; the genuine message carrying the same mesh id was delivered afterwards. No pre-cache authenticity gate needs to be prototyped, and `PUBSUB.md`'s conditional clause — "if a future rust-libp2p version changes that ordering" — remains a future concern rather than a present one.
 

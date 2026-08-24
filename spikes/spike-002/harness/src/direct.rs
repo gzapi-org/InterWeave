@@ -309,20 +309,32 @@ pub async fn a3_two_families() {
 
     let mut direct_seen = false;
     let mut endpoints_seen = false;
+    // THE CONNECTION IDS THE REQUESTS ACTUALLY ARRIVED ON. Counting
+    // peers answers a different question: `num_peers()` is 1 whether one
+    // connection carried both families or each opened its own, so the
+    // first version of this experiment would have reported "one
+    // connection" in exactly the case it was meant to detect.
+    let mut connection_ids: Vec<libp2p::swarm::ConnectionId> = Vec::new();
     while !(direct_seen && endpoints_seen) {
         tokio::select! {
             e = server.select_next_some() => match e {
                 SwarmEvent::Behaviour(BehaviourEvent::Direct(RrEvent::Message {
-                    message: RrMessage::Request { channel, .. }, ..
+                    message: RrMessage::Request { channel, .. }, connection_id, ..
                 })) => {
                     direct_seen = true;
+                    if !connection_ids.contains(&connection_id) {
+                        connection_ids.push(connection_id);
+                    }
                     let _ = server.behaviour_mut().direct.send_response(
                         channel, Response::AcceptedV2 { resolved_endpoint: "chat".to_owned() });
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Endpoints(RrEvent::Message {
-                    message: RrMessage::Request { channel, .. }, ..
+                    message: RrMessage::Request { channel, .. }, connection_id, ..
                 })) => {
                     endpoints_seen = true;
+                    if !connection_ids.contains(&connection_id) {
+                        connection_ids.push(connection_id);
+                    }
                     let _ = server.behaviour_mut().endpoints.send_response(
                         channel, Response::AcceptedV2 { resolved_endpoint: "default".to_owned() });
                 }
@@ -332,11 +344,16 @@ pub async fn a3_two_families() {
         }
     }
     note("both families answered", direct_seen && endpoints_seen);
-    // THE REUSE QUESTION. Two protocol families, one connection: the
-    // responder must not be opening a connection per family.
     note(
-        "connections the responder holds",
-        server.network_info().num_peers(),
+        "distinct connections the two families arrived on",
+        connection_ids.len(),
+    );
+    note(
+        "established connections on the responder",
+        server
+            .network_info()
+            .connection_counters()
+            .num_established(),
     );
 }
 

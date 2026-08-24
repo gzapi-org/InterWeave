@@ -14,6 +14,8 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
+
 use futures::StreamExt;
 use libp2p::gossipsub::{
     self, IdentTopic, MessageAuthenticity, MessageId, ValidationMode,
@@ -31,8 +33,12 @@ struct Behaviour {
 /// How a mesh id is computed for the experiment.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum IdRule {
-    /// `GossipSubMessageIdV1`'s shape: authenticated publisher plus wire
-    /// sequence number, never the application envelope.
+    /// `GossipSubMessageIdV1` ITSELF, not its shape.
+    ///
+    /// The first version of this experiment hashed nothing: it returned
+    /// raw `source || u64be(sequence)`. That separates two publishers,
+    /// which made B1 pass, but it is not the frozen function -- so the
+    /// pass said nothing about the calculation Stage 7 will ship.
     SourceAndSequence,
     /// PAYLOAD-DERIVED, and only for B2. See the note there: the public
     /// API does not let a caller choose a sequence number, so a
@@ -62,15 +68,13 @@ fn config_with(rule: IdRule, validation: ValidationMode) -> gossipsub::Config {
     match rule {
         IdRule::SourceAndSequence => {
             builder.message_id_fn(|message: &gossipsub::Message| {
-                // Source PeerId + 64-bit sequence, which is what the
-                // frozen design pins. The application envelope is never
-                // read.
-                let mut id = Vec::new();
-                if let Some(source) = message.source {
-                    id.extend_from_slice(&source.to_bytes());
-                }
-                id.extend_from_slice(&message.sequence_number.unwrap_or(0).to_be_bytes());
-                MessageId::from(id)
+                MessageId::from(
+                    gossipsub_message_id_v1(
+                        message.source.as_ref(),
+                        message.sequence_number.unwrap_or(0),
+                    )
+                    .to_vec(),
+                )
             });
         }
         IdRule::PayloadDerived => {
@@ -82,6 +86,56 @@ fn config_with(rule: IdRule, validation: ValidationMode) -> gossipsub::Config {
         }
     }
     builder.build().expect("gossipsub config")
+}
+
+/// `GossipSubMessageIdV1`, exactly as `PUBSUB.md` freezes it.
+///
+/// ```text
+/// domain    = UTF8("interweave/gossipsub-message-id/v1\0")
+/// canonical = domain || u16be(len(source)) || source || u64be(sequence)
+/// id        = SHA-256(canonical)
+/// ```
+///
+/// Copied here rather than imported because no production crate exposes
+/// it yet -- GossipSub belongs to Stage 7. The golden vector below is
+/// what keeps the copy honest.
+fn gossipsub_message_id_v1(source: Option<&PeerId>, sequence: u64) -> [u8; 32] {
+    const DOMAIN: &[u8] = b"interweave/gossipsub-message-id/v1\0";
+    let source_bytes = source.map_or_else(Vec::new, |p| p.to_bytes());
+    let mut hasher = Sha256::new();
+    hasher.update(DOMAIN);
+    hasher.update(u16::try_from(source_bytes.len()).unwrap_or(u16::MAX).to_be_bytes());
+    hasher.update(&source_bytes);
+    hasher.update(sequence.to_be_bytes());
+    hasher.finalize().into()
+}
+
+/// The copy above against the repository's frozen vectors.
+///
+/// A spike that reimplements a frozen calculation and does not check it
+/// is a spike measuring its own reimplementation.
+pub fn b0_message_id_matches_the_golden_vectors() {
+    // fixtures/gossipsub/gossipsub-message-id-v1.json, also quoted in
+    // PUBSUB.md.
+    const ZERO_SEED_PEER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+    let vectors: [(u64, &str); 3] = [
+        (0, "7f037dd538d9cccfb1949ca26b875c469173e6b248f1b68553ccaeb16bf9cf89"),
+        (1, "daa108a21185fe3cd017c553e3041986ae124061356366be4cc7105fa28182df"),
+        (
+            u64::MAX,
+            "1eaa16ade59e3214aa5080e1bce06cae5e27733f823081ee26a9d9bfae3aabb0",
+        ),
+    ];
+    let peer: PeerId = ZERO_SEED_PEER.parse().expect("canonical peer id");
+    let mut all = true;
+    for (sequence, expected) in vectors {
+        let got = gossipsub_message_id_v1(Some(&peer), sequence);
+        let hex = got.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let ok = hex == expected;
+        all &= ok;
+        note(&format!("sequence {sequence} matches the frozen vector"), ok);
+    }
+    note("the id function under test IS GossipSubMessageIdV1", all);
 }
 
 fn node(
@@ -155,9 +209,8 @@ async fn listen(swarm: &mut Swarm<Behaviour>) -> Multiaddr {
 /// Drive every node for `how_long`, collecting messages the receiver got.
 async fn pump(
     nodes: &mut [&mut Swarm<Behaviour>],
-    receiver: usize,
     how_long: Duration,
-    received: &mut Vec<(Option<PeerId>, Vec<u8>, MessageId)>,
+    received: &mut Vec<(usize, Option<PeerId>, Vec<u8>, MessageId)>,
 ) {
     let deadline = tokio::time::Instant::now() + how_long;
     loop {
@@ -177,9 +230,8 @@ async fn pump(
                     message_id,
                     ..
                 })) = event
-                && index == receiver
             {
-                received.push((message.source, message.data.clone(), message_id));
+                received.push((index, message.source, message.data.clone(), message_id));
             }
         }
     }
@@ -199,7 +251,7 @@ async fn mesh_up(nodes: &mut [&mut Swarm<Behaviour>], topic: &IdentTopic) -> Mul
     }
     // Let connections, subscriptions and the mesh settle.
     let mut nothing = Vec::new();
-    pump(nodes, usize::MAX, Duration::from_secs(2), &mut nothing).await;
+    pump(nodes, Duration::from_secs(2), &mut nothing).await;
     addr
 }
 
@@ -226,7 +278,7 @@ pub async fn b1_distinct_mesh_ids() {
     {
         let mut nodes: Vec<&mut Swarm<Behaviour>> = vec![&mut receiver, &mut first, &mut second];
         let mut warmup = Vec::new();
-        pump(&mut nodes, 0, Duration::from_millis(500), &mut warmup).await;
+        pump(&mut nodes, Duration::from_millis(500), &mut warmup).await;
 
         let a = nodes[1]
             .behaviour_mut()
@@ -239,10 +291,11 @@ pub async fn b1_distinct_mesh_ids() {
         note("first publish accepted locally", a.is_ok());
         note("second publish accepted locally", b.is_ok());
 
-        pump(&mut nodes, 0, Duration::from_secs(3), &mut received).await;
+        pump(&mut nodes, Duration::from_secs(3), &mut received).await;
     }
 
-    let ids: Vec<&MessageId> = received.iter().map(|(_, _, id)| id).collect();
+    let received: Vec<_> = received.into_iter().filter(|(node, ..)| *node == 0).collect();
+    let ids: Vec<&MessageId> = received.iter().map(|(_, _, _, id)| id).collect();
     let distinct = {
         let mut seen: Vec<&MessageId> = Vec::new();
         for id in &ids {
@@ -256,8 +309,8 @@ pub async fn b1_distinct_mesh_ids() {
     note("distinct mesh ids among them", distinct);
     note(
         "both publishers reached the application",
-        received.iter().any(|(s, _, _)| *s == Some(first_peer))
-            && received.iter().any(|(s, _, _)| *s == Some(second_peer)),
+        received.iter().any(|(_, s, _, _)| *s == Some(first_peer))
+            && received.iter().any(|(_, s, _, _)| *s == Some(second_peer)),
     );
 }
 
@@ -270,7 +323,18 @@ pub async fn b2_authenticity_before_cache() {
     let victim_keypair = libp2p::identity::Keypair::generate_ed25519();
     let victim_peer = PeerId::from_public_key(&victim_keypair.public());
 
+    // THE STRICT RECEIVER is the node under test. The PERMISSIVE one is
+    // the positive control the first version of this experiment lacked:
+    // without it, "the forged message was not delivered" is equally
+    // explained by the forgery never having reached anyone, and the
+    // experiment closes the spike without the invalid message ever
+    // touching a receive path.
     let mut receiver = signing_node(IdRule::PayloadDerived);
+    let mut permissive = node(
+        MessageAuthenticity::Signed(libp2p::identity::Keypair::generate_ed25519()),
+        IdRule::PayloadDerived,
+        ValidationMode::Permissive,
+    );
     let mut forger = node(
         MessageAuthenticity::Author(victim_peer),
         IdRule::PayloadDerived,
@@ -295,9 +359,38 @@ pub async fn b2_authenticity_before_cache() {
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(30)))
         .build();
 
+    // WIRED BY HAND, because the star topology `mesh_up` builds put the
+    // permissive receiver DOWNSTREAM of the strict one -- and the strict
+    // one rejects the forgery, so it never forwards it. The control then
+    // reported zero for the same reason the experiment did, which is a
+    // control that cannot fail independently of what it is controlling.
+    //
+    // The permissive receiver therefore dials the FORGER directly, and
+    // its path to the forged message does not pass through the node
+    // under test.
+    let strict_addr = listen(&mut receiver).await;
+    let forger_addr = listen(&mut forger).await;
+    for (node, addr) in [
+        (&mut forger, strict_addr.clone()),
+        (&mut victim, strict_addr.clone()),
+        (&mut permissive, forger_addr.clone()),
+    ] {
+        node.behaviour_mut()
+            .gossipsub
+            .subscribe(&topic)
+            .expect("subscribe");
+        node.dial(addr).expect("dial");
+    }
+    receiver
+        .behaviour_mut()
+        .gossipsub
+        .subscribe(&topic)
+        .expect("subscribe");
     {
-        let mut nodes: Vec<&mut Swarm<Behaviour>> = vec![&mut receiver, &mut forger, &mut victim];
-        let _ = mesh_up(&mut nodes, &topic).await;
+        let mut nodes: Vec<&mut Swarm<Behaviour>> =
+            vec![&mut receiver, &mut forger, &mut victim, &mut permissive];
+        let mut nothing = Vec::new();
+        pump(&mut nodes, Duration::from_secs(3), &mut nothing).await;
     }
 
     // ONE payload, so the forged and the genuine message share a mesh id
@@ -307,9 +400,10 @@ pub async fn b2_authenticity_before_cache() {
     let mut after_forgery = Vec::new();
     let mut after_genuine = Vec::new();
     {
-        let mut nodes: Vec<&mut Swarm<Behaviour>> = vec![&mut receiver, &mut forger, &mut victim];
+        let mut nodes: Vec<&mut Swarm<Behaviour>> =
+            vec![&mut receiver, &mut forger, &mut victim, &mut permissive];
         let mut warmup = Vec::new();
-        pump(&mut nodes, 0, Duration::from_millis(500), &mut warmup).await;
+        pump(&mut nodes, Duration::from_millis(500), &mut warmup).await;
 
         // CONTROL, so a pass cannot mean "nothing reached anyone". A
         // different payload from the victim first: if the receiver does
@@ -321,8 +415,11 @@ pub async fn b2_authenticity_before_cache() {
             .publish(topic.clone(), b"control-message".to_vec());
         note("control publish accepted", control.is_ok());
         let mut control_seen = Vec::new();
-        pump(&mut nodes, 0, Duration::from_secs(2), &mut control_seen).await;
-        note("control delivered to the receiver", control_seen.len());
+        pump(&mut nodes, Duration::from_secs(2), &mut control_seen).await;
+        note(
+            "control delivered to the strict receiver",
+            control_seen.iter().filter(|(n, ..)| *n == 0).count(),
+        );
         note(
             "receiver's connected peers",
             nodes[0].network_info().num_peers(),
@@ -333,20 +430,34 @@ pub async fn b2_authenticity_before_cache() {
             .gossipsub
             .publish(topic.clone(), payload.clone());
         note("forged publish accepted by its own node", forged.is_ok());
-        pump(&mut nodes, 0, Duration::from_secs(2), &mut after_forgery).await;
-        note("forged message delivered to the receiver", after_forgery.len());
+        pump(&mut nodes, Duration::from_secs(2), &mut after_forgery).await;
+        let forged_strict = after_forgery.iter().filter(|(n, ..)| *n == 0).count();
+        let forged_permissive = after_forgery.iter().filter(|(n, ..)| *n == 3).count();
+        // THE EVIDENCE THAT IT ARRIVED. A permissive receiver on the same
+        // mesh delivering the forged message proves it left the forger
+        // and reached a receive path; the strict receiver's silence is
+        // then attributable to validation rather than to non-arrival.
+        note("forged message delivered to the PERMISSIVE receiver", forged_permissive);
+        note("forged message delivered to the STRICT receiver", forged_strict);
 
         let genuine = nodes[2]
             .behaviour_mut()
             .gossipsub
             .publish(topic.clone(), payload.clone());
         note("genuine publish accepted by its own node", genuine.is_ok());
-        pump(&mut nodes, 0, Duration::from_secs(3), &mut after_genuine).await;
+        pump(&mut nodes, Duration::from_secs(3), &mut after_genuine).await;
     }
 
-    note("genuine message delivered afterwards", after_genuine.len());
+    let forged_strict = after_forgery.iter().filter(|(n, ..)| *n == 0).count();
+    let forged_permissive = after_forgery.iter().filter(|(n, ..)| *n == 3).count();
+    let genuine_strict = after_genuine.iter().filter(|(n, ..)| *n == 0).count();
+    note("genuine message delivered to the strict receiver", genuine_strict);
     note(
         "VERDICT: authenticity precedes the duplicate cache",
-        after_forgery.is_empty() && !after_genuine.is_empty(),
+        forged_permissive > 0 && forged_strict == 0 && genuine_strict > 0,
+    );
+    note(
+        "  (arrived at a receive path, rejected by strict, left nothing behind)",
+        "",
     );
 }

@@ -34,6 +34,9 @@ async fn main() {
     println!("\nA7. reservation-capacity overflow");
     direct::a7_reservation_overflow().await;
 
+    println!("\nB0. the id function under test is the frozen one");
+    mesh::b0_message_id_matches_the_golden_vectors();
+
     println!("\nB1. two publishers, one application message id");
     mesh::b1_distinct_mesh_ids().await;
 
