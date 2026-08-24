@@ -102,6 +102,41 @@ pub fn node(
         .build()
 }
 
+/// `node`, but presenting a CALLER-CHOSEN identity rather than a fresh
+/// one. Two swarms built with the same keypair present the same PeerId
+/// -- and therefore the same `source_peer` for `DedupKey` purposes --
+/// while remaining physically distinct connections. That is what makes
+/// a genuine cancellation race constructible: two independent
+/// connections carrying retransmissions of ONE key, so one can be
+/// killed without the other.
+pub fn node_as(
+    keypair: libp2p::identity::Keypair,
+    direct_protocols: Vec<(StreamProtocol, ProtocolSupport)>,
+    request_timeout: Duration,
+) -> Swarm<Behaviour> {
+    libp2p::SwarmBuilder::with_existing_identity(keypair)
+        .with_tokio()
+        .with_tcp(
+            tcp::Config::default().nodelay(true),
+            noise::Config::new,
+            yamux::Config::default,
+        )
+        .expect("tcp")
+        .with_behaviour(|_| Behaviour {
+            direct: request_response::cbor::Behaviour::new(
+                direct_protocols,
+                request_response::Config::default().with_request_timeout(request_timeout),
+            ),
+            endpoints: request_response::cbor::Behaviour::new(
+                [(ENDPOINTS_V1, ProtocolSupport::Full)],
+                request_response::Config::default().with_request_timeout(request_timeout),
+            ),
+        })
+        .expect("behaviour")
+        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(30)))
+        .build()
+}
+
 pub fn full_direct() -> Vec<(StreamProtocol, ProtocolSupport)> {
     vec![(DIRECT_V2, ProtocolSupport::Full)]
 }
@@ -711,4 +746,146 @@ pub async fn a7_reservation_overflow() {
     note("refused as overloaded", overloaded);
     note("peers told `overloaded` on the wire", overloaded_on_the_wire);
     note("reservations held", reservations.len());
+}
+
+/// A8 — a cancellation race, not merely a slow race.
+///
+/// `SPIKES.md` requires "response timeout/cancellation races" alongside
+/// the same-key retransmission claim A6 tests. A6 kept every response
+/// channel alive until an outcome was sent; nothing there ever cancels.
+/// This does: the connection carrying the OWNER's request is killed
+/// mid-admission, while waiters on a SEPARATE connection remain — the
+/// same key, genuinely split across two connections, because two
+/// `Swarm`s built from one shared keypair present one `source_peer` for
+/// `DedupKey` purposes while being physically distinct connections.
+///
+/// The question: does an owner's connection dying orphan the surviving
+/// waiters, or leak the reservation forever? Production code has to get
+/// this right; nothing forces it to without a test that can fail this
+/// way.
+pub async fn a8_cancellation_race() {
+    const ADMISSION: Duration = Duration::from_millis(600);
+    const SURVIVING_WAITERS: usize = 4;
+
+    let shared = libp2p::identity::Keypair::generate_ed25519();
+    let source = identity(&PeerId::from(shared.public()));
+
+    let mut server = node(full_direct(), Duration::from_secs(20));
+    let addr = listen(&mut server).await;
+    let server_peer = *server.local_peer_id();
+
+    let mut owner_conn = node_as(shared.clone(), full_direct(), Duration::from_secs(20));
+    let mut waiter_conn = node_as(shared, full_direct(), Duration::from_secs(20));
+    connect(&mut owner_conn, &mut server, addr.clone()).await;
+    connect(&mut waiter_conn, &mut server, addr).await;
+
+    // THE OWNER, alone on its own connection.
+    owner_conn
+        .behaviour_mut()
+        .direct
+        .send_request(&server_peer, request("m-cancel", Some("chat"), b"canceled"));
+
+    let key = key(&source, "m-cancel");
+    let fingerprint = direct_content_fingerprint_v1(None, b"canceled").expect("fingerprint");
+    let mut reservations = ReservationMap::new(64, 8);
+
+    let mut owner_connection_id = None;
+    let mut waiter_channels: Vec<ResponseChannel<Response>> = Vec::new();
+    let mut admission_due: Option<tokio::time::Instant> = None;
+    let mut killed = false;
+    let mut owner_inbound_failure: Option<String> = None;
+    let mut waiter_answers = 0_usize;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if waiter_answers >= SURVIVING_WAITERS {
+            break;
+        }
+        tokio::select! {
+            () = tokio::time::sleep_until(deadline) => {
+                note("deadline reached before every surviving waiter answered", true);
+                break;
+            }
+            () = async {
+                match admission_due {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                admission_due = None;
+                // THE OWNER'S CONNECTION IS ALREADY GONE. Its channel is
+                // not answered -- there is nowhere for the answer to go
+                // -- but the waiters on the surviving connection still
+                // get one, and the reservation is released either way.
+                for channel in waiter_channels.drain(..) {
+                    let _ = server.behaviour_mut().direct.send_response(
+                        channel,
+                        Response::AcceptedV2 { resolved_endpoint: "chat".to_owned() },
+                    );
+                }
+                reservations.release(&key);
+                note("reservation released after the owner's connection died", true);
+            }
+            e = server.select_next_some() => match e {
+                SwarmEvent::Behaviour(BehaviourEvent::Direct(RrEvent::Message {
+                    message: RrMessage::Request { channel, .. }, connection_id, ..
+                })) => {
+                    match reservations.acquire(&key, fingerprint) {
+                        Ok(Reservation::Owner) => {
+                            owner_connection_id = Some(connection_id);
+                            admission_due = Some(tokio::time::Instant::now() + ADMISSION);
+                            note("owner admitted, on its own connection", format!("{connection_id:?}"));
+                            // KILL IT NOW, before admission has a chance
+                            // to complete. The channel is dropped with
+                            // it; there is no cancel API for one
+                            // request, so this is what a cancellation
+                            // looks like at this layer -- the connection
+                            // carrying it is gone.
+                            server.close_connection(connection_id);
+                            killed = true;
+                            // SENT HERE, synchronously with the kill:
+                            // every one of these genuinely arrives while
+                            // admission is pending on a connection that
+                            // no longer exists, which is the scenario
+                            // under test.
+                            for _ in 0..SURVIVING_WAITERS {
+                                waiter_conn.behaviour_mut().direct.send_request(
+                                    &server_peer, request("m-cancel", Some("chat"), b"canceled"));
+                            }
+                        }
+                        Ok(Reservation::Waiter) => {
+                            waiter_channels.push(channel);
+                        }
+                        Err(_) => {}
+                    }
+                }
+                SwarmEvent::Behaviour(BehaviourEvent::Direct(RrEvent::InboundFailure { connection_id, error, .. })) => {
+                    if Some(connection_id) == owner_connection_id {
+                        owner_inbound_failure = Some(describe_inbound(&error));
+                    }
+                }
+                _ => {}
+            },
+            e = owner_conn.select_next_some() => { let _ = e; }
+            e = waiter_conn.select_next_some() => {
+                if let SwarmEvent::Behaviour(BehaviourEvent::Direct(RrEvent::Message {
+                    message: RrMessage::Response { .. }, ..
+                })) = e {
+                    waiter_answers += 1;
+                }
+            }
+        }
+    }
+
+    note("owner's connection was killed mid-admission", killed);
+    note(
+        "server learned the owner's connection died",
+        owner_inbound_failure.unwrap_or_else(|| "no InboundFailure event arrived".to_owned()),
+    );
+    note("surviving waiters that still received an answer", waiter_answers);
+    note("reservations held after the race settled", reservations.len());
+    note(
+        "a NEW request for the same key is admitted afterward",
+        reservations.acquire(&key, fingerprint).is_ok(),
+    );
 }

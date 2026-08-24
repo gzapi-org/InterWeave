@@ -122,6 +122,22 @@ reservations held                              4
 
 The map holds exactly its budget and the excess is refused. `DIRECT.md` lists `overloaded` as a **distinct** coarse reason from `no_route`, and the two mean different things to whoever receives them: one says the route is fine and to retry later, the other says there is nowhere to deliver. The first version of this harness collapsed overflow into `no_route` while its own counter printed `Overloaded` — the spike would have reported a mapping it was not performing. Both the counter and the wire now say `overloaded`.
 
+### A8. A cancellation race, not merely a slow one
+
+`SPIKES.md` requires cancellation races alongside the same-key retransmission claim, and A6 never cancels anything — every response channel stays alive until an outcome is sent. This does: the connection carrying the **owner's** request is killed mid-admission, while waiters attach on a **separate** connection to the same identity.
+
+That construction needs two physically distinct connections presenting one `source_peer` — two `Swarm`s built from one shared keypair, since `DedupKey` is scoped to the peer and a cancellation race worth testing has to leave some retransmissions alive while others die.
+
+```text
+owner admitted, on its own connection          ConnectionId(20)
+server learned the owner's connection died     ConnectionClosed
+surviving waiters that still received an answer 4
+reservations held after the race settled       0
+a NEW request for the same key is admitted afterward true
+```
+
+The owner's connection dying does not orphan the surviving waiters — they still receive the outcome once admission completes, on the connection that is still up — and the reservation is released rather than held forever waiting for a channel that no longer exists. A production implementation that released the reservation only when the *owner's* channel confirmed delivery would hang the waiters and leak the slot; this is the case that would have caught it.
+
 ## B — GossipSub
 
 ### B0. The ID function under test is the frozen one

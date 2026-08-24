@@ -34,6 +34,9 @@ async fn main() {
     println!("\nA7. reservation-capacity overflow");
     direct::a7_reservation_overflow().await;
 
+    println!("\nA8. a cancellation race: the owner's connection dies mid-admission");
+    direct::a8_cancellation_race().await;
+
     println!("\nB0. the id function under test is the frozen one");
     mesh::b0_message_id_matches_the_golden_vectors();
 
