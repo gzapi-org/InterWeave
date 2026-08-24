@@ -940,3 +940,41 @@ fn concurrent_flushes_of_one_profile_do_not_splice_each_other() {
         strays.len()
     );
 }
+
+#[test]
+fn a_capability_observation_does_not_extend_the_record_ttl() {
+    // `providers/peer-cache.md`: "Capability freshness never outlives
+    // the enclosing peer-cache record TTL." `COMPOSITION.md` says the
+    // same from the other side: protocol observations "do not keep an
+    // otherwise expired peer candidate alive beyond the source's TTL."
+    //
+    // Both are about the attack this closes: a peer that can provoke
+    // capability observations -- an Identify exchange is cheap -- could
+    // otherwise hold a cache entry alive indefinitely without ever
+    // completing another successful connection, which is what the TTL
+    // is counting.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("peers.json");
+    let mut cache = empty(&path);
+
+    cache
+        .record_success(&peer(PEER_A), "/ip4/10.0.0.1/tcp/1", 0)
+        .expect("record");
+
+    // Observations arriving right up to the edge of expiry.
+    for at in [1_000, DEFAULT_TTL_MS / 2, DEFAULT_TTL_MS - 1] {
+        cache
+            .record_capability(&peer(PEER_A), capability("interweave/kad", true, at))
+            .expect("observe");
+    }
+
+    // The TTL runs from the last SUCCESS, which was at 0.
+    assert!(
+        cache.candidates(DEFAULT_TTL_MS - 1).len() == 1,
+        "still fresh just before expiry"
+    );
+    assert!(
+        cache.candidates(DEFAULT_TTL_MS + 1).is_empty(),
+        "observations must not have pushed the expiry out"
+    );
+}

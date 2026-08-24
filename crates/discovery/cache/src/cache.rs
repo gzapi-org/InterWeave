@@ -504,6 +504,32 @@ impl PeerCache {
                     source: SOURCE.to_owned(),
                     observed_at: r.last_success_ms,
                     expires_at: Some(r.expires_at_ms(self.limits.ttl_ms())),
+                    // EMPTY, AND THIS IS A KNOWN GAP -- not "this peer
+                    // has no observations".
+                    //
+                    // `providers/peer-cache.md` says the Kademlia
+                    // provider may read fresh capability observations
+                    // "through normal candidate/hint data", which is
+                    // this field. Nothing reads it yet: Kademlia is
+                    // Stage 10 and the discovery manager is later, so
+                    // the gap is not live.
+                    //
+                    // It is left empty rather than filled because the
+                    // mapping is NOT specified and guessing it here
+                    // would freeze a wire-adjacent decision in the
+                    // wrong place. A stored observation is
+                    // `(protocol_family, wire_major, network_hash,
+                    // role)`; a `ProtocolObservation` carries a single
+                    // `protocol_id`. ADR-0047 gives the canonical form
+                    // `/interweave/kad/1.0.0/<network-hash>`, so three
+                    // of those four fields have an evident home and
+                    // `role` has none -- and "wire_major 1 means 1.0.0"
+                    // is an inference, not something any document
+                    // states. Dropping `role` silently would be the
+                    // same class of loss as dropping the whole set.
+                    //
+                    // Whoever opens Stage 10 decides the mapping in the
+                    // architecture first, then fills this in.
                     protocol_observations: Default::default(),
                 })
             })
