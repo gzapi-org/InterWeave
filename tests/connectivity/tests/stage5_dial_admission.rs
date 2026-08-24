@@ -1229,9 +1229,16 @@ async fn a_failed_peer_is_retried_without_anyone_asking() {
     // Paused time, because the first retry is thirty seconds out by
     // CONNECTIVITY.md and a test that waited would be a test nobody
     // runs. The clock is tokio's, so advancing it advances the
-    // substrate's own notion of now -- and the address below fails
-    // SYNCHRONOUSLY, with no socket, so there is no real I/O for the
+    // substrate's own notion of now -- and the address below is
+    // refused by the KERNEL near-instantly, loopback with nobody
+    // listening, so there is no real network round trip for the
     // virtual clock to outrun.
+    //
+    // TCP, deliberately, and not UDP: a UDP address on this TCP-only
+    // Swarm is the STRUCTURAL failure `an_unsupported_local_address_is_
+    // reported_once_and_never_retried` below exists to prove is the
+    // opposite of this. This one has to be a genuine network-level
+    // refusal, or it would prove nothing about retrying.
     let absent = TransportIdentity::parse(ABSENT).expect("canonical");
     let mut runtime = SwarmRuntime::start(
         &identity(),
@@ -1240,23 +1247,20 @@ async fn a_failed_peer_is_retried_without_anyone_asking() {
     )
     .expect("starts");
 
-    // UDP, on a Swarm whose only transport is TCP. libp2p refuses it
-    // without opening anything, which is what keeps this test free of
-    // wall-clock time.
-    let unsupported: Multiaddr = "/ip4/127.0.0.1/udp/1".parse().expect("valid");
+    let refused: Multiaddr = "/ip4/127.0.0.1/tcp/1".parse().expect("valid");
     assert!(
         runtime
-            .add_address(absent.clone(), unsupported.clone())
+            .add_address(absent.clone(), refused.clone())
             .await
             .expect("the command reaches the task")
     );
     assert!(
         runtime
-            .dial(absent.clone(), unsupported)
+            .dial(absent.clone(), refused)
             .await
             .expect("the command reaches the task")
             .is_ok(),
-        "admitted -- libp2p discovers there is no transport for it afterwards"
+        "admitted -- the connection is refused afterwards"
     );
 
     // NOBODY ASKS AGAIN. This test issues exactly one dial, so a
@@ -1282,15 +1286,13 @@ async fn a_failed_peer_is_retried_without_anyone_asking() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_revoked_peer_is_not_retried() {
-    // The scheduler is a dial origin like any other, so a revocation
-    // has to stop it too. A retry that bypassed admission -- because it
-    // was "already scheduled" -- would keep dialing a peer the operator
-    // has withdrawn trust from, on a timer, indefinitely.
-    //
-    // The refusal is also REPORTED: nobody is holding a reply channel
-    // for a scheduled dial, so without an event an operator watching a
-    // peer that never reconnects would have nothing to look at.
+async fn an_unsupported_local_address_is_reported_once_and_never_retried() {
+    // The exact bug the review named: "a synchronous failure such as an
+    // unsupported transport is recorded as a normal address failure and
+    // scheduled again." A UDP address on this TCP-only Swarm fails the
+    // same way every time this process asks -- retrying it is not a
+    // smaller version of retrying a timed-out connection, it is
+    // retrying a question already answered.
     let absent = TransportIdentity::parse(ABSENT).expect("canonical");
     let mut runtime = SwarmRuntime::start(
         &identity(),
@@ -1309,6 +1311,61 @@ async fn a_revoked_peer_is_not_retried() {
     assert!(
         runtime
             .dial(absent.clone(), unsupported)
+            .await
+            .expect("the command reaches the task")
+            .is_ok(),
+        "admitted -- libp2p discovers there is no transport for it afterwards"
+    );
+    let first = wait_dial_failed(&mut runtime).await;
+    assert!(!first.is_empty(), "the one report: {first}");
+
+    // MANY simulated ticks, paused time costing nothing in wall clock,
+    // well past every backoff a transient failure would have used. A
+    // rescheduled peer would have reconnected -- failed again -- by now.
+    for _ in 0..20 {
+        tokio::time::advance(std::time::Duration::from_secs(400)).await;
+        if let Ok(event) =
+            tokio::time::timeout(std::time::Duration::from_millis(50), runtime.next_event()).await
+        {
+            panic!("a permanent local failure must not be retried, got {event:?}");
+        }
+    }
+
+    runtime.shutdown().await.expect("shuts down");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_revoked_peer_is_not_retried() {
+    // The scheduler is a dial origin like any other, so a revocation
+    // has to stop it too. A retry that bypassed admission -- because it
+    // was "already scheduled" -- would keep dialing a peer the operator
+    // has withdrawn trust from, on a timer, indefinitely.
+    //
+    // The refusal is also REPORTED: nobody is holding a reply channel
+    // for a scheduled dial, so without an event an operator watching a
+    // peer that never reconnects would have nothing to look at.
+    let absent = TransportIdentity::parse(ABSENT).expect("canonical");
+    let mut runtime = SwarmRuntime::start(
+        &identity(),
+        SubstrateConfig::default(),
+        trusting(&[&absent]),
+    )
+    .expect("starts");
+
+    // TCP, refused by the kernel rather than rejected structurally: a
+    // scheduled retry has to exist for revocation to have anything to
+    // intercept, and the permanent-failure classification this fix also
+    // adds means a UDP address here would never be rescheduled at all.
+    let refused: Multiaddr = "/ip4/127.0.0.1/tcp/1".parse().expect("valid");
+    assert!(
+        runtime
+            .add_address(absent.clone(), refused.clone())
+            .await
+            .expect("the command reaches the task")
+    );
+    assert!(
+        runtime
+            .dial(absent.clone(), refused)
             .await
             .expect("the command reaches the task")
             .is_ok()

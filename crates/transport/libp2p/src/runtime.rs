@@ -46,7 +46,7 @@ use interweave_transport_runtime::{
     ConnectionManager, ConnectionPolicy, ConnectionSlot, DialDenial, DialOrigin, DialRequest,
     DialTicket, TrustSources,
 };
-use libp2p::core::transport::ListenerId;
+use libp2p::core::transport::{ListenerId, TransportError};
 use libp2p::swarm::{DialError, SwarmEvent as Libp2pSwarmEvent};
 use libp2p::{Multiaddr, PeerId, identify, noise, tcp, yamux};
 use tokio::sync::{mpsc, oneshot};
@@ -971,9 +971,42 @@ fn attempt_dial(
             let (e, ticket) = *boxed;
             // A synchronous refusal produces no event, so the admission
             // is settled here or never.
-            manager.record_failure(ticket, now_ms);
+            if is_permanent_dial_error(&e) {
+                manager.record_permanent_failure(ticket, now_ms);
+            } else {
+                manager.record_failure(ticket, now_ms);
+            }
             Err(DialRefusal::Backend(e.to_string()))
         }
+    }
+}
+
+/// Whether `error` describes THIS PROCESS's transport stack rather than
+/// the remote end's availability.
+///
+/// `MultiaddrNotSupported` is libp2p's own name for "no configured
+/// transport understands this address" -- a UDP address handed to a
+/// TCP-only Swarm, for instance. It is not a fact about the network:
+/// the same address fails the same way every time, on every attempt,
+/// whatever the remote end does. Retrying it is not a smaller version
+/// of retrying a timed-out connection; it is retrying a question this
+/// process has already answered.
+///
+/// `DialError::Transport` carries one entry per address the dial
+/// considered, so ALL of them must be the structural kind for the whole
+/// attempt to be structural -- a mix means at least one address reached
+/// the network and failed there, which is the ordinary case
+/// `record_failure` exists for.
+fn is_permanent_dial_error(error: &DialError) -> bool {
+    match error {
+        DialError::NoAddresses | DialError::LocalPeerId { .. } => true,
+        DialError::Transport(attempts) => {
+            !attempts.is_empty()
+                && attempts
+                    .iter()
+                    .all(|(_, e)| matches!(e, TransportError::MultiaddrNotSupported(_)))
+        }
+        _ => false,
     }
 }
 
@@ -1074,6 +1107,15 @@ fn settle_outcome(
                 // quarantine existed only as a method nobody called.
                 if matches!(error, DialError::WrongPeerId { .. }) {
                     let _ = manager.record_identity_mismatch(ticket, now_ms);
+                } else if is_permanent_dial_error(error) {
+                    // STRUCTURAL, not transient. The same address fails
+                    // the same way every time this process asks, so
+                    // treating it as an ordinary network failure --
+                    // punitive backoff, a rescheduled retry -- retries a
+                    // thing retrying cannot fix. The paused-time
+                    // scheduler test caught this: a UDP address on a
+                    // TCP-only Swarm was retried forever.
+                    manager.record_permanent_failure(ticket, now_ms);
                 } else {
                     // ADDRESS-SCOPED, not peer-scoped. ADR-0011: a
                     // failure against one address must not advance a
@@ -1324,5 +1366,77 @@ fn translate(
             }
         }),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_permanent_dial_error;
+    use libp2p::Multiaddr;
+    use libp2p::core::transport::TransportError;
+    use libp2p::swarm::DialError;
+
+    fn addr() -> Multiaddr {
+        "/ip4/127.0.0.1/tcp/1".parse().expect("valid")
+    }
+
+    fn unsupported() -> (Multiaddr, TransportError<std::io::Error>) {
+        (addr(), TransportError::MultiaddrNotSupported(addr()))
+    }
+
+    fn network(kind: std::io::ErrorKind) -> (Multiaddr, TransportError<std::io::Error>) {
+        (addr(), TransportError::Other(std::io::Error::from(kind)))
+    }
+
+    #[test]
+    fn a_single_unsupported_address_is_permanent() {
+        assert!(is_permanent_dial_error(&DialError::Transport(vec![
+            unsupported()
+        ])));
+    }
+
+    #[test]
+    fn a_single_network_failure_is_not_permanent() {
+        assert!(!is_permanent_dial_error(&DialError::Transport(vec![
+            network(std::io::ErrorKind::ConnectionRefused)
+        ])));
+    }
+
+    #[test]
+    fn one_network_failure_among_several_unsupported_addresses_is_not_permanent() {
+        // THE quantifier this classification rests on. A dial that
+        // tried several addresses and reached the network on even one
+        // of them is not a structural failure -- `.all()`, not `.any()`,
+        // is what a mix has to fall through to `record_failure` rather
+        // than being cleared as unfixable.
+        assert!(!is_permanent_dial_error(&DialError::Transport(vec![
+            unsupported(),
+            network(std::io::ErrorKind::TimedOut),
+        ])));
+    }
+
+    #[test]
+    fn every_address_unsupported_is_permanent_even_with_several() {
+        assert!(is_permanent_dial_error(&DialError::Transport(vec![
+            unsupported(),
+            unsupported(),
+        ])));
+    }
+
+    #[test]
+    fn no_addresses_is_permanent() {
+        assert!(is_permanent_dial_error(&DialError::NoAddresses));
+    }
+
+    #[test]
+    fn dialing_the_local_peer_is_permanent() {
+        assert!(is_permanent_dial_error(&DialError::LocalPeerId {
+            address: addr()
+        }));
+    }
+
+    #[test]
+    fn a_timeout_is_not_permanent() {
+        assert!(!is_permanent_dial_error(&DialError::Aborted));
     }
 }
