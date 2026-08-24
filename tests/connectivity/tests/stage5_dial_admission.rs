@@ -1783,3 +1783,70 @@ async fn a_connection_admitted_then_revoked_mid_handshake_is_not_retained() {
     dialer.shutdown().await.expect("shuts down");
     listener.shutdown().await.expect("shuts down");
 }
+
+#[tokio::test]
+async fn revoking_a_peer_with_several_connections_counts_each_once() {
+    // `open` is keyed by CONNECTION, and one peer can hold several.
+    // Collecting its values gave `set_trust` a duplicate entry per
+    // connection, which reported the same revocation more than once,
+    // and the nested scan that followed then closed every matching
+    // connection once per duplicate: two connections to one revoked
+    // peer produced four close attempts and a reported count of four
+    // against two real connections.
+    //
+    // Two connections between the same pair, built by dialing the same
+    // listener twice -- libp2p's `PeerCondition::Always` is what the
+    // admitted dial uses, so the second dial genuinely opens a second
+    // connection rather than reusing the first.
+    let (dialer_id, dialer_peer) = who();
+    let listener = SwarmRuntime::start(
+        &identity(),
+        SubstrateConfig::default(),
+        trusting(&[&dialer_peer]),
+    )
+    .expect("starts");
+    let bound = listener
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
+        .await
+        .expect("binds");
+    let listener_peer = listener.local_peer().clone();
+
+    let mut dialer = SwarmRuntime::start(
+        &dialer_id,
+        SubstrateConfig::default(),
+        trusting(&[&listener_peer]),
+    )
+    .expect("starts");
+
+    for attempt in 0..2u8 {
+        assert!(
+            dialer
+                .dial(listener_peer.clone(), bound.clone())
+                .await
+                .expect("the command reaches the task")
+                .is_ok(),
+            "dial {attempt}"
+        );
+        assert_eq!(wait_connected(&mut dialer).await, listener_peer);
+    }
+
+    // Let the listener record both inbound connections before the
+    // revocation looks for them.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let closed = listener
+        .set_trust(trusting_nobody())
+        .await
+        .expect("the command reaches the task");
+
+    // THE COUNT IS OF CONNECTIONS, and there were two. The bug reported
+    // one closure per (revoked entry x matching connection) pair, so
+    // two connections to one peer reported four.
+    assert!(
+        closed <= 2,
+        "a peer with two connections cannot have more than two closed, got {closed}"
+    );
+
+    dialer.shutdown().await.expect("shuts down");
+    listener.shutdown().await.expect("shuts down");
+}

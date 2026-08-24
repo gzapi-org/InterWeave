@@ -36,7 +36,7 @@
 //! is blocking. The loop therefore holds a translated event and selects
 //! between delivering it and taking a command, so shutdown always wins.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::time::Duration;
 
 use interweave_profile_identity::ProfileIdentity;
@@ -1307,18 +1307,31 @@ fn handle_command(
             // what it would be granted next time. A trust change that
             // only affected future dials would leave a revoked peer
             // with a live session for as long as it kept talking.
-            let live: Vec<TransportIdentity> = open.values().map(|c| c.peer.clone()).collect();
+            // UNIQUE PEERS for the classification. `open` is keyed by
+            // CONNECTION, and one peer can hold several -- collecting
+            // its values produced a duplicate entry per connection, so
+            // `set_trust` reported the same revocation more than once
+            // and the nested scan below then closed each connection
+            // once per duplicate. Two connections to one revoked peer
+            // reported four closures against two real connections.
+            let live: BTreeSet<TransportIdentity> = open.values().map(|c| c.peer.clone()).collect();
+            let live: Vec<TransportIdentity> = live.into_iter().collect();
             let revoked = manager.set_trust(*trust, &live);
 
-            let mut closed = 0_usize;
-            for entry in &revoked {
-                for (id, connection) in open.iter() {
-                    if connection.peer == entry.peer {
-                        refuse.push(*id);
-                        closed = closed.saturating_add(1);
-                    }
+            // UNIQUE CONNECTIONS for the closing and the count. Every
+            // connection is named at most once however many revoked
+            // entries match it, so the number reported is the number of
+            // connections actually closed.
+            let revoked_peers: BTreeSet<&TransportIdentity> =
+                revoked.iter().map(|entry| &entry.peer).collect();
+            let mut closing: BTreeSet<libp2p::swarm::ConnectionId> = BTreeSet::new();
+            for (id, connection) in open.iter() {
+                if revoked_peers.contains(&connection.peer) {
+                    closing.insert(*id);
                 }
             }
+            let closed = closing.len();
+            refuse.extend(closing);
             let _ = reply.send(closed);
         }
         SwarmCommand::Drain { reply } => {
