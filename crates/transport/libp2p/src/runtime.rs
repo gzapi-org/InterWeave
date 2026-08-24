@@ -602,11 +602,35 @@ impl SwarmRuntime {
                             // failed silently would leave an operator
                             // watching a peer that never reconnects
                             // with nothing at all to look at.
+                            //
+                            // BOUNDED HERE TOO, and freshly checked
+                            // rather than trusting the `room` computed
+                            // once at the top of the loop: this branch
+                            // is not gated by `if room` the way the
+                            // Swarm-event branch is, and one tick can
+                            // push up to `max_retries_per_tick` events
+                            // in a single pass over `due` -- the outbox
+                            // capacity that one stale bool described
+                            // could be exhausted several pushes into the
+                            // same loop. A stalled consumer combined
+                            // with a peer that fails every tick would
+                            // otherwise grow the outbox by one entry per
+                            // tick forever, which is exactly the
+                            // unbounded memory this channel exists to
+                            // rule out. Dropped, not queued: the
+                            // diagnostic is informational only, nothing
+                            // downstream is waiting on it, and the
+                            // outcome itself was already settled above
+                            // regardless of whether this line runs.
                             if let Some(refusal) = last {
-                                outbox.push_back(SwarmEvent::DialFailed {
-                                    peer: Some(peer.clone()),
-                                    detail: format!("scheduled retry: {refusal:?}"),
-                                });
+                                let has_room = outbox.len()
+                                    < config.event_capacity.saturating_add(listens.len());
+                                if has_room {
+                                    outbox.push_back(SwarmEvent::DialFailed {
+                                        peer: Some(peer.clone()),
+                                        detail: format!("scheduled retry: {refusal:?}"),
+                                    });
+                                }
                             }
                         }
                     }

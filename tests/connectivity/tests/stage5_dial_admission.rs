@@ -1587,3 +1587,104 @@ async fn a_draining_runtime_refuses_new_work_and_keeps_what_it_has() {
     dialer.shutdown().await.expect("shuts down");
     listener.shutdown().await.expect("shuts down");
 }
+
+#[tokio::test(start_paused = true)]
+async fn retry_diagnostics_stay_bounded_when_nobody_is_listening() {
+    // The retry tick pushed its DialFailed diagnostic straight into the
+    // outbox with no capacity check at all -- the ONE branch not gated
+    // by the `room` bool every other producer respects. A stalled
+    // consumer and a peer that fails the SAME way every tick would
+    // otherwise grow that queue by one entry per tick forever, which is
+    // exactly the unbounded memory this channel's own module docs rule
+    // out.
+    //
+    // The failure has to be one that never produces a ticket, or the
+    // ordinary translate()-based reporting path handles it instead --
+    // already bounded by `room`, and not what this fix is about. A
+    // pending-dial-ceiling denial is exactly that: nothing dialed, no
+    // ticket, and REPEATED, because releasing (not clearing) a
+    // recoverable denial leaves the claim due again on the very next
+    // tick.
+    //
+    // `hog` closes the ceiling PERMANENTLY: a dial to TEST-NET-1 is
+    // routed nowhere, so it stays pending forever and never releases
+    // the slot it reserved. `absent` is admitted and scheduled FIRST,
+    // while the ceiling still has room, so its retry exists before the
+    // ceiling shuts -- exactly the ordering a real daemon would produce
+    // under load: work already scheduled outliving the resources that
+    // let it start.
+    let hog = TransportIdentity::parse("12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN")
+        .expect("canonical");
+    let absent = TransportIdentity::parse(ABSENT).expect("canonical");
+    let mut runtime = SwarmRuntime::start(
+        &identity(),
+        SubstrateConfig {
+            // Small on purpose: the smaller the stated capacity, the
+            // fewer ticks it takes to prove growth stopped rather than
+            // merely slowed.
+            event_capacity: 1,
+            max_pending_dials: 1,
+            ..SubstrateConfig::default()
+        },
+        trusting(&[&hog, &absent]),
+    )
+    .expect("starts");
+
+    // Admitted while the sole slot is free, fails on the network,
+    // releases the slot, and schedules a retry.
+    let refused: Multiaddr = "/ip4/127.0.0.1/tcp/1".parse().expect("valid");
+    assert!(
+        runtime
+            .add_address(absent.clone(), refused.clone())
+            .await
+            .expect("the command reaches the task")
+    );
+    assert!(
+        runtime
+            .dial(absent.clone(), refused)
+            .await
+            .expect("the command reaches the task")
+            .is_ok()
+    );
+    let first = wait_dial_failed(&mut runtime).await;
+    assert!(
+        !first.is_empty(),
+        "the network failure that schedules the retry: {first}"
+    );
+
+    // NOW the sole slot closes, permanently.
+    let unreachable: Multiaddr = "/ip4/192.0.2.1/tcp/4001".parse().expect("valid");
+    assert!(
+        runtime
+            .dial(hog, unreachable)
+            .await
+            .expect("the command reaches the task")
+            .is_ok()
+    );
+
+    // NOBODY CONSUMES FROM HERE. Many simulated ticks pass, costing
+    // nothing in wall-clock time, each one finding the pending-dial
+    // ceiling still spent and each refusal due to be reported -- if
+    // reporting is unbounded, dozens of entries pile up behind a
+    // channel and a queue nothing is draining.
+    for _ in 0..40 {
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+    }
+
+    // ONLY NOW does anything read. What arrives is what survived --
+    // bounded by the channel's own stated capacity plus the outbox's,
+    // not by how many ticks happened to fire while nobody was looking.
+    let mut arrived = 0_usize;
+    while tokio::time::timeout(std::time::Duration::from_millis(50), runtime.next_event())
+        .await
+        .is_ok()
+    {
+        arrived += 1;
+    }
+    assert!(
+        arrived <= 4,
+        "40 unread ticks must not mean 40 buffered diagnostics, got {arrived}"
+    );
+
+    runtime.shutdown().await.expect("shuts down");
+}
