@@ -29,6 +29,43 @@ use crate::CacheError;
 use crate::limits::{CacheLimits, MAX_ADDRESS_BYTES, MAX_CACHE_FILE_BYTES, MAX_LABEL_BYTES};
 use crate::record::{AddressObservation, PeerRecord, ProtocolCapabilityObservation};
 
+/// A temporary path beside `path`, unique to this attempt.
+///
+/// The same construction `profile-config`'s persist module uses, and
+/// for the same reason: a fixed `.tmp` name is shared by every process
+/// writing the same profile, so two concurrent flushes hold
+/// descriptors on one inode and one renames it away while the other is
+/// still writing. Process id and a per-process counter separate
+/// writers; the `RandomState` component means a name another account
+/// could otherwise predict -- and pre-create, turning every write into
+/// a failure against `create_new` -- is not computable from outside.
+///
+/// Not a CSPRNG and does not need to be: the requirement is that the
+/// name cannot be computed by someone else, not that it resists
+/// cryptanalysis.
+fn temp_beside(path: &Path) -> PathBuf {
+    use std::hash::{BuildHasher as _, Hasher as _};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    static SEED: std::sync::OnceLock<std::collections::hash_map::RandomState> =
+        std::sync::OnceLock::new();
+
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let mut h = SEED
+        .get_or_init(std::collections::hash_map::RandomState::new)
+        .build_hasher();
+    h.write_u64(n);
+    h.write_u32(std::process::id());
+
+    let mut temp = path.as_os_str().to_owned();
+    temp.push(format!(
+        ".{}.{n}.{:016x}.tmp",
+        std::process::id(),
+        h.finish()
+    ));
+    PathBuf::from(temp)
+}
+
 /// The provider name this cache reports on every candidate it emits.
 pub const SOURCE: &str = "peer-cache";
 
@@ -585,10 +622,29 @@ impl PeerCache {
 
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(parent)?;
-        let temp = self.path.with_extension("tmp");
+
+        // A UNIQUE NAME, and `create_new`. The temporary used to be
+        // `self.path.with_extension("tmp")` opened with `File::create`:
+        // one fixed name per profile, shared by every process writing
+        // that profile's cache. Two of them flush concurrently and both
+        // hold descriptors on the same inode -- one renames it into
+        // place while the other is still writing through its own
+        // descriptor, so the published file is a splice of two
+        // serializations. The peer cache is advisory, so this is not
+        // identity corruption; it is a whole cache invalidated and an
+        // unexplained cold start, which is exactly the cost the rename
+        // was there to avoid.
+        //
+        // `create_new` refuses an existing file and refuses to follow a
+        // symlink, so a name someone pre-created is an error here
+        // rather than a write somewhere else.
+        let temp = temp_beside(&self.path);
         {
             use std::io::Write as _;
-            let mut handle = fs::File::create(&temp)?;
+            let mut handle = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp)?;
             handle.write_all(&json)?;
             // Explicit, because `fs::write` does not do this. Without it
             // the rename can land before the bytes, and a crash in that
@@ -596,7 +652,23 @@ impl PeerCache {
             // than a missing one, since it looks like a valid cache.
             handle.sync_all()?;
         }
-        fs::rename(&temp, &self.path)?;
+        // A FAILED RENAME MUST NOT LEAVE THE TEMPORARY BEHIND. The name
+        // is unique per attempt now, so an abandoned one is never
+        // reused and would simply accumulate.
+        if let Err(error) = fs::rename(&temp, &self.path) {
+            let _ = fs::remove_file(&temp);
+            return Err(error.into());
+        }
+
+        // fsync the DIRECTORY, so the rename itself survives a crash.
+        // Without it the bytes are durable and the name that points at
+        // them may not be, which is the same cold start by a different
+        // route. Best-effort: a filesystem that refuses to open a
+        // directory for this is not a reason to fail a flush that has
+        // already landed.
+        if let Ok(dir) = fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
 
         self.dirty = false;
         self.last_write_ms = Some(now_ms);
