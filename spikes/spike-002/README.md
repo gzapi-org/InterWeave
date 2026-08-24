@@ -120,7 +120,7 @@ peers told `overloaded` on the wire            12
 reservations held                              4
 ```
 
-The map holds exactly its budget and the excess is refused. `DIRECT.md` lists `overloaded` as a **distinct** coarse reason from `no_route`, and the two mean different things to whoever receives them: one says the route is fine and to retry later, the other says there is nowhere to deliver. The first version of this harness collapsed overflow into `no_route` while its own counter printed `Overloaded` — the spike would have reported a mapping it was not performing. Both the counter and the wire now say `overloaded`.
+The map holds exactly its budget and the excess is refused. **Every refusal here is the PER-PEER check** — the per-peer budget is smaller than the global one, so the global bound is never touched. That is A10's job, below, and the distinction is not academic: broken global accounting produces this experiment's 4/12 exactly. `DIRECT.md` lists `overloaded` as a **distinct** coarse reason from `no_route`, and the two mean different things to whoever receives them: one says the route is fine and to retry later, the other says there is nowhere to deliver. The first version of this harness collapsed overflow into `no_route` while its own counter printed `Overloaded` — the spike would have reported a mapping it was not performing. Both the counter and the wire now say `overloaded`.
 
 ### A8. A cancellation race, not merely a slow one
 
@@ -137,6 +137,42 @@ a NEW request for the same key is admitted afterward true
 ```
 
 The owner's connection dying does not orphan the surviving waiters — they still receive the outcome once admission completes, on the connection that is still up — and the reservation is released rather than held forever waiting for a channel that no longer exists. A production implementation that released the reservation only when the *owner's* channel confirmed delivery would hang the waiters and leak the slot; this is the case that would have caught it.
+
+### A10. The global reservation budget, reached by many peers
+
+`DIRECT.md` states two separate limits ("128 global / 8 per source PeerId by default"), and A7 only ever reaches one of them. Eight distinct source peers, a generous per-peer budget of eight, and a global budget of three, so nothing but the global bound can be what refuses:
+
+```text
+distinct source peers                          8
+global budget                                  3
+per-peer budget (generous, cannot be the refuser) 8
+admitted (owners)                              3
+refused as overloaded                          5
+distinct peers actually charged a reservation  3
+```
+
+Each admitted reservation is charged to a different `source_peer` — the connected peer, not a label the request chose — so the three that got in are three genuinely different accounting keys rather than three requests wearing one identity.
+
+**Deleting the global check makes this report 8 admitted and 0 refused, while A7 still reports its documented 4 and 12.** That is the whole reason this experiment exists: the two limits fail independently, and a spike reaching only one of them has evidence about only one of them.
+
+### A9. The `no_route` privacy class
+
+`SPIKES.md` lists "no_route privacy class" among the cases this spike must exercise, and until now nothing did: `NoRoute` appeared only as a predetermined owner outcome in A6 and as the conflict arm in A7. A regression exposing endpoint-unknown and policy-denied as distinguishable answers would have left every recorded number unchanged.
+
+`DIRECT.md`: `no_route` "deliberately collapses endpoint unknown, endpoint disabled, no active lease, missing default endpoint, and endpoint-specific policy denial. All such branches use the same wire code/response shape and shared response encoder."
+
+Five requests, each selecting a genuinely different branch of the responder's routing decision:
+
+```text
+internal route failures exercised              5
+responses received                             5
+every response decodes to one identical value  true
+and every encoding is byte-identical           true
+```
+
+The second check is the stronger one and the one the specification actually makes. Two values can compare equal in Rust and still serialize differently — a field added later with a skip condition would do it — so the five refusals are also encoded through **the same CBOR library the codec itself uses** and compared as bytes. Making a single branch answer `overloaded` instead turns both lines false.
+
+Why it matters: distinguishable refusals are an endpoint oracle. A peer authorized for nothing learns which endpoints exist, which are disabled, and which refused it by policy, purely by probing.
 
 ## B — GossipSub
 

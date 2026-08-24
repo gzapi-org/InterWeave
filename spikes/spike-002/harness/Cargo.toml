@@ -58,6 +58,12 @@ tokio = { version = "=1.48.0", features = ["rt-multi-thread", "macros", "sync", 
 futures = "=0.3.31"
 serde = { version = "=1.0.228", features = ["derive"] }
 sha2 = "=0.10.9"
+# THE EXACT ENCODER the request-response CBOR codec uses -- already in
+# this graph as its transitive dependency, pinned to the same version,
+# so no licence or advisory surface is added. A9 compares the ENCODED
+# bytes of five refusals; encoding them with a different library would
+# compare something the wire never sees.
+cbor4ii = { version = "=0.3.3", features = ["use_std", "serde1"] }
 
 # The PRODUCTION dedup and reservation machinery, by path and on purpose.
 # The question this spike asks about concurrency is whether those exact

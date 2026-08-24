@@ -674,6 +674,11 @@ async fn same_key_race_once(owner_outcome: &Response) {
 /// Reservations are held for the whole experiment, so the budget is
 /// genuinely exhausted rather than churned through.
 pub async fn a7_reservation_overflow() {
+    // PER-PEER, deliberately: the per-peer budget is smaller than the
+    // global one, so every refusal here is the per-peer check. The
+    // GLOBAL bound is a separate limit with its own failure mode, and
+    // A10 is what reaches it -- this experiment alone would leave
+    // broken global accounting producing exactly the same 4/12.
     const KEYS: usize = 16;
     const PER_PEER: usize = 4;
 
@@ -906,5 +911,274 @@ pub async fn a8_cancellation_race() {
     note(
         "a NEW request for the same key is admitted afterward",
         reservations.acquire(&key, fingerprint).is_ok(),
+    );
+}
+
+/// The five internal reasons `DIRECT.md` requires `no_route` to collapse.
+///
+/// Distinct here precisely so the experiment can show they are NOT
+/// distinct on the wire. A responder that answered each with its own
+/// code would be an endpoint oracle: a probing peer learns which
+/// endpoints exist, which are disabled, and which refused it by policy,
+/// all without being authorized for any of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteFailure {
+    EndpointUnknown,
+    EndpointDisabled,
+    NoActiveLease,
+    MissingDefaultEndpoint,
+    EndpointPolicyDenied,
+}
+
+impl RouteFailure {
+    /// Every internal route failure, in one place, so the experiment
+    /// cannot quietly omit one.
+    pub const ALL: [Self; 5] = [
+        Self::EndpointUnknown,
+        Self::EndpointDisabled,
+        Self::NoActiveLease,
+        Self::MissingDefaultEndpoint,
+        Self::EndpointPolicyDenied,
+    ];
+
+    /// The label a request carries to select this branch.
+    pub const fn destination(self) -> &'static str {
+        match self {
+            Self::EndpointUnknown => "unknown",
+            Self::EndpointDisabled => "disabled",
+            Self::NoActiveLease => "unleased",
+            Self::MissingDefaultEndpoint => "nodefault",
+            Self::EndpointPolicyDenied => "denied",
+        }
+    }
+}
+
+/// THE SHARED RESPONSE ENCODER `DIRECT.md` requires.
+///
+/// One function, taking the internal reason and discarding it. That the
+/// argument is unused is the entire point: there is no branch here that
+/// could grow a distinguishing field, because there is no branch.
+fn refuse_route(reason: RouteFailure) -> Response {
+    let _ = reason;
+    Response::Rejected {
+        reason: Reason::NoRoute,
+    }
+}
+
+/// A9 -- the `no_route` privacy class.
+///
+/// `SPIKES.md` lists "no_route privacy class" among the cases this spike
+/// must exercise, and nothing did: `NoRoute` appeared only as a
+/// predetermined owner outcome in A6 and as the conflict arm in A7.
+/// A regression that exposed endpoint-unknown and policy-denied as
+/// distinguishable answers would have left every recorded number
+/// unchanged.
+///
+/// `DIRECT.md`: no_route "deliberately collapses endpoint unknown,
+/// endpoint disabled, no active lease, missing default endpoint, and
+/// endpoint-specific policy denial. All such branches use the same wire
+/// code/response shape and shared response encoder."
+pub async fn a9_no_route_is_one_answer() {
+    let mut server = node(full_direct(), Duration::from_secs(20));
+    let mut client = node(full_direct(), Duration::from_secs(20));
+    let addr = listen(&mut server).await;
+    let server_peer = *server.local_peer_id();
+    connect(&mut client, &mut server, addr).await;
+
+    // One request per internal failure, each selecting a genuinely
+    // different branch on the responder.
+    for failure in RouteFailure::ALL {
+        client.behaviour_mut().direct.send_request(
+            &server_peer,
+            request(
+                &format!("m-route-{}", failure.destination()),
+                Some(failure.destination()),
+                b"probe",
+            ),
+        );
+    }
+
+    let mut answers: Vec<(RouteFailure, Response)> = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while answers.len() < RouteFailure::ALL.len() {
+        tokio::select! {
+            () = tokio::time::sleep_until(deadline) => break,
+            e = server.select_next_some() => {
+                if let SwarmEvent::Behaviour(BehaviourEvent::Direct(RrEvent::Message {
+                    message: RrMessage::Request { request, channel, .. }, ..
+                })) = e {
+                    // THE BRANCHES ARE REAL. Each destination reaches a
+                    // different arm of the responder's own routing
+                    // decision; what they share is the encoder.
+                    let destination = request.destination.clone().unwrap_or_default();
+                    let failure = RouteFailure::ALL
+                        .into_iter()
+                        .find(|f| f.destination() == destination)
+                        .expect("every request names one of the five");
+                    let _ = server
+                        .behaviour_mut()
+                        .direct
+                        .send_response(channel, refuse_route(failure));
+                }
+            }
+            e = client.select_next_some() => {
+                if let SwarmEvent::Behaviour(BehaviourEvent::Direct(RrEvent::Message {
+                    message: RrMessage::Response { response, request_id: _, .. }, ..
+                })) = e {
+                    // Which failure produced it is not recoverable from
+                    // the response -- which is the property -- so they
+                    // are recorded in arrival order and compared as a
+                    // set.
+                    let failure = RouteFailure::ALL[answers.len()];
+                    answers.push((failure, response));
+                }
+            }
+        }
+    }
+
+    note("internal route failures exercised", RouteFailure::ALL.len());
+    note("responses received", answers.len());
+
+    // DECODED EQUALITY: every answer is the same value.
+    let all_same = answers.windows(2).all(|w| w[0].1 == w[1].1);
+    note("every response decodes to one identical value", all_same);
+
+    // AND ENCODED EQUALITY, which is the stronger claim and the one
+    // `DIRECT.md` actually makes ("shared response encoder"). Two values
+    // can compare equal in Rust and still serialize differently if a
+    // future field is added with a skip condition; comparing the bytes
+    // is what would catch that.
+    let encodings: Vec<Vec<u8>> = RouteFailure::ALL
+        .into_iter()
+        .map(|f| serde_cbor_bytes(&refuse_route(f)))
+        .collect();
+    let bytes_identical = encodings.windows(2).all(|w| w[0] == w[1]);
+    note("and every encoding is byte-identical", bytes_identical);
+    note(
+        "VERDICT: no_route is one answer, not five",
+        all_same && bytes_identical && answers.len() == RouteFailure::ALL.len(),
+    );
+}
+
+/// Encode exactly as the codec does, so the byte comparison above is
+/// about the wire and not about `Debug`.
+fn serde_cbor_bytes(response: &Response) -> Vec<u8> {
+    let mut out = Vec::new();
+    cbor4ii::serde::to_writer(&mut out, response).expect("encode");
+    out
+}
+
+/// A10 -- the GLOBAL reservation budget, reached by many peers.
+///
+/// A7 sends everything from one peer against a per-peer limit smaller
+/// than the global one, so the global bound is never touched: broken
+/// global accounting would have produced A7's documented 4/12 exactly.
+/// `DIRECT.md` states the two limits separately ("128 global / 8 per
+/// source PeerId by default"), so a spike that only ever reached one of
+/// them has evidence about one of them.
+///
+/// Here the per-peer budget is generous and the global one is small,
+/// and enough DISTINCT source peers connect that only the global limit
+/// can be what refuses.
+pub async fn a10_global_reservation_budget() {
+    const PEERS: usize = 8;
+    const MAX_GLOBAL: usize = 3;
+    const PER_PEER: usize = 8;
+
+    let mut server = node(full_direct(), Duration::from_secs(20));
+    let addr = listen(&mut server).await;
+    let server_peer = *server.local_peer_id();
+
+    // A DISTINCT IDENTITY PER CLIENT, so every reservation is charged
+    // to a different `source_peer` and the per-peer budget -- eight,
+    // versus one request each -- cannot be what refuses any of them.
+    let mut clients = Vec::new();
+    for _ in 0..PEERS {
+        let mut client = node(full_direct(), Duration::from_secs(20));
+        connect(&mut client, &mut server, addr.clone()).await;
+        clients.push(client);
+    }
+
+    for (i, client) in clients.iter_mut().enumerate() {
+        client.behaviour_mut().direct.send_request(
+            &server_peer,
+            request(&format!("m-global-{i}"), Some("chat"), b"distinct"),
+        );
+    }
+
+    let mut reservations = ReservationMap::new(MAX_GLOBAL, PER_PEER);
+    let mut owners = 0_usize;
+    let mut overloaded = 0_usize;
+    let mut answered = 0_usize;
+    let mut charged_to: Vec<TransportIdentity> = Vec::new();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while answered < PEERS {
+        tokio::select! {
+            () = tokio::time::sleep_until(deadline) => break,
+            e = server.select_next_some() => {
+                if let SwarmEvent::Behaviour(BehaviourEvent::Direct(RrEvent::Message {
+                    message: RrMessage::Request { request, channel, .. }, peer, ..
+                })) = e {
+                    // THE SOURCE IS THE CONNECTED PEER, so each of the
+                    // eight is a genuinely different accounting key
+                    // rather than eight requests wearing one.
+                    let source = identity(&peer);
+                    let key = key(&source, &request.message_id);
+                    let fingerprint =
+                        direct_content_fingerprint_v1(None, &request.body).expect("fingerprint");
+                    let response = match reservations.acquire(&key, fingerprint) {
+                        Ok(Reservation::Owner) => {
+                            owners += 1;
+                            charged_to.push(source);
+                            Response::AcceptedV2 { resolved_endpoint: "chat".to_owned() }
+                        }
+                        Ok(Reservation::Waiter) => {
+                            Response::AcceptedV2 { resolved_endpoint: "chat".to_owned() }
+                        }
+                        Err(ReservationFailure::Overloaded) => {
+                            overloaded += 1;
+                            Response::Rejected { reason: Reason::Overloaded }
+                        }
+                        Err(ReservationFailure::Conflict) => {
+                            Response::Rejected { reason: Reason::NoRoute }
+                        }
+                    };
+                    let _ = server.behaviour_mut().direct.send_response(channel, response);
+                }
+            }
+            e = futures::future::select_all(
+                clients.iter_mut().map(|c| Box::pin(c.select_next_some()))
+            ) => {
+                let (event, _, _) = e;
+                if let SwarmEvent::Behaviour(BehaviourEvent::Direct(RrEvent::Message {
+                    message: RrMessage::Response { .. }, ..
+                })) = event {
+                    answered += 1;
+                }
+            }
+        }
+    }
+
+    let distinct_sources: std::collections::BTreeSet<&TransportIdentity> =
+        charged_to.iter().collect();
+    note("distinct source peers", PEERS);
+    note("global budget", MAX_GLOBAL);
+    note(
+        "per-peer budget (generous, so it cannot be the refuser)",
+        PER_PEER,
+    );
+    note("responses received", answered);
+    note("admitted (owners)", owners);
+    note("refused as overloaded", overloaded);
+    note(
+        "distinct peers actually charged a reservation",
+        distinct_sources.len(),
+    );
+    note(
+        "VERDICT: the GLOBAL budget refused the excess",
+        owners == MAX_GLOBAL
+            && overloaded == PEERS - MAX_GLOBAL
+            && distinct_sources.len() == owners,
     );
 }

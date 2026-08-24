@@ -37,6 +37,12 @@ async fn main() {
     println!("\nA8. a cancellation race: the owner's connection dies mid-admission");
     direct::a8_cancellation_race().await;
 
+    println!("\nA10. the GLOBAL reservation budget, reached by many peers");
+    direct::a10_global_reservation_budget().await;
+
+    println!("\nA9. the no_route privacy class: five reasons, one answer");
+    direct::a9_no_route_is_one_answer().await;
+
     println!("\nB0. the id function under test is the frozen one");
     mesh::b0_message_id_matches_the_golden_vectors();
 

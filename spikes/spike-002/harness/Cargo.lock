@@ -2715,6 +2715,7 @@ dependencies = [
 name = "spike-002-harness"
 version = "0.0.0"
 dependencies = [
+ "cbor4ii",
  "futures",
  "interweave-transport-api",
  "interweave-transport-runtime",
