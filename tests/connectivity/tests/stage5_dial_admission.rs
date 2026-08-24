@@ -1688,3 +1688,98 @@ async fn retry_diagnostics_stay_bounded_when_nobody_is_listening() {
 
     runtime.shutdown().await.expect("shuts down");
 }
+
+#[tokio::test]
+async fn a_connection_admitted_then_revoked_mid_handshake_is_not_retained() {
+    // The window between an outbound dial being ADMITTED and its
+    // handshake COMPLETING is exactly the window a trust revocation can
+    // land in. Admission photographs authorization at the moment it
+    // decides; nothing until now re-checked it once the handshake
+    // finished, so a peer trusted when dialed and revoked microseconds
+    // later kept its connection under authority that no longer existed.
+    //
+    // `set_trust` is sent the instant `dial` reports admission -- by
+    // then `swarm.dial()` has been called and the OS-level connect is
+    // under way, but the actual TCP+Noise handshake still needs several
+    // real syscalls to complete. An in-process channel round trip wins
+    // that race by a wide margin, which is what makes this reliable
+    // without needing to fabricate an artificial delay in the
+    // handshake itself.
+    let (dialer_id, dialer_peer) = who();
+    let listener = SwarmRuntime::start(
+        &identity(),
+        SubstrateConfig::default(),
+        trusting(&[&dialer_peer]),
+    )
+    .expect("starts");
+    let bound = listener
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
+        .await
+        .expect("binds");
+    let listener_peer = listener.local_peer().clone();
+
+    let mut dialer = SwarmRuntime::start(
+        &dialer_id,
+        SubstrateConfig::default(),
+        trusting(&[&listener_peer]),
+    )
+    .expect("starts");
+    assert!(
+        dialer
+            .dial(listener_peer.clone(), bound)
+            .await
+            .expect("the command reaches the task")
+            .is_ok(),
+        "admitted while still trusted"
+    );
+
+    // REVOKED, before the handshake this admission started has had a
+    // realistic chance to finish.
+    let closed = dialer
+        .set_trust(trusting_nobody())
+        .await
+        .expect("the command reaches the task");
+
+    // Either the connection had not yet established when the
+    // revocation landed -- in which case there is nothing in `open` to
+    // report closed, and the establishment-time check catches it a
+    // moment later when the handshake finishes -- or it had, in which
+    // case the ordinary eviction path already closed it. Both are the
+    // SAME property observed at different points in one race: whatever
+    // order the two events actually landed in, the peer does not end
+    // up connected.
+    let _ = closed;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut saw_connected = false;
+    let settled = loop {
+        match tokio::time::timeout_at(deadline, dialer.next_event()).await {
+            Ok(Some(interweave_transport_libp2p::SwarmEvent::Connected { .. })) => {
+                saw_connected = true;
+            }
+            Ok(Some(interweave_transport_libp2p::SwarmEvent::Disconnected { .. })) => {
+                assert!(
+                    saw_connected,
+                    "a disconnect with no prior connect is not this test's story"
+                );
+                break true;
+            }
+            Ok(Some(_)) => {}
+            // No Connected ever arrived within the window: the
+            // revocation won the race outright, and the establishment-
+            // time check refused to retain the connection at all --
+            // which never produces a Connected event for it in the
+            // first place. THIS counts as settled too, and is the more
+            // common outcome given the timing this test relies on.
+            Ok(None) | Err(_) => break !saw_connected,
+        }
+    };
+    assert!(
+        settled,
+        "a connection admitted before revocation and established after it \
+         must not stay open: saw Connected and then neither a Disconnected \
+         nor the absence of one within the deadline"
+    );
+
+    dialer.shutdown().await.expect("shuts down");
+    listener.shutdown().await.expect("shuts down");
+}

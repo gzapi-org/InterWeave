@@ -805,6 +805,29 @@ impl ConnectionManager {
         self.publish();
     }
 
+    /// The handshake succeeded, and admission is no longer what it was
+    /// when this ticket was issued.
+    ///
+    /// The window between an outbound dial being admitted and its
+    /// handshake completing is exactly the window a trust revocation or
+    /// a drain can land in. Recording the outcome as an ordinary
+    /// success would retain a connection under authority that no longer
+    /// exists; recording it as an ordinary FAILURE would be wrong too --
+    /// nothing about the network or the remote peer failed, and
+    /// scheduling a retry for a peer this profile no longer trusts
+    /// would be the same mistake the trust-revocation eviction path
+    /// exists to prevent, reached from a different direction.
+    ///
+    /// Settled with neither backoff nor a retry, and no reschedule for
+    /// the same reason [`Self::record_permanent_failure`] schedules
+    /// none: a peer becoming trusted again is not this method's job to
+    /// notice.
+    pub fn record_authorization_withdrawn(&mut self, ticket: DialTicket, now_ms: u64) {
+        let _ = now_ms;
+        self.settle(ticket);
+        self.publish();
+    }
+
     /// Established connections right now, dialed and accepted.
     #[must_use]
     pub fn connections(&self) -> usize {
@@ -871,14 +894,18 @@ impl ConnectionManager {
         self.publish();
     }
 
-    /// Whether an inbound connection from this peer is kept.
+    /// Whether a connection of this class is still authorized to be
+    /// held open, RIGHT NOW.
     ///
-    /// ADR-0011: the same CURRENT authorization policy that governs
-    /// outbound applies before an inbound data-plane connection is
-    /// retained. Inbound is not a way in for a peer that outbound would
-    /// refuse, and "it connected to us" is not an authorization.
+    /// ADR-0011: the same CURRENT authorization policy that governs an
+    /// admission decision applies before a connection is RETAINED,
+    /// whichever direction it started in. Inbound is not a way in for a
+    /// peer that outbound would refuse -- "it connected to us" is not
+    /// an authorization -- and an outbound connection whose handshake
+    /// outlasted a revocation or a drain is not grandfathered in just
+    /// because admission approved the dial that produced it.
     #[must_use]
-    pub fn retain_inbound(&self, class: ConnectionClass) -> bool {
+    pub fn authorizes(&self, class: ConnectionClass) -> bool {
         !self.shutting_down.load(Ordering::Acquire)
             && matches!(class, ConnectionClass::DataPlaneTrusted)
     }
@@ -1681,19 +1708,45 @@ mod tests {
     }
 
     #[test]
-    fn inbound_is_judged_by_the_same_authorization_as_outbound() {
-        // ADR-0011: current authorization applies before an inbound
-        // data-plane connection is RETAINED. Arriving is not an
+    fn withdrawn_authorization_settles_without_scheduling_anything() {
+        // The window this closes: admission photographed trust at ONE
+        // instant, and the handshake can outlast it. Recording the
+        // outcome as an ordinary success would retain a connection
+        // under authority that no longer exists; recording it as an
+        // ordinary failure would schedule a retry for a peer this
+        // profile no longer trusts, which is the same mistake reached
+        // from the other direction.
+        let mut m = manager(8);
+        let t = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 0)
+            .expect("admitted");
+        assert_eq!(m.connections(), 1, "the connection slot was reserved");
+
+        m.record_authorization_withdrawn(t, 0);
+        assert_eq!(m.connections(), 0, "settled, the slot came back");
+        assert_eq!(
+            m.scheduled_retries(),
+            0,
+            "authorization withdrawn is not a failure the peer earned a retry for"
+        );
+    }
+
+    #[test]
+    fn a_connection_is_judged_by_the_same_authorization_whichever_way_it_started() {
+        // ADR-0011: current authorization applies before a connection
+        // is RETAINED, inbound or outbound. Arriving is not an
         // authorization, and an infrastructure peer authorized for
         // reachability is not thereby a data-plane peer.
         let mut m = manager(8);
-        assert!(m.retain_inbound(ConnectionClass::DataPlaneTrusted));
-        assert!(!m.retain_inbound(ConnectionClass::ConnectivityInfrastructureOnly));
-        assert!(!m.retain_inbound(ConnectionClass::Unauthorized));
+        assert!(m.authorizes(ConnectionClass::DataPlaneTrusted));
+        assert!(!m.authorizes(ConnectionClass::ConnectivityInfrastructureOnly));
+        assert!(!m.authorizes(ConnectionClass::Unauthorized));
 
         m.begin_shutdown();
         assert!(
-            !m.retain_inbound(ConnectionClass::DataPlaneTrusted),
+            !m.authorizes(ConnectionClass::DataPlaneTrusted),
             "a draining runtime keeps nothing new"
         );
     }

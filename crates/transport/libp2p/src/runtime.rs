@@ -1074,6 +1074,21 @@ fn settle_outcome(
                 // Outbound: the slot was reserved when the dial was
                 // admitted, and the connection takes it over.
                 Some(ticket) => {
+                    // REVALIDATED, not merely recorded. Admission
+                    // happened when the dial was ADMITTED; the
+                    // handshake that just finished could have taken
+                    // long enough for a trust revocation or a drain to
+                    // land in between. Retaining the connection because
+                    // it was admitted once would hold it open under
+                    // authority that no longer exists -- the exact
+                    // outbound counterpart of the check inbound already
+                    // gets below.
+                    let class = manager.classify(&peer);
+                    if !manager.authorizes(class) {
+                        manager.record_authorization_withdrawn(ticket, now_ms);
+                        refuse.push(*connection_id);
+                        return;
+                    }
                     // THE ADDRESS THAT WORKED. Learned from the ticket
                     // rather than from anything the peer said, so a
                     // route this profile has actually authenticated is
@@ -1091,7 +1106,7 @@ fn settle_outcome(
                 // keep should not spend a slot to find that out.
                 None => {
                     let class = manager.classify(&peer);
-                    if !manager.retain_inbound(class) {
+                    if !manager.authorizes(class) {
                         refuse.push(*connection_id);
                         return;
                     }
