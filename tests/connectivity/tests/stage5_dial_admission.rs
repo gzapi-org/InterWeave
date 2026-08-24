@@ -199,15 +199,14 @@ fn a_denied_autonomous_dial_leaves_retry_state_exactly_as_it_was() {
             "{origin:?} caused a republish, so something mutated"
         );
         assert!(
-            manager.due_retries(2_000).is_empty(),
+            !manager.is_retry_due(&peer, 2_000),
             "{origin:?} brought the retry forward"
         );
     }
 
     // And the schedule still elapses on its own terms afterwards.
-    assert_eq!(
-        manager.due_retries(u64::MAX),
-        vec![peer],
+    assert!(
+        manager.is_retry_due(&peer, u64::MAX),
         "the retry survived every refusal"
     );
 }
@@ -1338,6 +1337,25 @@ async fn a_revoked_peer_is_not_retried() {
             }
             Some(_) => {}
             None => panic!("the substrate stopped before the retry came due"),
+        }
+    }
+
+    // THE CLAIM WAS CLEARED, not merely refused once and left sitting
+    // in the schedule at its old, already-overdue due time. Restore
+    // trust and prove nothing reconnects on its own: a released-not-
+    // cleared claim would be reclaimed on the very next tick (one
+    // second later) and would now succeed, since trust is back. Nothing
+    // here re-schedules a peer just because it became trusted again --
+    // that is a different feature this fix does not add, and its
+    // absence is exactly what "cleared" means.
+    let _ = runtime
+        .set_trust(trusting(&[&absent]))
+        .await
+        .expect("the command reaches the task");
+    match tokio::time::timeout(std::time::Duration::from_secs(3), runtime.next_event()).await {
+        Err(_) => {}
+        Ok(event) => {
+            panic!("a cleared claim must not reconnect on its own once trust returns: {event:?}")
         }
     }
 

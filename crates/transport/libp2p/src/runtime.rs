@@ -493,10 +493,15 @@ impl SwarmRuntime {
                 let room = outbox.len() < config.event_capacity.saturating_add(listens.len());
 
                 tokio::select! {
-                    // THE RECONNECT SCHEDULER. `due_retries` has
-                    // existed with nothing driving it, so a failed peer
-                    // was scheduled and then never retried: the backoff
-                    // computed a moment that nothing waited for.
+                    // THE RECONNECT SCHEDULER. `due_retries` used to
+                    // be read-only: every call returned the SAME due
+                    // entries until something else cleared them, which a
+                    // scheduler tick never did. A slow dial still
+                    // pending when the next tick fired got started
+                    // again, unbounded, because nothing recorded that
+                    // an attempt was already under way. `take_due_retries`
+                    // CLAIMS what it returns, so a peer does not surface
+                    // here a second time until its attempt settles.
                     //
                     // A tick rather than a timer per peer, because a
                     // timer per peer is a structure a remote party
@@ -504,15 +509,31 @@ impl SwarmRuntime {
                     // already bounded; this walks it.
                     _ = retries.tick() => {
                         let now = now_ms(started);
-                        let due = manager.due_retries(now);
-                        for peer in due.into_iter().take(config.max_retries_per_tick) {
+                        let due = manager.take_due_retries(now, config.max_retries_per_tick);
+                        for peer in due {
+                            let candidates = manager.dial_candidates(&peer, now);
+                            if candidates.is_empty() {
+                                // NOTHING TO TRY. Reconsidering this
+                                // peer a moment later would not produce
+                                // a different answer, and leaving the
+                                // claim in place would mean it is never
+                                // reconsidered at all -- both a stuck
+                                // claim and an immediate re-offer are
+                                // wrong; clearing it is the only answer
+                                // that is not a starvation risk in
+                                // either direction.
+                                manager.clear_retry_claim(&peer);
+                                continue;
+                            }
+
                             // ADMITTED LIKE ANY OTHER DIAL, and
                             // attributed to the scheduler rather than
                             // to whoever asked first: a denial an
                             // operator sees must say which of the two
                             // it refused.
                             let mut last: Option<DialRefusal> = None;
-                            for address in manager.dial_candidates(&peer, now) {
+                            let mut ticketed = false;
+                            for address in candidates {
                                 match attempt_dial(
                                     &mut swarm,
                                     &mut manager,
@@ -523,10 +544,56 @@ impl SwarmRuntime {
                                     now,
                                 ) {
                                     Ok(()) => {
+                                        // A ticket now owns the claim:
+                                        // record_success/record_failure/
+                                        // record_permanent_failure will
+                                        // settle it when the outcome
+                                        // arrives.
+                                        ticketed = true;
                                         last = None;
                                         break;
                                     }
-                                    Err(refusal) => last = Some(refusal),
+                                    // A POLICY DENIAL produced no ticket
+                                    // at all, so nothing downstream will
+                                    // ever settle this claim. "A denied
+                                    // dial must not reset retry state"
+                                    // applies here exactly as it does
+                                    // for every other origin: the claim
+                                    // is released, not rescheduled, so
+                                    // the peer is offered again without
+                                    // waiting out a fresh backoff it did
+                                    // not earn.
+                                    //
+                                    // Authorization that no longer holds
+                                    // is the one exception: retrying an
+                                    // unauthorized or draining peer on
+                                    // the very next tick would not
+                                    // become true by waiting a second,
+                                    // so that claim is cleared instead.
+                                    Err(DialRefusal::Backend(reason)) => {
+                                        last = Some(DialRefusal::Backend(reason));
+                                    }
+                                    Err(refusal @ DialRefusal::Policy(
+                                        DialDenial::Unauthorized
+                                        | DialDenial::NotAuthorizedForDataPlane
+                                        | DialDenial::ShuttingDown,
+                                    )) => {
+                                        last = Some(refusal);
+                                        break;
+                                    }
+                                    Err(refusal) => {
+                                        last = Some(refusal);
+                                    }
+                                }
+                            }
+                            if !ticketed {
+                                match &last {
+                                    Some(DialRefusal::Policy(
+                                        DialDenial::Unauthorized
+                                        | DialDenial::NotAuthorizedForDataPlane
+                                        | DialDenial::ShuttingDown,
+                                    )) => manager.clear_retry_claim(&peer),
+                                    _ => manager.release_retry_claim(&peer),
                                 }
                             }
                             // REPORTED, because nobody asked for this

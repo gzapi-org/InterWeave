@@ -471,6 +471,11 @@ pub const DEFAULT_MAX_RETRY_ENTRIES: usize = 1_024;
 struct Retry {
     due_at_ms: u64,
     attempts: u32,
+    /// A scheduler tick has claimed this peer and an attempt is under
+    /// way that has not yet been settled. A claimed entry is never
+    /// returned by [`ConnectionManager::take_due_retries`] again, which
+    /// is what stops the same slow dial from being started twice.
+    claimed: bool,
 }
 
 /// Default ceiling on addresses remembered for one peer.
@@ -754,6 +759,12 @@ impl ConnectionManager {
     /// a ticket, so there is no path by which a refusal advances retry
     /// state. ADR-0011 requires exactly that, and expressing it through
     /// the ticket makes it structural rather than a rule to remember.
+    ///
+    /// For a TRANSIENT failure -- the network refused, timed out, or
+    /// reset the attempt. A structural one -- an address this profile
+    /// cannot dial at all -- is [`Self::record_permanent_failure`], and
+    /// answering "will retrying help" is the caller's job because only
+    /// the backend knows which `DialError` it received.
     pub fn record_failure(&mut self, ticket: DialTicket, now_ms: u64) {
         if let Some(peer) = ticket.peer().cloned() {
             // ONE delay, used for both. The address-scoped backoff and
@@ -766,6 +777,29 @@ impl ConnectionManager {
             self.policy
                 .record_address_failure(&peer, ticket.address(), now_ms, delay);
             self.schedule_retry(peer, now_ms, delay);
+        }
+        self.settle(ticket);
+        self.publish();
+    }
+
+    /// Record a failure that retrying cannot fix.
+    ///
+    /// A `MultiaddrNotSupported`, `NoAddresses`, or `LocalPeerId` dial
+    /// error describes this profile's own transport stack, not the
+    /// remote end's availability -- the same address fails the same way
+    /// every time, indefinitely, which the paused-time scheduler test
+    /// caught: a UDP address on a TCP-only Swarm was scheduled and
+    /// retried forever by [`Self::record_failure`]'s unconditional
+    /// reschedule.
+    ///
+    /// The ticket is settled and NOTHING is rescheduled. If the peer was
+    /// claimed from [`Self::take_due_retries`], it simply does not
+    /// re-enter the table; if it has another address, that address is
+    /// untouched by this call and remains a candidate on its own merit.
+    pub fn record_permanent_failure(&mut self, ticket: DialTicket, now_ms: u64) {
+        let _ = now_ms;
+        if let Some(peer) = ticket.peer() {
+            self.retries.remove(peer);
         }
         self.settle(ticket);
         self.publish();
@@ -856,22 +890,87 @@ impl ConnectionManager {
         self.publish();
     }
 
-    /// Peers whose retry is due, soonest first.
+    /// Claim up to `limit` due retries, soonest first, REMOVING them
+    /// from the schedule.
+    ///
+    /// The read-only predecessor of this method returned the same
+    /// entries on every tick until something else cleared them, which
+    /// produced three failures at once: a slow dial still pending when
+    /// the next tick fired got dialled again, because nothing recorded
+    /// that an attempt was already under way; a peer stuck at the front
+    /// with no usable address could consume every scheduler selection
+    /// forever, because reading it changed nothing about its position;
+    /// and there was no way to tell "claimed, an attempt is in flight"
+    /// from "still waiting its turn".
+    ///
+    /// Claiming is unconditional and REMOVES the entry. A caller that
+    /// cannot start a dial this tick -- no candidate address, the peer
+    /// is no longer authorized -- must not put it back on a hair
+    /// trigger: doing nothing here is correct, because a peer with
+    /// nothing to try is not usefully "due" again a moment later. A
+    /// caller whose dial genuinely fails re-enters the schedule through
+    /// [`Self::record_failure`], which is the same path any other
+    /// failed dial uses and carries its own backoff.
     #[must_use]
-    pub fn due_retries(&self, now_ms: u64) -> Vec<TransportIdentity> {
-        let mut due: Vec<(&TransportIdentity, &Retry)> = self
+    pub fn take_due_retries(&mut self, now_ms: u64, limit: usize) -> Vec<TransportIdentity> {
+        let mut due: Vec<(TransportIdentity, u64)> = self
             .retries
             .iter()
-            .filter(|(_, r)| now_ms >= r.due_at_ms)
+            .filter(|(_, r)| !r.claimed && now_ms >= r.due_at_ms)
+            .map(|(p, r)| (p.clone(), r.due_at_ms))
             .collect();
-        due.sort_by_key(|(_, r)| r.due_at_ms);
-        due.into_iter().map(|(p, _)| p.clone()).collect()
+        due.sort_by_key(|(_, at)| *at);
+        due.truncate(limit);
+        for (peer, _) in &due {
+            if let Some(entry) = self.retries.get_mut(peer) {
+                entry.claimed = true;
+            }
+        }
+        due.into_iter().map(|(p, _)| p).collect()
+    }
+
+    /// Give up a claim without ever producing a ticket to settle it
+    /// with -- there was nothing to dial, or authorization no longer
+    /// permits it. Removes the entry outright: a peer with no candidate
+    /// address, or one this profile no longer trusts, gains nothing
+    /// from being reconsidered a moment later.
+    pub fn clear_retry_claim(&mut self, peer: &TransportIdentity) {
+        self.retries.remove(peer);
+    }
+
+    /// Give up a claim without touching WHY it was due. Used when
+    /// admission itself refused the scheduled dial for a reason that
+    /// may already have cleared by the next tick -- a resource ceiling,
+    /// a superseded snapshot -- rather than one retrying can never fix.
+    ///
+    /// `due_at_ms` and `attempts` are left exactly as they were, which
+    /// is the same guarantee [`Self::record_failure`]'s sibling
+    /// invariant makes for every other origin: a denial must not reset
+    /// retry state. The entry is simply eligible for
+    /// [`Self::take_due_retries`] again.
+    pub fn release_retry_claim(&mut self, peer: &TransportIdentity) {
+        if let Some(entry) = self.retries.get_mut(peer) {
+            entry.claimed = false;
+        }
     }
 
     /// Peers awaiting a retry.
     #[must_use]
     pub fn scheduled_retries(&self) -> usize {
         self.retries.len()
+    }
+
+    /// Whether `peer`'s retry has come due, WITHOUT claiming it.
+    ///
+    /// Diagnostic only. [`Self::take_due_retries`] is the only method
+    /// production code may use to decide what to dial next -- this one
+    /// answers "when", not "go", and calling it costs nothing because it
+    /// changes nothing.
+    #[must_use]
+    pub fn is_retry_due(&self, peer: &TransportIdentity, now_ms: u64) -> bool {
+        self.retries
+            .get(peer)
+            .is_some_and(|r| !r.claimed && now_ms >= r.due_at_ms)
     }
 
     /// The delay before this peer is retried, given what it has already
@@ -919,6 +1018,7 @@ impl ConnectionManager {
             Retry {
                 due_at_ms: now_ms.saturating_add(delay),
                 attempts: attempts.saturating_add(1),
+                claimed: false,
             },
         );
     }
@@ -1026,6 +1126,133 @@ mod tests {
     }
 
     #[test]
+    fn a_claimed_retry_is_not_offered_twice() {
+        // Consequence 1 of the finding: a slow dial still pending when
+        // the next tick fires must not be started again. The old
+        // read-only `due_retries` returned the same entry every call;
+        // `take_due_retries` must not.
+        let mut m = manager(8);
+        let t = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 0)
+            .expect("admitted");
+        m.record_failure(t, 0);
+
+        let due = 30_000;
+        let first = m.take_due_retries(due, 8);
+        assert_eq!(first, vec![peer(P1)]);
+        let second = m.take_due_retries(due, 8);
+        assert!(second.is_empty(), "already claimed; not offered again");
+    }
+
+    #[test]
+    fn a_transient_failure_reschedules_and_keeps_attempts() {
+        // The backoff cadence depends on `attempts` surviving the claim.
+        // A design that forgot the entry on claim would reset every
+        // rescheduled peer to the base delay forever.
+        let mut m = manager(8);
+        let t = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 0)
+            .expect("admitted");
+        m.record_failure(t, 0);
+        let claimed = m.take_due_retries(30_000, 8);
+        assert_eq!(claimed, vec![peer(P1)]);
+
+        let t2 = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 30_000)
+            .expect("a claimed peer can still be dialed directly");
+        m.record_failure(t2, 30_000);
+        // Second failure: attempts=2, so the delay is 60s (30s * 2^1),
+        // not the base 30s a reset counter would produce.
+        assert!(
+            !m.is_retry_due(&peer(P1), 30_000 + 30_000),
+            "the second failure must not be due after only the base delay"
+        );
+        assert!(m.is_retry_due(&peer(P1), 30_000 + 60_000));
+    }
+
+    #[test]
+    fn a_permanent_failure_is_cleared_rather_than_rescheduled() {
+        // The exact bug the review named: a synchronous, structural
+        // failure -- an address this profile cannot dial at all --
+        // treated as a normal transient one is retried forever.
+        let mut m = manager(8);
+        let t = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 0)
+            .expect("admitted");
+        m.record_permanent_failure(t, 0);
+        assert_eq!(m.scheduled_retries(), 0, "nothing was ever scheduled");
+
+        // And a peer claimed via the scheduler, whose dial then turns
+        // out permanent, is not left claimed-forever either.
+        let t2 = m
+            .handle()
+            .load()
+            .admit(&request(P2, "/b"), 0)
+            .expect("admitted");
+        m.record_failure(t2, 0);
+        assert_eq!(m.take_due_retries(30_000, 8), vec![peer(P2)]);
+        let t3 = m
+            .handle()
+            .load()
+            .admit(&request(P2, "/b"), 30_000)
+            .expect("admitted");
+        m.record_permanent_failure(t3, 30_000);
+        assert_eq!(
+            m.scheduled_retries(),
+            0,
+            "the claim is cleared, not left dangling"
+        );
+    }
+
+    #[test]
+    fn a_claim_with_nothing_to_dial_is_cleared() {
+        // A peer with no candidate address gains nothing from being
+        // reconsidered a moment later -- the finding's starvation case.
+        let mut m = manager(8);
+        let t = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 0)
+            .expect("admitted");
+        m.record_failure(t, 0);
+        assert_eq!(m.take_due_retries(30_000, 8), vec![peer(P1)]);
+
+        m.clear_retry_claim(&peer(P1));
+        assert_eq!(m.scheduled_retries(), 0);
+        assert!(m.take_due_retries(60_000, 8).is_empty());
+    }
+
+    #[test]
+    fn a_claim_denied_by_a_recoverable_reason_is_released_unchanged() {
+        // "A denied dial must not reset retry state" -- released, not
+        // rescheduled, so the peer is offered again on the very next
+        // tick rather than waiting out a fresh backoff it did not earn.
+        let mut m = manager(8);
+        let t = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 0)
+            .expect("admitted");
+        m.record_failure(t, 0);
+        assert_eq!(m.take_due_retries(30_000, 8), vec![peer(P1)]);
+
+        m.release_retry_claim(&peer(P1));
+        assert_eq!(
+            m.take_due_retries(30_000, 8),
+            vec![peer(P1)],
+            "released at the same due time, reclaimable immediately"
+        );
+    }
+
+    #[test]
     fn a_denied_dial_cannot_advance_or_reset_retry_state() {
         // ADR-0011: "a denied dial must not silently reset
         // ConnectionManager retry state." Expressed structurally rather
@@ -1042,8 +1269,7 @@ mod tests {
             .expect("admitted");
         m.record_failure(t, 0);
         assert_eq!(m.scheduled_retries(), 1);
-        let after_first = m.due_retries(0);
-        assert!(after_first.is_empty(), "not due yet");
+        assert!(!m.is_retry_due(&p, 0), "not due yet");
 
         // A behaviour-originated dial for the same peer is now refused
         // by backoff. The refusal must leave the schedule exactly as it
@@ -1060,7 +1286,7 @@ mod tests {
         assert!(denied.is_err(), "backoff refuses it");
         assert_eq!(m.scheduled_retries(), 1, "the schedule is untouched");
         assert_eq!(m.revision(), before, "and nothing was republished");
-        assert!(m.due_retries(1_000).is_empty(), "and it is still not due");
+        assert!(!m.is_retry_due(&p, 1_000), "and it is still not due");
     }
 
     #[test]
@@ -1083,11 +1309,10 @@ mod tests {
             let due_before = m.scheduled_retries();
             m.record_failure(t, now);
             assert!(m.scheduled_retries() >= due_before);
-            let next = m.due_retries(u64::MAX);
-            assert_eq!(next, vec![peer(P1)]);
+            assert!(m.is_retry_due(&peer(P1), u64::MAX));
             // Advance to exactly when it becomes due and note the gap.
             let mut probe = now;
-            while m.due_retries(probe).is_empty() {
+            while !m.is_retry_due(&peer(P1), probe) {
                 probe += 1_000;
             }
             delays.push(probe - now);
