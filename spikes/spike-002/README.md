@@ -169,6 +169,22 @@ unexpected responses                           0
 highest number of channels held at once        8
 ```
 
+### The same gap in A7 and A10, found by sweeping instead of waiting
+
+Review found A10: its verdict checked `owners`, `overloaded` and the distinct sources — all decided at REQUEST time — so a run where responses were lost, timed out, or came back with an unexpected reason left `answered < PEERS` at the deadline and still passed. The experiment is about what the budget does to callers, and a caller that never heard is not a caller that was refused.
+
+Sweeping every client-response experiment for the same property found **A7** as well, which nobody reported: it classified the refusals on the wire but never required a total, so the accepted responses could all have gone missing while `overloaded_on_the_wire == KEYS - PER_PEER` stayed true.
+
+The sweep was noisy and the noise is the point — a first pass flagged A8 and A1 too, and reading them showed both already assert their counts and inspect their responses. A scan is what puts the right functions in front of you; it is not the judgement.
+
+| mutation | result |
+|---|---|
+| A10 loses two client responses | `responses received 6` → `every request was answered` **false** |
+| A10's server refuses with `NoRoute` | three checks **false**, exit 1 |
+| A7 loses three client responses | two checks **false**, exit 1 |
+
+A first attempt at the second of those mutated **A7** instead of A10, because `replace(..., 1)` takes the first occurrence in the file and A7 comes earlier — the same slip as an earlier round in this spike. It then `survived`, because the output was filtered to A10's section and A7's failure was outside the filter. Both halves are recorded here: mutate by function boundary, and read the WHOLE run.
+
 **The verdict used to accept 33 of 40 requests.** It read `owners == 1 && high_water <= PER_PEER && overloaded == COPIES - PER_PEER`, which classifies one owner plus thirty-two refusals — and leaves the seven **waiters**, the bound this experiment exists to measure, merely printed. The polling loop can also exit on its deadline with `answered < COPIES`, so reaching the verdict never implied every request came back. A run where seven requests never reached the server satisfied the expression and closed the waiter-bound experiment as a success. Review found that; it is the same defect as A6's and B1's, one round later.
 
 Every request is now accounted for, and the **wire** is checked against the map — counting only the map's own decisions would accept a run where the refusals never reached the client, or reached it wearing a different reason:

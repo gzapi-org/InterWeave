@@ -887,6 +887,19 @@ pub async fn a7_reservation_overflow() {
         "with `overloaded` on the wire, not another reason",
         overloaded_on_the_wire == KEYS - PER_PEER,
     );
+    // THE TOTAL, which classifying the refusals does not imply. If the
+    // accepted responses never reached the client, `overloaded_on_the_wire`
+    // is still KEYS - PER_PEER and the run reads as a success with four
+    // outcomes missing. Same gap A10 and A11 had.
+    check("every request was answered", answered.len() == KEYS);
+    check(
+        "and the budget's worth were accepted on the wire",
+        answered
+            .iter()
+            .filter(|r| matches!(r, Response::AcceptedV2 { .. }))
+            .count()
+            == PER_PEER,
+    );
     check(
         "and the map holds exactly the admitted keys",
         reservations.len() == PER_PEER,
@@ -1300,6 +1313,9 @@ pub async fn a10_global_reservation_budget() {
     let mut owners = 0_usize;
     let mut overloaded = 0_usize;
     let mut answered = 0_usize;
+    let mut accepted_on_the_wire = 0_usize;
+    let mut overloaded_on_the_wire = 0_usize;
+    let mut unexpected_on_the_wire = 0_usize;
     let mut charged_to: Vec<TransportIdentity> = Vec::new();
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
@@ -1342,9 +1358,16 @@ pub async fn a10_global_reservation_budget() {
             ) => {
                 let (event, _, _) = e;
                 if let SwarmEvent::Behaviour(BehaviourEvent::Direct(RrEvent::Message {
-                    message: RrMessage::Response { .. }, ..
+                    message: RrMessage::Response { response, .. }, ..
                 })) = event {
                     answered += 1;
+                    match response {
+                        Response::AcceptedV2 { .. } => accepted_on_the_wire += 1,
+                        Response::Rejected { reason: Reason::Overloaded } => {
+                            overloaded_on_the_wire += 1;
+                        }
+                        _ => unexpected_on_the_wire += 1,
+                    }
                 }
             }
         }
@@ -1365,11 +1388,40 @@ pub async fn a10_global_reservation_budget() {
         "distinct peers actually charged a reservation",
         distinct_sources.len(),
     );
+    note("accepted ON THE WIRE", accepted_on_the_wire);
+    note("overloaded ON THE WIRE", overloaded_on_the_wire);
+    note("unexpected responses", unexpected_on_the_wire);
+
+    // THE CLIENTS' SIDE, which the server-side counters do not imply.
+    // The verdict checked only `owners`, `overloaded` and the distinct
+    // sources — all decided at request time — so a run where responses
+    // were lost, timed out, or came back with an unexpected reason left
+    // `answered < PEERS` at the deadline and still passed. The
+    // experiment is about what the budget DOES to callers; a caller
+    // that never heard is not a caller that was refused.
+    check("every request was answered", answered == PEERS);
+    check(
+        "the global budget's worth were accepted on the wire",
+        accepted_on_the_wire == MAX_GLOBAL,
+    );
+    check(
+        "and every other request was refused as Overloaded on the wire",
+        overloaded_on_the_wire == PEERS - MAX_GLOBAL,
+    );
+    check(
+        "with no other response shape at all",
+        unexpected_on_the_wire == 0,
+    );
+
     check(
         "VERDICT: the GLOBAL budget refused the excess",
         owners == MAX_GLOBAL
             && overloaded == PEERS - MAX_GLOBAL
-            && distinct_sources.len() == owners,
+            && distinct_sources.len() == owners
+            && answered == PEERS
+            && accepted_on_the_wire == MAX_GLOBAL
+            && overloaded_on_the_wire == PEERS - MAX_GLOBAL
+            && unexpected_on_the_wire == 0,
     );
 }
 

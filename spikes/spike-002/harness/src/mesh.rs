@@ -746,11 +746,11 @@ pub async fn b3_invalid_signed_claim_is_rejected() {
     // invalid message's cache entry, the final checks would then read
     // `delivered_invalid == 0` and `delivered_genuine == 1` and PASS on
     // exactly the outcome this experiment exists to rule out.
-    let mut record = |message: &gossipsub::Message,
-                      control: &mut usize,
-                      invalid: &mut usize,
-                      genuine: &mut usize,
-                      sources: &mut Vec<Option<PeerId>>| {
+    let record = |message: &gossipsub::Message,
+                  control: &mut usize,
+                  invalid: &mut usize,
+                  genuine: &mut usize,
+                  sources: &mut Vec<Option<PeerId>>| {
         match attribute(
             &message.data,
             &control_payload,
