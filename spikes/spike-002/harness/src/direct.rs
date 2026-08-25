@@ -145,9 +145,20 @@ pub async fn listen(swarm: &mut Swarm<Behaviour>) -> Multiaddr {
     swarm
         .listen_on("/ip4/127.0.0.1/tcp/0".parse().expect("addr"))
         .expect("listen");
+    // Bounded for the same reason every experiment loop is: a setup
+    // step that waits forever reports nothing at all, and no exit code
+    // can express a run that never ends. Panicking here is deliberate --
+    // it names the step and exits non-zero, where hanging names nothing.
+    let deadline = tokio::time::sleep(Duration::from_secs(20));
+    tokio::pin!(deadline);
     loop {
-        if let SwarmEvent::NewListenAddr { address, .. } = swarm.select_next_some().await {
-            return address;
+        tokio::select! {
+            _ = &mut deadline => panic!("no listen address within 20s"),
+            event = swarm.select_next_some() => {
+                if let SwarmEvent::NewListenAddr { address, .. } = event {
+                    return address;
+                }
+            }
         }
     }
 }
@@ -237,8 +248,11 @@ pub fn identity(peer: &PeerId) -> TransportIdentity {
 async fn connect(a: &mut Swarm<Behaviour>, b: &mut Swarm<Behaviour>, addr: Multiaddr) {
     a.dial(addr).expect("dial");
     let mut up = 0;
+    let deadline = tokio::time::sleep(Duration::from_secs(20));
+    tokio::pin!(deadline);
     while up < 2 {
         tokio::select! {
+            _ = &mut deadline => panic!("connection not established by both sides within 20s"),
             e = a.select_next_some() => {
                 if matches!(e, SwarmEvent::ConnectionEstablished { .. }) { up += 1; }
             }
@@ -383,6 +397,11 @@ pub async fn a3_two_families() {
 
     let mut direct_seen = false;
     let mut endpoints_seen = false;
+    // Same bound A1 needed, and missed here when A1 got it: a request
+    // that never reaches the responder leaves this loop with nothing to
+    // end it, and a run that hangs reports no verdict at all.
+    let deadline = tokio::time::sleep(Duration::from_secs(20));
+    tokio::pin!(deadline);
     // THE CONNECTION IDS THE REQUESTS ACTUALLY ARRIVED ON. Counting
     // peers answers a different question: `num_peers()` is 1 whether one
     // connection carried both families or each opened its own, so the
@@ -391,6 +410,7 @@ pub async fn a3_two_families() {
     let mut connection_ids: Vec<libp2p::swarm::ConnectionId> = Vec::new();
     while !(direct_seen && endpoints_seen) {
         tokio::select! {
+            _ = &mut deadline => break,
             e = server.select_next_some() => match e {
                 SwarmEvent::Behaviour(BehaviourEvent::Direct(RrEvent::Message {
                     message: RrMessage::Request { channel, .. }, connection_id, ..
@@ -544,6 +564,8 @@ pub async fn a5_timeout() {
     let mut kept: Option<ResponseChannel<Response>> = None;
     let mut outbound = None;
     let mut inbound = None;
+    let mut inbound_timeout = false;
+    let mut outbound_permitted = false;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     while outbound.is_none() || inbound.is_none() {
         tokio::select! {
@@ -553,12 +575,15 @@ pub async fn a5_timeout() {
                     message: RrMessage::Request { channel, .. }, ..
                 })) => { kept = Some(channel); }
                 SwarmEvent::Behaviour(BehaviourEvent::Direct(RrEvent::InboundFailure { error, .. })) => {
+                    inbound_timeout = matches!(error, InboundFailure::Timeout);
                     inbound = Some(describe_inbound(&error));
                 }
                 _ => {}
             },
             e = client.select_next_some() => {
                 if let SwarmEvent::Behaviour(BehaviourEvent::Direct(RrEvent::OutboundFailure { error, .. })) = e {
+                    outbound_permitted =
+                        matches!(error, OutboundFailure::Timeout | OutboundFailure::Io(_));
                     outbound = Some(describe_outbound(&error));
                 }
             }
@@ -577,6 +602,19 @@ pub async fn a5_timeout() {
     // That is the FINDING, so it is asserted rather than printed -- the
     // label used to read "still answerable" against a value of `false`,
     // which is the shape of a failing line sitting inside a PASS.
+    // THE ATTRIBUTION IS THE FIRST HALF OF THE FINDING, and it was
+    // only printed: a regression to `ConnectionClosed`, or no event at
+    // all, left the two checks below covering the retained channel
+    // while the documented Timeout/Io result quietly stopped holding.
+    check("the responder was told Timeout", inbound_timeout);
+    // The SET, not one variant. Both sides run the same request_timeout
+    // and whichever fires first decides what the other is told, so
+    // Timeout and Io are both correct here -- which is exactly why
+    // Stage 6 must treat them as one class.
+    check(
+        "and the requester saw Timeout or Io, the two the race permits",
+        outbound_permitted,
+    );
     check("responder still holds a channel", kept.is_some());
     check(
         "and that channel is NO LONGER answerable",
@@ -724,6 +762,16 @@ async fn same_key_race_once(owner_outcome: &Response) {
     check(
         "every ATTACHED request got the owner's outcome",
         refused == 0 && answered.len() == COPIES && answered.iter().all(|r| r == owner_outcome),
+    );
+    // ONE local enqueue is the claim; sharing an outcome is only how it
+    // shows. If `acquire` handed out several owners they would each be
+    // configured with the same outcome and every channel would still
+    // receive it, so the check above stays true while the sentence it
+    // is standing in for has become false.
+    check("exactly ONE local enqueue", enqueues == 1);
+    check(
+        "and every other copy attached as a waiter",
+        waiters == COPIES - 1,
     );
     note("reservations still held", reservations.len());
 }

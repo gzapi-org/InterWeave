@@ -340,6 +340,40 @@ Mutations, each restored afterwards:
 
 A3's is a coupling check rather than a true mutation: forcing a genuine second connection between the two sends hangs the harness, so the stronger evidence is not available and is not claimed.
 
+### The fourth round, and what finally found the rest
+
+Three more arrived after the third fix, and one of them — A3's unbounded response loop — was the *same defect as A1's*, in the commit whose message claimed a sweep. Fixing instances one at a time kept producing a next instance, so this round enumerated the two properties mechanically instead:
+
+- **every event loop**, checked for a deadline arm. Two had none: `a3_two_families` and the `listen` helper.
+- **every experiment**, checked for whether its *central* claim is asserted rather than printed.
+
+That second pass found one review had not: **B1** printed `distinct mesh ids among them` and required only that both publishers arrived. Two deliveries sharing **one** mesh id satisfied the experiment that exists to rule exactly that out.
+
+| experiment | what was printed instead of required |
+|---|---|
+| **A3** | no deadline at all — a request that never arrives hangs the run |
+| **A5** | the `Timeout`/`Io` attribution, the *first half* of the finding; the two checks covered only the retained channel |
+| **A6** | `enqueues == 1`, the entire point of the experiment |
+| **B1** | `distinct == 2`, the entire point of the experiment |
+
+A6 is the one to keep. Its check — "every attached request got the owner's outcome" — stays **true** when `acquire` hands every copy an `Owner`, because all 24 get configured with the same outcome and all 24 receive it:
+
+```text
+local enqueues (owners)                        24
+waiters attached to the owner                  0
+every ATTACHED request got the owner's outcome true    <-- still true
+exactly ONE local enqueue                      false
+```
+
+The old assertion was not weak in general. It was weak in the one direction the experiment existed to measure.
+
+| mutation | result |
+|---|---|
+| A3 deadline → 1 ms | both families false, exit 1 |
+| A5: the responder answers, so no timeout occurs | attribution checks false, exit 1 |
+| A6: `acquire` returns `Owner` for every copy | 6 checks false — while the old one stayed true |
+| B1: publishers share a payload-derived id | one suppressed the other, `distinct == 1`, exit 1 |
+
 ### An incidental finding about the library### An incidental finding about the library
 
 `gossipsub::Behaviour::new` **refuses** to build a node that publishes unsigned while requiring signatures on receipt, and says so:

@@ -329,6 +329,11 @@ pub async fn b1_distinct_mesh_ids() {
         received.iter().any(|d| d.source == Some(first_peer))
             && received.iter().any(|d| d.source == Some(second_peer)),
     );
+    // DISTINCT is the claim -- one application `message_id` reused by
+    // two publishers must not collapse to one mesh id. It was printed
+    // while only "both arrived" was required, so two deliveries sharing
+    // ONE mesh id satisfied the experiment that exists to rule that out.
+    check("under TWO distinct mesh ids", distinct == 2);
 }
 
 /// B2 — the ordering `PUBSUB.md` demands.
