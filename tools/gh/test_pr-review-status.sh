@@ -169,6 +169,19 @@ if [[ "$1" == "api" && "$*" == *"/issues/"* && "$*" == *"/comments"* ]]; then
   exit 0
 fi
 
+# gh api repos/o/r/issues/N/timeline — force-push events, which carry a
+# REAL timestamp where a commit date does not. state/forced holds one
+# ISO instant, or is absent for a branch nobody force-pushed.
+if [[ "$1" == "api" && "$*" == *"/timeline"* ]]; then
+  forced="$(cat "$S/forced" 2>/dev/null || true)"
+  if [[ -n "$forced" ]]; then
+    printf '[{"event":"head_ref_force_pushed","created_at":"%s"}]\n' "$forced"
+  else
+    printf '[]\n'
+  fi
+  exit 0
+fi
+
 # gh api repos/o/r/commits/<sha> — when the head was born, which is how
 # an ask is told from an answer.
 if [[ "$1" == "api" && "$*" == *"/commits/"* ]]; then
@@ -222,7 +235,7 @@ run() {
     # every timestamp these cases use, so an ask written by a case is an
     # ask about the current head unless the case says otherwise.
     : > "$SANDBOX/state/asks"
-    rm -f "$SANDBOX/state/head_born_fail"
+    rm -f "$SANDBOX/state/head_born_fail" "$SANDBOX/state/forced"
     printf '2026-08-07T09:00:00Z\n' > "$SANDBOX/state/head_born"
     shift 2
     RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
@@ -590,6 +603,50 @@ assert_rc "an ask older than the head does not suppress it" 5
 run_ask "OPEN:thirdhead:0" "chatgpt-codex-connector,secondhead,2026-08-07T11:30:00Z" \
         "me,2026-08-07T11:00:00Z" "2026-08-07T12:00:00Z"
 assert_rc "a push after the ask lets exit 5 fire again" 5
+
+echo "pr-review-status: a force-push is when the head became the head"
+# THE COMMIT DATE IS NOT THE HEAD-TRANSITION TIME. Force-pushing or
+# resetting a branch to an EXISTING commit keeps that commit's old date,
+# so an ask from before the reset looks newer than the head and reads as
+# still pending — every `--wait` then burns its whole timeout on an ask
+# that was answered long ago.
+#
+# Head commit dated 09:00, ask at 11:00, force-push at 13:00. Without the
+# force-push event the ask (11:00) looks newer than the head (09:00) and
+# suppresses exit 5 forever.
+run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
+        "me,2026-08-07T11:00:00Z" "2026-08-07T09:00:00Z"
+printf '2026-08-07T13:00:00Z\n' > "$SANDBOX/state/forced"
+: > "$SANDBOX/state/n"
+RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
+    timeout 20 bash "$UNDER_TEST" 77 o/r 2>&1)"; RUN_RC=$?
+assert_rc    "an ask predating the force-push does not suppress exit 5" 5
+assert_lacks "  and is not reported as outstanding"                     "in flight"
+
+# ...and an ask made AFTER the force-push is still pending.
+run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
+        "me,2026-08-07T14:00:00Z" "2026-08-07T09:00:00Z"
+printf '2026-08-07T13:00:00Z\n' > "$SANDBOX/state/forced"
+: > "$SANDBOX/state/n"
+RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
+    timeout 20 bash "$UNDER_TEST" 77 o/r 2>&1)"; RUN_RC=$?
+assert_rc       "an ask after the force-push still suppresses it" 1
+assert_contains "  and is reported as outstanding"                "in flight"
+
+echo "pr-review-status: a future-dated head is an unknown age, not a late one"
+# Git permits future-dated commits. A head dated ahead makes a genuine
+# ask look like it predates the head, so exit 5 fires on a review that is
+# really coming.
+#
+# CLAMPING TO NOW DOES NOT FIX THIS, which is worth stating because it
+# was the first attempt: a real ask is always slightly EARLIER than the
+# moment the check runs, so a head clamped to now still outranks it. The
+# honest reading is that this head's age is unknown — the same state an
+# unreadable date leaves — and it takes the same safe direction.
+run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
+        "me,2026-08-07T11:00:00Z" "2099-01-01T00:00:00Z"
+assert_rc       "a far-future head date does not swallow the ask" 1
+assert_contains "  which is still in flight"                      "in flight"
 
 echo "pr-review-status: an unreadable head date waits rather than concluding"
 # The fallback direction matters: unreadable must mean PENDING. Guessing

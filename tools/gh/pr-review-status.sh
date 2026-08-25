@@ -415,14 +415,61 @@ probe() {
     # ask stays pending forever and exit 5 could never fire, which is the
     # one thing it exists to say.
     #
-    # The HEAD's OWN COMMIT DATE separates them cleanly: an ask made
-    # after this head existed is an ask about this head. Fetched only
-    # when there is an ask, so the common path keeps its three calls.
+    # WHEN THIS COMMIT BECAME THE HEAD, which is not the same as when it
+    # was authored -- and the difference breaks the comparison in both
+    # directions:
+    #
+    #   * FORCE-PUSHING or resetting to an EXISTING commit keeps that
+    #     commit's old date. An `@codex review` from before the reset
+    #     then looks newer than the head, so it reads as still pending
+    #     and every `--wait` burns its whole timeout on an ask that was
+    #     answered long ago.
+    #   * Git permits FUTURE-DATED commits. A head dated tomorrow makes a
+    #     genuine ask made a minute ago look like it predates the head,
+    #     so exit 5 fires on a review that really is coming.
+    #
+    # Two corrections, one for each. The force-push EVENT carries a real
+    # timestamp where the commit does not, so the later of the two is
+    # when this commit can first have been the head. And a head cannot
+    # have become the head in the future, so the result is clamped to
+    # now. Both fetches happen only when there IS an ask, so the common
+    # path keeps its three calls.
     request_pending=no
     if [[ -n "$request_at" ]]; then
-        local head_born
+        local head_born forced now
         head_born="$(gh api "repos/$REPO/commits/$head" \
             --jq '.commit.committer.date' 2>/dev/null)" || head_born=""
+
+        # The most recent force-push, when there has been one.
+        #
+        # Fetched RAW and filtered here, exactly as the comments and
+        # reviews calls above are. Asking `gh` to apply `--jq` would work
+        # against the real API and silently differ under the self-test's
+        # mock, which returns the document rather than a filtered value —
+        # and a filter that runs in only one of the two is a difference
+        # between what is tested and what ships.
+        local timeline_raw
+        timeline_raw="$(gh api --paginate "repos/$REPO/issues/$PR/timeline" 2>/dev/null)" \
+            || timeline_raw=""
+        forced="$(printf '%s' "$timeline_raw" \
+            | jq -rs '[.[]? | .[]? | select(.event == "head_ref_force_pushed") | .created_at]
+                      | sort | last // ""' 2>/dev/null)" || forced=""
+        if [[ -n "$forced" && "$forced" > "$head_born" ]]; then
+            head_born="$forced"
+        fi
+
+        # A FUTURE-DATED HEAD IS NOT A USABLE TRANSITION TIME. Git
+        # permits it, and clamping to now does not rescue the comparison:
+        # a real ask is always a little EARLIER than the moment this runs,
+        # so a head clamped to now still outranks it and exit 5 still
+        # fires on a review that is genuinely coming. The honest reading
+        # is that this head's age is unknown, which is the same state an
+        # unreadable date leaves — and it takes the same safe direction.
+        now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        if [[ -n "$head_born" && "$head_born" > "$now" ]]; then
+            head_born=""
+        fi
+
         # Unreadable falls back to PENDING, which costs a longer wait and
         # never a false "nothing is coming".
         if [[ -z "$head_born" || "$request_at" > "$head_born" ]]; then
