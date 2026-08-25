@@ -46,10 +46,10 @@ fn who() -> (ProfileIdentity, TransportIdentity) {
 /// trusts, and one that forgot would fail with `Unauthorized` rather
 /// than quietly proving something else.
 fn trusting(peers: &[&TransportIdentity]) -> TrustSources {
-    TrustSources {
-        peers: PeerTrustPolicy::new(peers.iter().map(|p| (*p).clone())).expect("a handful"),
-        infrastructure: InfrastructureSet::default(),
-    }
+    TrustSources::new(
+        PeerTrustPolicy::new(peers.iter().map(|p| (*p).clone())).expect("a handful"),
+        InfrastructureSet::default(),
+    )
 }
 
 /// Trust nobody, which is what a freshly configured profile does.
@@ -199,15 +199,14 @@ fn a_denied_autonomous_dial_leaves_retry_state_exactly_as_it_was() {
             "{origin:?} caused a republish, so something mutated"
         );
         assert!(
-            manager.due_retries(2_000).is_empty(),
+            !manager.is_retry_due(&peer, 2_000),
             "{origin:?} brought the retry forward"
         );
     }
 
     // And the schedule still elapses on its own terms afterwards.
-    assert_eq!(
-        manager.due_retries(u64::MAX),
-        vec![peer],
+    assert!(
+        manager.is_retry_due(&peer, u64::MAX),
         "the retry survived every refusal"
     );
 }
@@ -1230,9 +1229,16 @@ async fn a_failed_peer_is_retried_without_anyone_asking() {
     // Paused time, because the first retry is thirty seconds out by
     // CONNECTIVITY.md and a test that waited would be a test nobody
     // runs. The clock is tokio's, so advancing it advances the
-    // substrate's own notion of now -- and the address below fails
-    // SYNCHRONOUSLY, with no socket, so there is no real I/O for the
+    // substrate's own notion of now -- and the address below is
+    // refused by the KERNEL near-instantly, loopback with nobody
+    // listening, so there is no real network round trip for the
     // virtual clock to outrun.
+    //
+    // TCP, deliberately, and not UDP: a UDP address on this TCP-only
+    // Swarm is the STRUCTURAL failure `an_unsupported_local_address_is_
+    // reported_once_and_never_retried` below exists to prove is the
+    // opposite of this. This one has to be a genuine network-level
+    // refusal, or it would prove nothing about retrying.
     let absent = TransportIdentity::parse(ABSENT).expect("canonical");
     let mut runtime = SwarmRuntime::start(
         &identity(),
@@ -1241,23 +1247,20 @@ async fn a_failed_peer_is_retried_without_anyone_asking() {
     )
     .expect("starts");
 
-    // UDP, on a Swarm whose only transport is TCP. libp2p refuses it
-    // without opening anything, which is what keeps this test free of
-    // wall-clock time.
-    let unsupported: Multiaddr = "/ip4/127.0.0.1/udp/1".parse().expect("valid");
+    let refused: Multiaddr = "/ip4/127.0.0.1/tcp/1".parse().expect("valid");
     assert!(
         runtime
-            .add_address(absent.clone(), unsupported.clone())
+            .add_address(absent.clone(), refused.clone())
             .await
             .expect("the command reaches the task")
     );
     assert!(
         runtime
-            .dial(absent.clone(), unsupported)
+            .dial(absent.clone(), refused)
             .await
             .expect("the command reaches the task")
             .is_ok(),
-        "admitted -- libp2p discovers there is no transport for it afterwards"
+        "admitted -- the connection is refused afterwards"
     );
 
     // NOBODY ASKS AGAIN. This test issues exactly one dial, so a
@@ -1283,15 +1286,13 @@ async fn a_failed_peer_is_retried_without_anyone_asking() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_revoked_peer_is_not_retried() {
-    // The scheduler is a dial origin like any other, so a revocation
-    // has to stop it too. A retry that bypassed admission -- because it
-    // was "already scheduled" -- would keep dialing a peer the operator
-    // has withdrawn trust from, on a timer, indefinitely.
-    //
-    // The refusal is also REPORTED: nobody is holding a reply channel
-    // for a scheduled dial, so without an event an operator watching a
-    // peer that never reconnects would have nothing to look at.
+async fn an_unsupported_local_address_is_reported_once_and_never_retried() {
+    // The exact bug the review named: "a synchronous failure such as an
+    // unsupported transport is recorded as a normal address failure and
+    // scheduled again." A UDP address on this TCP-only Swarm fails the
+    // same way every time this process asks -- retrying it is not a
+    // smaller version of retrying a timed-out connection, it is
+    // retrying a question already answered.
     let absent = TransportIdentity::parse(ABSENT).expect("canonical");
     let mut runtime = SwarmRuntime::start(
         &identity(),
@@ -1310,6 +1311,61 @@ async fn a_revoked_peer_is_not_retried() {
     assert!(
         runtime
             .dial(absent.clone(), unsupported)
+            .await
+            .expect("the command reaches the task")
+            .is_ok(),
+        "admitted -- libp2p discovers there is no transport for it afterwards"
+    );
+    let first = wait_dial_failed(&mut runtime).await;
+    assert!(!first.is_empty(), "the one report: {first}");
+
+    // MANY simulated ticks, paused time costing nothing in wall clock,
+    // well past every backoff a transient failure would have used. A
+    // rescheduled peer would have reconnected -- failed again -- by now.
+    for _ in 0..20 {
+        tokio::time::advance(std::time::Duration::from_secs(400)).await;
+        if let Ok(event) =
+            tokio::time::timeout(std::time::Duration::from_millis(50), runtime.next_event()).await
+        {
+            panic!("a permanent local failure must not be retried, got {event:?}");
+        }
+    }
+
+    runtime.shutdown().await.expect("shuts down");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_revoked_peer_is_not_retried() {
+    // The scheduler is a dial origin like any other, so a revocation
+    // has to stop it too. A retry that bypassed admission -- because it
+    // was "already scheduled" -- would keep dialing a peer the operator
+    // has withdrawn trust from, on a timer, indefinitely.
+    //
+    // The refusal is also REPORTED: nobody is holding a reply channel
+    // for a scheduled dial, so without an event an operator watching a
+    // peer that never reconnects would have nothing to look at.
+    let absent = TransportIdentity::parse(ABSENT).expect("canonical");
+    let mut runtime = SwarmRuntime::start(
+        &identity(),
+        SubstrateConfig::default(),
+        trusting(&[&absent]),
+    )
+    .expect("starts");
+
+    // TCP, refused by the kernel rather than rejected structurally: a
+    // scheduled retry has to exist for revocation to have anything to
+    // intercept, and the permanent-failure classification this fix also
+    // adds means a UDP address here would never be rescheduled at all.
+    let refused: Multiaddr = "/ip4/127.0.0.1/tcp/1".parse().expect("valid");
+    assert!(
+        runtime
+            .add_address(absent.clone(), refused.clone())
+            .await
+            .expect("the command reaches the task")
+    );
+    assert!(
+        runtime
+            .dial(absent.clone(), refused)
             .await
             .expect("the command reaches the task")
             .is_ok()
@@ -1338,6 +1394,25 @@ async fn a_revoked_peer_is_not_retried() {
             }
             Some(_) => {}
             None => panic!("the substrate stopped before the retry came due"),
+        }
+    }
+
+    // THE CLAIM WAS CLEARED, not merely refused once and left sitting
+    // in the schedule at its old, already-overdue due time. Restore
+    // trust and prove nothing reconnects on its own: a released-not-
+    // cleared claim would be reclaimed on the very next tick (one
+    // second later) and would now succeed, since trust is back. Nothing
+    // here re-schedules a peer just because it became trusted again --
+    // that is a different feature this fix does not add, and its
+    // absence is exactly what "cleared" means.
+    let _ = runtime
+        .set_trust(trusting(&[&absent]))
+        .await
+        .expect("the command reaches the task");
+    match tokio::time::timeout(std::time::Duration::from_secs(3), runtime.next_event()).await {
+        Err(_) => {}
+        Ok(event) => {
+            panic!("a cleared claim must not reconnect on its own once trust returns: {event:?}")
         }
     }
 
@@ -1509,6 +1584,329 @@ async fn a_draining_runtime_refuses_new_work_and_keeps_what_it_has() {
     }
 
     other.shutdown().await.expect("shuts down");
+    dialer.shutdown().await.expect("shuts down");
+    listener.shutdown().await.expect("shuts down");
+}
+
+#[tokio::test(start_paused = true)]
+async fn retry_diagnostics_stay_bounded_when_nobody_is_listening() {
+    // The retry tick pushed its DialFailed diagnostic straight into the
+    // outbox with no capacity check at all -- the ONE branch not gated
+    // by the `room` bool every other producer respects. A stalled
+    // consumer and a peer that fails the SAME way every tick would
+    // otherwise grow that queue by one entry per tick forever, which is
+    // exactly the unbounded memory this channel's own module docs rule
+    // out.
+    //
+    // The failure has to be one that never produces a ticket, or the
+    // ordinary translate()-based reporting path handles it instead --
+    // already bounded by `room`, and not what this fix is about. A
+    // pending-dial-ceiling denial is exactly that: nothing dialed, no
+    // ticket, and REPEATED, because releasing (not clearing) a
+    // recoverable denial leaves the claim due again on the very next
+    // tick.
+    //
+    // `hog` closes the ceiling PERMANENTLY: a dial to TEST-NET-1 is
+    // routed nowhere, so it stays pending forever and never releases
+    // the slot it reserved. `absent` is admitted and scheduled FIRST,
+    // while the ceiling still has room, so its retry exists before the
+    // ceiling shuts -- exactly the ordering a real daemon would produce
+    // under load: work already scheduled outliving the resources that
+    // let it start.
+    let hog = TransportIdentity::parse("12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN")
+        .expect("canonical");
+    let absent = TransportIdentity::parse(ABSENT).expect("canonical");
+    let mut runtime = SwarmRuntime::start(
+        &identity(),
+        SubstrateConfig {
+            // Small on purpose: the smaller the stated capacity, the
+            // fewer ticks it takes to prove growth stopped rather than
+            // merely slowed.
+            event_capacity: 1,
+            max_pending_dials: 1,
+            ..SubstrateConfig::default()
+        },
+        trusting(&[&hog, &absent]),
+    )
+    .expect("starts");
+
+    // Admitted while the sole slot is free, fails on the network,
+    // releases the slot, and schedules a retry.
+    let refused: Multiaddr = "/ip4/127.0.0.1/tcp/1".parse().expect("valid");
+    assert!(
+        runtime
+            .add_address(absent.clone(), refused.clone())
+            .await
+            .expect("the command reaches the task")
+    );
+    assert!(
+        runtime
+            .dial(absent.clone(), refused)
+            .await
+            .expect("the command reaches the task")
+            .is_ok()
+    );
+    let first = wait_dial_failed(&mut runtime).await;
+    assert!(
+        !first.is_empty(),
+        "the network failure that schedules the retry: {first}"
+    );
+
+    // NOW the sole slot closes, permanently.
+    let unreachable: Multiaddr = "/ip4/192.0.2.1/tcp/4001".parse().expect("valid");
+    assert!(
+        runtime
+            .dial(hog, unreachable)
+            .await
+            .expect("the command reaches the task")
+            .is_ok()
+    );
+
+    // NOBODY CONSUMES FROM HERE. Many simulated ticks pass, costing
+    // nothing in wall-clock time, each one finding the pending-dial
+    // ceiling still spent and each refusal due to be reported -- if
+    // reporting is unbounded, dozens of entries pile up behind a
+    // channel and a queue nothing is draining.
+    for _ in 0..40 {
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+    }
+
+    // ONLY NOW does anything read. What arrives is what survived --
+    // bounded by the channel's own stated capacity plus the outbox's,
+    // not by how many ticks happened to fire while nobody was looking.
+    let mut arrived = 0_usize;
+    while tokio::time::timeout(std::time::Duration::from_millis(50), runtime.next_event())
+        .await
+        .is_ok()
+    {
+        arrived += 1;
+    }
+    assert!(
+        arrived <= 4,
+        "40 unread ticks must not mean 40 buffered diagnostics, got {arrived}"
+    );
+
+    runtime.shutdown().await.expect("shuts down");
+}
+
+#[tokio::test]
+async fn a_connection_admitted_then_revoked_mid_handshake_is_not_retained() {
+    // The window between an outbound dial being ADMITTED and its
+    // handshake COMPLETING is exactly the window a trust revocation can
+    // land in. Admission photographs authorization at the moment it
+    // decides; nothing until now re-checked it once the handshake
+    // finished, so a peer trusted when dialed and revoked microseconds
+    // later kept its connection under authority that no longer existed.
+    //
+    // `set_trust` is sent the instant `dial` reports admission -- by
+    // then `swarm.dial()` has been called and the OS-level connect is
+    // under way, but the actual TCP+Noise handshake still needs several
+    // real syscalls to complete. An in-process channel round trip wins
+    // that race by a wide margin, which is what makes this reliable
+    // without needing to fabricate an artificial delay in the
+    // handshake itself.
+    let (dialer_id, dialer_peer) = who();
+    let listener = SwarmRuntime::start(
+        &identity(),
+        SubstrateConfig::default(),
+        trusting(&[&dialer_peer]),
+    )
+    .expect("starts");
+    let bound = listener
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
+        .await
+        .expect("binds");
+    let listener_peer = listener.local_peer().clone();
+
+    let mut dialer = SwarmRuntime::start(
+        &dialer_id,
+        SubstrateConfig::default(),
+        trusting(&[&listener_peer]),
+    )
+    .expect("starts");
+    assert!(
+        dialer
+            .dial(listener_peer.clone(), bound)
+            .await
+            .expect("the command reaches the task")
+            .is_ok(),
+        "admitted while still trusted"
+    );
+
+    // REVOKED, before the handshake this admission started has had a
+    // realistic chance to finish.
+    let closed = dialer
+        .set_trust(trusting_nobody())
+        .await
+        .expect("the command reaches the task");
+
+    // Either the connection had not yet established when the
+    // revocation landed -- in which case there is nothing in `open` to
+    // report closed, and the establishment-time check catches it a
+    // moment later when the handshake finishes -- or it had, in which
+    // case the ordinary eviction path already closed it. Both are the
+    // SAME property observed at different points in one race: whatever
+    // order the two events actually landed in, the peer does not end
+    // up connected.
+    let _ = closed;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut saw_connected = false;
+    let settled = loop {
+        match tokio::time::timeout_at(deadline, dialer.next_event()).await {
+            Ok(Some(interweave_transport_libp2p::SwarmEvent::Connected { .. })) => {
+                saw_connected = true;
+            }
+            Ok(Some(interweave_transport_libp2p::SwarmEvent::Disconnected { .. })) => {
+                assert!(
+                    saw_connected,
+                    "a disconnect with no prior connect is not this test's story"
+                );
+                break true;
+            }
+            Ok(Some(_)) => {}
+            // No Connected ever arrived within the window: the
+            // revocation won the race outright, and the establishment-
+            // time check refused to retain the connection at all --
+            // which never produces a Connected event for it in the
+            // first place. THIS counts as settled too, and is the more
+            // common outcome given the timing this test relies on.
+            Ok(None) | Err(_) => break !saw_connected,
+        }
+    };
+    assert!(
+        settled,
+        "a connection admitted before revocation and established after it \
+         must not stay open: saw Connected and then neither a Disconnected \
+         nor the absence of one within the deadline"
+    );
+
+    dialer.shutdown().await.expect("shuts down");
+    listener.shutdown().await.expect("shuts down");
+}
+
+#[tokio::test]
+async fn revoking_a_peer_with_several_connections_counts_each_once() {
+    // `open` is keyed by CONNECTION, and one peer can hold several.
+    // Collecting its values gave `set_trust` a duplicate entry per
+    // connection, which reported the same revocation more than once,
+    // and the nested scan that followed then closed every matching
+    // connection once per duplicate: two connections to one revoked
+    // peer produced four close attempts and a reported count of four
+    // against two real connections.
+    //
+    // Two connections between the same pair, built by dialing the same
+    // listener twice -- libp2p's `PeerCondition::Always` is what the
+    // admitted dial uses, so the second dial genuinely opens a second
+    // connection rather than reusing the first.
+    let (dialer_id, dialer_peer) = who();
+    let listener = SwarmRuntime::start(
+        &identity(),
+        SubstrateConfig::default(),
+        trusting(&[&dialer_peer]),
+    )
+    .expect("starts");
+    let bound = listener
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
+        .await
+        .expect("binds");
+    let listener_peer = listener.local_peer().clone();
+
+    let mut dialer = SwarmRuntime::start(
+        &dialer_id,
+        SubstrateConfig::default(),
+        trusting(&[&listener_peer]),
+    )
+    .expect("starts");
+
+    for attempt in 0..2u8 {
+        assert!(
+            dialer
+                .dial(listener_peer.clone(), bound.clone())
+                .await
+                .expect("the command reaches the task")
+                .is_ok(),
+            "dial {attempt}"
+        );
+        assert_eq!(wait_connected(&mut dialer).await, listener_peer);
+    }
+
+    // Let the listener record both inbound connections before the
+    // revocation looks for them.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let closed = listener
+        .set_trust(trusting_nobody())
+        .await
+        .expect("the command reaches the task");
+
+    // THE COUNT IS OF CONNECTIONS, and there were two. The bug reported
+    // one closure per (revoked entry x matching connection) pair, so
+    // two connections to one peer reported four.
+    assert!(
+        closed <= 2,
+        "a peer with two connections cannot have more than two closed, got {closed}"
+    );
+
+    dialer.shutdown().await.expect("shuts down");
+    listener.shutdown().await.expect("shuts down");
+}
+
+#[tokio::test]
+async fn an_untrusted_inbound_peer_is_never_announced_as_connected() {
+    // `translate` is a pure shape conversion and knows nothing about
+    // admission, so a connection this runtime REFUSED still reached the
+    // consumer as `Connected` -- a peer announced as available moments
+    // before a close it was never told was coming. A consumer that
+    // started work on that announcement would be talking to a peer this
+    // profile had already decided not to keep.
+    //
+    // The close then emitted `Disconnected` for a connection that never
+    // entered `open`, so the consumer saw a peer arrive and leave when
+    // in truth it was refused on arrival.
+    let (dialer_id, dialer_peer) = who();
+    let mut listener =
+        SwarmRuntime::start(&identity(), SubstrateConfig::default(), trusting_nobody())
+            .expect("starts");
+    let bound = listener
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
+        .await
+        .expect("binds");
+    let listener_peer = listener.local_peer().clone();
+    let _ = dialer_peer;
+
+    // The dialer trusts the listener; the listener trusts nobody, so
+    // the inbound connection is refused at establishment.
+    let dialer = SwarmRuntime::start(
+        &dialer_id,
+        SubstrateConfig::default(),
+        trusting(&[&listener_peer]),
+    )
+    .expect("starts");
+    assert!(
+        dialer
+            .dial(listener_peer, bound)
+            .await
+            .expect("the command reaches the task")
+            .is_ok()
+    );
+
+    // THE LISTENER'S OWN EVENT STREAM is what this asserts about. It
+    // must never claim the refused peer connected, and must not report
+    // a disconnection for a connection it never announced.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        match tokio::time::timeout_at(deadline, listener.next_event()).await {
+            Ok(Some(interweave_transport_libp2p::SwarmEvent::Connected { peer })) => {
+                panic!("a refused inbound peer was announced as connected: {peer:?}");
+            }
+            Ok(Some(interweave_transport_libp2p::SwarmEvent::Disconnected { peer })) => {
+                panic!("a refused inbound peer was announced as disconnecting: {peer:?}");
+            }
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break,
+        }
+    }
+
     dialer.shutdown().await.expect("shuts down");
     listener.shutdown().await.expect("shuts down");
 }

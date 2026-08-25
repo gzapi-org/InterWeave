@@ -50,13 +50,16 @@
 //! only policy authority for outbound Swarm dials" — a caller cannot
 //! forget to ask, because it cannot call without the answer.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Weak;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use interweave_transport_api::TransportIdentity;
 use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 
-use crate::connection_policy::{ConnectionClass, ConnectionPolicy, DialDenial, DialRequest};
+use crate::connection_policy::{
+    ConnectionClass, ConnectionPolicy, DialDenial, DialOrigin, DialRequest,
+};
 
 /// Who this profile trusts, and for what.
 ///
@@ -72,9 +75,35 @@ pub struct TrustSources {
     pub peers: PeerTrustPolicy,
     /// Peers authorized for reachability control only.
     pub infrastructure: InfrastructureSet,
+    /// This profile's own identity, when the manager knows it.
+    ///
+    /// Private, and set only by [`ConnectionManager::set_trust`] from
+    /// the authoritative value the runtime holds -- never by whoever
+    /// supplies the two sets. A caller that could name the local peer
+    /// could also name a different one, which is the confusion this
+    /// exists to prevent rather than a flexibility worth offering.
+    local_peer: Option<TransportIdentity>,
 }
 
 impl TrustSources {
+    /// Build the trust sources from the two authorities a
+    /// configuration supplies.
+    ///
+    /// A constructor rather than a struct literal because the local
+    /// identity is deliberately not one of the inputs: it is bound by
+    /// [`ConnectionManager::bind_local_peer`] from the value the
+    /// runtime derived from its own keypair. A caller that could pass
+    /// it could also pass a different one, and "who am I" is not a
+    /// question configuration gets to answer.
+    #[must_use]
+    pub fn new(peers: PeerTrustPolicy, infrastructure: InfrastructureSet) -> Self {
+        Self {
+            peers,
+            infrastructure,
+            local_peer: None,
+        }
+    }
+
     /// The class this profile grants `peer`, right now.
     ///
     /// Data-plane trust is checked first and wins, because it is the
@@ -83,8 +112,19 @@ impl TrustSources {
     /// [`ConnectionClass::Unauthorized`], which is the DEFAULT answer --
     /// an empty configuration admits nobody (ADR-0012), and there is no
     /// constructor here that says otherwise.
+    ///
+    /// THE LOCAL PEER IS NEVER ANY OTHER CLASS. A configuration listing
+    /// this profile's own identity is a mistake -- a copied allowlist,
+    /// a template filled in wrong -- and treating it as an ordinary
+    /// trusted remote would let self-directed admission, retries and
+    /// address-book entries all proceed for a peer that cannot be
+    /// dialed. Answered here rather than at each call site because
+    /// there are three of them and a fourth is one commit away.
     #[must_use]
     pub fn classify(&self, peer: &TransportIdentity) -> ConnectionClass {
+        if self.local_peer.as_ref() == Some(peer) {
+            return ConnectionClass::Unauthorized;
+        }
         if self.peers.decide(peer).is_allowed() {
             ConnectionClass::DataPlaneTrusted
         } else if self.infrastructure.permits_control_connection(peer) {
@@ -128,12 +168,50 @@ pub struct PolicySnapshot {
     /// kind of policy that may be eventually consistent: the whole point
     /// of it is that no new dial starts.
     shutting_down: Arc<AtomicBool>,
-    /// The revision the manager has currently published, SHARED.
+    /// A WEAK reference back to the single cell that holds whichever
+    /// snapshot is currently published.
     ///
-    /// What bounds staleness to zero rather than to "however long a
-    /// holder keeps its `Arc`". See [`Self::admit`].
-    published_revision: Arc<AtomicU64>,
+    /// Not `published_revision: Arc<AtomicU64>`, which this replaces.
+    /// That was a second piece of shared state, written in a SEPARATE
+    /// step from installing the new snapshot in the cell -- between
+    /// the two, an old snapshot's own revision could still equal the
+    /// not-yet-updated atomic, so it read as fresh and decided against
+    /// policy that had already been superseded. Reading the live
+    /// revision back out of the SAME cell every other reader consults
+    /// leaves nothing that can disagree with it, because there is only
+    /// one write.
+    ///
+    /// Weak, not `Arc`: the cell holds an `Arc<PolicySnapshot>`, so a
+    /// strong reference back to the cell from inside the snapshot it
+    /// contains would be a genuine reference cycle -- neither side
+    /// could ever be dropped. A weak reference breaks it; the manager
+    /// itself holds the one strong reference that keeps the cell alive.
+    current: Weak<RwLock<Arc<PolicySnapshot>>>,
+    /// A WEAK reference to a token the manager alone owns.
+    ///
+    /// Separate from `current`, and it has to be: `SnapshotHandle` holds
+    /// a STRONG `Arc` to the cell so it can read it, so the cell outlives
+    /// the manager whenever a handle does. Asking "does the cell still
+    /// exist" therefore answers "does anyone still hold a handle", which
+    /// is not the question -- and a caller that kept a handle and dropped
+    /// its manager went on being admitted indefinitely against the final
+    /// snapshot, which the docs on [`Self::is_current`] flatly promised
+    /// could not happen.
+    ///
+    /// [`ManagerLiveness`] exists to be owned by exactly one place. No
+    /// handle, snapshot, or ticket holds a strong reference to it, so its
+    /// upgrade failing means the manager itself is gone.
+    manager: Weak<ManagerLiveness>,
 }
+
+/// A token whose only property is who owns it.
+///
+/// Zero-sized. [`ConnectionManager`] holds the sole `Arc`; snapshots hold
+/// a `Weak`. Nothing else may hold a strong reference -- that is the
+/// entire contract, and it is what makes `Weak::upgrade` returning `None`
+/// mean "the manager is gone" rather than "nobody is looking any more".
+#[derive(Debug)]
+pub(crate) struct ManagerLiveness;
 
 impl PolicySnapshot {
     /// Which publication this is.
@@ -146,6 +224,36 @@ impl PolicySnapshot {
     #[must_use]
     pub const fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// Whether this is the snapshot currently published.
+    ///
+    /// Two questions, and they are genuinely different:
+    ///
+    /// 1. **Does the manager still exist?** Asked of [`ManagerLiveness`],
+    ///    which only the manager owns. If it is gone nothing can ever
+    ///    publish again, so there is no "current" to be, and refusing is
+    ///    the fail-closed answer to a question that no longer has one.
+    /// 2. **Is this the snapshot in the cell?** `self.revision` against
+    ///    the currently installed snapshot's own revision field, fetched
+    ///    fresh through the one cell every snapshot and handle shares.
+    ///
+    /// The first used to be asked of the CELL, which a `SnapshotHandle`
+    /// keeps alive by holding a strong `Arc` to it. A caller that dropped
+    /// its manager while retaining a handle therefore kept upgrading
+    /// successfully, kept matching the final revision, and kept being
+    /// admitted -- for as long as it held the handle.
+    ///
+    /// Enforced by `a_handle_that_outlives_its_manager_admits_nothing`
+    /// and `the_liveness_token_is_owned_by_the_manager_alone`.
+    #[must_use]
+    fn is_current(&self) -> bool {
+        if self.manager.upgrade().is_none() {
+            return false;
+        }
+        self.current.upgrade().is_some_and(|cell| {
+            self.revision == cell.read().unwrap_or_else(|e| e.into_inner()).revision
+        })
     }
 
     /// The class this profile grants `peer`, as photographed.
@@ -202,7 +310,13 @@ impl PolicySnapshot {
         // than unbounded, and the refusal is recoverable: reload the
         // handle and ask again, which is what `SnapshotHandle::admit`
         // does.
-        if self.revision != self.published_revision.load(Ordering::Acquire) {
+        //
+        // ONE READ of the ONE place that says what is current: the cell
+        // this snapshot came from, upgraded and read fresh. Comparing
+        // against a second value published in a separate step is what
+        // let an old snapshot pass this check during the instant between
+        // that value's two writes; there is only one write now.
+        if !self.is_current() {
             return Err(DialDenial::PolicySuperseded);
         }
 
@@ -230,6 +344,7 @@ impl PolicySnapshot {
             connections: Arc::clone(&self.connections),
             peer: request.peer.clone(),
             address: request.address.clone(),
+            origin: request.origin,
             settled: false,
             connection_kept: false,
         };
@@ -249,9 +364,7 @@ impl PolicySnapshot {
         // Checking again once the slots are held means any publication
         // concurrent with the decision refuses it, and the rollback is
         // what makes the refusal free.
-        if self.shutting_down.load(Ordering::Acquire)
-            || self.revision != self.published_revision.load(Ordering::Acquire)
-        {
+        if self.shutting_down.load(Ordering::Acquire) || !self.is_current() {
             drop(ticket);
             return Err(DialDenial::PolicySuperseded);
         }
@@ -359,6 +472,16 @@ impl Drop for ConnectionSlot {
 pub struct DialTicket {
     pending: Arc<AtomicUsize>,
     connections: Arc<AtomicUsize>,
+    /// Why this dial was asked for.
+    ///
+    /// Read for exactly one question: does settling this ticket own the
+    /// peer's SCHEDULER CLAIM? Only the reconnect scheduler claims, so
+    /// only a `ConnectionManager`-origin ticket may consume or release
+    /// one. A manual dial settling must leave the schedule alone --
+    /// the retry entry is peer-scoped while a dial outcome is
+    /// address-scoped, and conflating them let one bad address cancel
+    /// the reconnect that would have tried a good one.
+    origin: DialOrigin,
     peer: Option<TransportIdentity>,
     address: String,
     settled: bool,
@@ -370,6 +493,24 @@ impl DialTicket {
     #[must_use]
     pub const fn peer(&self) -> Option<&TransportIdentity> {
         self.peer.as_ref()
+    }
+
+    /// Why this dial was asked for.
+    ///
+    /// Read at establishment: ADR-0036's separation is an origin/class
+    /// PAIR, so revalidating an outbound connection needs the reason it
+    /// was opened, not only what the peer is authorized for.
+    #[must_use]
+    pub const fn origin(&self) -> DialOrigin {
+        self.origin
+    }
+
+    /// Whether settling this ticket owns the peer's scheduler claim.
+    ///
+    /// Only the reconnect scheduler claims a retry entry, so only its
+    /// own dials may consume or release one.
+    const fn owns_scheduler_claim(&self) -> bool {
+        matches!(self.origin, DialOrigin::ConnectionManager)
     }
 
     /// The address this permission was granted for.
@@ -471,6 +612,11 @@ pub const DEFAULT_MAX_RETRY_ENTRIES: usize = 1_024;
 struct Retry {
     due_at_ms: u64,
     attempts: u32,
+    /// A scheduler tick has claimed this peer and an attempt is under
+    /// way that has not yet been settled. A claimed entry is never
+    /// returned by [`ConnectionManager::take_due_retries`] again, which
+    /// is what stops the same slow dial from being started twice.
+    claimed: bool,
 }
 
 /// Default ceiling on addresses remembered for one peer.
@@ -530,7 +676,10 @@ pub struct ConnectionManager {
     connections: Arc<AtomicUsize>,
     max_connections: usize,
     shutting_down: Arc<AtomicBool>,
-    published_revision: Arc<AtomicU64>,
+    /// This profile's own identity, once the runtime has said what it
+    /// is. `None` until then, which is the honest answer for a manager
+    /// constructed by a test that never had one.
+    local_peer: Option<TransportIdentity>,
     retries: std::collections::BTreeMap<TransportIdentity, Retry>,
     /// Candidate addresses per peer.
     ///
@@ -543,6 +692,12 @@ pub struct ConnectionManager {
     max_addresses_per_peer: usize,
     max_retry_entries: usize,
     published: Arc<RwLock<Arc<PolicySnapshot>>>,
+    /// The SOLE strong reference to this manager's liveness token.
+    ///
+    /// Dropping the manager drops this, and every snapshot it ever
+    /// published starts refusing. Handing a clone of this `Arc` to
+    /// anything else silently restores the defect it exists to close.
+    alive: Arc<ManagerLiveness>,
 }
 
 impl ConnectionManager {
@@ -553,19 +708,32 @@ impl ConnectionManager {
         let connections = Arc::new(AtomicUsize::new(0));
         let max_connections = policy.max_connections;
         let shutting_down = Arc::new(AtomicBool::new(false));
-        let published_revision = Arc::new(AtomicU64::new(0));
         let trust = Arc::new(TrustSources::default());
-        let first = Arc::new(PolicySnapshot {
-            policy: policy.clone(),
-            trust: Arc::clone(&trust),
-            revision: 0,
-            pending: Arc::clone(&pending),
-            max_pending_dials,
-            connections: Arc::clone(&connections),
-            max_connections,
-            shutting_down: Arc::clone(&shutting_down),
-            published_revision: Arc::clone(&published_revision),
+        let alive = Arc::new(ManagerLiveness);
+
+        // BUILT WITH `Arc::new_cyclic`, because the first snapshot has
+        // to hold a weak reference to the very cell it is about to be
+        // installed in -- and that cell does not exist until this call
+        // returns. The closure receives a `Weak` to what the `Arc`
+        // will become, which can be cloned and stored before the outer
+        // `Arc` finishes constructing, and is not usable (upgrading
+        // returns `None`) until it does. Nothing here upgrades it
+        // early; it is only stored.
+        let published: Arc<RwLock<Arc<PolicySnapshot>>> = Arc::new_cyclic(|weak| {
+            RwLock::new(Arc::new(PolicySnapshot {
+                policy: policy.clone(),
+                trust: Arc::clone(&trust),
+                revision: 0,
+                pending: Arc::clone(&pending),
+                max_pending_dials,
+                connections: Arc::clone(&connections),
+                max_connections,
+                shutting_down: Arc::clone(&shutting_down),
+                current: weak.clone(),
+                manager: Arc::downgrade(&alive),
+            }))
         });
+
         Self {
             policy,
             trust,
@@ -575,12 +743,13 @@ impl ConnectionManager {
             connections,
             max_connections,
             shutting_down,
-            published_revision,
+            local_peer: None,
             retries: std::collections::BTreeMap::new(),
             book: std::collections::BTreeMap::new(),
             max_addresses_per_peer: DEFAULT_MAX_ADDRESSES_PER_PEER,
             max_retry_entries: DEFAULT_MAX_RETRY_ENTRIES,
-            published: Arc::new(RwLock::new(first)),
+            published,
+            alive,
         }
     }
 
@@ -617,14 +786,35 @@ impl ConnectionManager {
             connections: Arc::clone(&self.connections),
             max_connections: self.max_connections,
             shutting_down: Arc::clone(&self.shutting_down),
-            published_revision: Arc::clone(&self.published_revision),
+            current: Arc::downgrade(&self.published),
+            manager: Arc::downgrade(&self.alive),
         });
+        // ONE WRITE. The revision a reader compares itself against IS
+        // this cell's own content now, not a second value kept in step
+        // with it by hand -- there is no longer a window between "the
+        // new snapshot is installed" and "the fact that it is current
+        // becomes visible", because those are the same write.
         *self.published.write().unwrap_or_else(|e| e.into_inner()) = next;
-        // AFTER the install, so the window between them is one in which
-        // both the old and the new snapshot refuse rather than one in
-        // which the old one is still trusted.
-        self.published_revision
-            .store(self.revision, Ordering::Release);
+    }
+
+    /// Tell the manager which identity is this profile's own.
+    ///
+    /// Called by the runtime, from the value it derived from the
+    /// keypair -- the authoritative one. Every classification from here
+    /// on answers [`ConnectionClass::Unauthorized`] for that identity,
+    /// whatever a configured allowlist says, so a mistaken self-entry
+    /// cannot reach admission, retries, or the address book.
+    ///
+    /// Rebinds the currently published trust immediately rather than
+    /// waiting for the next [`Self::set_trust`], so there is no window
+    /// in which the local peer is bound in the manager but not in what
+    /// the gate is reading.
+    pub fn bind_local_peer(&mut self, local: TransportIdentity) {
+        self.local_peer = Some(local);
+        let mut trust = (*self.trust).clone();
+        trust.local_peer = self.local_peer.clone();
+        self.trust = Arc::new(trust);
+        self.publish();
     }
 
     /// Replace the trust sources and publish them.
@@ -642,6 +832,13 @@ impl ConnectionManager {
     /// nothing kept.
     pub fn set_trust(&mut self, trust: TrustSources, live: &[TransportIdentity]) -> Vec<Revoked> {
         let previous = Arc::clone(&self.trust);
+        // REBOUND ON EVERY CHANGE, from the manager's own copy rather
+        // than from what the caller supplied. A `TrustSources` handed in
+        // by configuration cannot name the local peer -- the field is
+        // private -- so a later trust update cannot unbind it either,
+        // whether by omission or by naming a different identity.
+        let mut trust = trust;
+        trust.local_peer = self.local_peer.clone();
         self.trust = Arc::new(trust);
         self.publish();
         live.iter()
@@ -754,6 +951,12 @@ impl ConnectionManager {
     /// a ticket, so there is no path by which a refusal advances retry
     /// state. ADR-0011 requires exactly that, and expressing it through
     /// the ticket makes it structural rather than a rule to remember.
+    ///
+    /// For a TRANSIENT failure -- the network refused, timed out, or
+    /// reset the attempt. A structural one -- an address this profile
+    /// cannot dial at all -- is [`Self::record_permanent_failure`], and
+    /// answering "will retrying help" is the caller's job because only
+    /// the backend knows which `DialError` it received.
     pub fn record_failure(&mut self, ticket: DialTicket, now_ms: u64) {
         if let Some(peer) = ticket.peer().cloned() {
             // ONE delay, used for both. The address-scoped backoff and
@@ -765,7 +968,115 @@ impl ConnectionManager {
             let delay = self.retry_delay_ms(&peer);
             self.policy
                 .record_address_failure(&peer, ticket.address(), now_ms, delay);
-            self.schedule_retry(peer, now_ms, delay);
+            // REMEMBER THE ADDRESS WE JUST TRIED, or the retry we are
+            // about to schedule has nothing to dial.
+            //
+            // `dial_candidates` reads the address book and nothing else,
+            // and the public `dial(peer, address)` API admits an address
+            // that was never learned through Identify. A transient
+            // failure there scheduled a retry against an EMPTY book, so
+            // the first tick found no candidates and cleared the entry
+            // -- which removes it outright, not merely its claim -- and
+            // nothing recreates it, so learning the address afterwards
+            // could not restart the peer either. One transient refusal
+            // on a directly-dialled address ended reconnection for that
+            // peer permanently.
+            //
+            // `learn_address` is the same bounded, authorization-checked
+            // path Identify uses: it refuses an unauthorized peer, caps
+            // the list at `max_addresses_per_peer`, and evicts only an
+            // address the policy will not currently dial. An address
+            // this profile actually attempted is at least as good a
+            // candidate as one a peer asserted about itself.
+            self.learn_address(&peer, ticket.address(), now_ms);
+            // A CLAIM THIS TICKET DOES NOT OWN SURVIVES THE RESCHEDULE.
+            // Rewriting the entry with `claimed: false` was correct for
+            // the scheduler's own dial -- that is how a claim is given
+            // back -- and wrong for every other origin: a manual dial to
+            // a second address can fail transiently while the
+            // scheduler's dial is still in flight, and clearing the flag
+            // there makes the entry due again with a dial already
+            // running. The next tick then starts the duplicate that
+            // claiming exists to prevent.
+            let held_by_another = !ticket.owns_scheduler_claim()
+                && self.retries.get(&peer).is_some_and(|entry| entry.claimed);
+            self.schedule_retry(peer, now_ms, delay, held_by_another);
+        }
+        self.settle(ticket);
+        self.publish();
+    }
+
+    /// Record a failure that retrying cannot fix.
+    ///
+    /// A `MultiaddrNotSupported`, `NoAddresses`, or `LocalPeerId` dial
+    /// error describes this profile's own transport stack, not the
+    /// remote end's availability -- the same address fails the same way
+    /// every time, indefinitely, which the paused-time scheduler test
+    /// caught: a UDP address on a TCP-only Swarm was scheduled and
+    /// retried forever by [`Self::record_failure`]'s unconditional
+    /// reschedule.
+    ///
+    /// The ticket is settled and NOTHING is rescheduled. If the peer was
+    /// claimed from [`Self::take_due_retries`], it simply does not
+    /// re-enter the table; if it has another address, that address is
+    /// untouched by this call and remains a candidate on its own merit.
+    pub fn record_permanent_failure(&mut self, ticket: DialTicket, now_ms: u64) {
+        let _ = now_ms;
+        if let Some(peer) = ticket.peer().cloned() {
+            // THE ADDRESS IS UNUSABLE, NOT THE PEER. This used to remove
+            // the peer's whole retry entry, which is peer-scoped while
+            // the failure is address-scoped: a manual dial to one bad
+            // address cancelled the scheduled reconnect that would have
+            // tried a good one still sitting in the book.
+            //
+            // Forgetting the address is what stops the loop the old
+            // unconditional reschedule created -- a scheduler claim is
+            // released rather than consumed, so the next tick tries the
+            // peer's OTHER addresses, and if there are none
+            // `dial_candidates` comes back empty and the scheduler
+            // clears the claim itself.
+            if let Some(known) = self.book.get_mut(&peer) {
+                known.remove(ticket.address());
+                if known.is_empty() {
+                    self.book.remove(&peer);
+                }
+            }
+            if ticket.owns_scheduler_claim() {
+                self.release_retry_claim(&peer);
+            }
+        }
+        self.settle(ticket);
+        self.publish();
+    }
+
+    /// The handshake succeeded, and admission is no longer what it was
+    /// when this ticket was issued.
+    ///
+    /// The window between an outbound dial being admitted and its
+    /// handshake completing is exactly the window a trust revocation or
+    /// a drain can land in. Recording the outcome as an ordinary
+    /// success would retain a connection under authority that no longer
+    /// exists; recording it as an ordinary FAILURE would be wrong too --
+    /// nothing about the network or the remote peer failed, and
+    /// scheduling a retry for a peer this profile no longer trusts
+    /// would be the same mistake the trust-revocation eviction path
+    /// exists to prevent, reached from a different direction.
+    ///
+    /// Settled with neither backoff nor a retry, and no reschedule for
+    /// the same reason [`Self::record_permanent_failure`] schedules
+    /// none: a peer becoming trusted again is not this method's job to
+    /// notice.
+    pub fn record_authorization_withdrawn(&mut self, ticket: DialTicket, now_ms: u64) {
+        let _ = now_ms;
+        // CLEARED, not released: unlike a quarantine or an unusable
+        // address, this is not a fact about one route. The peer is no
+        // longer authorized, so there is nothing for a later tick to
+        // try, and leaving the entry claimed would strand it -- never
+        // selected again, still holding retry-table capacity.
+        if ticket.owns_scheduler_claim()
+            && let Some(peer) = ticket.peer().cloned()
+        {
+            self.clear_retry_claim(&peer);
         }
         self.settle(ticket);
         self.publish();
@@ -784,6 +1095,19 @@ impl ConnectionManager {
             self.policy
                 .record_identity_mismatch(&peer, ticket.address(), now_ms)
         });
+        // A CLAIMED ATTEMPT THAT ENDS HERE MUST GIVE THE CLAIM BACK.
+        // The quarantine is address-scoped and the peer may have other
+        // routes, so the entry is released rather than removed -- but
+        // it was released by NOTHING before this, so a scheduled retry
+        // ending in a wrong-key answer left the entry claimed forever:
+        // permanently excluded from selection, permanently occupying
+        // retry-table capacity, and the peer's good addresses never
+        // tried again.
+        if ticket.owns_scheduler_claim()
+            && let Some(peer) = ticket.peer().cloned()
+        {
+            self.release_retry_claim(&peer);
+        }
         self.settle(ticket);
         self.publish();
         mismatched
@@ -837,16 +1161,49 @@ impl ConnectionManager {
         self.publish();
     }
 
-    /// Whether an inbound connection from this peer is kept.
+    /// Whether a connection of this class is still authorized to be
+    /// held open, RIGHT NOW.
     ///
-    /// ADR-0011: the same CURRENT authorization policy that governs
-    /// outbound applies before an inbound data-plane connection is
-    /// retained. Inbound is not a way in for a peer that outbound would
-    /// refuse, and "it connected to us" is not an authorization.
+    /// ADR-0011: the same CURRENT authorization policy that governs an
+    /// admission decision applies before a connection is RETAINED,
+    /// whichever direction it started in. Inbound is not a way in for a
+    /// peer that outbound would refuse -- "it connected to us" is not
+    /// an authorization -- and an outbound connection whose handshake
+    /// outlasted a revocation or a drain is not grandfathered in just
+    /// because admission approved the dial that produced it.
     #[must_use]
-    pub fn retain_inbound(&self, class: ConnectionClass) -> bool {
-        !self.shutting_down.load(Ordering::Acquire)
-            && matches!(class, ConnectionClass::DataPlaneTrusted)
+    pub fn authorizes(&self, class: ConnectionClass) -> bool {
+        self.authorizes_for(class, DialOrigin::Manual)
+    }
+
+    /// Whether a connection of this class, opened for this REASON, is
+    /// still authorized to be held open.
+    ///
+    /// ADR-0036's separation is a pair, not a class alone: an
+    /// infrastructure-only peer is dialable for reachability and
+    /// refused for the data plane, on the same address in the same
+    /// moment. `ConnectionPolicy::admit` has always decided it that
+    /// way -- `origin.is_data_plane()` is the discriminator, and
+    /// `tests/transport-contract` pins every origin/class pair.
+    ///
+    /// Revalidating an established connection with the data-plane-only
+    /// predicate therefore closed connections admission had correctly
+    /// permitted: a relay reservation, a relay circuit, an AutoNAT
+    /// probe or a DCUtR hole punch to an infrastructure peer completed
+    /// its handshake and was immediately dropped. The inbound path has
+    /// no origin to consult and no such pair to honour, which is why it
+    /// keeps the stricter predicate and why applying that one to
+    /// outbound was wrong rather than merely conservative.
+    #[must_use]
+    pub fn authorizes_for(&self, class: ConnectionClass, origin: DialOrigin) -> bool {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return false;
+        }
+        match class {
+            ConnectionClass::Unauthorized => false,
+            ConnectionClass::DataPlaneTrusted => true,
+            ConnectionClass::ConnectivityInfrastructureOnly => !origin.is_data_plane(),
+        }
     }
 
     /// Begin draining. Admission refuses from the next snapshot on.
@@ -856,22 +1213,104 @@ impl ConnectionManager {
         self.publish();
     }
 
-    /// Peers whose retry is due, soonest first.
+    /// Claim up to `limit` due retries, soonest first, REMOVING them
+    /// from the schedule.
+    ///
+    /// The read-only predecessor of this method returned the same
+    /// entries on every tick until something else cleared them, which
+    /// produced three failures at once: a slow dial still pending when
+    /// the next tick fired got dialled again, because nothing recorded
+    /// that an attempt was already under way; a peer stuck at the front
+    /// with no usable address could consume every scheduler selection
+    /// forever, because reading it changed nothing about its position;
+    /// and there was no way to tell "claimed, an attempt is in flight"
+    /// from "still waiting its turn".
+    ///
+    /// Claiming is unconditional and REMOVES the entry. A caller that
+    /// cannot start a dial this tick -- no candidate address, the peer
+    /// is no longer authorized -- must not put it back on a hair
+    /// trigger: doing nothing here is correct, because a peer with
+    /// nothing to try is not usefully "due" again a moment later. A
+    /// caller whose dial genuinely fails re-enters the schedule through
+    /// [`Self::record_failure`], which is the same path any other
+    /// failed dial uses and carries its own backoff.
     #[must_use]
-    pub fn due_retries(&self, now_ms: u64) -> Vec<TransportIdentity> {
-        let mut due: Vec<(&TransportIdentity, &Retry)> = self
+    pub fn take_due_retries(&mut self, now_ms: u64, limit: usize) -> Vec<TransportIdentity> {
+        let mut due: Vec<(TransportIdentity, u64)> = self
             .retries
             .iter()
-            .filter(|(_, r)| now_ms >= r.due_at_ms)
+            .filter(|(_, r)| !r.claimed && now_ms >= r.due_at_ms)
+            .map(|(p, r)| (p.clone(), r.due_at_ms))
             .collect();
-        due.sort_by_key(|(_, r)| r.due_at_ms);
-        due.into_iter().map(|(p, _)| p.clone()).collect()
+        due.sort_by_key(|(_, at)| *at);
+        due.truncate(limit);
+        for (peer, _) in &due {
+            if let Some(entry) = self.retries.get_mut(peer) {
+                entry.claimed = true;
+            }
+        }
+        due.into_iter().map(|(p, _)| p).collect()
+    }
+
+    /// Give up a claim without ever producing a ticket to settle it
+    /// with -- there was nothing to dial, or authorization no longer
+    /// permits it. Removes the entry outright: a peer with no candidate
+    /// address, or one this profile no longer trusts, gains nothing
+    /// from being reconsidered a moment later.
+    pub fn clear_retry_claim(&mut self, peer: &TransportIdentity) {
+        self.retries.remove(peer);
+    }
+
+    /// Take the claim back, for a scheduler tick that released one and
+    /// then started a later candidate anyway.
+    ///
+    /// A scheduled retry with several addresses can have an early one
+    /// fail SYNCHRONOUSLY -- an address this profile cannot dial at all
+    /// -- which settles that ticket and releases the claim, while the
+    /// tick goes on to start a later candidate successfully. The peer
+    /// would then have a dial in flight AND an unclaimed, already-due
+    /// entry, so the next tick would dial it again: the duplicate
+    /// concurrent retry that claiming exists to prevent, reached
+    /// through the one path that settles mid-loop.
+    pub fn reclaim_retry(&mut self, peer: &TransportIdentity) {
+        if let Some(entry) = self.retries.get_mut(peer) {
+            entry.claimed = true;
+        }
+    }
+
+    /// Give up a claim without touching WHY it was due. Used when
+    /// admission itself refused the scheduled dial for a reason that
+    /// may already have cleared by the next tick -- a resource ceiling,
+    /// a superseded snapshot -- rather than one retrying can never fix.
+    ///
+    /// `due_at_ms` and `attempts` are left exactly as they were, which
+    /// is the same guarantee [`Self::record_failure`]'s sibling
+    /// invariant makes for every other origin: a denial must not reset
+    /// retry state. The entry is simply eligible for
+    /// [`Self::take_due_retries`] again.
+    pub fn release_retry_claim(&mut self, peer: &TransportIdentity) {
+        if let Some(entry) = self.retries.get_mut(peer) {
+            entry.claimed = false;
+        }
     }
 
     /// Peers awaiting a retry.
     #[must_use]
     pub fn scheduled_retries(&self) -> usize {
         self.retries.len()
+    }
+
+    /// Whether `peer`'s retry has come due, WITHOUT claiming it.
+    ///
+    /// Diagnostic only. [`Self::take_due_retries`] is the only method
+    /// production code may use to decide what to dial next -- this one
+    /// answers "when", not "go", and calling it costs nothing because it
+    /// changes nothing.
+    #[must_use]
+    pub fn is_retry_due(&self, peer: &TransportIdentity, now_ms: u64) -> bool {
+        self.retries
+            .get(peer)
+            .is_some_and(|r| !r.claimed && now_ms >= r.due_at_ms)
     }
 
     /// The delay before this peer is retried, given what it has already
@@ -896,7 +1335,9 @@ impl ConnectionManager {
             .min(CEILING_MS)
     }
 
-    fn schedule_retry(&mut self, peer: TransportIdentity, now_ms: u64, delay: u64) {
+    /// `claimed` carries a claim forward that this failure did not own;
+    /// see [`Self::record_failure`].
+    fn schedule_retry(&mut self, peer: TransportIdentity, now_ms: u64, delay: u64, claimed: bool) {
         let attempts = self.retries.get(&peer).map_or(0, |r| r.attempts);
 
         if !self.retries.contains_key(&peer) && self.retries.len() >= self.max_retry_entries {
@@ -919,6 +1360,7 @@ impl ConnectionManager {
             Retry {
                 due_at_ms: now_ms.saturating_add(delay),
                 attempts: attempts.saturating_add(1),
+                claimed,
             },
         );
     }
@@ -926,7 +1368,6 @@ impl ConnectionManager {
 
 #[cfg(test)]
 mod tests {
-    use crate::connection_policy::DialOrigin;
 
     use super::*;
 
@@ -961,11 +1402,140 @@ mod tests {
     }
 
     fn request(peer_id: &str, address: &str) -> DialRequest {
+        request_at(peer_id, address, DialOrigin::ConnectionManager)
+    }
+
+    /// A request whose ORIGIN matters, since only the scheduler's own
+    /// dials may consume a retry claim.
+    fn request_at(peer_id: &str, address: &str, origin: DialOrigin) -> DialRequest {
         DialRequest {
             peer: Some(peer(peer_id)),
             address: address.to_owned(),
-            origin: DialOrigin::ConnectionManager,
+            origin,
         }
+    }
+
+    #[test]
+    fn a_directly_dialled_address_survives_into_its_own_retry() {
+        // THE PUBLIC `dial(peer, address)` PATH, which is the caller
+        // this function actually has. That API admits an address nobody
+        // learned through Identify, so the book can be empty while a
+        // retry is being scheduled — and `dial_candidates` reads the
+        // book and nothing else. The first tick then found no
+        // candidates, cleared the entry (which REMOVES it, not merely
+        // its claim), and nothing recreates it: one transient refusal
+        // ended reconnection for that peer permanently, and learning the
+        // address afterwards could not restart it.
+        let mut m = manager(4);
+        let p = peer(P1);
+        assert_eq!(
+            m.known_addresses(&p),
+            0,
+            "nothing was learned through Identify — this is the whole case"
+        );
+
+        let ticket = m
+            .handle()
+            .admit(&request(P1, "/ip4/10.0.0.1/tcp/4001"), 0)
+            .expect("a trusted peer is admitted");
+        m.record_failure(ticket, 0);
+
+        assert_eq!(
+            m.known_addresses(&p),
+            1,
+            "the address we just tried is remembered"
+        );
+
+        // ...and the scheduled retry can therefore actually dial. The
+        // backoff has to have elapsed, which is what the retry delay is.
+        let later = 60_000;
+        let due = m.take_due_retries(later, 8);
+        assert_eq!(due, vec![p.clone()], "the peer is due");
+        assert!(
+            !m.dial_candidates(&p, later).is_empty(),
+            "and the tick has something to dial, so the entry is not cleared"
+        );
+    }
+
+    #[test]
+    fn a_handle_that_outlives_its_manager_admits_nothing() {
+        // THE HANDLE IS THE CALLER THIS FUNCTION ACTUALLY HAS. The Swarm
+        // task holds a `SnapshotHandle`, not a manager, and a handle is
+        // `Clone` and `'static` -- so "the manager was dropped while a
+        // handle survived" is not an exotic shape, it is the ordinary
+        // shutdown ordering of a task that outlives the thing that
+        // spawned it.
+        //
+        // `is_current` used to ask whether the CELL was still reachable.
+        // The handle holds a strong `Arc` to that cell to read it, so it
+        // kept its own answer alive: the upgrade succeeded, the revision
+        // still matched the final snapshot, and admission carried on
+        // indefinitely against authorization nothing could revoke.
+        let m = manager(4);
+        let handle = m.handle();
+
+        // Admitted while the manager is alive, so the refusal below is
+        // the drop and not some unrelated denial.
+        assert!(
+            handle
+                .admit(&request(P1, "/ip4/10.0.0.1/tcp/4001"), 0)
+                .is_ok(),
+            "a trusted peer is admitted while the manager exists"
+        );
+
+        drop(m);
+
+        assert!(
+            matches!(
+                handle.admit(&request(P1, "/ip4/10.0.0.1/tcp/4001"), 0),
+                Err(DialDenial::PolicySuperseded)
+            ),
+            "with no manager there is nothing to be current against"
+        );
+        // ...and the same through the documented `load().admit(..)` path,
+        // which is public and bypasses the reload loop entirely.
+        assert!(
+            matches!(
+                handle
+                    .load()
+                    .admit(&request(P1, "/ip4/10.0.0.1/tcp/4001"), 0),
+                Err(DialDenial::PolicySuperseded)
+            ),
+            "a directly loaded snapshot refuses too"
+        );
+    }
+
+    #[test]
+    fn the_liveness_token_is_owned_by_the_manager_alone() {
+        // The contract that makes the test above mean anything: if any
+        // handle, snapshot, or ticket ever held a STRONG reference to
+        // the token, dropping the manager would no longer drop it and
+        // the fail-closed answer would quietly stop arriving. Counting
+        // is what notices a clone someone adds later, where the
+        // behavioural test above would keep passing until the very
+        // reference that broke it happened to be the last one.
+        let m = manager(4);
+        let handle = m.handle();
+        let snapshot = handle.load();
+        let ticket = handle
+            .admit(&request(P1, "/ip4/10.0.0.1/tcp/4001"), 0)
+            .expect("trusted");
+
+        assert_eq!(
+            Arc::strong_count(&m.alive),
+            1,
+            "exactly one strong reference, and it is the manager's"
+        );
+
+        drop(ticket);
+        drop(snapshot);
+        drop(handle);
+        assert_eq!(
+            Arc::strong_count(&m.alive),
+            1,
+            "and dropping every other holder changed nothing, because \
+             none of them held one"
+        );
     }
 
     #[test]
@@ -1026,6 +1596,376 @@ mod tests {
     }
 
     #[test]
+    fn a_claimed_retry_is_not_offered_twice() {
+        // Consequence 1 of the finding: a slow dial still pending when
+        // the next tick fires must not be started again. The old
+        // read-only `due_retries` returned the same entry every call;
+        // `take_due_retries` must not.
+        let mut m = manager(8);
+        let t = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 0)
+            .expect("admitted");
+        m.record_failure(t, 0);
+
+        let due = 30_000;
+        let first = m.take_due_retries(due, 8);
+        assert_eq!(first, vec![peer(P1)]);
+        let second = m.take_due_retries(due, 8);
+        assert!(second.is_empty(), "already claimed; not offered again");
+    }
+
+    /// A manual dial failing does not hand back a claim it never took.
+    ///
+    /// `schedule_retry` rewrote the entry with `claimed: false`, which
+    /// is how the SCHEDULER gives its claim back and wrong for every
+    /// other origin. With a scheduler dial still in flight, a manual
+    /// dial to a second address failing transiently made the entry due
+    /// again, and the next tick started the duplicate that claiming
+    /// exists to prevent.
+    #[test]
+    fn a_manual_failure_does_not_release_the_schedulers_claim() {
+        let mut m = manager(8);
+        let seed = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 0)
+            .expect("admitted");
+        m.record_failure(seed, 0);
+
+        // The scheduler takes the claim and its dial is still in flight.
+        assert_eq!(m.take_due_retries(30_000, 8), vec![peer(P1)]);
+
+        // A MANUAL dial to a different address fails transiently while
+        // that one is pending. Past the backoff so it is admitted on its
+        // own merit rather than refused before reaching the code here.
+        let manual = m
+            .handle()
+            .admit(&request_at(P1, "/b", DialOrigin::Manual), 31_000)
+            .expect("admitted");
+        m.record_failure(manual, 31_000);
+
+        assert!(
+            m.take_due_retries(300_000, 8).is_empty(),
+            "the scheduler's dial is still in flight: no duplicate"
+        );
+    }
+
+    /// The other direction: the SCHEDULER's own failure still returns
+    /// the claim, or a peer whose dial failed would never be retried.
+    #[test]
+    fn the_schedulers_own_failure_gives_the_claim_back() {
+        let mut m = manager(8);
+        let seed = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 0)
+            .expect("admitted");
+        m.record_failure(seed, 0);
+        assert_eq!(m.take_due_retries(30_000, 8), vec![peer(P1)]);
+
+        let claimed = m
+            .handle()
+            .load()
+            .admit(&request_at(P1, "/a", DialOrigin::ConnectionManager), 30_000)
+            .expect("admitted");
+        m.record_failure(claimed, 30_000);
+
+        assert_eq!(
+            m.take_due_retries(300_000, 8),
+            vec![peer(P1)],
+            "its own failure releases the claim, so the peer is retried"
+        );
+    }
+
+    #[test]
+    fn a_transient_failure_reschedules_and_keeps_attempts() {
+        // The backoff cadence depends on `attempts` surviving the claim.
+        // A design that forgot the entry on claim would reset every
+        // rescheduled peer to the base delay forever.
+        let mut m = manager(8);
+        let t = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 0)
+            .expect("admitted");
+        m.record_failure(t, 0);
+        let claimed = m.take_due_retries(30_000, 8);
+        assert_eq!(claimed, vec![peer(P1)]);
+
+        let t2 = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 30_000)
+            .expect("a claimed peer can still be dialed directly");
+        m.record_failure(t2, 30_000);
+        // Second failure: attempts=2, so the delay is 60s (30s * 2^1),
+        // not the base 30s a reset counter would produce.
+        assert!(
+            !m.is_retry_due(&peer(P1), 30_000 + 30_000),
+            "the second failure must not be due after only the base delay"
+        );
+        assert!(m.is_retry_due(&peer(P1), 30_000 + 60_000));
+    }
+
+    #[test]
+    fn a_permanent_failure_forgets_the_address_not_the_peers_schedule() {
+        // The retry entry is PEER-scoped; a permanent dial failure is
+        // ADDRESS-scoped. Removing the peer's whole entry meant a manual
+        // dial to one unusable address cancelled the scheduled reconnect
+        // that would have tried a good one still in the book.
+        let mut m = manager(8);
+        let good = "/ip4/10.0.0.1/tcp/1";
+        let unusable = "/ip4/10.0.0.2/tcp/1";
+        assert!(m.learn_address(&peer(P1), good, 0));
+        assert!(m.learn_address(&peer(P1), unusable, 0));
+
+        // A transient failure on the good address schedules a retry.
+        let t = m
+            .handle()
+            .admit(&request_at(P1, good, DialOrigin::Manual), 0)
+            .expect("admitted");
+        m.record_failure(t, 0);
+        assert_eq!(m.scheduled_retries(), 1);
+
+        // A MANUAL dial to the unusable address then fails permanently.
+        // It owns no scheduler claim, so it must not touch the schedule.
+        let t2 = m
+            .handle()
+            .admit(&request_at(P1, unusable, DialOrigin::Manual), 30_000)
+            .expect("admitted");
+        m.record_permanent_failure(t2, 30_000);
+
+        assert_eq!(
+            m.scheduled_retries(),
+            1,
+            "a manual dial's permanent failure must not cancel the peer's reconnect"
+        );
+        let candidates = m.dial_candidates(&peer(P1), 60_000);
+        assert!(
+            candidates.iter().any(|a| a == good),
+            "the good address survives: {candidates:?}"
+        );
+        assert!(
+            !candidates.iter().any(|a| a == unusable),
+            "and the unusable one is forgotten: {candidates:?}"
+        );
+    }
+
+    #[test]
+    fn a_claimed_permanent_failure_releases_rather_than_strands_the_claim() {
+        // A scheduled attempt that ends permanently must give the claim
+        // back so the peer's OTHER addresses are tried. Removing the
+        // entry would abandon them; leaving it claimed would strand it.
+        let mut m = manager(8);
+        let good = "/ip4/10.0.0.1/tcp/1";
+        let unusable = "/ip4/10.0.0.2/tcp/1";
+        assert!(m.learn_address(&peer(P1), good, 0));
+        assert!(m.learn_address(&peer(P1), unusable, 0));
+
+        let t = m
+            .handle()
+            .admit(&request_at(P1, good, DialOrigin::Manual), 0)
+            .expect("admitted");
+        m.record_failure(t, 0);
+        assert_eq!(m.take_due_retries(30_000, 8), vec![peer(P1)]);
+
+        let claimed = m
+            .handle()
+            .admit(
+                &request_at(P1, unusable, DialOrigin::ConnectionManager),
+                30_000,
+            )
+            .expect("admitted");
+        m.record_permanent_failure(claimed, 30_000);
+
+        assert_eq!(
+            m.take_due_retries(30_000, 8),
+            vec![peer(P1)],
+            "the claim came back, so the good address gets its turn"
+        );
+    }
+
+    #[test]
+    fn a_claimed_attempt_ending_in_a_mismatch_gives_the_claim_back() {
+        // Nothing released the claim on this path, so a scheduled retry
+        // answered by the wrong key left the entry claimed forever:
+        // never selected again, still occupying retry-table capacity,
+        // and the peer's good addresses never tried.
+        let mut m = manager(8);
+        let t = m
+            .handle()
+            .admit(&request_at(P1, "/a", DialOrigin::Manual), 0)
+            .expect("admitted");
+        m.record_failure(t, 0);
+        assert_eq!(m.take_due_retries(30_000, 8), vec![peer(P1)]);
+
+        let claimed = m
+            .handle()
+            .admit(&request_at(P1, "/b", DialOrigin::ConnectionManager), 30_000)
+            .expect("admitted");
+        let _ = m.record_identity_mismatch(claimed, 30_000);
+
+        assert_eq!(
+            m.take_due_retries(30_000, 8),
+            vec![peer(P1)],
+            "an address-scoped quarantine releases the claim rather than stranding it"
+        );
+    }
+
+    #[test]
+    fn a_claimed_attempt_losing_authorization_clears_the_claim() {
+        // Unlike a quarantine, this is not a fact about one route:
+        // there is nothing for a later tick to try, so the entry goes
+        // rather than being released -- but it must not be left claimed
+        // either, which is what stranded it.
+        let mut m = manager(8);
+        let t = m
+            .handle()
+            .admit(&request_at(P1, "/a", DialOrigin::Manual), 0)
+            .expect("admitted");
+        m.record_failure(t, 0);
+        assert_eq!(m.take_due_retries(30_000, 8), vec![peer(P1)]);
+
+        let claimed = m
+            .handle()
+            .admit(&request_at(P1, "/a", DialOrigin::ConnectionManager), 30_000)
+            .expect("admitted");
+        m.record_authorization_withdrawn(claimed, 30_000);
+
+        assert_eq!(m.scheduled_retries(), 0, "the entry is gone, not stranded");
+    }
+
+    #[test]
+    fn a_later_candidate_starting_takes_the_claim_back() {
+        // A scheduled retry with several addresses can have an early
+        // one fail SYNCHRONOUSLY -- an address this profile cannot dial
+        // at all -- which settles that ticket and releases the claim
+        // while the same tick goes on to start a later candidate. The
+        // peer would then have a dial in flight AND an unclaimed,
+        // already-due entry, so the next tick dials it again: the
+        // duplicate concurrent retry claiming exists to prevent,
+        // reached through the one path that settles mid-loop.
+        let mut m = manager(8);
+        let unusable = "/ip4/10.0.0.2/tcp/1";
+        let good = "/ip4/10.0.0.1/tcp/1";
+        assert!(m.learn_address(&peer(P1), unusable, 0));
+        assert!(m.learn_address(&peer(P1), good, 0));
+
+        let t = m
+            .handle()
+            .admit(&request_at(P1, good, DialOrigin::Manual), 0)
+            .expect("admitted");
+        m.record_failure(t, 0);
+        assert_eq!(m.take_due_retries(30_000, 8), vec![peer(P1)]);
+
+        // The tick's first candidate fails synchronously and releases.
+        let first = m
+            .handle()
+            .admit(
+                &request_at(P1, unusable, DialOrigin::ConnectionManager),
+                30_000,
+            )
+            .expect("admitted");
+        m.record_permanent_failure(first, 30_000);
+        assert_eq!(
+            m.take_due_retries(30_000, 8),
+            vec![peer(P1)],
+            "released, as the mid-loop settle requires"
+        );
+        // Put it back as the loop found it, then start a later one.
+        m.release_retry_claim(&peer(P1));
+        let _second = m
+            .handle()
+            .admit(&request_at(P1, good, DialOrigin::ConnectionManager), 30_000)
+            .expect("admitted");
+        m.reclaim_retry(&peer(P1));
+
+        assert!(
+            m.take_due_retries(30_000, 8).is_empty(),
+            "a dial is in flight, so the next tick must not start another"
+        );
+    }
+
+    #[test]
+    fn a_manual_dial_never_consumes_the_schedulers_claim() {
+        // THE OWNERSHIP CHECK ITSELF. The three tests above all settle
+        // tickets whose origin already matches, so each would pass with
+        // `owns_scheduler_claim` hardcoded true -- which is finding B
+        // exactly: a manual dial reaching into peer-scoped retry state
+        // it does not own.
+        //
+        // `record_authorization_withdrawn` is the one that CLEARS, so it
+        // is where borrowing another origin's claim actually destroys
+        // something: a manual dial losing authorization mid-handshake
+        // would cancel a reconnect scheduled by the scheduler for a
+        // completely different address.
+        let mut m = manager(8);
+        let t = m
+            .handle()
+            .admit(&request_at(P1, "/a", DialOrigin::Manual), 0)
+            .expect("admitted");
+        m.record_failure(t, 0);
+        assert_eq!(m.scheduled_retries(), 1, "the scheduler has an entry");
+
+        // PAST THE BACKOFF the failure above imposed, so this dial is
+        // admitted on its merits rather than refused before it can
+        // reach the code under test.
+        let manual = m
+            .handle()
+            .admit(&request_at(P1, "/b", DialOrigin::Manual), 31_000)
+            .expect("admitted");
+        m.record_authorization_withdrawn(manual, 31_000);
+
+        assert_eq!(
+            m.scheduled_retries(),
+            1,
+            "a manual dial must not cancel a schedule it does not own"
+        );
+    }
+
+    #[test]
+    fn a_claim_with_nothing_to_dial_is_cleared() {
+        // A peer with no candidate address gains nothing from being
+        // reconsidered a moment later -- the finding's starvation case.
+        let mut m = manager(8);
+        let t = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 0)
+            .expect("admitted");
+        m.record_failure(t, 0);
+        assert_eq!(m.take_due_retries(30_000, 8), vec![peer(P1)]);
+
+        m.clear_retry_claim(&peer(P1));
+        assert_eq!(m.scheduled_retries(), 0);
+        assert!(m.take_due_retries(60_000, 8).is_empty());
+    }
+
+    #[test]
+    fn a_claim_denied_by_a_recoverable_reason_is_released_unchanged() {
+        // "A denied dial must not reset retry state" -- released, not
+        // rescheduled, so the peer is offered again on the very next
+        // tick rather than waiting out a fresh backoff it did not earn.
+        let mut m = manager(8);
+        let t = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 0)
+            .expect("admitted");
+        m.record_failure(t, 0);
+        assert_eq!(m.take_due_retries(30_000, 8), vec![peer(P1)]);
+
+        m.release_retry_claim(&peer(P1));
+        assert_eq!(
+            m.take_due_retries(30_000, 8),
+            vec![peer(P1)],
+            "released at the same due time, reclaimable immediately"
+        );
+    }
+
+    #[test]
     fn a_denied_dial_cannot_advance_or_reset_retry_state() {
         // ADR-0011: "a denied dial must not silently reset
         // ConnectionManager retry state." Expressed structurally rather
@@ -1042,8 +1982,7 @@ mod tests {
             .expect("admitted");
         m.record_failure(t, 0);
         assert_eq!(m.scheduled_retries(), 1);
-        let after_first = m.due_retries(0);
-        assert!(after_first.is_empty(), "not due yet");
+        assert!(!m.is_retry_due(&p, 0), "not due yet");
 
         // A behaviour-originated dial for the same peer is now refused
         // by backoff. The refusal must leave the schedule exactly as it
@@ -1060,7 +1999,7 @@ mod tests {
         assert!(denied.is_err(), "backoff refuses it");
         assert_eq!(m.scheduled_retries(), 1, "the schedule is untouched");
         assert_eq!(m.revision(), before, "and nothing was republished");
-        assert!(m.due_retries(1_000).is_empty(), "and it is still not due");
+        assert!(!m.is_retry_due(&p, 1_000), "and it is still not due");
     }
 
     #[test]
@@ -1083,11 +2022,10 @@ mod tests {
             let due_before = m.scheduled_retries();
             m.record_failure(t, now);
             assert!(m.scheduled_retries() >= due_before);
-            let next = m.due_retries(u64::MAX);
-            assert_eq!(next, vec![peer(P1)]);
+            assert!(m.is_retry_due(&peer(P1), u64::MAX));
             // Advance to exactly when it becomes due and note the gap.
             let mut probe = now;
-            while m.due_retries(probe).is_empty() {
+            while !m.is_retry_due(&peer(P1), probe) {
                 probe += 1_000;
             }
             delays.push(probe - now);
@@ -1224,6 +2162,57 @@ mod tests {
     }
 
     #[test]
+    fn currency_is_read_from_the_same_cell_the_snapshot_came_from() {
+        // The atomicity this rests on, asserted as a property rather
+        // than by trying to observe a window that no longer exists.
+        //
+        // The predecessor kept the current revision in a SECOND shared
+        // value, written after the new snapshot was installed. Between
+        // those two writes an old snapshot's own revision still equalled
+        // the not-yet-updated value, so it read as current and decided
+        // against policy already superseded. There is now one write and
+        // one place to read: whatever the published cell holds IS the
+        // answer, so "installed" and "current" cannot disagree because
+        // they are the same fact.
+        //
+        // Observable consequence: for ANY snapshot, currency is exactly
+        // "is this the Arc the cell holds", checkable from outside by
+        // comparing revisions -- and no sequence of publishes can
+        // produce a moment where an older snapshot answers otherwise,
+        // because there is no intermediate state to catch it in.
+        let mut m = manager(8);
+        let handle = m.handle();
+
+        let mut held = Vec::new();
+        for _ in 0..4 {
+            held.push(handle.load());
+            let ticket = m.handle().admit(&request(P1, "/a"), 0).expect("admitted");
+            drop(m.record_success(ticket, 0));
+        }
+        let newest = handle.load();
+
+        // Every snapshot taken before the latest publish refuses, and
+        // the one the cell currently holds admits -- with no ordering
+        // of the publishes in between able to change either answer.
+        for (age, stale) in held.iter().enumerate() {
+            assert!(
+                stale.revision() < newest.revision(),
+                "snapshot {age} should predate the newest"
+            );
+            assert_eq!(
+                stale.admit(&request(P2, "/b"), 0).err(),
+                Some(DialDenial::PolicySuperseded),
+                "snapshot {age} is not the published one and must not decide"
+            );
+        }
+        drop(
+            newest
+                .admit(&request(P2, "/b"), 0)
+                .expect("the snapshot the cell holds is the one that decides"),
+        );
+    }
+
+    #[test]
     fn a_publication_during_admission_is_not_outrun() {
         // THE WINDOW BETWEEN THE CHECK AND THE DECISION. The freshness
         // test happens before the policy read and the two reservations;
@@ -1283,11 +2272,10 @@ mod tests {
     }
 
     fn trusting(data_plane: &[&str], infrastructure: &[&str]) -> TrustSources {
-        TrustSources {
-            peers: PeerTrustPolicy::new(data_plane.iter().map(|p| peer(p))).expect("small"),
-            infrastructure: InfrastructureSet::new(infrastructure.iter().map(|p| peer(p)))
-                .expect("small"),
-        }
+        TrustSources::new(
+            PeerTrustPolicy::new(data_plane.iter().map(|p| peer(p))).expect("small"),
+            InfrastructureSet::new(infrastructure.iter().map(|p| peer(p))).expect("small"),
+        )
     }
 
     #[test]
@@ -1303,6 +2291,55 @@ mod tests {
             m.handle().admit(&request(P1, "/a"), 0).err(),
             Some(DialDenial::Unauthorized),
             "an unclassified peer is not dialable"
+        );
+    }
+
+    #[test]
+    fn the_local_identity_is_never_classified_as_a_remote_peer() {
+        // A configuration that lists this profile's own PeerId is a
+        // mistake -- a copied allowlist, a template filled in wrong --
+        // and classifying it as an ordinary trusted remote would let
+        // self-directed admission, retries and address-book entries all
+        // proceed for a peer that cannot be dialed.
+        let mut m = untrusting(8);
+        m.bind_local_peer(peer(P1));
+        // P1 is listed in BOTH sets, as emphatically as a configuration
+        // can say it.
+        let _ = m.set_trust(trusting(&[P1, P2], &[P1]), &[]);
+
+        assert_eq!(
+            m.classify(&peer(P1)),
+            ConnectionClass::Unauthorized,
+            "the local identity outranks anything the configuration says"
+        );
+        assert_eq!(
+            m.classify(&peer(P2)),
+            ConnectionClass::DataPlaneTrusted,
+            "and other peers are unaffected"
+        );
+        assert_eq!(
+            m.handle().admit(&request(P1, "/a"), 0).err(),
+            Some(DialDenial::Unauthorized),
+            "so a self-dial is refused rather than admitted"
+        );
+    }
+
+    #[test]
+    fn a_later_trust_change_cannot_unbind_the_local_identity() {
+        // The binding has to survive every update, not merely the
+        // first: a caller supplies the two sets and cannot name the
+        // local peer, so a subsequent set_trust must not drop it by
+        // omission.
+        let mut m = untrusting(8);
+        m.bind_local_peer(peer(P1));
+        let _ = m.set_trust(trusting(&[P1], &[]), &[]);
+        assert_eq!(m.classify(&peer(P1)), ConnectionClass::Unauthorized);
+
+        let _ = m.set_trust(trusting(&[P1, P2], &[]), &[]);
+        assert_eq!(
+            m.classify(&peer(P1)),
+            ConnectionClass::Unauthorized,
+            "still the local identity after a second trust change"
         );
     }
 
@@ -1456,19 +2493,80 @@ mod tests {
     }
 
     #[test]
-    fn inbound_is_judged_by_the_same_authorization_as_outbound() {
-        // ADR-0011: current authorization applies before an inbound
-        // data-plane connection is RETAINED. Arriving is not an
+    fn withdrawn_authorization_settles_without_scheduling_anything() {
+        // The window this closes: admission photographed trust at ONE
+        // instant, and the handshake can outlast it. Recording the
+        // outcome as an ordinary success would retain a connection
+        // under authority that no longer exists; recording it as an
+        // ordinary failure would schedule a retry for a peer this
+        // profile no longer trusts, which is the same mistake reached
+        // from the other direction.
+        let mut m = manager(8);
+        let t = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 0)
+            .expect("admitted");
+        assert_eq!(m.connections(), 1, "the connection slot was reserved");
+
+        m.record_authorization_withdrawn(t, 0);
+        assert_eq!(m.connections(), 0, "settled, the slot came back");
+        assert_eq!(
+            m.scheduled_retries(),
+            0,
+            "authorization withdrawn is not a failure the peer earned a retry for"
+        );
+    }
+
+    #[test]
+    fn an_infrastructure_peer_keeps_a_reachability_connection_and_loses_a_data_plane_one() {
+        // ADR-0036's separation is an origin/class PAIR, and
+        // `ConnectionPolicy::admit` has always decided it that way --
+        // `tests/transport-contract/tests/stage2_exit_gate.rs` pins
+        // every combination. Revalidating an established connection
+        // with the data-plane-only predicate ignored the pair, so a
+        // relay reservation, relay circuit, AutoNAT probe or DCUtR hole
+        // punch to an infrastructure peer completed its handshake and
+        // was closed immediately -- admission permitted it and
+        // establishment threw it away.
+        let mut m = untrusting(8);
+        let _ = m.set_trust(trusting(&[], &[P1]), &[]);
+        let class = m.classify(&peer(P1));
+        assert_eq!(class, ConnectionClass::ConnectivityInfrastructureOnly);
+
+        for origin in DialOrigin::ALL {
+            let kept = m.authorizes_for(class, origin);
+            assert_eq!(
+                kept,
+                !origin.is_data_plane(),
+                "{origin:?} on an infrastructure peer: kept must match what admission permits"
+            );
+        }
+
+        // A drain still refuses everything, whatever the origin.
+        m.begin_shutdown();
+        for origin in DialOrigin::ALL {
+            assert!(
+                !m.authorizes_for(class, origin),
+                "{origin:?} must not survive a drain"
+            );
+        }
+    }
+
+    #[test]
+    fn a_connection_is_judged_by_the_same_authorization_whichever_way_it_started() {
+        // ADR-0011: current authorization applies before a connection
+        // is RETAINED, inbound or outbound. Arriving is not an
         // authorization, and an infrastructure peer authorized for
         // reachability is not thereby a data-plane peer.
         let mut m = manager(8);
-        assert!(m.retain_inbound(ConnectionClass::DataPlaneTrusted));
-        assert!(!m.retain_inbound(ConnectionClass::ConnectivityInfrastructureOnly));
-        assert!(!m.retain_inbound(ConnectionClass::Unauthorized));
+        assert!(m.authorizes(ConnectionClass::DataPlaneTrusted));
+        assert!(!m.authorizes(ConnectionClass::ConnectivityInfrastructureOnly));
+        assert!(!m.authorizes(ConnectionClass::Unauthorized));
 
         m.begin_shutdown();
         assert!(
-            !m.retain_inbound(ConnectionClass::DataPlaneTrusted),
+            !m.authorizes(ConnectionClass::DataPlaneTrusted),
             "a draining runtime keeps nothing new"
         );
     }
@@ -1493,10 +2591,10 @@ mod tests {
         // Trusted first, because the gate classifies now and an
         // unauthorized peer never reaches the retry table at all.
         let _ = m.set_trust(
-            TrustSources {
-                peers: PeerTrustPolicy::new(generated.iter().map(|p| peer(p))).expect("small"),
-                infrastructure: InfrastructureSet::default(),
-            },
+            TrustSources::new(
+                PeerTrustPolicy::new(generated.iter().map(|p| peer(p))).expect("small"),
+                InfrastructureSet::default(),
+            ),
             &[],
         );
         for (i, p) in (0..8u32).zip(generated.iter()) {
