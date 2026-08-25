@@ -130,8 +130,26 @@ if [[ "$1" == "api" && "$*" == *"/issues/"* && "$*" == *"/comments"* ]]; then
       printf '{"user":{"login":"%s"},"created_at":"%s","body":"Codex Review: no major issues. **Reviewed commit:** `%s`"}' \
         "$login" "$at" "$sha"
     done < "$S/verdicts" 2>/dev/null
+    # `@codex review` asks land in the SAME stream, which is the whole
+    # reason the script can see them: they are not review requests.
+    # state/asks holds <login>,<created_at> per line.
+    while IFS=, read -r login at; do
+      [[ -z "$login" ]] && continue
+      (( first )) || printf ','
+      first=0
+      printf '{"user":{"login":"%s"},"created_at":"%s","body":"@codex review please"}' \
+        "$login" "$at"
+    done < "$S/asks" 2>/dev/null
     printf ']\n'
   }
+  exit 0
+fi
+
+# gh api repos/o/r/commits/<sha> — when the head was born, which is how
+# an ask is told from an answer.
+if [[ "$1" == "api" && "$*" == *"/commits/"* ]]; then
+  if [[ -f "$S/head_born_fail" ]]; then exit 1; fi
+  printf '%s\n' "$(cat "$S/head_born" 2>/dev/null || echo '2026-08-07T09:00:00Z')"
   exit 0
 fi
 
@@ -176,6 +194,12 @@ run() {
     # Empty by default: most cases predate verdict comments and must go
     # on meaning what they meant.
     : > "$SANDBOX/state/verdicts"
+    # Same for `@codex review` asks. The default head_born sits BEFORE
+    # every timestamp these cases use, so an ask written by a case is an
+    # ask about the current head unless the case says otherwise.
+    : > "$SANDBOX/state/asks"
+    rm -f "$SANDBOX/state/head_born_fail"
+    printf '2026-08-07T09:00:00Z\n' > "$SANDBOX/state/head_born"
     shift 2
     RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
         timeout 20 bash "$UNDER_TEST" 77 o/r "$@" 2>&1)"
@@ -192,6 +216,21 @@ run_v() {
     printf '%s\n' "$verdicts" > "$SANDBOX/state/verdicts"
     RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
         timeout 20 bash "$UNDER_TEST" 77 o/r "${@:4}" 2>&1)"
+    RUN_RC=$?
+    (( RUN_RC == 124 )) && RUN_OUT="TIMED OUT — the run did not return"$'\n'"$RUN_OUT"
+}
+
+# Same as `run`, plus `@codex review` asks ("<login>,<created_at>" per
+# line) and the head's commit date. Separate rather than more positionals
+# so every existing call keeps its meaning unchanged.
+run_ask() {
+    local asks="$3" born="$4"
+    run "$1" "$2" "${@:5}"
+    : > "$SANDBOX/state/n"
+    printf '%s\n' "$asks" > "$SANDBOX/state/asks"
+    printf '%s\n' "$born" > "$SANDBOX/state/head_born"
+    RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
+        timeout 20 bash "$UNDER_TEST" 77 o/r "${@:5}" 2>&1)"
     RUN_RC=$?
     (( RUN_RC == 124 )) && RUN_OUT="TIMED OUT — the run did not return"$'\n'"$RUN_OUT"
 }
@@ -465,6 +504,60 @@ assert_rc "a pending RECOGNISED request does suppress it" 1
 
 run "OPEN:newhead:a-human" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z"
 assert_rc "and without the flag a human request still suppresses it" 1
+
+echo "pr-review-status: an @codex review in flight is not 'nothing is coming'"
+# THE DEFECT §9 DOCUMENTED INSTEAD OF FIXING. `@codex review` is how a
+# review is asked for here and it is NOT a GitHub review request, so
+# `reviewRequests` stays empty and the stale-review branch fired
+# NO REVIEW COMING seconds after the ask. §9 tells a session to request a
+# review and then wait — so the tool answered "waiting cannot help"
+# about the exact sequence §9 prescribes.
+#
+# Head born 09:00, review of an OLD commit at 10:00, ask at 11:00.
+run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
+        "me,2026-08-07T11:00:00Z" "2026-08-07T09:00:00Z"
+assert_rc       "an ask after this head was pushed suppresses exit 5" 1
+assert_contains "  and the report names it"      "@codex review asked"
+assert_contains "  who asked, not just when"     "by me"
+assert_contains "  and that it is outstanding"   "in flight"
+
+# An ask made BEFORE this head existed asked about the PREVIOUS one.
+# Without the head's own commit date this could only be compared against
+# the newest review, and a review of an earlier commit landing after a
+# newer push reads as the answer to an ask it never saw.
+run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
+        "me,2026-08-07T08:00:00Z" "2026-08-07T09:00:00Z"
+assert_rc "an ask older than the head does not suppress it" 5
+
+# The other direction, which requiring a head-matching review would
+# break: asked, reviewed, then pushed again WITHOUT asking. No review can
+# ever match the new head, so a naive "is there a review for this head"
+# test would keep the ask pending forever and exit 5 could never fire.
+run_ask "OPEN:thirdhead:0" "chatgpt-codex-connector,secondhead,2026-08-07T11:30:00Z" \
+        "me,2026-08-07T11:00:00Z" "2026-08-07T12:00:00Z"
+assert_rc "a push after the ask lets exit 5 fire again" 5
+
+echo "pr-review-status: an unreadable head date waits rather than concluding"
+# The fallback direction matters: unreadable must mean PENDING. Guessing
+# "answered" turns a lookup failure into a confident "nothing is coming"
+# about a review that is on its way.
+run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
+        "me,2026-08-07T08:00:00Z" "2026-08-07T09:00:00Z"
+: > "$SANDBOX/state/n"
+touch "$SANDBOX/state/head_born_fail"
+RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
+    timeout 20 bash "$UNDER_TEST" 77 o/r 2>&1)"; RUN_RC=$?
+rm -f "$SANDBOX/state/head_born_fail"
+assert_rc "an unreadable head date keeps the ask pending" 1
+
+echo "pr-review-status: a covered head does not report an unanswered ask"
+# Decides no exit — head_reviewed wins first — but a line reading
+# "nothing has answered it yet" beside "head reviewed? yes" is false.
+run_ask "OPEN:abc123:0" "chatgpt-codex-connector,abc123,2026-08-07T10:00:00Z" \
+        "me,2026-08-07T11:00:00Z" "2026-08-07T09:00:00Z"
+assert_rc       "the head is covered" 0
+assert_contains "  and the ask reads as answered" "already answered"
+assert_lacks    "  not as outstanding"            "in flight"
 
 echo "pr-review-status: --help documents the flag §9 now requires"
 RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" bash "$UNDER_TEST" --help 2>&1)"; RUN_RC=$?

@@ -215,6 +215,9 @@ VERDICT_AUTHORS="${INTERWEAVE_VERDICT_AUTHORS:-[\"chatgpt-codex-connector\",\"ch
 probe_ok=0
 verdicts='[]'
 verdict_count=0
+request_at=""
+request_by=""
+request_pending=no
 probe() {
     local meta reviews
     meta="$(gh pr view "$PR" --repo "$REPO" \
@@ -314,6 +317,39 @@ probe() {
         ]' <<<"$comments" 2>/dev/null)" || verdicts='[]'
     verdict_count="$(jq 'length' <<<"$verdicts")"
 
+    # A PENDING ASK, read from the same comment stream.
+    #
+    # `@codex review` is how a review is requested here, and it is NOT a
+    # GitHub review *request* -- `reviewRequests` stays empty -- so
+    # `requested == 0` held while one was genuinely in flight and the
+    # stale-review branch fired NO REVIEW COMING seconds after the ask.
+    # That broke the exact sequence §9 prescribes for a security-boundary
+    # change: request a review, then wait for it. §9 documented the wart
+    # instead of fixing it, which left its own instruction unusable.
+    #
+    # NO ALLOW-LIST here, and the asymmetry from the verdict filter is
+    # deliberate. Two reasons, and the second is the stronger one:
+    #
+    #   * this signal can only turn 5 ("nothing is coming") into 1 ("not
+    #     yet"). It never marks a head reviewed, so a forged ask cannot
+    #     arm a merge -- the worst it does is make the tool wait out the
+    #     --wait the caller chose, and then exit 1.
+    #   * there is no correct list to check it against. The ask comes
+    #     from whoever is shepherding the PR, not from the reviewer, so
+    #     VERDICT_AUTHORS is the wrong set; "the PR author" would reject
+    #     a legitimate ask from anyone else. A filter with no right
+    #     answer fails closed on real asks, which is the failure that
+    #     costs something.
+    #
+    # The report names WHO asked, so a stray ask is visible rather than
+    # merely effective.
+    local asks
+    asks="$(jq '[ .[] | select((.body // "") | test("@codex[[:space:]]+review"; "i"))
+                 | {at: .created_at, by: .user.login} ] | sort_by(.at)' \
+             <<<"$comments" 2>/dev/null)" || asks='[]'
+    request_at="$(jq -r 'last.at // ""' <<<"$asks")"
+    request_by="$(jq -r 'last.by // ""' <<<"$asks")"
+
     head_reviewed=no
     recognised_covers=no
     newest_ind_commit=""
@@ -349,6 +385,42 @@ probe() {
             head_reviewed=yes
         fi
     fi
+    # IS THAT ASK STILL OUTSTANDING? Timestamps alone get this wrong in
+    # both directions.
+    #
+    # Comparing the ask against the newest REVIEW fails when a review of
+    # an earlier commit lands after a newer head was pushed and asked
+    # about: it reads as the answer, and exit 5 fires while the real
+    # review is still in flight. That is recency mistaken for coverage,
+    # the same confusion the head-reviewed test already avoids.
+    #
+    # Requiring a HEAD-MATCHING review to answer the ask -- the obvious
+    # repair -- breaks the other direction: asked, reviewed, then pushed
+    # again without asking. No review can ever match the new head, so the
+    # ask stays pending forever and exit 5 could never fire, which is the
+    # one thing it exists to say.
+    #
+    # The HEAD's OWN COMMIT DATE separates them cleanly: an ask made
+    # after this head existed is an ask about this head. Fetched only
+    # when there is an ask, so the common path keeps its three calls.
+    request_pending=no
+    if [[ -n "$request_at" ]]; then
+        local head_born
+        head_born="$(gh api "repos/$REPO/commits/$head" \
+            --jq '.commit.committer.date' 2>/dev/null)" || head_born=""
+        # Unreadable falls back to PENDING, which costs a longer wait and
+        # never a false "nothing is coming".
+        if [[ -z "$head_born" || "$request_at" > "$head_born" ]]; then
+            request_pending=yes
+        fi
+        # The review it asked for answers it. No exit path reaches here
+        # with a covered head -- head_reviewed wins first -- so this
+        # decides nothing; it stops the REPORT printing "nothing has
+        # answered it yet" beside "head reviewed? yes", which is simply
+        # false.
+        [[ "$head_reviewed" == "yes" ]] && request_pending=no
+    fi
+
     # Only a COMPLETE probe counts. A probe that read the PR metadata and
     # then failed on reviews leaves head set but the review globals unset,
     # and the fall-out path below must not mistake that for readable data
@@ -372,7 +444,8 @@ no_review_coming() {
     # first review still on its way.
     [[ "$head_reviewed" == "no" ]] \
         && (( qual_count + verdict_count > 0 )) \
-        && (( requested == 0 ))
+        && (( requested == 0 )) \
+        && [[ "$request_pending" != "yes" ]]
 }
 
 # ── The full report, rendered once ───────────────────────────────────
@@ -420,6 +493,15 @@ render() {
     fi
     printf '  self reviews        : %s   (thread replies etc. — not coverage)\n' "$self_count"
     printf '  review requested?   : %s\n' "$( (( requested > 0 )) && echo yes || echo no )"
+    if [[ -n "$request_at" ]]; then
+        # WHO asked is reported, not just when. `@codex review` is not
+        # allow-listed, so on a public repository the login is what
+        # separates the ask this session made from one it did not.
+        printf '  @codex review asked : %s  by %s%s\n' "$request_at" "$request_by" \
+            "$( [[ "$request_pending" == "yes" ]] \
+                  && echo '   (in flight — nothing has answered it yet)' \
+                  || echo '   (already answered)' )"
+    fi
     printf '  head reviewed?      : %s%s\n' "$head_reviewed" \
         "$( (( AUTOMATED_ONLY )) && echo '   (--automated-only: the recognised reviewer, not just anyone)' )"
 
