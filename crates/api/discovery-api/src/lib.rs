@@ -164,10 +164,15 @@ impl ProtocolId {
 
 impl<'de> Deserialize<'de> for ProtocolId {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        // The wire path goes through the same parse. A derived
-        // `Deserialize` on the inner `String` is exactly how a validated
-        // type ends up more permissive than the boundary it names.
-        Self::parse(String::deserialize(d)?).map_err(serde::de::Error::custom)
+        // BOUNDED IN THE VISITOR, then parsed. `String::deserialize`
+        // here materialised the whole token before `parse` could refuse
+        // it, so a single enormous `protocol_id` allocated in full --
+        // the streaming array visitor above capped the number of
+        // elements and nothing capped one element. The derived path is
+        // exactly how a validated type ends up more permissive than the
+        // boundary it names, which is why neither half is derived now.
+        let raw = bounded_string(d, "protocol_id", MAX_PROTOCOL_ID_BYTES)?;
+        Self::parse(raw).map_err(serde::de::Error::custom)
     }
 }
 
@@ -218,6 +223,7 @@ pub struct CandidatePeer {
     #[serde(deserialize_with = "wire_address_set")]
     pub addresses: BTreeSet<String>,
     /// Which provider observed it.
+    #[serde(deserialize_with = "wire_provider_name")]
     pub source: String,
     /// Local millisecond timestamp of the observation.
     pub observed_at: u64,
@@ -333,6 +339,78 @@ where
 /// codec refuses an over-ceiling declared length before allocating. This
 /// crate is types and validation with no I/O, so a bound on the reader
 /// is not its to impose.
+/// Refuse an over-long string INSIDE the visitor, for any bounded field.
+///
+/// WHY THIS IS A HELPER AND NOT A THIRD COPY. `BoundedAddress` closed
+/// this for addresses and the sibling fields in the same module kept the
+/// derived path: `ProtocolId::deserialize` called `String::deserialize`
+/// and checked `MAX_PROTOCOL_ID_BYTES` afterwards, and `source`/`name`
+/// were plain `String` fields whose bound lived only in `validate`, which
+/// runs after the whole record is materialised. Fixing the instance and
+/// documenting it left two more, which is how the first one arrived.
+///
+/// The same caveat as `BoundedAddress` applies and is not repeated at
+/// each call site: a visitor runs after the deserializer has produced a
+/// `&str`, so this bounds what is RETAINED, never what a deserializer
+/// materialises. The ceiling on materialised input belongs where the
+/// bytes are read.
+fn visit_bounded<E: serde::de::Error>(
+    value: &str,
+    field: &'static str,
+    max: usize,
+) -> Result<String, E> {
+    if value.len() > max {
+        return Err(E::custom(format!(
+            "{field} must be at most {max} bytes, got {}",
+            value.len()
+        )));
+    }
+    Ok(value.to_owned())
+}
+
+/// `serde` adaptor for a bounded string field, used via
+/// `#[serde(deserialize_with = ...)]` where the field is a plain
+/// `String` and a newtype would change the public shape.
+fn bounded_string<'de, D: serde::Deserializer<'de>>(
+    d: D,
+    field: &'static str,
+    max: usize,
+) -> Result<String, D::Error> {
+    struct Bounded(&'static str, usize);
+
+    impl serde::de::Visitor<'_> for Bounded {
+        type Value = String;
+
+        fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(f, "{} of at most {} bytes", self.0, self.1)
+        }
+
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+            visit_bounded(value, self.0, self.1)
+        }
+
+        /// A deserializer that already owns the buffer hands it over
+        /// here. Checking before taking it means the owned value is
+        /// dropped rather than kept.
+        fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
+            self.visit_str(&value)
+        }
+    }
+
+    d.deserialize_str(Bounded(field, max))
+}
+
+/// `source` on a candidate: bounded in the visitor, not in `validate`.
+fn wire_provider_name<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    bounded_string(d, "source", MAX_PROVIDER_NAME_BYTES)
+}
+
+/// `name` on a descriptor. Same bound, named for its own field so the
+/// error says which one was too long.
+fn wire_descriptor_name<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    bounded_string(d, "name", MAX_PROVIDER_NAME_BYTES)
+}
+
 struct BoundedAddress(String);
 
 impl<'de> Deserialize<'de> for BoundedAddress {
@@ -347,13 +425,11 @@ impl<'de> Deserialize<'de> for BoundedAddress {
             }
 
             fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
-                if value.len() > MAX_ADDRESS_BYTES {
-                    return Err(E::custom(format!(
-                        "address must be at most {MAX_ADDRESS_BYTES} bytes, got {}",
-                        value.len()
-                    )));
-                }
-                Ok(BoundedAddress(value.to_owned()))
+                // Through the shared helper, so there is ONE bounded
+                // string rule in this module rather than one per field.
+                // Three fields drifted apart the last time there were
+                // two copies of it.
+                visit_bounded(value, "address", MAX_ADDRESS_BYTES).map(BoundedAddress)
             }
 
             /// A deserializer that already owns the buffer hands it over
@@ -547,6 +623,7 @@ pub enum ProviderHealth {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderDescriptor {
     /// Stable provider name, also used as `CandidatePeer::source`.
+    #[serde(deserialize_with = "wire_descriptor_name")]
     pub name: String,
     /// The provider-interface version this implements, `major.minor`.
     pub interface_version: String,
@@ -1104,6 +1181,104 @@ mod tests {
         assert!(
             error.to_string().contains("bytes"),
             "refused for its length, not its syntax: {error}"
+        );
+    }
+
+    /// EVERY BOUNDED STRING, not the one review happened to name.
+    ///
+    /// `BoundedAddress` closed the address path and the two sibling
+    /// fields in this module kept the derived one: `ProtocolId` called
+    /// `String::deserialize` and checked afterwards, and `source`/`name`
+    /// were bounded only in `validate`, which runs once the whole record
+    /// is already materialised. Review found the first of those; this
+    /// table exists so the third does not need a seventh round.
+    #[test]
+    fn every_bounded_string_field_is_refused_inside_the_visitor() {
+        let long_protocol = "p".repeat(MAX_PROTOCOL_ID_BYTES + 1);
+        let long_name = "n".repeat(MAX_PROVIDER_NAME_BYTES + 1);
+
+        let cases: [(&str, String); 3] = [
+            (
+                "protocol_id",
+                format!(r#"{{"protocol_id":"{long_protocol}","supported":true,"observed_at":1}}"#),
+            ),
+            (
+                "source",
+                format!(
+                    r#"{{"peer_id":"{P1}","addresses":["/ip4/192.0.2.1/tcp/1"],"source":"{long_name}","observed_at":1}}"#
+                ),
+            ),
+            (
+                "name",
+                format!(r#"{{"name":"{long_name}","interface_version":"1.0"}}"#),
+            ),
+        ];
+
+        for (field, json) in cases {
+            let error = match field {
+                "protocol_id" => serde_json::from_str::<ProtocolObservation>(&json)
+                    .err()
+                    .map(|e| e.to_string()),
+                "source" => serde_json::from_str::<CandidatePeer>(&json)
+                    .err()
+                    .map(|e| e.to_string()),
+                _ => serde_json::from_str::<ProviderDescriptor>(&json)
+                    .err()
+                    .map(|e| e.to_string()),
+            }
+            .unwrap_or_else(|| panic!("an over-long `{field}` must be refused"));
+
+            // "must be at most" is the VISITOR's phrasing. Asserting
+            // only "bytes" passed with `ProtocolId` reverted to
+            // `String::deserialize`, because `parse` rejects the same
+            // input afterwards with "is N bytes; the limit is ..." --
+            // the test agreed with the fix instead of testing it, and
+            // the mutation is what said so. The claim here is not "an
+            // over-long value is refused" but "it is refused BEFORE it
+            // is owned", and the message is what distinguishes them.
+            assert!(
+                error.contains("must be at most"),
+                "`{field}` refused inside the VISITOR, not after parsing: {error}"
+            );
+        }
+    }
+
+    /// The same three through the UNESCAPE path, which is where the
+    /// earlier address fix found its own gap: an unescaped token is
+    /// borrowed, so a test written with plain characters never exercises
+    /// the branch that owns a buffer.
+    #[test]
+    fn every_bounded_string_field_is_refused_on_the_unescape_path() {
+        // `\u0039` is `9`, so each of these is the same over-long value
+        // arriving the other way.
+        let esc_protocol = "\\u0039".repeat(MAX_PROTOCOL_ID_BYTES + 1);
+        let esc_name = "\\u0039".repeat(MAX_PROVIDER_NAME_BYTES + 1);
+
+        let protocol_json =
+            format!(r#"{{"protocol_id":"{esc_protocol}","supported":true,"observed_at":1}}"#);
+        assert!(
+            serde_json::from_str::<ProtocolObservation>(&protocol_json)
+                .expect_err("escaped over-long protocol_id is refused")
+                .to_string()
+                .contains("must be at most")
+        );
+
+        let source_json = format!(
+            r#"{{"peer_id":"{P1}","addresses":["/ip4/192.0.2.1/tcp/1"],"source":"{esc_name}","observed_at":1}}"#
+        );
+        assert!(
+            serde_json::from_str::<CandidatePeer>(&source_json)
+                .expect_err("escaped over-long source is refused")
+                .to_string()
+                .contains("must be at most")
+        );
+
+        let name_json = format!(r#"{{"name":"{esc_name}","interface_version":"1.0"}}"#);
+        assert!(
+            serde_json::from_str::<ProviderDescriptor>(&name_json)
+                .expect_err("escaped over-long name is refused")
+                .to_string()
+                .contains("must be at most")
         );
     }
 
