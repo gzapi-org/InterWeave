@@ -57,7 +57,9 @@ use std::sync::{Arc, RwLock};
 use interweave_transport_api::TransportIdentity;
 use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 
-use crate::connection_policy::{ConnectionClass, ConnectionPolicy, DialDenial, DialRequest};
+use crate::connection_policy::{
+    ConnectionClass, ConnectionPolicy, DialDenial, DialOrigin, DialRequest,
+};
 
 /// Who this profile trusts, and for what.
 ///
@@ -303,6 +305,7 @@ impl PolicySnapshot {
             connections: Arc::clone(&self.connections),
             peer: request.peer.clone(),
             address: request.address.clone(),
+            origin: request.origin,
             settled: false,
             connection_kept: false,
         };
@@ -430,6 +433,16 @@ impl Drop for ConnectionSlot {
 pub struct DialTicket {
     pending: Arc<AtomicUsize>,
     connections: Arc<AtomicUsize>,
+    /// Why this dial was asked for.
+    ///
+    /// Read for exactly one question: does settling this ticket own the
+    /// peer's SCHEDULER CLAIM? Only the reconnect scheduler claims, so
+    /// only a `ConnectionManager`-origin ticket may consume or release
+    /// one. A manual dial settling must leave the schedule alone --
+    /// the retry entry is peer-scoped while a dial outcome is
+    /// address-scoped, and conflating them let one bad address cancel
+    /// the reconnect that would have tried a good one.
+    origin: DialOrigin,
     peer: Option<TransportIdentity>,
     address: String,
     settled: bool,
@@ -441,6 +454,14 @@ impl DialTicket {
     #[must_use]
     pub const fn peer(&self) -> Option<&TransportIdentity> {
         self.peer.as_ref()
+    }
+
+    /// Whether settling this ticket owns the peer's scheduler claim.
+    ///
+    /// Only the reconnect scheduler claims a retry entry, so only its
+    /// own dials may consume or release one.
+    const fn owns_scheduler_claim(&self) -> bool {
+        matches!(self.origin, DialOrigin::ConnectionManager)
     }
 
     /// The address this permission was granted for.
@@ -910,8 +931,28 @@ impl ConnectionManager {
     /// untouched by this call and remains a candidate on its own merit.
     pub fn record_permanent_failure(&mut self, ticket: DialTicket, now_ms: u64) {
         let _ = now_ms;
-        if let Some(peer) = ticket.peer() {
-            self.retries.remove(peer);
+        if let Some(peer) = ticket.peer().cloned() {
+            // THE ADDRESS IS UNUSABLE, NOT THE PEER. This used to remove
+            // the peer's whole retry entry, which is peer-scoped while
+            // the failure is address-scoped: a manual dial to one bad
+            // address cancelled the scheduled reconnect that would have
+            // tried a good one still sitting in the book.
+            //
+            // Forgetting the address is what stops the loop the old
+            // unconditional reschedule created -- a scheduler claim is
+            // released rather than consumed, so the next tick tries the
+            // peer's OTHER addresses, and if there are none
+            // `dial_candidates` comes back empty and the scheduler
+            // clears the claim itself.
+            if let Some(known) = self.book.get_mut(&peer) {
+                known.remove(ticket.address());
+                if known.is_empty() {
+                    self.book.remove(&peer);
+                }
+            }
+            if ticket.owns_scheduler_claim() {
+                self.release_retry_claim(&peer);
+            }
         }
         self.settle(ticket);
         self.publish();
@@ -936,6 +977,16 @@ impl ConnectionManager {
     /// notice.
     pub fn record_authorization_withdrawn(&mut self, ticket: DialTicket, now_ms: u64) {
         let _ = now_ms;
+        // CLEARED, not released: unlike a quarantine or an unusable
+        // address, this is not a fact about one route. The peer is no
+        // longer authorized, so there is nothing for a later tick to
+        // try, and leaving the entry claimed would strand it -- never
+        // selected again, still holding retry-table capacity.
+        if ticket.owns_scheduler_claim()
+            && let Some(peer) = ticket.peer().cloned()
+        {
+            self.clear_retry_claim(&peer);
+        }
         self.settle(ticket);
         self.publish();
     }
@@ -953,6 +1004,19 @@ impl ConnectionManager {
             self.policy
                 .record_identity_mismatch(&peer, ticket.address(), now_ms)
         });
+        // A CLAIMED ATTEMPT THAT ENDS HERE MUST GIVE THE CLAIM BACK.
+        // The quarantine is address-scoped and the peer may have other
+        // routes, so the entry is released rather than removed -- but
+        // it was released by NOTHING before this, so a scheduled retry
+        // ending in a wrong-key answer left the entry claimed forever:
+        // permanently excluded from selection, permanently occupying
+        // retry-table capacity, and the peer's good addresses never
+        // tried again.
+        if ticket.owns_scheduler_claim()
+            && let Some(peer) = ticket.peer().cloned()
+        {
+            self.release_retry_claim(&peer);
+        }
         self.settle(ticket);
         self.publish();
         mismatched
@@ -1165,7 +1229,6 @@ impl ConnectionManager {
 
 #[cfg(test)]
 mod tests {
-    use crate::connection_policy::DialOrigin;
 
     use super::*;
 
@@ -1200,10 +1263,16 @@ mod tests {
     }
 
     fn request(peer_id: &str, address: &str) -> DialRequest {
+        request_at(peer_id, address, DialOrigin::ConnectionManager)
+    }
+
+    /// A request whose ORIGIN matters, since only the scheduler's own
+    /// dials may consume a retry claim.
+    fn request_at(peer_id: &str, address: &str, origin: DialOrigin) -> DialRequest {
         DialRequest {
             peer: Some(peer(peer_id)),
             address: address.to_owned(),
-            origin: DialOrigin::ConnectionManager,
+            origin,
         }
     }
 
@@ -1316,38 +1385,167 @@ mod tests {
     }
 
     #[test]
-    fn a_permanent_failure_is_cleared_rather_than_rescheduled() {
-        // The exact bug the review named: a synchronous, structural
-        // failure -- an address this profile cannot dial at all --
-        // treated as a normal transient one is retried forever.
+    fn a_permanent_failure_forgets_the_address_not_the_peers_schedule() {
+        // The retry entry is PEER-scoped; a permanent dial failure is
+        // ADDRESS-scoped. Removing the peer's whole entry meant a manual
+        // dial to one unusable address cancelled the scheduled reconnect
+        // that would have tried a good one still in the book.
+        let mut m = manager(8);
+        let good = "/ip4/10.0.0.1/tcp/1";
+        let unusable = "/ip4/10.0.0.2/tcp/1";
+        assert!(m.learn_address(&peer(P1), good, 0));
+        assert!(m.learn_address(&peer(P1), unusable, 0));
+
+        // A transient failure on the good address schedules a retry.
+        let t = m
+            .handle()
+            .admit(&request_at(P1, good, DialOrigin::Manual), 0)
+            .expect("admitted");
+        m.record_failure(t, 0);
+        assert_eq!(m.scheduled_retries(), 1);
+
+        // A MANUAL dial to the unusable address then fails permanently.
+        // It owns no scheduler claim, so it must not touch the schedule.
+        let t2 = m
+            .handle()
+            .admit(&request_at(P1, unusable, DialOrigin::Manual), 30_000)
+            .expect("admitted");
+        m.record_permanent_failure(t2, 30_000);
+
+        assert_eq!(
+            m.scheduled_retries(),
+            1,
+            "a manual dial's permanent failure must not cancel the peer's reconnect"
+        );
+        let candidates = m.dial_candidates(&peer(P1), 60_000);
+        assert!(
+            candidates.iter().any(|a| a == good),
+            "the good address survives: {candidates:?}"
+        );
+        assert!(
+            !candidates.iter().any(|a| a == unusable),
+            "and the unusable one is forgotten: {candidates:?}"
+        );
+    }
+
+    #[test]
+    fn a_claimed_permanent_failure_releases_rather_than_strands_the_claim() {
+        // A scheduled attempt that ends permanently must give the claim
+        // back so the peer's OTHER addresses are tried. Removing the
+        // entry would abandon them; leaving it claimed would strand it.
+        let mut m = manager(8);
+        let good = "/ip4/10.0.0.1/tcp/1";
+        let unusable = "/ip4/10.0.0.2/tcp/1";
+        assert!(m.learn_address(&peer(P1), good, 0));
+        assert!(m.learn_address(&peer(P1), unusable, 0));
+
+        let t = m
+            .handle()
+            .admit(&request_at(P1, good, DialOrigin::Manual), 0)
+            .expect("admitted");
+        m.record_failure(t, 0);
+        assert_eq!(m.take_due_retries(30_000, 8), vec![peer(P1)]);
+
+        let claimed = m
+            .handle()
+            .admit(
+                &request_at(P1, unusable, DialOrigin::ConnectionManager),
+                30_000,
+            )
+            .expect("admitted");
+        m.record_permanent_failure(claimed, 30_000);
+
+        assert_eq!(
+            m.take_due_retries(30_000, 8),
+            vec![peer(P1)],
+            "the claim came back, so the good address gets its turn"
+        );
+    }
+
+    #[test]
+    fn a_claimed_attempt_ending_in_a_mismatch_gives_the_claim_back() {
+        // Nothing released the claim on this path, so a scheduled retry
+        // answered by the wrong key left the entry claimed forever:
+        // never selected again, still occupying retry-table capacity,
+        // and the peer's good addresses never tried.
         let mut m = manager(8);
         let t = m
             .handle()
-            .load()
-            .admit(&request(P1, "/a"), 0)
+            .admit(&request_at(P1, "/a", DialOrigin::Manual), 0)
             .expect("admitted");
-        m.record_permanent_failure(t, 0);
-        assert_eq!(m.scheduled_retries(), 0, "nothing was ever scheduled");
+        m.record_failure(t, 0);
+        assert_eq!(m.take_due_retries(30_000, 8), vec![peer(P1)]);
 
-        // And a peer claimed via the scheduler, whose dial then turns
-        // out permanent, is not left claimed-forever either.
-        let t2 = m
+        let claimed = m
             .handle()
-            .load()
-            .admit(&request(P2, "/b"), 0)
+            .admit(&request_at(P1, "/b", DialOrigin::ConnectionManager), 30_000)
             .expect("admitted");
-        m.record_failure(t2, 0);
-        assert_eq!(m.take_due_retries(30_000, 8), vec![peer(P2)]);
-        let t3 = m
+        let _ = m.record_identity_mismatch(claimed, 30_000);
+
+        assert_eq!(
+            m.take_due_retries(30_000, 8),
+            vec![peer(P1)],
+            "an address-scoped quarantine releases the claim rather than stranding it"
+        );
+    }
+
+    #[test]
+    fn a_claimed_attempt_losing_authorization_clears_the_claim() {
+        // Unlike a quarantine, this is not a fact about one route:
+        // there is nothing for a later tick to try, so the entry goes
+        // rather than being released -- but it must not be left claimed
+        // either, which is what stranded it.
+        let mut m = manager(8);
+        let t = m
             .handle()
-            .load()
-            .admit(&request(P2, "/b"), 30_000)
+            .admit(&request_at(P1, "/a", DialOrigin::Manual), 0)
             .expect("admitted");
-        m.record_permanent_failure(t3, 30_000);
+        m.record_failure(t, 0);
+        assert_eq!(m.take_due_retries(30_000, 8), vec![peer(P1)]);
+
+        let claimed = m
+            .handle()
+            .admit(&request_at(P1, "/a", DialOrigin::ConnectionManager), 30_000)
+            .expect("admitted");
+        m.record_authorization_withdrawn(claimed, 30_000);
+
+        assert_eq!(m.scheduled_retries(), 0, "the entry is gone, not stranded");
+    }
+
+    #[test]
+    fn a_manual_dial_never_consumes_the_schedulers_claim() {
+        // THE OWNERSHIP CHECK ITSELF. The three tests above all settle
+        // tickets whose origin already matches, so each would pass with
+        // `owns_scheduler_claim` hardcoded true -- which is finding B
+        // exactly: a manual dial reaching into peer-scoped retry state
+        // it does not own.
+        //
+        // `record_authorization_withdrawn` is the one that CLEARS, so it
+        // is where borrowing another origin's claim actually destroys
+        // something: a manual dial losing authorization mid-handshake
+        // would cancel a reconnect scheduled by the scheduler for a
+        // completely different address.
+        let mut m = manager(8);
+        let t = m
+            .handle()
+            .admit(&request_at(P1, "/a", DialOrigin::Manual), 0)
+            .expect("admitted");
+        m.record_failure(t, 0);
+        assert_eq!(m.scheduled_retries(), 1, "the scheduler has an entry");
+
+        // PAST THE BACKOFF the failure above imposed, so this dial is
+        // admitted on its merits rather than refused before it can
+        // reach the code under test.
+        let manual = m
+            .handle()
+            .admit(&request_at(P1, "/b", DialOrigin::Manual), 31_000)
+            .expect("admitted");
+        m.record_authorization_withdrawn(manual, 31_000);
+
         assert_eq!(
             m.scheduled_retries(),
-            0,
-            "the claim is cleared, not left dangling"
+            1,
+            "a manual dial must not cancel a schedule it does not own"
         );
     }
 
