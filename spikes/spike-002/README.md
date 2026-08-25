@@ -199,6 +199,14 @@ Admission completion is now gated on that observation; the outer deadline still 
 |---|---|
 | the failure is never recorded, standing in for teardown delayed past the timer | four checks **false**, exit 1 |
 
+**And that gate was itself too loose.** It accepted *any* `InboundFailure` on the owner's connection. The owner's `ResponseChannel` is not retained in the `Owner` arm, so dropping it yields `ResponseOmission` on that same connection before teardown is observed - which satisfied the gate, completed admission, and passed the cancellation experiment without the connection ever dying. Review found it in the next round. The gate now keys on `InboundFailure::ConnectionClosed` specifically, which is what request-response reports when the connection carrying a pending inbound request is torn down; nothing else is evidence of that.
+
+| mutation | old gate | new gate |
+|---|---|---|
+| owner channel dropped, connection **never closed** | `server learned ... ResponseOmission`, every check **true**, exit 0 - a false pass | the event is named and ignored, four checks **false**, exit 1 |
+
+One measurement slip on the way: the first run of the old-gate mutation reused a stale binary from the previous run and printed the *new* gate's output, so it looked as though the old gate also failed. A `cargo clean` of the copy's target produced the row above. Recorded because a mutation that is not actually compiled is the most convincing kind of wrong.
+
 ### A6 printed its cleanup instead of requiring it
 
 Every A6 check is satisfied once the parked channels have received the shared outcome — which happens whether or not the owner path then releases its reservation. `reservations.len()` was a `note`. A release that stopped happening left the experiment passing while contradicting its own recorded `reservations still held 0`, and for the *rejected* outcome it also contradicts the thing that makes rejection survivable: that a later retry becomes an owner rather than attaching to a corpse. Both are now required, for both outcomes.

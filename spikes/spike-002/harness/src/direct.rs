@@ -1116,8 +1116,25 @@ pub async fn a8_cancellation_race() {
                     }
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Direct(RrEvent::InboundFailure { connection_id, error, .. })) => {
+                    // ONLY THE FAILURE THAT MEANS THE CONNECTION DIED.
+                    // The gate above used to accept ANY `InboundFailure`
+                    // on the owner's connection -- and the owner's
+                    // `ResponseChannel` is not retained in the `Owner`
+                    // arm, so dropping it yields `ResponseOmission` on
+                    // that same connection BEFORE teardown is observed.
+                    // That satisfied the gate, admission completed, and
+                    // the cancellation experiment passed without ever
+                    // proving the connection had gone. `ConnectionClosed`
+                    // is what request-response reports when the
+                    // connection carrying a pending inbound request is
+                    // torn down; nothing else is evidence of that.
                     if Some(connection_id) == owner_connection_id {
-                        owner_inbound_failure = Some(describe_inbound(&error));
+                        let described = describe_inbound(&error);
+                        if matches!(error, InboundFailure::ConnectionClosed) {
+                            owner_inbound_failure = Some(described);
+                        } else {
+                            note("owner connection: an inbound failure that is NOT closure (ignored)", described);
+                        }
                     }
                 }
                 _ => {}
