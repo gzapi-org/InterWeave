@@ -129,6 +129,12 @@ fn legal_frame() -> Vec<u8> {
 ///
 /// Bounded throughout: a receiver that never answers is a RESULT.
 async fn what_the_receiver_answers(bytes: Vec<u8>) -> DirectResponse {
+    answers_with_trust(bytes, true, 1).await
+}
+
+/// As above, but the receiver may distrust the sender, and the sender
+/// may send `repeat` frames so a rate bound can be reached.
+async fn answers_with_trust(bytes: Vec<u8>, trusted: bool, repeat: usize) -> DirectResponse {
     let receiver_id = ProfileIdentity::generate();
     let receiver_peer = receiver_id.transport_identity().expect("peer id");
 
@@ -140,8 +146,22 @@ async fn what_the_receiver_answers(bytes: Vec<u8>) -> DirectResponse {
         &receiver_id,
         SubstrateConfig::default(),
         TrustSources::new(
-            PeerTrustPolicy::new([hostile_peer]).expect("a one-peer allowlist"),
-            InfrastructureSet::default(),
+            if trusted {
+                PeerTrustPolicy::new([hostile_peer.clone()]).expect("a one-peer allowlist")
+            } else {
+                PeerTrustPolicy::new(std::iter::empty()).expect("an empty allowlist")
+            },
+            if trusted {
+                InfrastructureSet::default()
+            } else {
+                // INFRASTRUCTURE-ONLY, not unknown. A peer this profile
+                // does not know at all is refused at the CONNECTION gate
+                // and never reaches the direct protocol, so it cannot
+                // test what the direct protocol answers. Infrastructure
+                // trust is the case that connects and still has no
+                // data-plane authority (ADR-0036).
+                InfrastructureSet::new([hostile_peer]).expect("a one-peer infrastructure set")
+            },
         ),
     )
     .expect("the receiver starts");
@@ -181,6 +201,7 @@ async fn what_the_receiver_answers(bytes: Vec<u8>) -> DirectResponse {
     // Drive both sides until the receiver answers, or give up loudly.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let mut sent = false;
+    let mut seen = 0usize;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(!remaining.is_zero(), "no answer within 20s");
@@ -188,15 +209,21 @@ async fn what_the_receiver_answers(bytes: Vec<u8>) -> DirectResponse {
         tokio::select! {
             event = hostile.select_next_some() => match event {
                 Libp2pSwarmEvent::ConnectionEstablished { .. } if !sent => {
-                    hostile
-                        .behaviour_mut()
-                        .send_request(&receiver_peer_id, bytes.clone());
+                    for _ in 0..repeat {
+                        hostile
+                            .behaviour_mut()
+                            .send_request(&receiver_peer_id, bytes.clone());
+                    }
                     sent = true;
                 }
                 Libp2pSwarmEvent::Behaviour(request_response::Event::Message {
                     message: request_response::Message::Response { response, .. },
                     ..
                 }) => {
+                    seen += 1;
+                    if seen < repeat {
+                        continue;
+                    }
                     // AN EMPTY BODY IS "NOTHING WAS ANSWERED", which is
                     // the defect this suite exists for. Named separately
                     // because dropping a `ResponseChannel` closes the
@@ -256,5 +283,45 @@ async fn a_bad_field_is_answered_malformed() {
             reason: DirectRejectReason::Malformed,
         },
         "and a bad field is malformed, not too_large"
+    );
+}
+
+// NO TEST HERE FOR AN UNTRUSTED PEER'S MALFORMED FRAME, and the reason
+// is worth recording rather than leaving as an absence.
+//
+// Neither an unknown peer nor an infrastructure-only one can hold an
+// INBOUND connection at all: `settle_outcome` admits inbound with
+// `manager.authorizes(class)`, which is `authorizes_for(class,
+// DialOrigin::Manual)`, and `Manual.is_data_plane()` is true — so
+// `ConnectivityInfrastructureOnly` is refused and the socket closes.
+// Both were tried here and both produced `ConnectionClosed` before a
+// request could be sent, which is the connection layer doing its job.
+//
+// The reachable case is trust REVOKED after the connection is
+// established, where the close is asynchronous. That is a race by
+// construction, and `stage6_direct_over_the_wire.rs` already covers it
+// the only honest way — by naming both outcomes. What IS deterministic
+// is the rate bound below, and it is sufficient evidence the gates run:
+// `Overloaded` is a code only `admit_prefix` can produce.
+
+/// Malformed frames are rate limited like any other request.
+///
+/// Answering costs this node an encode and a send, so a peer that never
+/// spends ingress allowance to make it happen can do it without limit.
+/// The per-peer burst is 32, so the thirty-third in one instant is over
+/// it — and `overloaded` is what it must hear, not `malformed`.
+#[tokio::test]
+async fn malformed_frames_spend_ingress_allowance() {
+    let mut frame = legal_frame();
+    frame[MessageId::LEN + 8] = 200;
+
+    let answer = answers_with_trust(frame, true, 40).await;
+    assert_eq!(
+        answer,
+        DirectResponse::Rejected {
+            message_id: MessageId::from_bytes([7; 16]),
+            reason: DirectRejectReason::Overloaded,
+        },
+        "past the burst the answer is overloaded, so the bucket was charged"
     );
 }

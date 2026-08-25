@@ -45,7 +45,7 @@ use interweave_transport_api::{
     DirectMessageV2, DirectRejectReason, EndpointId, TransportIdentity,
 };
 use interweave_transport_runtime::direct_inbound::{
-    AdmissionContext, Outcome as AdmissionOutcome, admit_inbound,
+    AdmissionContext, Outcome as AdmissionOutcome, admit_inbound, admit_prefix,
 };
 use interweave_transport_runtime::endpoint_queue::EndpointQueues;
 use interweave_transport_runtime::endpoint_registry::EndpointRegistry;
@@ -2175,6 +2175,36 @@ fn handle_direct(
             let request = match request {
                 crate::direct_codec::InboundRequest::Frame(frame) => *frame,
                 crate::direct_codec::InboundRequest::Unparsable { message_id, reason } => {
+                    // THE GATES RUN FIRST, EVEN HERE. A frame that failed
+                    // to decode still arrived from some peer, over some
+                    // connection, at some rate — and answering it is
+                    // work. Answering before trust, draining and the rate
+                    // buckets let a peer spend no allowance to make this
+                    // node encode and send a rejection, and let a peer
+                    // with no data-plane trust draw a data-plane
+                    // response. `admit_prefix` is the same three gates
+                    // `admit_inbound` runs, in the same order, so the two
+                    // paths cannot drift.
+                    //
+                    // A gate's refusal OUTRANKS the parse failure: an
+                    // untrusted peer learns it is untrusted, not that its
+                    // frame was malformed.
+                    let gated = {
+                        let mut ctx = AdmissionContext {
+                            trust: &state.trust,
+                            ingress: &mut state.ingress,
+                            dedup: &mut state.dedup,
+                            reservations: &mut state.reservations,
+                            registry: &state.registry,
+                            queues: &mut state.queues,
+                            draining,
+                        };
+                        admit_prefix(&source, now_ms, &mut ctx)
+                    };
+                    let reason = match gated {
+                        Ok(()) => reason,
+                        Err(refusal) => refusal.to_wire(),
+                    };
                     // SPIKE-002 finding 2 applies here as everywhere: a
                     // produced response is not evidence the peer heard
                     // it. Nothing is retried — the peer that sent an

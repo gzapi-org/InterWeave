@@ -201,16 +201,27 @@ impl Outcome {
 /// owner's outcome arrives — `ReservationMap::release` already returns
 /// the owner's and every waiter's budget together, so a waiter needs no
 /// settling of its own.
-pub fn admit_inbound(
-    frame: &DirectMessageV2,
+/// The gates EVERY inbound request passes, parsable or not.
+///
+/// Extracted because a frame that failed to decode still arrived from
+/// some peer, over some connection, at some rate — and answering it is
+/// work. Answering before these ran let a peer spend no allowance to
+/// make this node encode and send a rejection, and let a peer with no
+/// data-plane trust draw a data-plane response. Both paths now run the
+/// same three gates in the same order, which is the property this
+/// module exists to hold.
+///
+/// # Errors
+/// Returns the local [`Refusal`]; the caller collapses it to a wire code.
+pub fn admit_prefix(
     source_peer: &TransportIdentity,
     now_ms: u64,
     ctx: &mut AdmissionContext<'_>,
-) -> Outcome {
+) -> Result<(), Refusal> {
     // 1. PROFILE TRUST. Before a token is charged, so an unauthorized
     //    peer cannot spend an authorized peer's allowance being refused.
     if matches!(ctx.trust.decide(source_peer), TrustDecision::Denied(_)) {
-        return Outcome::Refused(Refusal::UntrustedPeer);
+        return Err(Refusal::UntrustedPeer);
     }
 
     // 2. DRAINING. `AcceptedV2` means this node took the message into a
@@ -219,7 +230,7 @@ pub fn admit_inbound(
     //    before the token is charged, because a peer gains nothing by
     //    spending allowance to be told the node is going away.
     if ctx.draining {
-        return Outcome::Refused(Refusal::Draining);
+        return Err(Refusal::Draining);
     }
 
     // 3. INGRESS RATE. A trusted peer may still be flooding.
@@ -228,7 +239,19 @@ pub fn admit_inbound(
         // coarse `overloaded` and must not delete or mutate the prior
         // positive dedup entry. Returning here is what guarantees that,
         // rather than a comment asking a later branch not to.
-        return Outcome::Refused(Refusal::RateLimited);
+        return Err(Refusal::RateLimited);
+    }
+    Ok(())
+}
+
+pub fn admit_inbound(
+    frame: &DirectMessageV2,
+    source_peer: &TransportIdentity,
+    now_ms: u64,
+    ctx: &mut AdmissionContext<'_>,
+) -> Outcome {
+    if let Err(refusal) = admit_prefix(source_peer, now_ms, ctx) {
+        return Outcome::Refused(refusal);
     }
 
     // 4. CONTENT IDENTITY. Needed by both the cache and the reservation,
