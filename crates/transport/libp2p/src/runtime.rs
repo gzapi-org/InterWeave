@@ -837,6 +837,7 @@ impl SwarmRuntime {
                             &mut pending_direct,
                             &mut outbox,
                             now_ms(started),
+                            manager.is_draining(),
                         ) {
                             DirectHandled::Consumed => continue,
                             DirectHandled::Passed(event) => *event,
@@ -2013,6 +2014,7 @@ fn handle_direct(
     pending: &mut HashMap<libp2p::request_response::OutboundRequestId, PendingDirect>,
     outbox: &mut std::collections::VecDeque<SwarmEvent>,
     now_ms: u64,
+    draining: bool,
 ) -> DirectHandled {
     use crate::direct_codec::DirectResponse;
     use libp2p::request_response::{Event as RrEvent, Message as RrMessage};
@@ -2044,6 +2046,7 @@ fn handle_direct(
                     reservations: &mut state.reservations,
                     registry: &state.registry,
                     queues: &mut state.queues,
+                    draining,
                 };
                 admit_inbound(&request, &source, now_ms, &mut ctx)
             };

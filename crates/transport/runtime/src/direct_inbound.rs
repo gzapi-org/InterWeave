@@ -10,6 +10,7 @@
 //!
 //! ```text
 //! profile trust        who is this, and may they talk to us at all
+//! draining             we are going away; take on no new work
 //! ingress rate         a trusted peer may still be flooding
 //! content fingerprint  the frame is intact enough to have an identity
 //! dedup cache          have we already accepted this exact message
@@ -25,6 +26,15 @@
 //! **Trust before rate.** An untrusted peer must not consume a token; a
 //! limiter that charged first would let an unauthorized peer spend the
 //! allowance of authorized ones on the way to being refused.
+//!
+//! **Trust before draining, draining before everything else.** An
+//! untrusted peer learns that it is untrusted, not what state this node
+//! is in. Past that, a draining node refuses before it charges a token or
+//! touches the cache: `AcceptedV2` promises a bounded queue took the
+//! message, and a node about to drop that queue cannot honestly promise
+//! it. Draining is not stopping — connections opened before the drain
+//! stay up — so without this step the only thing stopping new work is
+//! that no new *connections* are admitted.
 //!
 //! **Rate before dedup.** ADR-0019 is explicit that a rate-limited retry
 //! receives coarse `overloaded` and **must not delete or mutate a prior
@@ -85,6 +95,12 @@ pub struct AdmissionContext<'a> {
     pub registry: &'a EndpointRegistry,
     /// Open delivery queues.
     pub queues: &'a mut EndpointQueues,
+    /// Whether the node has begun draining.
+    ///
+    /// Draining is not stopping: existing connections stay up, so a peer
+    /// that connected before the drain can still send. What it must not
+    /// get is `AcceptedV2` for work this node is about to discard.
+    pub draining: bool,
 }
 
 /// What admission decided, in local terms.
@@ -123,6 +139,8 @@ pub enum Outcome {
 pub enum Refusal {
     /// Profile trust does not admit this peer.
     UntrustedPeer,
+    /// The node is draining and will not take on new work.
+    Draining,
     /// The peer's own or the shared ingress allowance is exhausted.
     RateLimited,
     /// The frame's content could not be fingerprinted.
@@ -151,6 +169,7 @@ impl Refusal {
     pub const fn to_wire(&self) -> DirectRejectReason {
         match self {
             Self::UntrustedPeer => DirectRejectReason::UnauthorizedPeer,
+            Self::Draining => DirectRejectReason::ShuttingDown,
             Self::RateLimited | Self::Overloaded => DirectRejectReason::Overloaded,
             Self::Unfingerprintable | Self::DuplicateConflict => DirectRejectReason::Malformed,
             // Both already collapse everything they carry.
@@ -194,7 +213,16 @@ pub fn admit_inbound(
         return Outcome::Refused(Refusal::UntrustedPeer);
     }
 
-    // 2. INGRESS RATE. A trusted peer may still be flooding.
+    // 2. DRAINING. `AcceptedV2` means this node took the message into a
+    //    bounded queue, and a draining node is about to drop that queue —
+    //    so accepting here would be a lie the sender acts on. Refusing
+    //    before the token is charged, because a peer gains nothing by
+    //    spending allowance to be told the node is going away.
+    if ctx.draining {
+        return Outcome::Refused(Refusal::Draining);
+    }
+
+    // 3. INGRESS RATE. A trusted peer may still be flooding.
     if ctx.ingress.admit(source_peer, now_ms).is_err() {
         // AND NOTHING ELSE HAPPENS. ADR-0019: a rate-limited retry gets
         // coarse `overloaded` and must not delete or mutate the prior
@@ -203,7 +231,7 @@ pub fn admit_inbound(
         return Outcome::Refused(Refusal::RateLimited);
     }
 
-    // 3. CONTENT IDENTITY. Needed by both the cache and the reservation,
+    // 4. CONTENT IDENTITY. Needed by both the cache and the reservation,
     //    and it excludes `sent_at_ms` — a retry may carry a different one.
     let Ok(fingerprint) = direct_content_fingerprint_v1(
         frame.payload.media_type().map(|m| m.as_str()),
@@ -214,7 +242,7 @@ pub fn admit_inbound(
 
     let key = dedup_key(frame, source_peer);
 
-    // 4. DEDUP. An already-accepted message replays its STORED route and
+    // 5. DEDUP. An already-accepted message replays its STORED route and
     //    is not delivered again, even if the default has since changed.
     match ctx.dedup.admit(&key, fingerprint, now_ms) {
         Admission::DuplicateAccepted { resolved_endpoint } => {
@@ -224,7 +252,7 @@ pub fn admit_inbound(
         Admission::Fresh => {}
     }
 
-    // 5. RESERVATION. Only the owner proceeds; a matching concurrent copy
+    // 6. RESERVATION. Only the owner proceeds; a matching concurrent copy
     //    attaches and will receive the owner's outcome.
     match ctx.reservations.acquire(&key, fingerprint) {
         Ok(Reservation::Waiter) => return Outcome::AttachedAsWaiter,
@@ -258,7 +286,7 @@ pub fn admit_inbound(
         }
     };
 
-    // 8. QUEUE ADMISSION. THE acceptance point: `AcceptedV2` is sent only
+    // 9. QUEUE ADMISSION. THE acceptance point: `AcceptedV2` is sent only
     //    after this returned Ok.
     let event = DirectEvent {
         source_peer: source_peer.clone(),
@@ -272,7 +300,7 @@ pub fn admit_inbound(
         return Outcome::Refused(Refusal::Queue(refusal));
     }
 
-    // 9. RECORD, so a retry replays this route rather than re-resolving.
+    // 10. RECORD, so a retry replays this route rather than re-resolving.
     ctx.dedup
         .record_accepted(key.clone(), resolved.clone(), fingerprint, now_ms);
     ctx.reservations.release(&key);
@@ -371,6 +399,7 @@ mod tests {
         reservations: ReservationMap,
         registry: EndpointRegistry,
         queues: EndpointQueues,
+        draining: bool,
     }
 
     impl World {
@@ -382,6 +411,7 @@ mod tests {
                 reservations: ReservationMap::new(128, 8),
                 registry: registry(),
                 queues: queues(),
+                draining: false,
             }
         }
 
@@ -398,6 +428,7 @@ mod tests {
                 reservations: &mut self.reservations,
                 registry: &self.registry,
                 queues: &mut self.queues,
+                draining: self.draining,
             };
             admit_inbound(frame, from, now, &mut ctx)
         }
@@ -434,6 +465,44 @@ mod tests {
 
     /// TRUST BEFORE RATE. An untrusted peer must not spend a token, so it
     /// cannot exhaust the allowance of peers that are authorized.
+    #[test]
+    fn a_draining_node_refuses_without_spending_ingress_or_queueing() {
+        let mut w = World::new();
+        w.draining = true;
+        let before = w.ingress.tracked_peers();
+        let outcome = w.admit(&frame(Some("claude"), b"hi", 40), &peer(P1), 0);
+        assert_eq!(outcome, Outcome::Refused(Refusal::Draining));
+        assert_eq!(
+            w.ingress.tracked_peers(),
+            before,
+            "a peer spends no allowance to be told the node is going away"
+        );
+        assert_eq!(
+            w.queues.len(&endpoint("claude")),
+            0,
+            "and nothing was enqueued on the way to being refused"
+        );
+    }
+
+    /// Trust outranks draining: an untrusted peer learns that it is
+    /// untrusted, never what state this node is in.
+    #[test]
+    fn a_draining_node_still_tells_an_untrusted_peer_it_is_untrusted() {
+        let mut w = World::new();
+        w.draining = true;
+        let outcome = w.admit(&frame(Some("claude"), b"hi", 41), &peer(P2), 0);
+        assert_eq!(outcome, Outcome::Refused(Refusal::UntrustedPeer));
+    }
+
+    #[test]
+    fn draining_is_shutting_down_on_the_wire() {
+        assert_eq!(
+            Refusal::Draining.to_wire(),
+            DirectRejectReason::ShuttingDown,
+            "not overloaded, and not a routing answer"
+        );
+    }
+
     #[test]
     fn an_untrusted_peer_is_refused_without_spending_ingress() {
         let mut w = World::new();

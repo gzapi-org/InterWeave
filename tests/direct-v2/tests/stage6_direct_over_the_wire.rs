@@ -492,3 +492,51 @@ async fn revoking_a_lease_removes_the_route_and_discards_its_backlog() {
         "and nothing survived to be drained"
     );
 }
+
+/// A draining node refuses new direct work on a connection that is
+/// already open.
+///
+/// Draining is deliberately not stopping: `drain()` tells the connection
+/// manager to admit no NEW connections, and existing ones stay up so
+/// in-flight work can finish. That left a gap — a peer connected before
+/// the drain could still send, and admission would enqueue the message
+/// and answer `AcceptedV2` for work the following `shutdown()` discards.
+///
+/// `AcceptedV2` means a bounded queue took the message (ADR-0018). A
+/// node about to drop that queue cannot honestly say it, so the answer is
+/// `shutting_down` and the queue stays untouched.
+#[tokio::test]
+async fn a_draining_node_refuses_new_work_on_an_open_connection() {
+    let (sender, receiver, receiver_peer) = connected_pair(8).await;
+
+    // Before draining, the same send is accepted — so the refusal below
+    // is attributable to the drain and to nothing else about this setup.
+    sender
+        .send_direct(receiver_peer.clone(), frame(Some("claude"), b"before", 30))
+        .await
+        .expect("the command reaches the task")
+        .expect("accepted while serving");
+
+    receiver.drain().await.expect("the drain reaches the task");
+
+    let error = sender
+        .send_direct(receiver_peer, frame(Some("claude"), b"during", 31))
+        .await
+        .expect("the command reaches the task")
+        .expect_err("a draining node takes on no new work");
+    assert_eq!(
+        error,
+        TransportError::BackendUnavailable,
+        "`shutting_down` on the wire, not a routing or overload answer"
+    );
+
+    // AND NOTHING WAS ENQUEUED. The refusal is the whole point only if
+    // the message did not also land in the queue on its way to being
+    // refused: exactly the one accepted before the drain is there.
+    let delivered = receiver
+        .drain_endpoint(endpoint("claude"))
+        .await
+        .expect("the receiver answers");
+    assert_eq!(delivered.len(), 1, "only the pre-drain message");
+    assert_eq!(delivered[0].payload.bytes(), b"before");
+}

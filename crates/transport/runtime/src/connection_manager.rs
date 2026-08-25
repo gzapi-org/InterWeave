@@ -1206,6 +1206,16 @@ impl ConnectionManager {
         }
     }
 
+    /// Whether draining has begun.
+    ///
+    /// Read by the direct-admission path, which must refuse new work for
+    /// the same reason inbound connections are refused: this node is
+    /// about to drop what it is holding.
+    #[must_use]
+    pub fn is_draining(&self) -> bool {
+        self.shutting_down.load(Ordering::Acquire)
+    }
+
     /// Begin draining. Admission refuses from the next snapshot on.
     pub fn begin_shutdown(&mut self) {
         self.shutting_down.store(true, Ordering::Release);
