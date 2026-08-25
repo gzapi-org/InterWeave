@@ -172,15 +172,61 @@ async fn read_bounded<T>(io: &mut T, limit: usize) -> io::Result<Vec<u8>>
 where
     T: futures::AsyncRead + Unpin + Send,
 {
-    let mut buffer = Vec::new();
-    io.take(limit as u64 + 1).read_to_end(&mut buffer).await?;
-    if buffer.len() > limit {
+    let (buffer, oversize) = read_bounded_or_oversize(io, limit).await?;
+    if oversize {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("frame exceeds the {limit}-byte ceiling"),
         ));
     }
     Ok(buffer)
+}
+
+/// Read at most `limit + 1` bytes, and SAY whether the limit was passed
+/// rather than deciding what that means.
+///
+/// The extra byte is what distinguishes "exactly at the limit" from
+/// "over it", and returning the buffer either way is what lets a request
+/// that is too large still be ANSWERED: the bytes already read include
+/// the message id, so there is something to echo. Erroring here instead
+/// threw those bytes away and left the peer with a broken exchange for
+/// the one failure mode the contract names `too_large` outright.
+async fn read_bounded_or_oversize<T>(io: &mut T, limit: usize) -> io::Result<(Vec<u8>, bool)>
+where
+    T: futures::AsyncRead + Unpin + Send,
+{
+    let mut buffer = Vec::new();
+    io.take(limit as u64 + 1).read_to_end(&mut buffer).await?;
+    let oversize = buffer.len() > limit;
+    Ok((buffer, oversize))
+}
+
+/// The rejection an over-ceiling frame is owed.
+///
+/// Separate from the decode path because it runs BEFORE decoding: there
+/// is no `FrameError` to map, only a length that was already too big.
+fn oversize_request(bytes: &[u8]) -> InboundRequest {
+    // A frame past the request ceiling always carries sixteen bytes, so
+    // the fallback is unreachable there — written as a rejection rather
+    // than a panic because the lint policy treats a reachable panic in a
+    // transport daemon as a defect and this function is public to the
+    // crate.
+    let message_id = recover_id(bytes).unwrap_or(MessageId::from_bytes([0; MessageId::LEN]));
+    InboundRequest::Unparsable {
+        message_id,
+        reason: DirectRejectReason::TooLarge,
+    }
+}
+
+/// The message id, when enough of the frame arrived to carry one.
+///
+/// It is the FIRST field, so it survives every failure occurring after
+/// it — which is every failure the contract names a code for.
+fn recover_id(bytes: &[u8]) -> Option<MessageId> {
+    let head = bytes.get(..MessageId::LEN)?;
+    let mut id = [0u8; MessageId::LEN];
+    id.copy_from_slice(head);
+    Some(MessageId::from_bytes(id))
 }
 
 #[async_trait]
@@ -193,23 +239,29 @@ impl Codec for DirectCodec {
     where
         T: futures::AsyncRead + Unpin + Send,
     {
-        let bytes = read_bounded(io, MAX_REQUEST_BYTES).await?;
+        let (bytes, oversize) = read_bounded_or_oversize(io, MAX_REQUEST_BYTES).await?;
+        if oversize {
+            // TOO BIG TO DECODE, BIG ENOUGH TO ANSWER. The frame passed
+            // the ceiling, so nothing here will parse it — but the bytes
+            // already read start with the message id, which is all a
+            // rejection needs. This is the failure mode `too_large`
+            // exists for, and it used to be the one that got no answer.
+            return Ok(oversize_request(&bytes));
+        }
         match DirectMessageV2::decode(&bytes, MAX_PAYLOAD_BYTES) {
             Ok(frame) => Ok(InboundRequest::Frame(Box::new(frame))),
             Err(error) => {
                 // THE ID COMES FIRST IN THE FRAME, so it outlives every
                 // later field's failure. Without it there is nothing to
                 // echo and therefore nothing that can be sent back.
-                let Some(head) = bytes.get(..MessageId::LEN) else {
+                let Some(message_id) = recover_id(&bytes) else {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         error.to_string(),
                     ));
                 };
-                let mut id = [0u8; MessageId::LEN];
-                id.copy_from_slice(head);
                 Ok(InboundRequest::Unparsable {
-                    message_id: MessageId::from_bytes(id),
+                    message_id,
                     reason: error.to_wire(),
                 })
             }

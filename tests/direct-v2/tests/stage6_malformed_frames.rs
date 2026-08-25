@@ -325,3 +325,32 @@ async fn malformed_frames_spend_ingress_allowance() {
         "past the burst the answer is overloaded, so the bucket was charged"
     );
 }
+
+/// A PHYSICALLY oversized frame is answered `too_large`.
+///
+/// The distinction the earlier tests missed. They overstated a declared
+/// length inside a short buffer, so the frame still fitted under
+/// `MAX_REQUEST_BYTES` and reached the decoder. A sender that actually
+/// transmits one byte past the payload ceiling produces a frame that
+/// exceeds the request ceiling, and the bounded reader used to error
+/// before any rejection could be built — so the peer got nothing at all
+/// for the single failure mode the contract names `too_large` outright.
+///
+/// The reader now keeps the bytes it already had, and the first sixteen
+/// of them are the message id.
+#[tokio::test]
+async fn a_physically_oversized_frame_is_answered_too_large() {
+    let mut frame = legal_frame();
+    // Past the REQUEST ceiling, not merely past the payload ceiling.
+    frame.extend(std::iter::repeat_n(0u8, 64 * 1024));
+
+    let answer = what_the_receiver_answers(frame).await;
+    assert_eq!(
+        answer,
+        DirectResponse::Rejected {
+            message_id: MessageId::from_bytes([7; 16]),
+            reason: DirectRejectReason::TooLarge,
+        },
+        "answered under its own id rather than dropped"
+    );
+}
