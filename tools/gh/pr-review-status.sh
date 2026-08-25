@@ -218,8 +218,23 @@ verdict_count=0
 request_at=""
 request_by=""
 request_pending=no
+# Set before the first probe runs. The progress line below prints
+# `${head:0:8}`, and under `set -u` an unset `head` is a fatal error --
+# so a run whose FIRST probe failed died mid-loop with "unbound
+# variable" and exit 1 instead of retrying and reporting exit 2, the
+# unreadable-PR contract. Reachable whenever --wait is long enough to
+# reach the second poll, which is every real invocation.
+head=""
 probe() {
     local meta reviews
+
+    # RESET, not just set on success. `probe_ok` is what the fall-out
+    # path below uses to decide whether it holds readable data, and a
+    # probe that reads the PR metadata and then fails on reviews leaves
+    # a NEW head beside the PREVIOUS poll's review counts. Left latched
+    # from an earlier success, that renders as a current report of a
+    # state that was never observed.
+    probe_ok=0
     meta="$(gh pr view "$PR" --repo "$REPO" \
         --json state,mergeStateStatus,headRefOid,author,isDraft,reviewRequests \
         2>/dev/null)" || return 1

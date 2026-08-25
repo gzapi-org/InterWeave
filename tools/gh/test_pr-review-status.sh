@@ -529,6 +529,24 @@ assert_rc "a pending RECOGNISED request does suppress it" 1
 run "OPEN:newhead:a-human" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z"
 assert_rc "and without the flag a human request still suppresses it" 1
 
+echo "pr-review-status: an incomplete probe is unreadable, not a stale report"
+# The progress line prints ${head:0:8}, and under `set -u` an unset head
+# is fatal — so a run whose FIRST probe failed died with "unbound
+# variable" and exit 1 rather than retrying and reporting the exit-2
+# unreadable contract. Reachable on every --wait long enough to reach a
+# second poll.
+run "FAIL:x:0" "" --wait 3 --interval 1 -q
+assert_rc    "a first-probe failure exits 2, not a crash" 2
+assert_lacks "  and never says 'unbound variable'"        "unbound variable"
+
+# `probe_ok` latched on from an earlier success meant the fall-out path
+# rendered the PREVIOUS poll's numbers as a current answer. The last
+# probe failed; the data is stale, and this script exists to avoid
+# exactly the confident wrong answer that would be.
+run "OPEN:abc123:0
+FAIL:x:0" "" --wait 2 --interval 1 -q
+assert_rc "a stale latch does not turn a failed probe into a report" 2
+
 echo "pr-review-status: an @codex review in flight is not 'nothing is coming'"
 # THE DEFECT §9 DOCUMENTED INSTEAD OF FIXING. `@codex review` is how a
 # review is asked for here and it is NOT a GitHub review request, so
