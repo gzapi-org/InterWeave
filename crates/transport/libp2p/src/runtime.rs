@@ -2008,11 +2008,30 @@ fn handle_direct(
                         resolved_endpoint: resolved_endpoint.clone(),
                     }
                 }
-                // A WAITER IS NOT ANSWERED HERE. The owner's outcome is
-                // what it receives, and holding the channel until then is
-                // the caller's job — answering now would be a second,
-                // possibly different, answer to one message.
-                AdmissionOutcome::AttachedAsWaiter => return DirectHandled::Consumed,
+                // A WAITER IS ANSWERED, not dropped. The previous version
+                // returned here and let the `ResponseChannel` fall out of
+                // scope, which sends nothing at all — the remote then
+                // waits out its own deadline for a message this profile
+                // had already decided about.
+                //
+                // It read as harmless because it is currently
+                // UNREACHABLE: `admit_inbound` acquires and releases the
+                // reservation inside one synchronous call, so nothing is
+                // ever in flight when the next request arrives. That is a
+                // property of today's admission, not of the protocol, and
+                // a silent drop waiting for admission to become async is
+                // the kind of thing that surfaces as an unexplained
+                // timeout much later.
+                //
+                // The owner has therefore already settled, and its result
+                // is in the dedup cache — which is exactly what the
+                // waiter should receive. A cache miss means the owner is
+                // genuinely still in flight (a future async admission) or
+                // was refused, and `overloaded` is the honest answer to
+                // "I cannot hold this open for you".
+                AdmissionOutcome::AttachedAsWaiter => {
+                    waiter_response(&state.dedup, &request, &source)
+                }
                 AdmissionOutcome::Refused(refusal) => DirectResponse::Rejected {
                     message_id: request.message_id,
                     reason: refusal.to_wire(),
@@ -2071,6 +2090,30 @@ fn handle_direct(
         // Nothing to undo: admission already decided, and the remote will
         // retry into dedup.
         RrEvent::InboundFailure { .. } | RrEvent::ResponseSent { .. } => DirectHandled::Consumed,
+    }
+}
+
+/// What a request that attached as a waiter is told.
+///
+/// See the call site for why this is a cache lookup rather than a held
+/// channel: the owner settles synchronously, so by the time a waiter
+/// could exist its answer is already recorded.
+fn waiter_response(
+    dedup: &interweave_transport_runtime::dedup::DedupCache,
+    request: &DirectMessageV2,
+    source: &TransportIdentity,
+) -> crate::direct_codec::DirectResponse {
+    use crate::direct_codec::DirectResponse;
+    let key = interweave_transport_runtime::direct_inbound::dedup_key(request, source);
+    match dedup.get(&key) {
+        Some(record) => DirectResponse::Accepted {
+            message_id: request.message_id,
+            resolved_endpoint: record.resolved_endpoint.clone(),
+        },
+        None => DirectResponse::Rejected {
+            message_id: request.message_id,
+            reason: DirectRejectReason::Overloaded,
+        },
     }
 }
 
@@ -2471,5 +2514,92 @@ mod response_validation_tests {
             validate_response(&response, asked(), Some(&endpoint("claude"))),
             Err(DirectError::RemoteEndpointUnavailable)
         );
+    }
+}
+
+#[cfg(test)]
+mod waiter_tests {
+    use super::waiter_response;
+    use crate::direct_codec::DirectResponse;
+    use interweave_transport_api::{
+        DirectMessageV2, DirectRejectReason, EndpointId, MediaType, MessageId, Payload,
+        TransportIdentity,
+    };
+    use interweave_transport_runtime::dedup::{DEFAULT_TTL_MS, DedupCache};
+    use interweave_transport_runtime::direct_inbound::dedup_key;
+    use interweave_transport_runtime::fingerprint::direct_content_fingerprint_v1;
+
+    const P1: &str = "12D3KooWA9hFCGwGCpCbWWfLmYSpqPzXgLmPvbBrgWGNvNGSDVpS";
+
+    fn peer() -> TransportIdentity {
+        TransportIdentity::parse(P1).expect("valid peer id")
+    }
+
+    fn endpoint(name: &str) -> EndpointId {
+        EndpointId::parse(name).expect("valid endpoint id")
+    }
+
+    fn request() -> DirectMessageV2 {
+        DirectMessageV2 {
+            message_id: MessageId::from_bytes([4; 16]),
+            sent_at_ms: 1,
+            source_endpoint: endpoint("human"),
+            destination_endpoint: Some(endpoint("claude")),
+            payload: Payload::at_ceiling(
+                Some(MediaType::parse("text/plain").expect("valid media type")),
+                b"hi".to_vec(),
+            )
+            .expect("within the ceiling"),
+        }
+    }
+
+    /// THE OWNER HAS SETTLED, so the waiter receives the owner's route —
+    /// the same answer, never a second enqueue.
+    #[test]
+    fn a_waiter_receives_the_owners_recorded_route() {
+        let mut dedup = DedupCache::new(64, DEFAULT_TTL_MS);
+        let req = request();
+        let fingerprint = direct_content_fingerprint_v1(Some("text/plain"), b"hi").expect("hashes");
+        dedup.record_accepted(dedup_key(&req, &peer()), endpoint("claude"), fingerprint, 0);
+
+        assert_eq!(
+            waiter_response(&dedup, &req, &peer()),
+            DirectResponse::Accepted {
+                message_id: req.message_id,
+                resolved_endpoint: endpoint("claude"),
+            }
+        );
+    }
+
+    /// NEVER SILENCE. A cache miss means the owner is genuinely still in
+    /// flight or was refused; `overloaded` is the honest answer to "I
+    /// cannot hold this open for you", and it is an answer rather than a
+    /// dropped channel the remote waits out its deadline on.
+    #[test]
+    fn a_waiter_with_no_recorded_owner_is_told_overloaded_not_nothing() {
+        let dedup = DedupCache::new(64, DEFAULT_TTL_MS);
+        let req = request();
+        assert_eq!(
+            waiter_response(&dedup, &req, &peer()),
+            DirectResponse::Rejected {
+                message_id: req.message_id,
+                reason: DirectRejectReason::Overloaded,
+            }
+        );
+    }
+
+    /// The id is echoed on both shapes, so a waiter's answer settles the
+    /// exchange it belongs to rather than being discarded by the sender's
+    /// own id check.
+    #[test]
+    fn a_waiters_answer_echoes_the_request_id() {
+        let dedup = DedupCache::new(64, DEFAULT_TTL_MS);
+        let req = request();
+        match waiter_response(&dedup, &req, &peer()) {
+            DirectResponse::Accepted { message_id, .. }
+            | DirectResponse::Rejected { message_id, .. } => {
+                assert_eq!(message_id, req.message_id);
+            }
+        }
     }
 }
