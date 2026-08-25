@@ -244,6 +244,22 @@ pub fn admit_prefix(
     Ok(())
 }
 
+/// Run one inbound direct-v2 request through admission.
+///
+/// `source_peer` is the **authenticated** remote identity — Noise proved
+/// it. The frame's `source_endpoint` is peer-asserted and is used as a
+/// dedup dimension, never as authorization.
+///
+/// Begins with [`admit_prefix`], the gates every inbound request passes
+/// whether or not it decoded, and then runs the structured half that
+/// needs a frame: fingerprint, dedup, reservation, resolution, endpoint
+/// policy, queue admission.
+///
+/// The reservation is released here on every path this function decides.
+/// A caller holding waiters' response channels answers them when the
+/// owner's outcome arrives — `ReservationMap::release` already returns
+/// the owner's and every waiter's budget together, so a waiter needs no
+/// settling of its own.
 pub fn admit_inbound(
     frame: &DirectMessageV2,
     source_peer: &TransportIdentity,

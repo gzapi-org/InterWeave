@@ -354,3 +354,130 @@ async fn a_physically_oversized_frame_is_answered_too_large() {
         "answered under its own id rather than dropped"
     );
 }
+
+/// An in-flight exchange gets a bounded grace at shutdown.
+///
+/// `shutdown` used to break the loop the moment the command arrived,
+/// dropping every `PendingDirect` — so a caller whose request had
+/// already reached the wire was answered `Stopped`, a shutdown
+/// cancelling work it had accepted. `DIRECT.md` asks for the opposite:
+/// stop taking new work, let existing exchanges finish briefly, close.
+///
+/// The peer here accepts the request and HOLDS its response channel,
+/// which is the only way to keep an exchange genuinely in flight —
+/// dropping the channel would resolve it as a failure and there would be
+/// nothing left to grace.
+#[tokio::test]
+async fn shutdown_grants_an_in_flight_exchange_a_bounded_grace() {
+    let silent_keys = libp2p::identity::Keypair::generate_ed25519();
+    let silent_peer = TransportIdentity::parse(silent_keys.public().to_peer_id().to_string())
+        .expect("a valid peer id");
+
+    let mut silent = SwarmBuilder::with_existing_identity(silent_keys)
+        .with_tokio()
+        .with_tcp(
+            libp2p::tcp::Config::default(),
+            libp2p::noise::Config::new,
+            libp2p::yamux::Config::default,
+        )
+        .expect("the same transport stack")
+        .with_behaviour(|_| {
+            request_response::Behaviour::<RawCodec>::new(
+                [(DIRECT_PROTOCOL, ProtocolSupport::Full)],
+                request_response::Config::default(),
+            )
+        })
+        .expect("behaviour")
+        .build();
+    silent
+        .listen_on("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
+        .expect("listens");
+
+    let address = loop {
+        if let Libp2pSwarmEvent::NewListenAddr { address, .. } = silent.select_next_some().await {
+            break address;
+        }
+    };
+
+    // Hold every channel, answer nothing.
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        loop {
+            if let Libp2pSwarmEvent::Behaviour(request_response::Event::Message {
+                message: request_response::Message::Request { channel, .. },
+                ..
+            }) = silent.select_next_some().await
+            {
+                held.push(channel);
+            }
+        }
+    });
+
+    let sender_id = ProfileIdentity::generate();
+    let mut sender = SwarmRuntime::start(
+        &sender_id,
+        SubstrateConfig::default(),
+        TrustSources::new(
+            PeerTrustPolicy::new([silent_peer.clone()]).expect("a one-peer allowlist"),
+            InfrastructureSet::default(),
+        ),
+    )
+    .expect("the sender starts");
+    sender
+        .configure_direct(endpoints())
+        .await
+        .expect("endpoints install");
+    sender
+        .dial(silent_peer.clone(), address)
+        .await
+        .expect("command")
+        .expect("admitted");
+
+    // THE CONNECTION MUST EXIST FIRST, or `send_direct` refuses as
+    // unreachable and returns at once — which looks exactly like the
+    // pass this test is trying to detect.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(!remaining.is_zero(), "no connection within 20s");
+        match tokio::time::timeout(remaining, sender.next_event()).await {
+            Ok(Some(interweave_transport_libp2p::runtime::SwarmEvent::Connected { .. })) => break,
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("the sender stopped before connecting"),
+            Err(_) => panic!("no connection within 20s"),
+        }
+    }
+
+    // Dispatch and walk away: the peer never answers, so this times out
+    // and leaves the exchange in flight.
+    let dispatched = tokio::time::timeout(
+        Duration::from_millis(500),
+        sender.send_direct(silent_peer, legal_message()),
+    )
+    .await;
+    assert!(dispatched.is_err(), "the silent peer answered nothing");
+
+    let started = tokio::time::Instant::now();
+    sender.shutdown().await.expect("the task ends");
+    let waited = started.elapsed();
+
+    assert!(
+        waited >= Duration::from_secs(1),
+        "shutdown waited for the exchange rather than dropping it, took {waited:?}"
+    );
+    assert!(
+        waited < Duration::from_secs(15),
+        "and the grace is BOUNDED, not a second protocol deadline: {waited:?}"
+    );
+}
+
+/// The frame the grace test sends, as a value rather than bytes.
+fn legal_message() -> DirectMessageV2 {
+    DirectMessageV2 {
+        message_id: MessageId::from_bytes([9; 16]),
+        sent_at_ms: 1,
+        source_endpoint: endpoint("human"),
+        destination_endpoint: Some(endpoint("claude")),
+        payload: Payload::at_ceiling(None, b"held".to_vec()).expect("within the ceiling"),
+    }
+}

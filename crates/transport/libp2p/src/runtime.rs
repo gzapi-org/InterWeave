@@ -467,6 +467,19 @@ fn admit_outbound<'a>(
     Ok(())
 }
 
+/// How long `shutdown` lets already-dispatched exchanges finish.
+///
+/// `DIRECT.md`: "allow existing exchanges a short bounded grace, then
+/// close." Shorter than the ten-second direct deadline on purpose — this
+/// is a grace for exchanges already in flight, not a second deadline for
+/// them, and a caller that asked to stop should not wait out the full
+/// protocol timeout to find out that it has.
+///
+/// The contract's daemon-facing `shutdown(grace)` takes this as a
+/// parameter. Stage 6 has no daemon, so it is a constant here and
+/// becomes an argument when the API that needs it exists.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Outbound direct exchanges allowed at once, in total.
 ///
 /// The `direct inflight total` row of `resource-limits.md` (128, ceiling
@@ -609,6 +622,10 @@ impl SwarmRuntime {
         // that admitted its connection.
         direct_state.adopt_trust(&trust);
 
+        // A shutdown that is waiting for in-flight exchanges: the
+        // deadline it must not pass, and the caller to answer when it
+        // finishes or expires.
+        let mut stopping: Option<(tokio::time::Instant, oneshot::Sender<()>)> = None;
         let mut pending_direct: HashMap<
             libp2p::request_response::OutboundRequestId,
             PendingDirect,
@@ -671,6 +688,24 @@ impl SwarmRuntime {
                 // bounded — `admit_outbound` caps it at 128 — so this
                 // cannot become the unbounded queue the capacity exists
                 // to rule out.
+                // A GRACE THAT IS OVER ENDS THE LOOP. Checked before the
+                // select rather than inside it, so both ways out — the
+                // last exchange settling, and the deadline passing —
+                // leave through one place and answer the caller once.
+                if let Some((deadline, _)) = &stopping
+                    && (pending_direct.is_empty() || tokio::time::Instant::now() >= *deadline)
+                {
+                    if let Some((_, reply)) = stopping.take() {
+                        let _ = reply.send(());
+                    }
+                    break;
+                }
+
+                // The deadline, when a shutdown is waiting out its
+                // grace. `None` the rest of the time, and the select
+                // branch below is inert then.
+                let grace_deadline = stopping.as_ref().map(|(deadline, _)| *deadline);
+
                 let room = outbox.len()
                     < config
                         .event_capacity
@@ -852,8 +887,32 @@ impl SwarmRuntime {
                             // spin forever.
                             None => break,
                             Some(SwarmCommand::Shutdown { reply }) => {
-                                let _ = reply.send(());
-                                break;
+                                // NOTHING IN FLIGHT IS THE COMMON CASE,
+                                // and it still stops immediately.
+                                if pending_direct.is_empty() || stopping.is_some() {
+                                    let _ = reply.send(());
+                                    break;
+                                }
+                                // EXCHANGES ALREADY DISPATCHED GET A
+                                // BOUNDED GRACE. Breaking here drops
+                                // every `PendingDirect`, so each caller
+                                // that had already reached the wire is
+                                // answered `Stopped` — a shutdown
+                                // cancelling work it had accepted.
+                                // `DIRECT.md` asks for the opposite:
+                                // stop taking new work, let existing
+                                // exchanges finish briefly, then close.
+                                //
+                                // `begin_shutdown` is what stops the new
+                                // work, and it is the same flag the
+                                // drain path already reads on both
+                                // directions — so no second notion of
+                                // "closing" is introduced here.
+                                manager.begin_shutdown();
+                                stopping = Some((
+                                    tokio::time::Instant::now() + SHUTDOWN_GRACE,
+                                    reply,
+                                ));
                             }
                             Some(command) => {
                                 let mut refuse = Vec::new();
@@ -881,6 +940,16 @@ impl SwarmRuntime {
                             }
                         }
                     }
+                    // WAKE AT THE DEADLINE even if nothing else arrives.
+                    // Without this the grace would only end when some
+                    // other branch happened to fire, which for a peer
+                    // that has gone silent is never.
+                    () = async {
+                        match grace_deadline {
+                            Some(deadline) => tokio::time::sleep_until(deadline).await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => {}
                     event = swarm.select_next_some(), if room => {
                         // SETTLE THE ADMISSION FIRST. Every dial holds a
                         // pending slot until its outcome arrives, so an
