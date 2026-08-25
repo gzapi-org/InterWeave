@@ -184,24 +184,27 @@ Each admitted reservation is charged to a different `source_peer` — the connec
 
 **Deleting the global check makes this report 8 admitted and 0 refused, while A7 still reports its documented 4 and 12.** That is the whole reason this experiment exists: the two limits fail independently, and a spike reaching only one of them has evidence about only one of them.
 
-### A9. The `no_route` privacy class
+### A9. The `no_route` privacy class — driven through the production predicates
 
-`SPIKES.md` lists "no_route privacy class" among the cases this spike must exercise, and until now nothing did: `NoRoute` appeared only as a predetermined owner outcome in A6 and as the conflict arm in A7. A regression exposing endpoint-unknown and policy-denied as distinguishable answers would have left every recorded number unchanged.
+`SPIKES.md` lists "no_route privacy class" among the required cases. **Two earlier versions of this experiment were tautologies, and both were caught in review.** The first never ran the case. The second converted a label the request carried into an enum and handed it to a function that *discarded its argument* and returned `no_route` — so it measured whether a function that ignores its input returns the same value for every input, and reported the answer as a verdict. That is recorded here because a spike whose evidence was manufactured twice owes the reader the history.
 
-`DIRECT.md`: `no_route` "deliberately collapses endpoint unknown, endpoint disabled, no active lease, missing default endpoint, and endpoint-specific policy denial. All such branches use the same wire code/response shape and shared response encoder."
-
-Five requests, each selecting a genuinely different branch of the responder's routing decision:
+What the property actually rests on is `EndpointRegistry::resolve_inbound` — whose five refusals are selected by five *independent predicates over real registry state* (configured? enabled? policy admits the sender? leased? default present?) — and `ResolveFailure::to_wire`, the production collapse. The responder now holds five registries in five genuinely different states, passes each request's destination through untouched, and lets the production code decide:
 
 ```text
-internal route failures exercised              5
-responses received                             5
-every response decodes to one identical value  true
-and every encoding is byte-identical           true
+unknown    -> local   EndpointUnknown
+disabled   -> local   EndpointDisabled
+unleased   -> local   EndpointOffline
+nodefault  -> local   NoDefaultConfigured
+denied     -> local   EndpointPolicyDenied
+distinct LOCAL failures the production predicates produced  5
+every response decodes to one identical value               true
+and that value is no_route                                  true
+and every encoding is byte-identical                        true
 ```
 
-The second check is the stronger one and the one the specification actually makes. Two values can compare equal in Rust and still serialize differently — a field added later with a skip condition would do it — so the five refusals are also encoded through **the same CBOR library the codec itself uses** and compared as bytes. Making a single branch answer `overloaded` instead turns both lines false.
+Two halves, and the first is the one the tautology lacked: **five distinct local failures** proves five independent predicates each fired, so a regression in any one — or two collapsing upstream of the encoder — is visible. The wire vocabulary is now the production `DirectRejectReason` (the spike's private copy is gone), encoded through the codec's own CBOR library and compared as bytes.
 
-Why it matters: distinguishable refusals are an endpoint oracle. A peer authorized for nothing learns which endpoints exist, which are disabled, and which refused it by policy, purely by probing.
+Proved load-bearing by breaking **production**, not the harness: making `to_wire` leak one variant fails the byte and value checks; making `resolve_inbound` collapse two predicates drops the distinct count to 4 and fails the verdict. The previous A9 would have stayed green under both.
 
 ## B — GossipSub
 
@@ -247,7 +250,18 @@ forged message delivered to the STRICT receiver     false  <- and was rejected t
 genuine message delivered to the strict receiver    true   <- NOT suppressed
 ```
 
-**A second gap, found by review after the first fix: these counts were never checked against the message that arrived.** `pump` polls every node for a fixed duration regardless of what has already been published, and the first version of these counters treated any event delivered to a given index during a given window as the message that window was measuring. The control publication above is delivered asynchronously; had it been delayed into the `after_forgery` window instead of its own, it would have been counted as the forged message arriving, and the verdict could have read PASS without the contested payload ever having been involved. The counts now filter on the exact contested payload (`arrived`, in the harness), which cannot tell the forged and genuine deliveries apart from each other — they share one payload and one mesh id by construction — but rules out everything else, which is what the gap was actually about.
+**A second gap: the counts were never checked against *which* message arrived.** `pump` polls for a fixed duration, so a forgery delayed past its own window would land in the genuine window and be counted as the genuine delivery — and forged and genuine share payload, mesh id *and* source by construction, so filtering by payload cannot separate them. What neither can fake is the per-publisher **sequence number**: the forger's is random, the victim's is its own counter.
+
+Attribution is now by sequence, across all windows combined. The forged sequence is read at the permissive receiver. The genuine one turned out **not** to be independently observable — the permissive receiver sits behind the forger, whose own duplicate cache already holds this mesh id from the forgery it published, so it never forwards the genuine message; a first version of this attribution tried to read it there and found `None`. It does not need to be observed: exactly two publications of this payload exist, so a strict delivery whose sequence is not the forged one *is* the genuine one, by elimination.
+
+```text
+forged sequence (seen at permissive)                     Some(7472259401723353819)
+strict deliveries of the contested payload, ALL windows  1
+their sequence numbers                                   [Some(1787644342344501503)]
+strict delivered exactly one, and it is not the forgery  true
+```
+
+Proved by making the strict receiver permissive: the forgery is then delivered, poisons the cache, the genuine message is suppressed, and the strict node's single delivery carries the **forged** sequence. The old window check counted that as "genuine delivered" and passed; this fails it — which is exactly the false-PASS the reviewer described.
 
 **That permissive receiver is the control this experiment turned out to need, and it failed the first time it was run.** Without it, "the forged message was not delivered" is equally explained by the forgery never reaching anyone — the experiment would close the spike without the invalid message ever touching a receive path. When it was first added it reported **zero**, because the star topology put it downstream of the strict receiver, which rejects the forgery and therefore never forwards it: a control that could only fail for the same reason as the thing it was controlling. Wiring it directly to the forger is what makes the numbers above evidence.
 

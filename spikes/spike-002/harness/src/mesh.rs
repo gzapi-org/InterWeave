@@ -221,7 +221,7 @@ async fn listen(swarm: &mut Swarm<Behaviour>) -> Multiaddr {
 async fn pump(
     nodes: &mut [&mut Swarm<Behaviour>],
     how_long: Duration,
-    received: &mut Vec<(usize, Option<PeerId>, Vec<u8>, MessageId)>,
+    received: &mut Vec<Delivery>,
 ) {
     let deadline = tokio::time::Instant::now() + how_long;
     loop {
@@ -242,7 +242,13 @@ async fn pump(
                     ..
                 })) = event
             {
-                received.push((index, message.source, message.data.clone(), message_id));
+                received.push(Delivery {
+                    node: index,
+                    source: message.source,
+                    data: message.data.clone(),
+                    id: message_id,
+                    sequence: message.sequence_number,
+                });
             }
         }
     }
@@ -305,11 +311,8 @@ pub async fn b1_distinct_mesh_ids() {
         pump(&mut nodes, Duration::from_secs(3), &mut received).await;
     }
 
-    let received: Vec<_> = received
-        .into_iter()
-        .filter(|(node, ..)| *node == 0)
-        .collect();
-    let ids: Vec<&MessageId> = received.iter().map(|(_, _, _, id)| id).collect();
+    let received: Vec<_> = received.into_iter().filter(|d| d.node == 0).collect();
+    let ids: Vec<&MessageId> = received.iter().map(|d| &d.id).collect();
     let distinct = {
         let mut seen: Vec<&MessageId> = Vec::new();
         for id in &ids {
@@ -323,8 +326,8 @@ pub async fn b1_distinct_mesh_ids() {
     note("distinct mesh ids among them", distinct);
     note(
         "both publishers reached the application",
-        received.iter().any(|(_, s, _, _)| *s == Some(first_peer))
-            && received.iter().any(|(_, s, _, _)| *s == Some(second_peer)),
+        received.iter().any(|d| d.source == Some(first_peer))
+            && received.iter().any(|d| d.source == Some(second_peer)),
     );
 }
 
@@ -433,7 +436,7 @@ pub async fn b2_authenticity_before_cache() {
         pump(&mut nodes, Duration::from_secs(2), &mut control_seen).await;
         note(
             "control delivered to the strict receiver",
-            arrived(&control_seen, 0, &control_payload),
+            !deliveries(&control_seen, 0, &control_payload).is_empty(),
         );
         note(
             "receiver's connected peers",
@@ -462,11 +465,7 @@ pub async fn b2_authenticity_before_cache() {
         // ever having arrived at all.
         note(
             "forged message delivered to the PERMISSIVE receiver",
-            arrived(&after_forgery, 3, &payload),
-        );
-        note(
-            "forged message delivered to the STRICT receiver",
-            arrived(&after_forgery, 0, &payload),
+            !deliveries(&after_forgery, 3, &payload).is_empty(),
         );
 
         let genuine = nodes[2]
@@ -477,23 +476,61 @@ pub async fn b2_authenticity_before_cache() {
         pump(&mut nodes, Duration::from_secs(3), &mut after_genuine).await;
     }
 
-    // Forged and genuine share ONE payload and ONE mesh id by
-    // construction -- that collision is the ordering question this
-    // experiment asks. Payload equality cannot tell the two apart from
-    // each other, but it is exactly what rules out everything ELSE: the
-    // control message's distinct payload, and anything a delayed or
-    // duplicate delivery from an unrelated step might otherwise
-    // contribute to a window it does not belong to.
-    let forged_strict = arrived(&after_forgery, 0, &payload);
-    let forged_permissive = arrived(&after_forgery, 3, &payload);
-    let genuine_strict = arrived(&after_genuine, 0, &payload);
+    // ATTRIBUTED BY SEQUENCE NUMBER, ACROSS ALL WINDOWS. Forged and
+    // genuine share payload and mesh id by construction and source by
+    // design, so payload cannot tell them apart -- and a forgery
+    // delayed past its own pump window would have been counted as the
+    // genuine delivery. The per-publisher sequence number is what
+    // neither can fake: the forger's is random, the victim's is its own
+    // counter.
+    //
+    // The forged sequence is known from the permissive receiver. The
+    // genuine one is NOT independently observable: the permissive
+    // receiver sits behind the forger, whose own duplicate cache
+    // already holds this mesh id from the forgery it published, so it
+    // never forwards the genuine message onward -- a first version of
+    // this attribution tried to read the genuine sequence there and
+    // found nothing. It does not need to be observed. Exactly two
+    // publications of this payload exist in the experiment, so a
+    // strict delivery whose sequence is not the forged one IS the
+    // genuine one, by elimination, whatever window it landed in.
+    let mut everything: Vec<Delivery> = Vec::new();
+    everything.extend(after_forgery.iter().cloned());
+    everything.extend(after_genuine.iter().cloned());
+
+    let forged_seq: Option<u64> = deliveries(&after_forgery, 3, &payload)
+        .first()
+        .and_then(|d| d.sequence);
+    let strict_all = deliveries(&everything, 0, &payload);
+    let strict_seqs: Vec<Option<u64>> = strict_all.iter().map(|d| d.sequence).collect();
+
     note(
-        "genuine message delivered to the strict receiver",
-        genuine_strict,
+        "forged sequence (seen at permissive)",
+        format!("{forged_seq:?}"),
+    );
+    note(
+        "strict deliveries of the contested payload, ALL windows",
+        strict_all.len(),
+    );
+    note("their sequence numbers", format!("{strict_seqs:?}"));
+
+    let forgery_reached_a_receive_path = forged_seq.is_some();
+    // Exactly one, carrying a sequence, and not the forgery's -- so
+    // the forgery was not delivered late either, and the one that was
+    // delivered can only be the genuine publication.
+    let strict_got_exactly_the_genuine_one =
+        strict_all.len() == 1 && strict_seqs[0].is_some() && strict_seqs[0] != forged_seq;
+    note(
+        "forgery reached a receive path",
+        forgery_reached_a_receive_path,
+    );
+    note(
+        "strict delivered exactly one, and it is not the forgery",
+        strict_got_exactly_the_genuine_one,
     );
     note(
         "VERDICT: authenticity precedes the duplicate cache",
-        forged_permissive && !forged_strict && genuine_strict,
+        forgery_reached_a_receive_path && strict_got_exactly_the_genuine_one,
     );
     note(
         "  (arrived at a receive path, rejected by strict, left nothing behind)",
@@ -501,19 +538,29 @@ pub async fn b2_authenticity_before_cache() {
     );
 }
 
-/// Whether the EXACT contested payload was delivered to node `at`.
+/// One gossipsub delivery, with everything needed to say WHICH
+/// publication it was.
 ///
-/// Filtered by payload, not merely by whether some event landed in the
-/// index/window pair: `pump` polls every node for a fixed duration
-/// regardless of what has already arrived, so a message published in
-/// an EARLIER step -- the control message, most obviously -- can be
-/// delivered late, into a LATER pump call's window, and get counted as
-/// if it were the message that call was measuring. Forged and genuine
-/// share one payload and one mesh id by construction, so this cannot
-/// tell the two apart from each other; it is what rules out everything
-/// else.
-fn arrived(events: &[(usize, Option<PeerId>, Vec<u8>, MessageId)], at: usize, want: &[u8]) -> bool {
+/// `sequence` is the field that makes attribution possible. Forged and
+/// genuine share payload and mesh id by construction -- that collision
+/// is the experiment -- and share `source` by design, since the forger
+/// claims the victim's identity. What they cannot share is the
+/// per-publisher sequence number: the forger's is random, the victim's
+/// is its own counter, and neither can produce the other's.
+#[derive(Debug, Clone)]
+struct Delivery {
+    node: usize,
+    source: Option<PeerId>,
+    data: Vec<u8>,
+    id: MessageId,
+    sequence: Option<u64>,
+}
+
+/// Every delivery of `payload` at node `at`, whatever window it landed
+/// in.
+fn deliveries<'a>(events: &'a [Delivery], at: usize, payload: &[u8]) -> Vec<&'a Delivery> {
     events
         .iter()
-        .any(|(node, _source, data, _id)| *node == at && data == want)
+        .filter(|d| d.node == at && d.data == payload)
+        .collect()
 }

@@ -42,22 +42,17 @@ pub struct Request {
     pub body: Vec<u8>,
 }
 
-/// The coarse wire reasons this spike can produce.
+/// THE PRODUCTION WIRE VOCABULARY, not a spike-private copy of it.
 ///
-/// `DIRECT.md` lists seven and is explicit that they are DISTINCT on the
-/// wire. Collapsing reservation overflow into `no_route` -- which the
-/// first version of this harness did -- means the spike reports
-/// `Overloaded` in its own counters while the peer is told something
-/// else, so it verifies neither the mapping nor the behaviour.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Reason {
-    /// Endpoint unknown, offline, disabled, or policy-denied -- one
-    /// answer, so the reply cannot be used as an endpoint oracle.
-    NoRoute,
-    /// A bounded budget is exhausted. Distinct from `no_route`: the route
-    /// may be perfectly good and the caller should retry later.
-    Overloaded,
-}
+/// The first version of this harness carried its own two-variant enum
+/// here. That made every "the peer was told X" line a statement about
+/// the harness's own type, and A9 in particular a statement about an
+/// encoder the harness had written for the purpose. The type that
+/// reaches the wire in Stage 6 is `DirectRejectReason`, its serde
+/// derive IS the encoder, and `ResolveFailure::to_wire` is the
+/// production collapse -- so those are what every response below is
+/// built from.
+pub use interweave_transport_api::DirectRejectReason as Reason;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Response {
@@ -923,149 +918,200 @@ pub async fn a8_cancellation_race() {
     );
 }
 
-/// The five internal reasons `DIRECT.md` requires `no_route` to collapse.
+/// A9 -- the `no_route` privacy class, driven through the PRODUCTION
+/// routing predicates.
 ///
-/// Distinct here precisely so the experiment can show they are NOT
-/// distinct on the wire. A responder that answered each with its own
-/// code would be an endpoint oracle: a probing peer learns which
-/// endpoints exist, which are disabled, and which refused it by policy,
-/// all without being authorized for any of them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RouteFailure {
-    EndpointUnknown,
-    EndpointDisabled,
-    NoActiveLease,
-    MissingDefaultEndpoint,
-    EndpointPolicyDenied,
-}
+/// Two earlier versions of this experiment were tautologies. The first
+/// never ran the case at all. The second converted a label the request
+/// carried into an enum and passed it to a function that discarded its
+/// argument and returned `NoRoute` -- so it measured whether a
+/// function that ignores its input returns the same thing for every
+/// input, and reported the answer as a VERDICT. Review caught both.
+///
+/// What the property actually rests on is `EndpointRegistry::
+/// resolve_inbound`, whose five refusals are selected by five
+/// independent predicates over real registry state -- is the endpoint
+/// configured, is it enabled, does the endpoint policy admit the
+/// sender, is anything leasing it, is there a default -- and
+/// `ResolveFailure::to_wire`, the production collapse. This experiment
+/// puts the responder in five genuinely different registry STATES,
+/// lets the production code decide, and checks two things: that five
+/// DISTINCT local failures were produced (the predicates are
+/// independent, so a bug in any one of them would show), and that all
+/// five reach the wire as one byte-identical answer.
+///
+/// The request carries the destination it asks for, exactly as Stage 6
+/// will receive it; nothing in the harness maps a label to an outcome.
+pub async fn a9_no_route_is_one_answer() {
+    use interweave_transport_api::EndpointId;
+    use interweave_transport_runtime::{EndpointRegistry, RegisteredEndpoint, ResolveFailure};
+    use std::collections::BTreeMap;
 
-impl RouteFailure {
-    /// Every internal route failure, in one place, so the experiment
-    /// cannot quietly omit one.
-    pub const ALL: [Self; 5] = [
-        Self::EndpointUnknown,
-        Self::EndpointDisabled,
-        Self::NoActiveLease,
-        Self::MissingDefaultEndpoint,
-        Self::EndpointPolicyDenied,
+    /// One registry per scenario, each in the state that makes ONE
+    /// predicate in `resolve_inbound` refuse. Which one refuses is the
+    /// production code's decision; the harness only arranges the state.
+    struct Scenario {
+        label: &'static str,
+        registry: EndpointRegistry,
+        /// The destination the REQUEST names -- what a remote peer
+        /// would actually send, passed through untouched.
+        destination: Option<&'static str>,
+        /// The endpoint-policy answer for this sender. Profile trust is
+        /// the caller's concern in production too; this closure is
+        /// exactly the argument `resolve_inbound` takes.
+        policy_admits: bool,
+    }
+
+    fn chat() -> EndpointId {
+        EndpointId::parse("chat").expect("endpoint")
+    }
+    fn with_chat(enabled: bool) -> EndpointRegistry {
+        let mut endpoints = BTreeMap::new();
+        endpoints.insert(
+            chat(),
+            RegisteredEndpoint {
+                enabled,
+                ..RegisteredEndpoint::default()
+            },
+        );
+        EndpointRegistry::new(endpoints, Some(chat()))
+    }
+
+    let scenarios = vec![
+        // Configured endpoints exist, but not the one asked for.
+        Scenario {
+            label: "unknown",
+            registry: with_chat(true),
+            destination: Some("absent"),
+            policy_admits: true,
+        },
+        // Asked-for endpoint exists and is disabled.
+        Scenario {
+            label: "disabled",
+            registry: with_chat(false),
+            destination: Some("chat"),
+            policy_admits: true,
+        },
+        // Exists, enabled, admitted -- and nothing is leasing it.
+        Scenario {
+            label: "unleased",
+            registry: with_chat(true),
+            destination: Some("chat"),
+            policy_admits: true,
+        },
+        // No destination named and no default configured.
+        Scenario {
+            label: "nodefault",
+            registry: EndpointRegistry::new(BTreeMap::new(), None),
+            destination: None,
+            policy_admits: true,
+        },
+        // Exists, enabled -- and the endpoint policy excludes this sender.
+        Scenario {
+            label: "denied",
+            registry: with_chat(true),
+            destination: Some("chat"),
+            policy_admits: false,
+        },
     ];
 
-    /// The label a request carries to select this branch.
-    pub const fn destination(self) -> &'static str {
-        match self {
-            Self::EndpointUnknown => "unknown",
-            Self::EndpointDisabled => "disabled",
-            Self::NoActiveLease => "unleased",
-            Self::MissingDefaultEndpoint => "nodefault",
-            Self::EndpointPolicyDenied => "denied",
-        }
-    }
-}
-
-/// THE SHARED RESPONSE ENCODER `DIRECT.md` requires.
-///
-/// One function, taking the internal reason and discarding it. That the
-/// argument is unused is the entire point: there is no branch here that
-/// could grow a distinguishing field, because there is no branch.
-fn refuse_route(reason: RouteFailure) -> Response {
-    let _ = reason;
-    Response::Rejected {
-        reason: Reason::NoRoute,
-    }
-}
-
-/// A9 -- the `no_route` privacy class.
-///
-/// `SPIKES.md` lists "no_route privacy class" among the cases this spike
-/// must exercise, and nothing did: `NoRoute` appeared only as a
-/// predetermined owner outcome in A6 and as the conflict arm in A7.
-/// A regression that exposed endpoint-unknown and policy-denied as
-/// distinguishable answers would have left every recorded number
-/// unchanged.
-///
-/// `DIRECT.md`: no_route "deliberately collapses endpoint unknown,
-/// endpoint disabled, no active lease, missing default endpoint, and
-/// endpoint-specific policy denial. All such branches use the same wire
-/// code/response shape and shared response encoder."
-pub async fn a9_no_route_is_one_answer() {
     let mut server = node(full_direct(), Duration::from_secs(20));
     let mut client = node(full_direct(), Duration::from_secs(20));
     let addr = listen(&mut server).await;
     let server_peer = *server.local_peer_id();
     connect(&mut client, &mut server, addr).await;
 
-    // One request per internal failure, each selecting a genuinely
-    // different branch on the responder.
-    for failure in RouteFailure::ALL {
+    for sc in &scenarios {
         client.behaviour_mut().direct.send_request(
             &server_peer,
-            request(
-                &format!("m-route-{}", failure.destination()),
-                Some(failure.destination()),
-                b"probe",
-            ),
+            request(&format!("m-route-{}", sc.label), sc.destination, b"probe"),
         );
     }
 
-    let mut answers: Vec<(RouteFailure, Response)> = Vec::new();
+    // What the PRODUCTION code decided locally, per scenario.
+    let mut local: Vec<(&'static str, ResolveFailure)> = Vec::new();
+    let mut answers: Vec<Response> = Vec::new();
+
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    while answers.len() < RouteFailure::ALL.len() {
+    while answers.len() < scenarios.len() {
         tokio::select! {
             () = tokio::time::sleep_until(deadline) => break,
             e = server.select_next_some() => {
                 if let SwarmEvent::Behaviour(BehaviourEvent::Direct(RrEvent::Message {
                     message: RrMessage::Request { request, channel, .. }, ..
                 })) = e {
-                    // THE BRANCHES ARE REAL. Each destination reaches a
-                    // different arm of the responder's own routing
-                    // decision; what they share is the encoder.
-                    let destination = request.destination.clone().unwrap_or_default();
-                    let failure = RouteFailure::ALL
-                        .into_iter()
-                        .find(|f| f.destination() == destination)
-                        .expect("every request names one of the five");
-                    let _ = server
-                        .behaviour_mut()
-                        .direct
-                        .send_response(channel, refuse_route(failure));
+                    let sc = scenarios
+                        .iter()
+                        .find(|s| request.message_id == format!("m-route-{}", s.label))
+                        .expect("every request names a scenario");
+                    // THE DESTINATION IS PASSED THROUGH, not mapped.
+                    let requested = request
+                        .destination
+                        .as_deref()
+                        .map(|d| EndpointId::parse(d).expect("endpoint grammar"));
+                    let admits = sc.policy_admits;
+                    let outcome = sc
+                        .registry
+                        .resolve_inbound(requested.as_ref(), |_| admits);
+                    let response = match outcome {
+                        Ok(_) => Response::AcceptedV2 { resolved_endpoint: "chat".to_owned() },
+                        Err(failure) => {
+                            local.push((sc.label, failure));
+                            // THE PRODUCTION COLLAPSE, not a harness one.
+                            Response::Rejected { reason: failure.to_wire() }
+                        }
+                    };
+                    let _ = server.behaviour_mut().direct.send_response(channel, response);
                 }
             }
             e = client.select_next_some() => {
                 if let SwarmEvent::Behaviour(BehaviourEvent::Direct(RrEvent::Message {
-                    message: RrMessage::Response { response, request_id: _, .. }, ..
+                    message: RrMessage::Response { response, .. }, ..
                 })) = e {
-                    // Which failure produced it is not recoverable from
-                    // the response -- which is the property -- so they
-                    // are recorded in arrival order and compared as a
-                    // set.
-                    let failure = RouteFailure::ALL[answers.len()];
-                    answers.push((failure, response));
+                    answers.push(response);
                 }
             }
         }
     }
 
-    note("internal route failures exercised", RouteFailure::ALL.len());
+    // FIVE DIFFERENT LOCAL FAILURES. This is the half the tautology
+    // lacked: proof that five independent predicates each fired, so a
+    // regression in any one of them -- or two collapsing into one
+    // upstream of the encoder -- would show here.
+    let mut distinct: Vec<ResolveFailure> = local.iter().map(|(_, f)| *f).collect();
+    distinct.sort_by_key(|f| format!("{f:?}"));
+    distinct.dedup();
+    for (label, failure) in &local {
+        note(&format!("  {label:<10} -> local"), format!("{failure:?}"));
+    }
+    note("scenarios exercised", scenarios.len());
+    note(
+        "distinct LOCAL failures the production predicates produced",
+        distinct.len(),
+    );
     note("responses received", answers.len());
 
-    // DECODED EQUALITY: every answer is the same value.
-    let all_same = answers.windows(2).all(|w| w[0].1 == w[1].1);
+    let all_same = answers.windows(2).all(|w| w[0] == w[1]);
+    let all_no_route = answers.iter().all(|r| {
+        *r == Response::Rejected {
+            reason: Reason::NoRoute,
+        }
+    });
     note("every response decodes to one identical value", all_same);
+    note("and that value is no_route", all_no_route);
 
-    // AND ENCODED EQUALITY, which is the stronger claim and the one
-    // `DIRECT.md` actually makes ("shared response encoder"). Two values
-    // can compare equal in Rust and still serialize differently if a
-    // future field is added with a skip condition; comparing the bytes
-    // is what would catch that.
-    let encodings: Vec<Vec<u8>> = RouteFailure::ALL
-        .into_iter()
-        .map(|f| serde_cbor_bytes(&refuse_route(f)))
-        .collect();
+    // ENCODED equality through the production type's own serde and the
+    // codec's own CBOR library -- the bytes the wire carries.
+    let encodings: Vec<Vec<u8>> = answers.iter().map(serde_cbor_bytes).collect();
     let bytes_identical = encodings.windows(2).all(|w| w[0] == w[1]);
     note("and every encoding is byte-identical", bytes_identical);
     note(
-        "VERDICT: no_route is one answer, not five",
-        all_same && bytes_identical && answers.len() == RouteFailure::ALL.len(),
+        "VERDICT: five independent refusals, one wire answer",
+        distinct.len() == scenarios.len()
+            && answers.len() == scenarios.len()
+            && all_same
+            && all_no_route
+            && bytes_identical,
     );
 }
 
