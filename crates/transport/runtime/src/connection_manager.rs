@@ -187,7 +187,31 @@ pub struct PolicySnapshot {
     /// could ever be dropped. A weak reference breaks it; the manager
     /// itself holds the one strong reference that keeps the cell alive.
     current: Weak<RwLock<Arc<PolicySnapshot>>>,
+    /// A WEAK reference to a token the manager alone owns.
+    ///
+    /// Separate from `current`, and it has to be: `SnapshotHandle` holds
+    /// a STRONG `Arc` to the cell so it can read it, so the cell outlives
+    /// the manager whenever a handle does. Asking "does the cell still
+    /// exist" therefore answers "does anyone still hold a handle", which
+    /// is not the question -- and a caller that kept a handle and dropped
+    /// its manager went on being admitted indefinitely against the final
+    /// snapshot, which the docs on [`Self::is_current`] flatly promised
+    /// could not happen.
+    ///
+    /// [`ManagerLiveness`] exists to be owned by exactly one place. No
+    /// handle, snapshot, or ticket holds a strong reference to it, so its
+    /// upgrade failing means the manager itself is gone.
+    manager: Weak<ManagerLiveness>,
 }
+
+/// A token whose only property is who owns it.
+///
+/// Zero-sized. [`ConnectionManager`] holds the sole `Arc`; snapshots hold
+/// a `Weak`. Nothing else may hold a strong reference -- that is the
+/// entire contract, and it is what makes `Weak::upgrade` returning `None`
+/// mean "the manager is gone" rather than "nobody is looking any more".
+#[derive(Debug)]
+pub(crate) struct ManagerLiveness;
 
 impl PolicySnapshot {
     /// Which publication this is.
@@ -204,14 +228,29 @@ impl PolicySnapshot {
 
     /// Whether this is the snapshot currently published.
     ///
-    /// Reads `self.revision` against the CURRENTLY installed snapshot's
-    /// own revision field, fetched fresh through the one cell every
-    /// snapshot and every handle shares. `false` if the manager itself
-    /// is gone: nothing can publish again, so there is no "current" to
-    /// be, and refusing is the fail-closed answer to a question that no
-    /// longer has one.
+    /// Two questions, and they are genuinely different:
+    ///
+    /// 1. **Does the manager still exist?** Asked of [`ManagerLiveness`],
+    ///    which only the manager owns. If it is gone nothing can ever
+    ///    publish again, so there is no "current" to be, and refusing is
+    ///    the fail-closed answer to a question that no longer has one.
+    /// 2. **Is this the snapshot in the cell?** `self.revision` against
+    ///    the currently installed snapshot's own revision field, fetched
+    ///    fresh through the one cell every snapshot and handle shares.
+    ///
+    /// The first used to be asked of the CELL, which a `SnapshotHandle`
+    /// keeps alive by holding a strong `Arc` to it. A caller that dropped
+    /// its manager while retaining a handle therefore kept upgrading
+    /// successfully, kept matching the final revision, and kept being
+    /// admitted -- for as long as it held the handle.
+    ///
+    /// Enforced by `a_handle_that_outlives_its_manager_admits_nothing`
+    /// and `the_liveness_token_is_owned_by_the_manager_alone`.
     #[must_use]
     fn is_current(&self) -> bool {
+        if self.manager.upgrade().is_none() {
+            return false;
+        }
         self.current.upgrade().is_some_and(|cell| {
             self.revision == cell.read().unwrap_or_else(|e| e.into_inner()).revision
         })
@@ -653,6 +692,12 @@ pub struct ConnectionManager {
     max_addresses_per_peer: usize,
     max_retry_entries: usize,
     published: Arc<RwLock<Arc<PolicySnapshot>>>,
+    /// The SOLE strong reference to this manager's liveness token.
+    ///
+    /// Dropping the manager drops this, and every snapshot it ever
+    /// published starts refusing. Handing a clone of this `Arc` to
+    /// anything else silently restores the defect it exists to close.
+    alive: Arc<ManagerLiveness>,
 }
 
 impl ConnectionManager {
@@ -664,6 +709,7 @@ impl ConnectionManager {
         let max_connections = policy.max_connections;
         let shutting_down = Arc::new(AtomicBool::new(false));
         let trust = Arc::new(TrustSources::default());
+        let alive = Arc::new(ManagerLiveness);
 
         // BUILT WITH `Arc::new_cyclic`, because the first snapshot has
         // to hold a weak reference to the very cell it is about to be
@@ -684,6 +730,7 @@ impl ConnectionManager {
                 max_connections,
                 shutting_down: Arc::clone(&shutting_down),
                 current: weak.clone(),
+                manager: Arc::downgrade(&alive),
             }))
         });
 
@@ -702,6 +749,7 @@ impl ConnectionManager {
             max_addresses_per_peer: DEFAULT_MAX_ADDRESSES_PER_PEER,
             max_retry_entries: DEFAULT_MAX_RETRY_ENTRIES,
             published,
+            alive,
         }
     }
 
@@ -739,6 +787,7 @@ impl ConnectionManager {
             max_connections: self.max_connections,
             shutting_down: Arc::clone(&self.shutting_down),
             current: Arc::downgrade(&self.published),
+            manager: Arc::downgrade(&self.alive),
         });
         // ONE WRITE. The revision a reader compares itself against IS
         // this cell's own content now, not a second value kept in step
@@ -1343,6 +1392,87 @@ mod tests {
             address: address.to_owned(),
             origin,
         }
+    }
+
+    #[test]
+    fn a_handle_that_outlives_its_manager_admits_nothing() {
+        // THE HANDLE IS THE CALLER THIS FUNCTION ACTUALLY HAS. The Swarm
+        // task holds a `SnapshotHandle`, not a manager, and a handle is
+        // `Clone` and `'static` -- so "the manager was dropped while a
+        // handle survived" is not an exotic shape, it is the ordinary
+        // shutdown ordering of a task that outlives the thing that
+        // spawned it.
+        //
+        // `is_current` used to ask whether the CELL was still reachable.
+        // The handle holds a strong `Arc` to that cell to read it, so it
+        // kept its own answer alive: the upgrade succeeded, the revision
+        // still matched the final snapshot, and admission carried on
+        // indefinitely against authorization nothing could revoke.
+        let m = manager(4);
+        let handle = m.handle();
+
+        // Admitted while the manager is alive, so the refusal below is
+        // the drop and not some unrelated denial.
+        assert!(
+            handle
+                .admit(&request(P1, "/ip4/10.0.0.1/tcp/4001"), 0)
+                .is_ok(),
+            "a trusted peer is admitted while the manager exists"
+        );
+
+        drop(m);
+
+        assert!(
+            matches!(
+                handle.admit(&request(P1, "/ip4/10.0.0.1/tcp/4001"), 0),
+                Err(DialDenial::PolicySuperseded)
+            ),
+            "with no manager there is nothing to be current against"
+        );
+        // ...and the same through the documented `load().admit(..)` path,
+        // which is public and bypasses the reload loop entirely.
+        assert!(
+            matches!(
+                handle
+                    .load()
+                    .admit(&request(P1, "/ip4/10.0.0.1/tcp/4001"), 0),
+                Err(DialDenial::PolicySuperseded)
+            ),
+            "a directly loaded snapshot refuses too"
+        );
+    }
+
+    #[test]
+    fn the_liveness_token_is_owned_by_the_manager_alone() {
+        // The contract that makes the test above mean anything: if any
+        // handle, snapshot, or ticket ever held a STRONG reference to
+        // the token, dropping the manager would no longer drop it and
+        // the fail-closed answer would quietly stop arriving. Counting
+        // is what notices a clone someone adds later, where the
+        // behavioural test above would keep passing until the very
+        // reference that broke it happened to be the last one.
+        let m = manager(4);
+        let handle = m.handle();
+        let snapshot = handle.load();
+        let ticket = handle
+            .admit(&request(P1, "/ip4/10.0.0.1/tcp/4001"), 0)
+            .expect("trusted");
+
+        assert_eq!(
+            Arc::strong_count(&m.alive),
+            1,
+            "exactly one strong reference, and it is the manager's"
+        );
+
+        drop(ticket);
+        drop(snapshot);
+        drop(handle);
+        assert_eq!(
+            Arc::strong_count(&m.alive),
+            1,
+            "and dropping every other holder changed nothing, because \
+             none of them held one"
+        );
     }
 
     #[test]
