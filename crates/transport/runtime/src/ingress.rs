@@ -108,7 +108,23 @@ pub struct IngressLimiter {
     global: Bucket,
     per_peer_per_minute: u32,
     per_peer_burst: u32,
+    last_prune_ms: u64,
 }
+
+/// How often admission sweeps fully-refilled buckets.
+///
+/// A DEFENCE AGAINST THE HELPER BEING FORGOTTEN. `prune_idle` is public
+/// and explains why an unpruned map grows forever, and for the whole of
+/// this stage nothing called it: the only caller was its own test. A
+/// bound that depends on someone remembering to invoke it is not a
+/// bound, so the sweep now runs from inside `admit` and no caller can
+/// omit it.
+///
+/// One minute, which is comfortably longer than a bucket takes to refill
+/// at the configured defaults (burst 32 at 120/minute is sixteen
+/// seconds), so a sweep finds the peers that have genuinely gone quiet
+/// rather than ones mid-conversation.
+const PRUNE_INTERVAL_MS: u64 = 60_000;
 
 impl IngressLimiter {
     /// Build a limiter with the contract defaults.
@@ -137,6 +153,7 @@ impl IngressLimiter {
             global: Bucket::new(global_per_minute, global_burst, now_ms),
             per_peer_per_minute,
             per_peer_burst,
+            last_prune_ms: now_ms,
         }
     }
 
@@ -152,6 +169,19 @@ impl IngressLimiter {
     /// Returns [`IngressDenial`] naming which bound was hit; both surface
     /// as coarse `overloaded` on the wire.
     pub fn admit(&mut self, peer: &TransportIdentity, now_ms: u64) -> Result<(), IngressDenial> {
+        // THE SWEEP RUNS HERE so that it runs at all. A peer dropped from
+        // the trust allowlist stops sending, its bucket refills to full,
+        // and a full bucket is indistinguishable from one never seen —
+        // so it is pure retained state. Trust rotations therefore grew
+        // this map for the lifetime of the process.
+        //
+        // Pruning BEFORE the entry below is deliberate: if this peer's
+        // own bucket is swept, `entry` recreates it full, which is
+        // exactly what it already was.
+        if now_ms.saturating_sub(self.last_prune_ms) >= PRUNE_INTERVAL_MS {
+            self.prune_idle(now_ms);
+            self.last_prune_ms = now_ms;
+        }
         let per_peer_per_minute = self.per_peer_per_minute;
         let per_peer_burst = self.per_peer_burst;
         let bucket = self
@@ -584,6 +614,56 @@ mod tests {
         // never seen, so retaining it is pure state growth.
         l.prune_idle(60_000);
         assert_eq!(l.tracked_peers(), 0);
+    }
+
+    #[test]
+    fn admission_sweeps_idle_buckets_without_being_asked() {
+        // The defect this replaces: `prune_idle` existed, documented why
+        // skipping it grows the map forever, and had no caller but its
+        // own test.
+        let mut l = IngressLimiter::new(60_000, 4, 1_200, 256, 0);
+        l.admit(&peer(P1), 0).expect("ok");
+        l.admit(&peer(P2), 0).expect("ok");
+        assert_eq!(l.tracked_peers(), 2);
+
+        // A minute later both have refilled to full. One of them sends
+        // again; the sweep that admits it also drops the other.
+        l.admit(&peer(P1), 60_000).expect("ok");
+        assert_eq!(
+            l.tracked_peers(),
+            1,
+            "the peer that went quiet is no longer tracked"
+        );
+    }
+
+    #[test]
+    fn the_sweep_keeps_a_bucket_that_is_still_spent() {
+        // THE ASYMMETRY. A sweep that dropped everything would pass the
+        // test above while destroying the accounting it exists to keep:
+        // a peer mid-flood would get its allowance back every minute.
+        let mut l = IngressLimiter::new(1, 4, 1_200, 256, 0);
+        for _ in 0..4 {
+            l.admit(&peer(P2), 0).expect("within the burst");
+        }
+        // P2 is empty and refills at 1/minute, so a minute later it has
+        // one token back and is still short of its burst.
+        l.admit(&peer(P1), 60_000).expect("ok");
+        assert_eq!(
+            l.tracked_peers(),
+            2,
+            "a peer that has not refilled keeps its bucket"
+        );
+    }
+
+    #[test]
+    fn no_sweep_runs_before_the_interval_elapses() {
+        let mut l = IngressLimiter::new(60_000, 4, 1_200, 256, 0);
+        l.admit(&peer(P1), 0).expect("ok");
+        l.admit(&peer(P2), 0).expect("ok");
+        // Full again after a second at this rate, but the interval has
+        // not passed, so nothing is swept.
+        l.admit(&peer(P1), 59_999).expect("ok");
+        assert_eq!(l.tracked_peers(), 2);
     }
 
     #[test]
