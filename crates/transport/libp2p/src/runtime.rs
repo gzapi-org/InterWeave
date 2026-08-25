@@ -657,7 +657,25 @@ impl SwarmRuntime {
                 // slack a full outbox would stop the polling that
                 // resolves those very callers, which is the deadlock
                 // above wearing a bound.
-                let room = outbox.len() < config.event_capacity.saturating_add(listens.len());
+                // PENDING DIRECT EXCHANGES BUY SLACK TOO, for exactly
+                // the reason pending listeners do — the comment above
+                // names the deadlock and then counts only one of the two
+                // callers it applies to. A dispatched direct request is
+                // answered only by Swarm progress, so a full outbox
+                // stopping that progress leaves `send_direct` waiting
+                // past its own deadline with nothing able to settle it.
+                // A remote peer can drive the outbox full on its own:
+                // every accepted delivery appends a `DirectDelivered`.
+                //
+                // The slack stays bounded because `pending_direct` is
+                // bounded — `admit_outbound` caps it at 128 — so this
+                // cannot become the unbounded queue the capacity exists
+                // to rule out.
+                let room = outbox.len()
+                    < config
+                        .event_capacity
+                        .saturating_add(listens.len())
+                        .saturating_add(pending_direct.len());
 
                 tokio::select! {
                     // THE RECONNECT SCHEDULER. `due_retries` used to

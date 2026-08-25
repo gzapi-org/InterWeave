@@ -825,3 +825,75 @@ async fn a_queue_depth_past_the_ceiling_is_refused() {
         .await
         .expect("the ceiling itself is permitted");
 }
+
+/// A full user-event channel cannot freeze a direct exchange.
+///
+/// The Swarm branch is polled only when the outbox has room, and the
+/// slack for that used to count pending LISTENERS and nothing else. A
+/// dispatched direct request is answered only by Swarm progress, so a
+/// consumer that stops draining events would stop the polling that
+/// settles its own request — and `send_direct` would wait past the
+/// contract's deadline with nothing able to resolve it. A remote peer
+/// can drive that state alone: every accepted delivery appends a
+/// `DirectDelivered`.
+///
+/// The sender here never calls `next_event`, so its outbox fills and
+/// stays full.
+#[tokio::test]
+async fn a_full_event_channel_does_not_freeze_a_direct_exchange() {
+    let (sender_id, sender_peer) = who();
+    let (receiver_id, receiver_peer) = who();
+
+    // ONE EVENT OF CAPACITY. The connection alone fills it.
+    let cramped = SubstrateConfig {
+        event_capacity: 1,
+        ..SubstrateConfig::default()
+    };
+
+    let mut receiver = SwarmRuntime::start(
+        &receiver_id,
+        SubstrateConfig::default(),
+        trusting(&[&sender_peer]),
+    )
+    .expect("starts");
+    let sender =
+        SwarmRuntime::start(&sender_id, cramped, trusting(&[&receiver_peer])).expect("starts");
+
+    sender
+        .configure_direct(endpoints(8))
+        .await
+        .expect("the sender's own endpoints install");
+    receiver
+        .configure_direct(endpoints(8))
+        .await
+        .expect("endpoints install");
+    let address = receiver
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
+        .await
+        .expect("listens");
+    sender
+        .dial(receiver_peer.clone(), address)
+        .await
+        .expect("command")
+        .expect("admitted");
+    wait_connected(&mut receiver).await;
+
+    // Bounded: without the fix this never returns, and a test that hangs
+    // reports nothing at all.
+    let answered = tokio::time::timeout(
+        Duration::from_secs(20),
+        sender.send_direct(
+            receiver_peer,
+            frame(Some("claude"), b"through a full outbox", 60),
+        ),
+    )
+    .await
+    .expect("the exchange settled rather than hanging on a full event channel");
+
+    assert_eq!(
+        answered
+            .expect("the command reaches the task")
+            .expect("accepted"),
+        endpoint("claude")
+    );
+}
