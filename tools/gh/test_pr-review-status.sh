@@ -529,6 +529,18 @@ assert_rc "a pending RECOGNISED request does suppress it" 1
 run "OPEN:newhead:a-human" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z"
 assert_rc "and without the flag a human request still suppresses it" 1
 
+echo "pr-review-status: --wait means the deadline, not the last whole interval"
+# The loop refused to sleep unless a WHOLE interval fitted before the
+# deadline, which redefines --wait as "the last deadline a full interval
+# lands on". Any wait shorter than one interval polled ONCE and returned
+# having waited nothing: `--wait 10s` was silently `--wait 0`.
+#
+# Asserted behaviourally rather than by timing: poll 1 is unreadable,
+# poll 2 carries the review. Only a run that actually naps reaches it.
+run "FAIL:x:0
+OPEN:abc123:0" "chatgpt-codex-connector,abc123,2026-08-07T10:00:00Z" --wait 3 --interval 30 -q
+assert_rc "a wait shorter than the interval still waits" 0
+
 echo "pr-review-status: an incomplete probe is unreadable, not a stale report"
 # The progress line prints ${head:0:8}, and under `set -u` an unset head
 # is fatal — so a run whose FIRST probe failed died with "unbound

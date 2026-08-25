@@ -583,9 +583,20 @@ while :; do
     fi
 
     (( WAIT > 0 )) || break
-    (( SECONDS + INTERVAL <= deadline )) || break
-    note "no independent review of ${head:0:8} yet; next check in ${INTERVAL}s"
-    sleep "$INTERVAL"
+
+    # CLAMP THE NAP TO WHAT IS LEFT, exactly as wait-merged.sh does.
+    #
+    # Requiring a WHOLE interval to fit before sleeping redefines --wait
+    # as "the last deadline a full interval lands on". `--wait 10s` with
+    # the default 30s interval polled ONCE and returned immediately,
+    # having waited nothing at all -- any wait shorter than an interval
+    # was silently the same as no wait, and longer ones lost up to one
+    # interval off the end. The deadline is the deadline.
+    remaining=$(( deadline - SECONDS ))
+    (( remaining > 0 )) || break
+    nap=$(( INTERVAL < remaining ? INTERVAL : remaining ))
+    note "no independent review of ${head:0:8} yet; next check in ${nap}s"
+    sleep "$nap"
 done
 
 # Fell out: either one-shot, or the wait expired with nothing. Requires a
