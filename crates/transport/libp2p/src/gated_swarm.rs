@@ -262,13 +262,11 @@ mod tests {
         // that dials has to say who it trusts. `None` below is the
         // peerless case, which is unauthorized whatever this says.
         let _ = m.set_trust(
-            TrustSources {
-                peers: PeerTrustPolicy::new([
-                    TransportIdentity::parse(ADMITTED).expect("canonical")
-                ])
-                .expect("one"),
-                infrastructure: InfrastructureSet::default(),
-            },
+            TrustSources::new(
+                PeerTrustPolicy::new([TransportIdentity::parse(ADMITTED).expect("canonical")])
+                    .expect("one"),
+                InfrastructureSet::default(),
+            ),
             &[],
         );
         m
