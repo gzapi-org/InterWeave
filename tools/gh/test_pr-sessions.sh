@@ -428,6 +428,33 @@ run /all /lastDate:2h
 assert_rc       "/lastDate:2h exits 0" 0
 assert_contains "fixtures are recent enough for a tight window" "#30"
 
+echo "pr-sessions: /unresolved honours an explicit /lastItem"
+# The candidate cap of 100 was applied as the FINAL slice, after
+# /lastItem had already narrowed the pool — so `/lastItem:150
+# /unresolved` queried the newest 100 and never asked about rows
+# 101-150. The caller named a number and silently got a different one.
+#
+# 150 rows; every one has a RESOLVED thread except the oldest, #151. If
+# the cap still wins, #151 is never queried and never reported — and
+# `/unresolved` is exactly the command a session trusts to say that
+# nothing is outstanding.
+write_pr_list "$(jq -n --arg me "$ME" --arg t "$(ago '1 hour')" '[range(150) | {
+  number: (300 - .), state: "MERGED", headRefName: ($me + "/feat/p\(.)"),
+  title: "p", updatedAt: $t, isDraft: false, mergedAt: $t}]')"
+write_graphql "$(jq -n '{data: {repository: (
+  [range(150) | {key: ("p" + ((300 - .) | tostring)),
+                 value: {number: (300 - .), author: {login: "andreabenetton"},
+                         reviewThreads: {pageInfo: {hasNextPage: false}, nodes: [
+                           {isResolved: ((300 - .) != 151),
+                            comments: {nodes: [{author: {login: "some-reviewer"}}]}}
+                         ]}}}] | from_entries)}}')"
+run /all -n 200 /lastItem:150 /unresolved
+assert_rc           "exits 0" 0
+assert_contains     "queries past the 100-row cap"     "#151"
+assert_not_contains "and still drops the resolved ones" "#300"
+
+default_pr_list; default_graphql
+
 echo "pr-sessions: malformed pool filters are refused"
 run /lastItem:0
 assert_rc       "/lastItem:0 exits 2" 2

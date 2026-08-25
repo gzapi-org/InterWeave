@@ -228,6 +228,18 @@ fi
 CANDIDATES="$LIMIT"
 if [[ "$UNRESOLVED_ONLY" -eq 1 ]]; then
     CANDIDATES=100
+    # AN EXPLICIT /lastItem IS A REQUEST, NOT A SUGGESTION.
+    #
+    # The 100 exists to keep the aliased GraphQL query one sane request
+    # when nobody has said how far to look. But it was applied as the
+    # FINAL slice, after /lastItem had already narrowed the pool — so
+    # `/all /lastItem:150 /unresolved` quietly queried the newest 100 and
+    # never asked about rows 101-150. The caller named a number and got
+    # a different one, with nothing said, from the command whose job is
+    # answering "what still owes a reply".
+    if (( ${LAST_ITEM:-0} > CANDIDATES )); then
+        CANDIDATES="$LAST_ITEM"
+    fi
     (( CANDIDATES > FETCH )) && CANDIDATES="$FETCH"
 fi
 
