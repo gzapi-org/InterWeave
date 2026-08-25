@@ -80,7 +80,11 @@ pub struct SubstrateBehaviour {
 impl SubstrateBehaviour {
     /// Build the behaviour for `public_key`.
     #[must_use]
-    pub fn new(public_key: identity::PublicKey, preauth: PreAuthLimits) -> Self {
+    pub fn new(
+        public_key: identity::PublicKey,
+        preauth: PreAuthLimits,
+        max_payload_bytes: usize,
+    ) -> Self {
         Self {
             preauth: PreAuthAdmission::new(preauth),
             outbound: OutboundAdmission::default(),
@@ -89,7 +93,7 @@ impl SubstrateBehaviour {
                 public_key,
             )),
             direct: request_response::Behaviour::with_codec(
-                DirectCodec,
+                DirectCodec::new(max_payload_bytes),
                 // FULL, because a profile both sends and receives directed
                 // messages. Inbound-only would make this peer unable to
                 // initiate, which is not a security posture — an

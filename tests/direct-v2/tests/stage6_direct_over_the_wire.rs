@@ -935,3 +935,173 @@ async fn a_draining_node_starts_no_new_outbound_exchange() {
     assert_eq!(delivered.len(), 1);
     assert_eq!(delivered[0].payload.bytes(), b"before");
 }
+
+/// A profile's effective payload limit binds below the frozen ceiling.
+///
+/// The wire ceiling is 49,152 bytes, but a profile may configure less.
+/// Every frame used to be decoded against the architecture maximum, so a
+/// payload above the profile's limit and below the ceiling was accepted
+/// and queued — the limit existed in the contract and reached no
+/// decoder.
+///
+/// Both directions: the sender refuses locally, and a receiver
+/// configured lower refuses on the wire with `too_large`.
+#[tokio::test]
+async fn a_profile_payload_limit_binds_below_the_ceiling() {
+    let (sender_id, sender_peer) = who();
+    let (receiver_id, receiver_peer) = who();
+
+    let narrow = SubstrateConfig {
+        max_payload_bytes: 1_024,
+        ..SubstrateConfig::default()
+    };
+
+    let mut receiver =
+        SwarmRuntime::start(&receiver_id, narrow, trusting(&[&sender_peer])).expect("starts");
+    // The SENDER keeps the full ceiling, so the refusal below is the
+    // receiver's configuration and not the sender declining to send.
+    let sender = SwarmRuntime::start(
+        &sender_id,
+        SubstrateConfig::default(),
+        trusting(&[&receiver_peer]),
+    )
+    .expect("starts");
+
+    sender
+        .configure_direct(endpoints(8))
+        .await
+        .expect("the sender's endpoints install");
+    receiver
+        .configure_direct(endpoints(8))
+        .await
+        .expect("endpoints install");
+    let address = receiver
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
+        .await
+        .expect("listens");
+    sender
+        .dial(receiver_peer.clone(), address)
+        .await
+        .expect("command")
+        .expect("admitted");
+    wait_connected(&mut receiver).await;
+
+    let body = vec![b'x'; 2_048];
+    let oversized = DirectMessageV2 {
+        message_id: MessageId::from_bytes([80; 16]),
+        sent_at_ms: 1,
+        source_endpoint: endpoint("human"),
+        destination_endpoint: Some(endpoint("claude")),
+        payload: Payload::at_ceiling(None, body).expect("under the FROZEN ceiling"),
+    };
+
+    let error = sender
+        .send_direct(receiver_peer.clone(), oversized)
+        .await
+        .expect("the command reaches the task")
+        .expect_err("above the receiver's configured limit");
+    assert_eq!(error, TransportError::PayloadTooLarge);
+    assert!(
+        receiver
+            .drain_endpoint(endpoint("claude"))
+            .await
+            .expect("answers")
+            .is_empty(),
+        "and nothing was queued"
+    );
+
+    // UNDER the limit still works, so this is a limit and not a wall.
+    sender
+        .send_direct(
+            receiver_peer,
+            DirectMessageV2 {
+                message_id: MessageId::from_bytes([81; 16]),
+                sent_at_ms: 1,
+                source_endpoint: endpoint("human"),
+                destination_endpoint: Some(endpoint("claude")),
+                payload: Payload::at_ceiling(None, vec![b'x'; 512]).expect("well under"),
+            },
+        )
+        .await
+        .expect("command")
+        .expect("under the configured limit");
+    assert_eq!(
+        receiver
+            .drain_endpoint(endpoint("claude"))
+            .await
+            .expect("answers")
+            .len(),
+        1
+    );
+}
+
+/// The sender's own limit refuses before anything crosses the wire.
+///
+/// The other direction of the same configuration. A profile that refuses
+/// a payload on the way in has configured nothing if it sends the same
+/// payload out, and the refusal must be LOCAL — no frame, no exchange.
+#[tokio::test]
+async fn a_narrow_sender_refuses_its_own_oversized_payload() {
+    let (sender_id, sender_peer) = who();
+    let (receiver_id, receiver_peer) = who();
+
+    let narrow = SubstrateConfig {
+        max_payload_bytes: 1_024,
+        ..SubstrateConfig::default()
+    };
+    let mut receiver = SwarmRuntime::start(
+        &receiver_id,
+        SubstrateConfig::default(),
+        trusting(&[&sender_peer]),
+    )
+    .expect("starts");
+    let sender =
+        SwarmRuntime::start(&sender_id, narrow, trusting(&[&receiver_peer])).expect("starts");
+
+    sender
+        .configure_direct(endpoints(8))
+        .await
+        .expect("the sender's endpoints install");
+    receiver
+        .configure_direct(endpoints(8))
+        .await
+        .expect("endpoints install");
+    let address = receiver
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
+        .await
+        .expect("listens");
+    sender
+        .dial(receiver_peer.clone(), address)
+        .await
+        .expect("command")
+        .expect("admitted");
+    wait_connected(&mut receiver).await;
+
+    let error = sender
+        .send_direct(
+            receiver_peer,
+            DirectMessageV2 {
+                message_id: MessageId::from_bytes([82; 16]),
+                sent_at_ms: 1,
+                source_endpoint: endpoint("human"),
+                destination_endpoint: Some(endpoint("claude")),
+                payload: Payload::at_ceiling(None, vec![b'x'; 2_048])
+                    .expect("under the FROZEN ceiling"),
+            },
+        )
+        .await
+        .expect("the command reaches the task")
+        .expect_err("above this profile's own limit");
+    assert_eq!(error, TransportError::PayloadTooLarge);
+
+    // THE RECEIVER, which is configured wide, saw nothing — so the
+    // refusal was local rather than the remote's answer.
+    assert!(
+        receiver
+            .drain_endpoint(endpoint("claude"))
+            .await
+            .expect("answers")
+            .is_empty(),
+        "nothing crossed the wire"
+    );
+}

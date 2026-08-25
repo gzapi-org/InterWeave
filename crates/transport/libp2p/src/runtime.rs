@@ -94,6 +94,13 @@ pub struct SubstrateConfig {
     pub max_connections: usize,
     /// Idle connection timeout.
     pub idle_timeout: Duration,
+    /// The profile's EFFECTIVE direct payload limit, in bytes.
+    ///
+    /// May narrow the frozen ceiling and never widen it: `validate`
+    /// refuses zero and anything above [`MAX_PAYLOAD_BYTES`]. Decoding
+    /// every frame against the architecture maximum accepted payloads a
+    /// profile had already refused, in both directions.
+    pub max_payload_bytes: usize,
     /// Bounds on work done for a peer that has not authenticated.
     ///
     /// A `PreAuthLimits` value is proof its numbers were checked --
@@ -130,6 +137,7 @@ impl Default for SubstrateConfig {
         Self {
             command_capacity: DEFAULT_COMMAND_CAPACITY,
             event_capacity: DEFAULT_EVENT_CAPACITY,
+            max_payload_bytes: interweave_transport_api::MAX_PAYLOAD_BYTES,
             max_pending_dials: 32,
             max_connections: 256,
             idle_timeout: Duration::from_secs(60),
@@ -174,6 +182,22 @@ impl SubstrateConfig {
                     allowed: (min, MAX_CONFIGURED_CAPACITY),
                 });
             }
+        }
+        // THE PAYLOAD LIMIT IS NOT A CHANNEL DEPTH, so it is checked
+        // against its own ceiling rather than added to the table above.
+        // Zero is refused because a profile that admits no payload
+        // admits no direct message at all — the same reasoning that
+        // refuses a zero-length event queue — and above the frozen
+        // ceiling is refused rather than clamped, so a caller learns its
+        // configuration was wrong instead of quietly getting another.
+        if self.max_payload_bytes == 0
+            || self.max_payload_bytes > interweave_transport_api::MAX_PAYLOAD_BYTES
+        {
+            return Err(SubstrateError::InvalidConfig {
+                field: "max_payload_bytes",
+                got: self.max_payload_bytes,
+                allowed: (1, interweave_transport_api::MAX_PAYLOAD_BYTES),
+            });
         }
         Ok(())
     }
@@ -534,7 +558,9 @@ impl SwarmRuntime {
                 yamux::Config::default,
             )
             .map_err(|e| SubstrateError::Transport(e.to_string()))?
-            .with_behaviour(|key| SubstrateBehaviour::new(key.public(), config.preauth))
+            .with_behaviour(|key| {
+                SubstrateBehaviour::new(key.public(), config.preauth, config.max_payload_bytes)
+            })
             .map_err(|e| SubstrateError::Transport(e.to_string()))?
             .with_swarm_config(|c| c.with_idle_connection_timeout(config.idle_timeout))
             // THE HANDSHAKE TIMEOUT, taken from the same limits the
@@ -926,6 +952,7 @@ impl SwarmRuntime {
                                     &mut direct_state,
                                     &mut in_flight,
                                     config.max_pending_listens,
+                                    config.max_payload_bytes,
                                     now_ms(started),
                                     command,
                                 );
@@ -1785,6 +1812,7 @@ fn handle_command(
     direct_state: &mut DirectState,
     in_flight: &mut HashMap<libp2p::swarm::ConnectionId, DialTicket>,
     max_pending_listens: usize,
+    effective_payload: usize,
     now_ms: u64,
     command: SwarmCommand,
 ) {
@@ -1953,6 +1981,15 @@ fn handle_command(
             // dispatched fresh work whose answer it may not be around to
             // receive. `ShuttingDown` is the local error, not the remote
             // one: nothing crossed a network boundary.
+            // THE LIMIT BINDS BOTH DIRECTIONS. A profile that refuses a
+            // payload on the way in has not configured anything if it
+            // sends the same payload out — and the remote's own limit is
+            // its business, so this is about honouring the local
+            // configuration rather than predicting the peer's.
+            if frame.payload.bytes().len() > effective_payload {
+                let _ = reply.send(Err(DirectError::PayloadTooLarge));
+                return;
+            }
             if manager.is_draining() {
                 let _ = reply.send(Err(DirectError::ShuttingDown));
                 return;

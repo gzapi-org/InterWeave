@@ -160,7 +160,34 @@ const fn reason_from_code(code: u8) -> Option<DirectRejectReason> {
 
 /// The codec itself. Stateless.
 #[derive(Debug, Clone, Default)]
-pub struct DirectCodec;
+pub struct DirectCodec {
+    /// The profile's EFFECTIVE payload limit.
+    ///
+    /// Not the hard ceiling. A profile may configure a lower
+    /// `max_payload_bytes`, and decoding every frame against the
+    /// architecture maximum accepted payloads that profile had already
+    /// refused — the limit existed in the contract and reached no
+    /// decoder. Clamped at construction so a configuration cannot widen
+    /// a frozen ceiling.
+    max_payload_bytes: usize,
+}
+
+impl DirectCodec {
+    /// A codec bounded by this profile's effective payload limit.
+    ///
+    /// `limit` is clamped to [`MAX_PAYLOAD_BYTES`]: configuration may
+    /// narrow the frozen ceiling and never widen it.
+    #[must_use]
+    pub const fn new(limit: usize) -> Self {
+        Self {
+            max_payload_bytes: if limit < MAX_PAYLOAD_BYTES {
+                limit
+            } else {
+                MAX_PAYLOAD_BYTES
+            },
+        }
+    }
+}
 
 /// Read at most `limit` bytes, then insist the substream had ended.
 ///
@@ -248,7 +275,7 @@ impl Codec for DirectCodec {
             // exists for, and it used to be the one that got no answer.
             return Ok(oversize_request(&bytes));
         }
-        match DirectMessageV2::decode(&bytes, MAX_PAYLOAD_BYTES) {
+        match DirectMessageV2::decode(&bytes, self.max_payload_bytes) {
             Ok(frame) => Ok(InboundRequest::Frame(Box::new(frame))),
             Err(error) => {
                 // THE ID COMES FIRST IN THE FRAME, so it outlives every
