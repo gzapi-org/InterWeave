@@ -66,6 +66,58 @@ fn temp_beside(path: &Path) -> PathBuf {
     PathBuf::from(temp)
 }
 
+/// Write `json` to `temp`, fsync it, and rename it onto `final_path`.
+///
+/// REMOVES `temp` ON ANY FAILURE AFTER THIS CALL CREATED IT, and never
+/// otherwise. Both halves are load-bearing.
+///
+/// The first half: the name is unique per attempt, so an abandoned
+/// temporary is never reused and never overwritten -- a full disk or a
+/// transient error during `write_all` or `sync_all` would leave one file
+/// behind per failed flush, forever, in the profile directory. Every
+/// fallible step after creation sits in one block whose `Err` runs the
+/// cleanup, so adding a step cannot escape it.
+///
+/// The second half is the one that was missing. `create_new` refuses an
+/// existing file, so a failure at THAT step means this call did not
+/// create the temporary -- a cross-process name collision, or an entry
+/// another writer is mid-flush on. Removing it there deletes a file this
+/// invocation never owned and breaks the rename its owner is about to
+/// do. Creation succeeding is what confers the right to clean up, so the
+/// handle is opened outside the block rather than inside it.
+///
+/// Enforced by `a_temporary_this_call_did_not_create_is_left_alone` and
+/// `a_failure_after_creation_removes_the_temporary`.
+fn publish_via_temp(temp: &Path, final_path: &Path, json: &[u8]) -> Result<(), CacheError> {
+    use std::io::Write as _;
+
+    // OUTSIDE the cleanup block, deliberately. A failure here is a
+    // temporary that belongs to somebody else.
+    let mut handle = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(temp)?;
+
+    // From here on the file is ours, so every exit removes it.
+    let written = (|| -> Result<(), CacheError> {
+        handle.write_all(json)?;
+        // Explicit, because `fs::write` does not do this. Without it the
+        // rename can land before the bytes, and a crash in that window
+        // leaves a correctly-named empty file -- worse than a missing
+        // one, since it looks like a valid cache.
+        handle.sync_all()?;
+        Ok(())
+    })();
+    drop(handle);
+
+    let published = written.and_then(|()| fs::rename(temp, final_path).map_err(CacheError::from));
+    if let Err(error) = published {
+        let _ = fs::remove_file(temp);
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// The provider name this cache reports on every candidate it emits.
 pub const SOURCE: &str = "peer-cache";
 
@@ -674,26 +726,7 @@ impl PeerCache {
         // cleaning up on any `Err` is what makes that impossible to
         // reintroduce by adding a step -- a `?` inside the block cannot
         // escape the cleanup.
-        let published = (|| -> Result<(), CacheError> {
-            use std::io::Write as _;
-            let mut handle = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temp)?;
-            handle.write_all(&json)?;
-            // Explicit, because `fs::write` does not do this. Without it
-            // the rename can land before the bytes, and a crash in that
-            // window leaves a correctly-named empty file — which is worse
-            // than a missing one, since it looks like a valid cache.
-            handle.sync_all()?;
-            drop(handle);
-            fs::rename(&temp, &self.path)?;
-            Ok(())
-        })();
-        if let Err(error) = published {
-            let _ = fs::remove_file(&temp);
-            return Err(error);
-        }
+        publish_via_temp(&temp, &self.path, &json)?;
 
         // fsync the DIRECTORY, so the rename itself survives a crash.
         // Without it the bytes are durable and the name that points at
@@ -708,5 +741,74 @@ impl PeerCache {
         self.dirty = false;
         self.last_write_ms = Some(now_ms);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod publish_tests {
+    use super::publish_via_temp;
+    use std::fs;
+
+    /// THE FINDING. `create_new` refuses an existing file, so a failure
+    /// at that step means this call did not create the temporary — a
+    /// cross-process name collision, or an entry another writer is
+    /// mid-flush on. The cleanup used to run anyway and delete it,
+    /// breaking the rename its owner was about to do.
+    #[test]
+    fn a_temporary_this_call_did_not_create_is_left_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let temp = dir.path().join("peers.json.someone-elses.tmp");
+        let final_path = dir.path().join("peers.json");
+        fs::write(&temp, b"another writer's bytes").expect("pre-create");
+
+        let result = publish_via_temp(&temp, &final_path, b"ours");
+
+        assert!(result.is_err(), "an occupied temp name must refuse");
+        assert_eq!(
+            fs::read(&temp).expect("the other writer's file still exists"),
+            b"another writer's bytes",
+            "and its contents are untouched — deleting it would break \
+             the rename its owner is about to do"
+        );
+        assert!(
+            !final_path.exists(),
+            "and nothing was published from a flush that never wrote"
+        );
+    }
+
+    /// The other half, which the original did get right and which a
+    /// careless fix would lose: once creation succeeds the file IS ours,
+    /// so every later failure removes it. Without this the profile
+    /// directory accumulates one abandoned temporary per failed flush,
+    /// forever, since each name is unique per attempt.
+    #[test]
+    fn a_failure_after_creation_removes_the_temporary() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let temp = dir.path().join("peers.json.ours.tmp");
+        // Renaming a file onto a DIRECTORY fails, and it fails after the
+        // temporary has been created, written and synced.
+        let final_path = dir.path().join("peers.json");
+        fs::create_dir(&final_path).expect("make the rename fail");
+        fs::write(final_path.join("occupant"), b"x").expect("non-empty");
+
+        let result = publish_via_temp(&temp, &final_path, b"ours");
+
+        assert!(result.is_err(), "the rename cannot succeed");
+        assert!(
+            !temp.exists(),
+            "a temporary this call created is removed when publishing fails"
+        );
+    }
+
+    #[test]
+    fn a_successful_publish_leaves_no_temporary_and_the_bytes_land() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let temp = dir.path().join("peers.json.ours.tmp");
+        let final_path = dir.path().join("peers.json");
+
+        publish_via_temp(&temp, &final_path, b"the bytes").expect("publishes");
+
+        assert!(!temp.exists(), "the temporary was renamed away");
+        assert_eq!(fs::read(&final_path).expect("published"), b"the bytes");
     }
 }
