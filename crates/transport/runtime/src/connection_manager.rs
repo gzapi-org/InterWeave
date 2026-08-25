@@ -456,6 +456,16 @@ impl DialTicket {
         self.peer.as_ref()
     }
 
+    /// Why this dial was asked for.
+    ///
+    /// Read at establishment: ADR-0036's separation is an origin/class
+    /// PAIR, so revalidating an outbound connection needs the reason it
+    /// was opened, not only what the peer is authorized for.
+    #[must_use]
+    pub const fn origin(&self) -> DialOrigin {
+        self.origin
+    }
+
     /// Whether settling this ticket owns the peer's scheduler claim.
     ///
     /// Only the reconnect scheduler claims a retry entry, so only its
@@ -1082,8 +1092,37 @@ impl ConnectionManager {
     /// because admission approved the dial that produced it.
     #[must_use]
     pub fn authorizes(&self, class: ConnectionClass) -> bool {
-        !self.shutting_down.load(Ordering::Acquire)
-            && matches!(class, ConnectionClass::DataPlaneTrusted)
+        self.authorizes_for(class, DialOrigin::Manual)
+    }
+
+    /// Whether a connection of this class, opened for this REASON, is
+    /// still authorized to be held open.
+    ///
+    /// ADR-0036's separation is a pair, not a class alone: an
+    /// infrastructure-only peer is dialable for reachability and
+    /// refused for the data plane, on the same address in the same
+    /// moment. `ConnectionPolicy::admit` has always decided it that
+    /// way -- `origin.is_data_plane()` is the discriminator, and
+    /// `tests/transport-contract` pins every origin/class pair.
+    ///
+    /// Revalidating an established connection with the data-plane-only
+    /// predicate therefore closed connections admission had correctly
+    /// permitted: a relay reservation, a relay circuit, an AutoNAT
+    /// probe or a DCUtR hole punch to an infrastructure peer completed
+    /// its handshake and was immediately dropped. The inbound path has
+    /// no origin to consult and no such pair to honour, which is why it
+    /// keeps the stricter predicate and why applying that one to
+    /// outbound was wrong rather than merely conservative.
+    #[must_use]
+    pub fn authorizes_for(&self, class: ConnectionClass, origin: DialOrigin) -> bool {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return false;
+        }
+        match class {
+            ConnectionClass::Unauthorized => false,
+            ConnectionClass::DataPlaneTrusted => true,
+            ConnectionClass::ConnectivityInfrastructureOnly => !origin.is_data_plane(),
+        }
     }
 
     /// Begin draining. Admission refuses from the next snapshot on.
@@ -2140,6 +2179,41 @@ mod tests {
             0,
             "authorization withdrawn is not a failure the peer earned a retry for"
         );
+    }
+
+    #[test]
+    fn an_infrastructure_peer_keeps_a_reachability_connection_and_loses_a_data_plane_one() {
+        // ADR-0036's separation is an origin/class PAIR, and
+        // `ConnectionPolicy::admit` has always decided it that way --
+        // `tests/transport-contract/tests/stage2_exit_gate.rs` pins
+        // every combination. Revalidating an established connection
+        // with the data-plane-only predicate ignored the pair, so a
+        // relay reservation, relay circuit, AutoNAT probe or DCUtR hole
+        // punch to an infrastructure peer completed its handshake and
+        // was closed immediately -- admission permitted it and
+        // establishment threw it away.
+        let mut m = untrusting(8);
+        let _ = m.set_trust(trusting(&[], &[P1]), &[]);
+        let class = m.classify(&peer(P1));
+        assert_eq!(class, ConnectionClass::ConnectivityInfrastructureOnly);
+
+        for origin in DialOrigin::ALL {
+            let kept = m.authorizes_for(class, origin);
+            assert_eq!(
+                kept,
+                !origin.is_data_plane(),
+                "{origin:?} on an infrastructure peer: kept must match what admission permits"
+            );
+        }
+
+        // A drain still refuses everything, whatever the origin.
+        m.begin_shutdown();
+        for origin in DialOrigin::ALL {
+            assert!(
+                !m.authorizes_for(class, origin),
+                "{origin:?} must not survive a drain"
+            );
+        }
     }
 
     #[test]

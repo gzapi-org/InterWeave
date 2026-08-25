@@ -1108,8 +1108,16 @@ fn settle_outcome(
                     // authority that no longer exists -- the exact
                     // outbound counterpart of the check inbound already
                     // gets below.
+                    // THE ORIGIN IS PART OF THE QUESTION. An
+                    // infrastructure-only peer is authorized for
+                    // reachability and refused for the data plane, so
+                    // asking only what the peer is authorized FOR --
+                    // the inbound predicate, which has no origin to
+                    // consult -- closed relay reservations, relay
+                    // circuits, AutoNAT probes and DCUtR hole punches
+                    // that admission had correctly permitted.
                     let class = manager.classify(&peer);
-                    if !manager.authorizes(class) {
+                    if !manager.authorizes_for(class, ticket.origin()) {
                         manager.record_authorization_withdrawn(ticket, now_ms);
                         refuse.push(*connection_id);
                         return Announce::Suppress;
