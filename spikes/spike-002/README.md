@@ -316,6 +316,30 @@ $ echo $?
 - **A1 could not fail at all.** Its `while answered < 2` loop had no deadline, so a response that never arrives hangs the run forever — the one outcome no exit code can express. It now has a bounded deadline and reports the shortfall.
 - **A5's label contradicted its own value.** It printed `and that channel is still answerable  false` — in a run recorded as PASS. The value was right and the *label* was inverted: the finding is that the channel is **not** answerable, which is what the comment beside it and this README both say. `note` prints without judging, so a line reading `false` under a positive claim sat there unremarked. It is now asserted with the correct polarity, so a rust-libp2p that started keeping the channel open would fail the run.
 
+### The third round of the same finding
+
+Review found the exit-code gap twice more after it was "fixed". The first fix converted a hand-picked list; the second converted every observation that was *already a boolean* — and still left whole experiments asserting nothing at all. What the third round caught:
+
+| experiment | what could fail while the run exited 0 |
+|---|---|
+| **A2** | negotiation could time out, or fail with an error *other than* `UnsupportedProtocols`, and finding 3 would be recorded as reproduced |
+| **A3** | the two protocol families could arrive on **two** connections — the exact case the experiment exists to detect — and the count was merely printed |
+| **A7** | the per-peer bound could admit the wrong number, refuse the wrong number, or answer with a reason other than `overloaded`; the experiment contained no `check` whatsoever |
+| **A8** | `acquire(...).is_ok()` is `Ok` for a **`Waiter`** as well as an `Owner`, so a leaked reservation made the check pass *because of* the leak it exists to rule out |
+
+A8 is the one worth keeping in mind. The check was not weak by oversight — it was weak in the one direction that mattered, and it passed for the precise reason it should have failed.
+
+Mutations, each restored afterwards:
+
+| mutation | result |
+|---|---|
+| A2: remove the version mismatch so no `UnsupportedProtocols` occurs | `Io(Eof)` observed instead, check false, exit 1 |
+| A7: give the map `PER_PEER + 1` | 4 checks false, exit 1 |
+| A8: skip `release` on the cancellation path | `left no reservation behind` false, and `becomes an OWNER` **false** — under the old `is_ok()` this read `true` |
+| A3 *(weaker: assertion flipped to `== 2`, not a forced second connection)* | fails against the live count of 1, so the check reads the measurement |
+
+A3's is a coupling check rather than a true mutation: forcing a genuine second connection between the two sends hangs the harness, so the stronger evidence is not available and is not claimed.
+
 ### An incidental finding about the library### An incidental finding about the library
 
 `gossipsub::Behaviour::new` **refuses** to build a node that publishes unsigned while requiring signatures on receipt, and says so:

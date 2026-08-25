@@ -332,6 +332,11 @@ pub async fn a2_unsupported_major() {
         .direct
         .send_request(&server_peer, request("m-3", Some("chat"), b"hello"));
 
+    // Finding 3 is that an unsupported MAJOR is refused as
+    // `UnsupportedProtocols` rather than hanging or reporting something
+    // else. Printing whatever arrived would record a PASS for a timeout
+    // or for a different error, so the exact variant is asserted.
+    let mut unsupported = false;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         tokio::select! {
@@ -347,11 +352,16 @@ pub async fn a2_unsupported_major() {
             e = client.select_next_some() => {
                 if let SwarmEvent::Behaviour(BehaviourEvent::Direct(RrEvent::OutboundFailure { error, .. })) = e {
                     note("requester sees", describe_outbound(&error));
+                    unsupported = matches!(error, OutboundFailure::UnsupportedProtocols);
                     break;
                 }
             }
         }
     }
+    check(
+        "the requester was told UnsupportedProtocols, not merely something",
+        unsupported,
+    );
 }
 
 /// A3 — both protocol families over one connection.
@@ -408,6 +418,14 @@ pub async fn a3_two_families() {
         }
     }
     check("both families answered", direct_seen && endpoints_seen);
+    // The recorded finding is "one connection serves both protocol
+    // families, so no connection-per-protocol accounting is needed".
+    // Printing this count let the run agree with itself when the count
+    // was 2 -- the exact case the experiment exists to detect.
+    check(
+        "and both arrived on ONE connection",
+        connection_ids.len() == 1,
+    );
     note(
         "distinct connections the two families arrived on",
         connection_ids.len(),
@@ -805,6 +823,26 @@ pub async fn a7_reservation_overflow() {
         overloaded_on_the_wire,
     );
     note("reservations held", reservations.len());
+    // This experiment printed all of the above and asserted none of it,
+    // so the per-peer bound could admit the wrong number, refuse the
+    // wrong number, or answer with a reason other than `overloaded`,
+    // and the run would still end in `done` and exit 0.
+    check(
+        "exactly the per-peer budget was admitted",
+        owners == PER_PEER,
+    );
+    check(
+        "and every excess key was refused",
+        overloaded == KEYS - PER_PEER,
+    );
+    check(
+        "with `overloaded` on the wire, not another reason",
+        overloaded_on_the_wire == KEYS - PER_PEER,
+    );
+    check(
+        "and the map holds exactly the admitted keys",
+        reservations.len() == PER_PEER,
+    );
 }
 
 /// A8 — a cancellation race, not merely a slow race.
@@ -949,9 +987,21 @@ pub async fn a8_cancellation_race() {
         "reservations held after the race settled",
         reservations.len(),
     );
+    // `is_ok()` was true for a WAITER as well, which is what a leaked
+    // reservation produces: the old entry survives, the new request
+    // attaches to it, and the check that exists to rule the leak out
+    // passes BECAUSE of the leak. Requiring OWNER is what distinguishes
+    // "released" from "still there and I joined it".
     check(
-        "a NEW request for the same key is admitted afterward",
-        reservations.acquire(&key, fingerprint).is_ok(),
+        "the race left no reservation behind",
+        reservations.is_empty(),
+    );
+    check(
+        "so a NEW request for the same key becomes an OWNER, not a waiter",
+        matches!(
+            reservations.acquire(&key, fingerprint),
+            Ok(Reservation::Owner)
+        ),
     );
 }
 
