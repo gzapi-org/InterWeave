@@ -41,6 +41,30 @@ command -v jq >/dev/null 2>&1 || {
     echo "test: jq is required to run these tests." >&2; exit 1; }
 
 failures=0
+
+# A SELF-TEST CANNOT CATCH AN ASSERTION IT NEVER RAN.
+#
+# `assert_containss "…" "…"` — a typo, a helper renamed, a helper that
+# only ever existed in a sibling suite — is not an error under
+# `set -uo pipefail`. bash prints "command not found" to stderr, nothing
+# here reads it, and the case asserts NOTHING while the run reports OK.
+# This repository shipped two assertions doing exactly that (5f2c0c9),
+# and they were found by reading, which is not a mechanism.
+#
+# bash runs `command_not_found_handle` in a SUBSHELL, so incrementing
+# `failures` from inside it is discarded when that subshell exits: the
+# handler would print its complaint and the suite would still exit 0 —
+# a vacuous guard against vacuous assertions. A FILE survives the
+# subshell, so the marker is a file.
+#
+# The script under test runs as a separate `bash` process, so none of
+# this reaches it or masks a genuine missing-command path there.
+GUARD_MARKER="$(mktemp)"
+command_not_found_handle() {
+    printf '%s\n' "$1" >> "$GUARD_MARKER"
+    echo "  ✗ self-test bug: called '$1', which this suite does not define" >&2
+    return 127
+}
 SANDBOX=""
 
 cleanup() { [[ -n "$SANDBOX" && -d "$SANDBOX" ]] && rm -rf "$SANDBOX"; }
@@ -610,6 +634,17 @@ assert_rc           "exits 0" 0
 assert_contains     "the pooled row is listed"                "#50"
 assert_not_contains "and nothing outside the pool is claimed" "cannot be scoped"
 
+
+# Consulted BEFORE the pass/fail summary: a suite whose assertions never
+# ran has not passed, whatever its counter says.
+if [[ -s "$GUARD_MARKER" ]]; then
+    echo "test_pr-sessions: FAILED — called $(sort -u "$GUARD_MARKER" | wc -l | tr -d " ") command(s) this suite does not define:" >&2
+    sort -u "$GUARD_MARKER" | sed 's/^/      /' >&2
+    echo "      Those assertions did not run. Exit 0 would have been a lie." >&2
+    rm -f "$GUARD_MARKER"
+    exit 1
+fi
+rm -f "$GUARD_MARKER"
 echo
 if [[ "$failures" -eq 0 ]]; then
     echo "test_pr-sessions: OK — all assertions passed."
