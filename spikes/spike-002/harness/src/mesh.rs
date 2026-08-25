@@ -613,6 +613,72 @@ fn deliveries<'a>(events: &'a [Delivery], at: usize, payload: &[u8]) -> Vec<&'a 
 ///    (2), so the same `GossipSubMessageIdV1`. If (2) reached the
 ///    duplicate cache before its signature was checked, this is
 ///    suppressed and never arrives.
+/// Which injection a delivered message came from.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum Which {
+    Control,
+    Invalid,
+    Genuine,
+}
+
+/// Attribute one delivery to the injection that produced it.
+///
+/// BY THE BYTES IT CARRIES, never by when it arrived. B3 injects three
+/// messages in sequence and used to credit each delivery to whichever
+/// four-second interval it landed in -- so an invalid publication
+/// delayed past its own interval and delivered during the genuine one
+/// was counted as the genuine message. Since the genuine message may
+/// have been suppressed by the invalid one's cache entry, the checks
+/// would then read `invalid == 0, genuine == 1` and PASS on exactly the
+/// outcome the experiment exists to rule out.
+///
+/// Sound because `GossipSubMessageIdV1` is source + sequence: the
+/// payload is NOT in the mesh id, so giving each injection its own
+/// bytes leaves the (2)/(3) collision exactly as it was.
+fn attribute(data: &[u8], control: &[u8], invalid: &[u8], genuine: &[u8]) -> Option<Which> {
+    if data == control {
+        Some(Which::Control)
+    } else if data == invalid {
+        Some(Which::Invalid)
+    } else if data == genuine {
+        Some(Which::Genuine)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod attribution_tests {
+    use super::{Which, attribute};
+
+    const C: &[u8] = b"b3-control-seq-1";
+    const I: &[u8] = b"b3-invalid-signature-seq-2";
+    const G: &[u8] = b"b3-genuine-seq-2";
+
+    #[test]
+    fn each_injection_is_identified_by_its_own_bytes() {
+        assert_eq!(attribute(C, C, I, G), Some(Which::Control));
+        assert_eq!(attribute(I, C, I, G), Some(Which::Invalid));
+        assert_eq!(attribute(G, C, I, G), Some(Which::Genuine));
+    }
+
+    #[test]
+    fn an_invalid_delivery_is_never_credited_to_the_genuine_injection() {
+        // THE FALSE PASS, stated as an assertion. Window attribution
+        // made this depend on the clock; identity attribution makes the
+        // answer the same whenever it arrives, which is the whole claim.
+        assert_ne!(attribute(I, C, I, G), Some(Which::Genuine));
+        assert_ne!(attribute(G, C, I, G), Some(Which::Invalid));
+    }
+
+    #[test]
+    fn a_payload_from_no_injection_is_counted_as_none_of_them() {
+        // Silently bucketing an unknown delivery would put the harness
+        // straight back to guessing.
+        assert_eq!(attribute(b"something-nobody-sent", C, I, G), None);
+    }
+}
+
 pub async fn b3_invalid_signed_claim_is_rejected() {
     use crate::inject::{Injector, signed_message};
 
@@ -620,7 +686,16 @@ pub async fn b3_invalid_signed_claim_is_rejected() {
     let victim_keypair = libp2p::identity::Keypair::generate_ed25519();
     let victim_peer = PeerId::from_public_key(&victim_keypair.public());
     let topic_string = topic.hash().into_string();
-    let payload = b"the-signed-contested-message".to_vec();
+    // ONE PAYLOAD PER INJECTION, and it is what makes attribution
+    // possible at all. `GossipSubMessageIdV1` is source + sequence, so
+    // (2) and (3) still collide on mesh id exactly as this experiment
+    // requires -- the payload is not in the id and cannot weaken the
+    // collision. What it does is let a delivery say WHICH injection it
+    // came from, instead of being credited to whichever four-second
+    // window it happened to land in.
+    let control_payload = b"b3-control-seq-1".to_vec();
+    let invalid_payload = b"b3-invalid-signature-seq-2".to_vec();
+    let genuine_payload = b"b3-genuine-seq-2".to_vec();
 
     // THE FROZEN RULE, not a stand-in: source + sequence, checked
     // against the repository's golden vectors in B0.
@@ -634,19 +709,25 @@ pub async fn b3_invalid_signed_claim_is_rejected() {
 
     // (2) and (3) share source and sequence, so they share a mesh id.
     const CONTESTED_SEQ: u64 = 2;
-    let control = signed_message(&victim_keypair, &topic_string, &payload, &payload, 1);
+    let control = signed_message(
+        &victim_keypair,
+        &topic_string,
+        &control_payload,
+        &control_payload,
+        1,
+    );
     let invalid = signed_message(
         &victim_keypair,
         &topic_string,
-        &payload,
+        &invalid_payload,
         b"something-else",
         CONTESTED_SEQ,
     );
     let genuine = signed_message(
         &victim_keypair,
         &topic_string,
-        &payload,
-        &payload,
+        &genuine_payload,
+        &genuine_payload,
         CONTESTED_SEQ,
     );
 
@@ -655,11 +736,38 @@ pub async fn b3_invalid_signed_claim_is_rejected() {
     let mut delivered_genuine = 0_usize;
     let mut sources: Vec<Option<PeerId>> = Vec::new();
 
-    for (message, seen) in [
-        (control, &mut delivered_control),
-        (invalid, &mut delivered_invalid),
-        (genuine, &mut delivered_genuine),
-    ] {
+    // ATTRIBUTE BY PAYLOAD, NEVER BY WINDOW.
+    //
+    // Every injection previously carried the SAME bytes, so a delivery
+    // was credited to whichever four-second interval it arrived in. An
+    // invalid publication delayed past its own interval and delivered
+    // during the genuine one therefore incremented `delivered_genuine`
+    // -- and since the genuine message may have been suppressed by the
+    // invalid message's cache entry, the final checks would then read
+    // `delivered_invalid == 0` and `delivered_genuine == 1` and PASS on
+    // exactly the outcome this experiment exists to rule out.
+    let mut record = |message: &gossipsub::Message,
+                      control: &mut usize,
+                      invalid: &mut usize,
+                      genuine: &mut usize,
+                      sources: &mut Vec<Option<PeerId>>| {
+        match attribute(
+            &message.data,
+            &control_payload,
+            &invalid_payload,
+            &genuine_payload,
+        ) {
+            Some(Which::Control) => {
+                *control += 1;
+                sources.push(message.source);
+            }
+            Some(Which::Invalid) => *invalid += 1,
+            Some(Which::Genuine) => *genuine += 1,
+            None => {}
+        }
+    };
+
+    for message in [control, invalid, genuine] {
         let mut injector = libp2p::SwarmBuilder::with_new_identity()
             .with_tokio()
             .with_tcp(
@@ -680,15 +788,43 @@ pub async fn b3_invalid_signed_claim_is_rejected() {
                 e = receiver.select_next_some() => {
                     if let SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(
                         gossipsub::Event::Message { message, .. })) = e
-                        && message.data == payload
                     {
-                        *seen += 1;
-                        sources.push(message.source);
+                        record(
+                            &message,
+                            &mut delivered_control,
+                            &mut delivered_invalid,
+                            &mut delivered_genuine,
+                            &mut sources,
+                        );
                     }
                 }
                 _ = injector.select_next_some() => {}
                 () = tokio::time::sleep(Duration::from_millis(20)) => {}
             }
+        }
+    }
+
+    // A FINAL DRAIN, for the same reason. The last injection has no
+    // interval after it, so a genuine delivery still in flight when its
+    // own window closed would be lost entirely -- read as suppression,
+    // which is the finding this experiment reports.
+    let drain = tokio::time::Instant::now() + Duration::from_secs(4);
+    while tokio::time::Instant::now() < drain {
+        tokio::select! {
+            e = receiver.select_next_some() => {
+                if let SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(
+                    gossipsub::Event::Message { message, .. })) = e
+                {
+                    record(
+                        &message,
+                        &mut delivered_control,
+                        &mut delivered_invalid,
+                        &mut delivered_genuine,
+                        &mut sources,
+                    );
+                }
+            }
+            () = tokio::time::sleep(Duration::from_millis(20)) => {}
         }
     }
 

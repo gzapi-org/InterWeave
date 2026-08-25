@@ -291,6 +291,16 @@ Injection (2) carries a signature that is present, well-formed, and computed ove
 
 **The control is not decoration.** Hand-rolled protobuf has its own failure mode: an encoding the receiver cannot parse is *also* rejected, and the experiment would report success for a reason having nothing to do with signatures.
 
+**Each injection carries its own payload, and that is the difference between measuring and guessing.** All three used to carry identical bytes, so a delivery was credited to whichever four-second interval it arrived in. An invalid publication delayed past its own interval and delivered during the genuine one would therefore increment the *genuine* counter — and because the genuine message may itself have been suppressed by the invalid one's cache entry, the checks would then read `invalid == 0, genuine == 1` and **PASS on precisely the outcome this experiment exists to rule out**. Review found that; it is a false pass, not a flake.
+
+Distinct payloads cost nothing here because `GossipSubMessageIdV1` is source + sequence: the payload is not in the mesh id, so the (2)/(3) collision is exactly as tight as before. A final drain after the last injection catches a delivery still in flight when its own window closed, which the old shape would have read as suppression.
+
+The rule is now a named function, `attribute`, with three unit tests beside it — including `an_invalid_delivery_is_never_credited_to_the_genuine_injection`, which is the false pass stated as an assertion. Replacing the function body with a constant fails all three.
+
+> **These unit tests are not CI-enforced.** The harness declares its own `[workspace]`, so it is outside the root workspace and no job builds it; `cargo test` inside `harness/` is part of *running the spike*, not part of the merge gate. Said here rather than left to look enforced.
+>
+> The timing skew itself is **not** reproduced. On loopback every delivery lands inside its own window, and forcing a cross-window arrival by shrinking the first interval to 50ms did not mis-attribute even with the old rule restored. So the evidence for this fix is the tested attribution rule, not a demonstrated failure — weaker than a mutation of the live experiment, and labelled as such.
+
 | mutation | result |
 |---|---|
 | sign the "invalid" message correctly | it is delivered, caches under `(source, seq 2)`, and **the genuine message is suppressed** — 3 checks fail |
