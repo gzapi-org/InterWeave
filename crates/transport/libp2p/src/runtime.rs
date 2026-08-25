@@ -984,6 +984,15 @@ impl SwarmRuntime {
         peer: TransportIdentity,
         frame: DirectMessageV2,
     ) -> Result<Result<EndpointId, DirectError>, SubstrateError> {
+        // SENDING TO SELF IS A CALLER ERROR, not a network one. DIRECT.md
+        // is explicit that the local profile PeerId is `InvalidArgument`
+        // and that self-dial never occurs. Left to the swarm, libp2p
+        // cannot hold a self-connection and the caller would be told
+        // `PeerUnreachable` — a network verdict about a local mistake,
+        // and a misleading one, since the peer is right here.
+        if peer == self.local_peer {
+            return Ok(Err(DirectError::InvalidArgument));
+        }
         let (reply, answer) = oneshot::channel();
         self.commands
             .send(SwarmCommand::SendDirect {

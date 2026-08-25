@@ -540,3 +540,26 @@ async fn a_draining_node_refuses_new_work_on_an_open_connection() {
     assert_eq!(delivered.len(), 1, "only the pre-drain message");
     assert_eq!(delivered[0].payload.bytes(), b"before");
 }
+
+/// Sending to one's own PeerId is a caller error, not a network one.
+///
+/// `DIRECT.md`: "sending to the local profile PeerId is `InvalidArgument`;
+/// self-dial never occurs." libp2p cannot hold a self-connection, so
+/// without the check the caller is told `PeerUnreachable` — a network
+/// verdict on a local mistake, about a peer that is right here.
+#[tokio::test]
+async fn sending_to_the_local_peer_is_invalid_argument() {
+    let (sender, _receiver, _peer) = connected_pair(8).await;
+    let me = sender.local_peer().clone();
+
+    let error = sender
+        .send_direct(me, frame(Some("claude"), b"to myself", 32))
+        .await
+        .expect("the command reaches the task")
+        .expect_err("the local peer is not a destination");
+    assert_eq!(
+        error,
+        TransportError::InvalidArgument,
+        "a local input error, not PeerUnreachable"
+    );
+}
