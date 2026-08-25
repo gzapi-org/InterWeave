@@ -11,6 +11,7 @@
 //! from the other side of a socket; asserting it here first means a
 //! regression in the registry is caught as a registry defect, not
 //! discovered as a mysterious `no_route`.
+#![allow(clippy::expect_used, clippy::panic)]
 
 use interweave_transport_api::{DirectRejectReason, EndpointId};
 use interweave_transport_runtime::endpoint_registry::ResolveFailure;
@@ -45,4 +46,38 @@ fn endpoint_ids_share_one_grammar_between_wire_and_registry() {
     assert!(EndpointId::parse("a".repeat(65)).is_err());
     assert!(EndpointId::parse("Human").is_err(), "must begin a-z");
     assert!(EndpointId::parse("human").is_ok());
+}
+
+/// ENDPOINT NAMES ARE AN OPEN SET, and this stage must not quietly close
+/// it. `human` and `claude` are configured labels, not variants: a
+/// profile that adds `gpt-5`, `gemini`, or `llama-4` is editing config,
+/// not this crate, and no wire byte changes because the frame carries a
+/// length-prefixed label rather than a code point.
+///
+/// The risk is not today's code — it is a future `match name { "human"
+/// => .., "claude" => .. }` somewhere in routing, which would compile,
+/// pass every existing test, and silently make unknown endpoints
+/// unroutable. This asserts the property directly so that change fails
+/// here.
+#[test]
+fn an_endpoint_name_no_one_has_heard_of_is_as_valid_as_the_familiar_ones() {
+    for name in [
+        "human",
+        "claude",
+        // Models that do not exist yet, and one that never will.
+        "gpt-5",
+        "gemini",
+        "llama-4",
+        "some.future.llm",
+        "a",
+    ] {
+        assert!(
+            EndpointId::parse(name).is_ok(),
+            "`{name}` must be a legal endpoint label"
+        );
+    }
+
+    // The grammar is what constrains a label — never a known-names list.
+    assert!(EndpointId::parse("gpt 5").is_err(), "spaces are not legal");
+    assert!(EndpointId::parse("GPT-5").is_err(), "must begin a-z");
 }

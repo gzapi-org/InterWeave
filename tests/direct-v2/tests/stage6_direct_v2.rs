@@ -8,6 +8,7 @@
 //! the shape the fixture README promises. A stage that opened against
 //! missing fixtures would build a codec with nothing to be byte-identical
 //! to, so this fails first.
+#![allow(clippy::expect_used, clippy::panic)]
 
 use interweave_test_support::fixtures;
 
