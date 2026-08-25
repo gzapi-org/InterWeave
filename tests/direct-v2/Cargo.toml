@@ -30,6 +30,7 @@ interweave-profile-identity = { path = "../../crates/identity/profile-identity" 
 interweave-transport-api = { path = "../../crates/api/transport-api" }
 interweave-transport-libp2p = { path = "../../crates/transport/libp2p" }
 interweave-transport-runtime = { path = "../../crates/transport/runtime" }
+interweave-profile-config = { path = "../../crates/config/profile-config" }
 interweave-trust-api = { path = "../../crates/api/trust-api" }
 interweave-local-client-api = { path = "../../crates/api/local-client-api" }
 interweave-test-support = { path = "../support" }

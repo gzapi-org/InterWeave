@@ -1063,6 +1063,23 @@ impl SwarmRuntime {
     /// # Errors
     /// [`SubstrateError::Stopped`] if the task is gone.
     pub async fn configure_direct(&self, config: DirectEndpoints) -> Result<(), SubstrateError> {
+        // THE CEILING IS CHECKED BEFORE THE CONFIGURATION BECOMES STATE.
+        // `configure` builds a registry entry and a queue per endpoint,
+        // so an oversized configuration is not merely accepted, it is
+        // retained — and the command used to reply success unconditionally
+        // because `DirectEndpoints` has no validating constructor.
+        //
+        // `MAX_ENDPOINTS` rather than a 64 written here: the byte ceiling
+        // on an EndpointId is also 64, and two unrelated limits that
+        // happen to share a number are exactly the pair someone later
+        // "unifies".
+        if config.endpoints.len() > interweave_profile_config::MAX_ENDPOINTS {
+            return Err(SubstrateError::InvalidConfig {
+                field: "direct.endpoints",
+                got: config.endpoints.len(),
+                allowed: (0, interweave_profile_config::MAX_ENDPOINTS),
+            });
+        }
         let (reply, answer) = oneshot::channel();
         self.commands
             .send(SwarmCommand::ConfigureDirect {

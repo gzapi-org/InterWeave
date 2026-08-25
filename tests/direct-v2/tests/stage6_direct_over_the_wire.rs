@@ -21,7 +21,7 @@ use interweave_transport_api::{
     DirectMessageV2, EndpointId, MediaType, MessageId, Payload, TransportError, TransportIdentity,
 };
 use interweave_transport_libp2p::runtime::{
-    DirectEndpoints, SubstrateConfig, SwarmEvent, SwarmRuntime,
+    DirectEndpoints, SubstrateConfig, SubstrateError, SwarmEvent, SwarmRuntime,
 };
 use interweave_transport_runtime::{Generation, TrustSources};
 use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
@@ -719,4 +719,62 @@ async fn revoking_trust_stops_direct_sends_before_the_close_lands() {
         .expect("the receiver answers");
     assert_eq!(delivered.len(), 1, "only the pre-revocation message");
     assert_eq!(delivered[0].payload.bytes(), b"trusted");
+}
+
+/// A configuration past the endpoint ceiling is refused, not retained.
+///
+/// `configure` builds a registry entry and a delivery queue per
+/// endpoint, so an oversized configuration does not merely pass — it
+/// becomes runtime state for the life of the process. `DirectEndpoints`
+/// has no validating constructor and the command used to reply success
+/// whatever it was handed.
+///
+/// The ceiling is `MAX_ENDPOINTS`, deliberately not a `64` written here:
+/// `EndpointId::MAX_BYTES` is also 64, and two unrelated limits sharing
+/// a number are the pair someone later unifies.
+#[tokio::test]
+async fn a_configuration_past_the_endpoint_ceiling_is_refused() {
+    let (identity, _peer) = who();
+    let runtime = SwarmRuntime::start(&identity, SubstrateConfig::default(), trusting(&[]))
+        .expect("the runtime starts");
+
+    let too_many: Vec<EndpointId> = (0..=interweave_profile_config::MAX_ENDPOINTS)
+        .map(|i| endpoint(&format!("endpoint-{i}")))
+        .collect();
+    assert_eq!(too_many.len(), interweave_profile_config::MAX_ENDPOINTS + 1);
+
+    let error = runtime
+        .configure_direct(DirectEndpoints {
+            endpoints: too_many,
+            default: None,
+            queue_bound: 8,
+            epoch: generation(),
+        })
+        .await
+        .expect_err("one past the ceiling is one too many");
+    assert!(
+        matches!(
+            error,
+            SubstrateError::InvalidConfig {
+                field: "direct.endpoints",
+                ..
+            }
+        ),
+        "refused as a configuration error, got {error:?}"
+    );
+
+    // EXACTLY AT THE CEILING IS ALLOWED, so the check is a ceiling and
+    // not an off-by-one that happens to reject the case tested above.
+    let exactly: Vec<EndpointId> = (0..interweave_profile_config::MAX_ENDPOINTS)
+        .map(|i| endpoint(&format!("endpoint-{i}")))
+        .collect();
+    runtime
+        .configure_direct(DirectEndpoints {
+            endpoints: exactly,
+            default: None,
+            queue_bound: 8,
+            epoch: generation(),
+        })
+        .await
+        .expect("the ceiling itself is permitted");
 }

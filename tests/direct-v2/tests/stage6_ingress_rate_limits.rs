@@ -37,6 +37,15 @@ const PER_PEER_BURST: u8 = 32;
 /// party, or every assertion below would hold for the wrong reason.
 const QUEUE_BOUND: usize = 512;
 
+/// How many distinct source endpoint names the flooding peer holds.
+///
+/// `MAX_ENDPOINTS` is 64 and two of them are `human` and `claude`, so
+/// this is what is left. It only has to be comfortably ABOVE the
+/// per-peer burst — the claim under test is that distinct source names
+/// buy no extra allowance, and 62 names against a burst of 32 says that
+/// as well as 640 would.
+const INVENTED_SOURCES: u8 = 62;
+
 fn who() -> (ProfileIdentity, TransportIdentity) {
     let id = ProfileIdentity::generate();
     let peer = id.transport_identity().expect("peer id");
@@ -74,7 +83,7 @@ fn endpoints() -> DirectEndpoints {
 /// software and holding no leases at all.
 fn sender_endpoints() -> DirectEndpoints {
     let mut endpoints = vec![endpoint("human"), endpoint("claude")];
-    for id in 0..(PER_PEER_BURST * 2) {
+    for id in 0..INVENTED_SOURCES {
         endpoints.push(endpoint(&format!("source-{id}")));
     }
     DirectEndpoints {
@@ -246,15 +255,14 @@ async fn a_trusted_peer_is_refused_once_its_burst_is_spent() {
 async fn a_peer_cannot_mint_allowance_by_inventing_source_endpoints() {
     let (senders, receiver, peer) = fan_in(1).await;
     let answers = flood(&senders[0], &peer, PER_PEER_BURST * 2, |id| {
-        format!("source-{id}")
+        format!("source-{}", id % INVENTED_SOURCES)
     })
     .await;
 
     let allowed = accepted(&answers);
     assert!(
         allowed < answers.len(),
-        "{} distinct source endpoints bought no extra allowance",
-        answers.len()
+        "{INVENTED_SOURCES} distinct source endpoints bought no extra allowance"
     );
     assert!(
         allowed <= usize::from(PER_PEER_BURST) + 1,
