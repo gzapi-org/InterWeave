@@ -51,6 +51,35 @@
 #                          answer once and exit, the original behaviour)
 #   --interval <duration>  between polls (default 30, as wait-merged.sh;
 #                          the API is rate limited and humans are slow)
+#   --automated-only       only a RECOGNISED reviewer's review counts as
+#                          coverage. Required by CLAUDE.md §9 before
+#                          arming --auto on a security-boundary change.
+#
+# WHY --automated-only EXISTS, and why the bare command does not satisfy
+# §9. "Not the PR author" is the right test for INDEPENDENCE and the
+# wrong test for a gate that is waiting on one named reviewer. This
+# repository is PUBLIC, so any GitHub user can submit a review object on
+# an open PR — and one drive-by review carrying the current head is
+# enough to make this command exit 0 and a session arm the merge the
+# gate exists to hold open. That is the same hole the verdict-comment
+# path already closes with an allow-list, for the reason stated there: a
+# negation is what lets everybody in.
+#
+# Under the flag the allow-list narrows THREE things together, because a
+# mode that narrows coverage and leaves the freshness terms reading a
+# different population answers a question nobody asked:
+#
+#   * which review objects cover the head;
+#   * which pending review REQUEST suppresses the exit-5 verdict, so a
+#     human reviewer being slow does not mask a bot review that is not
+#     coming;
+#   * whether any prior review exists at all, the "this is not a fresh
+#     PR" term.
+#
+# It is off by default because the unnarrowed question — was this PR
+# reviewed, by anyone — is a real question and a human review is a real
+# answer to it. Without the flag, coverage that rests only on an
+# unrecognised account is reported as such rather than passed off.
 #
 # Durations take an optional unit — 90, 90s, 10m, 2h. A bare number is
 # SECONDS, so anything written before units existed still means what it
@@ -74,7 +103,8 @@
 # describe the commit before it.
 #
 # Exit codes:
-#   0  the current head has at least one independent review
+#   0  the current head has at least one independent review (with
+#      --automated-only: one from a recognised reviewer)
 #   1  it does not — nothing yet, or --wait expired still waiting
 #   2  invocation problem (no gh, not authenticated, unknown PR)
 #   5  no review is COMING — the head advanced past the newest
@@ -90,6 +120,7 @@ REPO=""
 WAIT=0
 INTERVAL=30
 QUIET=0
+AUTOMATED_ONLY=0
 
 die() { echo "pr-review-status: $*" >&2; exit 2; }
 
@@ -135,6 +166,7 @@ while [[ $# -gt 0 ]]; do
         --interval)
             need_operand "$@"; INTERVAL="$(as_seconds "$1" "$2")" || exit 2
             want_positive "$1" "$INTERVAL" "$2"; shift 2 ;;
+        --automated-only) AUTOMATED_ONLY=1; shift ;;
         -q|--quiet) QUIET=1; shift ;;
         -h|--help)
             sed -n '/^# >>> help$/,/^# <<< help$/p' "$0" \
@@ -193,7 +225,22 @@ probe() {
     state="$(jq -r '.state'              <<<"$meta")"
     mergest="$(jq -r '.mergeStateStatus'  <<<"$meta")"
     author="$(jq -r '.author.login'      <<<"$meta")"
-    requested="$(jq '.reviewRequests | length' <<<"$meta")"
+
+    # NARROWED BY THE MODE, exactly as `qualifying` is below.
+    #
+    # `requested` suppresses the exit-5 verdict, so under
+    # --automated-only a pending HUMAN reviewer would keep this command
+    # waiting and then reporting 1 about a bot review that is never
+    # coming. A mode that narrows coverage has to narrow whatever
+    # answers "is more coverage on its way", or the two terms are
+    # reading different populations.
+    if (( AUTOMATED_ONLY )); then
+        requested="$(jq --argjson allowed "$VERDICT_AUTHORS" \
+            '[.reviewRequests[]? | select((.login // .slug // "") as $l | $allowed | index($l))] | length' \
+            <<<"$meta")"
+    else
+        requested="$(jq '.reviewRequests | length' <<<"$meta")"
+    fi
 
     # PAGINATED, and a failure here is UNREADABLE — never empty. This
     # script's entire job is answering "was this really reviewed", so
@@ -212,7 +259,28 @@ probe() {
     independent="$(jq --arg a "$author" '[.[] | select(.user.login != $a)]' <<<"$reviews")"
     self="$(jq --arg a "$author" '[.[] | select(.user.login == $a)]' <<<"$reviews")"
 
+    # WHICH REVIEWS COUNT AS COVERAGE, which is a different question from
+    # which are independent.
+    #
+    # THIS REPOSITORY IS PUBLIC: any GitHub user may submit a review
+    # object on an open PR, so "not the PR author" admits a stranger.
+    # Under --automated-only a review only covers the head if it came
+    # from the same allow-list the verdict comments use, and for the same
+    # reason given there -- a negation is what lets everybody in.
+    #
+    # `recognised` is computed in BOTH modes, because the default mode
+    # still has to be able to say that the coverage it is reporting rests
+    # on an account nobody recognises.
+    recognised="$(jq --argjson allowed "$VERDICT_AUTHORS" \
+        '[.[] | select(.user.login as $l | $allowed | index($l))]' <<<"$independent")"
+    if (( AUTOMATED_ONLY )); then
+        qualifying="$recognised"
+    else
+        qualifying="$independent"
+    fi
+
     ind_count="$(jq 'length' <<<"$independent")"
+    qual_count="$(jq 'length' <<<"$qualifying")"
     self_count="$(jq 'length' <<<"$self")"
 
     # VERDICT COMMENTS. Unreadable rather than empty, for the same
@@ -247,6 +315,7 @@ probe() {
     verdict_count="$(jq 'length' <<<"$verdicts")"
 
     head_reviewed=no
+    recognised_covers=no
     newest_ind_commit=""
 
     # Either kind of evidence counts, and a verdict comment is checked
@@ -256,10 +325,19 @@ probe() {
           'any(.[]; (.sha as $s | ($h | startswith($s)) or ($s | startswith($h))))' \
           <<<"$verdicts")" == "true" ]]; then
         head_reviewed=yes
+        recognised_covers=yes
     fi
 
-    if (( ind_count > 0 )); then
-        newest_ind_commit="$(jq -r 'sort_by(.submitted_at) | last | .commit_id' <<<"$independent")"
+    # Tracked in BOTH modes. Under --automated-only this is the same
+    # answer as `head_reviewed`; without it, it is what lets the report
+    # disclose that the only thing covering this head is a review object
+    # from an account the allow-list does not know.
+    if [[ "$(jq -r --arg h "$head" 'any(.[]; .commit_id == $h)' <<<"$recognised")" == "true" ]]; then
+        recognised_covers=yes
+    fi
+
+    if (( qual_count > 0 )); then
+        newest_ind_commit="$(jq -r 'sort_by(.submitted_at) | last | .commit_id' <<<"$qualifying")"
         # COVERAGE IS "ANY review targets head", NOT "the newest one
         # does". A review created before the last push but submitted
         # after a fresh one is newer by timestamp and older by commit, so
@@ -267,7 +345,7 @@ probe() {
         # this script would then report the head unreviewed, and exit 5
         # claiming no review is coming, while the review it needed was
         # already sitting there. The newest is kept for REPORTING only.
-        if [[ "$(jq -r --arg h "$head" 'any(.[]; .commit_id == $h)' <<<"$independent")" == "true" ]]; then
+        if [[ "$(jq -r --arg h "$head" 'any(.[]; .commit_id == $h)' <<<"$qualifying")" == "true" ]]; then
             head_reviewed=yes
         fi
     fi
@@ -287,8 +365,13 @@ no_review_coming() {
     # A prior VERDICT comment is equally evidence that this PR is one
     # the reviewer answers, so it satisfies the "not a fresh PR" term
     # just as a review object does.
+    #
+    # `qual_count`, not `ind_count`: under --automated-only a stranger's
+    # review is not evidence that the recognised reviewer has already had
+    # its turn, and counting it would report "nothing is coming" about a
+    # first review still on its way.
     [[ "$head_reviewed" == "no" ]] \
-        && (( ind_count + verdict_count > 0 )) \
+        && (( qual_count + verdict_count > 0 )) \
         && (( requested == 0 ))
 }
 
@@ -315,8 +398,12 @@ render() {
     printf 'PR #%s  state=%s  mergeState=%s  head=%s\n' \
         "$PR" "$state" "$mergest" "${head:0:8}"
     printf '  independent reviews : %s' "$ind_count"
-    if (( ind_count > 0 )); then
+    if (( qual_count > 0 )); then
         printf '   (newest against %s)' "${newest_ind_commit:0:8}"
+    fi
+    if (( AUTOMATED_ONLY )) && (( ind_count > qual_count )); then
+        printf '   [%s not the recognised reviewer — NOT counted]' \
+            "$(( ind_count - qual_count ))"
     fi
     printf '\n'
     if (( ind_count > 0 )); then
@@ -333,8 +420,20 @@ render() {
     fi
     printf '  self reviews        : %s   (thread replies etc. — not coverage)\n' "$self_count"
     printf '  review requested?   : %s\n' "$( (( requested > 0 )) && echo yes || echo no )"
-    printf '  head reviewed?      : %s\n' "$head_reviewed"
-    if [[ "$head_reviewed" == "no" && "$ind_count" -gt 0 ]]; then
+    printf '  head reviewed?      : %s%s\n' "$head_reviewed" \
+        "$( (( AUTOMATED_ONLY )) && echo '   (--automated-only: the recognised reviewer, not just anyone)' )"
+
+    # THE CALLER WHO FORGOT THE FLAG still gets told. On a public
+    # repository the dangerous shape is coverage that rests entirely on
+    # an account nobody recognises, and a session following §9 reads the
+    # exit code -- so the exposure has to be visible in the default mode
+    # too, not only in the mode that already excludes it.
+    if [[ "$head_reviewed" == "yes" && "$recognised_covers" == "no" ]]; then
+        printf '                        ^ carried ONLY by an unrecognised account. This repo\n'
+        printf '                          is public: anyone may review. CLAUDE.md §9 wants\n'
+        printf '                          --automated-only before arming a security change.\n'
+    fi
+    if [[ "$head_reviewed" == "no" && "$qual_count" -gt 0 ]]; then
         printf '                        ^ reviewed, but an EARLIER commit. Pushes do not\n'
         printf '                          re-trigger automated review — request it explicitly.\n'
     fi

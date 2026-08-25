@@ -86,8 +86,22 @@ case "$1 ${2:-}" in
     echo $((n+1)) > "$S/n"
     IFS=: read -r st head req <<<"$line"
     [[ "$st" == "FAIL" ]] && exit 1
+    # `req` is either a COUNT (the original form, rendered as that many
+    # anonymous human requests) or a comma-separated list of LOGINS.
+    # --automated-only asks which reviewer a pending request names, and a
+    # count cannot answer that.
+    if [[ "$req" =~ ^[0-9]+$ ]]; then
+      reqs='['; sep=''
+      for ((i = 0; i < req; i++)); do reqs="$reqs$sep{\"login\":\"a-human\"}"; sep=','; done
+      reqs="$reqs]"
+    else
+      reqs='['; sep=''
+      IFS=, read -ra logins <<<"$req"
+      for l in "${logins[@]}"; do reqs="$reqs$sep{\"login\":\"$l\"}"; sep=','; done
+      reqs="$reqs]"
+    fi
     printf '{"state":"%s","mergeStateStatus":"CLEAN","headRefOid":"%s","author":{"login":"me"},"isDraft":false,"reviewRequests":%s}\n' \
-      "$st" "$head" "$(python3 -c "print('['+','.join(['{}']*$req)+']')")"
+      "$st" "$head" "$reqs"
     exit 0 ;;
   "repo view")
     echo '{"nameWithOwner":"o/r"}'; exit 0 ;;
@@ -382,6 +396,83 @@ INTERWEAVE_VERDICT_AUTHORS='["me"]' \
 run_v "OPEN:abc1234:0" "" "me,abc1234,2026-08-23T06:23:02Z"
 assert_rc "a self-authored verdict is not coverage" 1
 assert_contains "  and is not counted" "verdict comments    : 0"
+
+echo "pr-review-status: --automated-only closes the review-OBJECT hole"
+# THE DEFECT. `independent` is every non-author reviewer, and this
+# repository is PUBLIC -- any GitHub user may submit a review object on
+# an open PR. One drive-by review carrying the current head therefore
+# exits 0, and CLAUDE.md §9 reads that exit as permission to arm --auto
+# on a security-boundary change. The gate that exists to hold the merge
+# open for the recognised reviewer is satisfied by a stranger.
+#
+# This is the same hole the verdict-COMMENT path closes above, left open
+# on the path that carries more weight.
+run "OPEN:abc123:0" "some-passer-by,abc123,2026-08-07T10:00:00Z" --automated-only
+assert_rc    "a stranger's review is not coverage under the flag" 1
+assert_contains "  head is reported unreviewed" "head reviewed?      : no"
+assert_contains "  and the exclusion is disclosed, not silent" \
+                "[1 not the recognised reviewer — NOT counted]"
+
+run "OPEN:abc123:0" "chatgpt-codex-connector,abc123,2026-08-07T10:00:00Z" --automated-only
+assert_rc "the recognised reviewer IS coverage under the flag" 0
+
+echo "pr-review-status: the default mode discloses unrecognised coverage"
+# The flag is off by default because "was this reviewed by anyone" is a
+# real question. But a caller who FORGOT the flag reads an exit code, so
+# the exposure has to be visible without it. Coverage resting entirely
+# on an unrecognised account says so.
+run "OPEN:abc123:0" "some-passer-by,abc123,2026-08-07T10:00:00Z"
+assert_rc       "still exits 0 — a human review is real coverage" 0
+assert_contains "  but names what is carrying it" "carried ONLY by an unrecognised account"
+assert_contains "  and points at the flag"        "--automated-only"
+
+run "OPEN:abc123:0" "chatgpt-codex-connector,abc123,2026-08-07T10:00:00Z"
+assert_rc    "recognised coverage exits 0" 0
+assert_lacks "  and says nothing about unrecognised accounts" \
+             "carried ONLY by an unrecognised account"
+
+# A CLEAN review leaves a verdict comment and no review object, and the
+# allow-list already gates those -- so it must not trip the disclosure.
+run_v "OPEN:abc1234:0" "" "chatgpt-codex-connector,abc1234,2026-08-23T06:23:02Z"
+assert_rc    "a clean verdict covers the head" 0
+assert_lacks "  and is not called unrecognised" \
+             "carried ONLY by an unrecognised account"
+
+echo "pr-review-status: a stranger cannot make the reviewer look done"
+# `no_review_coming` needs a PRIOR review to conclude "this PR is one the
+# reviewer has already answered". Counting a stranger there reports
+# NO REVIEW COMING (exit 5) about a first automated review still on its
+# way -- and §9 then sends the session off to re-request one it already
+# has in flight.
+run "OPEN:newhead:0" "some-passer-by,oldhead,2026-08-07T10:00:00Z" --automated-only
+assert_rc "a stranger's stale review does not trigger exit 5" 1
+
+run "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" --automated-only
+assert_rc "the recognised reviewer's stale review does" 5
+
+echo "pr-review-status: --automated-only narrows the pending REQUEST too"
+# `requested` suppresses exit 5. A mode that narrows coverage and leaves
+# this term reading everybody keeps waiting on a HUMAN reviewer while
+# reporting about a bot review that is not coming -- the two terms would
+# be answering questions about different populations.
+run "OPEN:newhead:a-human" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" --automated-only
+assert_rc "a pending HUMAN request does not suppress the verdict" 5
+assert_contains "  and the request is reported as absent for this question" \
+                "review requested?   : no"
+
+run "OPEN:newhead:chatgpt-codex-connector" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" --automated-only
+assert_rc "a pending RECOGNISED request does suppress it" 1
+
+run "OPEN:newhead:a-human" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z"
+assert_rc "and without the flag a human request still suppresses it" 1
+
+echo "pr-review-status: --help documents the flag §9 now requires"
+RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" bash "$UNDER_TEST" --help 2>&1)"; RUN_RC=$?
+assert_rc       "exits 0" 0
+assert_contains "names the flag"        "--automated-only"
+assert_contains "says why it exists"    "repository is PUBLIC"
+assert_contains "and that the bare command is not enough" \
+                "does not satisfy"
 
 echo "pr-review-status: a failed comments lookup is UNREADABLE, not empty"
 # Same contract as the reviews endpoint: swallowing the failure would
