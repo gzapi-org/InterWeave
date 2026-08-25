@@ -129,12 +129,16 @@ fn legal_frame() -> Vec<u8> {
 ///
 /// Bounded throughout: a receiver that never answers is a RESULT.
 async fn what_the_receiver_answers(bytes: Vec<u8>) -> DirectResponse {
-    answers_with_trust(bytes, true, 1).await
+    answers_with_trust(bytes, true, 1)
+        .await
+        .into_iter()
+        .next()
+        .expect("one answer")
 }
 
 /// As above, but the receiver may distrust the sender, and the sender
 /// may send `repeat` frames so a rate bound can be reached.
-async fn answers_with_trust(bytes: Vec<u8>, trusted: bool, repeat: usize) -> DirectResponse {
+async fn answers_with_trust(bytes: Vec<u8>, trusted: bool, repeat: usize) -> Vec<DirectResponse> {
     let receiver_id = ProfileIdentity::generate();
     let receiver_peer = receiver_id.transport_identity().expect("peer id");
 
@@ -201,7 +205,7 @@ async fn answers_with_trust(bytes: Vec<u8>, trusted: bool, repeat: usize) -> Dir
     // Drive both sides until the receiver answers, or give up loudly.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let mut sent = false;
-    let mut seen = 0usize;
+    let mut collected: Vec<DirectResponse> = Vec::with_capacity(repeat);
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(!remaining.is_zero(), "no answer within 20s");
@@ -220,10 +224,6 @@ async fn answers_with_trust(bytes: Vec<u8>, trusted: bool, repeat: usize) -> Dir
                     message: request_response::Message::Response { response, .. },
                     ..
                 }) => {
-                    seen += 1;
-                    if seen < repeat {
-                        continue;
-                    }
                     // AN EMPTY BODY IS "NOTHING WAS ANSWERED", which is
                     // the defect this suite exists for. Named separately
                     // because dropping a `ResponseChannel` closes the
@@ -234,8 +234,13 @@ async fn answers_with_trust(bytes: Vec<u8>, trusted: bool, repeat: usize) -> Dir
                         !response.is_empty(),
                         "the receiver closed the exchange without answering"
                     );
-                    return decode_response(&response)
-                        .expect("the receiver answered in the frozen shape");
+                    collected.push(
+                        decode_response(&response)
+                            .expect("the receiver answered in the frozen shape"),
+                    );
+                    if collected.len() == repeat {
+                        return collected;
+                    }
                 }
                 Libp2pSwarmEvent::Behaviour(request_response::Event::OutboundFailure {
                     error, ..
@@ -315,14 +320,54 @@ async fn malformed_frames_spend_ingress_allowance() {
     let mut frame = legal_frame();
     frame[MessageId::LEN + 8] = 200;
 
-    let answer = answers_with_trust(frame, true, 40).await;
-    assert_eq!(
-        answer,
-        DirectResponse::Rejected {
-            message_id: MessageId::from_bytes([7; 16]),
-            reason: DirectRejectReason::Overloaded,
-        },
+    // SIXTY-FOUR, and the number is bounded from BOTH sides.
+    //
+    // Above, because the bucket refills while the test runs: 120/minute
+    // is two tokens a second, so a burst of 32 plus a slow machine
+    // absorbed forty and this test passed vacuously under parallel load.
+    //
+    // Below, because every request opens a substream at once and the
+    // connection has its own limits: 192 closed it outright with
+    // `WriteZero`, which fails the test for a reason that has nothing to
+    // do with rate limiting.
+    let started = tokio::time::Instant::now();
+    let answers = answers_with_trust(frame, true, 64).await;
+    let elapsed = started.elapsed();
+
+    // THE TEST STATES ITS OWN PRECONDITION rather than quietly becoming
+    // vacuous when the machine is slow. Refill over `elapsed` plus the
+    // burst must stay under the number sent, or "some were refused"
+    // proves nothing.
+    let refilled = 2 * elapsed.as_secs();
+    assert!(
+        32 + refilled < 64,
+        "too slow for this to mean anything: {elapsed:?} refilled ~{refilled} tokens"
+    );
+
+    // ANY refusal, not the last answer: responses arrive in whatever
+    // order the peer produces them, so "the last one" is not the same
+    // question as "some were refused".
+    assert!(
+        answers.iter().any(|a| matches!(
+            a,
+            DirectResponse::Rejected {
+                reason: DirectRejectReason::Overloaded,
+                ..
+            }
+        )),
         "past the burst the answer is overloaded, so the bucket was charged"
+    );
+    // ...and some were still answered `malformed`, so the flood was not
+    // refused wholesale for some other reason.
+    assert!(
+        answers.iter().any(|a| matches!(
+            a,
+            DirectResponse::Rejected {
+                reason: DirectRejectReason::Malformed,
+                ..
+            }
+        )),
+        "the ones within the burst were answered on their merits"
     );
 }
 

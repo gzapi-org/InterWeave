@@ -658,7 +658,7 @@ mod tests {
     #[tokio::test]
     async fn writing_a_rejection_as_a_request_is_refused() {
         let mut sink: Vec<u8> = Vec::new();
-        let written = DirectCodec
+        let written = DirectCodec::new(MAX_PAYLOAD_BYTES)
             .write_request(
                 &DIRECT_PROTOCOL,
                 &mut futures::io::Cursor::new(&mut sink),
@@ -674,7 +674,7 @@ mod tests {
 
     /// Run `read_request` over a byte slice.
     async fn read_one_request(bytes: &[u8]) -> io::Result<InboundRequest> {
-        DirectCodec
+        DirectCodec::new(MAX_PAYLOAD_BYTES)
             .read_request(&DIRECT_PROTOCOL, &mut futures::io::Cursor::new(bytes))
             .await
     }
