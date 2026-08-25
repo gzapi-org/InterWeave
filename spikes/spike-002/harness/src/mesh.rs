@@ -21,7 +21,7 @@ use libp2p::gossipsub::{self, IdentTopic, MessageAuthenticity, MessageId, Valida
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{Multiaddr, PeerId, Swarm, noise, tcp, yamux};
 
-use crate::direct::note;
+use crate::direct::{check, note};
 
 #[derive(NetworkBehaviour)]
 struct Behaviour {
@@ -146,7 +146,7 @@ pub fn b0_message_id_matches_the_golden_vectors() {
             ok,
         );
     }
-    note("the id function under test IS GossipSubMessageIdV1", all);
+    check("the id function under test IS GossipSubMessageIdV1", all);
 }
 
 fn node(
@@ -324,7 +324,7 @@ pub async fn b1_distinct_mesh_ids() {
     };
     note("messages delivered to the receiver", received.len());
     note("distinct mesh ids among them", distinct);
-    note(
+    check(
         "both publishers reached the application",
         received.iter().any(|d| d.source == Some(first_peer))
             && received.iter().any(|d| d.source == Some(second_peer)),
@@ -528,7 +528,7 @@ pub async fn b2_authenticity_before_cache() {
         "strict delivered exactly one, and it is not the forgery",
         strict_got_exactly_the_genuine_one,
     );
-    note(
+    check(
         "VERDICT: authenticity precedes the duplicate cache",
         forgery_reached_a_receive_path && strict_got_exactly_the_genuine_one,
     );
@@ -565,29 +565,34 @@ fn deliveries<'a>(events: &'a [Delivery], at: usize, payload: &[u8]) -> Vec<&'a 
         .collect()
 }
 
-/// B3 -- an invalid SIGNED source claim, injected on the wire.
+/// B3 -- an invalid SIGNED source claim, colliding under the FROZEN
+/// mesh id.
 ///
 /// B2 uses `MessageAuthenticity::Author`, which publishes UNSIGNED with
-/// a claimed source. `PUBSUB.md` requires the receive path to reject an
-/// invalid **signed** source claim before it can create a lasting
-/// duplicate-cache entry, and a missing signature is not that: it could
-/// in principle be refused earlier, leaving the signed case untested
-/// while the spike reported PASS. Review caught that, and it is the
-/// reason this experiment exists rather than an extension of B2.
+/// a claimed source, and collides under a payload-derived id because
+/// the public API will not let a caller choose a sequence number.
+/// `PUBSUB.md` requires neither of those substitutions: it asks whether
+/// an invalid **signed** source/sequence claim can poison the cache
+/// keyed by `GossipSubMessageIdV1`, which is source + sequence.
 ///
-/// Nothing in the public API can produce the message: `publish` only
-/// ever signs correctly, and no public call accepts a prebuilt
-/// `RawMessage`. So the frames are written directly to a
-/// `/meshsub/1.1.0` substream by [`crate::inject`].
+/// The injector in [`crate::inject`] can choose the sequence number,
+/// which removes the reason the substitution existed -- a fact review
+/// noticed before I did, after I had written the injector that made it
+/// obsolete and left the caveat in place. So this experiment uses the
+/// frozen rule and collides on source AND sequence exactly.
 ///
-/// # The control is the point
+/// Three injections against one receiver, all through the same writer:
 ///
-/// Hand-rolled protobuf invites its own failure mode: an encoding the
-/// receiver cannot parse is also rejected, and the experiment would
-/// then report success for a reason having nothing to do with
-/// signatures. So the SAME injector sends a correctly-signed message
-/// first. The receiver must deliver that one. Only then does a
-/// rejection of the mutated one mean what it says.
+/// 1. correctly signed, sequence 1 -- the CONTROL. Hand-rolled
+///    protobuf has its own failure mode, and an encoding the receiver
+///    cannot parse is rejected too; without this, a rejection below
+///    would mean nothing.
+/// 2. sequence 2, signature present and computed over DIFFERENT bytes
+///    than it carries, so it cannot verify.
+/// 3. correctly signed, sequence 2 -- the same `(source, sequence)` as
+///    (2), so the same `GossipSubMessageIdV1`. If (2) reached the
+///    duplicate cache before its signature was checked, this is
+///    suppressed and never arrives.
 pub async fn b3_invalid_signed_claim_is_rejected() {
     use crate::inject::{Injector, signed_message};
 

@@ -10,8 +10,14 @@ mod direct;
 mod inject;
 mod mesh;
 
+/// Exits NONZERO when any required observation came out false.
+///
+/// The harness used to print a false verdict and still exit 0, so the
+/// `cargo run` the README tells a reader to reproduce with reported
+/// success while its own output disproved the recorded PASS -- and a
+/// script checking the status would have been told the spike passed.
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
-async fn main() {
+async fn main() -> std::process::ExitCode {
     println!("SPIKE-002 — libp2p 0.56, request-response and gossipsub\n");
 
     println!("A1. protocol-family negotiation, matching majors");
@@ -59,5 +65,11 @@ async fn main() {
     println!("\nB3. an invalid SIGNED claim, injected on the wire");
     mesh::b3_invalid_signed_claim_is_rejected().await;
 
-    println!("\ndone.");
+    let failed = direct::failures();
+    if failed == 0 {
+        println!("\ndone -- every required observation held.");
+        return std::process::ExitCode::SUCCESS;
+    }
+    println!("\ndone -- {failed} REQUIRED observation(s) failed; the recorded PASS does not hold.");
+    std::process::ExitCode::FAILURE
 }

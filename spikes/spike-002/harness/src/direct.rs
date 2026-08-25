@@ -157,6 +157,30 @@ pub fn note(what: &str, detail: impl std::fmt::Display) {
     println!("  {what:<46} {detail}");
 }
 
+/// Required observations that came out false.
+static FAILURES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// One line of evidence that the spike's conclusions REST on.
+///
+/// Prints like [`note`] and records a false answer. Without this the
+/// harness printed a false verdict and still exited 0, so `cargo run`
+/// -- the reproduction the README tells a reader to run -- reported
+/// success while its own output disproved the recorded PASS. A script
+/// checking the exit status would have been told the spike passed.
+pub fn check(what: &str, ok: bool) -> bool {
+    note(what, ok);
+    if !ok {
+        FAILURES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    ok
+}
+
+/// How many required observations failed.
+#[must_use]
+pub fn failures() -> usize {
+    FAILURES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The dedup key both sides of the race use.
 pub fn key(source: &TransportIdentity, message_id: &str) -> DedupKey {
     DedupKey::Direct {
@@ -666,7 +690,7 @@ async fn same_key_race_once(owner_outcome: &Response) {
     // two would make this assertion unfalsifiable the moment any bound
     // binds, which is exactly what happened when the waiter bound
     // landed and this line still said "every response".
-    note(
+    check(
         "every ATTACHED request got the owner's outcome",
         refused == 0 && answered.len() == COPIES && answered.iter().all(|r| r == owner_outcome),
     );
@@ -1105,7 +1129,7 @@ pub async fn a9_no_route_is_one_answer() {
     let encodings: Vec<Vec<u8>> = answers.iter().map(serde_cbor_bytes).collect();
     let bytes_identical = encodings.windows(2).all(|w| w[0] == w[1]);
     note("and every encoding is byte-identical", bytes_identical);
-    note(
+    check(
         "VERDICT: five independent refusals, one wire answer",
         distinct.len() == scenarios.len()
             && answers.len() == scenarios.len()
@@ -1230,7 +1254,7 @@ pub async fn a10_global_reservation_budget() {
         "distinct peers actually charged a reservation",
         distinct_sources.len(),
     );
-    note(
+    check(
         "VERDICT: the GLOBAL budget refused the excess",
         owners == MAX_GLOBAL
             && overloaded == PEERS - MAX_GLOBAL
@@ -1360,7 +1384,7 @@ pub async fn a11_same_key_waiter_flood() {
     note("waiters attached", waiters);
     note("refused as overloaded BY THE MAP", overloaded);
     note("highest number of channels held at once", high_water);
-    note(
+    check(
         "VERDICT: one key cannot accumulate unbounded waiters",
         owners == 1 && high_water <= PER_PEER && overloaded == COPIES - PER_PEER,
     );

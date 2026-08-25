@@ -296,6 +296,18 @@ Three mutations, and two of them found real weaknesses in the first version of t
 
 That last one is the strongest evidence here: it shows the collision half genuinely detects a poisoned cache, rather than passing because nothing ever collides.
 
+### A false verdict now fails the run
+
+Every experiment used to `note` its result and return, so `main` reached `done` and exited **0** even when its own output disproved the recorded PASS. The `cargo run` this README tells you to reproduce with would have reported success, and a script checking the status would have been told the spike passed.
+
+Observations the conclusions rest on now go through `check`, which tallies false answers, and `main` returns a non-zero `ExitCode` when any failed:
+
+```text
+done -- 3 REQUIRED observation(s) failed; the recorded PASS does not hold.
+$ echo $?
+1
+```
+
 ### An incidental finding about the library
 
 `gossipsub::Behaviour::new` **refuses** to build a node that publishes unsigned while requiring signatures on receipt, and says so:
