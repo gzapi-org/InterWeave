@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# Stage 6, the routing half: same-PeerId multi-endpoint delivery
+# (ADR-0030 Model B). TEST-ONLY; nothing depends on this package.
+#
+# Split from `tests/direct-v2` on purpose: that suite asks whether the
+# wire is correct, this one asks whether a message for `human` reaches
+# only `human` when `claude` holds a lease on the same profile. Both run
+# real peers, but a failure here is a registry or lease defect, not a
+# codec one, and a reader should not have to tell them apart by reading
+# the assertion.
+[package]
+name = "interweave-endpoint-routing-tests"
+version = "0.0.0"
+publish = false
+description = "Stage 6 endpoint-routing exit-gate tests for InterWeave."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+interweave-profile-identity = { path = "../../crates/identity/profile-identity" }
+interweave-transport-api = { path = "../../crates/api/transport-api" }
+interweave-transport-libp2p = { path = "../../crates/transport/libp2p" }
+interweave-transport-runtime = { path = "../../crates/transport/runtime" }
+interweave-trust-api = { path = "../../crates/api/trust-api" }
+interweave-local-client-api = { path = "../../crates/api/local-client-api" }
+libp2p = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

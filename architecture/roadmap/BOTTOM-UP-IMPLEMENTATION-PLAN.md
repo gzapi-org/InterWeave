@@ -488,12 +488,11 @@ Every claim above was verified by breaking the code and watching the
 test fail, which is the only evidence that distinguishes a test of the
 behaviour from a test written from the same belief as the code.
 
-Stage 6 does not open on this alone: its prerequisite is SPIKE-002.
+Stage 6 did not open on this alone: its prerequisite was SPIKE-002.
 That spike was run and closed **PASS** on 2026-08-23 — see
-[`spikes/spike-002/`](../../spikes/spike-002/README.md) — so the
-remaining step is the deliberate act of opening Stage 6 and moving
-`workspace.metadata.interweave.status` with it. Nothing is blocking
-that except the decision to take it.
+[`spikes/spike-002/`](../../spikes/spike-002/README.md) — and Stage 6
+was opened on 2026-08-25, once that record had merged, by moving
+`workspace.metadata.interweave.status` to `stage-6-direct-v2`.
 
 ## 9. Stage 6 — direct protocol v2
 
