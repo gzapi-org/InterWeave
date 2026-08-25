@@ -158,12 +158,25 @@ ADR-0019's "never creates a parallel enqueue path" was upheld the whole time: on
 Fixed in the production `ReservationMap` rather than worked around in the harness: waiters are charged against the same per-peer and global budgets owners are, and releasing a key returns all of it — owner and waiters were admitted as one outcome and are answered as one outcome, so returning only the owner's share would leak the rest and turn the ceiling into a lifetime quota. The experiment now runs with **no cap of its own**:
 
 ```text
+responses received                            40
 per-peer budget                                8
 owners                                         1
 waiters attached                               7
 refused as overloaded BY THE MAP              32
+accepted ON THE WIRE                           8
+overloaded ON THE WIRE                        32
+unexpected responses                           0
 highest number of channels held at once        8
 ```
+
+**The verdict used to accept 33 of 40 requests.** It read `owners == 1 && high_water <= PER_PEER && overloaded == COPIES - PER_PEER`, which classifies one owner plus thirty-two refusals — and leaves the seven **waiters**, the bound this experiment exists to measure, merely printed. The polling loop can also exit on its deadline with `answered < COPIES`, so reaching the verdict never implied every request came back. A run where seven requests never reached the server satisfied the expression and closed the waiter-bound experiment as a success. Review found that; it is the same defect as A6's and B1's, one round later.
+
+Every request is now accounted for, and the **wire** is checked against the map — counting only the map's own decisions would accept a run where the refusals never reached the client, or reached it wearing a different reason:
+
+| mutation | result |
+|---|---|
+| loop exits seven responses early | `responses received 33` → `every request was answered` **false**. The *old* expression is still satisfied under this mutation, which is the finding |
+| the map refuses correctly but the wire sends `NoRoute` | `unexpected responses 32` → two checks **false** |
 
 A6 was corrected in the same change. It asserted "every response is the owner's outcome", which stops being true the moment any bound binds — a request the budget refused was never attached and was never promised that outcome. It now runs with a budget large enough not to bind (the bound is A11's subject) and asserts that every **attached** request got the owner's outcome.
 

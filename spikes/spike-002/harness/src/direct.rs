@@ -1427,6 +1427,13 @@ pub async fn a11_same_key_waiter_flood() {
     let mut overloaded = 0_usize;
     let mut high_water = 0_usize;
     let mut answered = 0_usize;
+    // WHAT CAME BACK ON THE WIRE, classified. `answered` alone counts
+    // responses without asking what they said, so a run full of
+    // unexpected `NoRoute` refusals looked identical to the run this
+    // experiment is trying to observe.
+    let mut accepted_on_the_wire = 0_usize;
+    let mut overloaded_on_the_wire = 0_usize;
+    let mut unexpected_on_the_wire = 0_usize;
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     while answered < COPIES {
@@ -1480,9 +1487,16 @@ pub async fn a11_same_key_waiter_flood() {
             }
             e = client.select_next_some() => {
                 if let SwarmEvent::Behaviour(BehaviourEvent::Direct(RrEvent::Message {
-                    message: RrMessage::Response { .. }, ..
+                    message: RrMessage::Response { response, .. }, ..
                 })) = e {
                     answered += 1;
+                    match response {
+                        Response::AcceptedV2 { .. } => accepted_on_the_wire += 1,
+                        Response::Rejected { reason: Reason::Overloaded } => {
+                            overloaded_on_the_wire += 1;
+                        }
+                        _ => unexpected_on_the_wire += 1,
+                    }
                 }
             }
         }
@@ -1494,9 +1508,60 @@ pub async fn a11_same_key_waiter_flood() {
     note("owners", owners);
     note("waiters attached", waiters);
     note("refused as overloaded BY THE MAP", overloaded);
+    note("accepted ON THE WIRE", accepted_on_the_wire);
+    note("overloaded ON THE WIRE", overloaded_on_the_wire);
+    note("unexpected responses", unexpected_on_the_wire);
     note("highest number of channels held at once", high_water);
+
+    // EVERY REQUEST HAS TO BE ACCOUNTED FOR, and the old verdict did not
+    // require that. `owners == 1 && overloaded == COPIES - PER_PEER`
+    // classifies 1 + 32 = 33 of 40; the remaining seven -- the WAITERS,
+    // which is the bound this experiment exists to measure -- were
+    // merely printed. A run where seven requests never reached the
+    // server at all satisfied the expression and closed the
+    // waiter-bound experiment as a success.
+    //
+    // The loop can also exit on its deadline with `answered < COPIES`,
+    // so the count is not implied by having got here.
+    check("every request was answered", answered == COPIES);
+    check("exactly one owner", owners == 1);
+    check(
+        "and exactly PER_PEER - 1 waiters attached to it",
+        waiters == PER_PEER - 1,
+    );
+    check(
+        "the map never held more than the budget",
+        high_water <= PER_PEER,
+    );
+    check(
+        "the rest were refused as overloaded BY THE MAP",
+        overloaded == COPIES - PER_PEER,
+    );
+    // ...and the WIRE agrees with the map. Counting only the map's own
+    // decisions would accept a run where the refusals never reached the
+    // client, or reached it wearing a different reason.
+    check(
+        "the budget's worth were accepted on the wire",
+        accepted_on_the_wire == PER_PEER,
+    );
+    check(
+        "and every other request was refused as Overloaded on the wire",
+        overloaded_on_the_wire == COPIES - PER_PEER,
+    );
+    check(
+        "with no other response shape at all",
+        unexpected_on_the_wire == 0,
+    );
+
     check(
         "VERDICT: one key cannot accumulate unbounded waiters",
-        owners == 1 && high_water <= PER_PEER && overloaded == COPIES - PER_PEER,
+        answered == COPIES
+            && owners == 1
+            && waiters == PER_PEER - 1
+            && high_water <= PER_PEER
+            && overloaded == COPIES - PER_PEER
+            && accepted_on_the_wire == PER_PEER
+            && overloaded_on_the_wire == COPIES - PER_PEER
+            && unexpected_on_the_wire == 0,
     );
 }
