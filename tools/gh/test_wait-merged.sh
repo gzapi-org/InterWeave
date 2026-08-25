@@ -161,6 +161,12 @@ if [[ "${2:-}" == "checks" ]]; then
     fi
     exit 1
   fi
+  # UNREADABLE, not empty: gh prints nothing and exits non-zero on a
+  # rate limit or an expired token. Indistinguishable from "pending" by
+  # exit code alone, which is exactly why the OUTPUT has to be checked.
+  if [[ -f "$GH_MOCK_STATE/checks_unreadable" ]]; then
+    exit 1
+  fi
   # No required checks at all — what a head SHA with no workflow run
   # looks like.
   if [[ -f "$GH_MOCK_STATE/checks_empty" ]]; then
@@ -191,7 +197,7 @@ command -v jq >/dev/null 2>&1 || { echo "test: jq required" >&2; exit 1; }
 
 states() { printf '%s\n' "$@" > "$SANDBOX/state/states"; : > "$SANDBOX/state/calls";
            printf 'queued\n' > "$SANDBOX/state/arming"
-           rm -f "$SANDBOX/state/checks_empty"
+           rm -f "$SANDBOX/state/checks_empty" "$SANDBOX/state/checks_unreadable"
            printf 'operational\n' > "$SANDBOX/state/actions_status"
            printf '1\n' > "$SANDBOX/state/runs_count"
            printf '1\n' > "$SANDBOX/state/required_checks"
@@ -200,6 +206,7 @@ states() { printf '%s\n' "$@" > "$SANDBOX/state/states"; : > "$SANDBOX/state/cal
            printf '0\n' > "$SANDBOX/state/billing_mins"
            unset INTERWEAVE_ACTIONS_INCLUDED_MINUTES; }
 no_checks()       { : > "$SANDBOX/state/checks_empty"; }
+unreadable_checks() { : > "$SANDBOX/state/checks_unreadable"; }
 actions_status()  { printf '%s\n' "$1" > "$SANDBOX/state/actions_status"; }
 runs_count()      { printf '%s\n' "$1" > "$SANDBOX/state/runs_count"; }
 required_checks() { printf '%s\n' "$1" > "$SANDBOX/state/required_checks"; }
@@ -327,6 +334,50 @@ states "OPEN:DIRTY"
 invoke 429 --interval 1 --timeout 30
 assert_rc       "exits 5" 5
 assert_contains "says what to do" "fold origin/main in"
+
+echo "wait-merged: an unreadable checks lookup is not 'nothing is failing'"
+# gh exits non-zero when checks are FAILING or PENDING, so the exit code
+# cannot separate either from "could not read". The output can — a
+# readable lookup is a JSON array, the empty one included.
+#
+# Without that test, unparseable output silently became "nothing failing
+# yet", and because it is not literally length 0 it also RESET the
+# empty-poll counter, so the missing-run diagnosis could never fire. A
+# rate limit bought a full-timeout watch that reported nothing and
+# explained nothing.
+states "OPEN:BLOCKED"
+unreadable_checks
+invoke 429 --interval 1 --timeout 4
+assert_rc       "expires at 4, having learned nothing"    4
+assert_contains "and SAYS the lookup was unreadable"      "unreadable on"
+assert_lacks    "rather than diagnosing a missing run"    "no workflow run exists"
+
+echo "wait-merged: a conflict outranks the missing-run diagnosis"
+# A PR that conflicts with its base reports NO required checks — there
+# is nothing to run them on — so it feeds the empty-poll counter every
+# poll, and when that counter trips it is told GitHub lost a webhook and
+# to re-trigger the workflow. Re-triggering a conflicted PR does
+# nothing; the actionable fact is that origin/main needs folding in.
+# `diagnose_stall` exits without returning, so ordering is the whole fix.
+#
+# THE SCENARIO IS THE POINT, and a simpler one does not test this.
+# `states "OPEN:DIRTY"` alone passes in EITHER order, because the
+# conflict is visible on poll 1 while the diagnosis needs three — so it
+# proves nothing about which is checked first. GitHub reports
+# mergeStateStatus UNKNOWN while it computes mergeability, and a
+# conflicted PR has no checks the whole time; by the poll where DIRTY
+# finally appears the counter has already reached its threshold. That is
+# the only shape where the two actually race.
+states "OPEN:UNKNOWN" "OPEN:UNKNOWN" "OPEN:DIRTY"
+no_checks
+# ...and the diagnosis has to be one that would actually FIRE. With a
+# live repo in the fixtures it declines and returns, so the ordering
+# decides nothing and the case passes either way.
+runs_count 0
+invoke 429 --interval 1 --timeout 30
+assert_rc       "exits 5, not the exit-6 stall"      5
+assert_contains "names the conflict"                 "fold origin/main in"
+assert_lacks    "and does not send them to CI"       "Re-trigger"
 
 echo "wait-merged: BLOCKED with checks merely pending keeps waiting"
 # The normal path through the queue. Treating this as terminal would
