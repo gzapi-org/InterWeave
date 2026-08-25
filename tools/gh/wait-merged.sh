@@ -270,18 +270,26 @@ head_sha_has_no_run() {
 # $INTERWEAVE_ACTIONS_INCLUDED_MINUTES, set in .claude/settings.json. No plan
 # size is hardcoded anywhere in this repo.
 #
-# netAmount > 0 is still checked, but it is NOT sufficient — and this
-# function relied on it alone until 2026-08-07. A non-zero net means
-# overage is actually being BILLED, which only happens on a plan that
-# purchases overage. A plan that does not is never billed: GitHub simply
-# stops handing out runners while net stays 0. On this repo's plan that
-# made the allowance branch of exit 6 unreachable, so the one state it
-# existed to name could never be named. Usage-against-limit is the check
-# that fires there, and it needs the setting.
+# BILLED OVERAGE IS NOT A STALL, and this function said it was. A
+# positive netAmount means usage is being billed after discounts, which
+# is what a plan that PURCHASES overage looks like while it happily keeps
+# handing out runners — so returning success there made `diagnose_stall`
+# exit 6 claiming green code cannot merge, about an organisation where
+# nothing was wrong.
 #
-# `netAmount: 0` therefore means nothing is being billed — never that the
-# allowance is intact. Same correction actions-health.sh took the same
-# day; the two now agree.
+# The two facts point opposite ways: money moving proves runs are still
+# being SERVED. The plan that actually blocks is the one that never
+# bills, where net stays 0 while every job dies in seconds.
+#
+# So the stall is: past the configured allowance AND nothing billed.
+# `netAmount: 0` means nothing is being billed, never that the allowance
+# is intact — and the check reads the MINUTE sku, because a billed
+# Actions STORAGE line is not runner overage and summing the product
+# compared two different things.
+#
+# actions-health.sh reports the billed case as a COST rather than a
+# block; this is the same rule, and a watcher that disagreed with the
+# health tool about one billing response was the defect review found.
 actions_allowance_spent() {
     local owner usage net mins included
     included="${INTERWEAVE_ACTIONS_INCLUDED_MINUTES:-}"
@@ -290,9 +298,12 @@ actions_allowance_spent() {
     usage="$(gh api "/organizations/$owner/settings/billing/usage" 2>/dev/null)" || return 1
     [[ -n "$usage" ]] || return 1
 
-    net="$(jq -r '[.usageItems[]? | select(.product == "actions") | .netAmount] | add // 0' \
+    # THE MINUTE SKU, matching `mins` below. Summing netAmount across the
+    # whole product let a storage charge read as runner overage.
+    net="$(jq -r '[.usageItems[]? | select(.product == "actions" and (.unitType == "Minutes")) | .netAmount] | add // 0' \
         <<<"$usage" 2>/dev/null || echo 0)"
-    awk -v n="$net" 'BEGIN { exit !(n > 0) }' && return 0
+    # Billed: runners are being served. Not a stall, whatever else is true.
+    awk -v n="$net" 'BEGIN { exit !(n > 0) }' && return 1
 
     # No configured allowance: usage alone cannot say what is left, so
     # decline to guess rather than report a false "spent".

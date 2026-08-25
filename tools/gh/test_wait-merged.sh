@@ -114,9 +114,13 @@ if [[ "${1:-}" == "api" ]]; then
     # mock that answers with a bare figure could not exercise the
     # usage-against-limit branch at all.
     *billing/usage*)
-      printf '{"usageItems":[{"product":"actions","unitType":"Minutes","quantity":%s,"netAmount":%s}]}\n' \
+      # A second Actions line billed in a DIFFERENT unit. Storage is an
+      # Actions charge that is not runner minutes, and summing netAmount
+      # across the product read it as minute overage.
+      printf '{"usageItems":[{"product":"actions","unitType":"Minutes","quantity":%s,"netAmount":%s},{"product":"actions","unitType":"GigabyteHours","quantity":10,"netAmount":%s}]}\n' \
         "$(cat "$GH_MOCK_STATE/billing_mins" 2>/dev/null || echo 0)" \
-        "$(cat "$GH_MOCK_STATE/billing_net"  2>/dev/null || echo 0)"
+        "$(cat "$GH_MOCK_STATE/billing_net"  2>/dev/null || echo 0)" \
+        "$(cat "$GH_MOCK_STATE/billing_storage_net" 2>/dev/null || echo 0)"
       exit 0 ;;
   esac
   cat "$GH_MOCK_STATE/arming" 2>/dev/null || echo "queued"
@@ -203,6 +207,7 @@ states() { printf '%s\n' "$@" > "$SANDBOX/state/states"; : > "$SANDBOX/state/cal
            printf '1\n' > "$SANDBOX/state/required_checks"
            printf '0\n' > "$SANDBOX/state/required_other"
            printf '0\n' > "$SANDBOX/state/billing_net"
+           printf '0\n' > "$SANDBOX/state/billing_storage_net"
            printf '0\n' > "$SANDBOX/state/billing_mins"
            unset INTERWEAVE_ACTIONS_INCLUDED_MINUTES; }
 no_checks()       { : > "$SANDBOX/state/checks_empty"; }
@@ -213,6 +218,7 @@ required_checks() { printf '%s\n' "$1" > "$SANDBOX/state/required_checks"; }
 # Required contexts reported by something OTHER than Actions.
 required_other()  { printf '%s\n' "$1" > "$SANDBOX/state/required_other"; }
 billing_net()     { printf '%s\n' "$1" > "$SANDBOX/state/billing_net"; }
+billing_storage_net() { printf '%s\n' "$1" > "$SANDBOX/state/billing_storage_net"; }
 billing_mins()    { printf '%s\n' "$1" > "$SANDBOX/state/billing_mins"; }
 arming() { printf '%s\n' "$1" > "$SANDBOX/state/arming"; }
 calls()  { cat "$SANDBOX/state/calls" 2>/dev/null || echo 0; }
@@ -543,19 +549,24 @@ assert_rc       "exits 6"                   6
 assert_contains "names the lost webhook"    "no workflow run exists"
 assert_contains "says to re-arm afterwards" "RE-ARM"
 
-echo "wait-merged: a spent Actions allowance is named"
+echo "wait-merged: billed overage is NOT a stall"
+# MONEY MOVING PROVES RUNNERS ARE BEING SERVED. A plan that purchases
+# overage bills and keeps handing them out, so exiting 6 there claimed
+# green code could not merge about an organisation where nothing was
+# wrong. actions-health.sh reports this as a COST; a watcher that
+# disagreed with the health tool about one billing response is exactly
+# the inconsistency review found.
 states "OPEN:BLOCKED"
 no_checks
 billing_net "4.20"
 invoke 431 --interval 1 --timeout 6
-assert_rc       "billed overage exits 6"    6
-assert_contains "names the allowance"       "allowance is spent"
+assert_rc    "billed overage does not exit 6"   4
+assert_lacks "  and names no allowance stall"   "allowance is spent"
 
-# The case netAmount alone CANNOT see, and the reason this function was
-# rewritten on 2026-08-07. A plan that does not purchase overage is never
-# billed: net stays 0 while GitHub quietly stops handing out runners. The
-# old check read that as "allowance intact" and expired at plain 4,
-# leaving the one state exit 6 exists to name permanently unreachable.
+# THE STALL THAT IS REAL: past the allowance AND nothing billed. A plan
+# that does not purchase overage is never billed — net stays 0 while
+# GitHub quietly stops handing out runners — so this is the one state
+# exit 6 exists to name, and netAmount alone cannot see it.
 states "OPEN:BLOCKED"
 no_checks
 billing_net "0"
@@ -564,6 +575,21 @@ export INTERWEAVE_ACTIONS_INCLUDED_MINUTES=50000
 invoke 431 --interval 1 --timeout 6
 assert_rc       "usage at the configured limit exits 6, with net 0"  6
 assert_contains "  and names the allowance"                          "allowance is spent"
+
+# Actions STORAGE billed while minute runners have stopped. Summing
+# netAmount across the product read the storage charge as runner overage
+# and suppressed the real stall — the same defect actions-health.sh had,
+# in the sibling that must agree with it.
+states "OPEN:BLOCKED"
+no_checks
+billing_net "0"
+billing_storage_net "9.99"
+billing_mins "50000"
+export INTERWEAVE_ACTIONS_INCLUDED_MINUTES=50000
+invoke 431 --interval 1 --timeout 6
+assert_rc       "a storage charge does not mask the real stall"  6
+assert_contains "  which is still named"                         "allowance is spent"
+unset INTERWEAVE_ACTIONS_INCLUDED_MINUTES
 
 # Same plan, minutes to spare: must NOT fire, or every ordinary slow PR
 # on a healthy account becomes a false alarm.
