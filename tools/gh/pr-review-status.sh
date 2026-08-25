@@ -440,6 +440,18 @@ probe() {
         head_born="$(gh api "repos/$REPO/commits/$head" \
             --jq '.commit.committer.date' 2>/dev/null)" || head_born=""
 
+        # THE COMMIT DATE IS VALIDATED BEFORE IT IS COMBINED, because a
+        # future date is not merely late — it is unusable, and leaving it
+        # in the comparison discards a force-push timestamp that IS
+        # usable. Force-push a future-dated commit and the old order kept
+        # 2099 (later than the event), then erased it as unreadable, and
+        # every historical ask read as pending: `--wait` ran to its
+        # timeout instead of returning exit 5.
+        now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        if [[ -n "$head_born" && "$head_born" > "$now" ]]; then
+            head_born=""
+        fi
+
         # The most recent force-push, when there has been one.
         #
         # Fetched RAW and filtered here, exactly as the comments and
@@ -454,20 +466,19 @@ probe() {
         forced="$(printf '%s' "$timeline_raw" \
             | jq -rs '[.[]? | .[]? | select(.event == "head_ref_force_pushed") | .created_at]
                       | sort | last // ""' 2>/dev/null)" || forced=""
+        # Whichever is later, and a discarded commit date lets the
+        # event stand alone rather than taking the whole answer with it.
+        #
+        # A FUTURE-DATED HEAD IS NOT A USABLE TRANSITION TIME, which is
+        # what the discard above expresses. Clamping to now does not
+        # rescue the comparison: a real ask is always a little EARLIER
+        # than the moment this runs, so a head clamped to now still
+        # outranks it and exit 5 still fires on a review that is
+        # genuinely coming. Unknown, taking the safe direction, is the
+        # honest reading — but only for the commit date, never for a
+        # force-push event that really happened.
         if [[ -n "$forced" && "$forced" > "$head_born" ]]; then
             head_born="$forced"
-        fi
-
-        # A FUTURE-DATED HEAD IS NOT A USABLE TRANSITION TIME. Git
-        # permits it, and clamping to now does not rescue the comparison:
-        # a real ask is always a little EARLIER than the moment this runs,
-        # so a head clamped to now still outranks it and exit 5 still
-        # fires on a review that is genuinely coming. The honest reading
-        # is that this head's age is unknown, which is the same state an
-        # unreadable date leaves — and it takes the same safe direction.
-        now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        if [[ -n "$head_born" && "$head_born" > "$now" ]]; then
-            head_born=""
         fi
 
         # Unreadable falls back to PENDING, which costs a longer wait and

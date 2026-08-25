@@ -648,6 +648,36 @@ run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" 
 assert_rc       "a far-future head date does not swallow the ask" 1
 assert_contains "  which is still in flight"                      "in flight"
 
+echo "pr-review-status: a future-dated head that was FORCE-PUSHED keeps the event"
+# THE COMBINATION, which the two cases above do not reach individually.
+# A future-dated commit is later than the force-push event, so an order
+# that combines first and validates second keeps 2099, then erases it as
+# unusable — and discards a force-push timestamp that was perfectly
+# good. Every historical ask then reads as pending and `--wait` runs to
+# its timeout instead of returning exit 5.
+#
+# Commit dated 2099, force-push at 13:00, ask at 11:00. The ask predates
+# the real head transition, so exit 5 is correct.
+run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
+        "me,2026-08-07T11:00:00Z" "2099-01-01T00:00:00Z"
+printf '2026-08-07T13:00:00Z\n' > "$SANDBOX/state/forced"
+: > "$SANDBOX/state/n"
+RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
+    timeout 20 bash "$UNDER_TEST" 77 o/r 2>&1)"; RUN_RC=$?
+assert_rc    "the force-push time survives an unusable commit date" 5
+assert_lacks "  so the stale ask is not reported outstanding"       "in flight"
+
+# ...and an ask AFTER that force-push is still pending, so the event is
+# being used as a real boundary rather than merely as a way to say 5.
+run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
+        "me,2026-08-07T14:00:00Z" "2099-01-01T00:00:00Z"
+printf '2026-08-07T13:00:00Z\n' > "$SANDBOX/state/forced"
+: > "$SANDBOX/state/n"
+RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
+    timeout 20 bash "$UNDER_TEST" 77 o/r 2>&1)"; RUN_RC=$?
+assert_rc       "and a later ask is still outstanding" 1
+assert_contains "  reported as in flight"              "in flight"
+
 echo "pr-review-status: an unreadable head date waits rather than concluding"
 # The fallback direction matters: unreadable must mean PENDING. Guessing
 # "answered" turns a lookup failure into a confident "nothing is coming"
