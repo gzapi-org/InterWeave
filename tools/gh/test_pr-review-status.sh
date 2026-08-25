@@ -198,16 +198,23 @@ if [[ "$1" == "api" && "$*" == *"/check-suites"* ]]; then
   #                       whether it is allowed to win.
   pushed="$(cat "$S/pushed" 2>/dev/null || true)"
   other="$(cat "$S/pushed_other" 2>/dev/null || true)"
+  # TWO PAGES, and the PR-associated suite is on the SECOND one.
+  #
+  # This endpoint is paginated and a commit with many runs or reruns has
+  # more than one page. Serving the associated suite only on page two is
+  # what makes the `--paginate` flag load-bearing here: without it the
+  # script sees the unassociated suite alone, finds no transition time,
+  # and falls back to the commit date.
   {
     printf '{"total_count":0,"check_suites":['
-    sep=''
     if [[ -n "$other" ]]; then
-      printf '{"created_at":"%s","pull_requests":[]}' "$other"; sep=','
-    fi
-    if [[ -n "$pushed" ]]; then
-      printf '%s{"created_at":"%s","pull_requests":[{"number":77}]}' "$sep" "$pushed"
+      printf '{"created_at":"%s","pull_requests":[]}' "$other"
     fi
     printf ']}\n'
+    if [[ "$*" == *"--paginate"* && -n "$pushed" ]]; then
+      printf '{"total_count":0,"check_suites":[{"created_at":"%s","pull_requests":[{"number":77}]}]}\n' \
+        "$pushed"
+    fi
   }
   exit 0
 fi

@@ -521,7 +521,12 @@ probe() {
         # Fetched raw and filtered locally for the same reason the two
         # calls above are, and it costs a call only when there IS an ask.
         local suites_raw pushed
-        suites_raw="$(gh api "repos/$REPO/commits/$head/check-suites" 2>/dev/null)" \
+        # PAGINATED, like the two calls above. A commit with many
+        # workflow runs or reruns has more than one page of suites, and
+        # the PR-associated one that first saw the push can be on a later
+        # page — selecting the earliest of page one alone then dates the
+        # head too late and reports a live ask as stale.
+        suites_raw="$(gh api --paginate "repos/$REPO/commits/$head/check-suites" 2>/dev/null)" \
             || suites_raw=""
         pushed="$(printf '%s' "$suites_raw" \
             | jq -rs --arg pr "$PR" \
