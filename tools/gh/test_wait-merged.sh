@@ -27,6 +27,30 @@ UNDER_TEST="$SCRIPT_DIR/wait-merged.sh"
 [[ -f "$UNDER_TEST" ]] || { echo "test: $UNDER_TEST not found" >&2; exit 1; }
 
 failures=0
+
+# A SELF-TEST CANNOT CATCH AN ASSERTION IT NEVER RAN.
+#
+# `assert_containss "…" "…"` — a typo, a helper renamed, a helper that
+# only ever existed in a sibling suite — is not an error under
+# `set -uo pipefail`. bash prints "command not found" to stderr, nothing
+# here reads it, and the case asserts NOTHING while the run reports OK.
+# This repository shipped two assertions doing exactly that (5f2c0c9),
+# and they were found by reading, which is not a mechanism.
+#
+# bash runs `command_not_found_handle` in a SUBSHELL, so incrementing
+# `failures` from inside it is discarded when that subshell exits: the
+# handler would print its complaint and the suite would still exit 0 —
+# a vacuous guard against vacuous assertions. A FILE survives the
+# subshell, so the marker is a file.
+#
+# The script under test runs as a separate `bash` process, so none of
+# this reaches it or masks a genuine missing-command path there.
+GUARD_MARKER="$(mktemp)"
+command_not_found_handle() {
+    printf '%s\n' "$1" >> "$GUARD_MARKER"
+    echo "  ✗ self-test bug: called '$1', which this suite does not define" >&2
+    return 127
+}
 SANDBOX=""
 cleanup() { [[ -n "$SANDBOX" && -d "$SANDBOX" ]] && rm -rf "$SANDBOX"; }
 trap cleanup EXIT
@@ -90,9 +114,13 @@ if [[ "${1:-}" == "api" ]]; then
     # mock that answers with a bare figure could not exercise the
     # usage-against-limit branch at all.
     *billing/usage*)
-      printf '{"usageItems":[{"product":"actions","unitType":"Minutes","quantity":%s,"netAmount":%s}]}\n' \
+      # A second Actions line billed in a DIFFERENT unit. Storage is an
+      # Actions charge that is not runner minutes, and summing netAmount
+      # across the product read it as minute overage.
+      printf '{"usageItems":[{"product":"actions","unitType":"Minutes","quantity":%s,"netAmount":%s},{"product":"actions","unitType":"GigabyteHours","quantity":10,"netAmount":%s}]}\n' \
         "$(cat "$GH_MOCK_STATE/billing_mins" 2>/dev/null || echo 0)" \
-        "$(cat "$GH_MOCK_STATE/billing_net"  2>/dev/null || echo 0)"
+        "$(cat "$GH_MOCK_STATE/billing_net"  2>/dev/null || echo 0)" \
+        "$(cat "$GH_MOCK_STATE/billing_storage_net" 2>/dev/null || echo 0)"
       exit 0 ;;
   esac
   cat "$GH_MOCK_STATE/arming" 2>/dev/null || echo "queued"
@@ -137,6 +165,12 @@ if [[ "${2:-}" == "checks" ]]; then
     fi
     exit 1
   fi
+  # UNREADABLE, not empty: gh prints nothing and exits non-zero on a
+  # rate limit or an expired token. Indistinguishable from "pending" by
+  # exit code alone, which is exactly why the OUTPUT has to be checked.
+  if [[ -f "$GH_MOCK_STATE/checks_unreadable" ]]; then
+    exit 1
+  fi
   # No required checks at all — what a head SHA with no workflow run
   # looks like.
   if [[ -f "$GH_MOCK_STATE/checks_empty" ]]; then
@@ -167,21 +201,24 @@ command -v jq >/dev/null 2>&1 || { echo "test: jq required" >&2; exit 1; }
 
 states() { printf '%s\n' "$@" > "$SANDBOX/state/states"; : > "$SANDBOX/state/calls";
            printf 'queued\n' > "$SANDBOX/state/arming"
-           rm -f "$SANDBOX/state/checks_empty"
+           rm -f "$SANDBOX/state/checks_empty" "$SANDBOX/state/checks_unreadable"
            printf 'operational\n' > "$SANDBOX/state/actions_status"
            printf '1\n' > "$SANDBOX/state/runs_count"
            printf '1\n' > "$SANDBOX/state/required_checks"
            printf '0\n' > "$SANDBOX/state/required_other"
            printf '0\n' > "$SANDBOX/state/billing_net"
+           printf '0\n' > "$SANDBOX/state/billing_storage_net"
            printf '0\n' > "$SANDBOX/state/billing_mins"
            unset INTERWEAVE_ACTIONS_INCLUDED_MINUTES; }
 no_checks()       { : > "$SANDBOX/state/checks_empty"; }
+unreadable_checks() { : > "$SANDBOX/state/checks_unreadable"; }
 actions_status()  { printf '%s\n' "$1" > "$SANDBOX/state/actions_status"; }
 runs_count()      { printf '%s\n' "$1" > "$SANDBOX/state/runs_count"; }
 required_checks() { printf '%s\n' "$1" > "$SANDBOX/state/required_checks"; }
 # Required contexts reported by something OTHER than Actions.
 required_other()  { printf '%s\n' "$1" > "$SANDBOX/state/required_other"; }
 billing_net()     { printf '%s\n' "$1" > "$SANDBOX/state/billing_net"; }
+billing_storage_net() { printf '%s\n' "$1" > "$SANDBOX/state/billing_storage_net"; }
 billing_mins()    { printf '%s\n' "$1" > "$SANDBOX/state/billing_mins"; }
 arming() { printf '%s\n' "$1" > "$SANDBOX/state/arming"; }
 calls()  { cat "$SANDBOX/state/calls" 2>/dev/null || echo 0; }
@@ -303,6 +340,50 @@ states "OPEN:DIRTY"
 invoke 429 --interval 1 --timeout 30
 assert_rc       "exits 5" 5
 assert_contains "says what to do" "fold origin/main in"
+
+echo "wait-merged: an unreadable checks lookup is not 'nothing is failing'"
+# gh exits non-zero when checks are FAILING or PENDING, so the exit code
+# cannot separate either from "could not read". The output can — a
+# readable lookup is a JSON array, the empty one included.
+#
+# Without that test, unparseable output silently became "nothing failing
+# yet", and because it is not literally length 0 it also RESET the
+# empty-poll counter, so the missing-run diagnosis could never fire. A
+# rate limit bought a full-timeout watch that reported nothing and
+# explained nothing.
+states "OPEN:BLOCKED"
+unreadable_checks
+invoke 429 --interval 1 --timeout 4
+assert_rc       "expires at 4, having learned nothing"    4
+assert_contains "and SAYS the lookup was unreadable"      "unreadable on"
+assert_lacks    "rather than diagnosing a missing run"    "no workflow run exists"
+
+echo "wait-merged: a conflict outranks the missing-run diagnosis"
+# A PR that conflicts with its base reports NO required checks — there
+# is nothing to run them on — so it feeds the empty-poll counter every
+# poll, and when that counter trips it is told GitHub lost a webhook and
+# to re-trigger the workflow. Re-triggering a conflicted PR does
+# nothing; the actionable fact is that origin/main needs folding in.
+# `diagnose_stall` exits without returning, so ordering is the whole fix.
+#
+# THE SCENARIO IS THE POINT, and a simpler one does not test this.
+# `states "OPEN:DIRTY"` alone passes in EITHER order, because the
+# conflict is visible on poll 1 while the diagnosis needs three — so it
+# proves nothing about which is checked first. GitHub reports
+# mergeStateStatus UNKNOWN while it computes mergeability, and a
+# conflicted PR has no checks the whole time; by the poll where DIRTY
+# finally appears the counter has already reached its threshold. That is
+# the only shape where the two actually race.
+states "OPEN:UNKNOWN" "OPEN:UNKNOWN" "OPEN:DIRTY"
+no_checks
+# ...and the diagnosis has to be one that would actually FIRE. With a
+# live repo in the fixtures it declines and returns, so the ordering
+# decides nothing and the case passes either way.
+runs_count 0
+invoke 429 --interval 1 --timeout 30
+assert_rc       "exits 5, not the exit-6 stall"      5
+assert_contains "names the conflict"                 "fold origin/main in"
+assert_lacks    "and does not send them to CI"       "Re-trigger"
 
 echo "wait-merged: BLOCKED with checks merely pending keeps waiting"
 # The normal path through the queue. Treating this as terminal would
@@ -468,19 +549,24 @@ assert_rc       "exits 6"                   6
 assert_contains "names the lost webhook"    "no workflow run exists"
 assert_contains "says to re-arm afterwards" "RE-ARM"
 
-echo "wait-merged: a spent Actions allowance is named"
+echo "wait-merged: billed overage is NOT a stall"
+# MONEY MOVING PROVES RUNNERS ARE BEING SERVED. A plan that purchases
+# overage bills and keeps handing them out, so exiting 6 there claimed
+# green code could not merge about an organisation where nothing was
+# wrong. actions-health.sh reports this as a COST; a watcher that
+# disagreed with the health tool about one billing response is exactly
+# the inconsistency review found.
 states "OPEN:BLOCKED"
 no_checks
 billing_net "4.20"
 invoke 431 --interval 1 --timeout 6
-assert_rc       "billed overage exits 6"    6
-assert_contains "names the allowance"       "allowance is spent"
+assert_rc    "billed overage does not exit 6"   4
+assert_lacks "  and names no allowance stall"   "allowance is spent"
 
-# The case netAmount alone CANNOT see, and the reason this function was
-# rewritten on 2026-08-07. A plan that does not purchase overage is never
-# billed: net stays 0 while GitHub quietly stops handing out runners. The
-# old check read that as "allowance intact" and expired at plain 4,
-# leaving the one state exit 6 exists to name permanently unreachable.
+# THE STALL THAT IS REAL: past the allowance AND nothing billed. A plan
+# that does not purchase overage is never billed — net stays 0 while
+# GitHub quietly stops handing out runners — so this is the one state
+# exit 6 exists to name, and netAmount alone cannot see it.
 states "OPEN:BLOCKED"
 no_checks
 billing_net "0"
@@ -489,6 +575,21 @@ export INTERWEAVE_ACTIONS_INCLUDED_MINUTES=50000
 invoke 431 --interval 1 --timeout 6
 assert_rc       "usage at the configured limit exits 6, with net 0"  6
 assert_contains "  and names the allowance"                          "allowance is spent"
+
+# Actions STORAGE billed while minute runners have stopped. Summing
+# netAmount across the product read the storage charge as runner overage
+# and suppressed the real stall — the same defect actions-health.sh had,
+# in the sibling that must agree with it.
+states "OPEN:BLOCKED"
+no_checks
+billing_net "0"
+billing_storage_net "9.99"
+billing_mins "50000"
+export INTERWEAVE_ACTIONS_INCLUDED_MINUTES=50000
+invoke 431 --interval 1 --timeout 6
+assert_rc       "a storage charge does not mask the real stall"  6
+assert_contains "  which is still named"                         "allowance is spent"
+unset INTERWEAVE_ACTIONS_INCLUDED_MINUTES
 
 # Same plan, minutes to spare: must NOT fire, or every ordinary slow PR
 # on a healthy account becomes a false alarm.
@@ -617,6 +718,17 @@ invoke 431 --interval 1 --timeout 9
 assert_rc       "exits 0, not 6"              0
 assert_contains "reports the merge"           "MERGED — safe to return to main"
 
+
+# Consulted BEFORE the pass/fail summary: a suite whose assertions never
+# ran has not passed, whatever its counter says.
+if [[ -s "$GUARD_MARKER" ]]; then
+    echo "test_wait-merged: FAILED — called $(sort -u "$GUARD_MARKER" | wc -l | tr -d " ") command(s) this suite does not define:" >&2
+    sort -u "$GUARD_MARKER" | sed 's/^/      /' >&2
+    echo "      Those assertions did not run. Exit 0 would have been a lie." >&2
+    rm -f "$GUARD_MARKER"
+    exit 1
+fi
+rm -f "$GUARD_MARKER"
 echo
 if [[ "$failures" -eq 0 ]]; then
     echo "test_wait-merged: OK — all assertions passed."

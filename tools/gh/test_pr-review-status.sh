@@ -34,6 +34,30 @@ UNDER_TEST="$SCRIPT_DIR/pr-review-status.sh"
 [[ -f "$UNDER_TEST" ]] || { echo "test: $UNDER_TEST not found" >&2; exit 1; }
 
 failures=0
+
+# A SELF-TEST CANNOT CATCH AN ASSERTION IT NEVER RAN.
+#
+# `assert_containss "…" "…"` — a typo, a helper renamed, a helper that
+# only ever existed in a sibling suite — is not an error under
+# `set -uo pipefail`. bash prints "command not found" to stderr, nothing
+# here reads it, and the case asserts NOTHING while the run reports OK.
+# This repository shipped two assertions doing exactly that (5f2c0c9),
+# and they were found by reading, which is not a mechanism.
+#
+# bash runs `command_not_found_handle` in a SUBSHELL, so incrementing
+# `failures` from inside it is discarded when that subshell exits: the
+# handler would print its complaint and the suite would still exit 0 —
+# a vacuous guard against vacuous assertions. A FILE survives the
+# subshell, so the marker is a file.
+#
+# The script under test runs as a separate `bash` process, so none of
+# this reaches it or masks a genuine missing-command path there.
+GUARD_MARKER="$(mktemp)"
+command_not_found_handle() {
+    printf '%s\n' "$1" >> "$GUARD_MARKER"
+    echo "  ✗ self-test bug: called '$1', which this suite does not define" >&2
+    return 127
+}
 SANDBOX=""
 cleanup() { [[ -n "$SANDBOX" && -d "$SANDBOX" ]] && rm -rf "$SANDBOX"; }
 trap cleanup EXIT
@@ -86,8 +110,22 @@ case "$1 ${2:-}" in
     echo $((n+1)) > "$S/n"
     IFS=: read -r st head req <<<"$line"
     [[ "$st" == "FAIL" ]] && exit 1
+    # `req` is either a COUNT (the original form, rendered as that many
+    # anonymous human requests) or a comma-separated list of LOGINS.
+    # --automated-only asks which reviewer a pending request names, and a
+    # count cannot answer that.
+    if [[ "$req" =~ ^[0-9]+$ ]]; then
+      reqs='['; sep=''
+      for ((i = 0; i < req; i++)); do reqs="$reqs$sep{\"login\":\"a-human\"}"; sep=','; done
+      reqs="$reqs]"
+    else
+      reqs='['; sep=''
+      IFS=, read -ra logins <<<"$req"
+      for l in "${logins[@]}"; do reqs="$reqs$sep{\"login\":\"$l\"}"; sep=','; done
+      reqs="$reqs]"
+    fi
     printf '{"state":"%s","mergeStateStatus":"CLEAN","headRefOid":"%s","author":{"login":"me"},"isDraft":false,"reviewRequests":%s}\n' \
-      "$st" "$head" "$(python3 -c "print('['+','.join(['{}']*$req)+']')")"
+      "$st" "$head" "$reqs"
     exit 0 ;;
   "repo view")
     echo '{"nameWithOwner":"o/r"}'; exit 0 ;;
@@ -116,8 +154,39 @@ if [[ "$1" == "api" && "$*" == *"/issues/"* && "$*" == *"/comments"* ]]; then
       printf '{"user":{"login":"%s"},"created_at":"%s","body":"Codex Review: no major issues. **Reviewed commit:** `%s`"}' \
         "$login" "$at" "$sha"
     done < "$S/verdicts" 2>/dev/null
+    # `@codex review` asks land in the SAME stream, which is the whole
+    # reason the script can see them: they are not review requests.
+    # state/asks holds <login>,<created_at> per line.
+    while IFS=, read -r login at; do
+      [[ -z "$login" ]] && continue
+      (( first )) || printf ','
+      first=0
+      printf '{"user":{"login":"%s"},"created_at":"%s","body":"@codex review please"}' \
+        "$login" "$at"
+    done < "$S/asks" 2>/dev/null
     printf ']\n'
   }
+  exit 0
+fi
+
+# gh api repos/o/r/issues/N/timeline — force-push events, which carry a
+# REAL timestamp where a commit date does not. state/forced holds one
+# ISO instant, or is absent for a branch nobody force-pushed.
+if [[ "$1" == "api" && "$*" == *"/timeline"* ]]; then
+  forced="$(cat "$S/forced" 2>/dev/null || true)"
+  if [[ -n "$forced" ]]; then
+    printf '[{"event":"head_ref_force_pushed","created_at":"%s"}]\n' "$forced"
+  else
+    printf '[]\n'
+  fi
+  exit 0
+fi
+
+# gh api repos/o/r/commits/<sha> — when the head was born, which is how
+# an ask is told from an answer.
+if [[ "$1" == "api" && "$*" == *"/commits/"* ]]; then
+  if [[ -f "$S/head_born_fail" ]]; then exit 1; fi
+  printf '%s\n' "$(cat "$S/head_born" 2>/dev/null || echo '2026-08-07T09:00:00Z')"
   exit 0
 fi
 
@@ -162,6 +231,12 @@ run() {
     # Empty by default: most cases predate verdict comments and must go
     # on meaning what they meant.
     : > "$SANDBOX/state/verdicts"
+    # Same for `@codex review` asks. The default head_born sits BEFORE
+    # every timestamp these cases use, so an ask written by a case is an
+    # ask about the current head unless the case says otherwise.
+    : > "$SANDBOX/state/asks"
+    rm -f "$SANDBOX/state/head_born_fail" "$SANDBOX/state/forced"
+    printf '2026-08-07T09:00:00Z\n' > "$SANDBOX/state/head_born"
     shift 2
     RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
         timeout 20 bash "$UNDER_TEST" 77 o/r "$@" 2>&1)"
@@ -178,6 +253,21 @@ run_v() {
     printf '%s\n' "$verdicts" > "$SANDBOX/state/verdicts"
     RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
         timeout 20 bash "$UNDER_TEST" 77 o/r "${@:4}" 2>&1)"
+    RUN_RC=$?
+    (( RUN_RC == 124 )) && RUN_OUT="TIMED OUT — the run did not return"$'\n'"$RUN_OUT"
+}
+
+# Same as `run`, plus `@codex review` asks ("<login>,<created_at>" per
+# line) and the head's commit date. Separate rather than more positionals
+# so every existing call keeps its meaning unchanged.
+run_ask() {
+    local asks="$3" born="$4"
+    run "$1" "$2" "${@:5}"
+    : > "$SANDBOX/state/n"
+    printf '%s\n' "$asks" > "$SANDBOX/state/asks"
+    printf '%s\n' "$born" > "$SANDBOX/state/head_born"
+    RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
+        timeout 20 bash "$UNDER_TEST" 77 o/r "${@:5}" 2>&1)"
     RUN_RC=$?
     (( RUN_RC == 124 )) && RUN_OUT="TIMED OUT — the run did not return"$'\n'"$RUN_OUT"
 }
@@ -383,6 +473,261 @@ run_v "OPEN:abc1234:0" "" "me,abc1234,2026-08-23T06:23:02Z"
 assert_rc "a self-authored verdict is not coverage" 1
 assert_contains "  and is not counted" "verdict comments    : 0"
 
+echo "pr-review-status: --automated-only closes the review-OBJECT hole"
+# THE DEFECT. `independent` is every non-author reviewer, and this
+# repository is PUBLIC -- any GitHub user may submit a review object on
+# an open PR. One drive-by review carrying the current head therefore
+# exits 0, and CLAUDE.md §9 reads that exit as permission to arm --auto
+# on a security-boundary change. The gate that exists to hold the merge
+# open for the recognised reviewer is satisfied by a stranger.
+#
+# This is the same hole the verdict-COMMENT path closes above, left open
+# on the path that carries more weight.
+run "OPEN:abc123:0" "some-passer-by,abc123,2026-08-07T10:00:00Z" --automated-only
+assert_rc    "a stranger's review is not coverage under the flag" 1
+assert_contains "  head is reported unreviewed" "head reviewed?      : no"
+assert_contains "  and the exclusion is disclosed, not silent" \
+                "[1 not the recognised reviewer — NOT counted]"
+
+run "OPEN:abc123:0" "chatgpt-codex-connector,abc123,2026-08-07T10:00:00Z" --automated-only
+assert_rc "the recognised reviewer IS coverage under the flag" 0
+
+echo "pr-review-status: the default mode discloses unrecognised coverage"
+# The flag is off by default because "was this reviewed by anyone" is a
+# real question. But a caller who FORGOT the flag reads an exit code, so
+# the exposure has to be visible without it. Coverage resting entirely
+# on an unrecognised account says so.
+run "OPEN:abc123:0" "some-passer-by,abc123,2026-08-07T10:00:00Z"
+assert_rc       "still exits 0 — a human review is real coverage" 0
+assert_contains "  but names what is carrying it" "carried ONLY by an unrecognised account"
+assert_contains "  and points at the flag"        "--automated-only"
+
+run "OPEN:abc123:0" "chatgpt-codex-connector,abc123,2026-08-07T10:00:00Z"
+assert_rc    "recognised coverage exits 0" 0
+assert_lacks "  and says nothing about unrecognised accounts" \
+             "carried ONLY by an unrecognised account"
+
+# A CLEAN review leaves a verdict comment and no review object, and the
+# allow-list already gates those -- so it must not trip the disclosure.
+run_v "OPEN:abc1234:0" "" "chatgpt-codex-connector,abc1234,2026-08-23T06:23:02Z"
+assert_rc    "a clean verdict covers the head" 0
+assert_lacks "  and is not called unrecognised" \
+             "carried ONLY by an unrecognised account"
+
+echo "pr-review-status: a stranger cannot make the reviewer look done"
+# `no_review_coming` needs a PRIOR review to conclude "this PR is one the
+# reviewer has already answered". Counting a stranger there reports
+# NO REVIEW COMING (exit 5) about a first automated review still on its
+# way -- and §9 then sends the session off to re-request one it already
+# has in flight.
+run "OPEN:newhead:0" "some-passer-by,oldhead,2026-08-07T10:00:00Z" --automated-only
+assert_rc "a stranger's stale review does not trigger exit 5" 1
+
+run "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" --automated-only
+assert_rc "the recognised reviewer's stale review does" 5
+
+echo "pr-review-status: --automated-only narrows the pending REQUEST too"
+# `requested` suppresses exit 5. A mode that narrows coverage and leaves
+# this term reading everybody keeps waiting on a HUMAN reviewer while
+# reporting about a bot review that is not coming -- the two terms would
+# be answering questions about different populations.
+run "OPEN:newhead:a-human" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" --automated-only
+assert_rc "a pending HUMAN request does not suppress the verdict" 5
+assert_contains "  and the request is reported as absent for this question" \
+                "review requested?   : no"
+
+run "OPEN:newhead:chatgpt-codex-connector" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" --automated-only
+assert_rc "a pending RECOGNISED request does suppress it" 1
+
+run "OPEN:newhead:a-human" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z"
+assert_rc "and without the flag a human request still suppresses it" 1
+
+echo "pr-review-status: --wait means the deadline, not the last whole interval"
+# The loop refused to sleep unless a WHOLE interval fitted before the
+# deadline, which redefines --wait as "the last deadline a full interval
+# lands on". Any wait shorter than one interval polled ONCE and returned
+# having waited nothing: `--wait 10s` was silently `--wait 0`.
+#
+# Asserted behaviourally rather than by timing: poll 1 is unreadable,
+# poll 2 carries the review. Only a run that actually naps reaches it.
+run "FAIL:x:0
+OPEN:abc123:0" "chatgpt-codex-connector,abc123,2026-08-07T10:00:00Z" --wait 3 --interval 30 -q
+assert_rc "a wait shorter than the interval still waits" 0
+
+echo "pr-review-status: an incomplete probe is unreadable, not a stale report"
+# The progress line prints ${head:0:8}, and under `set -u` an unset head
+# is fatal — so a run whose FIRST probe failed died with "unbound
+# variable" and exit 1 rather than retrying and reporting the exit-2
+# unreadable contract. Reachable on every --wait long enough to reach a
+# second poll.
+run "FAIL:x:0" "" --wait 3 --interval 1 -q
+assert_rc    "a first-probe failure exits 2, not a crash" 2
+assert_lacks "  and never says 'unbound variable'"        "unbound variable"
+
+# `probe_ok` latched on from an earlier success meant the fall-out path
+# rendered the PREVIOUS poll's numbers as a current answer. The last
+# probe failed; the data is stale, and this script exists to avoid
+# exactly the confident wrong answer that would be.
+run "OPEN:abc123:0
+FAIL:x:0" "" --wait 2 --interval 1 -q
+assert_rc "a stale latch does not turn a failed probe into a report" 2
+
+echo "pr-review-status: an @codex review in flight is not 'nothing is coming'"
+# THE DEFECT §9 DOCUMENTED INSTEAD OF FIXING. `@codex review` is how a
+# review is asked for here and it is NOT a GitHub review request, so
+# `reviewRequests` stays empty and the stale-review branch fired
+# NO REVIEW COMING seconds after the ask. §9 tells a session to request a
+# review and then wait — so the tool answered "waiting cannot help"
+# about the exact sequence §9 prescribes.
+#
+# Head born 09:00, review of an OLD commit at 10:00, ask at 11:00.
+run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
+        "me,2026-08-07T11:00:00Z" "2026-08-07T09:00:00Z"
+assert_rc       "an ask after this head was pushed suppresses exit 5" 1
+assert_contains "  and the report names it"      "@codex review asked"
+assert_contains "  who asked, not just when"     "by me"
+assert_contains "  and that it is outstanding"   "in flight"
+
+# An ask made BEFORE this head existed asked about the PREVIOUS one.
+# Without the head's own commit date this could only be compared against
+# the newest review, and a review of an earlier commit landing after a
+# newer push reads as the answer to an ask it never saw.
+run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
+        "me,2026-08-07T08:00:00Z" "2026-08-07T09:00:00Z"
+assert_rc "an ask older than the head does not suppress it" 5
+
+# The other direction, which requiring a head-matching review would
+# break: asked, reviewed, then pushed again WITHOUT asking. No review can
+# ever match the new head, so a naive "is there a review for this head"
+# test would keep the ask pending forever and exit 5 could never fire.
+run_ask "OPEN:thirdhead:0" "chatgpt-codex-connector,secondhead,2026-08-07T11:30:00Z" \
+        "me,2026-08-07T11:00:00Z" "2026-08-07T12:00:00Z"
+assert_rc "a push after the ask lets exit 5 fire again" 5
+
+echo "pr-review-status: a force-push is when the head became the head"
+# THE COMMIT DATE IS NOT THE HEAD-TRANSITION TIME. Force-pushing or
+# resetting a branch to an EXISTING commit keeps that commit's old date,
+# so an ask from before the reset looks newer than the head and reads as
+# still pending — every `--wait` then burns its whole timeout on an ask
+# that was answered long ago.
+#
+# Head commit dated 09:00, ask at 11:00, force-push at 13:00. Without the
+# force-push event the ask (11:00) looks newer than the head (09:00) and
+# suppresses exit 5 forever.
+run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
+        "me,2026-08-07T11:00:00Z" "2026-08-07T09:00:00Z"
+printf '2026-08-07T13:00:00Z\n' > "$SANDBOX/state/forced"
+: > "$SANDBOX/state/n"
+RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
+    timeout 20 bash "$UNDER_TEST" 77 o/r 2>&1)"; RUN_RC=$?
+assert_rc    "an ask predating the force-push does not suppress exit 5" 5
+assert_lacks "  and is not reported as outstanding"                     "in flight"
+
+# ...and an ask made AFTER the force-push is still pending.
+run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
+        "me,2026-08-07T14:00:00Z" "2026-08-07T09:00:00Z"
+printf '2026-08-07T13:00:00Z\n' > "$SANDBOX/state/forced"
+: > "$SANDBOX/state/n"
+RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
+    timeout 20 bash "$UNDER_TEST" 77 o/r 2>&1)"; RUN_RC=$?
+assert_rc       "an ask after the force-push still suppresses it" 1
+assert_contains "  and is reported as outstanding"                "in flight"
+
+echo "pr-review-status: a future-dated head is an unknown age, not a late one"
+# Git permits future-dated commits. A head dated ahead makes a genuine
+# ask look like it predates the head, so exit 5 fires on a review that is
+# really coming.
+#
+# CLAMPING TO NOW DOES NOT FIX THIS, which is worth stating because it
+# was the first attempt: a real ask is always slightly EARLIER than the
+# moment the check runs, so a head clamped to now still outranks it. The
+# honest reading is that this head's age is unknown — the same state an
+# unreadable date leaves — and it takes the same safe direction.
+run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
+        "me,2026-08-07T11:00:00Z" "2099-01-01T00:00:00Z"
+assert_rc       "a far-future head date does not swallow the ask" 1
+assert_contains "  which is still in flight"                      "in flight"
+
+echo "pr-review-status: a future-dated head that was FORCE-PUSHED keeps the event"
+# THE COMBINATION, which the two cases above do not reach individually.
+# A future-dated commit is later than the force-push event, so an order
+# that combines first and validates second keeps 2099, then erases it as
+# unusable — and discards a force-push timestamp that was perfectly
+# good. Every historical ask then reads as pending and `--wait` runs to
+# its timeout instead of returning exit 5.
+#
+# Commit dated 2099, force-push at 13:00, ask at 11:00. The ask predates
+# the real head transition, so exit 5 is correct.
+run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
+        "me,2026-08-07T11:00:00Z" "2099-01-01T00:00:00Z"
+printf '2026-08-07T13:00:00Z\n' > "$SANDBOX/state/forced"
+: > "$SANDBOX/state/n"
+RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
+    timeout 20 bash "$UNDER_TEST" 77 o/r 2>&1)"; RUN_RC=$?
+assert_rc    "the force-push time survives an unusable commit date" 5
+assert_lacks "  so the stale ask is not reported outstanding"       "in flight"
+
+# ...and an ask AFTER that force-push is still pending, so the event is
+# being used as a real boundary rather than merely as a way to say 5.
+run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
+        "me,2026-08-07T14:00:00Z" "2099-01-01T00:00:00Z"
+printf '2026-08-07T13:00:00Z\n' > "$SANDBOX/state/forced"
+: > "$SANDBOX/state/n"
+RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
+    timeout 20 bash "$UNDER_TEST" 77 o/r 2>&1)"; RUN_RC=$?
+assert_rc       "and a later ask is still outstanding" 1
+assert_contains "  reported as in flight"              "in flight"
+
+echo "pr-review-status: a same-second ask is pending, not stale"
+# GitHub timestamps are SECOND-RESOLUTION, and an `@codex review` follows
+# the push that prompted it by seconds — so landing on the same second is
+# routine, not exotic. A strict `>` read that as predating the head and
+# exited 5 on a review requested a moment ago.
+run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
+        "me,2026-08-07T13:00:00Z" "2026-08-07T09:00:00Z"
+printf '2026-08-07T13:00:00Z\n' > "$SANDBOX/state/forced"
+: > "$SANDBOX/state/n"
+RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
+    timeout 20 bash "$UNDER_TEST" 77 o/r 2>&1)"; RUN_RC=$?
+assert_rc       "an ask on the force-push's own second is still pending" 1
+assert_contains "  and is reported outstanding"                          "in flight"
+
+# The same equality against a plain commit date, with no force-push.
+run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
+        "me,2026-08-07T09:00:00Z" "2026-08-07T09:00:00Z"
+assert_rc       "an ask on the head's own second is pending too" 1
+assert_contains "  and reported outstanding"                     "in flight"
+
+echo "pr-review-status: an unreadable head date waits rather than concluding"
+# The fallback direction matters: unreadable must mean PENDING. Guessing
+# "answered" turns a lookup failure into a confident "nothing is coming"
+# about a review that is on its way.
+run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
+        "me,2026-08-07T08:00:00Z" "2026-08-07T09:00:00Z"
+: > "$SANDBOX/state/n"
+touch "$SANDBOX/state/head_born_fail"
+RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
+    timeout 20 bash "$UNDER_TEST" 77 o/r 2>&1)"; RUN_RC=$?
+rm -f "$SANDBOX/state/head_born_fail"
+assert_rc "an unreadable head date keeps the ask pending" 1
+
+echo "pr-review-status: a covered head does not report an unanswered ask"
+# Decides no exit — head_reviewed wins first — but a line reading
+# "nothing has answered it yet" beside "head reviewed? yes" is false.
+run_ask "OPEN:abc123:0" "chatgpt-codex-connector,abc123,2026-08-07T10:00:00Z" \
+        "me,2026-08-07T11:00:00Z" "2026-08-07T09:00:00Z"
+assert_rc       "the head is covered" 0
+assert_contains "  and the ask reads as answered" "already answered"
+assert_lacks    "  not as outstanding"            "in flight"
+
+echo "pr-review-status: --help documents the flag §9 now requires"
+RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" bash "$UNDER_TEST" --help 2>&1)"; RUN_RC=$?
+assert_rc       "exits 0" 0
+assert_contains "names the flag"        "--automated-only"
+assert_contains "says why it exists"    "repository is PUBLIC"
+assert_contains "and that the bare command is not enough" \
+                "does not satisfy"
+
 echo "pr-review-status: a failed comments lookup is UNREADABLE, not empty"
 # Same contract as the reviews endpoint: swallowing the failure would
 # report a clean review as no review, which is the defect this whole
@@ -414,6 +759,17 @@ assert_rc    "a failing reviews endpoint exits 2, not 1"  2
 assert_lacks "  and never claims zero coverage"           "independent reviews : 0"
 rm -f "$SANDBOX/state/reviews_fail"
 
+
+# Consulted BEFORE the pass/fail summary: a suite whose assertions never
+# ran has not passed, whatever its counter says.
+if [[ -s "$GUARD_MARKER" ]]; then
+    echo "test_pr-review-status: FAILED — called $(sort -u "$GUARD_MARKER" | wc -l | tr -d " ") command(s) this suite does not define:" >&2
+    sort -u "$GUARD_MARKER" | sed 's/^/      /' >&2
+    echo "      Those assertions did not run. Exit 0 would have been a lie." >&2
+    rm -f "$GUARD_MARKER"
+    exit 1
+fi
+rm -f "$GUARD_MARKER"
 echo
 if (( failures )); then
     echo "FAILED: $failures assertion(s)" >&2
