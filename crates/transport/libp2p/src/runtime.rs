@@ -2166,6 +2166,27 @@ fn handle_direct(
                 return DirectHandled::Consumed;
             };
 
+            // AN UNPARSABLE FRAME IS ANSWERED AND GOES NO FURTHER. It
+            // never reaches admission: there is no frame to fingerprint,
+            // no source endpoint to key on, and no reservation worth
+            // taking. The peer gets the code the contract owes it —
+            // `too_large` for an over-ceiling payload, `malformed` for
+            // anything else — instead of a broken exchange.
+            let request = match request {
+                crate::direct_codec::InboundRequest::Frame(frame) => *frame,
+                crate::direct_codec::InboundRequest::Unparsable { message_id, reason } => {
+                    // SPIKE-002 finding 2 applies here as everywhere: a
+                    // produced response is not evidence the peer heard
+                    // it. Nothing is retried — the peer that sent an
+                    // unparsable frame and then vanished is owed
+                    // nothing further.
+                    let _answered = swarm
+                        .answer_direct(channel, DirectResponse::Rejected { message_id, reason })
+                        .is_ok();
+                    return DirectHandled::Consumed;
+                }
+            };
+
             let outcome = {
                 let mut ctx = AdmissionContext {
                     trust: &state.trust,

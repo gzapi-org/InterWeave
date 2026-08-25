@@ -40,6 +40,36 @@ use interweave_transport_api::{
     MessageId,
 };
 
+/// One inbound request, which may be a frame this node could not parse.
+///
+/// # A malformed frame is ANSWERED, not dropped
+///
+/// Mapping a decode failure to an `io::Error` makes request-response
+/// emit `InboundFailure` and no `Request` at all, so the handler has
+/// nothing to answer with and the peer observes a broken exchange. The
+/// contract says otherwise: an over-ceiling payload is `too_large` and a
+/// bad field is `malformed`, and `FrameError::to_wire` exists to say
+/// which. Before this type, that function was reachable only from its
+/// own unit tests.
+///
+/// `message_id` is the first sixteen bytes of the frame, so it survives
+/// every failure that happens after them — which is every failure the
+/// contract names a code for. A frame too short to carry one cannot be
+/// answered at all, because a response must echo the id it answers; that
+/// case stays an `io::Error` and is dropped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InboundRequest {
+    /// A frame that decoded.
+    Frame(Box<DirectMessageV2>),
+    /// A frame that did not, and the code its sender is owed.
+    Unparsable {
+        /// Recovered from the first sixteen bytes.
+        message_id: MessageId,
+        /// From [`interweave_transport_api::FrameError::to_wire`].
+        reason: DirectRejectReason,
+    },
+}
+
 /// The protocol this codec speaks (ADR-0030).
 ///
 /// Versioned in the string. A future incompatible framing is a NEW
@@ -156,7 +186,7 @@ where
 #[async_trait]
 impl Codec for DirectCodec {
     type Protocol = StreamProtocol;
-    type Request = DirectMessageV2;
+    type Request = InboundRequest;
     type Response = DirectResponse;
 
     async fn read_request<T>(&mut self, _: &StreamProtocol, io: &mut T) -> io::Result<Self::Request>
@@ -164,8 +194,26 @@ impl Codec for DirectCodec {
         T: futures::AsyncRead + Unpin + Send,
     {
         let bytes = read_bounded(io, MAX_REQUEST_BYTES).await?;
-        DirectMessageV2::decode(&bytes, MAX_PAYLOAD_BYTES)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+        match DirectMessageV2::decode(&bytes, MAX_PAYLOAD_BYTES) {
+            Ok(frame) => Ok(InboundRequest::Frame(Box::new(frame))),
+            Err(error) => {
+                // THE ID COMES FIRST IN THE FRAME, so it outlives every
+                // later field's failure. Without it there is nothing to
+                // echo and therefore nothing that can be sent back.
+                let Some(head) = bytes.get(..MessageId::LEN) else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        error.to_string(),
+                    ));
+                };
+                let mut id = [0u8; MessageId::LEN];
+                id.copy_from_slice(head);
+                Ok(InboundRequest::Unparsable {
+                    message_id: MessageId::from_bytes(id),
+                    reason: error.to_wire(),
+                })
+            }
+        }
     }
 
     async fn read_response<T>(
@@ -189,7 +237,18 @@ impl Codec for DirectCodec {
     where
         T: futures::AsyncWrite + Unpin + Send,
     {
-        io.write_all(&request.encode()).await?;
+        // ONLY A FRAME IS SENDABLE. `Unparsable` describes something
+        // that arrived, not something to send, and the send path
+        // constructs it nowhere. Reported rather than panicked: the lint
+        // policy here treats a reachable panic in a transport daemon as
+        // a defect, and this is reachable by a caller mistake.
+        let InboundRequest::Frame(frame) = request else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a rejection is not a sendable request",
+            ));
+        };
+        io.write_all(&frame.encode()).await?;
         io.close().await
     }
 
@@ -440,5 +499,104 @@ mod tests {
             MAX_REQUEST_BYTES,
             "the ceiling is exactly the largest legal frame"
         );
+    }
+
+    /// A malformed frame becomes an ANSWERABLE rejection, not an error.
+    ///
+    /// The defect this replaces: mapping the decode failure to an
+    /// `io::Error` made request-response emit `InboundFailure` and no
+    /// `Request`, so the handler had nothing to answer with and the peer
+    /// saw a broken exchange instead of the code it is owed.
+    #[tokio::test]
+    async fn an_over_ceiling_payload_reads_back_as_too_large() {
+        let mut frame = DirectMessageV2 {
+            message_id: message_id(),
+            sent_at_ms: 1,
+            source_endpoint: endpoint("human"),
+            destination_endpoint: Some(endpoint("claude")),
+            payload: interweave_transport_api::Payload::at_ceiling(None, b"hi".to_vec())
+                .expect("within the ceiling"),
+        }
+        .encode();
+        // Overstate the declared payload length, which is the last four
+        // bytes before the payload itself.
+        let at = frame.len() - 4 - 2;
+        frame[at..at + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+
+        let read = read_one_request(&frame).await.expect("answerable");
+        assert_eq!(
+            read,
+            InboundRequest::Unparsable {
+                message_id: message_id(),
+                reason: DirectRejectReason::TooLarge,
+            },
+            "the sender is told its payload was too large"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bad_field_reads_back_as_malformed() {
+        let mut frame = DirectMessageV2 {
+            message_id: message_id(),
+            sent_at_ms: 1,
+            source_endpoint: endpoint("human"),
+            destination_endpoint: None,
+            payload: interweave_transport_api::Payload::at_ceiling(None, b"hi".to_vec())
+                .expect("within the ceiling"),
+        }
+        .encode();
+        // Claim a source endpoint longer than the bytes that follow.
+        frame[MessageId::LEN + 8] = 200;
+
+        let read = read_one_request(&frame).await.expect("answerable");
+        assert_eq!(
+            read,
+            InboundRequest::Unparsable {
+                message_id: message_id(),
+                reason: DirectRejectReason::Malformed,
+            },
+            "and a bad field is malformed, not too_large"
+        );
+    }
+
+    /// TOO SHORT TO ANSWER. A response must echo the id it answers, so a
+    /// frame that does not even carry one cannot be refused on the wire
+    /// — it stays an I/O error and the exchange is dropped.
+    #[tokio::test]
+    async fn a_frame_too_short_to_carry_an_id_stays_an_error() {
+        let truncated = vec![0u8; MessageId::LEN - 1];
+        assert!(
+            read_one_request(&truncated).await.is_err(),
+            "nothing to echo, so nothing to send"
+        );
+    }
+
+    /// A rejection is not something this node sends as a REQUEST.
+    ///
+    /// Reported rather than panicked: the lint policy treats a reachable
+    /// panic in a transport daemon as a defect, and a caller mistake is
+    /// reachable.
+    #[tokio::test]
+    async fn writing_a_rejection_as_a_request_is_refused() {
+        let mut sink: Vec<u8> = Vec::new();
+        let written = DirectCodec
+            .write_request(
+                &DIRECT_PROTOCOL,
+                &mut futures::io::Cursor::new(&mut sink),
+                InboundRequest::Unparsable {
+                    message_id: message_id(),
+                    reason: DirectRejectReason::Malformed,
+                },
+            )
+            .await;
+        assert!(written.is_err(), "not a sendable request");
+        assert!(sink.is_empty(), "and nothing was written");
+    }
+
+    /// Run `read_request` over a byte slice.
+    async fn read_one_request(bytes: &[u8]) -> io::Result<InboundRequest> {
+        DirectCodec
+            .read_request(&DIRECT_PROTOCOL, &mut futures::io::Cursor::new(bytes))
+            .await
     }
 }

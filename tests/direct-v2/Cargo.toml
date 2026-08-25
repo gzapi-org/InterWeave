@@ -35,4 +35,6 @@ interweave-trust-api = { path = "../../crates/api/trust-api" }
 interweave-local-client-api = { path = "../../crates/api/local-client-api" }
 interweave-test-support = { path = "../support" }
 libp2p = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

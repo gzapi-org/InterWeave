@@ -232,7 +232,10 @@ impl GatedSwarm {
         if !self.inner.is_connected(peer) {
             return Err(NotConnected);
         }
-        Ok(self.inner.behaviour_mut().direct.send_request(peer, frame))
+        Ok(self.inner.behaviour_mut().direct.send_request(
+            peer,
+            crate::direct_codec::InboundRequest::Frame(Box::new(frame)),
+        ))
     }
 
     /// Answer one inbound directed exchange.
