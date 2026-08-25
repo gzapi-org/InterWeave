@@ -430,7 +430,56 @@ struct PendingDirect {
     requested: Option<EndpointId>,
     /// The caller waiting for the outcome.
     reply: oneshot::Sender<Result<EndpointId, DirectError>>,
+    /// Who the exchange is with, so the per-peer bound can be counted.
+    peer: TransportIdentity,
 }
+
+/// Whether another outbound direct exchange may start.
+///
+/// Takes the in-flight peers as an ITERATOR rather than the pending
+/// table, so the decision can be tested against a population this test
+/// builds instead of one only the swarm can produce —
+/// `OutboundRequestId` has no public constructor, and a rule that can
+/// only be exercised through the network is a rule tested by luck.
+/// SPIKE-002 finding 1 settled that class: filling 128 in-flight
+/// exchanges over loopback means racing the responder.
+///
+/// One pass, counting both bounds together, because the iterator is
+/// consumed and two passes would need it cloned or collected.
+fn admit_outbound<'a>(
+    in_flight: impl Iterator<Item = &'a TransportIdentity>,
+    peer: &TransportIdentity,
+) -> Result<(), DirectError> {
+    let mut total: usize = 0;
+    let mut for_peer: usize = 0;
+    for held in in_flight {
+        total = total.saturating_add(1);
+        if held == peer {
+            for_peer = for_peer.saturating_add(1);
+        }
+    }
+    if total >= MAX_OUTBOUND_DIRECT {
+        return Err(DirectError::Overloaded);
+    }
+    if for_peer >= MAX_OUTBOUND_DIRECT_PER_PEER {
+        return Err(DirectError::Overloaded);
+    }
+    Ok(())
+}
+
+/// Outbound direct exchanges allowed at once, in total.
+///
+/// The `direct inflight total` row of `resource-limits.md` (128, ceiling
+/// 512). It is a DIFFERENT row from the dedup reservation limits, which
+/// happen to carry the same numbers and bound inbound work instead —
+/// naming them separately is what stops one being "fixed" to match the
+/// other.
+const MAX_OUTBOUND_DIRECT: usize = 128;
+
+/// Outbound direct exchanges allowed at once with any one peer.
+///
+/// The `direct inflight/peer` row (8, ceiling 32).
+const MAX_OUTBOUND_DIRECT_PER_PEER: usize = 8;
 
 /// A running substrate.
 ///
@@ -1789,6 +1838,23 @@ fn handle_command(
                     return;
                 }
             };
+            // BOUNDED BEFORE THE EXCHANGE STARTS. Every send inserts an
+            // entry that lives until a response or the request timeout,
+            // and the command channel does not bound it — its capacity is
+            // released as the task drains commands, so a caller can queue
+            // far more exchanges than either limit allows. Without this,
+            // `pending_direct` and libp2p's own outbound queue grow
+            // together with nothing to stop them.
+            //
+            // Counted by scanning rather than kept in a second index:
+            // the map is bounded at 128 by the line below, so the scan is
+            // bounded too, and one source of truth cannot disagree with
+            // itself.
+            if let Err(refused) = admit_outbound(pending_direct.values().map(|p| &p.peer), &peer) {
+                let _ = reply.send(Err(refused));
+                return;
+            }
+
             // CAPTURED BEFORE THE FRAME IS MOVED. The answer is checked
             // against what was asked, and after `send_direct` takes the
             // frame there is nothing left to compare with.
@@ -1802,6 +1868,7 @@ fn handle_command(
                             message_id,
                             requested,
                             reply,
+                            peer,
                         },
                     );
                 }
@@ -2164,6 +2231,7 @@ fn handle_direct(
                 message_id,
                 requested,
                 reply,
+                ..
             }) = pending.remove(&request_id)
             else {
                 return DirectHandled::Consumed;
@@ -2696,5 +2764,78 @@ mod waiter_tests {
                 assert_eq!(message_id, req.message_id);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod outbound_bound_tests {
+    use super::{MAX_OUTBOUND_DIRECT, MAX_OUTBOUND_DIRECT_PER_PEER, admit_outbound};
+    use interweave_transport_api::{TransportError, TransportIdentity};
+
+    const P1: &str = "12D3KooWA9hFCGwGCpCbWWfLmYSpqPzXgLmPvbBrgWGNvNGSDVpS";
+    const P2: &str = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
+    const P3: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+
+    fn identity(s: &str) -> TransportIdentity {
+        TransportIdentity::parse(s).expect("valid peer id")
+    }
+
+    #[test]
+    fn an_empty_table_admits() {
+        assert!(admit_outbound(std::iter::empty(), &identity(P1)).is_ok());
+    }
+
+    #[test]
+    fn the_per_peer_bound_refuses_that_peer_and_no_other() {
+        let loud = identity(P1);
+        let quiet = identity(P2);
+        let held: Vec<TransportIdentity> =
+            std::iter::repeat_n(loud.clone(), MAX_OUTBOUND_DIRECT_PER_PEER).collect();
+
+        assert_eq!(
+            admit_outbound(held.iter(), &loud),
+            Err(TransportError::Overloaded),
+            "the peer at its own bound is refused"
+        );
+        // THE ASYMMETRY IS THE POINT. A bound that refused everyone once
+        // any peer filled up would pass a test that only asked about the
+        // loud one.
+        assert!(
+            admit_outbound(held.iter(), &quiet).is_ok(),
+            "a peer that has spent nothing keeps its own allowance"
+        );
+    }
+
+    #[test]
+    fn the_global_bound_refuses_a_peer_with_nothing_in_flight() {
+        // Spread over two peers so neither reaches the per-peer bound
+        // alone -- the refusal can then only be the global one.
+        let held: Vec<TransportIdentity> = (0..MAX_OUTBOUND_DIRECT)
+            .map(|i| {
+                if i % 2 == 0 {
+                    identity(P1)
+                } else {
+                    identity(P3)
+                }
+            })
+            .collect();
+        assert_eq!(held.len(), MAX_OUTBOUND_DIRECT);
+
+        assert_eq!(
+            admit_outbound(held.iter(), &identity(P2)),
+            Err(TransportError::Overloaded),
+            "the global ceiling binds every peer, including an idle one"
+        );
+    }
+
+    #[test]
+    fn one_below_each_bound_still_admits() {
+        let loud = identity(P1);
+        let held: Vec<TransportIdentity> =
+            std::iter::repeat_n(loud.clone(), MAX_OUTBOUND_DIRECT_PER_PEER - 1).collect();
+        assert!(
+            admit_outbound(held.iter(), &loud).is_ok(),
+            "the bound is a ceiling reached, not one approached"
+        );
     }
 }
