@@ -182,6 +182,23 @@ if [[ "$1" == "api" && "$*" == *"/timeline"* ]]; then
   exit 0
 fi
 
+# gh api repos/o/r/commits/<sha>/check-suites — when GitHub first saw
+# the SHA, which for an ordinary push is the only observable transition
+# time. state/pushed holds one ISO instant, or is absent for a
+# repository with no workflows.
+#
+# BEFORE the bare /commits/ branch below, which would otherwise swallow
+# this URL and answer it with a date string.
+if [[ "$1" == "api" && "$*" == *"/check-suites"* ]]; then
+  pushed="$(cat "$S/pushed" 2>/dev/null || true)"
+  if [[ -n "$pushed" ]]; then
+    printf '{"total_count":1,"check_suites":[{"created_at":"%s"}]}\n' "$pushed"
+  else
+    printf '{"total_count":0,"check_suites":[]}\n'
+  fi
+  exit 0
+fi
+
 # gh api repos/o/r/commits/<sha> — when the head was born, which is how
 # an ask is told from an answer.
 if [[ "$1" == "api" && "$*" == *"/commits/"* ]]; then
@@ -235,7 +252,8 @@ run() {
     # every timestamp these cases use, so an ask written by a case is an
     # ask about the current head unless the case says otherwise.
     : > "$SANDBOX/state/asks"
-    rm -f "$SANDBOX/state/head_born_fail" "$SANDBOX/state/forced"
+    rm -f "$SANDBOX/state/head_born_fail" "$SANDBOX/state/forced" \
+          "$SANDBOX/state/pushed"
     printf '2026-08-07T09:00:00Z\n' > "$SANDBOX/state/head_born"
     shift 2
     RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
@@ -697,6 +715,55 @@ run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" 
         "me,2026-08-07T09:00:00Z" "2026-08-07T09:00:00Z"
 assert_rc       "an ask on the head's own second is pending too" 1
 assert_contains "  and reported outstanding"                     "in flight"
+
+echo "pr-review-status: an ORDINARY push is a head transition too"
+# ONLY A FORCE-PUSH LEAVES A TIMELINE EVENT. Everything above reads the
+# commit date for the ordinary case, and a commit date is when the commit
+# was WRITTEN, not when it reached the remote — on this repository's own
+# head the two were five minutes apart.
+#
+# Write a commit at 09:00, ask `@codex review` at 11:00 about the head of
+# that moment, then fast-forward the older commit into place at 12:00.
+# The ask (11:00) outranks a head born at 09:00, reads as pending
+# forever, and `--wait` burns its whole timeout on an answered ask.
+run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
+        "me,2026-08-07T11:00:00Z" "2026-08-07T09:00:00Z"
+printf '2026-08-07T12:00:00Z\n' > "$SANDBOX/state/pushed"
+: > "$SANDBOX/state/n"
+RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
+    timeout 20 bash "$UNDER_TEST" 77 o/r 2>&1)"; RUN_RC=$?
+assert_rc    "an ask predating an ordinary push does not suppress exit 5" 5
+assert_lacks "  and is not reported as outstanding"                       "in flight"
+
+# ...and an ask AFTER that push is still pending, so the push time is a
+# real boundary rather than merely a way to reach 5.
+run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
+        "me,2026-08-07T13:00:00Z" "2026-08-07T09:00:00Z"
+printf '2026-08-07T12:00:00Z\n' > "$SANDBOX/state/pushed"
+: > "$SANDBOX/state/n"
+RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
+    timeout 20 bash "$UNDER_TEST" 77 o/r 2>&1)"; RUN_RC=$?
+assert_rc       "an ask after the push is still outstanding" 1
+assert_contains "  reported as in flight"                    "in flight"
+
+# The same equality rule the force-push path takes: a push and the ask it
+# prompts land on the same second routinely.
+run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
+        "me,2026-08-07T12:00:00Z" "2026-08-07T09:00:00Z"
+printf '2026-08-07T12:00:00Z\n' > "$SANDBOX/state/pushed"
+: > "$SANDBOX/state/n"
+RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
+    timeout 20 bash "$UNDER_TEST" 77 o/r 2>&1)"; RUN_RC=$?
+assert_rc       "an ask on the push's own second is pending" 1
+assert_contains "  and reported outstanding"                 "in flight"
+
+# A REPOSITORY WITH NO WORKFLOWS HAS NO SUITES, and must keep exactly the
+# behaviour it had before this lookup existed: the commit date stands
+# alone and the ask reads as pending.
+run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
+        "me,2026-08-07T11:00:00Z" "2026-08-07T09:00:00Z"
+assert_rc       "with no check suites the commit date still stands" 1
+assert_contains "  and the ask is in flight"                        "in flight"
 
 echo "pr-review-status: an unreadable head date waits rather than concluding"
 # The fallback direction matters: unreadable must mean PENDING. Guessing

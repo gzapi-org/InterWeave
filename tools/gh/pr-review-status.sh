@@ -481,6 +481,38 @@ probe() {
             head_born="$forced"
         fi
 
+        # ORDINARY PUSHES LEAVE NO TIMELINE EVENT AT ALL. Only a
+        # force-push does, so everything above still reads the commit
+        # date for the common case — and a commit date is when the
+        # commit was WRITTEN, not when it reached the remote. Commit at
+        # 10:00, ask `@codex review` at 11:00 against the head of the
+        # moment, push the older commit as a fast-forward at 12:00, and
+        # the ask looks newer than a head born at 10:00: it reads as
+        # pending forever and `--wait` burns its whole timeout.
+        #
+        # A check suite is created when GitHub first sees the SHA, which
+        # is the push. The EARLIEST one is therefore the closest
+        # observable stand-in for the transition — later suites are
+        # re-runs. On the head of this very PR the gap was five minutes,
+        # so the commit date is not an approximation of the push, it is
+        # a different quantity.
+        #
+        # Fetched raw and filtered locally for the same reason the two
+        # calls above are, and it costs a call only when there IS an ask.
+        # A repository with no workflows has no suites, and the fallback
+        # is exactly the behaviour that existed before this block.
+        local suites_raw pushed
+        suites_raw="$(gh api "repos/$REPO/commits/$head/check-suites" 2>/dev/null)" \
+            || suites_raw=""
+        pushed="$(printf '%s' "$suites_raw" \
+            | jq -rs '[.[]? | .check_suites[]? | .created_at]
+                      | sort | first // ""' 2>/dev/null)" || pushed=""
+        # GitHub stamps this, so it is trusted like a force-push event
+        # and unlike a commit date — there is no future-date discard.
+        if [[ -n "$pushed" && "$pushed" > "$head_born" ]]; then
+            head_born="$pushed"
+        fi
+
         # Unreadable falls back to PENDING, which costs a longer wait and
         # never a false "nothing is coming".
         #
