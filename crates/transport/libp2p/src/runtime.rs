@@ -36,15 +36,15 @@
 //! is blocking. The loop therefore holds a translated event and selects
 //! between delivering it and taking a command, so shutdown always wins.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::time::Duration;
 
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::TransportIdentity;
 use interweave_transport_runtime::preauth::PreAuthLimits;
 use interweave_transport_runtime::{
-    ConnectionManager, ConnectionPolicy, ConnectionSlot, DialDenial, DialOrigin, DialRequest,
-    DialTicket, TrustSources,
+    ConnectionClass, ConnectionManager, ConnectionPolicy, ConnectionSlot, DialDenial, DialOrigin,
+    DialRequest, DialTicket, Revoked, TrustSources,
 };
 use libp2p::core::transport::{ListenerId, TransportError};
 use libp2p::swarm::{DialError, SwarmEvent as Libp2pSwarmEvent};
@@ -1137,9 +1137,17 @@ fn settle_outcome(
                     // route this profile has actually authenticated is
                     // in the book even if the peer never advertises it.
                     let address = ticket.address().to_owned();
+                    let origin = ticket.origin();
                     let slot = manager.record_success(ticket, now_ms);
                     let _ = manager.learn_address(&peer, &address, now_ms);
-                    open.insert(*connection_id, OpenConnection { peer, slot });
+                    open.insert(
+                        *connection_id,
+                        OpenConnection {
+                            peer,
+                            slot,
+                            origin: Some(origin),
+                        },
+                    );
                 }
                 // INBOUND HAS NO ADMISSION. ADR-0011: the same current
                 // authorization that governs outbound applies before an
@@ -1155,7 +1163,14 @@ fn settle_outcome(
                     }
                     match manager.admit_inbound() {
                         Some(slot) => {
-                            open.insert(*connection_id, OpenConnection { peer, slot });
+                            open.insert(
+                                *connection_id,
+                                OpenConnection {
+                                    peer,
+                                    slot,
+                                    origin: None,
+                                },
+                            );
                         }
                         None => {
                             refuse.push(*connection_id);
@@ -1266,6 +1281,52 @@ fn now_ms(started: tokio::time::Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+/// Which open connections a trust change actually withdraws.
+///
+/// THE NEW CLASS, PER CONNECTION, AGAINST ITS OWN ORIGIN. ADR-0036's
+/// separation is an origin/class PAIR, so this cannot be decided from
+/// the class alone. A peer in both trust sets that loses only its
+/// data-plane trust is still infrastructure: `set_trust` reports it
+/// revoked, while `authorizes_for` goes on permitting its relay
+/// reservation, relay circuit and AutoNAT probes. Closing every
+/// connection to a reported peer dropped exactly those -- the
+/// reachability that peer is still trusted for.
+///
+/// Inbound carries no origin because arriving is not a dial. It was
+/// admitted by the origin-less `authorizes` and is re-asked the same
+/// question, so a revocation that reaches the data plane still closes
+/// it.
+fn connections_to_close<'a>(
+    manager: &ConnectionManager,
+    revoked: &[Revoked],
+    open: impl Iterator<
+        Item = (
+            libp2p::swarm::ConnectionId,
+            &'a TransportIdentity,
+            Option<DialOrigin>,
+        ),
+    >,
+) -> BTreeSet<libp2p::swarm::ConnectionId> {
+    let revoked_class: BTreeMap<&TransportIdentity, ConnectionClass> = revoked
+        .iter()
+        .map(|entry| (&entry.peer, entry.now))
+        .collect();
+    let mut closing = BTreeSet::new();
+    for (id, peer, origin) in open {
+        let Some(now) = revoked_class.get(peer) else {
+            continue;
+        };
+        let still_authorized = match origin {
+            Some(origin) => manager.authorizes_for(*now, origin),
+            None => manager.authorizes(*now),
+        };
+        if !still_authorized {
+            closing.insert(id);
+        }
+    }
+    closing
+}
+
 /// A connection this process holds open.
 ///
 /// The slot is the accounting; the peer is what makes a revocation
@@ -1275,6 +1336,18 @@ fn now_ms(started: tokio::time::Instant) -> u64 {
 struct OpenConnection {
     peer: TransportIdentity,
     slot: ConnectionSlot,
+    /// Why this connection was opened, or `None` for one that arrived.
+    ///
+    /// ADR-0036's separation is an origin/class PAIR, so a trust change
+    /// cannot be re-evaluated from the class alone. Without this a peer
+    /// that lost only its data-plane trust -- still infrastructure --
+    /// had every connection to it closed, including relay reservations
+    /// and AutoNAT probes that `authorizes_for` would still permit.
+    ///
+    /// Inbound is `None` because arriving is not a dial: it was admitted
+    /// with the origin-less `authorizes`, and it is re-evaluated the
+    /// same way.
+    origin: Option<DialOrigin>,
 }
 
 /// Listen commands whose bound address has not arrived yet.
@@ -1395,14 +1468,11 @@ fn handle_command(
             // connection is named at most once however many revoked
             // entries match it, so the number reported is the number of
             // connections actually closed.
-            let revoked_peers: BTreeSet<&TransportIdentity> =
-                revoked.iter().map(|entry| &entry.peer).collect();
-            let mut closing: BTreeSet<libp2p::swarm::ConnectionId> = BTreeSet::new();
-            for (id, connection) in open.iter() {
-                if revoked_peers.contains(&connection.peer) {
-                    closing.insert(*id);
-                }
-            }
+            let closing = connections_to_close(
+                manager,
+                &revoked,
+                open.iter().map(|(id, c)| (*id, &c.peer, c.origin)),
+            );
             let closed = closing.len();
             refuse.extend(closing);
             let _ = reply.send(closed);
@@ -1496,10 +1566,115 @@ fn translate(
 
 #[cfg(test)]
 mod tests {
-    use super::is_permanent_dial_error;
+    use super::{connections_to_close, is_permanent_dial_error};
+    use interweave_transport_api::TransportIdentity;
+    use interweave_transport_runtime::{
+        ConnectionManager, ConnectionPolicy, DialOrigin, TrustSources,
+    };
+    use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
     use libp2p::Multiaddr;
     use libp2p::core::transport::TransportError;
-    use libp2p::swarm::DialError;
+    use libp2p::swarm::{ConnectionId, DialError};
+
+    const RELAY: &str = "12D3KooWCLxLXFHqvfsHVLDcNsSpZBQq1M1KMRgQRLLLnHTv7oQD";
+
+    fn ident(text: &str) -> TransportIdentity {
+        TransportIdentity::parse(text).expect("a valid peer id")
+    }
+
+    fn manager(data_plane: &[&str], infrastructure: &[&str]) -> ConnectionManager {
+        let mut m = ConnectionManager::new(ConnectionPolicy::default(), 8);
+        m.set_trust(trust(data_plane, infrastructure), &[]);
+        m
+    }
+
+    fn trust(data_plane: &[&str], infrastructure: &[&str]) -> TrustSources {
+        TrustSources::new(
+            PeerTrustPolicy::new(data_plane.iter().map(|p| ident(p))).expect("small"),
+            InfrastructureSet::new(infrastructure.iter().map(|p| ident(p))).expect("small"),
+        )
+    }
+
+    /// A peer trusted BOTH ways loses only its data-plane trust.
+    ///
+    /// ADR-0036 keeps the two authorizations separate, so this peer is
+    /// still infrastructure and its relay reservation is still
+    /// authorized. Deciding from the class alone -- which is what
+    /// closing every connection to a reported peer does -- drops the
+    /// reachability the peer is still trusted for.
+    #[test]
+    fn partial_revocation_keeps_the_reachability_it_still_authorizes() {
+        let mut m = manager(&[RELAY], &[RELAY]);
+        let peer = ident(RELAY);
+        let revoked = m.set_trust(trust(&[], &[RELAY]), &[peer.clone()]);
+        assert_eq!(revoked.len(), 1, "the data-plane loss IS a revocation");
+
+        let reservation = ConnectionId::new_unchecked(1);
+        let closing = connections_to_close(
+            &m,
+            &revoked,
+            [(reservation, &peer, Some(DialOrigin::RelayReservation))].into_iter(),
+        );
+        assert!(
+            closing.is_empty(),
+            "an infrastructure peer keeps the connection it is still authorized for"
+        );
+    }
+
+    /// The other half: the same revocation MUST close the data plane.
+    ///
+    /// Without this, "keep reachability" is satisfied by keeping
+    /// everything, which is the bug in the opposite direction.
+    #[test]
+    fn partial_revocation_still_closes_the_data_plane() {
+        let mut m = manager(&[RELAY], &[RELAY]);
+        let peer = ident(RELAY);
+        let revoked = m.set_trust(trust(&[], &[RELAY]), &[peer.clone()]);
+
+        let data = ConnectionId::new_unchecked(2);
+        let closing = connections_to_close(
+            &m,
+            &revoked,
+            [(data, &peer, Some(DialOrigin::ConnectionManager))].into_iter(),
+        );
+        assert!(
+            closing.contains(&data),
+            "the data-plane connection is exactly what was withdrawn"
+        );
+    }
+
+    /// Inbound carries no origin, and is re-asked the question it was
+    /// admitted with rather than being kept by default.
+    #[test]
+    fn an_inbound_connection_is_reevaluated_without_an_origin() {
+        let mut m = manager(&[RELAY], &[RELAY]);
+        let peer = ident(RELAY);
+        let revoked = m.set_trust(trust(&[], &[RELAY]), &[peer.clone()]);
+
+        let inbound = ConnectionId::new_unchecked(3);
+        let closing = connections_to_close(&m, &revoked, [(inbound, &peer, None)].into_iter());
+        assert!(
+            closing.contains(&inbound),
+            "arriving is not an authorization: the data-plane loss closes it"
+        );
+    }
+
+    /// A peer that was not revoked at all is untouched, whatever its
+    /// origin.
+    #[test]
+    fn a_peer_that_kept_its_trust_keeps_every_connection() {
+        let mut m = manager(&[RELAY], &[RELAY]);
+        let peer = ident(RELAY);
+        let revoked = m.set_trust(trust(&[RELAY], &[RELAY]), &[peer.clone()]);
+        assert!(revoked.is_empty(), "nothing changed, nothing revoked");
+
+        let closing = connections_to_close(
+            &m,
+            &revoked,
+            [(ConnectionId::new_unchecked(4), &peer, None)].into_iter(),
+        );
+        assert!(closing.is_empty());
+    }
 
     fn addr() -> Multiaddr {
         "/ip4/127.0.0.1/tcp/1".parse().expect("valid")
