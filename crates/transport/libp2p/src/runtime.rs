@@ -701,7 +701,7 @@ impl SwarmRuntime {
                         // `translate`, which is a pure shape conversion
                         // and must not also own resource accounting.
                         let mut refuse = Vec::new();
-                        settle_outcome(
+                        let announce = settle_outcome(
                             &event,
                             &mut manager,
                             &mut in_flight,
@@ -718,7 +718,25 @@ impl SwarmRuntime {
                         }
 
                         let mut abandoned = Vec::new();
-                        if let Some(event) = translate(event, &mut listens, &mut abandoned) {
+                        // TRANSLATED ONLY IF IT HAPPENED. `translate` is
+                        // a shape conversion and knows nothing about
+                        // admission, so without this a refused
+                        // connection still reaches the consumer as
+                        // `Connected` -- a peer announced as available
+                        // immediately after the revocation that refused
+                        // it.
+                        let translated = match announce {
+                            Announce::Yes => translate(event, &mut listens, &mut abandoned),
+                            Announce::Suppress => {
+                                // `translate` also answers pending
+                                // `listen` calls, and a suppressed event
+                                // is always a connection event, never a
+                                // listener one -- so nothing is owed an
+                                // answer here.
+                                None
+                            }
+                        };
+                        if let Some(event) = translated {
                             outbox.push_back(event);
                         }
                         // A caller that stopped awaiting `listen` — a
@@ -1059,7 +1077,7 @@ fn settle_outcome(
     open: &mut HashMap<libp2p::swarm::ConnectionId, OpenConnection>,
     refuse: &mut Vec<libp2p::swarm::ConnectionId>,
     now_ms: u64,
-) {
+) -> Announce {
     match event {
         Libp2pSwarmEvent::ConnectionEstablished {
             connection_id,
@@ -1075,7 +1093,7 @@ fn settle_outcome(
                 // the only answer that does not leave an unaccountable
                 // connection open.
                 refuse.push(*connection_id);
-                return;
+                return Announce::Suppress;
             };
             match in_flight.remove(connection_id) {
                 // Outbound: the slot was reserved when the dial was
@@ -1094,7 +1112,7 @@ fn settle_outcome(
                     if !manager.authorizes(class) {
                         manager.record_authorization_withdrawn(ticket, now_ms);
                         refuse.push(*connection_id);
-                        return;
+                        return Announce::Suppress;
                     }
                     // THE ADDRESS THAT WORKED. Learned from the ticket
                     // rather than from anything the peer said, so a
@@ -1115,7 +1133,7 @@ fn settle_outcome(
                     let class = manager.classify(&peer);
                     if !manager.authorizes(class) {
                         refuse.push(*connection_id);
-                        return;
+                        return Announce::Suppress;
                     }
                     match manager.admit_inbound() {
                         Some(slot) => {
@@ -1123,6 +1141,7 @@ fn settle_outcome(
                         }
                         None => {
                             refuse.push(*connection_id);
+                            return Announce::Suppress;
                         }
                     }
                 }
@@ -1133,9 +1152,17 @@ fn settle_outcome(
             // that was actually counted: a refused inbound reports a
             // close too, and releasing a slot it never held would let
             // the ceiling drift upward one refusal at a time.
-            if let Some(connection) = open.remove(connection_id) {
-                manager.record_connection_closed(connection.slot);
-            }
+            //
+            // The SAME condition decides whether to announce it. A
+            // connection this runtime refused was never announced as
+            // `Connected`, so announcing its close would hand a
+            // consumer a `Disconnected` for a peer it was never told
+            // about -- which reads as a peer going away rather than as
+            // one that was never admitted.
+            let Some(connection) = open.remove(connection_id) else {
+                return Announce::Suppress;
+            };
+            manager.record_connection_closed(connection.slot);
         }
         Libp2pSwarmEvent::OutgoingConnectionError {
             connection_id,
@@ -1189,6 +1216,27 @@ fn settle_outcome(
         }
         _ => {}
     }
+    Announce::Yes
+}
+
+/// Whether the event this runtime just settled should be reported to
+/// the consumer.
+///
+/// A connection REFUSED at establishment -- authorization withdrawn
+/// mid-handshake, an inbound peer this profile will not retain, a
+/// ceiling with no room, a PeerId the neutral grammar rejects -- was
+/// settled and queued for closing, but `translate` is a pure shape
+/// conversion and would happily emit `Connected` for it anyway. A
+/// consumer would then see a peer become available and start work
+/// against it, moments before the close it was never told was coming.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Announce {
+    /// Report it: the ordinary case.
+    Yes,
+    /// Say nothing. This connection is not one the consumer was told
+    /// about, and telling it now would describe a state that never
+    /// existed.
+    Suppress,
 }
 
 /// Milliseconds since the runtime task started.

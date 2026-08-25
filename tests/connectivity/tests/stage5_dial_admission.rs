@@ -1850,3 +1850,63 @@ async fn revoking_a_peer_with_several_connections_counts_each_once() {
     dialer.shutdown().await.expect("shuts down");
     listener.shutdown().await.expect("shuts down");
 }
+
+#[tokio::test]
+async fn an_untrusted_inbound_peer_is_never_announced_as_connected() {
+    // `translate` is a pure shape conversion and knows nothing about
+    // admission, so a connection this runtime REFUSED still reached the
+    // consumer as `Connected` -- a peer announced as available moments
+    // before a close it was never told was coming. A consumer that
+    // started work on that announcement would be talking to a peer this
+    // profile had already decided not to keep.
+    //
+    // The close then emitted `Disconnected` for a connection that never
+    // entered `open`, so the consumer saw a peer arrive and leave when
+    // in truth it was refused on arrival.
+    let (dialer_id, dialer_peer) = who();
+    let mut listener =
+        SwarmRuntime::start(&identity(), SubstrateConfig::default(), trusting_nobody())
+            .expect("starts");
+    let bound = listener
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
+        .await
+        .expect("binds");
+    let listener_peer = listener.local_peer().clone();
+    let _ = dialer_peer;
+
+    // The dialer trusts the listener; the listener trusts nobody, so
+    // the inbound connection is refused at establishment.
+    let dialer = SwarmRuntime::start(
+        &dialer_id,
+        SubstrateConfig::default(),
+        trusting(&[&listener_peer]),
+    )
+    .expect("starts");
+    assert!(
+        dialer
+            .dial(listener_peer, bound)
+            .await
+            .expect("the command reaches the task")
+            .is_ok()
+    );
+
+    // THE LISTENER'S OWN EVENT STREAM is what this asserts about. It
+    // must never claim the refused peer connected, and must not report
+    // a disconnection for a connection it never announced.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        match tokio::time::timeout_at(deadline, listener.next_event()).await {
+            Ok(Some(interweave_transport_libp2p::SwarmEvent::Connected { peer })) => {
+                panic!("a refused inbound peer was announced as connected: {peer:?}");
+            }
+            Ok(Some(interweave_transport_libp2p::SwarmEvent::Disconnected { peer })) => {
+                panic!("a refused inbound peer was announced as disconnecting: {peer:?}");
+            }
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break,
+        }
+    }
+
+    dialer.shutdown().await.expect("shuts down");
+    listener.shutdown().await.expect("shuts down");
+}

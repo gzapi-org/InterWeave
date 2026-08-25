@@ -665,7 +665,16 @@ impl PeerCache {
         // symlink, so a name someone pre-created is an error here
         // rather than a write somewhere else.
         let temp = temp_beside(&self.path);
-        {
+        // EVERY FAILURE AFTER CREATION REMOVES IT, not only a failed
+        // rename. The name is unique per attempt, so an abandoned
+        // temporary is never reused and never overwritten: a full disk
+        // or a transient I/O error during `write_all` or `sync_all`
+        // would leave one file behind per failed flush, forever, in the
+        // profile directory. Writing this as one fallible block and
+        // cleaning up on any `Err` is what makes that impossible to
+        // reintroduce by adding a step -- a `?` inside the block cannot
+        // escape the cleanup.
+        let published = (|| -> Result<(), CacheError> {
             use std::io::Write as _;
             let mut handle = fs::OpenOptions::new()
                 .write(true)
@@ -677,13 +686,13 @@ impl PeerCache {
             // window leaves a correctly-named empty file — which is worse
             // than a missing one, since it looks like a valid cache.
             handle.sync_all()?;
-        }
-        // A FAILED RENAME MUST NOT LEAVE THE TEMPORARY BEHIND. The name
-        // is unique per attempt now, so an abandoned one is never
-        // reused and would simply accumulate.
-        if let Err(error) = fs::rename(&temp, &self.path) {
+            drop(handle);
+            fs::rename(&temp, &self.path)?;
+            Ok(())
+        })();
+        if let Err(error) = published {
             let _ = fs::remove_file(&temp);
-            return Err(error.into());
+            return Err(error);
         }
 
         // fsync the DIRECTORY, so the rename itself survives a crash.

@@ -978,3 +978,55 @@ fn a_capability_observation_does_not_extend_the_record_ttl() {
         "observations must not have pushed the expiry out"
     );
 }
+
+#[test]
+fn a_failure_after_the_temporary_exists_still_removes_it() {
+    // Cleanup used to cover only a failed RENAME, so a failure between
+    // `create_new` succeeding and the rename -- a full disk or a
+    // transient I/O error during `write_all` or `sync_all` -- returned
+    // through `?` with the temporary still on disk. Unique names per
+    // attempt are what make those ACCUMULATE rather than overwrite: one
+    // file per failed flush, forever, in the profile directory.
+    //
+    // The failure provoked here is the rename itself, because that is
+    // the one reachable without fault injection -- and it is reached
+    // with the temporary already created, written and fsynced, which is
+    // the state the cleanup has to handle. A mid-write fault cannot be
+    // injected from a test, so what covers it is the shape rather than
+    // this assertion: the whole sequence is one fallible block whose
+    // every `?` lands on the same cleanup, so adding a step cannot
+    // reintroduce the leak.
+    //
+    // Rename fails because the target is a non-empty DIRECTORY, which
+    // the cache never creates itself and no earlier step objects to.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).expect("mkdir");
+    let path = state.join("peers.json");
+
+    let mut cache = empty(&path);
+    cache
+        .record_success(&peer(PEER_A), "/ip4/10.0.0.1/tcp/1", 0)
+        .expect("record");
+
+    // Now make the target a directory with something in it, so the
+    // rename cannot replace it.
+    std::fs::create_dir_all(&path).expect("target as a directory");
+    std::fs::write(path.join("occupied"), b"x").expect("make it non-empty");
+
+    assert!(
+        cache.flush(1_000).is_err(),
+        "renaming over a non-empty directory must fail"
+    );
+
+    let strays: Vec<_> = std::fs::read_dir(&state)
+        .expect("readdir")
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+        .collect();
+    assert!(
+        strays.is_empty(),
+        "a flush that failed after creating its temporary must remove it, found {}",
+        strays.len()
+    );
+}
