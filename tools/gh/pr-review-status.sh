@@ -497,16 +497,38 @@ probe() {
         # so the commit date is not an approximation of the push, it is
         # a different quantity.
         #
+        # ONLY SUITES ASSOCIATED WITH THIS PR COUNT. The endpoint lists
+        # suites for a Git REFERENCE, not head transitions for a PR: a
+        # commit built on another branch first carries that older
+        # branch's suite, and taking the earliest of everything would
+        # date this head to a build that happened before it was ever
+        # this PR's head. Filtering on the association is what makes the
+        # earliest suite mean "first built AS this PR".
+        #
+        # `--arg`, not `--argjson`: `$PR` is whatever the caller typed
+        # and is never validated as a number, so it is compared as a
+        # string rather than injected as JSON.
+        #
+        # THE RESIDUAL LIMITATION, and its direction. If GitHub never
+        # associates a suite — a fork PR, a repository with no workflows,
+        # or a fast-forward that creates no new suite because the SHA was
+        # already built — the filter yields nothing and the commit date
+        # stands alone. That is the behaviour that existed before this
+        # block: the ask reads as pending and `--wait` waits. This lookup
+        # can only move `head_born` LATER, so a case it cannot see costs
+        # a wait and never produces a false "no review is coming".
+        #
         # Fetched raw and filtered locally for the same reason the two
         # calls above are, and it costs a call only when there IS an ask.
-        # A repository with no workflows has no suites, and the fallback
-        # is exactly the behaviour that existed before this block.
         local suites_raw pushed
         suites_raw="$(gh api "repos/$REPO/commits/$head/check-suites" 2>/dev/null)" \
             || suites_raw=""
         pushed="$(printf '%s' "$suites_raw" \
-            | jq -rs '[.[]? | .check_suites[]? | .created_at]
-                      | sort | first // ""' 2>/dev/null)" || pushed=""
+            | jq -rs --arg pr "$PR" \
+                '[.[]? | .check_suites[]?
+                  | select([.pull_requests[]?.number | tostring] | index($pr))
+                  | .created_at]
+                 | sort | first // ""' 2>/dev/null)" || pushed=""
         # GitHub stamps this, so it is trusted like a force-push event
         # and unlike a commit date — there is no future-date discard.
         if [[ -n "$pushed" && "$pushed" > "$head_born" ]]; then

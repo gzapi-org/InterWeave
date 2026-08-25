@@ -190,12 +190,25 @@ fi
 # BEFORE the bare /commits/ branch below, which would otherwise swallow
 # this URL and answer it with a date string.
 if [[ "$1" == "api" && "$*" == *"/check-suites"* ]]; then
+  # state/pushed        — a suite ASSOCIATED with this PR (number 77)
+  # state/pushed_other  — a suite for the same SHA with no association,
+  #                       which is what a build on another branch leaves
+  #                       behind. Deliberately emitted FIRST, because it
+  #                       is the earlier one and the whole question is
+  #                       whether it is allowed to win.
   pushed="$(cat "$S/pushed" 2>/dev/null || true)"
-  if [[ -n "$pushed" ]]; then
-    printf '{"total_count":1,"check_suites":[{"created_at":"%s"}]}\n' "$pushed"
-  else
-    printf '{"total_count":0,"check_suites":[]}\n'
-  fi
+  other="$(cat "$S/pushed_other" 2>/dev/null || true)"
+  {
+    printf '{"total_count":0,"check_suites":['
+    sep=''
+    if [[ -n "$other" ]]; then
+      printf '{"created_at":"%s","pull_requests":[]}' "$other"; sep=','
+    fi
+    if [[ -n "$pushed" ]]; then
+      printf '%s{"created_at":"%s","pull_requests":[{"number":77}]}' "$sep" "$pushed"
+    fi
+    printf ']}\n'
+  }
   exit 0
 fi
 
@@ -253,7 +266,7 @@ run() {
     # ask about the current head unless the case says otherwise.
     : > "$SANDBOX/state/asks"
     rm -f "$SANDBOX/state/head_born_fail" "$SANDBOX/state/forced" \
-          "$SANDBOX/state/pushed"
+          "$SANDBOX/state/pushed" "$SANDBOX/state/pushed_other"
     printf '2026-08-07T09:00:00Z\n' > "$SANDBOX/state/head_born"
     shift 2
     RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
@@ -764,6 +777,38 @@ run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" 
         "me,2026-08-07T11:00:00Z" "2026-08-07T09:00:00Z"
 assert_rc       "with no check suites the commit date still stands" 1
 assert_contains "  and the ask is in flight"                        "in flight"
+
+echo "pr-review-status: a suite from ANOTHER branch is not this PR's push"
+# The endpoint lists suites for a git REFERENCE, not head transitions for
+# a PR. Build a commit on some other branch at 10:00, then fast-forward
+# it into this PR at 12:00: the SHA now carries two suites, and the
+# earlier one describes a build that happened before this was ever the
+# head here. Taking the earliest of EVERYTHING dates the head to 10:00,
+# an ask at 11:00 outranks it, and the timeout burns exactly as it did
+# before the lookup existed.
+printf '2026-08-07T10:00:00Z\n' > "$SANDBOX/state/pushed_other"
+run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T09:30:00Z" \
+        "me,2026-08-07T11:00:00Z" "2026-08-07T09:00:00Z"
+printf '2026-08-07T10:00:00Z\n' > "$SANDBOX/state/pushed_other"
+printf '2026-08-07T12:00:00Z\n' > "$SANDBOX/state/pushed"
+: > "$SANDBOX/state/n"
+RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
+    timeout 20 bash "$UNDER_TEST" 77 o/r 2>&1)"; RUN_RC=$?
+assert_rc    "an unassociated earlier suite does not date the head" 5
+assert_lacks "  so the stale ask is not reported outstanding"       "in flight"
+
+# ...and with ONLY the unassociated suite there is no signal at all, so
+# the commit date stands alone. Unseen costs a wait; it never invents a
+# transition time, which is the direction this whole lookup errs in.
+printf '2026-08-07T10:00:00Z\n' > "$SANDBOX/state/pushed_other"
+run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T09:30:00Z" \
+        "me,2026-08-07T11:00:00Z" "2026-08-07T09:00:00Z"
+printf '2026-08-07T10:00:00Z\n' > "$SANDBOX/state/pushed_other"
+: > "$SANDBOX/state/n"
+RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
+    timeout 20 bash "$UNDER_TEST" 77 o/r 2>&1)"; RUN_RC=$?
+assert_rc       "an unassociated suite alone leaves the commit date standing" 1
+assert_contains "  and the ask is still in flight"                            "in flight"
 
 echo "pr-review-status: an unreadable head date waits rather than concluding"
 # The fallback direction matters: unreadable must mean PENDING. Guessing
