@@ -13,7 +13,10 @@ Do not treat the experiment in [`harness/`](./harness) as production implementat
 ```text
 libp2p =0.56.0   features: tcp, noise, yamux, identify, tokio, macros,
                            ed25519, request-response, gossipsub, cbor
+tokio  =1.53.1   futures =0.3.34   serde =1.0.229
 ```
+
+**Every version is the one the root `Cargo.lock` resolves**, not merely a pinned one. The async graph underneath is part of what A5 and A8 measure — timeout attribution is a race between two executors, and cancellation is a stream-teardown ordering — so a spike on a different `tokio` or `futures` measures a different scheduler than the one that ships. The spike-only additions are libp2p *features*, never different versions.
 
 The version the substrate ships, pinned exactly and with `Cargo.lock`
 committed beside it. A floating `"0.56"` resolves a later patch release,
