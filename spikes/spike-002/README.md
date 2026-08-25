@@ -138,6 +138,32 @@ a NEW request for the same key is admitted afterward true
 
 The owner's connection dying does not orphan the surviving waiters — they still receive the outcome once admission completes, on the connection that is still up — and the reservation is released rather than held forever waiting for a channel that no longer exists. A production implementation that released the reservation only when the *owner's* channel confirmed delivery would hang the waiters and leak the slot; this is the case that would have caught it.
 
+### A11. Many waiters on one key — the bound that was missing
+
+A6 proved waiters share the owner's outcome. A7 and A10 proved the reservation map is bounded across many keys and many peers. None of them asked how many waiters **one key** may accumulate, and the first measurement was blunt:
+
+```text
+same-key copies sent                40
+times the MAP answered Waiter       39
+times the MAP answered Overloaded    0     <- never refused
+```
+
+`ReservationMap::acquire` matched an existing key and returned `Waiter` **before consulting either budget**. Every waiter costs the caller a held `ResponseChannel` until the owner's admission resolves — A4 established that holding one across an await is legitimate, and A6 that every waiter must be held — so the cost is real and per request. A peer retransmitting a matching request while the owner awaited endpoint admission could grow that state without limit and never be told `overloaded`.
+
+ADR-0019's "never creates a parallel enqueue path" was upheld the whole time: one enqueue, many waiters. What was absent was any bound on how much state one key may accumulate. **This is the finding a spike exists to produce** — the pattern Stage 6 derives from A6 would have inherited it.
+
+Fixed in the production `ReservationMap` rather than worked around in the harness: waiters are charged against the same per-peer and global budgets owners are, and releasing a key returns all of it — owner and waiters were admitted as one outcome and are answered as one outcome, so returning only the owner's share would leak the rest and turn the ceiling into a lifetime quota. The experiment now runs with **no cap of its own**:
+
+```text
+per-peer budget                                8
+owners                                         1
+waiters attached                               7
+refused as overloaded BY THE MAP              32
+highest number of channels held at once        8
+```
+
+A6 was corrected in the same change. It asserted "every response is the owner's outcome", which stops being true the moment any bound binds — a request the budget refused was never attached and was never promised that outcome. It now runs with a budget large enough not to bind (the bound is A11's subject) and asserts that every **attached** request got the owner's outcome.
+
 ### A10. The global reservation budget, reached by many peers
 
 `DIRECT.md` states two separate limits ("128 global / 8 per source PeerId by default"), and A7 only ever reaches one of them. Eight distinct source peers, a generous per-peer budget of eight, and a global budget of three, so nothing but the global bound can be what refuses:

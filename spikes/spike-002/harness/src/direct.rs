@@ -588,7 +588,11 @@ async fn same_key_race_once(owner_outcome: &Response) {
     let source = identity(&client_peer);
     let key = key(&source, "m-race");
     let fingerprint = direct_content_fingerprint_v1(None, b"identical").expect("fingerprint");
-    let mut reservations = ReservationMap::new(64, 8);
+    // A BUDGET LARGE ENOUGH FOR ALL OF THEM, deliberately: this
+    // experiment is about waiters SHARING one outcome, and a budget
+    // that refused most of them would be measuring the bound instead.
+    // A11 is where the bound is measured; here it must not bind.
+    let mut reservations = ReservationMap::new(64, COPIES);
 
     // Channels waiting on ONE outcome: the owner's and every waiter's.
     let mut parked: Vec<ResponseChannel<Response>> = Vec::new();
@@ -662,9 +666,14 @@ async fn same_key_race_once(owner_outcome: &Response) {
     note("local enqueues (owners)", enqueues);
     note("waiters attached to the owner", waiters);
     note("refused outright", refused);
+    // ATTACHED, then shared. A request the budget refused was never
+    // attached and never promised the owner's outcome -- conflating the
+    // two would make this assertion unfalsifiable the moment any bound
+    // binds, which is exactly what happened when the waiter bound
+    // landed and this line still said "every response".
     note(
-        "every response is the owner's outcome",
-        answered.len() == COPIES && answered.iter().all(|r| r == owner_outcome),
+        "every ATTACHED request got the owner's outcome",
+        refused == 0 && answered.len() == COPIES && answered.iter().all(|r| r == owner_outcome),
     );
     note("reservations still held", reservations.len());
 }
@@ -1180,5 +1189,133 @@ pub async fn a10_global_reservation_budget() {
         owners == MAX_GLOBAL
             && overloaded == PEERS - MAX_GLOBAL
             && distinct_sources.len() == owners,
+    );
+}
+
+/// A11 -- the waiters attached to ONE key.
+///
+/// A6 proved waiters share the owner's outcome; A7 and A10 proved the
+/// reservation map is bounded by requests from many peers and many
+/// keys. None of them asked how many waiters ONE key may accumulate,
+/// and the first answer this experiment measured was: unbounded.
+/// `ReservationMap::acquire` matched an existing key and returned
+/// `Waiter` before consulting either budget, so a peer flooding
+/// matching retransmissions while the owner awaited endpoint admission
+/// never received `Overloaded` however many it sent -- 39 waiters from
+/// 40 copies, zero refusals.
+///
+/// Each waiter costs a held `ResponseChannel`: A4 established that
+/// holding one across an await is legitimate and A6 that every waiter
+/// must be held until the owner resolves, so the cost is real and per
+/// request. That made it a memory-exhaustion path, and the pattern
+/// Stage 6 derives from A6 would have inherited it.
+///
+/// Fixed in the production `ReservationMap` rather than worked around
+/// here: waiters are charged against the same per-peer and global
+/// budgets owners are, and releasing the key returns all of it. This
+/// experiment now measures that the MAP refuses, with no cap of the
+/// caller's own.
+pub async fn a11_same_key_waiter_flood() {
+    const COPIES: usize = 40;
+    const PER_PEER: usize = 8;
+    const ADMISSION: Duration = Duration::from_millis(600);
+
+    let mut server = node(full_direct(), Duration::from_secs(20));
+    let mut client = node(full_direct(), Duration::from_secs(20));
+    let addr = listen(&mut server).await;
+    let server_peer = *server.local_peer_id();
+    let client_peer = *client.local_peer_id();
+    connect(&mut client, &mut server, addr).await;
+
+    for _ in 0..COPIES {
+        client
+            .behaviour_mut()
+            .direct
+            .send_request(&server_peer, request("m-flood", Some("chat"), b"identical"));
+    }
+
+    let source = identity(&client_peer);
+    let key = key(&source, "m-flood");
+    let fingerprint = direct_content_fingerprint_v1(None, b"identical").expect("fingerprint");
+    let mut reservations = ReservationMap::new(128, PER_PEER);
+
+    let mut parked: Vec<ResponseChannel<Response>> = Vec::new();
+    let mut admission_due: Option<tokio::time::Instant> = None;
+    let mut owners = 0_usize;
+    let mut waiters = 0_usize;
+    let mut overloaded = 0_usize;
+    let mut high_water = 0_usize;
+    let mut answered = 0_usize;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while answered < COPIES {
+        tokio::select! {
+            () = tokio::time::sleep_until(deadline) => break,
+            () = async {
+                match admission_due {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                admission_due = None;
+                for channel in parked.drain(..) {
+                    let _ = server.behaviour_mut().direct.send_response(
+                        channel,
+                        Response::AcceptedV2 { resolved_endpoint: "chat".to_owned() },
+                    );
+                }
+                reservations.release(&key);
+            }
+            e = server.select_next_some() => {
+                if let SwarmEvent::Behaviour(BehaviourEvent::Direct(RrEvent::Message {
+                    message: RrMessage::Request { channel, .. }, ..
+                })) = e {
+                    // NO CAP OF THE HARNESS'S OWN. Whatever bounds this
+                    // is the map's doing, which is the point: Stage 6
+                    // inherits the bound rather than having to remember
+                    // to add one.
+                    match reservations.acquire(&key, fingerprint) {
+                        Ok(Reservation::Owner) => {
+                            owners += 1;
+                            admission_due = Some(tokio::time::Instant::now() + ADMISSION);
+                            parked.push(channel);
+                        }
+                        Ok(Reservation::Waiter) => {
+                            waiters += 1;
+                            parked.push(channel);
+                        }
+                        Err(ReservationFailure::Overloaded) => {
+                            overloaded += 1;
+                            let _ = server.behaviour_mut().direct.send_response(
+                                channel, Response::Rejected { reason: Reason::Overloaded });
+                        }
+                        Err(ReservationFailure::Conflict) => {
+                            let _ = server.behaviour_mut().direct.send_response(
+                                channel, Response::Rejected { reason: Reason::NoRoute });
+                        }
+                    }
+                    high_water = high_water.max(parked.len());
+                }
+            }
+            e = client.select_next_some() => {
+                if let SwarmEvent::Behaviour(BehaviourEvent::Direct(RrEvent::Message {
+                    message: RrMessage::Response { .. }, ..
+                })) = e {
+                    answered += 1;
+                }
+            }
+        }
+    }
+
+    note("same-key copies sent", COPIES);
+    note("responses received", answered);
+    note("per-peer budget", PER_PEER);
+    note("owners", owners);
+    note("waiters attached", waiters);
+    note("refused as overloaded BY THE MAP", overloaded);
+    note("highest number of channels held at once", high_water);
+    note(
+        "VERDICT: one key cannot accumulate unbounded waiters",
+        owners == 1 && high_water <= PER_PEER && overloaded == COPIES - PER_PEER,
     );
 }

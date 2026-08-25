@@ -37,6 +37,9 @@ async fn main() {
     println!("\nA8. a cancellation race: the owner's connection dies mid-admission");
     direct::a8_cancellation_race().await;
 
+    println!("\nA11. many waiters on ONE key: what bounds them?");
+    direct::a11_same_key_waiter_flood().await;
+
     println!("\nA10. the GLOBAL reservation budget, reached by many peers");
     direct::a10_global_reservation_budget().await;
 
