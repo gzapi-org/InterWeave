@@ -311,6 +311,11 @@ $ echo $?
 1
 ```
 
+**The first attempt converted a hand-picked list and review caught the rest** — A4's timeout branch printed `false` and returned without counting, so a failed prerequisite still ended in `done` and exit 0. Converting by sweeping every observation instead of every observation I remembered found two more classes:
+
+- **A1 could not fail at all.** Its `while answered < 2` loop had no deadline, so a response that never arrives hangs the run forever — the one outcome no exit code can express. It now has a bounded deadline and reports the shortfall.
+- **A5's label contradicted its own value.** It printed `and that channel is still answerable  false` — in a run recorded as PASS. The value was right and the *label* was inverted: the finding is that the channel is **not** answerable, which is what the comment beside it and this README both say. `note` prints without judging, so a line reading `false` under a positive claim sat there unremarked. It is now asserted with the correct polarity, so a rust-libp2p that started keeping the channel open would fail the run.
+
 ### An incidental finding about the library### An incidental finding about the library
 
 `gossipsub::Behaviour::new` **refuses** to build a node that publishes unsigned while requiring signatures on receipt, and says so:

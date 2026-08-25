@@ -281,8 +281,14 @@ pub async fn a1_matching_majors() {
     let mut answered = 0;
     let mut seen_explicit = false;
     let mut seen_default = false;
+    // A response that never arrives is a RESULT, not a reason to wait
+    // forever: without this the run hangs and reports nothing at all,
+    // which is the one outcome no exit code can express.
+    let deadline = tokio::time::sleep(Duration::from_secs(20));
+    tokio::pin!(deadline);
     while answered < 2 {
         tokio::select! {
+            _ = &mut deadline => break,
             e = server.select_next_some() => {
                 if let SwarmEvent::Behaviour(BehaviourEvent::Direct(RrEvent::Message {
                     message: RrMessage::Request { request, channel, .. }, ..
@@ -305,8 +311,12 @@ pub async fn a1_matching_majors() {
             }
         }
     }
-    note("explicit destination carried", seen_explicit);
-    note("omitted destination carried", seen_default);
+    check(
+        "both requests were answered within the deadline",
+        answered == 2,
+    );
+    check("explicit destination carried", seen_explicit);
+    check("omitted destination carried", seen_default);
 }
 
 /// A2 — one side speaks only a different major.
@@ -397,7 +407,7 @@ pub async fn a3_two_families() {
             _ = client.select_next_some() => {}
         }
     }
-    note("both families answered", direct_seen && endpoints_seen);
+    check("both families answered", direct_seen && endpoints_seen);
     note(
         "distinct connections the two families arrived on",
         connection_ids.len(),
@@ -435,7 +445,7 @@ pub async fn a4_withheld_response() {
     while !prompt_answered {
         tokio::select! {
             () = tokio::time::sleep_until(deadline) => {
-                note("prompt request answered while one was held", false);
+                check("prompt request answered while one was held", false);
                 return;
             }
             e = server.select_next_some() => {
@@ -469,7 +479,7 @@ pub async fn a4_withheld_response() {
             sent_prompt = true;
         }
     }
-    note("a second peer was served while one was held", true);
+    check("a second peer was served while one was held", true);
 
     // Now answer the held one and see it still lands.
     if let Some(channel) = held {
@@ -484,7 +494,7 @@ pub async fn a4_withheld_response() {
     loop {
         tokio::select! {
             () = tokio::time::sleep_until(deadline) => {
-                note("the held response arrived late", false);
+                check("the held response arrived late", false);
                 break;
             }
             _ = server.select_next_some() => {}
@@ -492,7 +502,7 @@ pub async fn a4_withheld_response() {
                 if let SwarmEvent::Behaviour(BehaviourEvent::Direct(RrEvent::Message {
                     message: RrMessage::Response { .. }, ..
                 })) = e {
-                    note("the held response arrived late", true);
+                    check("the held response arrived late", true);
                     break;
                 }
             }
@@ -546,10 +556,13 @@ pub async fn a5_timeout() {
     );
     // The responder is still holding a channel it can no longer answer:
     // `is_open` is false, so a late `send_response` has nowhere to go.
-    note("responder still holds a channel", kept.is_some());
-    note(
-        "and that channel is still answerable",
-        kept.is_some_and(|c| c.is_open()),
+    // That is the FINDING, so it is asserted rather than printed -- the
+    // label used to read "still answerable" against a value of `false`,
+    // which is the shape of a failing line sitting inside a PASS.
+    check("responder still holds a channel", kept.is_some());
+    check(
+        "and that channel is NO LONGER answerable",
+        !kept.is_some_and(|c| c.is_open()),
     );
 }
 
@@ -849,7 +862,7 @@ pub async fn a8_cancellation_race() {
         }
         tokio::select! {
             () = tokio::time::sleep_until(deadline) => {
-                note("deadline reached before every surviving waiter answered", true);
+                check("every surviving waiter answered before the deadline", false);
                 break;
             }
             () = async {
@@ -923,7 +936,7 @@ pub async fn a8_cancellation_race() {
         }
     }
 
-    note("owner's connection was killed mid-admission", killed);
+    check("owner's connection was killed mid-admission", killed);
     note(
         "server learned the owner's connection died",
         owner_inbound_failure.unwrap_or_else(|| "no InboundFailure event arrived".to_owned()),
@@ -936,7 +949,7 @@ pub async fn a8_cancellation_race() {
         "reservations held after the race settled",
         reservations.len(),
     );
-    note(
+    check(
         "a NEW request for the same key is admitted afterward",
         reservations.acquire(&key, fingerprint).is_ok(),
     );
@@ -1121,14 +1134,14 @@ pub async fn a9_no_route_is_one_answer() {
             reason: Reason::NoRoute,
         }
     });
-    note("every response decodes to one identical value", all_same);
-    note("and that value is no_route", all_no_route);
+    check("every response decodes to one identical value", all_same);
+    check("and that value is no_route", all_no_route);
 
     // ENCODED equality through the production type's own serde and the
     // codec's own CBOR library -- the bytes the wire carries.
     let encodings: Vec<Vec<u8>> = answers.iter().map(serde_cbor_bytes).collect();
     let bytes_identical = encodings.windows(2).all(|w| w[0] == w[1]);
-    note("and every encoding is byte-identical", bytes_identical);
+    check("and every encoding is byte-identical", bytes_identical);
     check(
         "VERDICT: five independent refusals, one wire answer",
         distinct.len() == scenarios.len()

@@ -141,7 +141,7 @@ pub fn b0_message_id_matches_the_golden_vectors() {
         let hex = got.iter().map(|b| format!("{b:02x}")).collect::<String>();
         let ok = hex == expected;
         all &= ok;
-        note(
+        check(
             &format!("sequence {sequence} matches the frozen vector"),
             ok,
         );
@@ -305,8 +305,8 @@ pub async fn b1_distinct_mesh_ids() {
             .behaviour_mut()
             .gossipsub
             .publish(topic.clone(), envelope.clone());
-        note("first publish accepted locally", a.is_ok());
-        note("second publish accepted locally", b.is_ok());
+        check("first publish accepted locally", a.is_ok());
+        check("second publish accepted locally", b.is_ok());
 
         pump(&mut nodes, Duration::from_secs(3), &mut received).await;
     }
@@ -431,10 +431,10 @@ pub async fn b2_authenticity_before_cache() {
             .behaviour_mut()
             .gossipsub
             .publish(topic.clone(), control_payload.clone());
-        note("control publish accepted", control.is_ok());
+        check("control publish accepted", control.is_ok());
         let mut control_seen = Vec::new();
         pump(&mut nodes, Duration::from_secs(2), &mut control_seen).await;
-        note(
+        check(
             "control delivered to the strict receiver",
             !deliveries(&control_seen, 0, &control_payload).is_empty(),
         );
@@ -447,7 +447,7 @@ pub async fn b2_authenticity_before_cache() {
             .behaviour_mut()
             .gossipsub
             .publish(topic.clone(), payload.clone());
-        note("forged publish accepted by its own node", forged.is_ok());
+        check("forged publish accepted by its own node", forged.is_ok());
         pump(&mut nodes, Duration::from_secs(2), &mut after_forgery).await;
         // THE EVIDENCE THAT IT ARRIVED. A permissive receiver on the same
         // mesh delivering the forged message proves it left the forger
@@ -463,7 +463,7 @@ pub async fn b2_authenticity_before_cache() {
         // otherwise be counted as if it were the forged message and
         // the verdict below would pass without the contested payload
         // ever having arrived at all.
-        note(
+        check(
             "forged message delivered to the PERMISSIVE receiver",
             !deliveries(&after_forgery, 3, &payload).is_empty(),
         );
@@ -472,7 +472,7 @@ pub async fn b2_authenticity_before_cache() {
             .behaviour_mut()
             .gossipsub
             .publish(topic.clone(), payload.clone());
-        note("genuine publish accepted by its own node", genuine.is_ok());
+        check("genuine publish accepted by its own node", genuine.is_ok());
         pump(&mut nodes, Duration::from_secs(3), &mut after_genuine).await;
     }
 
@@ -520,11 +520,11 @@ pub async fn b2_authenticity_before_cache() {
     // delivered can only be the genuine publication.
     let strict_got_exactly_the_genuine_one =
         strict_all.len() == 1 && strict_seqs[0].is_some() && strict_seqs[0] != forged_seq;
-    note(
+    check(
         "forgery reached a receive path",
         forgery_reached_a_receive_path,
     );
-    note(
+    check(
         "strict delivered exactly one, and it is not the forgery",
         strict_got_exactly_the_genuine_one,
     );
