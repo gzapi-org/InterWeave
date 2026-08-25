@@ -265,10 +265,14 @@ where
     /// exists to be. One element past the limit is enough to know, and
     /// it is the only element past the limit this ever holds.
     ///
-    /// Each address is also length-checked as it arrives rather than
-    /// after the set is built: `MAX_ADDRESSES * MAX_ADDRESS_BYTES` is
-    /// the ceiling this imposes, and without the per-element check a
-    /// single enormous string inside a legal-length array is unbounded.
+    /// Each address is length-checked BEFORE it is materialized, not
+    /// after: `next_element::<String>` allocates and parses the whole
+    /// value first, so a check on the result rejects it while the
+    /// memory has already been taken -- the same collect-then-count
+    /// mistake as the array itself, one level down. `BoundedAddress`
+    /// refuses inside `visit_str`, so `MAX_ADDRESSES * MAX_ADDRESS_BYTES`
+    /// is a bound on what this can be made to hold rather than on what
+    /// it will keep.
     struct Bounded;
 
     impl<'de> serde::de::Visitor<'de> for Bounded {
@@ -287,17 +291,11 @@ where
             // COUNTED, not measured by the set. Duplicates collapse, and
             // the ceiling is on the array that was sent.
             let mut count = 0_usize;
-            while let Some(address) = seq.next_element::<String>()? {
+            while let Some(BoundedAddress(address)) = seq.next_element::<BoundedAddress>()? {
                 count = count.saturating_add(1);
                 if count > MAX_ADDRESSES {
                     return Err(A::Error::custom(format!(
                         "at most {MAX_ADDRESSES} addresses, got more"
-                    )));
-                }
-                if address.len() > MAX_ADDRESS_BYTES {
-                    return Err(A::Error::custom(format!(
-                        "address must be at most {MAX_ADDRESS_BYTES} bytes, got {}",
-                        address.len()
                     )));
                 }
                 out.insert(address);
@@ -310,6 +308,48 @@ where
     }
 
     deserializer.deserialize_seq(Bounded)
+}
+
+/// One address, refused before it is owned.
+///
+/// `String`'s own `Deserialize` allocates whatever arrives and hands it
+/// over; a length check after that has already paid for the input it
+/// rejects. This refuses inside the visitor, where the value is still
+/// borrowed from the deserializer and nothing of ours holds it.
+struct BoundedAddress(String);
+
+impl<'de> Deserialize<'de> for BoundedAddress {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Bounded;
+
+        impl serde::de::Visitor<'_> for Bounded {
+            type Value = BoundedAddress;
+
+            fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                write!(f, "an address of at most {MAX_ADDRESS_BYTES} bytes")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                if value.len() > MAX_ADDRESS_BYTES {
+                    return Err(E::custom(format!(
+                        "address must be at most {MAX_ADDRESS_BYTES} bytes, got {}",
+                        value.len()
+                    )));
+                }
+                Ok(BoundedAddress(value.to_owned()))
+            }
+
+            /// A deserializer that already owns the buffer hands it over
+            /// here. Checking before taking it means the owned value is
+            /// dropped rather than kept, which is the most this side can
+            /// do once the other side has allocated.
+            fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
+                self.visit_str(&value)
+            }
+        }
+
+        deserializer.deserialize_str(Bounded)
+    }
 }
 
 /// Read the wire array of observations, judge it, then collect.
@@ -996,6 +1036,26 @@ mod tests {
         // string inside a short array is unbounded input the array
         // ceiling never sees. Checked per element as it arrives.
         let huge = "/ip4/192.0.2.1/tcp/".to_owned() + &"9".repeat(MAX_ADDRESS_BYTES);
+        let json = format!(
+            r#"{{"peer_id":"{P1}","addresses":["{huge}"],"source":"mdns","observed_at":1}}"#
+        );
+        let error = serde_json::from_str::<CandidatePeer>(&json)
+            .expect_err("an over-long address is refused");
+        assert!(
+            error.to_string().contains("bytes"),
+            "refused for its length: {error}"
+        );
+    }
+
+    #[test]
+    fn an_enormous_address_is_refused_before_it_is_owned() {
+        // `next_element::<String>` allocates and parses the whole value
+        // before any check on the result can run, so a length check
+        // afterwards rejects input it has already paid for -- the same
+        // collect-then-count mistake as the array itself, one level
+        // down. Far past the limit, so the two are distinguishable in
+        // cost even though both refuse.
+        let huge = "/ip4/192.0.2.1/tcp/".to_owned() + &"9".repeat(MAX_ADDRESS_BYTES * 100);
         let json = format!(
             r#"{{"peer_id":"{P1}","addresses":["{huge}"],"source":"mdns","observed_at":1}}"#
         );

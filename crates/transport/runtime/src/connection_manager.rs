@@ -1180,6 +1180,23 @@ impl ConnectionManager {
         self.retries.remove(peer);
     }
 
+    /// Take the claim back, for a scheduler tick that released one and
+    /// then started a later candidate anyway.
+    ///
+    /// A scheduled retry with several addresses can have an early one
+    /// fail SYNCHRONOUSLY -- an address this profile cannot dial at all
+    /// -- which settles that ticket and releases the claim, while the
+    /// tick goes on to start a later candidate successfully. The peer
+    /// would then have a dial in flight AND an unclaimed, already-due
+    /// entry, so the next tick would dial it again: the duplicate
+    /// concurrent retry that claiming exists to prevent, reached
+    /// through the one path that settles mid-loop.
+    pub fn reclaim_retry(&mut self, peer: &TransportIdentity) {
+        if let Some(entry) = self.retries.get_mut(peer) {
+            entry.claimed = true;
+        }
+    }
+
     /// Give up a claim without touching WHY it was due. Used when
     /// admission itself refused the scheduled dial for a reason that
     /// may already have cleared by the next tick -- a resource ceiling,
@@ -1549,6 +1566,57 @@ mod tests {
         m.record_authorization_withdrawn(claimed, 30_000);
 
         assert_eq!(m.scheduled_retries(), 0, "the entry is gone, not stranded");
+    }
+
+    #[test]
+    fn a_later_candidate_starting_takes_the_claim_back() {
+        // A scheduled retry with several addresses can have an early
+        // one fail SYNCHRONOUSLY -- an address this profile cannot dial
+        // at all -- which settles that ticket and releases the claim
+        // while the same tick goes on to start a later candidate. The
+        // peer would then have a dial in flight AND an unclaimed,
+        // already-due entry, so the next tick dials it again: the
+        // duplicate concurrent retry claiming exists to prevent,
+        // reached through the one path that settles mid-loop.
+        let mut m = manager(8);
+        let unusable = "/ip4/10.0.0.2/tcp/1";
+        let good = "/ip4/10.0.0.1/tcp/1";
+        assert!(m.learn_address(&peer(P1), unusable, 0));
+        assert!(m.learn_address(&peer(P1), good, 0));
+
+        let t = m
+            .handle()
+            .admit(&request_at(P1, good, DialOrigin::Manual), 0)
+            .expect("admitted");
+        m.record_failure(t, 0);
+        assert_eq!(m.take_due_retries(30_000, 8), vec![peer(P1)]);
+
+        // The tick's first candidate fails synchronously and releases.
+        let first = m
+            .handle()
+            .admit(
+                &request_at(P1, unusable, DialOrigin::ConnectionManager),
+                30_000,
+            )
+            .expect("admitted");
+        m.record_permanent_failure(first, 30_000);
+        assert_eq!(
+            m.take_due_retries(30_000, 8),
+            vec![peer(P1)],
+            "released, as the mid-loop settle requires"
+        );
+        // Put it back as the loop found it, then start a later one.
+        m.release_retry_claim(&peer(P1));
+        let _second = m
+            .handle()
+            .admit(&request_at(P1, good, DialOrigin::ConnectionManager), 30_000)
+            .expect("admitted");
+        m.reclaim_retry(&peer(P1));
+
+        assert!(
+            m.take_due_retries(30_000, 8).is_empty(),
+            "a dial is in flight, so the next tick must not start another"
+        );
     }
 
     #[test]

@@ -556,6 +556,16 @@ impl SwarmRuntime {
                                         // record_permanent_failure will
                                         // settle it when the outcome
                                         // arrives.
+                                        //
+                                        // RECLAIMED, because an earlier
+                                        // candidate in this same loop
+                                        // may have failed synchronously
+                                        // and released the claim on the
+                                        // way past. Leaving it released
+                                        // with a dial in flight lets the
+                                        // next tick start a second one
+                                        // for the same peer.
+                                        manager.reclaim_retry(&peer);
                                         ticketed = true;
                                         last = None;
                                         break;
