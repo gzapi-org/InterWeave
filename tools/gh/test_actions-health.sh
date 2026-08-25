@@ -22,6 +22,30 @@ UNDER_TEST="$SCRIPT_DIR/actions-health.sh"
 command -v jq >/dev/null 2>&1 || { echo "test: jq required" >&2; exit 1; }
 
 failures=0
+
+# A SELF-TEST CANNOT CATCH AN ASSERTION IT NEVER RAN.
+#
+# `assert_containss "…" "…"` — a typo, a helper renamed, a helper that
+# only ever existed in a sibling suite — is not an error under
+# `set -uo pipefail`. bash prints "command not found" to stderr, nothing
+# here reads it, and the case asserts NOTHING while the run reports OK.
+# This repository shipped two assertions doing exactly that (5f2c0c9),
+# and they were found by reading, which is not a mechanism.
+#
+# bash runs `command_not_found_handle` in a SUBSHELL, so incrementing
+# `failures` from inside it is discarded when that subshell exits: the
+# handler would print its complaint and the suite would still exit 0 —
+# a vacuous guard against vacuous assertions. A FILE survives the
+# subshell, so the marker is a file.
+#
+# The script under test runs as a separate `bash` process, so none of
+# this reaches it or masks a genuine missing-command path there.
+GUARD_MARKER="$(mktemp)"
+command_not_found_handle() {
+    printf '%s\n' "$1" >> "$GUARD_MARKER"
+    echo "  ✗ self-test bug: called '$1', which this suite does not define" >&2
+    return 127
+}
 SANDBOX=""
 cleanup() { [[ -n "$SANDBOX" && -d "$SANDBOX" ]] && rm -rf "$SANDBOX"; }
 trap cleanup EXIT
@@ -38,6 +62,10 @@ assert_contains() {
     if [[ "$RUN_OUT" == *"$2"* ]]; then pass "$1"
     else fail "$1 — output lacked '$2'" "$RUN_OUT"; fi
 }
+assert_lacks() {
+    if [[ "$RUN_OUT" != *"$2"* ]]; then pass "$1"
+    else fail "$1 — output unexpectedly contained '$2'" "$RUN_OUT"; fi
+}
 
 SANDBOX="$(mktemp -d)"
 mkdir -p "$SANDBOX/bin" "$SANDBOX/state"
@@ -47,6 +75,12 @@ cat > "$SANDBOX/bin/curl" <<'CURLMOCK'
 #!/usr/bin/env bash
 set -uo pipefail
 [[ -f "$MOCK_STATE/status_unreachable" ]] && exit 7
+# REACHED BUT NOT THE SCHEMA. A captive portal answers 200 with an HTML
+# login page, so `curl -fsS` succeeds and the body is nonempty — the
+# exact shape that made the script claim it had read GitHub's status.
+if [[ -f "$MOCK_STATE/status_garbage" ]]; then
+  printf '<html><body>Sign in to the network</body></html>\n'; exit 0
+fi
 status="$(cat "$MOCK_STATE/actions_status" 2>/dev/null || echo operational)"
 incident="$(cat "$MOCK_STATE/incident" 2>/dev/null || true)"
 printf '{"components":[{"name":"Actions","status":"%s"}],"incidents":[' "$status"
@@ -64,7 +98,11 @@ if [[ "${1:-}" == "api" ]]; then
   [[ -f "$MOCK_STATE/billing_unreadable" ]] && exit 1
   net="$(cat "$MOCK_STATE/billing_net" 2>/dev/null || echo 0)"
   mins="$(cat "$MOCK_STATE/billing_mins" 2>/dev/null || echo 100)"
-  printf '{"usageItems":[{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":%s,"netAmount":%s}]}\n' "$mins" "$net"
+  # A second Actions line billed in a DIFFERENT unit. Storage is an
+  # Actions charge that is not runner minutes, and summing netAmount
+  # across the product read it as minute overage.
+  stor="$(cat "$MOCK_STATE/billing_storage_net" 2>/dev/null || echo 0)"
+  printf '{"usageItems":[{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":%s,"netAmount":%s},{"product":"actions","sku":"Actions Storage","unitType":"GigabyteHours","quantity":10,"netAmount":%s}]}\n' "$mins" "$net" "$stor"
   exit 0
 fi
 exit 1
@@ -112,14 +150,60 @@ assert_contains "names the status"       "major_outage"
 assert_contains "names the incident"     "Incident with Actions"
 assert_contains "says not to spend"      "do not spend minutes"
 
-echo "actions-health: a spent allowance stops the work"
+echo "actions-health: billed overage is a COST, not a block"
+# Money moving proves runners are still being SERVED — an organisation
+# that purchases overage bills and keeps handing them out. Calling that
+# "green code will not merge" halted work on exactly the plan where
+# nothing was wrong. It is degraded, because every further minute costs;
+# it is not a block, and the message must not say it is.
 reset
 printf '13.35\n' > "$SANDBOX/state/billing_net"
 printf '3200\n'  > "$SANDBOX/state/billing_mins"
 invoke
-assert_rc       "exits 1"                1
-assert_contains "names the allowance"    "allowance is spent"
-assert_contains "quotes the usage"       "3200 minutes used"
+assert_rc       "exits 1 — this is expensive"        1
+assert_contains "quotes the usage"                   "3200 minutes used"
+assert_contains "names it as overage"                "billing as overage"
+assert_contains "and says it blocks nothing"         "blocks nothing"
+assert_lacks    "never claims work has stopped"      "will not merge"
+
+# Same, with the allowance configured: past the limit AND billed is the
+# expensive case; past the limit and NOT billed is the blocking one.
+reset
+printf '13.35\n' > "$SANDBOX/state/billing_net"
+printf '3200\n'  > "$SANDBOX/state/billing_mins"
+invoke_with 3000
+assert_rc       "exits 1"                            1
+assert_contains "names it as overage"                "billing as overage"
+assert_lacks    "and not as a stoppage"              "Nothing will merge"
+
+echo "actions-health: Actions STORAGE is not runner overage"
+# `mins` filters on unitType; `net` summed netAmount across the whole
+# product. A billed storage line therefore read as "overage is being
+# paid for, runners are fine" while minute runners had actually stopped
+# — the plan-does-not-buy-overage block, silently inverted.
+reset
+printf '0\n'     > "$SANDBOX/state/billing_net"
+printf '9.99\n'  > "$SANDBOX/state/billing_storage_net"
+printf '3025\n'  > "$SANDBOX/state/billing_mins"
+invoke_with 3000
+assert_rc       "still exits 1"                      1
+assert_contains "and names the real cause"           "not buying overage"
+assert_lacks    "not the storage charge"             "billing as overage"
+
+echo "actions-health: billed minutes are named even with allowance to spare"
+# MONEY CAN MOVE WHILE THE ALLOWANCE HAS ROOM. A separately billable
+# runner sku does exactly that. Checking `m >= i` first let this fall
+# through to the OK line, so the script told a caller to go ahead
+# without mentioning that every further minute costs — the one thing the
+# billed semantics exist to say.
+reset
+printf '7.50\n' > "$SANDBOX/state/billing_net"
+printf '100\n'  > "$SANDBOX/state/billing_mins"
+invoke_with 3000
+assert_rc       "billed under the allowance is still degraded" 1
+assert_contains "  and says money is moving"                   "is billing"
+assert_contains "  while naming the room that remains"         "100 of 3000"
+assert_lacks    "  and does not report plain OK"               "remaining."
 
 echo "actions-health: a spent allowance is caught even when NOTHING is billed"
 # The regression that motivated the setting. On 2026-08-07 the org sat at
@@ -176,6 +260,28 @@ invoke
 assert_rc       "exits 2, not 1"         2
 assert_contains "says health is unknown" "health unknown"
 
+echo "actions-health: reached is not understood"
+# A captive portal answers 200 with an HTML login page: `curl -fsS`
+# succeeds, the body is nonempty, and nothing in it is GitHub's status.
+# Marking the source reachable on the BODY alone meant a script that had
+# learned nothing reported "Actions operational" whenever billing was
+# also unreadable — the health-unknown case wearing a green answer, from
+# the one tool whose job is deciding whether a run is worth spending.
+reset
+: > "$SANDBOX/state/status_garbage"
+: > "$SANDBOX/state/billing_unreadable"
+invoke
+assert_rc       "an unparseable status is not a readable one" 2
+assert_contains "says health is unknown"                      "health unknown"
+
+# The same body with billing READABLE must still not claim a status it
+# never read: the allowance answer is real, the Actions verdict is not.
+reset
+: > "$SANDBOX/state/status_garbage"
+invoke
+assert_rc       "the allowance answer still stands"    0
+assert_contains "but Actions health is not claimed"    "Actions health unread"
+
 echo "actions-health: a readable status with unreadable billing still answers"
 reset
 : > "$SANDBOX/state/billing_unreadable"
@@ -198,6 +304,17 @@ assert_rc       "unknown option exits 2" 2
 invoke --org
 assert_rc       "--org needs a value"    2
 
+
+# Consulted BEFORE the pass/fail summary: a suite whose assertions never
+# ran has not passed, whatever its counter says.
+if [[ -s "$GUARD_MARKER" ]]; then
+    echo "test_actions-health: FAILED — called $(sort -u "$GUARD_MARKER" | wc -l | tr -d " ") command(s) this suite does not define:" >&2
+    sort -u "$GUARD_MARKER" | sed 's/^/      /' >&2
+    echo "      Those assertions did not run. Exit 0 would have been a lie." >&2
+    rm -f "$GUARD_MARKER"
+    exit 1
+fi
+rm -f "$GUARD_MARKER"
 echo
 if [[ "$failures" -eq 0 ]]; then
     echo "test_actions-health: OK — all assertions passed."

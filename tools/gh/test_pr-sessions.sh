@@ -41,6 +41,30 @@ command -v jq >/dev/null 2>&1 || {
     echo "test: jq is required to run these tests." >&2; exit 1; }
 
 failures=0
+
+# A SELF-TEST CANNOT CATCH AN ASSERTION IT NEVER RAN.
+#
+# `assert_containss "…" "…"` — a typo, a helper renamed, a helper that
+# only ever existed in a sibling suite — is not an error under
+# `set -uo pipefail`. bash prints "command not found" to stderr, nothing
+# here reads it, and the case asserts NOTHING while the run reports OK.
+# This repository shipped two assertions doing exactly that (5f2c0c9),
+# and they were found by reading, which is not a mechanism.
+#
+# bash runs `command_not_found_handle` in a SUBSHELL, so incrementing
+# `failures` from inside it is discarded when that subshell exits: the
+# handler would print its complaint and the suite would still exit 0 —
+# a vacuous guard against vacuous assertions. A FILE survives the
+# subshell, so the marker is a file.
+#
+# The script under test runs as a separate `bash` process, so none of
+# this reaches it or masks a genuine missing-command path there.
+GUARD_MARKER="$(mktemp)"
+command_not_found_handle() {
+    printf '%s\n' "$1" >> "$GUARD_MARKER"
+    echo "  ✗ self-test bug: called '$1', which this suite does not define" >&2
+    return 127
+}
 SANDBOX=""
 
 cleanup() { [[ -n "$SANDBOX" && -d "$SANDBOX" ]] && rm -rf "$SANDBOX"; }
@@ -162,17 +186,29 @@ assert_not_contains() {
 write_pr_list() { printf '%s\n' "$1" > "$SANDBOX/fixtures/pr-list.json"; }
 write_graphql() { printf '%s\n' "$1" > "$SANDBOX/fixtures/graphql.json"; }
 
+# Every fixture timestamp is RELATIVE, and that is not tidiness.
+#
+# `/lastDate:<N>` resolves its cutoff from the real clock, so a fixture
+# with a literal `updatedAt` is a test whose verdict depends on the day
+# it runs. These rows were pinned to 2026-08-04..09 under a 99-day
+# window, which meant the `/lastDate:99d` case below stopped matching on
+# 2026-11-13 — and this suite is a required check that also runs on
+# merge_group, so the first symptom would have been every queued PR in
+# the repository blocking at once, with nothing in any diff to explain
+# it. A relative fixture cannot age out.
+ago() { date -u -d "$1 ago" +%Y-%m-%dT%H:%M:%SZ; }
+
 # Three PRs: two this clone's, one another session's.
 default_pr_list() {
-    write_pr_list "$(jq -n --arg me "$ME" --arg other "$OTHER" '[
+    write_pr_list "$(jq -n --arg me "$ME" --arg other "$OTHER" \
+      --arg t30 "$(ago '1 hour')" --arg t29 "$(ago '2 hours')" \
+      --arg t28 "$(ago '3 hours')" '[
       {number: 30, state: "OPEN",   headRefName: ($me    + "/feat/alpha"),
-       title: "alpha", updatedAt: "2026-08-06T10:00:00Z", isDraft: false, mergedAt: null},
+       title: "alpha", updatedAt: $t30, isDraft: false, mergedAt: null},
       {number: 29, state: "MERGED", headRefName: ($other + "/fix/beta"),
-       title: "beta",  updatedAt: "2026-08-05T10:00:00Z", isDraft: false,
-       mergedAt: "2026-08-05T11:00:00Z"},
+       title: "beta",  updatedAt: $t29, isDraft: false, mergedAt: $t29},
       {number: 28, state: "MERGED", headRefName: ($me    + "/docs/gamma"),
-       title: "gamma", updatedAt: "2026-08-04T10:00:00Z", isDraft: false,
-       mergedAt: "2026-08-04T11:00:00Z"}
+       title: "gamma", updatedAt: $t28, isDraft: false, mergedAt: $t28}
     ]')"
 }
 
@@ -184,18 +220,17 @@ default_pr_list() {
 # they vanished — so `/unresolved` answered "nothing outstanding" while
 # nine PRs and an unanswered P1 sat outside the filter.
 typed_pr_list() {
-    write_pr_list "$(jq -n --arg me "$ME" '[
+    write_pr_list "$(jq -n --arg me "$ME" \
+      --arg t40 "$(ago '1 hour')"  --arg t39 "$(ago '2 hours')" \
+      --arg t38 "$(ago '3 hours')" --arg t37 "$(ago '4 hours')" '[
       {number: 40, state: "MERGED", headRefName: ($me + "/stage-4/libp2p-substrate"),
-       title: "substrate", updatedAt: "2026-08-09T10:00:00Z", isDraft: false,
-       mergedAt: "2026-08-09T11:00:00Z"},
+       title: "substrate", updatedAt: $t40, isDraft: false, mergedAt: $t40},
       {number: 39, state: "MERGED", headRefName: ($me + "/conformance/negative-boundary"),
-       title: "conformance", updatedAt: "2026-08-08T10:00:00Z", isDraft: false,
-       mergedAt: "2026-08-08T11:00:00Z"},
+       title: "conformance", updatedAt: $t39, isDraft: false, mergedAt: $t39},
       {number: 38, state: "OPEN", headRefName: ($me + "/spike-006/identity"),
-       title: "spike", updatedAt: "2026-08-07T10:00:00Z", isDraft: false, mergedAt: null},
+       title: "spike", updatedAt: $t38, isDraft: false, mergedAt: null},
       {number: 37, state: "OPEN", headRefName: "no-slashes-at-all",
-       title: "unattributable", updatedAt: "2026-08-06T10:00:00Z", isDraft: false,
-       mergedAt: null}
+       title: "unattributable", updatedAt: $t37, isDraft: false, mergedAt: null}
     ]')"
 }
 
@@ -253,11 +288,11 @@ truncated_graphql() {
 # the script takes its early "no PRs" exit — the path that used to skip
 # the disclosure entirely and print a reassuring answer instead.
 all_unattributable_pr_list() {
-    write_pr_list "$(jq -n '[
+    write_pr_list "$(jq -n --arg t51 "$(ago '1 hour')" --arg t50 "$(ago '2 hours')" '[
       {number: 51, state: "OPEN", headRefName: "no-slashes-at-all",
-       title: "a", updatedAt: "2026-08-09T10:00:00Z", isDraft: false, mergedAt: null},
+       title: "a", updatedAt: $t51, isDraft: false, mergedAt: null},
       {number: 50, state: "OPEN", headRefName: "dependabot/cargo/serde-1.2.3",
-       title: "b", updatedAt: "2026-08-08T10:00:00Z", isDraft: false, mergedAt: null}
+       title: "b", updatedAt: $t50, isDraft: false, mergedAt: null}
     ]')"
 }
 
@@ -265,11 +300,12 @@ all_unattributable_pr_list() {
 # `/lastItem:1` narrows the pool to the newest alone, so the older row
 # was never in the requested set and nothing omitted it.
 pooled_pr_list() {
-    write_pr_list "$(jq -n --arg me "$ME" '[
+    write_pr_list "$(jq -n --arg me "$ME" \
+      --arg t50 "$(ago '1 hour')" --arg t49 "$(ago '2 hours')" '[
       {number: 50, state: "OPEN", headRefName: ($me + "/fix/newest"),
-       title: "newest", updatedAt: "2026-08-09T10:00:00Z", isDraft: false, mergedAt: null},
+       title: "newest", updatedAt: $t50, isDraft: false, mergedAt: null},
       {number: 49, state: "OPEN", headRefName: "no-slashes-at-all",
-       title: "older", updatedAt: "2026-08-08T10:00:00Z", isDraft: false, mergedAt: null}
+       title: "older", updatedAt: $t49, isDraft: false, mergedAt: null}
     ]')"
 }
 
@@ -375,6 +411,50 @@ run /all /lastDate:99d
 assert_rc       "/lastDate accepts <N>d" 0
 assert_contains "keeps PRs in the window" "#30"
 
+# A TIGHT window, which is what keeps the fixtures honest.
+#
+# A 99-day window admits a pinned date for 99 days after it is written,
+# so it cannot tell a relative fixture from one that is quietly ageing
+# out — the literal rows this suite used to carry sat comfortably inside
+# it for three months before the day they would have started failing a
+# required check on merge_group. A two-hour window is outside a pinned
+# date's reach within two hours of anyone writing one, so reintroducing
+# one fails here almost at once rather than on a date nobody wrote down.
+#
+# #30 sits one hour back, so the margin here is a full hour; the rows at
+# two and three hours straddle the cutoff and are deliberately not
+# asserted on.
+run /all /lastDate:2h
+assert_rc       "/lastDate:2h exits 0" 0
+assert_contains "fixtures are recent enough for a tight window" "#30"
+
+echo "pr-sessions: /unresolved honours an explicit /lastItem"
+# The candidate cap of 100 was applied as the FINAL slice, after
+# /lastItem had already narrowed the pool — so `/lastItem:150
+# /unresolved` queried the newest 100 and never asked about rows
+# 101-150. The caller named a number and silently got a different one.
+#
+# 150 rows; every one has a RESOLVED thread except the oldest, #151. If
+# the cap still wins, #151 is never queried and never reported — and
+# `/unresolved` is exactly the command a session trusts to say that
+# nothing is outstanding.
+write_pr_list "$(jq -n --arg me "$ME" --arg t "$(ago '1 hour')" '[range(150) | {
+  number: (300 - .), state: "MERGED", headRefName: ($me + "/feat/p\(.)"),
+  title: "p", updatedAt: $t, isDraft: false, mergedAt: $t}]')"
+write_graphql "$(jq -n '{data: {repository: (
+  [range(150) | {key: ("p" + ((300 - .) | tostring)),
+                 value: {number: (300 - .), author: {login: "andreabenetton"},
+                         reviewThreads: {pageInfo: {hasNextPage: false}, nodes: [
+                           {isResolved: ((300 - .) != 151),
+                            comments: {nodes: [{author: {login: "some-reviewer"}}]}}
+                         ]}}}] | from_entries)}}')"
+run /all -n 200 /lastItem:150 /unresolved
+assert_rc           "exits 0" 0
+assert_contains     "queries past the 100-row cap"     "#151"
+assert_not_contains "and still drops the resolved ones" "#300"
+
+default_pr_list; default_graphql
+
 echo "pr-sessions: malformed pool filters are refused"
 run /lastItem:0
 assert_rc       "/lastItem:0 exits 2" 2
@@ -436,13 +516,15 @@ assert_rc       "non-numeric limit exits 2" 2
 assert_contains "names the expectation" "positive integer"
 
 echo "pr-sessions: bot branches are not attributed to a session"
-write_pr_list "$(jq -n --arg me "$ME" '[
+write_pr_list "$(jq -n --arg me "$ME" \
+  --arg t40 "$(ago '1 hour')" --arg t41 "$(ago '2 hours')" \
+  --arg t42 "$(ago '3 hours')" '[
   {number: 40, state: "OPEN", headRefName: "dependabot/github_actions/actions-minor-patch-5c7bcdc794",
-   title: "bump", updatedAt: "2026-08-06T10:00:00Z", isDraft: false, mergedAt: null},
+   title: "bump", updatedAt: $t40, isDraft: false, mergedAt: null},
   {number: 41, state: "OPEN", headRefName: "dependabot/cargo/crates/interweave-core/tokio-minor-patch-04e2",
-   title: "bump", updatedAt: "2026-08-06T09:00:00Z", isDraft: false, mergedAt: null},
+   title: "bump", updatedAt: $t41, isDraft: false, mergedAt: null},
   {number: 42, state: "OPEN", headRefName: ($me + "/feat/real"),
-   title: "real", updatedAt: "2026-08-06T08:00:00Z", isDraft: false, mergedAt: null}
+   title: "real", updatedAt: $t42, isDraft: false, mergedAt: null}
 ]')"
 write_graphql "$(jq -n '{data: {repository: {
   p40: {number: 40, author: {login: "app/dependabot"}, reviewThreads: {nodes: []}},
@@ -506,9 +588,9 @@ fi
 echo "pr-sessions: a full /lastDate page warns that the window may be short"
 # The warning fires when the fetch came back full, so the fixture has to
 # fill the derived 200-row page.
-write_pr_list "$(jq -n --arg me "$ME" '[range(200) | {
+write_pr_list "$(jq -n --arg me "$ME" --arg t "$(ago '1 hour')" '[range(200) | {
   number: (500 - .), state: "OPEN", headRefName: ($me + "/feat/w\(.)"),
-  title: "w", updatedAt: "2026-08-06T10:00:00Z", isDraft: false, mergedAt: null}]')"
+  title: "w", updatedAt: $t, isDraft: false, mergedAt: null}]')"
 # -n 10 puts the derived fetch at its 200 floor, which the fixture fills
 # exactly.
 run /all -n 10 /lastDate:99d --no-threads
@@ -579,6 +661,17 @@ assert_rc           "exits 0" 0
 assert_contains     "the pooled row is listed"                "#50"
 assert_not_contains "and nothing outside the pool is claimed" "cannot be scoped"
 
+
+# Consulted BEFORE the pass/fail summary: a suite whose assertions never
+# ran has not passed, whatever its counter says.
+if [[ -s "$GUARD_MARKER" ]]; then
+    echo "test_pr-sessions: FAILED — called $(sort -u "$GUARD_MARKER" | wc -l | tr -d " ") command(s) this suite does not define:" >&2
+    sort -u "$GUARD_MARKER" | sed 's/^/      /' >&2
+    echo "      Those assertions did not run. Exit 0 would have been a lie." >&2
+    rm -f "$GUARD_MARKER"
+    exit 1
+fi
+rm -f "$GUARD_MARKER"
 echo
 if [[ "$failures" -eq 0 ]]; then
     echo "test_pr-sessions: OK — all assertions passed."

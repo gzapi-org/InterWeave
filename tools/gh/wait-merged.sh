@@ -270,18 +270,26 @@ head_sha_has_no_run() {
 # $INTERWEAVE_ACTIONS_INCLUDED_MINUTES, set in .claude/settings.json. No plan
 # size is hardcoded anywhere in this repo.
 #
-# netAmount > 0 is still checked, but it is NOT sufficient — and this
-# function relied on it alone until 2026-08-07. A non-zero net means
-# overage is actually being BILLED, which only happens on a plan that
-# purchases overage. A plan that does not is never billed: GitHub simply
-# stops handing out runners while net stays 0. On this repo's plan that
-# made the allowance branch of exit 6 unreachable, so the one state it
-# existed to name could never be named. Usage-against-limit is the check
-# that fires there, and it needs the setting.
+# BILLED OVERAGE IS NOT A STALL, and this function said it was. A
+# positive netAmount means usage is being billed after discounts, which
+# is what a plan that PURCHASES overage looks like while it happily keeps
+# handing out runners — so returning success there made `diagnose_stall`
+# exit 6 claiming green code cannot merge, about an organisation where
+# nothing was wrong.
 #
-# `netAmount: 0` therefore means nothing is being billed — never that the
-# allowance is intact. Same correction actions-health.sh took the same
-# day; the two now agree.
+# The two facts point opposite ways: money moving proves runs are still
+# being SERVED. The plan that actually blocks is the one that never
+# bills, where net stays 0 while every job dies in seconds.
+#
+# So the stall is: past the configured allowance AND nothing billed.
+# `netAmount: 0` means nothing is being billed, never that the allowance
+# is intact — and the check reads the MINUTE sku, because a billed
+# Actions STORAGE line is not runner overage and summing the product
+# compared two different things.
+#
+# actions-health.sh reports the billed case as a COST rather than a
+# block; this is the same rule, and a watcher that disagreed with the
+# health tool about one billing response was the defect review found.
 actions_allowance_spent() {
     local owner usage net mins included
     included="${INTERWEAVE_ACTIONS_INCLUDED_MINUTES:-}"
@@ -290,9 +298,12 @@ actions_allowance_spent() {
     usage="$(gh api "/organizations/$owner/settings/billing/usage" 2>/dev/null)" || return 1
     [[ -n "$usage" ]] || return 1
 
-    net="$(jq -r '[.usageItems[]? | select(.product == "actions") | .netAmount] | add // 0' \
+    # THE MINUTE SKU, matching `mins` below. Summing netAmount across the
+    # whole product let a storage charge read as runner overage.
+    net="$(jq -r '[.usageItems[]? | select(.product == "actions" and (.unitType == "Minutes")) | .netAmount] | add // 0' \
         <<<"$usage" 2>/dev/null || echo 0)"
-    awk -v n="$net" 'BEGIN { exit !(n > 0) }' && return 0
+    # Billed: runners are being served. Not a stall, whatever else is true.
+    awk -v n="$net" 'BEGIN { exit !(n > 0) }' && return 1
 
     # No configured allowance: usage alone cannot say what is left, so
     # decline to guess rather than report a false "spent".
@@ -341,6 +352,10 @@ elapsed=0
 # registering a fresh push, without making the wait pointless.
 EMPTY_POLLS_BEFORE_DIAGNOSIS=3
 empty_polls=0
+# Polls where the required-checks lookup produced no readable JSON. Kept
+# separate from empty_polls because "no checks" and "could not tell" are
+# different answers, and only the first is a diagnosis.
+checks_unreadable=0
 
 note "watching #$PR (every ${INTERVAL}s, giving up after ${TIMEOUT}s)"
 
@@ -406,11 +421,29 @@ while true; do
         #     a failing required status would then be invisible and the
         #     watch would run to timeout. `bucket` normalises both.
         #
-        # gh exits non-zero when checks are failing or pending, which is
-        # a status here and not an error, so the exit code is discarded
-        # and an unreadable result simply means "nothing failing yet".
+        # gh exits non-zero when checks are FAILING or PENDING, which is
+        # a status here and not an error, so the exit code cannot tell
+        # those apart from "could not read". The OUTPUT can: a readable
+        # lookup is a JSON array, the empty one included.
+        #
+        # That distinction was missing, and "unreadable" silently became
+        # "nothing is failing yet" — the confident wrong answer, on the
+        # question this watch exists to answer. It also RESET the
+        # empty-poll counter, because unparseable output is not literally
+        # length 0, so the missing-run diagnosis could never fire either.
+        # A rate limit or a token expiry therefore bought a full-timeout
+        # watch that reported nothing and explained nothing.
         checks_json="$( { gh pr checks "$PR" --required --json name,bucket 2>/dev/null \
             || true; } )"
+        # Three ways this is not a readable answer, and EMPTY is the one
+        # that matters most: gh prints nothing at all on a rate limit or
+        # an expired token, and `jq` fed nothing emits nothing and exits
+        # 0 — so a `|| echo unreadable` fallback never fires. The result
+        # has to be positively confirmed as a number.
+        checks_len="$(printf '%s' "$checks_json" \
+            | jq -r 'if type == "array" then length else "unreadable" end' \
+            2>/dev/null)" || checks_len=""
+        [[ "$checks_len" =~ ^[0-9]+$ ]] || checks_len="unreadable"
         failing="$(printf '%s' "$checks_json" \
             | jq -r '[.[]? | select(.bucket == "fail" or .bucket == "cancel")
                       | .name] | join(", ")' 2>/dev/null || true)"
@@ -438,7 +471,41 @@ while true; do
                 verdict 3 "CLOSED WITHOUT MERGING — do not return to main" ;;
         esac
 
-        if [[ "$(printf '%s' "$checks_json" | jq -r 'length' 2>/dev/null || echo 1)" == "0" ]]; then
+        # A FACT ABOUT THIS PR OUTRANKS A DIAGNOSIS OF THE PLATFORM, for
+        # the same reason the terminal states above outrank both.
+        #
+        # A PR that conflicts with its base reports no required checks —
+        # there is nothing to run them on — so it feeds the empty-poll
+        # counter every poll, and when that trips it is told GitHub lost
+        # a webhook and to re-trigger the workflow. Re-triggering a
+        # conflicted PR does nothing; the actionable fact is that
+        # origin/main needs folding in. `diagnose_stall` exits without
+        # returning, so ordering is the whole fix.
+        #
+        # The race needs mergeability to still be UNKNOWN on the early
+        # polls — GitHub reports that while it computes — so that DIRTY
+        # only appears on the poll where the counter has already reached
+        # its threshold. A conflict visible from poll 1 wins in either
+        # order, which is why the test does not use one.
+        if [[ "$merge_state" == "DIRTY" ]]; then
+            verdict 5 "BLOCKED — conflicts with the base; fold origin/main in"
+        fi
+
+        # BLOCKED is the NORMAL state while checks run, so it is not by
+        # itself a reason to stop. What ends the watch is a check that
+        # has already concluded badly: waiting that out to the timeout
+        # would spend forty minutes to report nothing.
+        if [[ -n "$failing" ]]; then
+            verdict 5 "BLOCKED — these required checks failed: $failing"
+        fi
+
+        if [[ "$checks_len" == "unreadable" ]]; then
+            # Learned nothing, so NO counter moves. Incrementing would
+            # diagnose a missing run that may not be missing; resetting
+            # would credit a reading that never happened.
+            checks_unreadable=$(( checks_unreadable + 1 ))
+            note "#$PR: the required-checks lookup was unreadable (${checks_unreadable} so far)"
+        elif [[ "$checks_len" == "0" ]]; then
             empty_polls=$(( empty_polls + 1 ))
             if (( empty_polls >= EMPTY_POLLS_BEFORE_DIAGNOSIS )); then
                 note "#$PR has reported no required checks for $empty_polls polls; diagnosing"
@@ -446,19 +513,6 @@ while true; do
             fi
         else
             empty_polls=0
-        fi
-
-        # BLOCKED is the NORMAL state while checks run, so it is not by
-        # itself a reason to stop. What ends the watch is a PR that will
-        # not merge as it stands: a check that has already concluded
-        # badly, or a base conflict. Waiting either of those out to the
-        # timeout would spend forty minutes to report nothing, when the
-        # actionable fact was available in the first poll.
-        if [[ -n "$failing" ]]; then
-            verdict 5 "BLOCKED — these required checks failed: $failing"
-        fi
-        if [[ "$merge_state" == "DIRTY" ]]; then
-            verdict 5 "BLOCKED — conflicts with the base; fold origin/main in"
         fi
         [[ "$merge_state" == "BLOCKED" ]] && note "#$PR blocked, checks still pending"
     else
@@ -475,6 +529,9 @@ while true; do
         # the PR does not. Checks were reporting, so a missing run is not
         # among the possibilities here.
         diagnose_stall 0
+        if (( checks_unreadable > 0 )); then
+            verdict 4 "STILL OPEN after ${TIMEOUT}s — watch expired, state unknown; the required-checks lookup was unreadable on ${checks_unreadable} poll(s), so a failing check may simply never have been visible"
+        fi
         verdict 4 "STILL OPEN after ${TIMEOUT}s — watch expired, state unknown"
     fi
     # Never sleep past the deadline, and never cut the watch short of

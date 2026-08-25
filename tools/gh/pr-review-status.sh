@@ -51,6 +51,35 @@
 #                          answer once and exit, the original behaviour)
 #   --interval <duration>  between polls (default 30, as wait-merged.sh;
 #                          the API is rate limited and humans are slow)
+#   --automated-only       only a RECOGNISED reviewer's review counts as
+#                          coverage. Required by CLAUDE.md §9 before
+#                          arming --auto on a security-boundary change.
+#
+# WHY --automated-only EXISTS, and why the bare command does not satisfy
+# §9. "Not the PR author" is the right test for INDEPENDENCE and the
+# wrong test for a gate that is waiting on one named reviewer. This
+# repository is PUBLIC, so any GitHub user can submit a review object on
+# an open PR — and one drive-by review carrying the current head is
+# enough to make this command exit 0 and a session arm the merge the
+# gate exists to hold open. That is the same hole the verdict-comment
+# path already closes with an allow-list, for the reason stated there: a
+# negation is what lets everybody in.
+#
+# Under the flag the allow-list narrows THREE things together, because a
+# mode that narrows coverage and leaves the freshness terms reading a
+# different population answers a question nobody asked:
+#
+#   * which review objects cover the head;
+#   * which pending review REQUEST suppresses the exit-5 verdict, so a
+#     human reviewer being slow does not mask a bot review that is not
+#     coming;
+#   * whether any prior review exists at all, the "this is not a fresh
+#     PR" term.
+#
+# It is off by default because the unnarrowed question — was this PR
+# reviewed, by anyone — is a real question and a human review is a real
+# answer to it. Without the flag, coverage that rests only on an
+# unrecognised account is reported as such rather than passed off.
 #
 # Durations take an optional unit — 90, 90s, 10m, 2h. A bare number is
 # SECONDS, so anything written before units existed still means what it
@@ -74,7 +103,8 @@
 # describe the commit before it.
 #
 # Exit codes:
-#   0  the current head has at least one independent review
+#   0  the current head has at least one independent review (with
+#      --automated-only: one from a recognised reviewer)
 #   1  it does not — nothing yet, or --wait expired still waiting
 #   2  invocation problem (no gh, not authenticated, unknown PR)
 #   5  no review is COMING — the head advanced past the newest
@@ -90,6 +120,7 @@ REPO=""
 WAIT=0
 INTERVAL=30
 QUIET=0
+AUTOMATED_ONLY=0
 
 die() { echo "pr-review-status: $*" >&2; exit 2; }
 
@@ -135,6 +166,7 @@ while [[ $# -gt 0 ]]; do
         --interval)
             need_operand "$@"; INTERVAL="$(as_seconds "$1" "$2")" || exit 2
             want_positive "$1" "$INTERVAL" "$2"; shift 2 ;;
+        --automated-only) AUTOMATED_ONLY=1; shift ;;
         -q|--quiet) QUIET=1; shift ;;
         -h|--help)
             sed -n '/^# >>> help$/,/^# <<< help$/p' "$0" \
@@ -183,8 +215,26 @@ VERDICT_AUTHORS="${INTERWEAVE_VERDICT_AUTHORS:-[\"chatgpt-codex-connector\",\"ch
 probe_ok=0
 verdicts='[]'
 verdict_count=0
+request_at=""
+request_by=""
+request_pending=no
+# Set before the first probe runs. The progress line below prints
+# `${head:0:8}`, and under `set -u` an unset `head` is a fatal error --
+# so a run whose FIRST probe failed died mid-loop with "unbound
+# variable" and exit 1 instead of retrying and reporting exit 2, the
+# unreadable-PR contract. Reachable whenever --wait is long enough to
+# reach the second poll, which is every real invocation.
+head=""
 probe() {
     local meta reviews
+
+    # RESET, not just set on success. `probe_ok` is what the fall-out
+    # path below uses to decide whether it holds readable data, and a
+    # probe that reads the PR metadata and then fails on reviews leaves
+    # a NEW head beside the PREVIOUS poll's review counts. Left latched
+    # from an earlier success, that renders as a current report of a
+    # state that was never observed.
+    probe_ok=0
     meta="$(gh pr view "$PR" --repo "$REPO" \
         --json state,mergeStateStatus,headRefOid,author,isDraft,reviewRequests \
         2>/dev/null)" || return 1
@@ -193,7 +243,22 @@ probe() {
     state="$(jq -r '.state'              <<<"$meta")"
     mergest="$(jq -r '.mergeStateStatus'  <<<"$meta")"
     author="$(jq -r '.author.login'      <<<"$meta")"
-    requested="$(jq '.reviewRequests | length' <<<"$meta")"
+
+    # NARROWED BY THE MODE, exactly as `qualifying` is below.
+    #
+    # `requested` suppresses the exit-5 verdict, so under
+    # --automated-only a pending HUMAN reviewer would keep this command
+    # waiting and then reporting 1 about a bot review that is never
+    # coming. A mode that narrows coverage has to narrow whatever
+    # answers "is more coverage on its way", or the two terms are
+    # reading different populations.
+    if (( AUTOMATED_ONLY )); then
+        requested="$(jq --argjson allowed "$VERDICT_AUTHORS" \
+            '[.reviewRequests[]? | select((.login // .slug // "") as $l | $allowed | index($l))] | length' \
+            <<<"$meta")"
+    else
+        requested="$(jq '.reviewRequests | length' <<<"$meta")"
+    fi
 
     # PAGINATED, and a failure here is UNREADABLE — never empty. This
     # script's entire job is answering "was this really reviewed", so
@@ -212,7 +277,28 @@ probe() {
     independent="$(jq --arg a "$author" '[.[] | select(.user.login != $a)]' <<<"$reviews")"
     self="$(jq --arg a "$author" '[.[] | select(.user.login == $a)]' <<<"$reviews")"
 
+    # WHICH REVIEWS COUNT AS COVERAGE, which is a different question from
+    # which are independent.
+    #
+    # THIS REPOSITORY IS PUBLIC: any GitHub user may submit a review
+    # object on an open PR, so "not the PR author" admits a stranger.
+    # Under --automated-only a review only covers the head if it came
+    # from the same allow-list the verdict comments use, and for the same
+    # reason given there -- a negation is what lets everybody in.
+    #
+    # `recognised` is computed in BOTH modes, because the default mode
+    # still has to be able to say that the coverage it is reporting rests
+    # on an account nobody recognises.
+    recognised="$(jq --argjson allowed "$VERDICT_AUTHORS" \
+        '[.[] | select(.user.login as $l | $allowed | index($l))]' <<<"$independent")"
+    if (( AUTOMATED_ONLY )); then
+        qualifying="$recognised"
+    else
+        qualifying="$independent"
+    fi
+
     ind_count="$(jq 'length' <<<"$independent")"
+    qual_count="$(jq 'length' <<<"$qualifying")"
     self_count="$(jq 'length' <<<"$self")"
 
     # VERDICT COMMENTS. Unreadable rather than empty, for the same
@@ -246,7 +332,41 @@ probe() {
         ]' <<<"$comments" 2>/dev/null)" || verdicts='[]'
     verdict_count="$(jq 'length' <<<"$verdicts")"
 
+    # A PENDING ASK, read from the same comment stream.
+    #
+    # `@codex review` is how a review is requested here, and it is NOT a
+    # GitHub review *request* -- `reviewRequests` stays empty -- so
+    # `requested == 0` held while one was genuinely in flight and the
+    # stale-review branch fired NO REVIEW COMING seconds after the ask.
+    # That broke the exact sequence §9 prescribes for a security-boundary
+    # change: request a review, then wait for it. §9 documented the wart
+    # instead of fixing it, which left its own instruction unusable.
+    #
+    # NO ALLOW-LIST here, and the asymmetry from the verdict filter is
+    # deliberate. Two reasons, and the second is the stronger one:
+    #
+    #   * this signal can only turn 5 ("nothing is coming") into 1 ("not
+    #     yet"). It never marks a head reviewed, so a forged ask cannot
+    #     arm a merge -- the worst it does is make the tool wait out the
+    #     --wait the caller chose, and then exit 1.
+    #   * there is no correct list to check it against. The ask comes
+    #     from whoever is shepherding the PR, not from the reviewer, so
+    #     VERDICT_AUTHORS is the wrong set; "the PR author" would reject
+    #     a legitimate ask from anyone else. A filter with no right
+    #     answer fails closed on real asks, which is the failure that
+    #     costs something.
+    #
+    # The report names WHO asked, so a stray ask is visible rather than
+    # merely effective.
+    local asks
+    asks="$(jq '[ .[] | select((.body // "") | test("@codex[[:space:]]+review"; "i"))
+                 | {at: .created_at, by: .user.login} ] | sort_by(.at)' \
+             <<<"$comments" 2>/dev/null)" || asks='[]'
+    request_at="$(jq -r 'last.at // ""' <<<"$asks")"
+    request_by="$(jq -r 'last.by // ""' <<<"$asks")"
+
     head_reviewed=no
+    recognised_covers=no
     newest_ind_commit=""
 
     # Either kind of evidence counts, and a verdict comment is checked
@@ -256,10 +376,19 @@ probe() {
           'any(.[]; (.sha as $s | ($h | startswith($s)) or ($s | startswith($h))))' \
           <<<"$verdicts")" == "true" ]]; then
         head_reviewed=yes
+        recognised_covers=yes
     fi
 
-    if (( ind_count > 0 )); then
-        newest_ind_commit="$(jq -r 'sort_by(.submitted_at) | last | .commit_id' <<<"$independent")"
+    # Tracked in BOTH modes. Under --automated-only this is the same
+    # answer as `head_reviewed`; without it, it is what lets the report
+    # disclose that the only thing covering this head is a review object
+    # from an account the allow-list does not know.
+    if [[ "$(jq -r --arg h "$head" 'any(.[]; .commit_id == $h)' <<<"$recognised")" == "true" ]]; then
+        recognised_covers=yes
+    fi
+
+    if (( qual_count > 0 )); then
+        newest_ind_commit="$(jq -r 'sort_by(.submitted_at) | last | .commit_id' <<<"$qualifying")"
         # COVERAGE IS "ANY review targets head", NOT "the newest one
         # does". A review created before the last push but submitted
         # after a fresh one is newer by timestamp and older by commit, so
@@ -267,10 +396,116 @@ probe() {
         # this script would then report the head unreviewed, and exit 5
         # claiming no review is coming, while the review it needed was
         # already sitting there. The newest is kept for REPORTING only.
-        if [[ "$(jq -r --arg h "$head" 'any(.[]; .commit_id == $h)' <<<"$independent")" == "true" ]]; then
+        if [[ "$(jq -r --arg h "$head" 'any(.[]; .commit_id == $h)' <<<"$qualifying")" == "true" ]]; then
             head_reviewed=yes
         fi
     fi
+    # IS THAT ASK STILL OUTSTANDING? Timestamps alone get this wrong in
+    # both directions.
+    #
+    # Comparing the ask against the newest REVIEW fails when a review of
+    # an earlier commit lands after a newer head was pushed and asked
+    # about: it reads as the answer, and exit 5 fires while the real
+    # review is still in flight. That is recency mistaken for coverage,
+    # the same confusion the head-reviewed test already avoids.
+    #
+    # Requiring a HEAD-MATCHING review to answer the ask -- the obvious
+    # repair -- breaks the other direction: asked, reviewed, then pushed
+    # again without asking. No review can ever match the new head, so the
+    # ask stays pending forever and exit 5 could never fire, which is the
+    # one thing it exists to say.
+    #
+    # WHEN THIS COMMIT BECAME THE HEAD, which is not the same as when it
+    # was authored -- and the difference breaks the comparison in both
+    # directions:
+    #
+    #   * FORCE-PUSHING or resetting to an EXISTING commit keeps that
+    #     commit's old date. An `@codex review` from before the reset
+    #     then looks newer than the head, so it reads as still pending
+    #     and every `--wait` burns its whole timeout on an ask that was
+    #     answered long ago.
+    #   * Git permits FUTURE-DATED commits. A head dated tomorrow makes a
+    #     genuine ask made a minute ago look like it predates the head,
+    #     so exit 5 fires on a review that really is coming.
+    #
+    # Two corrections, one for each. The force-push EVENT carries a real
+    # timestamp where the commit does not, so the later of the two is
+    # when this commit can first have been the head. And a head cannot
+    # have become the head in the future, so the result is clamped to
+    # now. Both fetches happen only when there IS an ask, so the common
+    # path keeps its three calls.
+    request_pending=no
+    if [[ -n "$request_at" ]]; then
+        local head_born forced now
+        head_born="$(gh api "repos/$REPO/commits/$head" \
+            --jq '.commit.committer.date' 2>/dev/null)" || head_born=""
+
+        # THE COMMIT DATE IS VALIDATED BEFORE IT IS COMBINED, because a
+        # future date is not merely late — it is unusable, and leaving it
+        # in the comparison discards a force-push timestamp that IS
+        # usable. Force-push a future-dated commit and the old order kept
+        # 2099 (later than the event), then erased it as unreadable, and
+        # every historical ask read as pending: `--wait` ran to its
+        # timeout instead of returning exit 5.
+        now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        if [[ -n "$head_born" && "$head_born" > "$now" ]]; then
+            head_born=""
+        fi
+
+        # The most recent force-push, when there has been one.
+        #
+        # Fetched RAW and filtered here, exactly as the comments and
+        # reviews calls above are. Asking `gh` to apply `--jq` would work
+        # against the real API and silently differ under the self-test's
+        # mock, which returns the document rather than a filtered value —
+        # and a filter that runs in only one of the two is a difference
+        # between what is tested and what ships.
+        local timeline_raw
+        timeline_raw="$(gh api --paginate "repos/$REPO/issues/$PR/timeline" 2>/dev/null)" \
+            || timeline_raw=""
+        forced="$(printf '%s' "$timeline_raw" \
+            | jq -rs '[.[]? | .[]? | select(.event == "head_ref_force_pushed") | .created_at]
+                      | sort | last // ""' 2>/dev/null)" || forced=""
+        # Whichever is later, and a discarded commit date lets the
+        # event stand alone rather than taking the whole answer with it.
+        #
+        # A FUTURE-DATED HEAD IS NOT A USABLE TRANSITION TIME, which is
+        # what the discard above expresses. Clamping to now does not
+        # rescue the comparison: a real ask is always a little EARLIER
+        # than the moment this runs, so a head clamped to now still
+        # outranks it and exit 5 still fires on a review that is
+        # genuinely coming. Unknown, taking the safe direction, is the
+        # honest reading — but only for the commit date, never for a
+        # force-push event that really happened.
+        if [[ -n "$forced" && "$forced" > "$head_born" ]]; then
+            head_born="$forced"
+        fi
+
+        # Unreadable falls back to PENDING, which costs a longer wait and
+        # never a false "nothing is coming".
+        #
+        # EQUALITY IS PENDING TOO, and that is not pedantry: GitHub
+        # timestamps are second-resolution, so a force-push and the
+        # `@codex review` that follows it land on the SAME second
+        # routinely — the ask is usually seconds behind the push that
+        # prompted it. A strict `>` reads that as predating the head and
+        # exits 5 on a review that was requested a moment ago. Equality
+        # cannot say which came first, so it takes the same direction
+        # every other ambiguity here takes.
+        #
+        # `[[ ]]` has no `>=` for strings, so this is written as "not
+        # earlier than" rather than assembled from two comparisons.
+        if [[ -z "$head_born" || ! "$request_at" < "$head_born" ]]; then
+            request_pending=yes
+        fi
+        # The review it asked for answers it. No exit path reaches here
+        # with a covered head -- head_reviewed wins first -- so this
+        # decides nothing; it stops the REPORT printing "nothing has
+        # answered it yet" beside "head reviewed? yes", which is simply
+        # false.
+        [[ "$head_reviewed" == "yes" ]] && request_pending=no
+    fi
+
     # Only a COMPLETE probe counts. A probe that read the PR metadata and
     # then failed on reviews leaves head set but the review globals unset,
     # and the fall-out path below must not mistake that for readable data
@@ -287,9 +522,15 @@ no_review_coming() {
     # A prior VERDICT comment is equally evidence that this PR is one
     # the reviewer answers, so it satisfies the "not a fresh PR" term
     # just as a review object does.
+    #
+    # `qual_count`, not `ind_count`: under --automated-only a stranger's
+    # review is not evidence that the recognised reviewer has already had
+    # its turn, and counting it would report "nothing is coming" about a
+    # first review still on its way.
     [[ "$head_reviewed" == "no" ]] \
-        && (( ind_count + verdict_count > 0 )) \
-        && (( requested == 0 ))
+        && (( qual_count + verdict_count > 0 )) \
+        && (( requested == 0 )) \
+        && [[ "$request_pending" != "yes" ]]
 }
 
 # ── The full report, rendered once ───────────────────────────────────
@@ -315,8 +556,12 @@ render() {
     printf 'PR #%s  state=%s  mergeState=%s  head=%s\n' \
         "$PR" "$state" "$mergest" "${head:0:8}"
     printf '  independent reviews : %s' "$ind_count"
-    if (( ind_count > 0 )); then
+    if (( qual_count > 0 )); then
         printf '   (newest against %s)' "${newest_ind_commit:0:8}"
+    fi
+    if (( AUTOMATED_ONLY )) && (( ind_count > qual_count )); then
+        printf '   [%s not the recognised reviewer — NOT counted]' \
+            "$(( ind_count - qual_count ))"
     fi
     printf '\n'
     if (( ind_count > 0 )); then
@@ -333,8 +578,29 @@ render() {
     fi
     printf '  self reviews        : %s   (thread replies etc. — not coverage)\n' "$self_count"
     printf '  review requested?   : %s\n' "$( (( requested > 0 )) && echo yes || echo no )"
-    printf '  head reviewed?      : %s\n' "$head_reviewed"
-    if [[ "$head_reviewed" == "no" && "$ind_count" -gt 0 ]]; then
+    if [[ -n "$request_at" ]]; then
+        # WHO asked is reported, not just when. `@codex review` is not
+        # allow-listed, so on a public repository the login is what
+        # separates the ask this session made from one it did not.
+        printf '  @codex review asked : %s  by %s%s\n' "$request_at" "$request_by" \
+            "$( [[ "$request_pending" == "yes" ]] \
+                  && echo '   (in flight — nothing has answered it yet)' \
+                  || echo '   (already answered)' )"
+    fi
+    printf '  head reviewed?      : %s%s\n' "$head_reviewed" \
+        "$( (( AUTOMATED_ONLY )) && echo '   (--automated-only: the recognised reviewer, not just anyone)' )"
+
+    # THE CALLER WHO FORGOT THE FLAG still gets told. On a public
+    # repository the dangerous shape is coverage that rests entirely on
+    # an account nobody recognises, and a session following §9 reads the
+    # exit code -- so the exposure has to be visible in the default mode
+    # too, not only in the mode that already excludes it.
+    if [[ "$head_reviewed" == "yes" && "$recognised_covers" == "no" ]]; then
+        printf '                        ^ carried ONLY by an unrecognised account. This repo\n'
+        printf '                          is public: anyone may review. CLAUDE.md §9 wants\n'
+        printf '                          --automated-only before arming a security change.\n'
+    fi
+    if [[ "$head_reviewed" == "no" && "$qual_count" -gt 0 ]]; then
         printf '                        ^ reviewed, but an EARLIER commit. Pushes do not\n'
         printf '                          re-trigger automated review — request it explicitly.\n'
     fi
@@ -387,9 +653,20 @@ while :; do
     fi
 
     (( WAIT > 0 )) || break
-    (( SECONDS + INTERVAL <= deadline )) || break
-    note "no independent review of ${head:0:8} yet; next check in ${INTERVAL}s"
-    sleep "$INTERVAL"
+
+    # CLAMP THE NAP TO WHAT IS LEFT, exactly as wait-merged.sh does.
+    #
+    # Requiring a WHOLE interval to fit before sleeping redefines --wait
+    # as "the last deadline a full interval lands on". `--wait 10s` with
+    # the default 30s interval polled ONCE and returned immediately,
+    # having waited nothing at all -- any wait shorter than an interval
+    # was silently the same as no wait, and longer ones lost up to one
+    # interval off the end. The deadline is the deadline.
+    remaining=$(( deadline - SECONDS ))
+    (( remaining > 0 )) || break
+    nap=$(( INTERVAL < remaining ? INTERVAL : remaining ))
+    note "no independent review of ${head:0:8} yet; next check in ${nap}s"
+    sleep "$nap"
 done
 
 # Fell out: either one-shot, or the wait expired with nothing. Requires a
