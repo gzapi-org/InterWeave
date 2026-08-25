@@ -28,11 +28,13 @@
 #     Without it, the allowance size is unknown and the script says so
 #     rather than guessing: usage alone cannot tell you how much is left.
 #
-#     netAmount > 0 is checked too. It means overage is actually being
-#     billed, which is a true "allowance gone" signal — but only on a
-#     plan that purchases overage. A plan that does not is never billed;
-#     GitHub simply stops handing out runners, so net stays 0 while
-#     everything dies. Usage-against-limit is the check that fires there.
+#     netAmount on the MINUTE sku is checked too, and it means the
+#     opposite of what it looks like. Billed overage proves runners are
+#     still being SERVED — the plan is buying them. It is a cost, so it
+#     is degraded and never a block. The plan that actually blocks is the
+#     one that never bills: net stays 0 while GitHub quietly stops
+#     handing out runners and every job dies in seconds. That is why the
+#     block is inferred from "past the allowance AND nothing billed".
 #
 # Deliberately NOT wired into anything automatically. A network call on
 # every push would cost more, in latency and in noise, than the rare
@@ -127,20 +129,44 @@ if command -v gh >/dev/null 2>&1; then
         usage="$(gh api "/organizations/$ORG/settings/billing/usage" 2>/dev/null || true)"
         if [[ -n "$usage" ]]; then
             reachable=1
+            # THE MINUTE SKU, not every Actions charge. `mins` already
+            # filters on unitType, so summing netAmount across the whole
+            # product compared two different things: a billed Actions
+            # STORAGE line would read as "runner overage is being paid
+            # for" while minute runners had actually stopped.
             net="$(printf '%s' "$usage" \
-                | jq -r '[.usageItems[]? | select(.product == "actions") | .netAmount] | add // 0' \
+                | jq -r '[.usageItems[]? | select(.product == "actions" and (.unitType == "Minutes")) | .netAmount] | add // 0' \
                 2>/dev/null || echo 0)"
             mins="$(printf '%s' "$usage" \
                 | jq -r '[.usageItems[]? | select(.product == "actions" and (.unitType == "Minutes")) | .quantity] | add // 0' \
                 2>/dev/null || echo 0)"
-            if awk -v n="$net" 'BEGIN { exit !(n > 0) }'; then
-                say "DEGRADED — the included Actions allowance is spent (${mins} minutes used, \$${net} now billing). On a plan that cannot buy more, green code will not merge."
-                exit 1
-            fi
+
+            # A NONZERO net IS NOT A BLOCK, and reading it as one halted
+            # work on exactly the plan where nothing was wrong. Money
+            # moving proves runs are still being SERVED: an organisation
+            # that purchases overage bills and keeps handing out runners.
+            # The plan that blocks is the one that never bills — net
+            # stays 0 while every job dies in seconds with no steps.
+            # The two facts point in opposite directions.
+            #
+            # Neither the spending limit nor the overage setting is
+            # exposed by any API readable here, so the block is inferred
+            # from what is: past the configured allowance AND nothing
+            # billed. Billed overage is reported as a COST instead.
+            billed=""
+            awk -v n="$net" 'BEGIN { exit !(n > 0) }' && billed="yes"
 
             # No allowance configured: usage alone cannot say what is left,
             # so report the usage and decline to guess at the remainder.
             if [[ -z "$INCLUDED" ]]; then
+                # Billed minutes are DEGRADED even here. The remainder is
+                # unknown; the cost is not. Reporting money already
+                # moving on an exit-0 line says the expensive thing out
+                # loud and then tells every caller to go ahead.
+                if [[ -n "$billed" ]]; then
+                    say "DEGRADED — ${mins} minutes used this period and \$${net} of it is billing as overage. Runs still start, so this blocks nothing; every further minute is money. (Allowance size unknown: set INTERWEAVE_ACTIONS_INCLUDED_MINUTES in .claude/settings.json.)"
+                    exit 1
+                fi
                 say "OK — ${ops_phrase}; ${mins} minutes used this period. (Remaining unknown: set INTERWEAVE_ACTIONS_INCLUDED_MINUTES in .claude/settings.json.)"
                 exit 0
             fi
@@ -150,7 +176,11 @@ if command -v gh >/dev/null 2>&1; then
 
             left="$(awk -v i="$INCLUDED" -v m="$mins" 'BEGIN { printf "%.0f", i - m }')"
             if awk -v i="$INCLUDED" -v m="$mins" 'BEGIN { exit !(m >= i) }'; then
-                say "DEGRADED — the included Actions allowance is spent (${mins} of ${INCLUDED} minutes used). Jobs stop getting runners: they fail in seconds with no steps and no logs. Nothing will merge until the period resets."
+                if [[ -n "$billed" ]]; then
+                    say "DEGRADED — past the included allowance (${mins} of ${INCLUDED} minutes used) and \$${net} is billing as overage. Runs still start, so this blocks nothing; every further minute is money."
+                else
+                    say "DEGRADED — the included Actions allowance is spent (${mins} of ${INCLUDED} minutes used) and nothing is being billed, so this plan is not buying overage. Jobs stop getting runners: they fail in seconds with no steps and no logs. Nothing will merge until the period resets."
+                fi
                 exit 1
             fi
             say "OK — ${ops_phrase}; ${mins} of ${INCLUDED} minutes used this period, ${left} remaining."

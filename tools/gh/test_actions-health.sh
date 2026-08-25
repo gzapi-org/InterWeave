@@ -62,6 +62,10 @@ assert_contains() {
     if [[ "$RUN_OUT" == *"$2"* ]]; then pass "$1"
     else fail "$1 — output lacked '$2'" "$RUN_OUT"; fi
 }
+assert_lacks() {
+    if [[ "$RUN_OUT" != *"$2"* ]]; then pass "$1"
+    else fail "$1 — output unexpectedly contained '$2'" "$RUN_OUT"; fi
+}
 
 SANDBOX="$(mktemp -d)"
 mkdir -p "$SANDBOX/bin" "$SANDBOX/state"
@@ -94,7 +98,11 @@ if [[ "${1:-}" == "api" ]]; then
   [[ -f "$MOCK_STATE/billing_unreadable" ]] && exit 1
   net="$(cat "$MOCK_STATE/billing_net" 2>/dev/null || echo 0)"
   mins="$(cat "$MOCK_STATE/billing_mins" 2>/dev/null || echo 100)"
-  printf '{"usageItems":[{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":%s,"netAmount":%s}]}\n' "$mins" "$net"
+  # A second Actions line billed in a DIFFERENT unit. Storage is an
+  # Actions charge that is not runner minutes, and summing netAmount
+  # across the product read it as minute overage.
+  stor="$(cat "$MOCK_STATE/billing_storage_net" 2>/dev/null || echo 0)"
+  printf '{"usageItems":[{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":%s,"netAmount":%s},{"product":"actions","sku":"Actions Storage","unitType":"GigabyteHours","quantity":10,"netAmount":%s}]}\n' "$mins" "$net" "$stor"
   exit 0
 fi
 exit 1
@@ -142,14 +150,45 @@ assert_contains "names the status"       "major_outage"
 assert_contains "names the incident"     "Incident with Actions"
 assert_contains "says not to spend"      "do not spend minutes"
 
-echo "actions-health: a spent allowance stops the work"
+echo "actions-health: billed overage is a COST, not a block"
+# Money moving proves runners are still being SERVED — an organisation
+# that purchases overage bills and keeps handing them out. Calling that
+# "green code will not merge" halted work on exactly the plan where
+# nothing was wrong. It is degraded, because every further minute costs;
+# it is not a block, and the message must not say it is.
 reset
 printf '13.35\n' > "$SANDBOX/state/billing_net"
 printf '3200\n'  > "$SANDBOX/state/billing_mins"
 invoke
-assert_rc       "exits 1"                1
-assert_contains "names the allowance"    "allowance is spent"
-assert_contains "quotes the usage"       "3200 minutes used"
+assert_rc       "exits 1 — this is expensive"        1
+assert_contains "quotes the usage"                   "3200 minutes used"
+assert_contains "names it as overage"                "billing as overage"
+assert_contains "and says it blocks nothing"         "blocks nothing"
+assert_lacks    "never claims work has stopped"      "will not merge"
+
+# Same, with the allowance configured: past the limit AND billed is the
+# expensive case; past the limit and NOT billed is the blocking one.
+reset
+printf '13.35\n' > "$SANDBOX/state/billing_net"
+printf '3200\n'  > "$SANDBOX/state/billing_mins"
+invoke_with 3000
+assert_rc       "exits 1"                            1
+assert_contains "names it as overage"                "billing as overage"
+assert_lacks    "and not as a stoppage"              "Nothing will merge"
+
+echo "actions-health: Actions STORAGE is not runner overage"
+# `mins` filters on unitType; `net` summed netAmount across the whole
+# product. A billed storage line therefore read as "overage is being
+# paid for, runners are fine" while minute runners had actually stopped
+# — the plan-does-not-buy-overage block, silently inverted.
+reset
+printf '0\n'     > "$SANDBOX/state/billing_net"
+printf '9.99\n'  > "$SANDBOX/state/billing_storage_net"
+printf '3025\n'  > "$SANDBOX/state/billing_mins"
+invoke_with 3000
+assert_rc       "still exits 1"                      1
+assert_contains "and names the real cause"           "not buying overage"
+assert_lacks    "not the storage charge"             "billing as overage"
 
 echo "actions-health: a spent allowance is caught even when NOTHING is billed"
 # The regression that motivated the setting. On 2026-08-07 the org sat at
