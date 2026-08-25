@@ -32,6 +32,7 @@ interweave-profile-identity = { path = "../../identity/profile-identity" }
 interweave-transport-api = { path = "../../api/transport-api" }
 interweave-transport-runtime = { path = "../runtime" }
 interweave-profile-config = { path = "../../config/profile-config" }
+interweave-local-client-api = { path = "../../api/local-client-api" }
 futures = { workspace = true }
 async-trait = { workspace = true }
 libp2p = { workspace = true }

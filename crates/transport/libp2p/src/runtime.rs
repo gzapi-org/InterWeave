@@ -1080,6 +1080,21 @@ impl SwarmRuntime {
                 allowed: (0, interweave_profile_config::MAX_ENDPOINTS),
             });
         }
+        // THE QUEUE DEPTH IS A CEILING TOO, and refused rather than
+        // clamped. `EndpointQueues::open` raises a zero to one and
+        // nothing lowered anything, so a caller asking for a million got
+        // a million — memory a remote peer then fills, bounded only by
+        // its rate allowance, for the life of the process. Clamping
+        // silently would install a configuration the caller did not ask
+        // for and never learns about, which is how a bound becomes a
+        // surprise later.
+        if config.queue_bound > interweave_local_client_api::MAX_EVENT_QUEUE {
+            return Err(SubstrateError::InvalidConfig {
+                field: "direct.queue_bound",
+                got: config.queue_bound,
+                allowed: (1, interweave_local_client_api::MAX_EVENT_QUEUE),
+            });
+        }
         let (reply, answer) = oneshot::channel();
         self.commands
             .send(SwarmCommand::ConfigureDirect {

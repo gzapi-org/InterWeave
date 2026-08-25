@@ -1688,6 +1688,7 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "futures",
+ "interweave-local-client-api",
  "interweave-profile-config",
  "interweave-profile-identity",
  "interweave-transport-api",

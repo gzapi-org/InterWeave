@@ -778,3 +778,50 @@ async fn a_configuration_past_the_endpoint_ceiling_is_refused() {
         .await
         .expect("the ceiling itself is permitted");
 }
+
+/// A queue depth past the ceiling is refused, not silently clamped.
+///
+/// `EndpointQueues::open` raises a zero to one and lowered nothing, so a
+/// caller asking for a million got a million — memory a remote peer then
+/// fills, bounded only by its rate allowance, for the life of the
+/// process. Refused rather than clamped: clamping installs a
+/// configuration the caller never asked for and never learns about.
+#[tokio::test]
+async fn a_queue_depth_past_the_ceiling_is_refused() {
+    let (identity, _peer) = who();
+    let runtime = SwarmRuntime::start(&identity, SubstrateConfig::default(), trusting(&[]))
+        .expect("the runtime starts");
+
+    let too_deep = interweave_local_client_api::MAX_EVENT_QUEUE + 1;
+    let error = runtime
+        .configure_direct(DirectEndpoints {
+            endpoints: vec![endpoint("human")],
+            default: None,
+            queue_bound: too_deep,
+            epoch: generation(),
+        })
+        .await
+        .expect_err("one past the ceiling is one too many");
+    assert!(
+        matches!(
+            error,
+            SubstrateError::InvalidConfig {
+                field: "direct.queue_bound",
+                ..
+            }
+        ),
+        "refused as a configuration error naming the field, got {error:?}"
+    );
+
+    // The ceiling itself installs, so this is a ceiling and not an
+    // off-by-one that also refuses the largest legal depth.
+    runtime
+        .configure_direct(DirectEndpoints {
+            endpoints: vec![endpoint("human")],
+            default: None,
+            queue_bound: interweave_local_client_api::MAX_EVENT_QUEUE,
+            epoch: generation(),
+        })
+        .await
+        .expect("the ceiling itself is permitted");
+}
