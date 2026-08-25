@@ -267,7 +267,9 @@ Proved by making the strict receiver permissive: the forgery is then delivered, 
 
 **Answer: yes, authenticity precedes the cache.** The forged message was rejected and left nothing behind; the genuine message carrying the same mesh id was delivered afterwards. No pre-cache authenticity gate needs to be prototyped, and `PUBSUB.md`'s conditional clause — "if a future rust-libp2p version changes that ordering" — remains a future concern rather than a present one.
 
-**The deviation this experiment required, stated plainly.** The public API does not let a caller choose a message's sequence number, so a *source + sequence* collision between a forged message and a genuine one cannot be arranged through it. B2 therefore derives the mesh id from the payload, which forces exactly the collision the ordering question is about and changes nothing else in the receive path. B1 uses the real source+sequence rule. A future rust-libp2p that exposes sequence numbers would allow B2 to be run without the substitution; until then, this is the closest honest approximation, and the substitution is confined to the id function.
+**The deviation this experiment retains, and why it is no longer the compromise it was.** B2 derives the mesh id from the payload, because the *public* API does not let a caller choose a sequence number and a source+sequence collision cannot be arranged through it. That was written when the public API was the only way in, and it stopped being true inside this same harness: the raw injector added for B3 chooses sequence numbers directly, so the collision B2 approximates is now performed exactly, under the frozen rule, one section below.
+
+B2 is kept as it stands rather than rewritten — it covers the *unsigned* publish path, which B3 does not — but it is redundant coverage, not the closest available approximation. B1 uses the real source+sequence rule; B3 uses it under collision. No future rust-libp2p release is required for anything here.
 
 ### B3. An invalid **signed** claim, colliding under the frozen mesh ID
 

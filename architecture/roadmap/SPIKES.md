@@ -42,7 +42,7 @@ Four findings constrain the Stage 6 implementation:
 3. **`OutboundFailure::UnsupportedProtocols`** is the clean, pre-timeout signal for a major-version mismatch.
 4. **One connection serves both protocol families**, so no connection-per-protocol accounting is needed.
 
-The GossipSub ordering experiment required one stated substitution: the public API does not let a caller choose a sequence number, so a source+sequence collision between a forged and a genuine message cannot be arranged through it. That experiment derives the mesh ID from the payload to force the collision the ordering question is about, and changes nothing else in the receive path; the source+sequence rule itself is exercised unmodified by the companion experiment.
+One GossipSub experiment retains a substitution: the unsigned-publish experiment derives the mesh ID from the payload, because the *public* API does not let a caller choose a sequence number. That is redundant coverage rather than a compromise — the raw `/meshsub/1.1.0` injector in the same harness chooses sequence numbers directly, and the companion experiment collides on source and sequence under the unmodified `GossipSubMessageIdV1`. No claim in this record depends on the substitution, and no future rust-libp2p release is required to remove it.
 
 ---
 
