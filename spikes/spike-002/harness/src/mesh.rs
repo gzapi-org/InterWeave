@@ -210,9 +210,24 @@ async fn listen(swarm: &mut Swarm<Behaviour>) -> Multiaddr {
     swarm
         .listen_on("/ip4/127.0.0.1/tcp/0".parse().expect("addr"))
         .expect("listen");
+    // Bounded for the same reason every experiment loop is, and this one
+    // is worse than most: `listen_on` returning `Ok` only means the
+    // request was accepted, so a listener that then closes or reports an
+    // asynchronous error never produces `NewListenAddr` and every B1-B3
+    // setup calling this waits forever. The run would never reach the
+    // failure aggregator, and no exit code can express a run that never
+    // ends. Panicking is deliberate: it names the step and exits
+    // non-zero, where hanging names nothing.
+    let deadline = tokio::time::sleep(Duration::from_secs(20));
+    tokio::pin!(deadline);
     loop {
-        if let SwarmEvent::NewListenAddr { address, .. } = swarm.select_next_some().await {
-            return address;
+        tokio::select! {
+            _ = &mut deadline => panic!("no listen address within 20s"),
+            event = swarm.select_next_some() => {
+                if let SwarmEvent::NewListenAddr { address, .. } = event {
+                    return address;
+                }
+            }
         }
     }
 }

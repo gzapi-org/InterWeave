@@ -344,8 +344,27 @@ A3's is a coupling check rather than a true mutation: forcing a genuine second c
 
 Three more arrived after the third fix, and one of them — A3's unbounded response loop — was the *same defect as A1's*, in the commit whose message claimed a sweep. Fixing instances one at a time kept producing a next instance, so this round enumerated the two properties mechanically instead:
 
-- **every event loop**, checked for a deadline arm. Two had none: `a3_two_families` and the `listen` helper.
+- **every event loop**, checked for a deadline arm. Two had none: `a3_two_families` and `direct.rs`'s `listen` helper.
 - **every experiment**, checked for whether its *central* claim is asserted rather than printed.
+
+### The fifth round, and the word that was doing the lying
+
+The sweep above said "every event loop" and had covered `direct.rs`. `mesh.rs` has its own `listen` helper, with the same unbounded wait, and review found it — a fifth instance of the defect whose fourth instance had prompted a sweep specifically to end the series.
+
+The enumeration was the right idea executed on the wrong set. "Every event loop" is a claim about the *harness*; the pass that produced it walked one file. That is not a smaller version of the same work, it is a different claim wearing its words — and because the sentence was written in the same commit as the fix, it read as a report of what had happened rather than an assertion anyone would check.
+
+Redone by brace-matching every `loop`/`while` in all four sources and reading the body of each, the list is:
+
+| site | verdict |
+|---|---|
+| `direct.rs` — 14 loops | all bounded |
+| `mesh.rs:227` (`pump`), `mesh.rs:663` | bounded |
+| `mesh.rs:213` (`listen`) | **unbounded — the finding** |
+| `inject.rs:61` (`varint`) | not an event loop: pure computation over `n >>= 7`, terminates in ≤10 iterations, waits on nothing |
+
+A first attempt at that scan read a fixed 22-line window after each loop header and reported `mesh.rs:213` as *bounded* — the window had run past the end of the five-line loop and into `pump`, which does have a deadline. A scan whose window is wrong finds nothing and says so confidently, which is the same failure as the sweep it was checking.
+
+The bound is mutation-checked: removing `listen_on` so `NewListenAddr` never arrives panics with `no listen address within 20s` and exits 101, where before it hung with no exit code at all.
 
 That second pass found one review had not: **B1** printed `distinct mesh ids among them` and required only that both publishers arrived. Two deliveries sharing **one** mesh id satisfied the experiment that exists to rule exactly that out.
 
