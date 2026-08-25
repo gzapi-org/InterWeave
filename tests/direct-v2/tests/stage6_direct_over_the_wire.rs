@@ -669,3 +669,54 @@ async fn a_revoked_endpoint_can_no_longer_be_a_source() {
         .expect_err("the lease is gone");
     assert_eq!(error, TransportError::EndpointNotRegistered);
 }
+
+/// Revoking a peer's trust stops direct sends immediately, not once the
+/// connection finishes closing.
+///
+/// `set_trust` closes the revoked peer's connections, but the close is
+/// asynchronous: until the event arrives the connection is open and
+/// `is_connected` still says yes. A send queued in that window used to
+/// cross a connection that had already lost data-plane authorization —
+/// exactly what the revocation was for. Trust is now re-read from the
+/// manager per command rather than inherited from the connection.
+///
+/// The send goes out on the very next line after `set_trust` returns, so
+/// nothing here waits for the close; that is the race, and waiting would
+/// test the wrong thing.
+#[tokio::test]
+async fn revoking_trust_stops_direct_sends_before_the_close_lands() {
+    let (sender, receiver, receiver_peer) = connected_pair(8).await;
+
+    // It works while trusted, so the refusal below is the revocation and
+    // not some other property of this setup.
+    sender
+        .send_direct(receiver_peer.clone(), frame(Some("claude"), b"trusted", 50))
+        .await
+        .expect("the command reaches the task")
+        .expect("accepted while trusted");
+
+    // Trust nobody. The connection is still open at this instant.
+    sender
+        .set_trust(TrustSources::new(
+            PeerTrustPolicy::new(std::iter::empty()).expect("an empty allowlist"),
+            InfrastructureSet::default(),
+        ))
+        .await
+        .expect("the trust update reaches the task");
+
+    let error = sender
+        .send_direct(receiver_peer, frame(Some("claude"), b"revoked", 51))
+        .await
+        .expect("the command reaches the task")
+        .expect_err("an untrusted peer is not a direct destination");
+    assert_eq!(error, TransportError::UnauthorizedPeer);
+
+    // AND IT NEVER CROSSED. A refusal that still sent the frame would
+    // have delivered it, which is the defect rather than the fix.
+    let delivered = receiver
+        .drain_endpoint(endpoint("claude"))
+        .await
+        .expect("the receiver answers");
+    assert_eq!(delivered.len(), 1, "only the pre-revocation message");
+    assert_eq!(delivered[0].payload.bytes(), b"trusted");
+}

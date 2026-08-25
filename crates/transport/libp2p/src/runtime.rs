@@ -1767,6 +1767,21 @@ fn handle_command(
                 let _ = reply.send(Err(DirectError::EndpointNotRegistered));
                 return;
             }
+            // TRUST IS RE-READ HERE, not inherited from the connection.
+            // `set_trust` revokes a peer and closes its connections, but
+            // the close is asynchronous: until the event arrives the
+            // connection is still open and `is_connected` still says yes.
+            // A send queued in that window would cross a connection that
+            // has already lost data-plane authorization, which is the one
+            // thing the revocation was for.
+            //
+            // Infrastructure-only trust is not data-plane trust either
+            // (ADR-0036), so the test names the class it needs rather
+            // than testing for "not Unauthorized".
+            if manager.classify(&peer) != ConnectionClass::DataPlaneTrusted {
+                let _ = reply.send(Err(DirectError::UnauthorizedPeer));
+                return;
+            }
             let peer_id = match to_peer_id(&peer) {
                 Ok(id) => id,
                 Err(()) => {
