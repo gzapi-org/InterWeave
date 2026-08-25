@@ -1877,6 +1877,17 @@ fn handle_command(
             // Infrastructure-only trust is not data-plane trust either
             // (ADR-0036), so the test names the class it needs rather
             // than testing for "not Unauthorized".
+            // DRAINING STOPS OUTBOUND WORK TOO. Inbound already refuses
+            // after `drain()`; starting a NEW local exchange in the same
+            // window contradicts the same contract from the other side —
+            // the node has said it is going out of service and then
+            // dispatched fresh work whose answer it may not be around to
+            // receive. `ShuttingDown` is the local error, not the remote
+            // one: nothing crossed a network boundary.
+            if manager.is_draining() {
+                let _ = reply.send(Err(DirectError::ShuttingDown));
+                return;
+            }
             if manager.classify(&peer) != ConnectionClass::DataPlaneTrusted {
                 let _ = reply.send(Err(DirectError::UnauthorizedPeer));
                 return;

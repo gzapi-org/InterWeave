@@ -897,3 +897,41 @@ async fn a_full_event_channel_does_not_freeze_a_direct_exchange() {
         endpoint("claude")
     );
 }
+
+/// A draining node starts no NEW outbound exchange either.
+///
+/// Inbound already refuses after `drain()`. Dispatching fresh local work
+/// in the same window contradicts the same contract from the other side:
+/// the node has announced it is going out of service and then sends
+/// something whose answer it may not be around to receive.
+///
+/// `ShuttingDown` and not `BackendUnavailable`: the refusal is local and
+/// nothing crossed a network boundary, so the caller should not read it
+/// as anything the remote said.
+#[tokio::test]
+async fn a_draining_node_starts_no_new_outbound_exchange() {
+    let (sender, receiver, receiver_peer) = connected_pair(8).await;
+
+    sender
+        .send_direct(receiver_peer.clone(), frame(Some("claude"), b"before", 70))
+        .await
+        .expect("the command reaches the task")
+        .expect("accepted while serving");
+
+    sender.drain().await.expect("the drain reaches the task");
+
+    let error = sender
+        .send_direct(receiver_peer, frame(Some("claude"), b"during", 71))
+        .await
+        .expect("the command reaches the task")
+        .expect_err("a draining node takes on no new work");
+    assert_eq!(error, TransportError::ShuttingDown);
+
+    // AND IT NEVER CROSSED — only the pre-drain message is there.
+    let delivered = receiver
+        .drain_endpoint(endpoint("claude"))
+        .await
+        .expect("the receiver answers");
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].payload.bytes(), b"before");
+}
