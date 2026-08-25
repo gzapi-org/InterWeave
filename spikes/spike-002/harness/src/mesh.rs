@@ -680,7 +680,7 @@ mod attribution_tests {
 }
 
 pub async fn b3_invalid_signed_claim_is_rejected() {
-    use crate::inject::{Injector, signed_message};
+    use crate::inject::{Injector, Wrote, signed_message};
 
     let topic = IdentTopic::new("/spike-002/broadcast");
     let victim_keypair = libp2p::identity::Keypair::generate_ed25519();
@@ -767,7 +767,10 @@ pub async fn b3_invalid_signed_claim_is_rejected() {
         }
     };
 
+    // ONE ENTRY PER INJECTION: was the frame actually written?
+    let mut wrote: Vec<Option<Wrote>> = Vec::new();
     for message in [control, invalid, genuine] {
+        let mut written: Option<Wrote> = None;
         let mut injector = libp2p::SwarmBuilder::with_new_identity()
             .with_tokio()
             .with_tcp(
@@ -798,10 +801,21 @@ pub async fn b3_invalid_signed_claim_is_rejected() {
                         );
                     }
                 }
-                _ = injector.select_next_some() => {}
+                ev = injector.select_next_some() => {
+                    // THE INJECTOR'S OWN VERDICT, no longer discarded.
+                    // `delivered_invalid == 0` means "the receiver
+                    // refused it" ONLY if the frame was actually put on
+                    // the wire; otherwise it equally means "nothing was
+                    // ever sent", and each message gets a fresh injector
+                    // and connection so the control cannot vouch for it.
+                    if let SwarmEvent::Behaviour(outcome) = ev {
+                        written.get_or_insert(outcome);
+                    }
+                }
                 () = tokio::time::sleep(Duration::from_millis(20)) => {}
             }
         }
+        wrote.push(written);
     }
 
     // A FINAL DRAIN, for the same reason. The last injection has no
@@ -842,15 +856,52 @@ pub async fn b3_invalid_signed_claim_is_rejected() {
     // The control gates everything: a broken encoder makes it fail, and
     // the rejection below would then be about protobuf rather than
     // about signatures. Mutating a field tag caught exactly that.
+    // WHETHER EACH FRAME REACHED THE WIRE, which the checks below need
+    // before any absence can mean rejection.
+    let wrote_frame = |i: usize| matches!(wrote.get(i), Some(Some(Wrote::Frame)));
+    note(
+        "control frame written",
+        format!("{:?}", wrote.first().and_then(Clone::clone)),
+    );
+    note(
+        "INVALID frame written",
+        format!("{:?}", wrote.get(1).and_then(Clone::clone)),
+    );
+    note(
+        "genuine frame written",
+        format!("{:?}", wrote.get(2).and_then(Clone::clone)),
+    );
+
     let control_ok = delivered_control == 1 && sources.first() == Some(&Some(victim_peer));
     check("the injector CAN produce an acceptable message", control_ok);
-    check("an invalid signature is refused", delivered_invalid == 0);
+
+    // THE INVALID FRAME'S OWN DELIVERY EVIDENCE. Each injection builds
+    // a fresh injector and a fresh connection, so the control proves
+    // nothing about this one: an injector that failed to connect,
+    // failed to negotiate `/meshsub/1.1.0`, or failed mid-write leaves
+    // `delivered_invalid == 0` looking exactly like a signature
+    // rejection, and the genuine injection then makes every remaining
+    // check pass. Absence is only evidence of refusal once presence on
+    // the wire is established.
+    check(
+        "the invalid frame actually reached the wire",
+        wrote_frame(1),
+    );
+    check("and the genuine frame did too", wrote_frame(2));
+    check(
+        "an invalid signature is refused (a frame that WAS sent)",
+        wrote_frame(1) && delivered_invalid == 0,
+    );
     check(
         "and left no entry under the frozen mesh id",
         delivered_genuine == 1,
     );
     check(
         "VERDICT: an invalid signed claim cannot poison GossipSubMessageIdV1",
-        control_ok && delivered_invalid == 0 && delivered_genuine == 1,
+        control_ok
+            && wrote_frame(1)
+            && wrote_frame(2)
+            && delivered_invalid == 0
+            && delivered_genuine == 1,
     );
 }

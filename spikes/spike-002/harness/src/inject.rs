@@ -143,9 +143,27 @@ pub fn signed_message(
 }
 
 /// Writes one prepared frame to one peer, then closes the stream.
+/// Whether the injected frame actually reached the wire.
+///
+/// REPORTED, not discarded. The write result used to go into `let _ =`
+/// and the handler's `ToBehaviour` was `()`, so an injector that failed
+/// to connect, failed to negotiate `/meshsub/1.1.0`, or failed mid-write
+/// looked exactly like one whose frame the receiver rejected. B3 reads
+/// `delivered_invalid == 0` as "the signature was refused"; without this
+/// it equally means "nothing was ever sent", and the control cannot rule
+/// that out because every message gets a fresh injector and connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Wrote {
+    /// The frame was written and flushed.
+    Frame,
+    /// It was not, and this is why.
+    Failed(String),
+}
+
 pub struct Injector {
     frame: Vec<u8>,
     pending: VecDeque<PeerId>,
+    outcomes: VecDeque<Wrote>,
 }
 
 impl Injector {
@@ -155,13 +173,14 @@ impl Injector {
         Self {
             frame: rpc_frame(topic, message),
             pending: VecDeque::new(),
+            outcomes: VecDeque::new(),
         }
     }
 }
 
 impl NetworkBehaviour for Injector {
     type ConnectionHandler = Writer;
-    type ToSwarm = ();
+    type ToSwarm = Wrote;
 
     fn handle_established_inbound_connection(
         &mut self,
@@ -191,12 +210,16 @@ impl NetworkBehaviour for Injector {
         &mut self,
         _: PeerId,
         _: ConnectionId,
-        (): THandlerOutEvent<Self>,
+        outcome: THandlerOutEvent<Self>,
     ) {
+        self.outcomes.push_back(outcome);
     }
 
-    fn poll(&mut self, _: &mut Context<'_>) -> Poll<ToSwarm<(), THandlerInEvent<Self>>> {
-        Poll::Pending
+    fn poll(&mut self, _: &mut Context<'_>) -> Poll<ToSwarm<Wrote, THandlerInEvent<Self>>> {
+        match self.outcomes.pop_front() {
+            Some(outcome) => Poll::Ready(ToSwarm::GenerateEvent(outcome)),
+            None => Poll::Pending,
+        }
     }
 }
 
@@ -205,7 +228,9 @@ impl NetworkBehaviour for Injector {
 pub struct Writer {
     frame: Option<Vec<u8>>,
     asked: bool,
-    writing: Option<futures::future::BoxFuture<'static, ()>>,
+    writing: Option<futures::future::BoxFuture<'static, Wrote>>,
+    /// Reported to the behaviour exactly once, then cleared.
+    outcome: Option<Wrote>,
 }
 
 impl Writer {
@@ -214,6 +239,7 @@ impl Writer {
             frame: None,
             asked: true,
             writing: None,
+            outcome: None,
         }
     }
     const fn carrying(frame: Vec<u8>) -> Self {
@@ -221,13 +247,14 @@ impl Writer {
             frame: Some(frame),
             asked: false,
             writing: None,
+            outcome: None,
         }
     }
 }
 
 impl ConnectionHandler for Writer {
     type FromBehaviour = ();
-    type ToBehaviour = ();
+    type ToBehaviour = Wrote;
     type InboundProtocol = ReadyUpgrade<StreamProtocol>;
     type OutboundProtocol = ReadyUpgrade<StreamProtocol>;
     type InboundOpenInfo = ();
@@ -243,32 +270,50 @@ impl ConnectionHandler for Writer {
         &mut self,
         event: ConnectionEvent<'_, Self::InboundProtocol, Self::OutboundProtocol>,
     ) {
-        if let ConnectionEvent::FullyNegotiatedOutbound(FullyNegotiatedOutbound {
-            protocol: mut stream,
-            ..
-        }) = event
-            && let Some(frame) = self.frame.take()
-        {
-            self.writing = Some(Box::pin(async move {
-                let _ = write_and_close(&mut stream, &frame).await;
-            }));
+        match event {
+            ConnectionEvent::FullyNegotiatedOutbound(FullyNegotiatedOutbound {
+                protocol: mut stream,
+                ..
+            }) => {
+                if let Some(frame) = self.frame.take() {
+                    self.writing = Some(Box::pin(async move {
+                        match write_and_close(&mut stream, &frame).await {
+                            Ok(()) => Wrote::Frame,
+                            Err(e) => Wrote::Failed(format!("write: {e}")),
+                        }
+                    }));
+                }
+            }
+            // A SUBSTREAM THAT NEVER NEGOTIATED is the other way the
+            // frame silently fails to arrive, and it produces no write
+            // at all to report on.
+            ConnectionEvent::DialUpgradeError(err) => {
+                self.outcome = Some(Wrote::Failed(format!("upgrade: {:?}", err.error)));
+            }
+            _ => {}
         }
     }
 
     fn poll(
         &mut self,
         cx: &mut Context<'_>,
-    ) -> Poll<ConnectionHandlerEvent<Self::OutboundProtocol, (), ()>> {
+    ) -> Poll<ConnectionHandlerEvent<Self::OutboundProtocol, (), Wrote>> {
         if !self.asked {
             self.asked = true;
             return Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest {
                 protocol: SubstreamProtocol::new(ReadyUpgrade::new(MESHSUB), ()),
             });
         }
-        if let Some(writing) = self.writing.as_mut() {
-            if std::pin::Pin::new(writing).poll(cx).is_ready() {
-                self.writing = None;
-            }
+        if let Some(writing) = self.writing.as_mut()
+            && let Poll::Ready(outcome) = std::pin::Pin::new(writing).poll(cx)
+        {
+            self.writing = None;
+            self.outcome = Some(outcome);
+        }
+        // Reported ONCE. Leaving it in place would re-emit forever and
+        // the harness would spin on its own evidence.
+        if let Some(outcome) = self.outcome.take() {
+            return Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(outcome));
         }
         Poll::Pending
     }

@@ -304,6 +304,14 @@ Injection (2) carries a signature that is present, well-formed, and computed ove
 
 **The control is not decoration.** Hand-rolled protobuf has its own failure mode: an encoding the receiver cannot parse is *also* rejected, and the experiment would report success for a reason having nothing to do with signatures.
 
+**Absence of delivery only means refusal once presence on the wire is established.** Each injection builds a *fresh* injector and a fresh connection, and the write result went into `let _ =` with the handler reporting `ToBehaviour = ()`. So an injector that failed to connect, failed to negotiate `/meshsub/1.1.0`, or failed mid-write left `delivered_invalid == 0` looking exactly like a signature rejection — and the genuine injection then made every remaining check pass. The control cannot vouch for it, because it is a different injector on a different connection.
+
+The handler now reports `Wrote::Frame` or `Wrote::Failed`, the behaviour surfaces it, and B3 requires the invalid and genuine frames to have reached the wire before reading anything into their delivery counts.
+
+| mutation | result |
+|---|---|
+| the invalid injector never dials, so its frame is never written | `INVALID frame written: None` → three checks **false**, exit 1. The delivery counts are *unchanged* (1 / 0 / 1), so the old checks passed — that is the finding |
+
 **Each injection carries its own payload, and that is the difference between measuring and guessing.** All three used to carry identical bytes, so a delivery was credited to whichever four-second interval it arrived in. An invalid publication delayed past its own interval and delivered during the genuine one would therefore increment the *genuine* counter — and because the genuine message may itself have been suppressed by the invalid one's cache entry, the checks would then read `invalid == 0, genuine == 1` and **PASS on precisely the outcome this experiment exists to rule out**. Review found that; it is a false pass, not a flake.
 
 Distinct payloads cost nothing here because `GossipSubMessageIdV1` is source + sequence: the payload is not in the mesh id, so the (2)/(3) collision is exactly as tight as before. A final drain after the last injection catches a delivery still in flight when its own window closed, which the old shape would have read as suppression.
