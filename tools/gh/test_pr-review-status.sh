@@ -678,6 +678,26 @@ RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
 assert_rc       "and a later ask is still outstanding" 1
 assert_contains "  reported as in flight"              "in flight"
 
+echo "pr-review-status: a same-second ask is pending, not stale"
+# GitHub timestamps are SECOND-RESOLUTION, and an `@codex review` follows
+# the push that prompted it by seconds — so landing on the same second is
+# routine, not exotic. A strict `>` read that as predating the head and
+# exited 5 on a review requested a moment ago.
+run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
+        "me,2026-08-07T13:00:00Z" "2026-08-07T09:00:00Z"
+printf '2026-08-07T13:00:00Z\n' > "$SANDBOX/state/forced"
+: > "$SANDBOX/state/n"
+RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
+    timeout 20 bash "$UNDER_TEST" 77 o/r 2>&1)"; RUN_RC=$?
+assert_rc       "an ask on the force-push's own second is still pending" 1
+assert_contains "  and is reported outstanding"                          "in flight"
+
+# The same equality against a plain commit date, with no force-push.
+run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
+        "me,2026-08-07T09:00:00Z" "2026-08-07T09:00:00Z"
+assert_rc       "an ask on the head's own second is pending too" 1
+assert_contains "  and reported outstanding"                     "in flight"
+
 echo "pr-review-status: an unreadable head date waits rather than concluding"
 # The fallback direction matters: unreadable must mean PENDING. Guessing
 # "answered" turns a lookup failure into a confident "nothing is coming"

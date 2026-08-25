@@ -483,7 +483,19 @@ probe() {
 
         # Unreadable falls back to PENDING, which costs a longer wait and
         # never a false "nothing is coming".
-        if [[ -z "$head_born" || "$request_at" > "$head_born" ]]; then
+        #
+        # EQUALITY IS PENDING TOO, and that is not pedantry: GitHub
+        # timestamps are second-resolution, so a force-push and the
+        # `@codex review` that follows it land on the SAME second
+        # routinely — the ask is usually seconds behind the push that
+        # prompted it. A strict `>` reads that as predating the head and
+        # exits 5 on a review that was requested a moment ago. Equality
+        # cannot say which came first, so it takes the same direction
+        # every other ambiguity here takes.
+        #
+        # `[[ ]]` has no `>=` for strings, so this is written as "not
+        # earlier than" rather than assembled from two comparisons.
+        if [[ -z "$head_born" || ! "$request_at" < "$head_born" ]]; then
             request_pending=yes
         fi
         # The review it asked for answers it. No exit path reaches here
