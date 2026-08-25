@@ -249,6 +249,26 @@ pub enum SwarmCommand {
         /// Answered when the exchange settles.
         reply: oneshot::Sender<Result<EndpointId, DirectError>>,
     },
+    /// Install endpoint configuration for directed messaging.
+    ///
+    /// Replaces whatever was there, which DISCARDS every open queue —
+    /// reconfiguring endpoints is the leases changing, and a new holder
+    /// must not inherit the previous one's undelivered messages.
+    ConfigureDirect {
+        /// The configuration to install.
+        config: Box<DirectEndpoints>,
+        /// Answered once installed.
+        reply: oneshot::Sender<()>,
+    },
+    /// Take everything waiting on one endpoint's queue.
+    ///
+    /// The in-process stand-in for what Stage 8's IPC session does.
+    DrainEndpoint {
+        /// Whose queue.
+        endpoint: EndpointId,
+        /// Answered with the events, oldest first.
+        reply: oneshot::Sender<Vec<interweave_transport_runtime::DirectEvent>>,
+    },
     /// Refuse new connectivity while keeping what is already up.
     Drain {
         /// Answered once the manager is draining.
@@ -465,7 +485,7 @@ impl SwarmRuntime {
         // a window in which it trusted nobody -- or, in the version this
         // replaces, everybody -- and nothing in the type system to say
         // which.
-        let _ = manager.set_trust(trust, &[]);
+        let _ = manager.set_trust(trust.clone(), &[]);
 
         // A MONOTONIC CLOCK, because the policy is a state machine over
         // time and it had been given a literal `0` on every call. Every
@@ -516,6 +536,11 @@ impl SwarmRuntime {
         // session claims a lease, which is the correct posture for a
         // daemon that has just started (testing.md scenario 27).
         let mut direct_state = DirectState::new(now_ms(started));
+        // FROM THE SAME SOURCES the manager just took. Two copies of
+        // "who may talk to us" is two answers that will eventually
+        // differ, and the one a directed message meets must be the one
+        // that admitted its connection.
+        direct_state.adopt_trust(&trust);
 
         let mut pending_direct: HashMap<
             libp2p::request_response::OutboundRequestId,
@@ -754,6 +779,7 @@ impl SwarmRuntime {
                                     &mut refuse,
                                     &mut listens,
                                     &mut pending_direct,
+                                    &mut direct_state,
                                     &mut in_flight,
                                     config.max_pending_listens,
                                     now_ms(started),
@@ -946,6 +972,44 @@ impl SwarmRuntime {
                 frame: Box::new(frame),
                 reply,
             })
+            .await
+            .map_err(|_| SubstrateError::Stopped)?;
+        answer.await.map_err(|_| SubstrateError::Stopped)
+    }
+
+    /// Install endpoint configuration for directed messaging.
+    ///
+    /// Replaces whatever was there and discards every open queue: this
+    /// is the leases changing hands, and a new holder must not inherit
+    /// the previous one's undelivered messages.
+    ///
+    /// # Errors
+    /// [`SubstrateError::Stopped`] if the task is gone.
+    pub async fn configure_direct(&self, config: DirectEndpoints) -> Result<(), SubstrateError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(SwarmCommand::ConfigureDirect {
+                config: Box::new(config),
+                reply,
+            })
+            .await
+            .map_err(|_| SubstrateError::Stopped)?;
+        answer.await.map_err(|_| SubstrateError::Stopped)
+    }
+
+    /// Take everything waiting on one endpoint's queue, oldest first.
+    ///
+    /// The in-process stand-in for what Stage 8's IPC session does.
+    ///
+    /// # Errors
+    /// [`SubstrateError::Stopped`] if the task is gone.
+    pub async fn drain_endpoint(
+        &self,
+        endpoint: EndpointId,
+    ) -> Result<Vec<interweave_transport_runtime::DirectEvent>, SubstrateError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(SwarmCommand::DrainEndpoint { endpoint, reply })
             .await
             .map_err(|_| SubstrateError::Stopped)?;
         answer.await.map_err(|_| SubstrateError::Stopped)
@@ -1505,6 +1569,7 @@ fn handle_command(
     refuse: &mut Vec<libp2p::swarm::ConnectionId>,
     listens: &mut PendingListens,
     pending_direct: &mut HashMap<libp2p::request_response::OutboundRequestId, PendingDirect>,
+    direct_state: &mut DirectState,
     in_flight: &mut HashMap<libp2p::swarm::ConnectionId, DialTicket>,
     max_pending_listens: usize,
     now_ms: u64,
@@ -1607,6 +1672,13 @@ fn handle_command(
             // reported four closures against two real connections.
             let live: BTreeSet<TransportIdentity> = open.values().map(|c| c.peer.clone()).collect();
             let live: Vec<TransportIdentity> = live.into_iter().collect();
+            // DIRECT ADMISSION MOVES WITH IT. Revocation must take away
+            // the connectivity a peer already has (ADR-0012), and a
+            // directed message travels over a connection — so a trust
+            // change that closed connections while leaving direct
+            // admission on the old policy would refuse the peer's
+            // connection and accept its message.
+            direct_state.adopt_trust(&trust);
             let revoked = manager.set_trust(*trust, &live);
 
             // UNIQUE CONNECTIONS for the closing and the count. Every
@@ -1649,6 +1721,13 @@ fn handle_command(
                     let _ = reply.send(Err(DirectError::PeerUnreachable));
                 }
             }
+        }
+        SwarmCommand::ConfigureDirect { config, reply } => {
+            direct_state.configure(*config);
+            let _ = reply.send(());
+        }
+        SwarmCommand::DrainEndpoint { endpoint, reply } => {
+            let _ = reply.send(direct_state.drain(&endpoint));
         }
         SwarmCommand::Drain { reply } => {
             // DRAINING IS NOT STOPPING. Existing connections stay up --
@@ -1758,6 +1837,54 @@ pub struct DirectState {
 }
 
 impl DirectState {
+    /// Adopt the profile's data-plane trust.
+    ///
+    /// THE SAME `PeerTrustPolicy` THE MANAGER USES, taken from the one
+    /// `TrustSources` a caller supplied rather than kept separately.
+    /// Two copies of "who may talk to us" is two answers, and the one a
+    /// directed message met would eventually differ from the one that
+    /// admitted its connection.
+    fn adopt_trust(&mut self, trust: &TrustSources) {
+        self.trust = trust.peers.clone();
+    }
+
+    /// Install endpoint configuration and open a queue for each lease.
+    fn configure(&mut self, config: DirectEndpoints) {
+        use interweave_transport_runtime::endpoint_registry::LocalSessionId;
+
+        let mut endpoints = std::collections::BTreeMap::new();
+        for name in &config.endpoints {
+            endpoints.insert(name.clone(), Default::default());
+        }
+        let mut registry = EndpointRegistry::new(endpoints, config.default.clone());
+
+        // A LEASE PER ENDPOINT, in-process. Stage 6 routes to an
+        // in-process `LocalDataSession`; Stage 8 replaces this with a
+        // real IPC claim, and the registry cannot tell the difference —
+        // which is the point of it holding leases rather than sessions.
+        let mut queues = EndpointQueues::new();
+        for name in &config.endpoints {
+            if registry
+                .claim(
+                    name,
+                    LocalSessionId(format!("in-process-{}", name.as_str())),
+                    "in-process",
+                    config.epoch.clone(),
+                )
+                .is_ok()
+            {
+                queues.open(name.clone(), config.queue_bound);
+            }
+        }
+        self.registry = registry;
+        self.queues = queues;
+    }
+
+    /// Take everything waiting for `endpoint`.
+    fn drain(&mut self, endpoint: &EndpointId) -> Vec<interweave_transport_runtime::DirectEvent> {
+        self.queues.drain(endpoint)
+    }
+
     /// Build the admission state for a profile that has no leases yet.
     #[must_use]
     pub fn new(now_ms: u64) -> Self {
@@ -1777,6 +1904,26 @@ impl DirectState {
             queues: EndpointQueues::new(),
         }
     }
+}
+
+/// Endpoint configuration for this profile's direct routing.
+///
+/// Stage 6 shape: every configured endpoint is leased in-process. Stage 8
+/// replaces the leasing half with real IPC claims and keeps the rest.
+#[derive(Debug, Clone)]
+pub struct DirectEndpoints {
+    /// Every endpoint this profile accepts directed messages on.
+    pub endpoints: Vec<EndpointId>,
+    /// The endpoint an omitted destination resolves to.
+    ///
+    /// `None` means a message with no destination is `no_route` — which
+    /// is a configuration, not a failure: a profile may require every
+    /// sender to name where it is going.
+    pub default: Option<EndpointId>,
+    /// Bound on each endpoint's delivery queue.
+    pub queue_bound: usize,
+    /// The lease epoch to grant.
+    pub epoch: interweave_transport_runtime::Generation,
 }
 
 /// Whether a swarm event was a direct-protocol one.

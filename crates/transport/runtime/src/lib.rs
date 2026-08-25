@@ -47,4 +47,8 @@ pub use ingress::{
     SubscriptionRegistry,
 };
 pub use interweave_trust_api::{EndpointTrustPolicy, PeerTrustPolicy};
+// Same reason: `EndpointRegistry::claim` takes a `Generation`, so it is
+// already in this crate's public API and a caller that could not spell
+// it could not claim a lease.
+pub use interweave_local_client_api::Generation;
 pub use reply_token::{DuplicateToken, ReplyResolution, ReplyRoute, ReplyTokenTable};

@@ -1496,6 +1496,7 @@ dependencies = [
 name = "interweave-direct-v2-tests"
 version = "0.0.0"
 dependencies = [
+ "interweave-local-client-api",
  "interweave-profile-identity",
  "interweave-test-support",
  "interweave-transport-api",
