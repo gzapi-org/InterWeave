@@ -1631,7 +1631,7 @@ mod tests {
     fn partial_revocation_keeps_the_reachability_it_still_authorizes() {
         let mut m = manager(&[RELAY], &[RELAY]);
         let peer = ident(RELAY);
-        let revoked = m.set_trust(trust(&[], &[RELAY]), &[peer.clone()]);
+        let revoked = m.set_trust(trust(&[], &[RELAY]), std::slice::from_ref(&peer));
         assert_eq!(revoked.len(), 1, "the data-plane loss IS a revocation");
 
         let reservation = ConnectionId::new_unchecked(1);
@@ -1654,7 +1654,7 @@ mod tests {
     fn partial_revocation_still_closes_the_data_plane() {
         let mut m = manager(&[RELAY], &[RELAY]);
         let peer = ident(RELAY);
-        let revoked = m.set_trust(trust(&[], &[RELAY]), &[peer.clone()]);
+        let revoked = m.set_trust(trust(&[], &[RELAY]), std::slice::from_ref(&peer));
 
         let data = ConnectionId::new_unchecked(2);
         let closing = connections_to_close(
@@ -1674,7 +1674,7 @@ mod tests {
     fn an_inbound_connection_is_reevaluated_without_an_origin() {
         let mut m = manager(&[RELAY], &[RELAY]);
         let peer = ident(RELAY);
-        let revoked = m.set_trust(trust(&[], &[RELAY]), &[peer.clone()]);
+        let revoked = m.set_trust(trust(&[], &[RELAY]), std::slice::from_ref(&peer));
 
         let inbound = ConnectionId::new_unchecked(3);
         let closing = connections_to_close(&m, &revoked, [(inbound, &peer, None)].into_iter());
@@ -1690,7 +1690,7 @@ mod tests {
     fn a_peer_that_kept_its_trust_keeps_every_connection() {
         let mut m = manager(&[RELAY], &[RELAY]);
         let peer = ident(RELAY);
-        let revoked = m.set_trust(trust(&[RELAY], &[RELAY]), &[peer.clone()]);
+        let revoked = m.set_trust(trust(&[RELAY], &[RELAY]), std::slice::from_ref(&peer));
         assert!(revoked.is_empty(), "nothing changed, nothing revoked");
 
         let closing = connections_to_close(
@@ -1737,9 +1737,8 @@ mod tests {
             )
             .expect("a trusted peer with a fresh policy is admitted");
 
-        let undialable = AdmittedDial::from_ticket(ticket)
-            .err()
-            .expect("libp2p cannot build a dial from it");
+        let undialable =
+            AdmittedDial::from_ticket(ticket).expect_err("libp2p cannot build a dial from it");
         let reason = settle_undialable(&mut m, *undialable, 0);
         assert!(reason.contains("PeerId"), "it says why: {reason}");
         assert_eq!(
