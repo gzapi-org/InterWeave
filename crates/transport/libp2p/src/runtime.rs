@@ -1740,13 +1740,33 @@ fn handle_command(
             let _ = reply.send(closed);
         }
         SwarmCommand::SendDirect { peer, frame, reply } => {
-            // NO ENDPOINT-OUTBOUND CHECK HERE, and its absence is not an
-            // omission: `authorize_outbound` narrows profile trust for a
-            // SOURCE endpoint, and the caller supplying that endpoint is
-            // the one holding its lease. The check belongs where the
-            // lease is known, which is Stage 8's IPC boundary. What this
-            // layer owes is profile trust, and `send_request` reaches a
-            // peer only over a connection the gate already admitted.
+            // THE SOURCE ENDPOINT MUST BE ONE THIS NODE HOLDS A LEASE
+            // FOR. It used to be taken from the frame and sent as given,
+            // which made it arbitrary caller input: a handle holder could
+            // name any endpoint at all, and the receiver would key its
+            // dedup entry on that label and surface it on the delivered
+            // event. CLAUDE.md §5 is the other way round — source
+            // EndpointId is derived from the local lease, never trusted
+            // from the caller.
+            //
+            // The registry is the whole check. `configure_direct` claims
+            // a lease per configured endpoint, so holding one means this
+            // runtime really serves that endpoint; a name it never
+            // configured, or one whose lease was revoked, has none.
+            //
+            // Stage 8 tightens this rather than replacing it: an IPC
+            // session gets ONE exclusive lease and may name only that
+            // one, where this layer accepts any lease the node holds.
+            // Which lease belongs to which caller is a question this
+            // stage has no sessions to ask.
+            if direct_state
+                .registry
+                .lease(&frame.source_endpoint)
+                .is_none()
+            {
+                let _ = reply.send(Err(DirectError::EndpointNotRegistered));
+                return;
+            }
             let peer_id = match to_peer_id(&peer) {
                 Ok(id) => id,
                 Err(()) => {

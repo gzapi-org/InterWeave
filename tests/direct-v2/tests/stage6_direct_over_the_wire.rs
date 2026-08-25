@@ -60,6 +60,15 @@ fn endpoints(queue_bound: usize) -> DirectEndpoints {
     }
 }
 
+/// Like [`frame`], with the SOURCE endpoint chosen by the caller —
+/// which is the thing the lease check governs.
+fn frame_from(source: &str, destination: Option<&str>, body: &[u8], id: u8) -> DirectMessageV2 {
+    DirectMessageV2 {
+        source_endpoint: endpoint(source),
+        ..frame(destination, body, id)
+    }
+}
+
 fn frame(destination: Option<&str>, body: &[u8], id: u8) -> DirectMessageV2 {
     DirectMessageV2 {
         message_id: MessageId::from_bytes([id; 16]),
@@ -92,6 +101,15 @@ async fn connected_pair(queue_bound: usize) -> (SwarmRuntime, SwarmRuntime, Tran
         trusting(&[&receiver_peer]),
     )
     .expect("the sender starts");
+
+    // THE SENDER CONFIGURES ITS OWN ENDPOINTS TOO, because a source
+    // endpoint must name a lease this node actually holds. Before that
+    // was enforced every sender here named `human` while holding
+    // nothing — which is precisely the spoofing the check now refuses.
+    sender
+        .configure_direct(endpoints(queue_bound))
+        .await
+        .expect("the sender's own endpoints install");
 
     receiver
         .configure_direct(endpoints(queue_bound))
@@ -357,6 +375,11 @@ async fn an_untrusted_peer_is_refused_at_the_data_plane() {
     )
     .expect("starts");
 
+    sender
+        .configure_direct(endpoints(8))
+        .await
+        .expect("the sender's own endpoints install");
+
     receiver
         .configure_direct(endpoints(8))
         .await
@@ -562,4 +585,87 @@ async fn sending_to_the_local_peer_is_invalid_argument() {
         TransportError::InvalidArgument,
         "a local input error, not PeerUnreachable"
     );
+}
+
+/// A source endpoint this node holds no lease for is refused locally.
+///
+/// The source EndpointId is derived from the local lease, never taken
+/// from caller input (CLAUDE.md §5). Before this was enforced, any
+/// holder of a runtime handle could name any endpoint at all, and the
+/// receiver would key its dedup entry on that label and surface it on
+/// the delivered event as though it meant something.
+///
+/// Refused before the frame reaches the swarm, so nothing crosses the
+/// socket and no dedup entry is minted anywhere.
+#[tokio::test]
+async fn a_source_endpoint_without_a_lease_is_refused() {
+    let (sender, receiver, receiver_peer) = connected_pair(8).await;
+
+    let error = sender
+        .send_direct(
+            receiver_peer.clone(),
+            frame_from("not-leased", Some("claude"), b"spoofed", 40),
+        )
+        .await
+        .expect("the command reaches the task")
+        .expect_err("a name this node never configured holds no lease");
+    assert_eq!(error, TransportError::EndpointNotRegistered);
+
+    // NOTHING CROSSED THE WIRE. A refusal that still sent the frame
+    // would leave the receiver holding the spoofed label, which is the
+    // defect rather than the fix.
+    assert!(
+        receiver
+            .drain_endpoint(endpoint("claude"))
+            .await
+            .expect("answers")
+            .is_empty(),
+        "the receiver never saw it"
+    );
+
+    // ...and a source this node DOES hold is unaffected, so the check
+    // discriminates rather than refusing everything.
+    sender
+        .send_direct(
+            receiver_peer,
+            frame_from("human", Some("claude"), b"real", 41),
+        )
+        .await
+        .expect("the command reaches the task")
+        .expect("a leased source endpoint still sends");
+    assert_eq!(
+        receiver
+            .drain_endpoint(endpoint("claude"))
+            .await
+            .expect("answers")
+            .len(),
+        1
+    );
+}
+
+/// Revoking the lease stops the endpoint being a usable SOURCE, not just
+/// a destination.
+///
+/// The registry is one fact read two ways: `revoke_endpoint` ends the
+/// lease, and a lease is exactly what the send path requires. Without
+/// this a revoked endpoint would go on sending under its own name while
+/// refusing to receive under it.
+#[tokio::test]
+async fn a_revoked_endpoint_can_no_longer_be_a_source() {
+    let (sender, _receiver, receiver_peer) = connected_pair(8).await;
+
+    sender
+        .revoke_endpoint(endpoint("human"))
+        .await
+        .expect("the revoke reaches the task");
+
+    let error = sender
+        .send_direct(
+            receiver_peer,
+            frame_from("human", Some("claude"), b"after revoke", 42),
+        )
+        .await
+        .expect("the command reaches the task")
+        .expect_err("the lease is gone");
+    assert_eq!(error, TransportError::EndpointNotRegistered);
 }

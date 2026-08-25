@@ -86,6 +86,13 @@ async fn connected_pair() -> (SwarmRuntime, SwarmRuntime, TransportIdentity) {
     )
     .expect("the sender starts");
 
+    // The sender holds leases for the endpoints it sends FROM: a source
+    // endpoint must name a lease this node holds, not a label it chose.
+    sender
+        .configure_direct(endpoints())
+        .await
+        .expect("the sender's own endpoints install");
+
     receiver
         .configure_direct(endpoints())
         .await

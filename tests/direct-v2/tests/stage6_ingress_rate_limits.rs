@@ -63,6 +63,28 @@ fn endpoints() -> DirectEndpoints {
     }
 }
 
+/// The SENDER's endpoints, which are not the receiver's.
+///
+/// A source endpoint must name a lease the sending node holds, so a
+/// sender that will flood under sixty-four invented names has to hold
+/// sixty-four leases. That is a local control and changes nothing about
+/// what is under test: the receiver sees sixty-four distinct
+/// peer-asserted source endpoints arriving from one authenticated peer,
+/// which is exactly what it would see from an attacker running its own
+/// software and holding no leases at all.
+fn sender_endpoints() -> DirectEndpoints {
+    let mut endpoints = vec![endpoint("human"), endpoint("claude")];
+    for id in 0..(PER_PEER_BURST * 2) {
+        endpoints.push(endpoint(&format!("source-{id}")));
+    }
+    DirectEndpoints {
+        endpoints,
+        default: Some(endpoint("human")),
+        queue_bound: QUEUE_BOUND,
+        epoch: Generation::parse("ingress_________").expect("valid generation"),
+    }
+}
+
 /// Distinct `id` per call, because a repeated message id is a DUPLICATE
 /// and would be accepted without ever reaching the queue — which would
 /// break the drain count these tests rely on.
@@ -106,6 +128,10 @@ async fn fan_in(senders: usize) -> (Vec<SwarmRuntime>, SwarmRuntime, TransportId
     let mut runtimes = Vec::with_capacity(senders);
     for (id, _) in &sending {
         let sender = start(id, trusting(&[&receiver_peer])).await;
+        sender
+            .configure_direct(sender_endpoints())
+            .await
+            .expect("the sender's own endpoints install");
         sender
             .dial(receiver_peer.clone(), address.clone())
             .await
