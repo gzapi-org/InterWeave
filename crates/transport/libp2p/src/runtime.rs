@@ -52,7 +52,7 @@ use libp2p::{Multiaddr, PeerId, identify, noise, tcp, yamux};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::behaviour::{SubstrateBehaviour, SubstrateBehaviourEvent};
-use crate::gated_swarm::{AdmittedDial, GatedSwarm};
+use crate::gated_swarm::{AdmittedDial, GatedSwarm, UndialableAdmission};
 
 /// Default depth of the command channel.
 pub const DEFAULT_COMMAND_CAPACITY: usize = 64;
@@ -1009,11 +1009,9 @@ fn attempt_dial(
     let admitted = match AdmittedDial::from_ticket(ticket) {
         Ok(a) => a,
         Err(boxed) => {
-            let undialable = *boxed;
-            // The refusal is still an admission that reserved a slot,
-            // so it is settled here rather than dropped on the floor.
-            manager.record_failure(undialable.ticket, now_ms);
-            return Err(DialRefusal::Backend(undialable.reason));
+            return Err(DialRefusal::Backend(settle_undialable(
+                manager, *boxed, now_ms,
+            )));
         }
     };
     let id = admitted.connection_id();
@@ -1038,6 +1036,31 @@ fn attempt_dial(
             Err(DialRefusal::Backend(e.to_string()))
         }
     }
+}
+
+/// Settle an admission that could not be turned into a dial, and say why.
+///
+/// PERMANENT, not transient. Every way `AdmittedDial::from_ticket`
+/// fails is a deterministic property of the ticket itself -- it names
+/// no peer, its peer is not a libp2p `PeerId`, or its address is not a
+/// multiaddr -- so the same ticket converts the same way every time,
+/// whatever the network does. `record_failure` reschedules, so a
+/// trusted peer with a remembered address retried that identical
+/// conversion failure forever once the scheduler became active.
+///
+/// The `PeerId` case is reachable rather than theoretical:
+/// `TransportIdentity` validates a prefix, an alphabet and a length,
+/// while libp2p decodes the multihash. `Qm` followed by 44 base58
+/// characters satisfies the first and fails the second.
+fn settle_undialable(
+    manager: &mut ConnectionManager,
+    undialable: UndialableAdmission,
+    now_ms: u64,
+) -> String {
+    // The refusal is still an admission that reserved a slot, so it is
+    // settled here rather than dropped on the floor.
+    manager.record_permanent_failure(undialable.ticket, now_ms);
+    undialable.reason
 }
 
 /// Whether `error` describes THIS PROCESS's transport stack rather than
@@ -1566,11 +1589,13 @@ fn translate(
 
 #[cfg(test)]
 mod tests {
-    use super::{connections_to_close, is_permanent_dial_error};
+    use super::{connections_to_close, is_permanent_dial_error, settle_undialable};
+    use crate::gated_swarm::AdmittedDial;
     use interweave_transport_api::TransportIdentity;
     use interweave_transport_runtime::{
         ConnectionManager, ConnectionPolicy, DialOrigin, TrustSources,
     };
+    use interweave_transport_runtime::{DialRequest, DialTicket};
     use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
     use libp2p::Multiaddr;
     use libp2p::core::transport::TransportError;
@@ -1674,6 +1699,54 @@ mod tests {
             [(ConnectionId::new_unchecked(4), &peer, None)].into_iter(),
         );
         assert!(closing.is_empty());
+    }
+
+    /// A ticket libp2p cannot dial is not retried forever.
+    ///
+    /// Every `from_ticket` failure is a deterministic property of the
+    /// ticket, so `record_failure` -- which reschedules -- meant a
+    /// trusted peer with a remembered address repeated the identical
+    /// conversion failure on every tick once the scheduler was active.
+    ///
+    /// The case is reachable, not theoretical: `TransportIdentity`
+    /// checks a prefix, an alphabet and a length; libp2p decodes the
+    /// multihash. This `Qm` identity satisfies the first and fails the
+    /// second.
+    #[test]
+    fn a_ticket_libp2p_cannot_dial_is_settled_permanently() {
+        let shaped_but_not_a_peer_id = format!("Qm{}", "z".repeat(44));
+        let peer = TransportIdentity::parse(shaped_but_not_a_peer_id.clone())
+            .expect("the neutral grammar accepts it");
+        assert!(
+            shaped_but_not_a_peer_id.parse::<libp2p::PeerId>().is_err(),
+            "and libp2p does not -- the precondition this test exists for"
+        );
+
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        m.set_trust(trust(&[&shaped_but_not_a_peer_id], &[]), &[]);
+        let ticket: DialTicket = m
+            .handle()
+            .load()
+            .admit(
+                &DialRequest {
+                    peer: Some(peer.clone()),
+                    address: "/ip4/192.0.2.1/tcp/4001".to_owned(),
+                    origin: DialOrigin::ConnectionManager,
+                },
+                0,
+            )
+            .expect("a trusted peer with a fresh policy is admitted");
+
+        let undialable = AdmittedDial::from_ticket(ticket)
+            .err()
+            .expect("libp2p cannot build a dial from it");
+        let reason = settle_undialable(&mut m, *undialable, 0);
+        assert!(reason.contains("PeerId"), "it says why: {reason}");
+        assert_eq!(
+            m.scheduled_retries(),
+            0,
+            "nothing to retry: the same ticket converts the same way every time"
+        );
     }
 
     fn addr() -> Multiaddr {
