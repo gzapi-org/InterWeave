@@ -446,3 +446,49 @@ async fn a_payload_at_the_ceiling_survives_the_wire() {
         "absent media stayed absent across the wire"
     );
 }
+
+/// Scenario 15: an endpoint lease disconnect removes the route
+/// immediately, and takes its undelivered backlog with it.
+///
+/// The two are one fact. A revoke that ended the lease but left the
+/// queue open would hold a daemon-side backlog for an endpoint nothing
+/// holds — which `testing.md` forbids and ADR-0044 puts in the human
+/// application instead.
+#[tokio::test]
+async fn revoking_a_lease_removes_the_route_and_discards_its_backlog() {
+    let (sender, receiver, receiver_peer) = connected_pair(8).await;
+
+    // One message lands and is left undrained.
+    sender
+        .send_direct(
+            receiver_peer.clone(),
+            frame(Some("claude"), b"undelivered", 20),
+        )
+        .await
+        .expect("the command reaches the task")
+        .expect("accepted");
+
+    let discarded = receiver
+        .revoke_endpoint(endpoint("claude"))
+        .await
+        .expect("the revoke reaches the task");
+    assert_eq!(discarded, 1, "the undelivered event went with the lease");
+
+    // THE ROUTE IS GONE, and indistinguishably so: an unleased endpoint
+    // is `no_route` with every other routing failure.
+    let error = sender
+        .send_direct(receiver_peer, frame(Some("claude"), b"after", 21))
+        .await
+        .expect("the command reaches the task")
+        .expect_err("a revoked endpoint has no route");
+    assert_eq!(error, TransportError::RemoteEndpointUnavailable);
+
+    assert!(
+        receiver
+            .drain_endpoint(endpoint("claude"))
+            .await
+            .expect("answers")
+            .is_empty(),
+        "and nothing survived to be drained"
+    );
+}

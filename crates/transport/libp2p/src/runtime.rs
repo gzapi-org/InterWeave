@@ -260,6 +260,17 @@ pub enum SwarmCommand {
         /// Answered once installed.
         reply: oneshot::Sender<()>,
     },
+    /// End one endpoint's lease, closing its queue with it.
+    ///
+    /// `testing.md` scenario 15: an endpoint lease disconnect removes the
+    /// route immediately. Stage 8 calls this when an IPC session goes;
+    /// until then it is how a test reaches the same state.
+    RevokeEndpoint {
+        /// Whose lease ends.
+        endpoint: EndpointId,
+        /// Answered with the number of undelivered events discarded.
+        reply: oneshot::Sender<usize>,
+    },
     /// Take everything waiting on one endpoint's queue.
     ///
     /// The in-process stand-in for what Stage 8's IPC session does.
@@ -999,6 +1010,23 @@ impl SwarmRuntime {
                 config: Box::new(config),
                 reply,
             })
+            .await
+            .map_err(|_| SubstrateError::Stopped)?;
+        answer.await.map_err(|_| SubstrateError::Stopped)
+    }
+
+    /// End one endpoint's lease and close its queue with it.
+    ///
+    /// Returns how many undelivered events were discarded. An offline
+    /// endpoint holds no daemon-side backlog, so they are dropped rather
+    /// than kept for whoever leases it next.
+    ///
+    /// # Errors
+    /// [`SubstrateError::Stopped`] if the task is gone.
+    pub async fn revoke_endpoint(&self, endpoint: EndpointId) -> Result<usize, SubstrateError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(SwarmCommand::RevokeEndpoint { endpoint, reply })
             .await
             .map_err(|_| SubstrateError::Stopped)?;
         answer.await.map_err(|_| SubstrateError::Stopped)
@@ -1745,6 +1773,9 @@ fn handle_command(
             direct_state.configure(*config);
             let _ = reply.send(());
         }
+        SwarmCommand::RevokeEndpoint { endpoint, reply } => {
+            let _ = reply.send(direct_state.revoke(&endpoint));
+        }
         SwarmCommand::DrainEndpoint { endpoint, reply } => {
             let _ = reply.send(direct_state.drain(&endpoint));
         }
@@ -1902,6 +1933,23 @@ impl DirectState {
     /// Take everything waiting for `endpoint`.
     fn drain(&mut self, endpoint: &EndpointId) -> Vec<interweave_transport_runtime::DirectEvent> {
         self.queues.drain(endpoint)
+    }
+
+    /// End `endpoint`'s lease and close its queue together.
+    ///
+    /// ONE OPERATION, because they are one fact. The registry decides
+    /// whether an endpoint is leased and the queue holds what arrived for
+    /// it, and a revoke that touched only the first would leave a queue
+    /// open for an endpoint nothing holds — a daemon-side backlog for an
+    /// offline endpoint, which `testing.md` and ADR-0044 both forbid.
+    /// Leaving them as two calls means every future caller has to
+    /// remember the second one.
+    ///
+    /// Returns the number of undelivered events discarded, so a caller
+    /// can log a real number rather than assume zero.
+    fn revoke(&mut self, endpoint: &EndpointId) -> usize {
+        self.registry.revoke(endpoint);
+        self.queues.close(endpoint)
     }
 
     /// Build the admission state for a profile that has no leases yet.
