@@ -269,6 +269,33 @@ Proved by making the strict receiver permissive: the forgery is then delivered, 
 
 **The deviation this experiment required, stated plainly.** The public API does not let a caller choose a message's sequence number, so a *source + sequence* collision between a forged message and a genuine one cannot be arranged through it. B2 therefore derives the mesh id from the payload, which forces exactly the collision the ordering question is about and changes nothing else in the receive path. B1 uses the real source+sequence rule. A future rust-libp2p that exposes sequence numbers would allow B2 to be run without the substitution; until then, this is the closest honest approximation, and the substitution is confined to the id function.
 
+### B3. An invalid **signed** claim, injected on the wire
+
+B2 uses `MessageAuthenticity::Author`, which publishes **unsigned** with a claimed source. `PUBSUB.md` requires the receive path to reject an invalid *signed* source claim before it can create a lasting duplicate-cache entry — and a missing signature is not that. It could in principle be refused on an earlier path, leaving the signed case untested while the spike reported PASS. Review caught it; this experiment exists because of that, not as an extension of B2.
+
+Nothing public can produce the message: `publish` only ever signs correctly, and no public call accepts a prebuilt `RawMessage`. So `src/inject.rs` writes the frames directly to a `/meshsub/1.1.0` substream — hand-encoded protobuf, signed with the victim's real key over *different bytes than it carries*, so the signature is present, well-formed, and cannot verify.
+
+```text
+correctly signed (control): delivered              1
+the injector CAN produce an acceptable message     true
+signed, signature invalid: delivered               0
+and an invalid signature is refused                true
+genuine message with the SAME mesh id delivered    1
+VERDICT: an invalid signed claim leaves no cache entry  true
+```
+
+**The control is not decoration.** Hand-rolled protobuf has its own failure mode: an encoding the receiver cannot parse is *also* rejected, and the experiment would report success for a reason having nothing to do with signatures. So the same injector sends a correctly-signed message first, and the receiver must deliver it.
+
+Three mutations, and two of them found real weaknesses in the first version of this experiment:
+
+| mutation | result |
+|---|---|
+| swap two protobuf field tags | control fails — **and the verdict initially still said PASS**, so the verdict now depends on its own control |
+| receiver set to `ValidationMode::Permissive` | no change: permissive still validates a signature that is *present*, so this cannot reach the collision logic |
+| sign the "invalid" message correctly | it is delivered, it caches, and **the later genuine message with the same mesh id is suppressed** — verdict false |
+
+That last one is the strongest evidence here: it shows the collision half genuinely detects a poisoned cache, rather than passing because nothing ever collides.
+
 ### An incidental finding about the library
 
 `gossipsub::Behaviour::new` **refuses** to build a node that publishes unsigned while requiring signatures on receipt, and says so:

@@ -564,3 +564,193 @@ fn deliveries<'a>(events: &'a [Delivery], at: usize, payload: &[u8]) -> Vec<&'a 
         .filter(|d| d.node == at && d.data == payload)
         .collect()
 }
+
+/// B3 -- an invalid SIGNED source claim, injected on the wire.
+///
+/// B2 uses `MessageAuthenticity::Author`, which publishes UNSIGNED with
+/// a claimed source. `PUBSUB.md` requires the receive path to reject an
+/// invalid **signed** source claim before it can create a lasting
+/// duplicate-cache entry, and a missing signature is not that: it could
+/// in principle be refused earlier, leaving the signed case untested
+/// while the spike reported PASS. Review caught that, and it is the
+/// reason this experiment exists rather than an extension of B2.
+///
+/// Nothing in the public API can produce the message: `publish` only
+/// ever signs correctly, and no public call accepts a prebuilt
+/// `RawMessage`. So the frames are written directly to a
+/// `/meshsub/1.1.0` substream by [`crate::inject`].
+///
+/// # The control is the point
+///
+/// Hand-rolled protobuf invites its own failure mode: an encoding the
+/// receiver cannot parse is also rejected, and the experiment would
+/// then report success for a reason having nothing to do with
+/// signatures. So the SAME injector sends a correctly-signed message
+/// first. The receiver must deliver that one. Only then does a
+/// rejection of the mutated one mean what it says.
+pub async fn b3_invalid_signed_claim_is_rejected() {
+    use crate::inject::{Injector, signed_message};
+
+    let topic = IdentTopic::new("/spike-002/broadcast");
+    let victim_keypair = libp2p::identity::Keypair::generate_ed25519();
+    let victim_peer = PeerId::from_public_key(&victim_keypair.public());
+    let topic_string = topic.hash().into_string();
+
+    // Both messages claim the victim and share a mesh id under the
+    // payload-derived rule, which is the collision the ordering
+    // question needs.
+    let payload = b"the-signed-contested-message".to_vec();
+
+    // CONTROL: signature computed over exactly the data it carries.
+    let valid = signed_message(&victim_keypair, &topic_string, &payload, &payload, 1);
+    // UNDER TEST: signature present and well-formed, computed over
+    // DIFFERENT bytes, so it cannot verify over what is carried.
+    let invalid = signed_message(
+        &victim_keypair,
+        &topic_string,
+        &payload,
+        b"something-else",
+        2,
+    );
+    assert_ne!(valid, invalid, "the two injections must differ");
+
+    // The control's result GATES the verdict below. A broken encoder
+    // makes the control fail and the invalid case "pass" -- rejected,
+    // but for the wrong reason -- and a verdict that did not depend on
+    // its own control reported PASS anyway. Mutating the field order
+    // caught exactly that, which is why `control_ok` exists.
+    let mut control_ok = false;
+    for (label, message, expect_delivered) in [
+        ("correctly signed (control)", valid, true),
+        ("signed, signature invalid", invalid, false),
+    ] {
+        let mut receiver = signing_node(IdRule::PayloadDerived);
+        let addr = listen(&mut receiver).await;
+        receiver
+            .behaviour_mut()
+            .gossipsub
+            .subscribe(&topic)
+            .expect("subscribe");
+
+        let mut injector = libp2p::SwarmBuilder::with_new_identity()
+            .with_tokio()
+            .with_tcp(
+                tcp::Config::default().nodelay(true),
+                noise::Config::new,
+                yamux::Config::default,
+            )
+            .expect("tcp")
+            .with_behaviour(|_| Injector::new(&topic_string, &message))
+            .expect("behaviour")
+            .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(30)))
+            .build();
+        injector.dial(addr.clone()).expect("dial");
+
+        // Drive both for a fixed window and record what the RECEIVER
+        // delivered to its application.
+        let mut delivered = 0_usize;
+        let mut sources: Vec<Option<PeerId>> = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+        while tokio::time::Instant::now() < deadline {
+            tokio::select! {
+                e = receiver.select_next_some() => {
+                    if let SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(
+                        gossipsub::Event::Message { message, .. })) = e
+                        && message.data == payload
+                    {
+                        delivered += 1;
+                        sources.push(message.source);
+                    }
+                }
+                _ = injector.select_next_some() => {}
+                () = tokio::time::sleep(Duration::from_millis(20)) => {}
+            }
+        }
+
+        note(&format!("  {label}: delivered"), delivered);
+        if expect_delivered {
+            control_ok = delivered == 1 && sources.first() == Some(&Some(victim_peer));
+            note(
+                "  the injector CAN produce an acceptable message",
+                control_ok,
+            );
+            continue;
+        }
+        note("  and an invalid signature is refused", delivered == 0);
+
+        // THE COLLISION, which is the actual ordering question. The
+        // rejection above is only half: what `PUBSUB.md` requires is
+        // that the rejected message left NOTHING BEHIND, so a genuine
+        // message with the same mesh id is still delivered afterwards.
+        // A receive path that cached before verifying would suppress
+        // it, and every number above would look identical.
+        let mut victim = libp2p::SwarmBuilder::with_existing_identity(victim_keypair.clone())
+            .with_tokio()
+            .with_tcp(
+                tcp::Config::default().nodelay(true),
+                noise::Config::new,
+                yamux::Config::default,
+            )
+            .expect("tcp")
+            .with_behaviour(|_| Behaviour {
+                gossipsub: gossipsub::Behaviour::new(
+                    MessageAuthenticity::Signed(victim_keypair.clone()),
+                    config(IdRule::PayloadDerived),
+                )
+                .expect("gossipsub behaviour"),
+            })
+            .expect("behaviour")
+            .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(30)))
+            .build();
+        victim
+            .behaviour_mut()
+            .gossipsub
+            .subscribe(&topic)
+            .expect("subscribe");
+        victim.dial(addr.clone()).expect("dial");
+
+        // Let the mesh form before publishing, or the publish has
+        // nobody to reach and the test measures the wiring.
+        let settle = tokio::time::Instant::now() + Duration::from_secs(2);
+        while tokio::time::Instant::now() < settle {
+            tokio::select! {
+                _ = receiver.select_next_some() => {}
+                _ = victim.select_next_some() => {}
+                () = tokio::time::sleep(Duration::from_millis(20)) => {}
+            }
+        }
+        let published = victim
+            .behaviour_mut()
+            .gossipsub
+            .publish(topic.clone(), payload.clone());
+        note(
+            "  genuine publish accepted by its own node",
+            published.is_ok(),
+        );
+
+        let mut genuine_delivered = 0_usize;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+        while tokio::time::Instant::now() < deadline {
+            tokio::select! {
+                e = receiver.select_next_some() => {
+                    if let SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(
+                        gossipsub::Event::Message { message, .. })) = e
+                        && message.data == payload
+                    {
+                        genuine_delivered += 1;
+                    }
+                }
+                _ = victim.select_next_some() => {}
+                () = tokio::time::sleep(Duration::from_millis(20)) => {}
+            }
+        }
+        note(
+            "  genuine message with the SAME mesh id delivered after it",
+            genuine_delivered,
+        );
+        note(
+            "  VERDICT: an invalid signed claim leaves no cache entry",
+            control_ok && delivered == 0 && genuine_delivered == 1,
+        );
+    }
+}

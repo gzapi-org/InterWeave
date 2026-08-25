@@ -7,6 +7,7 @@
 //! it observed; the README records what those observations mean.
 
 mod direct;
+mod inject;
 mod mesh;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
@@ -54,6 +55,9 @@ async fn main() {
 
     println!("\nB2. does an INVALID message create a lasting duplicate-cache entry?");
     mesh::b2_authenticity_before_cache().await;
+
+    println!("\nB3. an invalid SIGNED claim, injected on the wire");
+    mesh::b3_invalid_signed_claim_is_rejected().await;
 
     println!("\ndone.");
 }
