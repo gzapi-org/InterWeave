@@ -24,7 +24,7 @@
 //! here, so TTL behaviour is testable by enumeration rather than by
 //! sleeping.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 
 use interweave_transport_api::{ChannelId, EndpointId, MessageId, TransportIdentity};
 
@@ -301,10 +301,31 @@ pub enum Reservation {
 /// The bounded in-flight reservation map.
 #[derive(Debug)]
 pub struct ReservationMap {
-    in_flight: BTreeMap<DedupKey, ContentFingerprint>,
-    per_peer: BTreeMap<TransportIdentity, BTreeSet<DedupKey>>,
+    in_flight: BTreeMap<DedupKey, InFlight>,
+    /// OUTSTANDING REQUESTS per peer, not distinct keys.
+    ///
+    /// A `BTreeSet<DedupKey>` counted keys, so every waiter attached to
+    /// an existing key was free: a peer flooding matching
+    /// retransmissions while the owner awaited endpoint admission grew
+    /// the caller's held-channel state once per request and never
+    /// reached a budget. Counting requests is what makes the per-peer
+    /// number mean "how much of this daemon one peer may occupy",
+    /// which is what it was always for.
+    per_peer: BTreeMap<TransportIdentity, usize>,
     max_global: usize,
     max_per_peer: usize,
+}
+
+/// One reserved key and everything attached to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InFlight {
+    fingerprint: ContentFingerprint,
+    /// Requests attached to this key BESIDES the owner.
+    ///
+    /// Each one is a response channel the caller is holding until the
+    /// owner's admission resolves -- real per-request memory, chosen by
+    /// whoever is retransmitting.
+    waiters: usize,
 }
 
 impl Default for ReservationMap {
@@ -351,27 +372,50 @@ impl ReservationMap {
         key: &DedupKey,
         fingerprint: ContentFingerprint,
     ) -> Result<Reservation, ReservationFailure> {
-        if let Some(existing) = self.in_flight.get(key) {
-            return if *existing == fingerprint {
-                Ok(Reservation::Waiter)
-            } else {
+        let peer = key.source_peer().clone();
+        let held = self.per_peer.get(&peer).copied().unwrap_or(0);
+        let outstanding = self.outstanding();
+
+        // Disjoint field borrows: `in_flight` here, `per_peer` below.
+        if let Some(entry) = self.in_flight.get_mut(key) {
+            if entry.fingerprint != fingerprint {
                 // Immediate: two different bodies claiming one identity
                 // cannot both be right, and waiting would not help.
-                Err(ReservationFailure::Conflict)
-            };
+                return Err(ReservationFailure::Conflict);
+            }
+            // A WAITER IS CHARGED FOR, and this check used to be absent
+            // entirely -- the match on an existing key returned before
+            // either budget was consulted. Every waiter costs the caller
+            // a held response channel until the owner's admission
+            // resolves, so a peer retransmitting a matching request
+            // could grow that state without limit and never be told
+            // `Overloaded`. ADR-0019's "never creates a parallel enqueue
+            // path" was upheld; the bound on how much state one key may
+            // accumulate was not.
+            if held >= self.max_per_peer || outstanding >= self.max_global {
+                return Err(ReservationFailure::Overloaded);
+            }
+            entry.waiters = entry.waiters.saturating_add(1);
+            *self.per_peer.entry(peer).or_default() += 1;
+            return Ok(Reservation::Waiter);
         }
-        if self.in_flight.len() >= self.max_global {
+
+        if outstanding >= self.max_global {
             return Err(ReservationFailure::Overloaded);
         }
-        let peer = key.source_peer().clone();
-        let held = self.per_peer.get(&peer).map_or(0, BTreeSet::len);
         if held >= self.max_per_peer {
             // Per-peer before global, so one noisy peer cannot consume the
             // whole budget and refuse everyone else.
             return Err(ReservationFailure::Overloaded);
         }
-        self.in_flight.insert(key.clone(), fingerprint);
-        self.per_peer.entry(peer).or_default().insert(key.clone());
+        self.in_flight.insert(
+            key.clone(),
+            InFlight {
+                fingerprint,
+                waiters: 0,
+            },
+        );
+        *self.per_peer.entry(peer).or_default() += 1;
         Ok(Reservation::Owner)
     }
 
@@ -381,15 +425,34 @@ impl ReservationMap {
     /// **no** positive cache entry, so a later retry can succeed after the
     /// route recovers rather than being refused from cache forever.
     pub fn release(&mut self, key: &DedupKey) {
-        if self.in_flight.remove(key).is_some() {
+        // THE OWNER AND EVERY WAITER GO TOGETHER. They were admitted as
+        // one outcome and are answered as one outcome, so releasing the
+        // key returns all of the budget it was holding -- releasing only
+        // the owner's share would leak the waiters' permanently, and the
+        // per-peer budget would decay toward zero under exactly the
+        // retransmission load it exists to bound.
+        if let Some(entry) = self.in_flight.remove(key) {
+            let charged = entry.waiters.saturating_add(1);
             let peer = key.source_peer().clone();
-            if let Some(set) = self.per_peer.get_mut(&peer) {
-                set.remove(key);
-                if set.is_empty() {
+            if let Some(count) = self.per_peer.get_mut(&peer) {
+                *count = count.saturating_sub(charged);
+                if *count == 0 {
                     self.per_peer.remove(&peer);
                 }
             }
         }
+    }
+
+    /// Outstanding REQUESTS, owners and waiters together.
+    ///
+    /// What the global budget is measured against, for the same reason
+    /// the per-peer one is: the cost is per request, not per key.
+    #[must_use]
+    pub fn outstanding(&self) -> usize {
+        self.in_flight
+            .values()
+            .map(|e| e.waiters.saturating_add(1))
+            .sum()
     }
 }
 
@@ -591,6 +654,81 @@ mod tests {
         assert_eq!(m.acquire(&key, fp(b"x")), Ok(Reservation::Owner));
         assert_eq!(m.acquire(&key, fp(b"x")), Ok(Reservation::Waiter));
         assert_eq!(m.len(), 1);
+    }
+
+    #[test]
+    fn waiters_on_one_key_are_charged_against_the_budget() {
+        // THE HOLE THIS CLOSES. `acquire` matched an existing key and
+        // returned `Waiter` BEFORE consulting either budget, so a peer
+        // retransmitting a matching request while the owner awaited
+        // endpoint admission could attach unlimited waiters and never
+        // be told `Overloaded`. Each one costs the caller a held
+        // response channel until the owner resolves, so the state grew
+        // once per request, chosen entirely by the sender.
+        //
+        // ADR-0019's "never creates a parallel enqueue path" was always
+        // upheld -- one enqueue, many waiters -- but the bound on how
+        // much state one key may accumulate was simply absent.
+        let mut m = ReservationMap::new(64, 3);
+        let key = direct(DestinationSelector::Default, 1);
+
+        assert_eq!(m.acquire(&key, fp(b"x")), Ok(Reservation::Owner));
+        assert_eq!(m.acquire(&key, fp(b"x")), Ok(Reservation::Waiter));
+        assert_eq!(m.acquire(&key, fp(b"x")), Ok(Reservation::Waiter));
+        // Owner plus two waiters is three outstanding requests, which is
+        // the whole per-peer budget.
+        assert_eq!(
+            m.acquire(&key, fp(b"x")),
+            Err(ReservationFailure::Overloaded),
+            "the fourth request on one key must be refused, not attached"
+        );
+        assert_eq!(m.len(), 1, "still ONE key, whatever the request count");
+        assert_eq!(m.outstanding(), 3, "and three requests charged for");
+    }
+
+    #[test]
+    fn releasing_a_key_returns_the_waiters_budget_too() {
+        // Owner and waiters were admitted as one outcome and are
+        // answered as one outcome. Releasing only the owner's share
+        // would leak the waiters' permanently, and the per-peer budget
+        // would decay toward zero under exactly the retransmission load
+        // it exists to bound -- a ceiling that silently becomes a
+        // lifetime quota.
+        let mut m = ReservationMap::new(64, 4);
+        let key = direct(DestinationSelector::Default, 1);
+        m.acquire(&key, fp(b"x")).expect("owner");
+        m.acquire(&key, fp(b"x")).expect("waiter");
+        m.acquire(&key, fp(b"x")).expect("waiter");
+        assert_eq!(m.outstanding(), 3);
+
+        m.release(&key);
+        assert!(m.is_empty());
+        assert_eq!(m.outstanding(), 0, "every charged request came back");
+
+        // And the full budget is usable again, which is what "came
+        // back" has to mean.
+        for _ in 0..4 {
+            m.acquire(&key, fp(b"x"))
+                .expect("the budget is whole again");
+        }
+    }
+
+    #[test]
+    fn the_global_budget_counts_requests_not_keys() {
+        // The same reasoning as the per-peer bound: the cost is per
+        // request, so counting distinct keys would let a few keys with
+        // many waiters each exceed the global ceiling.
+        let mut m = ReservationMap::new(3, 64);
+        let key = direct(DestinationSelector::Default, 1);
+        m.acquire(&key, fp(b"x")).expect("owner");
+        m.acquire(&key, fp(b"x")).expect("waiter");
+        m.acquire(&key, fp(b"x")).expect("waiter");
+        assert_eq!(m.len(), 1, "one key");
+        assert_eq!(
+            m.acquire(&direct(DestinationSelector::Default, 2), fp(b"y")),
+            Err(ReservationFailure::Overloaded),
+            "a DIFFERENT key is refused because the global budget counts requests"
+        );
     }
 
     #[test]
