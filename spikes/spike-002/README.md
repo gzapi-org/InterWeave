@@ -169,6 +169,26 @@ unexpected responses                           0
 highest number of channels held at once        8
 ```
 
+### A8 asked for the race; it did not check that the race happened
+
+`killed` was set the instant `close_connection` returned, and that call only *requests* teardown. The admission timer then fired regardless — so if the connection was still alive, the waiters were answered in the ordinary way, the reservation released in the ordinary way, and every check passed. The experiment reported success for the one scenario it had not exercised. The server's own `InboundFailure`, which is the actual evidence, was only printed.
+
+Admission completion is now gated on that observation; the outer deadline still bounds it, and expiring there fails the run rather than passing it. Live output carries `server learned the owner's connection died: ConnectionClosed`.
+
+| mutation | result |
+|---|---|
+| the failure is never recorded, standing in for teardown delayed past the timer | four checks **false**, exit 1 |
+
+### A6 printed its cleanup instead of requiring it
+
+Every A6 check is satisfied once the parked channels have received the shared outcome — which happens whether or not the owner path then releases its reservation. `reservations.len()` was a `note`. A release that stopped happening left the experiment passing while contradicting its own recorded `reservations still held 0`, and for the *rejected* outcome it also contradicts the thing that makes rejection survivable: that a later retry becomes an owner rather than attaching to a corpse. Both are now required, for both outcomes.
+
+| mutation | result |
+|---|---|
+| the owner never releases | four checks **false** (two per outcome), exit 1 |
+
+That is the sixth instance of printed-not-asserted in this spike. The count is the finding: each round fixed the instances review named, and the next round found more. Enumerating the property is what ended it for event-loop deadlines; the same enumeration is what found A7 unasked.
+
 ### The same gap in A7 and A10, found by sweeping instead of waiting
 
 Review found A10: its verdict checked `owners`, `overloaded` and the distinct sources — all decided at REQUEST time — so a run where responses were lost, timed out, or came back with an unexpected reason left `answered < PEERS` at the deadline and still passed. The experiment is about what the budget does to callers, and a caller that never heard is not a caller that was refused.

@@ -774,6 +774,31 @@ async fn same_key_race_once(owner_outcome: &Response) {
         waiters == COPIES - 1,
     );
     note("reservations still held", reservations.len());
+    // REQUIRED, for BOTH outcomes, and it was only printed.
+    //
+    // Every check above is satisfied once the parked channels have
+    // received the shared outcome, which happens whether or not the
+    // owner path then releases its reservation. So a release that
+    // stopped happening left this experiment passing while contradicting
+    // its own recorded "reservations still held 0" -- and for the
+    // rejected outcome it also contradicts the thing that makes
+    // rejection survivable, which is that a later retry can become an
+    // owner rather than attaching to a corpse.
+    check(
+        "and the owner's reservation was released",
+        reservations.is_empty(),
+    );
+    // The consequence, stated as the caller sees it. `is_ok()` alone
+    // would be true for a WAITER, which is exactly what a leaked entry
+    // produces: the old reservation survives, the retry attaches to it,
+    // and a check meant to rule the leak out passes BECAUSE of it.
+    check(
+        "so a later retry for the same key becomes an OWNER",
+        matches!(
+            reservations.acquire(&key, fingerprint),
+            Ok(Reservation::Owner)
+        ),
+    );
 }
 
 /// A7 — more distinct in-flight keys than the map will hold.
