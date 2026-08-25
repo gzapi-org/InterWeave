@@ -190,6 +190,21 @@ assert_rc       "still exits 1"                      1
 assert_contains "and names the real cause"           "not buying overage"
 assert_lacks    "not the storage charge"             "billing as overage"
 
+echo "actions-health: billed minutes are named even with allowance to spare"
+# MONEY CAN MOVE WHILE THE ALLOWANCE HAS ROOM. A separately billable
+# runner sku does exactly that. Checking `m >= i` first let this fall
+# through to the OK line, so the script told a caller to go ahead
+# without mentioning that every further minute costs — the one thing the
+# billed semantics exist to say.
+reset
+printf '7.50\n' > "$SANDBOX/state/billing_net"
+printf '100\n'  > "$SANDBOX/state/billing_mins"
+invoke_with 3000
+assert_rc       "billed under the allowance is still degraded" 1
+assert_contains "  and says money is moving"                   "is billing"
+assert_contains "  while naming the room that remains"         "100 of 3000"
+assert_lacks    "  and does not report plain OK"               "remaining."
+
 echo "actions-health: a spent allowance is caught even when NOTHING is billed"
 # The regression that motivated the setting. On 2026-08-07 the org sat at
 # 3,025 minutes against a 3,000 allowance with netAmount 0 — a plan that

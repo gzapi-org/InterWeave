@@ -175,12 +175,26 @@ if command -v gh >/dev/null 2>&1; then
             fi
 
             left="$(awk -v i="$INCLUDED" -v m="$mins" 'BEGIN { printf "%.0f", i - m }')"
-            if awk -v i="$INCLUDED" -v m="$mins" 'BEGIN { exit !(m >= i) }'; then
-                if [[ -n "$billed" ]]; then
+
+            # BILLED IS DECIDED BEFORE THE REMAINDER IS CONSULTED, and
+            # the order is the fix. Money can be moving while the general
+            # allowance still has minutes left -- a separately billable
+            # runner sku does exactly that -- and checking `m >= i` first
+            # let that case fall through to the OK line below. The script
+            # then told a caller to go ahead without mentioning that
+            # every further minute costs, which is the one thing the
+            # billed semantics exist to say.
+            if [[ -n "$billed" ]]; then
+                if awk -v i="$INCLUDED" -v m="$mins" 'BEGIN { exit !(m >= i) }'; then
                     say "DEGRADED — past the included allowance (${mins} of ${INCLUDED} minutes used) and \$${net} is billing as overage. Runs still start, so this blocks nothing; every further minute is money."
                 else
-                    say "DEGRADED — the included Actions allowance is spent (${mins} of ${INCLUDED} minutes used) and nothing is being billed, so this plan is not buying overage. Jobs stop getting runners: they fail in seconds with no steps and no logs. Nothing will merge until the period resets."
+                    say "DEGRADED — ${mins} of ${INCLUDED} minutes used, so the general allowance has room, and yet \$${net} of minutes is billing. Some usage is charged outside that allowance. Runs still start, so this blocks nothing; every further minute is money."
                 fi
+                exit 1
+            fi
+
+            if awk -v i="$INCLUDED" -v m="$mins" 'BEGIN { exit !(m >= i) }'; then
+                say "DEGRADED — the included Actions allowance is spent (${mins} of ${INCLUDED} minutes used) and nothing is being billed, so this plan is not buying overage. Jobs stop getting runners: they fail in seconds with no steps and no logs. Nothing will merge until the period resets."
                 exit 1
             fi
             say "OK — ${ops_phrase}; ${mins} of ${INCLUDED} minutes used this period, ${left} remaining."
