@@ -845,3 +845,188 @@ fn a_full_cache_serializes_inside_what_a_load_will_read() {
     let reloaded = PeerCache::load(&path, CacheLimits::default()).expect("loads");
     assert_eq!(reloaded.len(), MAX_PEERS, "no record was quarantined");
 }
+
+#[test]
+fn concurrent_flushes_of_one_profile_do_not_splice_each_other() {
+    // The temporary used to be `path.with_extension("tmp")` opened with
+    // `File::create` -- ONE fixed name per profile, shared by every
+    // process writing that profile's cache. Two flushing at once both
+    // hold descriptors on the same inode: one truncates it while the
+    // other is mid-write, or renames it into place while the other is
+    // still writing through its own descriptor, so what lands is a
+    // splice of two serializations. The cache is advisory, so this is
+    // not identity corruption; it is a whole cache invalidated and an
+    // unexplained cold start.
+    //
+    // REAL THREADS, because the bug is a race and a sequential test
+    // cannot observe one -- an earlier version of this test flushed the
+    // two caches one after another and passed against the very code it
+    // was meant to condemn.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("peers.json");
+    // The parent has to exist before the readers start, since a flush
+    // creates it and a reader racing that is a different (uninteresting)
+    // failure.
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let corrupt = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    // A READER, watching for the splice while the writers race. Loading
+    // a spliced file quarantines it, which is exactly the observable
+    // this is looking for.
+    let reader = {
+        let path = path.clone();
+        let stop = std::sync::Arc::clone(&stop);
+        let corrupt = std::sync::Arc::clone(&corrupt);
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                if path.exists() {
+                    let cache = PeerCache::load(&path, CacheLimits::default()).expect("load");
+                    if !matches!(cache.health(), CacheHealth::Healthy) {
+                        corrupt.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }
+        })
+    };
+
+    let writers: Vec<_> = [
+        (PEER_A, "/ip4/10.0.0.1/tcp/1"),
+        (PEER_B, "/ip4/10.0.0.2/tcp/1"),
+    ]
+    .into_iter()
+    .map(|(id, address)| {
+        let path = path.clone();
+        std::thread::spawn(move || {
+            let mut cache = PeerCache::load(&path, CacheLimits::default()).expect("load");
+            cache.record_success(&peer(id), address, 0).expect("record");
+            for round in 0..200u64 {
+                // Dirtied each round, since a clean cache declines
+                // to rewrite and the race needs both threads
+                // genuinely writing.
+                cache
+                    .record_success(&peer(id), address, round * 1_000)
+                    .expect("record");
+                cache.flush(round * 1_000).expect("flush");
+            }
+        })
+    })
+    .collect();
+
+    for writer in writers {
+        writer.join().expect("writer");
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    reader.join().expect("reader");
+
+    assert_eq!(
+        corrupt.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "a concurrent flush published a file the cache could not read back"
+    );
+
+    // AND NO TEMPORARIES LEFT BEHIND. A unique name per attempt is only
+    // safe if abandoned ones are cleaned up; otherwise the directory
+    // grows one file per failed rename forever.
+    let strays: Vec<_> = std::fs::read_dir(path.parent().expect("parent"))
+        .expect("readdir")
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+        .collect();
+    assert!(
+        strays.is_empty(),
+        "no temporary should survive a successful flush, found {}",
+        strays.len()
+    );
+}
+
+#[test]
+fn a_capability_observation_does_not_extend_the_record_ttl() {
+    // `providers/peer-cache.md`: "Capability freshness never outlives
+    // the enclosing peer-cache record TTL." `COMPOSITION.md` says the
+    // same from the other side: protocol observations "do not keep an
+    // otherwise expired peer candidate alive beyond the source's TTL."
+    //
+    // Both are about the attack this closes: a peer that can provoke
+    // capability observations -- an Identify exchange is cheap -- could
+    // otherwise hold a cache entry alive indefinitely without ever
+    // completing another successful connection, which is what the TTL
+    // is counting.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("peers.json");
+    let mut cache = empty(&path);
+
+    cache
+        .record_success(&peer(PEER_A), "/ip4/10.0.0.1/tcp/1", 0)
+        .expect("record");
+
+    // Observations arriving right up to the edge of expiry.
+    for at in [1_000, DEFAULT_TTL_MS / 2, DEFAULT_TTL_MS - 1] {
+        cache
+            .record_capability(&peer(PEER_A), capability("interweave/kad", true, at))
+            .expect("observe");
+    }
+
+    // The TTL runs from the last SUCCESS, which was at 0.
+    assert!(
+        cache.candidates(DEFAULT_TTL_MS - 1).len() == 1,
+        "still fresh just before expiry"
+    );
+    assert!(
+        cache.candidates(DEFAULT_TTL_MS + 1).is_empty(),
+        "observations must not have pushed the expiry out"
+    );
+}
+
+#[test]
+fn a_failure_after_the_temporary_exists_still_removes_it() {
+    // Cleanup used to cover only a failed RENAME, so a failure between
+    // `create_new` succeeding and the rename -- a full disk or a
+    // transient I/O error during `write_all` or `sync_all` -- returned
+    // through `?` with the temporary still on disk. Unique names per
+    // attempt are what make those ACCUMULATE rather than overwrite: one
+    // file per failed flush, forever, in the profile directory.
+    //
+    // The failure provoked here is the rename itself, because that is
+    // the one reachable without fault injection -- and it is reached
+    // with the temporary already created, written and fsynced, which is
+    // the state the cleanup has to handle. A mid-write fault cannot be
+    // injected from a test, so what covers it is the shape rather than
+    // this assertion: the whole sequence is one fallible block whose
+    // every `?` lands on the same cleanup, so adding a step cannot
+    // reintroduce the leak.
+    //
+    // Rename fails because the target is a non-empty DIRECTORY, which
+    // the cache never creates itself and no earlier step objects to.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).expect("mkdir");
+    let path = state.join("peers.json");
+
+    let mut cache = empty(&path);
+    cache
+        .record_success(&peer(PEER_A), "/ip4/10.0.0.1/tcp/1", 0)
+        .expect("record");
+
+    // Now make the target a directory with something in it, so the
+    // rename cannot replace it.
+    std::fs::create_dir_all(&path).expect("target as a directory");
+    std::fs::write(path.join("occupied"), b"x").expect("make it non-empty");
+
+    assert!(
+        cache.flush(1_000).is_err(),
+        "renaming over a non-empty directory must fail"
+    );
+
+    let strays: Vec<_> = std::fs::read_dir(&state)
+        .expect("readdir")
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+        .collect();
+    assert!(
+        strays.is_empty(),
+        "a flush that failed after creating its temporary must remove it, found {}",
+        strays.len()
+    );
+}
