@@ -1682,6 +1682,7 @@ dependencies = [
 name = "interweave-transport-libp2p"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
  "futures",
  "interweave-profile-identity",
  "interweave-transport-api",

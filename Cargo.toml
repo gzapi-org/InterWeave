@@ -119,6 +119,12 @@ tokio = { version = "1", default-features = false, features = [
     "time",
 ] }
 futures = "0.3"
+# THE `request_response::Codec` TRAIT IS `#[async_trait]`, so an impl of
+# it must be too. Already in this graph as libp2p-request-response's own
+# dependency, at this exact version and under MIT OR Apache-2.0 — both
+# already on the allow-list — so declaring it here adds no licence or
+# advisory surface, only a name.
+async-trait = "0.1.92"
 # The libp2p identity boundary. Pinned to 0.2 because that is what
 # `libp2p` 0.56 depends on, and two versions in one graph would mean two
 # incompatible `Keypair` types — the identity crate could not hand its key

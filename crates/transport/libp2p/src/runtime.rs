@@ -40,7 +40,15 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::time::Duration;
 
 use interweave_profile_identity::ProfileIdentity;
-use interweave_transport_api::TransportIdentity;
+use interweave_transport_api::TransportError as DirectError;
+use interweave_transport_api::{
+    DirectMessageV2, DirectRejectReason, EndpointId, TransportIdentity,
+};
+use interweave_transport_runtime::direct_inbound::{
+    AdmissionContext, Outcome as AdmissionOutcome, admit_inbound,
+};
+use interweave_transport_runtime::endpoint_queue::EndpointQueues;
+use interweave_transport_runtime::endpoint_registry::EndpointRegistry;
 use interweave_transport_runtime::preauth::PreAuthLimits;
 use interweave_transport_runtime::{
     ConnectionClass, ConnectionManager, ConnectionPolicy, ConnectionSlot, DialDenial, DialOrigin,
@@ -52,6 +60,7 @@ use libp2p::{Multiaddr, PeerId, identify, noise, tcp, yamux};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::behaviour::{SubstrateBehaviour, SubstrateBehaviourEvent};
+use crate::gated_swarm::NotConnected;
 use crate::gated_swarm::{AdmittedDial, GatedSwarm, UndialableAdmission};
 
 /// Default depth of the command channel.
@@ -225,6 +234,21 @@ pub enum SwarmCommand {
         /// Answered with the number of connections closed by the change.
         reply: oneshot::Sender<usize>,
     },
+    /// Send one directed message to a peer.
+    ///
+    /// The frame's `source_endpoint` is supplied by the CALLER's runtime
+    /// from its own lease, never by an application: ADR-0030 makes the
+    /// source a routing selector derived locally, so a command that let
+    /// an application choose it would be the spoofing path the contract
+    /// forbids.
+    SendDirect {
+        /// The peer to send to.
+        peer: TransportIdentity,
+        /// The frame, already validated by its own types.
+        frame: Box<DirectMessageV2>,
+        /// Answered when the exchange settles.
+        reply: oneshot::Sender<Result<EndpointId, DirectError>>,
+    },
     /// Refuse new connectivity while keeping what is already up.
     Drain {
         /// Answered once the manager is draining.
@@ -283,6 +307,16 @@ pub enum SwarmEvent {
         /// and never authorization.
         listen_addresses: Vec<Multiaddr>,
     },
+    /// A directed message was admitted onto a local endpoint queue.
+    ///
+    /// Reported AFTER queue admission, so a consumer seeing this knows
+    /// the event is retrievable — not merely that a frame arrived.
+    DirectDelivered {
+        /// The endpoint whose queue took it.
+        endpoint: EndpointId,
+        /// The authenticated sender.
+        peer: TransportIdentity,
+    },
     /// An outbound dial failed after being admitted.
     DialFailed {
         /// The peer that was being dialed, when known.
@@ -338,8 +372,26 @@ impl core::fmt::Display for SubstrateError {
 
 impl core::error::Error for SubstrateError {}
 
+/// The reverse conversion.
+///
+/// Fallible for the same reason the forward one is: the neutral grammar
+/// is deliberately looser than libp2p's multihash parse — it checks
+/// prefix, alphabet and length — so a value this crate accepts is not
+/// automatically one libp2p can turn back into a PeerId.
+fn to_peer_id(peer: &TransportIdentity) -> Result<PeerId, ()> {
+    peer.as_str().parse::<PeerId>().map_err(|_| ())
+}
+
 fn to_transport_identity(peer: &PeerId) -> Result<TransportIdentity, SubstrateError> {
     TransportIdentity::parse(peer.to_base58()).map_err(|e| SubstrateError::Identity(e.to_string()))
+}
+
+/// One outbound direct exchange awaiting its answer.
+struct PendingDirect {
+    /// Who it went to, so a response can be validated against the ask.
+    peer: TransportIdentity,
+    /// The caller waiting for the outcome.
+    reply: oneshot::Sender<Result<EndpointId, DirectError>>,
 }
 
 /// A running substrate.
@@ -453,6 +505,22 @@ impl SwarmRuntime {
         // then can only be a placeholder, and a caller cannot advertise
         // or dial a placeholder.
         let mut listens: PendingListens = HashMap::new();
+
+        // Outbound direct exchanges awaiting an answer.
+        //
+        // Bounded by the request-response behaviour's own concurrency
+        // and by the command channel that feeds it — every entry was put
+        // here by a LOCAL caller, never by a remote party, so this is not
+        // a structure a peer can grow.
+        // Inbound direct admission. Empty of endpoints until a local
+        // session claims a lease, which is the correct posture for a
+        // daemon that has just started (testing.md scenario 27).
+        let mut direct_state = DirectState::new(now_ms(started));
+
+        let mut pending_direct: HashMap<
+            libp2p::request_response::OutboundRequestId,
+            PendingDirect,
+        > = HashMap::new();
 
         let (command_tx, mut command_rx) = mpsc::channel(config.command_capacity);
         let (event_tx, event_rx) = mpsc::channel(config.event_capacity);
@@ -685,6 +753,7 @@ impl SwarmRuntime {
                                     &open,
                                     &mut refuse,
                                     &mut listens,
+                                    &mut pending_direct,
                                     &mut in_flight,
                                     config.max_pending_listens,
                                     now_ms(started),
@@ -710,6 +779,25 @@ impl SwarmRuntime {
                         // can connect. Done here rather than inside
                         // `translate`, which is a pure shape conversion
                         // and must not also own resource accounting.
+                        // DIRECT V2 FIRST, and it CONSUMES the event.
+                        // An inbound request carries a `ResponseChannel`
+                        // that cannot be borrowed out of a shared
+                        // reference, so this cannot live in
+                        // `settle_outcome` — which takes the event by
+                        // reference precisely so it can run before the
+                        // shape conversion.
+                        let event = match handle_direct(
+                            event,
+                            &mut swarm,
+                            &mut direct_state,
+                            &mut pending_direct,
+                            &mut outbox,
+                            now_ms(started),
+                        ) {
+                            DirectHandled::Consumed => continue,
+                            DirectHandled::Passed(event) => *event,
+                        };
+
                         let mut refuse = Vec::new();
                         let announce = settle_outcome(
                             &event,
@@ -823,6 +911,39 @@ impl SwarmRuntime {
             .send(SwarmCommand::Dial {
                 peer,
                 address,
+                reply,
+            })
+            .await
+            .map_err(|_| SubstrateError::Stopped)?;
+        answer.await.map_err(|_| SubstrateError::Stopped)
+    }
+
+    /// Send one directed message to an already-connected peer.
+    ///
+    /// Returns the endpoint the remote resolved it to, which for an
+    /// omitted destination is how the caller learns the remote's
+    /// default. A `Rejected` answer becomes the local error its coarse
+    /// reason maps to — remote `no_route` is
+    /// [`RemoteEndpointUnavailable`](DirectError::RemoteEndpointUnavailable),
+    /// because that is all the peer disclosed.
+    ///
+    /// The peer must already be connected; see
+    /// [`GatedSwarm::send_direct`](crate::gated_swarm::GatedSwarm::send_direct)
+    /// for why an implicit dial is refused rather than attempted.
+    ///
+    /// # Errors
+    /// [`SubstrateError::Stopped`] if the task is gone; otherwise the
+    /// exchange's own outcome.
+    pub async fn send_direct(
+        &self,
+        peer: TransportIdentity,
+        frame: DirectMessageV2,
+    ) -> Result<Result<EndpointId, DirectError>, SubstrateError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(SwarmCommand::SendDirect {
+                peer,
+                frame: Box::new(frame),
                 reply,
             })
             .await
@@ -1383,6 +1504,7 @@ fn handle_command(
     open: &HashMap<libp2p::swarm::ConnectionId, OpenConnection>,
     refuse: &mut Vec<libp2p::swarm::ConnectionId>,
     listens: &mut PendingListens,
+    pending_direct: &mut HashMap<libp2p::request_response::OutboundRequestId, PendingDirect>,
     in_flight: &mut HashMap<libp2p::swarm::ConnectionId, DialTicket>,
     max_pending_listens: usize,
     now_ms: u64,
@@ -1500,6 +1622,34 @@ fn handle_command(
             refuse.extend(closing);
             let _ = reply.send(closed);
         }
+        SwarmCommand::SendDirect { peer, frame, reply } => {
+            // NO ENDPOINT-OUTBOUND CHECK HERE, and its absence is not an
+            // omission: `authorize_outbound` narrows profile trust for a
+            // SOURCE endpoint, and the caller supplying that endpoint is
+            // the one holding its lease. The check belongs where the
+            // lease is known, which is Stage 8's IPC boundary. What this
+            // layer owes is profile trust, and `send_request` reaches a
+            // peer only over a connection the gate already admitted.
+            let peer_id = match to_peer_id(&peer) {
+                Ok(id) => id,
+                Err(()) => {
+                    let _ = reply.send(Err(DirectError::InvalidArgument));
+                    return;
+                }
+            };
+            match swarm.send_direct(&peer_id, *frame) {
+                Ok(request_id) => {
+                    pending_direct.insert(request_id, PendingDirect { peer, reply });
+                }
+                // NOT CONNECTED. `DIRECT.md` distinguishes "no usable
+                // candidate addresses" from "could not reach"; this
+                // layer knows only that there is no connection to send
+                // over, and says the honest one.
+                Err(NotConnected) => {
+                    let _ = reply.send(Err(DirectError::PeerUnreachable));
+                }
+            }
+        }
         SwarmCommand::Drain { reply } => {
             // DRAINING IS NOT STOPPING. Existing connections stay up --
             // a node going out of service should stop taking on new
@@ -1584,6 +1734,221 @@ fn translate(
             }
         }),
         _ => None,
+    }
+}
+
+/// Everything inbound direct admission owns, held by the Swarm task.
+///
+/// Constructed empty: a profile with no endpoint leases admits nothing,
+/// which is the correct posture for a daemon that has just started and
+/// has no local client attached yet (`testing.md` scenario 27).
+pub struct DirectState {
+    /// Who this profile trusts, mirrored from the manager's sources.
+    trust: interweave_transport_runtime::PeerTrustPolicy,
+    /// Direct-ingress token buckets.
+    ingress: interweave_transport_runtime::ingress::IngressLimiter,
+    /// The duplicate cache.
+    dedup: interweave_transport_runtime::dedup::DedupCache,
+    /// In-flight reservations.
+    reservations: interweave_transport_runtime::dedup::ReservationMap,
+    /// Configured endpoints and their leases.
+    registry: EndpointRegistry,
+    /// Open delivery queues.
+    queues: EndpointQueues,
+}
+
+impl DirectState {
+    /// Build the admission state for a profile that has no leases yet.
+    #[must_use]
+    pub fn new(now_ms: u64) -> Self {
+        use interweave_transport_runtime::dedup::{
+            DEFAULT_MAX_ENTRIES, DEFAULT_MAX_RESERVATIONS, DEFAULT_MAX_RESERVATIONS_PER_PEER,
+            DEFAULT_TTL_MS, DedupCache, ReservationMap,
+        };
+        Self {
+            trust: interweave_transport_runtime::PeerTrustPolicy::default(),
+            ingress: interweave_transport_runtime::ingress::IngressLimiter::with_defaults(now_ms),
+            dedup: DedupCache::new(DEFAULT_MAX_ENTRIES, DEFAULT_TTL_MS),
+            reservations: ReservationMap::new(
+                DEFAULT_MAX_RESERVATIONS,
+                DEFAULT_MAX_RESERVATIONS_PER_PEER,
+            ),
+            registry: EndpointRegistry::new(std::collections::BTreeMap::new(), None),
+            queues: EndpointQueues::new(),
+        }
+    }
+}
+
+/// Whether a swarm event was a direct-protocol one.
+enum DirectHandled {
+    /// It was, and has been fully handled.
+    Consumed,
+    /// It was not; here it is back.
+    ///
+    /// Boxed because a `SwarmEvent` is far larger than the unit variant,
+    /// and every non-direct event — which is most of them — would
+    /// otherwise pay for the difference.
+    Passed(Box<Libp2pSwarmEvent<SubstrateBehaviourEvent>>),
+}
+
+/// Handle one direct-protocol event, or hand it back.
+fn handle_direct(
+    event: Libp2pSwarmEvent<SubstrateBehaviourEvent>,
+    swarm: &mut GatedSwarm,
+    state: &mut DirectState,
+    pending: &mut HashMap<libp2p::request_response::OutboundRequestId, PendingDirect>,
+    outbox: &mut std::collections::VecDeque<SwarmEvent>,
+    now_ms: u64,
+) -> DirectHandled {
+    use crate::direct_codec::DirectResponse;
+    use libp2p::request_response::{Event as RrEvent, Message as RrMessage};
+
+    let Libp2pSwarmEvent::Behaviour(SubstrateBehaviourEvent::Direct(direct)) = event else {
+        return DirectHandled::Passed(Box::new(event));
+    };
+
+    match direct {
+        RrEvent::Message {
+            peer,
+            message: RrMessage::Request {
+                request, channel, ..
+            },
+            ..
+        } => {
+            let Ok(source) = to_transport_identity(&peer) else {
+                // A PeerId the neutral grammar rejects cannot be
+                // classified or accounted for. Nothing is answered: a
+                // response would require naming the peer we cannot name.
+                return DirectHandled::Consumed;
+            };
+
+            let outcome = {
+                let mut ctx = AdmissionContext {
+                    trust: &state.trust,
+                    ingress: &mut state.ingress,
+                    dedup: &mut state.dedup,
+                    reservations: &mut state.reservations,
+                    registry: &state.registry,
+                    queues: &mut state.queues,
+                };
+                admit_inbound(&request, &source, now_ms, &mut ctx)
+            };
+
+            let response = match &outcome {
+                AdmissionOutcome::Accepted { resolved_endpoint }
+                | AdmissionOutcome::DuplicateAccepted { resolved_endpoint } => {
+                    DirectResponse::Accepted {
+                        message_id: request.message_id,
+                        resolved_endpoint: resolved_endpoint.clone(),
+                    }
+                }
+                // A WAITER IS NOT ANSWERED HERE. The owner's outcome is
+                // what it receives, and holding the channel until then is
+                // the caller's job — answering now would be a second,
+                // possibly different, answer to one message.
+                AdmissionOutcome::AttachedAsWaiter => return DirectHandled::Consumed,
+                AdmissionOutcome::Refused(refusal) => DirectResponse::Rejected {
+                    message_id: request.message_id,
+                    reason: refusal.to_wire(),
+                },
+            };
+
+            // SPIKE-002 FINDING 2: producing a response is not evidence
+            // the peer heard it. `send_response` fails when the
+            // connection that carried the request is gone, and that is
+            // reported rather than discarded — but it is NOT a reason to
+            // undo the delivery. The event is on a local queue; the
+            // remote simply will not learn that it arrived, and will
+            // retry, which dedup answers.
+            let answered = swarm.answer_direct(channel, response).is_ok();
+
+            if let AdmissionOutcome::Accepted { resolved_endpoint } = outcome {
+                let _ = answered;
+                outbox.push_back(SwarmEvent::DirectDelivered {
+                    endpoint: resolved_endpoint,
+                    peer: source,
+                });
+            }
+            DirectHandled::Consumed
+        }
+
+        RrEvent::Message {
+            message:
+                RrMessage::Response {
+                    request_id,
+                    response,
+                },
+            ..
+        } => {
+            let Some(PendingDirect { peer, reply }) = pending.remove(&request_id) else {
+                return DirectHandled::Consumed;
+            };
+            let _ = peer;
+            let _ = reply.send(validate_response(&response));
+            DirectHandled::Consumed
+        }
+
+        RrEvent::OutboundFailure {
+            request_id, error, ..
+        } => {
+            if let Some(PendingDirect { reply, .. }) = pending.remove(&request_id) {
+                let _ = reply.send(Err(outbound_error(&error)));
+            }
+            DirectHandled::Consumed
+        }
+
+        // An inbound failure means a request we were answering is gone.
+        // Nothing to undo: admission already decided, and the remote will
+        // retry into dedup.
+        RrEvent::InboundFailure { .. } | RrEvent::ResponseSent { .. } => DirectHandled::Consumed,
+    }
+}
+
+/// Validate a response before a caller may believe it.
+///
+/// `DIRECT.md`: a sender validates every remote field before caching or
+/// surfacing it. A response that does not satisfy this is a local
+/// `ProtocolViolation` and creates no positive result.
+fn validate_response(
+    response: &crate::direct_codec::DirectResponse,
+) -> Result<EndpointId, DirectError> {
+    use crate::direct_codec::DirectResponse;
+    match response {
+        DirectResponse::Accepted {
+            resolved_endpoint, ..
+        } => Ok(resolved_endpoint.clone()),
+        DirectResponse::Rejected { reason, .. } => Err(match reason {
+            // REMOTE no_route BECOMES A LOCAL DIAGNOSTIC. The peer told
+            // us nothing about which of its five branches applied, and
+            // this is the local name for "it would not route it".
+            DirectRejectReason::NoRoute => DirectError::RemoteEndpointUnavailable,
+            DirectRejectReason::UnauthorizedPeer => DirectError::UnauthorizedPeer,
+            DirectRejectReason::Overloaded => DirectError::Overloaded,
+            DirectRejectReason::Malformed => DirectError::ProtocolViolation,
+            DirectRejectReason::TooLarge => DirectError::PayloadTooLarge,
+            DirectRejectReason::ShuttingDown => DirectError::BackendUnavailable,
+            DirectRejectReason::Unsupported => DirectError::CapabilityDenied,
+        }),
+    }
+}
+
+/// Map an outbound failure onto a local error.
+fn outbound_error(error: &libp2p::request_response::OutboundFailure) -> DirectError {
+    use libp2p::request_response::OutboundFailure;
+    match error {
+        // SPIKE-002 FINDING 1: timeout attribution is a RACE. When both
+        // sides time out, whichever fires first decides whether the
+        // requester reads `Timeout` or `Io`, so the two are not reliably
+        // distinguishable and reporting them apart would surface
+        // scheduler luck as a diagnosis. Both are "the exchange did not
+        // complete", which is what `PeerUnreachable` says.
+        OutboundFailure::Timeout | OutboundFailure::Io(_) => DirectError::PeerUnreachable,
+        // FINDING 3: the major-version signal. A peer that does not speak
+        // this protocol id is not unreachable — it is incompatible, and
+        // an operator fixes that differently.
+        OutboundFailure::UnsupportedProtocols => DirectError::CapabilityDenied,
+        OutboundFailure::DialFailure => DirectError::PeerUnreachable,
+        OutboundFailure::ConnectionClosed => DirectError::PeerUnreachable,
     }
 }
 

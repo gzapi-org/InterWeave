@@ -33,6 +33,10 @@ pub use dedup::{
     ReservationMap,
 };
 pub use direct_inbound::{AdmissionContext, Outcome, Refusal, admit_inbound};
+// RE-EXPORTED, so a backend composing admission does not have to name
+// `trust-api` itself. `AdmissionContext` holds a `PeerTrustPolicy`, so
+// the type is already in this crate's public API — a consumer that could
+// not spell it could not build the context.
 pub use endpoint_queue::{DirectEvent, EndpointQueues, QueueRefusal};
 pub use endpoint_registry::{
     ActiveLease, ClaimFailure, EndpointRegistry, LocalSessionId, RegisteredEndpoint, ResolveFailure,
@@ -42,4 +46,5 @@ pub use ingress::{
     IngressDenial, IngressLimiter, MAX_SESSIONS_PER_CHANNEL, MAX_SUBSCRIPTIONS, SubscriptionDenial,
     SubscriptionRegistry,
 };
+pub use interweave_trust_api::{EndpointTrustPolicy, PeerTrustPolicy};
 pub use reply_token::{DuplicateToken, ReplyResolution, ReplyRoute, ReplyTokenTable};

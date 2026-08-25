@@ -60,6 +60,7 @@
 #![forbid(unsafe_code)]
 
 pub mod behaviour;
+pub mod direct_codec;
 pub mod gated_swarm;
 pub mod outbound_gate;
 pub mod preauth_gate;
