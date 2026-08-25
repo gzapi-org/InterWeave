@@ -11,6 +11,7 @@
 pub mod connection_manager;
 pub mod connection_policy;
 pub mod dedup;
+pub mod endpoint_queue;
 pub mod endpoint_registry;
 pub mod fingerprint;
 pub mod ingress;
@@ -30,6 +31,7 @@ pub use dedup::{
     Admission, DedupCache, DedupKey, DestinationSelector, Reservation, ReservationFailure,
     ReservationMap,
 };
+pub use endpoint_queue::{DirectEvent, EndpointQueues, QueueRefusal};
 pub use endpoint_registry::{
     ActiveLease, ClaimFailure, EndpointRegistry, LocalSessionId, RegisteredEndpoint, ResolveFailure,
 };
