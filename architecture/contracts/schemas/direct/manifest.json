@@ -2,12 +2,24 @@
   "family": "direct",
   "specification": "architecture/transport/libp2p/DIRECT.md",
   "concepts": [
-    { "name": "reject-reason", "file": "reject-reason.schema.json", "status": "approved" },
-    { "name": "destination-selector", "file": "destination-selector.schema.json", "status": "approved" },
-    { "name": "dedup-key", "file": "dedup-key.schema.json", "status": "approved" }
+    {
+      "name": "reject-reason",
+      "file": "reject-reason.schema.json",
+      "status": "active"
+    },
+    {
+      "name": "destination-selector",
+      "file": "destination-selector.schema.json",
+      "status": "active"
+    },
+    {
+      "name": "dedup-key",
+      "file": "dedup-key.schema.json",
+      "status": "active"
+    }
   ],
   "not_modelled": {
-    "DirectMessageV2 request frame": "A BYTE frame — fixed-width length prefixes over raw bytes (message_id 16 bytes, u8 endpoint lengths, u32 payload length), not a JSON document. JSON Schema cannot express it, and pretending otherwise would produce a contract that validates nothing an implementation actually parses. It stays with the codec, and cross-implementation agreement on it belongs in fixtures/direct-v2/ as byte vectors. ADR-0049 records this exact case as a revisit condition: byte-level framing is where Protobuf or CDDL would earn its place.",
-    "AcceptedV2 / RejectedV2 responses": "Byte frames for the same reason. Their vocabularies ARE modelled — see reject-reason — because the coarse code set is what a reviewer needs to check against the privacy rule, and it is stable independently of how the bytes are laid out."
+    "DirectMessageV2 request frame": "A BYTE frame \u2014 fixed-width length prefixes over raw bytes (message_id 16 bytes, u8 endpoint lengths, u32 payload length), not a JSON document. JSON Schema cannot express it, and pretending otherwise would produce a contract that validates nothing an implementation actually parses. It stays with the codec, and cross-implementation agreement on it belongs in fixtures/direct-v2/ as byte vectors. ADR-0049 records this exact case as a revisit condition: byte-level framing is where Protobuf or CDDL would earn its place.",
+    "AcceptedV2 / RejectedV2 responses": "Byte frames for the same reason. Their vocabularies ARE modelled \u2014 see reject-reason \u2014 because the coarse code set is what a reviewer needs to check against the privacy rule, and it is stable independently of how the bytes are laid out."
   }
 }

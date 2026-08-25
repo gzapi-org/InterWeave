@@ -2,10 +2,30 @@
   "family": "endpoints",
   "specification": "architecture/contracts/ENDPOINTS.md",
   "concepts": [
-    { "name": "endpoint-id", "file": "endpoint-id.schema.json", "status": "approved" },
-    { "name": "endpoint-config", "file": "endpoint-config.schema.json", "status": "approved" },
-    { "name": "direct-destination", "file": "direct-destination.schema.json", "status": "approved" },
-    { "name": "message-received", "file": "message-received.schema.json", "status": "approved" },
-    { "name": "directory-response", "file": "directory-response.schema.json", "status": "approved" }
+    {
+      "name": "endpoint-id",
+      "file": "endpoint-id.schema.json",
+      "status": "active"
+    },
+    {
+      "name": "endpoint-config",
+      "file": "endpoint-config.schema.json",
+      "status": "approved"
+    },
+    {
+      "name": "direct-destination",
+      "file": "direct-destination.schema.json",
+      "status": "active"
+    },
+    {
+      "name": "message-received",
+      "file": "message-received.schema.json",
+      "status": "approved"
+    },
+    {
+      "name": "directory-response",
+      "file": "directory-response.schema.json",
+      "status": "approved"
+    }
   ]
 }

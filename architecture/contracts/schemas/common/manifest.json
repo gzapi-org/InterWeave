@@ -4,12 +4,12 @@
     {
       "name": "peer-id",
       "file": "peer-id.schema.json",
-      "status": "approved"
+      "status": "active"
     },
     {
       "name": "message-id",
       "file": "message-id.schema.json",
-      "status": "approved"
+      "status": "active"
     },
     {
       "name": "channel-id",

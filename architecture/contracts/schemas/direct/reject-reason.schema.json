@@ -14,7 +14,7 @@
   ],
   "x-contract": {
     "name": "direct.reject-reason",
-    "status": "approved",
+    "status": "active",
     "version": "1.0.0",
     "adr": ["0005", "0030", "0018"],
     "specification": "architecture/transport/libp2p/DIRECT.md",
