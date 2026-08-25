@@ -84,17 +84,32 @@ say() { [[ "$QUIET" -eq 1 ]] || printf '%s\n' "$*"; }
 command -v jq >/dev/null 2>&1 || die "jq is required"
 
 reachable=0
+# What the final line may claim. Only a status actually EXTRACTED from
+# the summary earns the word "operational"; until then the tool has not
+# read GitHub's opinion of Actions and must not report one.
+ops_phrase="Actions health unread"
 
 # ── 1. Is Actions up? ───────────────────────────────────────────────
 if command -v curl >/dev/null 2>&1; then
     summary="$(curl -fsS --max-time 10 \
         https://www.githubstatus.com/api/v2/summary.json 2>/dev/null || true)"
     if [[ -n "$summary" ]]; then
-        reachable=1
         status="$(printf '%s' "$summary" \
-            | jq -r '[.components[]? | select(.name == "Actions") | .status] | first // "unknown"' \
-            2>/dev/null || echo unknown)"
-        if [[ "$status" != "operational" && "$status" != "unknown" ]]; then
+            | jq -r '[.components[]? | select(.name == "Actions") | .status] | first // ""' \
+            2>/dev/null || echo "")"
+        # REACHED IS NOT UNDERSTOOD. A non-empty body that is not this
+        # schema — a captive-portal login page, a proxy error page, a
+        # version bump that moved the component — parses to nothing.
+        # Marking the source reachable on the body ALONE meant a script
+        # that had learned nothing went on to report "Actions
+        # operational" whenever billing was also unreadable: the exit-2
+        # health-unknown case wearing a green answer, from the one tool
+        # whose job is deciding whether a CI run is worth spending.
+        if [[ -n "$status" ]]; then
+            reachable=1
+            ops_phrase="Actions operational"
+        fi
+        if [[ -n "$status" && "$status" != "operational" ]]; then
             # Name the incident too — "major_outage" alone does not say
             # whether anyone is working on it.
             inc="$(printf '%s' "$summary" \
@@ -126,7 +141,7 @@ if command -v gh >/dev/null 2>&1; then
             # No allowance configured: usage alone cannot say what is left,
             # so report the usage and decline to guess at the remainder.
             if [[ -z "$INCLUDED" ]]; then
-                say "OK — Actions operational; ${mins} minutes used this period. (Remaining unknown: set INTERWEAVE_ACTIONS_INCLUDED_MINUTES in .claude/settings.json.)"
+                say "OK — ${ops_phrase}; ${mins} minutes used this period. (Remaining unknown: set INTERWEAVE_ACTIONS_INCLUDED_MINUTES in .claude/settings.json.)"
                 exit 0
             fi
             if ! awk -v i="$INCLUDED" 'BEGIN { exit !(i + 0 > 0) }'; then
@@ -138,7 +153,7 @@ if command -v gh >/dev/null 2>&1; then
                 say "DEGRADED — the included Actions allowance is spent (${mins} of ${INCLUDED} minutes used). Jobs stop getting runners: they fail in seconds with no steps and no logs. Nothing will merge until the period resets."
                 exit 1
             fi
-            say "OK — Actions operational; ${mins} of ${INCLUDED} minutes used this period, ${left} remaining."
+            say "OK — ${ops_phrase}; ${mins} of ${INCLUDED} minutes used this period, ${left} remaining."
             exit 0
         fi
     fi
@@ -148,5 +163,5 @@ if [[ "$reachable" -eq 0 ]]; then
     die "could not read githubstatus.com or the billing API — health unknown"
 fi
 
-say "OK — Actions operational. (Allowance not checked: billing API unreadable.)"
+say "OK — ${ops_phrase}. (Allowance not checked: billing API unreadable.)"
 exit 0

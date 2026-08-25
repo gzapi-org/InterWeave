@@ -71,6 +71,12 @@ cat > "$SANDBOX/bin/curl" <<'CURLMOCK'
 #!/usr/bin/env bash
 set -uo pipefail
 [[ -f "$MOCK_STATE/status_unreachable" ]] && exit 7
+# REACHED BUT NOT THE SCHEMA. A captive portal answers 200 with an HTML
+# login page, so `curl -fsS` succeeds and the body is nonempty — the
+# exact shape that made the script claim it had read GitHub's status.
+if [[ -f "$MOCK_STATE/status_garbage" ]]; then
+  printf '<html><body>Sign in to the network</body></html>\n'; exit 0
+fi
 status="$(cat "$MOCK_STATE/actions_status" 2>/dev/null || echo operational)"
 incident="$(cat "$MOCK_STATE/incident" 2>/dev/null || true)"
 printf '{"components":[{"name":"Actions","status":"%s"}],"incidents":[' "$status"
@@ -199,6 +205,28 @@ reset
 invoke
 assert_rc       "exits 2, not 1"         2
 assert_contains "says health is unknown" "health unknown"
+
+echo "actions-health: reached is not understood"
+# A captive portal answers 200 with an HTML login page: `curl -fsS`
+# succeeds, the body is nonempty, and nothing in it is GitHub's status.
+# Marking the source reachable on the BODY alone meant a script that had
+# learned nothing reported "Actions operational" whenever billing was
+# also unreadable — the health-unknown case wearing a green answer, from
+# the one tool whose job is deciding whether a run is worth spending.
+reset
+: > "$SANDBOX/state/status_garbage"
+: > "$SANDBOX/state/billing_unreadable"
+invoke
+assert_rc       "an unparseable status is not a readable one" 2
+assert_contains "says health is unknown"                      "health unknown"
+
+# The same body with billing READABLE must still not claim a status it
+# never read: the allowance answer is real, the Actions verdict is not.
+reset
+: > "$SANDBOX/state/status_garbage"
+invoke
+assert_rc       "the allowance answer still stands"    0
+assert_contains "but Actions health is not claimed"    "Actions health unread"
 
 echo "actions-health: a readable status with unreadable billing still answers"
 reset
