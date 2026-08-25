@@ -162,17 +162,29 @@ assert_not_contains() {
 write_pr_list() { printf '%s\n' "$1" > "$SANDBOX/fixtures/pr-list.json"; }
 write_graphql() { printf '%s\n' "$1" > "$SANDBOX/fixtures/graphql.json"; }
 
+# Every fixture timestamp is RELATIVE, and that is not tidiness.
+#
+# `/lastDate:<N>` resolves its cutoff from the real clock, so a fixture
+# with a literal `updatedAt` is a test whose verdict depends on the day
+# it runs. These rows were pinned to 2026-08-04..09 under a 99-day
+# window, which meant the `/lastDate:99d` case below stopped matching on
+# 2026-11-13 — and this suite is a required check that also runs on
+# merge_group, so the first symptom would have been every queued PR in
+# the repository blocking at once, with nothing in any diff to explain
+# it. A relative fixture cannot age out.
+ago() { date -u -d "$1 ago" +%Y-%m-%dT%H:%M:%SZ; }
+
 # Three PRs: two this clone's, one another session's.
 default_pr_list() {
-    write_pr_list "$(jq -n --arg me "$ME" --arg other "$OTHER" '[
+    write_pr_list "$(jq -n --arg me "$ME" --arg other "$OTHER" \
+      --arg t30 "$(ago '1 hour')" --arg t29 "$(ago '2 hours')" \
+      --arg t28 "$(ago '3 hours')" '[
       {number: 30, state: "OPEN",   headRefName: ($me    + "/feat/alpha"),
-       title: "alpha", updatedAt: "2026-08-06T10:00:00Z", isDraft: false, mergedAt: null},
+       title: "alpha", updatedAt: $t30, isDraft: false, mergedAt: null},
       {number: 29, state: "MERGED", headRefName: ($other + "/fix/beta"),
-       title: "beta",  updatedAt: "2026-08-05T10:00:00Z", isDraft: false,
-       mergedAt: "2026-08-05T11:00:00Z"},
+       title: "beta",  updatedAt: $t29, isDraft: false, mergedAt: $t29},
       {number: 28, state: "MERGED", headRefName: ($me    + "/docs/gamma"),
-       title: "gamma", updatedAt: "2026-08-04T10:00:00Z", isDraft: false,
-       mergedAt: "2026-08-04T11:00:00Z"}
+       title: "gamma", updatedAt: $t28, isDraft: false, mergedAt: $t28}
     ]')"
 }
 
@@ -184,18 +196,17 @@ default_pr_list() {
 # they vanished — so `/unresolved` answered "nothing outstanding" while
 # nine PRs and an unanswered P1 sat outside the filter.
 typed_pr_list() {
-    write_pr_list "$(jq -n --arg me "$ME" '[
+    write_pr_list "$(jq -n --arg me "$ME" \
+      --arg t40 "$(ago '1 hour')"  --arg t39 "$(ago '2 hours')" \
+      --arg t38 "$(ago '3 hours')" --arg t37 "$(ago '4 hours')" '[
       {number: 40, state: "MERGED", headRefName: ($me + "/stage-4/libp2p-substrate"),
-       title: "substrate", updatedAt: "2026-08-09T10:00:00Z", isDraft: false,
-       mergedAt: "2026-08-09T11:00:00Z"},
+       title: "substrate", updatedAt: $t40, isDraft: false, mergedAt: $t40},
       {number: 39, state: "MERGED", headRefName: ($me + "/conformance/negative-boundary"),
-       title: "conformance", updatedAt: "2026-08-08T10:00:00Z", isDraft: false,
-       mergedAt: "2026-08-08T11:00:00Z"},
+       title: "conformance", updatedAt: $t39, isDraft: false, mergedAt: $t39},
       {number: 38, state: "OPEN", headRefName: ($me + "/spike-006/identity"),
-       title: "spike", updatedAt: "2026-08-07T10:00:00Z", isDraft: false, mergedAt: null},
+       title: "spike", updatedAt: $t38, isDraft: false, mergedAt: null},
       {number: 37, state: "OPEN", headRefName: "no-slashes-at-all",
-       title: "unattributable", updatedAt: "2026-08-06T10:00:00Z", isDraft: false,
-       mergedAt: null}
+       title: "unattributable", updatedAt: $t37, isDraft: false, mergedAt: null}
     ]')"
 }
 
@@ -253,11 +264,11 @@ truncated_graphql() {
 # the script takes its early "no PRs" exit — the path that used to skip
 # the disclosure entirely and print a reassuring answer instead.
 all_unattributable_pr_list() {
-    write_pr_list "$(jq -n '[
+    write_pr_list "$(jq -n --arg t51 "$(ago '1 hour')" --arg t50 "$(ago '2 hours')" '[
       {number: 51, state: "OPEN", headRefName: "no-slashes-at-all",
-       title: "a", updatedAt: "2026-08-09T10:00:00Z", isDraft: false, mergedAt: null},
+       title: "a", updatedAt: $t51, isDraft: false, mergedAt: null},
       {number: 50, state: "OPEN", headRefName: "dependabot/cargo/serde-1.2.3",
-       title: "b", updatedAt: "2026-08-08T10:00:00Z", isDraft: false, mergedAt: null}
+       title: "b", updatedAt: $t50, isDraft: false, mergedAt: null}
     ]')"
 }
 
@@ -265,11 +276,12 @@ all_unattributable_pr_list() {
 # `/lastItem:1` narrows the pool to the newest alone, so the older row
 # was never in the requested set and nothing omitted it.
 pooled_pr_list() {
-    write_pr_list "$(jq -n --arg me "$ME" '[
+    write_pr_list "$(jq -n --arg me "$ME" \
+      --arg t50 "$(ago '1 hour')" --arg t49 "$(ago '2 hours')" '[
       {number: 50, state: "OPEN", headRefName: ($me + "/fix/newest"),
-       title: "newest", updatedAt: "2026-08-09T10:00:00Z", isDraft: false, mergedAt: null},
+       title: "newest", updatedAt: $t50, isDraft: false, mergedAt: null},
       {number: 49, state: "OPEN", headRefName: "no-slashes-at-all",
-       title: "older", updatedAt: "2026-08-08T10:00:00Z", isDraft: false, mergedAt: null}
+       title: "older", updatedAt: $t49, isDraft: false, mergedAt: null}
     ]')"
 }
 
@@ -375,6 +387,23 @@ run /all /lastDate:99d
 assert_rc       "/lastDate accepts <N>d" 0
 assert_contains "keeps PRs in the window" "#30"
 
+# A TIGHT window, which is what keeps the fixtures honest.
+#
+# A 99-day window admits a pinned date for 99 days after it is written,
+# so it cannot tell a relative fixture from one that is quietly ageing
+# out — the literal rows this suite used to carry sat comfortably inside
+# it for three months before the day they would have started failing a
+# required check on merge_group. A two-hour window is outside a pinned
+# date's reach within two hours of anyone writing one, so reintroducing
+# one fails here almost at once rather than on a date nobody wrote down.
+#
+# #30 sits one hour back, so the margin here is a full hour; the rows at
+# two and three hours straddle the cutoff and are deliberately not
+# asserted on.
+run /all /lastDate:2h
+assert_rc       "/lastDate:2h exits 0" 0
+assert_contains "fixtures are recent enough for a tight window" "#30"
+
 echo "pr-sessions: malformed pool filters are refused"
 run /lastItem:0
 assert_rc       "/lastItem:0 exits 2" 2
@@ -436,13 +465,15 @@ assert_rc       "non-numeric limit exits 2" 2
 assert_contains "names the expectation" "positive integer"
 
 echo "pr-sessions: bot branches are not attributed to a session"
-write_pr_list "$(jq -n --arg me "$ME" '[
+write_pr_list "$(jq -n --arg me "$ME" \
+  --arg t40 "$(ago '1 hour')" --arg t41 "$(ago '2 hours')" \
+  --arg t42 "$(ago '3 hours')" '[
   {number: 40, state: "OPEN", headRefName: "dependabot/github_actions/actions-minor-patch-5c7bcdc794",
-   title: "bump", updatedAt: "2026-08-06T10:00:00Z", isDraft: false, mergedAt: null},
+   title: "bump", updatedAt: $t40, isDraft: false, mergedAt: null},
   {number: 41, state: "OPEN", headRefName: "dependabot/cargo/crates/interweave-core/tokio-minor-patch-04e2",
-   title: "bump", updatedAt: "2026-08-06T09:00:00Z", isDraft: false, mergedAt: null},
+   title: "bump", updatedAt: $t41, isDraft: false, mergedAt: null},
   {number: 42, state: "OPEN", headRefName: ($me + "/feat/real"),
-   title: "real", updatedAt: "2026-08-06T08:00:00Z", isDraft: false, mergedAt: null}
+   title: "real", updatedAt: $t42, isDraft: false, mergedAt: null}
 ]')"
 write_graphql "$(jq -n '{data: {repository: {
   p40: {number: 40, author: {login: "app/dependabot"}, reviewThreads: {nodes: []}},
@@ -506,9 +537,9 @@ fi
 echo "pr-sessions: a full /lastDate page warns that the window may be short"
 # The warning fires when the fetch came back full, so the fixture has to
 # fill the derived 200-row page.
-write_pr_list "$(jq -n --arg me "$ME" '[range(200) | {
+write_pr_list "$(jq -n --arg me "$ME" --arg t "$(ago '1 hour')" '[range(200) | {
   number: (500 - .), state: "OPEN", headRefName: ($me + "/feat/w\(.)"),
-  title: "w", updatedAt: "2026-08-06T10:00:00Z", isDraft: false, mergedAt: null}]')"
+  title: "w", updatedAt: $t, isDraft: false, mergedAt: null}]')"
 # -n 10 puts the derived fetch at its 200 floor, which the fixture fills
 # exactly.
 run /all -n 10 /lastDate:99d --no-threads
