@@ -919,7 +919,18 @@ impl ConnectionManager {
             let delay = self.retry_delay_ms(&peer);
             self.policy
                 .record_address_failure(&peer, ticket.address(), now_ms, delay);
-            self.schedule_retry(peer, now_ms, delay);
+            // A CLAIM THIS TICKET DOES NOT OWN SURVIVES THE RESCHEDULE.
+            // Rewriting the entry with `claimed: false` was correct for
+            // the scheduler's own dial -- that is how a claim is given
+            // back -- and wrong for every other origin: a manual dial to
+            // a second address can fail transiently while the
+            // scheduler's dial is still in flight, and clearing the flag
+            // there makes the entry due again with a dial already
+            // running. The next tick then starts the duplicate that
+            // claiming exists to prevent.
+            let held_by_another = !ticket.owns_scheduler_claim()
+                && self.retries.get(&peer).is_some_and(|entry| entry.claimed);
+            self.schedule_retry(peer, now_ms, delay, held_by_another);
         }
         self.settle(ticket);
         self.publish();
@@ -1254,7 +1265,9 @@ impl ConnectionManager {
             .min(CEILING_MS)
     }
 
-    fn schedule_retry(&mut self, peer: TransportIdentity, now_ms: u64, delay: u64) {
+    /// `claimed` carries a claim forward that this failure did not own;
+    /// see [`Self::record_failure`].
+    fn schedule_retry(&mut self, peer: TransportIdentity, now_ms: u64, delay: u64, claimed: bool) {
         let attempts = self.retries.get(&peer).map_or(0, |r| r.attempts);
 
         if !self.retries.contains_key(&peer) && self.retries.len() >= self.max_retry_entries {
@@ -1277,7 +1290,7 @@ impl ConnectionManager {
             Retry {
                 due_at_ms: now_ms.saturating_add(delay),
                 attempts: attempts.saturating_add(1),
-                claimed: false,
+                claimed,
             },
         );
     }
@@ -1408,6 +1421,69 @@ mod tests {
         assert_eq!(first, vec![peer(P1)]);
         let second = m.take_due_retries(due, 8);
         assert!(second.is_empty(), "already claimed; not offered again");
+    }
+
+    /// A manual dial failing does not hand back a claim it never took.
+    ///
+    /// `schedule_retry` rewrote the entry with `claimed: false`, which
+    /// is how the SCHEDULER gives its claim back and wrong for every
+    /// other origin. With a scheduler dial still in flight, a manual
+    /// dial to a second address failing transiently made the entry due
+    /// again, and the next tick started the duplicate that claiming
+    /// exists to prevent.
+    #[test]
+    fn a_manual_failure_does_not_release_the_schedulers_claim() {
+        let mut m = manager(8);
+        let seed = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 0)
+            .expect("admitted");
+        m.record_failure(seed, 0);
+
+        // The scheduler takes the claim and its dial is still in flight.
+        assert_eq!(m.take_due_retries(30_000, 8), vec![peer(P1)]);
+
+        // A MANUAL dial to a different address fails transiently while
+        // that one is pending. Past the backoff so it is admitted on its
+        // own merit rather than refused before reaching the code here.
+        let manual = m
+            .handle()
+            .admit(&request_at(P1, "/b", DialOrigin::Manual), 31_000)
+            .expect("admitted");
+        m.record_failure(manual, 31_000);
+
+        assert!(
+            m.take_due_retries(300_000, 8).is_empty(),
+            "the scheduler's dial is still in flight: no duplicate"
+        );
+    }
+
+    /// The other direction: the SCHEDULER's own failure still returns
+    /// the claim, or a peer whose dial failed would never be retried.
+    #[test]
+    fn the_schedulers_own_failure_gives_the_claim_back() {
+        let mut m = manager(8);
+        let seed = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 0)
+            .expect("admitted");
+        m.record_failure(seed, 0);
+        assert_eq!(m.take_due_retries(30_000, 8), vec![peer(P1)]);
+
+        let claimed = m
+            .handle()
+            .load()
+            .admit(&request_at(P1, "/a", DialOrigin::ConnectionManager), 30_000)
+            .expect("admitted");
+        m.record_failure(claimed, 30_000);
+
+        assert_eq!(
+            m.take_due_retries(300_000, 8),
+            vec![peer(P1)],
+            "its own failure releases the claim, so the peer is retried"
+        );
     }
 
     #[test]
