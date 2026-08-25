@@ -310,12 +310,29 @@ where
     deserializer.deserialize_seq(Bounded)
 }
 
-/// One address, refused before it is owned.
+/// One address, refused before *this crate* owns it.
 ///
 /// `String`'s own `Deserialize` allocates whatever arrives and hands it
 /// over; a length check after that has already paid for the input it
-/// rejects. This refuses inside the visitor, where the value is still
-/// borrowed from the deserializer and nothing of ours holds it.
+/// rejects. This refuses inside the visitor, so nothing of ours holds
+/// the value.
+///
+/// **What this does NOT bound, stated because the first version of this
+/// comment claimed it did.** A visitor runs after the deserializer has
+/// produced a `&str`. For an unescaped token `serde_json` borrows
+/// straight from the input and allocates nothing; for a token carrying
+/// escapes it must unescape into its own scratch buffer first, and that
+/// allocation happens whatever this visitor later decides. No `Visitor`
+/// hook runs earlier than that, so `MAX_ADDRESS_BYTES` cannot be the
+/// ceiling on what a *deserializer* materialises -- only on what is
+/// retained past it.
+///
+/// The ceiling on materialised input therefore belongs where the bytes
+/// are read, and it exists there: the peer cache refuses a file over
+/// `MAX_CACHE_FILE_BYTES` before parsing any of it, and the IPC v2 frame
+/// codec refuses an over-ceiling declared length before allocating. This
+/// crate is types and validation with no I/O, so a bound on the reader
+/// is not its to impose.
 struct BoundedAddress(String);
 
 impl<'de> Deserialize<'de> for BoundedAddress {
@@ -1064,6 +1081,29 @@ mod tests {
         assert!(
             error.to_string().contains("bytes"),
             "refused for its length: {error}"
+        );
+    }
+
+    /// The refusal must hold on the path where `serde_json` builds the
+    /// string itself, not only where it can borrow one.
+    ///
+    /// Every other address test uses unescaped bytes, which `from_str`
+    /// hands to `visit_str` as a borrowed slice -- so they never travel
+    /// the unescape path at all, and review was right that they proved
+    /// less than the comment beside them claimed. `\u0039` is `9`, so
+    /// this is the same address as the test above, arriving the other
+    /// way.
+    #[test]
+    fn an_escaped_address_is_refused_on_the_unescape_path() {
+        let escaped = "\\u0039".repeat(MAX_ADDRESS_BYTES + 1);
+        let json = format!(
+            r#"{{"peer_id":"{P1}","addresses":["/ip4/192.0.2.1/tcp/{escaped}"],"source":"mdns","observed_at":1}}"#
+        );
+        let error = serde_json::from_str::<CandidatePeer>(&json)
+            .expect_err("an over-long escaped address is refused");
+        assert!(
+            error.to_string().contains("bytes"),
+            "refused for its length, not its syntax: {error}"
         );
     }
 
