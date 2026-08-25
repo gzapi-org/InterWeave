@@ -968,6 +968,27 @@ impl ConnectionManager {
             let delay = self.retry_delay_ms(&peer);
             self.policy
                 .record_address_failure(&peer, ticket.address(), now_ms, delay);
+            // REMEMBER THE ADDRESS WE JUST TRIED, or the retry we are
+            // about to schedule has nothing to dial.
+            //
+            // `dial_candidates` reads the address book and nothing else,
+            // and the public `dial(peer, address)` API admits an address
+            // that was never learned through Identify. A transient
+            // failure there scheduled a retry against an EMPTY book, so
+            // the first tick found no candidates and cleared the entry
+            // -- which removes it outright, not merely its claim -- and
+            // nothing recreates it, so learning the address afterwards
+            // could not restart the peer either. One transient refusal
+            // on a directly-dialled address ended reconnection for that
+            // peer permanently.
+            //
+            // `learn_address` is the same bounded, authorization-checked
+            // path Identify uses: it refuses an unauthorized peer, caps
+            // the list at `max_addresses_per_peer`, and evicts only an
+            // address the policy will not currently dial. An address
+            // this profile actually attempted is at least as good a
+            // candidate as one a peer asserted about itself.
+            self.learn_address(&peer, ticket.address(), now_ms);
             // A CLAIM THIS TICKET DOES NOT OWN SURVIVES THE RESCHEDULE.
             // Rewriting the entry with `claimed: false` was correct for
             // the scheduler's own dial -- that is how a claim is given
@@ -1392,6 +1413,48 @@ mod tests {
             address: address.to_owned(),
             origin,
         }
+    }
+
+    #[test]
+    fn a_directly_dialled_address_survives_into_its_own_retry() {
+        // THE PUBLIC `dial(peer, address)` PATH, which is the caller
+        // this function actually has. That API admits an address nobody
+        // learned through Identify, so the book can be empty while a
+        // retry is being scheduled — and `dial_candidates` reads the
+        // book and nothing else. The first tick then found no
+        // candidates, cleared the entry (which REMOVES it, not merely
+        // its claim), and nothing recreates it: one transient refusal
+        // ended reconnection for that peer permanently, and learning the
+        // address afterwards could not restart it.
+        let mut m = manager(4);
+        let p = peer(P1);
+        assert_eq!(
+            m.known_addresses(&p),
+            0,
+            "nothing was learned through Identify — this is the whole case"
+        );
+
+        let ticket = m
+            .handle()
+            .admit(&request(P1, "/ip4/10.0.0.1/tcp/4001"), 0)
+            .expect("a trusted peer is admitted");
+        m.record_failure(ticket, 0);
+
+        assert_eq!(
+            m.known_addresses(&p),
+            1,
+            "the address we just tried is remembered"
+        );
+
+        // ...and the scheduled retry can therefore actually dial. The
+        // backoff has to have elapsed, which is what the retry delay is.
+        let later = 60_000;
+        let due = m.take_due_retries(later, 8);
+        assert_eq!(due, vec![p.clone()], "the peer is due");
+        assert!(
+            !m.dial_candidates(&p, later).is_empty(),
+            "and the tick has something to dial, so the entry is not cleared"
+        );
     }
 
     #[test]
