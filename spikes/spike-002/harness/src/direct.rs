@@ -293,6 +293,11 @@ pub async fn a1_matching_majors() {
         .send_request(&server_peer, request("m-2", None, b"hello"));
 
     let mut answered = 0;
+    // WHAT CAME BACK, not merely that something did. `seen_explicit`
+    // and `seen_default` below are set on the SERVER side -- they say
+    // the responder received both destination forms, which is a
+    // different claim from the one this experiment reports.
+    let mut replies: Vec<Response> = Vec::new();
     let mut seen_explicit = false;
     let mut seen_default = false;
     // A response that never arrives is a RESULT, not a reason to wait
@@ -320,6 +325,7 @@ pub async fn a1_matching_majors() {
                     message: RrMessage::Response { response, .. }, ..
                 })) = e {
                     note("response", format!("{response:?}"));
+                    replies.push(response);
                     answered += 1;
                 }
             }
@@ -331,6 +337,31 @@ pub async fn a1_matching_majors() {
     );
     check("explicit destination carried", seen_explicit);
     check("omitted destination carried", seen_default);
+
+    // THE ROUND TRIP THIS EXPERIMENT ACTUALLY CLAIMS. Both checks above
+    // are about what the RESPONDER saw; a run where either reply was a
+    // rejection, or where both resolved to `chat`, satisfied them while
+    // the README's claim about resolved endpoints surviving the round
+    // trip was false.
+    let resolved = |want: &str| {
+        replies.iter().any(|r| {
+            matches!(r, Response::AcceptedV2 { resolved_endpoint } if resolved_endpoint == want)
+        })
+    };
+    check(
+        "the explicit destination resolved to `chat`",
+        resolved("chat"),
+    );
+    check(
+        "and the omitted one to `default`, not to the same endpoint",
+        resolved("default"),
+    );
+    check(
+        "with nothing refused",
+        replies
+            .iter()
+            .all(|r| matches!(r, Response::AcceptedV2 { .. })),
+    );
 }
 
 /// A2 — one side speaks only a different major.
@@ -477,6 +508,7 @@ pub async fn a4_withheld_response() {
     // "withhold AcceptedV2 until bounded local route admission".
     let mut held: Option<ResponseChannel<Response>> = None;
     let mut prompt_answered = false;
+    let mut prompt_accepted = false;
     let mut sent_prompt = false;
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
@@ -502,8 +534,12 @@ pub async fn a4_withheld_response() {
             e = slow.select_next_some() => { let _ = e; }
             e = prompt.select_next_some() => {
                 if let SwarmEvent::Behaviour(BehaviourEvent::Direct(RrEvent::Message {
-                    message: RrMessage::Response { .. }, ..
+                    message: RrMessage::Response { response, .. }, ..
                 })) = e {
+                    // SERVED, not merely answered. A rejection is an
+                    // answer too, and "a second peer was served while
+                    // one was held" is false if that is what arrived.
+                    prompt_accepted = matches!(response, Response::AcceptedV2 { .. });
                     prompt_answered = true;
                 }
             }
@@ -518,6 +554,7 @@ pub async fn a4_withheld_response() {
         }
     }
     check("a second peer was served while one was held", true);
+    check("  and SERVED means accepted, not refused", prompt_accepted);
 
     // Now answer the held one and see it still lands.
     if let Some(channel) = held {
@@ -538,9 +575,13 @@ pub async fn a4_withheld_response() {
             _ = server.select_next_some() => {}
             e = slow.select_next_some() => {
                 if let SwarmEvent::Behaviour(BehaviourEvent::Direct(RrEvent::Message {
-                    message: RrMessage::Response { .. }, ..
+                    message: RrMessage::Response { response, .. }, ..
                 })) = e {
                     check("the held response arrived late", true);
+                    check(
+                        "  and it was the acceptance, not a refusal",
+                        matches!(response, Response::AcceptedV2 { .. }),
+                    );
                     break;
                 }
             }

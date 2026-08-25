@@ -169,6 +169,18 @@ unexpected responses                           0
 highest number of channels held at once        8
 ```
 
+### A1 checked what the RESPONDER saw, and called it a round trip
+
+`seen_explicit` and `seen_default` are set on the **server** side: they say the responder received both destination forms. The client branch only `note`d the reply and incremented a counter. So a run where either reply was a rejection, or where both resolved to `chat`, passed every check while this README's claim about resolved endpoints surviving the round trip was false.
+
+| mutation | result |
+|---|---|
+| the server resolves both destinations to `chat` | the new "omitted one resolved to `default`" check **false** - and every pre-existing check still true |
+
+**This one had already been flagged and dismissed.** The property sweep two rounds earlier listed A1 as a gap; reading it, I saw `seen_explicit`/`seen_default` being checked and concluded it was covered - without noticing they are set on the responder. The scan was right and the reading was wrong. A4 was dismissed in the same pass and has the same weakness in milder form: "a second peer was served while one was held" never verified that *served* meant accepted rather than refused. Both are fixed here.
+
+The lesson is not "trust the scan" - it also produced genuine false positives that reading correctly cleared. It is that a dismissal is a judgement with its own error rate, and this one left no evidence behind. The mutation is what would have caught it.
+
 ### A8 asked for the race; it did not check that the race happened
 
 `killed` was set the instant `close_connection` returned, and that call only *requests* teardown. The admission timer then fired regardless — so if the connection was still alive, the waiters were answered in the ordinary way, the reservation released in the ordinary way, and every check passed. The experiment reported success for the one scenario it had not exercised. The server's own `InboundFailure`, which is the actual evidence, was only printed.
