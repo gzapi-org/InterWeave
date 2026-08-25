@@ -971,6 +971,26 @@ pub async fn a8_cancellation_race() {
                 }
             } => {
                 admission_due = None;
+                // THE RACE HAS TO HAVE HAPPENED FIRST.
+                //
+                // `close_connection` only REQUESTS teardown, and
+                // `killed` was set the instant it returned. If the
+                // connection is still alive when this timer fires,
+                // completing admission here answers the waiters in the
+                // ordinary way, releases the reservation in the
+                // ordinary way, and every check passes without a
+                // connection-death race ever having occurred -- the
+                // experiment reporting success for the one scenario it
+                // does not exercise.
+                //
+                // So the observation gates it: wait until the server
+                // has actually seen the owner's connection fail. The
+                // outer deadline still bounds this, and expiring there
+                // fails the run rather than passing it, which is the
+                // honest outcome for a race that would not start.
+                if owner_inbound_failure.is_none() {
+                    admission_due = Some(tokio::time::Instant::now() + ADMISSION);
+                } else {
                 // THE OWNER'S CONNECTION IS ALREADY GONE. Its channel is
                 // not answered -- there is nowhere for the answer to go
                 // -- but the waiters on the surviving connection still
@@ -983,6 +1003,7 @@ pub async fn a8_cancellation_race() {
                 }
                 reservations.release(&key);
                 note("reservation released after the owner's connection died", true);
+                }
             }
             e = server.select_next_some() => match e {
                 SwarmEvent::Behaviour(BehaviourEvent::Direct(RrEvent::Message {
@@ -1035,10 +1056,25 @@ pub async fn a8_cancellation_race() {
         }
     }
 
-    check("owner's connection was killed mid-admission", killed);
+    // ASKED, which is not the same as HAPPENED -- see the admission
+    // branch above, where the distinction is now load-bearing.
+    check(
+        "owner's connection close was requested mid-admission",
+        killed,
+    );
+    let observed_death = owner_inbound_failure.is_some();
     note(
         "server learned the owner's connection died",
-        owner_inbound_failure.unwrap_or_else(|| "no InboundFailure event arrived".to_owned()),
+        owner_inbound_failure
+            .clone()
+            .unwrap_or_else(|| "no InboundFailure event arrived".to_owned()),
+    );
+    // THE PRECONDITION OF THE WHOLE EXPERIMENT. Without it the run
+    // exercised an ordinary admission and reported it as a survived
+    // race.
+    check(
+        "and the server OBSERVED it die before admission completed",
+        observed_death,
     );
     note(
         "surviving waiters that still received an answer",
