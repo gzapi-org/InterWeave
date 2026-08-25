@@ -177,6 +177,14 @@ highest number of channels held at once        8
 |---|---|
 | the server resolves both destinations to `chat` | the new "omitted one resolved to `default`" check **false** - and every pre-existing check still true |
 
+**And the first repair was itself insufficient.** It collected the replies into a bag and asked whether `chat` and `default` were both *present*. A responder that swaps them - `default` for the explicit request, `chat` for the omitted one - satisfies that while every per-request claim is false. Review found it in the next round. Each reply is now keyed by the `OutboundRequestId` that `send_request` returns, and the claim is about the pairing.
+
+| mutation | result |
+|---|---|
+| the responder swaps the two resolutions | both per-request checks **false**, exit 1 - and the previous set-based check would have passed it |
+
+My own mutation of the first repair swapped both to `chat`, which the set-based check does catch. The reviewer's swap is the one that discriminates, and I did not think of it: a mutation is only as strong as the failure mode the author imagines.
+
 **This one had already been flagged and dismissed.** The property sweep two rounds earlier listed A1 as a gap; reading it, I saw `seen_explicit`/`seen_default` being checked and concluded it was covered - without noticing they are set on the responder. The scan was right and the reading was wrong. A4 was dismissed in the same pass and has the same weakness in milder form: "a second peer was served while one was held" never verified that *served* meant accepted rather than refused. Both are fixed here.
 
 The lesson is not "trust the scan" - it also produced genuine false positives that reading correctly cleared. It is that a dismissal is a judgement with its own error rate, and this one left no evidence behind. The mutation is what would have caught it.

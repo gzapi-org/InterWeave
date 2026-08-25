@@ -283,21 +283,30 @@ pub async fn a1_matching_majors() {
     // DEFAULT endpoint and never fan-out; here that is the responder's
     // decision to make, and the spike only shows the request carries the
     // distinction.
-    client
+    // EACH REQUEST KEEPS ITS ID, so a reply can be tied to the request
+    // that produced it. The previous fix collected replies into a bag
+    // and asked whether `chat` and `default` were both present; a
+    // responder that SWAPPED them -- `default` for the explicit request
+    // and `chat` for the omitted one -- satisfied that while every
+    // per-request claim below was false.
+    let explicit_id = client
         .behaviour_mut()
         .direct
         .send_request(&server_peer, request("m-1", Some("chat"), b"hello"));
-    client
+    let omitted_id = client
         .behaviour_mut()
         .direct
         .send_request(&server_peer, request("m-2", None, b"hello"));
 
     let mut answered = 0;
-    // WHAT CAME BACK, not merely that something did. `seen_explicit`
+    // WHAT CAME BACK, keyed by WHICH request it answers. `seen_explicit`
     // and `seen_default` below are set on the SERVER side -- they say
     // the responder received both destination forms, which is a
     // different claim from the one this experiment reports.
-    let mut replies: Vec<Response> = Vec::new();
+    let mut replies: std::collections::BTreeMap<
+        libp2p::request_response::OutboundRequestId,
+        Response,
+    > = std::collections::BTreeMap::new();
     let mut seen_explicit = false;
     let mut seen_default = false;
     // A response that never arrives is a RESULT, not a reason to wait
@@ -322,10 +331,10 @@ pub async fn a1_matching_majors() {
             }
             e = client.select_next_some() => {
                 if let SwarmEvent::Behaviour(BehaviourEvent::Direct(RrEvent::Message {
-                    message: RrMessage::Response { response, .. }, ..
+                    message: RrMessage::Response { request_id, response }, ..
                 })) = e {
-                    note("response", format!("{response:?}"));
-                    replies.push(response);
+                    note("response", format!("{request_id:?} -> {response:?}"));
+                    replies.insert(request_id, response);
                     answered += 1;
                 }
             }
@@ -338,28 +347,30 @@ pub async fn a1_matching_majors() {
     check("explicit destination carried", seen_explicit);
     check("omitted destination carried", seen_default);
 
-    // THE ROUND TRIP THIS EXPERIMENT ACTUALLY CLAIMS. Both checks above
-    // are about what the RESPONDER saw; a run where either reply was a
-    // rejection, or where both resolved to `chat`, satisfied them while
-    // the README's claim about resolved endpoints surviving the round
-    // trip was false.
-    let resolved = |want: &str| {
-        replies.iter().any(|r| {
-            matches!(r, Response::AcceptedV2 { resolved_endpoint } if resolved_endpoint == want)
-        })
+    // THE ROUND TRIP THIS EXPERIMENT ACTUALLY CLAIMS, per request. Both
+    // checks above are about what the RESPONDER saw. The first repair of
+    // this asked only whether `chat` and `default` were both present
+    // somewhere in the replies, which a responder that swapped the two
+    // satisfies -- so each reply is now matched to the request that
+    // produced it, and the claim is about that pairing.
+    let resolved_to = |id, want: &str| {
+        matches!(
+            replies.get(&id),
+            Some(Response::AcceptedV2 { resolved_endpoint }) if resolved_endpoint == want
+        )
     };
     check(
-        "the explicit destination resolved to `chat`",
-        resolved("chat"),
+        "the EXPLICIT request resolved to `chat`",
+        resolved_to(explicit_id, "chat"),
     );
     check(
-        "and the omitted one to `default`, not to the same endpoint",
-        resolved("default"),
+        "and the OMITTED request to `default` -- not swapped, not the same",
+        resolved_to(omitted_id, "default"),
     );
     check(
         "with nothing refused",
         replies
-            .iter()
+            .values()
             .all(|r| matches!(r, Response::AcceptedV2 { .. })),
     );
 }
