@@ -408,8 +408,15 @@ fn to_transport_identity(peer: &PeerId) -> Result<TransportIdentity, SubstrateEr
 
 /// One outbound direct exchange awaiting its answer.
 struct PendingDirect {
-    /// Who it went to, so a response can be validated against the ask.
-    peer: TransportIdentity,
+    /// The id this exchange sent, which the answer must echo.
+    message_id: interweave_transport_api::MessageId,
+    /// The destination asked for, when one was named.
+    ///
+    /// `None` is an omitted destination, where the remote's resolved
+    /// endpoint is the ANSWER rather than something to check — it is how
+    /// the caller learns the default. An explicit one is a question with
+    /// exactly one correct reply.
+    requested: Option<EndpointId>,
     /// The caller waiting for the outcome.
     reply: oneshot::Sender<Result<EndpointId, DirectError>>,
 }
@@ -1709,9 +1716,21 @@ fn handle_command(
                     return;
                 }
             };
+            // CAPTURED BEFORE THE FRAME IS MOVED. The answer is checked
+            // against what was asked, and after `send_direct` takes the
+            // frame there is nothing left to compare with.
+            let message_id = frame.message_id;
+            let requested = frame.destination_endpoint.clone();
             match swarm.send_direct(&peer_id, *frame) {
                 Ok(request_id) => {
-                    pending_direct.insert(request_id, PendingDirect { peer, reply });
+                    pending_direct.insert(
+                        request_id,
+                        PendingDirect {
+                            message_id,
+                            requested,
+                            reply,
+                        },
+                    );
                 }
                 // NOT CONNECTED. `DIRECT.md` distinguishes "no usable
                 // candidate addresses" from "could not reach"; this
@@ -2027,11 +2046,15 @@ fn handle_direct(
                 },
             ..
         } => {
-            let Some(PendingDirect { peer, reply }) = pending.remove(&request_id) else {
+            let Some(PendingDirect {
+                message_id,
+                requested,
+                reply,
+            }) = pending.remove(&request_id)
+            else {
                 return DirectHandled::Consumed;
             };
-            let _ = peer;
-            let _ = reply.send(validate_response(&response));
+            let _ = reply.send(validate_response(&response, message_id, requested.as_ref()));
             DirectHandled::Consumed
         }
 
@@ -2058,12 +2081,46 @@ fn handle_direct(
 /// `ProtocolViolation` and creates no positive result.
 fn validate_response(
     response: &crate::direct_codec::DirectResponse,
+    asked: interweave_transport_api::MessageId,
+    requested: Option<&EndpointId>,
 ) -> Result<EndpointId, DirectError> {
     use crate::direct_codec::DirectResponse;
+
+    // THE ID MUST BE THE ONE WE SENT, on either shape. A response
+    // carrying somebody else's id is not an answer to this exchange, and
+    // believing it would let a peer settle a request it was never given
+    // — including, for an acceptance, caching a route for a message this
+    // caller did not send.
+    let echoed = match response {
+        DirectResponse::Accepted { message_id, .. }
+        | DirectResponse::Rejected { message_id, .. } => *message_id,
+    };
+    if echoed != asked {
+        return Err(DirectError::ProtocolViolation);
+    }
+
     match response {
         DirectResponse::Accepted {
             resolved_endpoint, ..
-        } => Ok(resolved_endpoint.clone()),
+        } => {
+            // AN EXPLICIT DESTINATION HAS EXACTLY ONE CORRECT ANSWER.
+            // Accepting a different endpoint would let a remote silently
+            // reroute a directed message to another local application —
+            // the one thing endpoint addressing exists to prevent — and
+            // the caller would surface that endpoint as where its
+            // message went.
+            //
+            // An OMITTED destination is the other case: there the
+            // resolved endpoint IS the answer, which is how a caller
+            // learns the remote's configured default, so there is
+            // nothing to compare it against.
+            if let Some(asked_for) = requested
+                && resolved_endpoint != asked_for
+            {
+                return Err(DirectError::ProtocolViolation);
+            }
+            Ok(resolved_endpoint.clone())
+        }
         DirectResponse::Rejected { reason, .. } => Err(match reason {
             // REMOTE no_route BECOMES A LOCAL DIAGNOSTIC. The peer told
             // us nothing about which of its five branches applied, and
@@ -2322,5 +2379,97 @@ mod tests {
     #[test]
     fn a_timeout_is_not_permanent() {
         assert!(!is_permanent_dial_error(&DialError::Aborted));
+    }
+}
+
+#[cfg(test)]
+mod response_validation_tests {
+    use super::validate_response;
+    use crate::direct_codec::DirectResponse;
+    use interweave_transport_api::{
+        DirectRejectReason, EndpointId, MessageId, TransportError as DirectError,
+    };
+
+    fn endpoint(name: &str) -> EndpointId {
+        EndpointId::parse(name).expect("valid endpoint id")
+    }
+
+    fn asked() -> MessageId {
+        MessageId::from_bytes([1; 16])
+    }
+
+    #[test]
+    fn an_explicit_destination_must_be_answered_by_that_endpoint() {
+        let honest = DirectResponse::Accepted {
+            message_id: asked(),
+            resolved_endpoint: endpoint("claude"),
+        };
+        assert_eq!(
+            validate_response(&honest, asked(), Some(&endpoint("claude"))),
+            Ok(endpoint("claude"))
+        );
+
+        // THE REROUTE. A remote answering with a DIFFERENT endpoint than
+        // the one addressed would silently deliver to another local
+        // application, and the caller would surface that endpoint as
+        // where its message went.
+        let rerouted = DirectResponse::Accepted {
+            message_id: asked(),
+            resolved_endpoint: endpoint("human"),
+        };
+        assert_eq!(
+            validate_response(&rerouted, asked(), Some(&endpoint("claude"))),
+            Err(DirectError::ProtocolViolation),
+            "an explicit destination has exactly one correct answer"
+        );
+    }
+
+    /// An omitted destination is the other case: the resolved endpoint
+    /// IS the answer, so there is nothing to compare it against.
+    #[test]
+    fn an_omitted_destination_accepts_whatever_the_default_resolved_to() {
+        let response = DirectResponse::Accepted {
+            message_id: asked(),
+            resolved_endpoint: endpoint("human"),
+        };
+        assert_eq!(
+            validate_response(&response, asked(), None),
+            Ok(endpoint("human"))
+        );
+    }
+
+    #[test]
+    fn a_response_echoing_the_wrong_id_is_not_an_answer_to_this_exchange() {
+        let other = MessageId::from_bytes([9; 16]);
+        for response in [
+            DirectResponse::Accepted {
+                message_id: other,
+                resolved_endpoint: endpoint("claude"),
+            },
+            DirectResponse::Rejected {
+                message_id: other,
+                reason: DirectRejectReason::NoRoute,
+            },
+        ] {
+            assert_eq!(
+                validate_response(&response, asked(), Some(&endpoint("claude"))),
+                Err(DirectError::ProtocolViolation),
+                "a mismatched id is refused on both shapes"
+            );
+        }
+    }
+
+    /// The id is checked before the reason is mapped, so a rejection
+    /// cannot settle an exchange it does not belong to either.
+    #[test]
+    fn a_rejection_with_the_right_id_still_maps_its_reason() {
+        let response = DirectResponse::Rejected {
+            message_id: asked(),
+            reason: DirectRejectReason::NoRoute,
+        };
+        assert_eq!(
+            validate_response(&response, asked(), Some(&endpoint("claude"))),
+            Err(DirectError::RemoteEndpointUnavailable)
+        );
     }
 }
