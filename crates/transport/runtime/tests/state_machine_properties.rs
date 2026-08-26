@@ -32,6 +32,8 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
+use std::collections::BTreeMap;
+
 use interweave_transport_api::{EndpointId, MessageId, Payload, TransportIdentity};
 use interweave_transport_runtime::{
     ContentFingerprint, DedupKey, DestinationSelector, DirectEvent, EndpointQueues, QueueRefusal,
@@ -194,23 +196,45 @@ proptest! {
             queues.open(e.clone(), bound);
         }
 
-        let mut expected = std::collections::BTreeMap::new();
-        for e in &all {
-            expected.insert(e.clone(), 0usize);
-        }
+        // CONTENTS, not depths. Comparing only lengths let traffic to
+        // one endpoint replace or reorder an event already queued for
+        // another without either length changing, and the drain property
+        // exercises a single endpoint so it could not see it either.
+        let mut expected: std::collections::BTreeMap<EndpointId, Vec<u8>> =
+            all.iter().map(|e| (e.clone(), Vec::new())).collect();
 
         for (destination, id) in ops {
             if queues.push(event(&destination, id, b"x")).is_ok() {
-                *expected.get_mut(&destination).expect("a known endpoint") += 1;
+                expected
+                    .get_mut(&destination)
+                    .expect("a known endpoint")
+                    .push(id);
             }
             for e in &all {
                 prop_assert_eq!(
                     queues.len(e),
-                    expected[e],
+                    expected[e].len(),
                     "traffic to another endpoint changed {}'s depth",
                     e.as_str()
                 );
             }
+        }
+
+        // Drain every endpoint and compare the sequences. A push to one
+        // queue must leave every other queue's contents identical, in
+        // order, not merely the same length.
+        for e in &all {
+            let drained: Vec<u8> = queues
+                .drain(e)
+                .iter()
+                .map(|ev| ev.message_id.as_bytes()[0])
+                .collect();
+            prop_assert_eq!(
+                &drained,
+                &expected[e],
+                "{}'s queue contents were disturbed by traffic to another endpoint",
+                e.as_str()
+            );
         }
     }
 }
@@ -233,18 +257,40 @@ proptest! {
     ) {
         let mut map = ReservationMap::new(max_global, max_per_peer);
 
+        // Per source as well as in total. Comparing only the total
+        // against `max_global` let an implementation admit more than
+        // `max_per_peer` from one source and stay under the global cap —
+        // so the property named both bounds and enforced one.
+        // Charge per (source, key), because `release` frees the owner
+        // AND every waiter attached to that key at once.
+        let mut held: BTreeMap<(usize, u8), usize> = BTreeMap::new();
+
         for (source, id, acquire) in ops {
             let key = dedup_key(source, id);
             if acquire {
-                let _ = map.acquire(&key, fingerprint(b"same"));
+                if map.acquire(&key, fingerprint(b"same")).is_ok() {
+                    *held.entry((source, id)).or_default() += 1;
+                }
             } else {
                 map.release(&key);
+                held.remove(&(source, id));
             }
             prop_assert!(
                 map.outstanding() <= max_global,
                 "{} outstanding against a global bound of {max_global}",
                 map.outstanding()
             );
+            for peer in 0..3usize {
+                let charged: usize = held
+                    .iter()
+                    .filter(|((s, _), _)| *s == peer)
+                    .map(|(_, c)| *c)
+                    .sum();
+                prop_assert!(
+                    charged <= max_per_peer,
+                    "peer {peer} holds {charged} against a per-peer bound of {max_per_peer}"
+                );
+            }
         }
     }
 
@@ -308,7 +354,8 @@ proptest! {
     fn a_fingerprint_conflict_never_consumes_budget(
         conflicts in 1usize..12,
     ) {
-        let mut map = ReservationMap::new(8, 8);
+        const PER_PEER: usize = 8;
+        let mut map = ReservationMap::new(64, PER_PEER);
         let key = dedup_key(0, 1);
 
         prop_assert!(map.acquire(&key, fingerprint(b"first")).is_ok());
@@ -324,6 +371,21 @@ proptest! {
                 map.outstanding(),
                 charged,
                 "a conflict changed the outstanding charge"
+            );
+        }
+
+        // SPEND the rest of the allowance. `outstanding()` above reads
+        // only `in_flight`, so a conflict that wrongly charged the
+        // separate per-peer ledger would satisfy every assertion so far
+        // and only surface as refusals later. This is the same vacuity
+        // the release property had; fixing it there and leaving it here
+        // is what a review caught.
+        for i in 0..PER_PEER - 1 {
+            let fresh = dedup_key(0, u8::try_from(100 + i).expect("in range"));
+            prop_assert!(
+                matches!(map.acquire(&fresh, fingerprint(b"fresh")), Ok(Reservation::Owner)),
+                "reservation {i} was refused after {conflicts} conflicts — \
+                 a conflict spent per-peer budget"
             );
         }
     }
