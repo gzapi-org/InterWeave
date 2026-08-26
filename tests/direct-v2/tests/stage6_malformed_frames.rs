@@ -563,3 +563,152 @@ fn legal_message() -> DirectMessageV2 {
         payload: Payload::at_ceiling(None, b"held".to_vec()).expect("within the ceiling"),
     }
 }
+
+/// Inbound deliveries cannot starve a node's own in-flight exchange.
+///
+/// The polling gate leaves room for exchanges awaiting a response,
+/// because polling is what settles them. `DirectDelivered` events land
+/// in the SAME outbox, so if they may spend that room a peer refills it
+/// and stops the polling which would settle the exchange — the freeze
+/// the slack was added to prevent, reached one layer down.
+///
+/// The unit tests beside `may_buffer_delivery` prove the predicates.
+/// This proves the LOOP uses them for their respective jobs: swapping
+/// the call site to share the slack is invisible to a unit test and
+/// hangs this one.
+///
+/// `a` holds an exchange with a peer that never answers, its event
+/// capacity is one, and nothing drains it after setup.
+#[tokio::test]
+async fn inbound_deliveries_cannot_starve_an_outbound_exchange() {
+    let silent_keys = libp2p::identity::Keypair::generate_ed25519();
+    let silent_peer = TransportIdentity::parse(silent_keys.public().to_peer_id().to_string())
+        .expect("a valid peer id");
+
+    let mut silent = SwarmBuilder::with_existing_identity(silent_keys)
+        .with_tokio()
+        .with_tcp(
+            libp2p::tcp::Config::default(),
+            libp2p::noise::Config::new,
+            libp2p::yamux::Config::default,
+        )
+        .expect("the same transport stack")
+        .with_behaviour(|_| {
+            request_response::Behaviour::<RawCodec>::new(
+                [(DIRECT_PROTOCOL, ProtocolSupport::Full)],
+                request_response::Config::default(),
+            )
+        })
+        .expect("behaviour")
+        .build();
+    silent
+        .listen_on("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
+        .expect("listens");
+    let silent_address = loop {
+        if let Libp2pSwarmEvent::NewListenAddr { address, .. } = silent.select_next_some().await {
+            break address;
+        }
+    };
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        loop {
+            if let Libp2pSwarmEvent::Behaviour(request_response::Event::Message {
+                message: request_response::Message::Request { channel, .. },
+                ..
+            }) = silent.select_next_some().await
+            {
+                held.push(channel);
+            }
+        }
+    });
+
+    let a_id = ProfileIdentity::generate();
+    let a_peer = a_id.transport_identity().expect("peer id");
+    let b_id = ProfileIdentity::generate();
+    let b_peer = b_id.transport_identity().expect("peer id");
+
+    let mut a = SwarmRuntime::start(
+        &a_id,
+        SubstrateConfig {
+            event_capacity: 1,
+            ..SubstrateConfig::default()
+        },
+        TrustSources::new(
+            PeerTrustPolicy::new([silent_peer.clone(), b_peer]).expect("two peers"),
+            InfrastructureSet::default(),
+        ),
+    )
+    .expect("a starts");
+    let b = SwarmRuntime::start(
+        &b_id,
+        SubstrateConfig::default(),
+        TrustSources::new(
+            PeerTrustPolicy::new([a_peer.clone()]).expect("one peer"),
+            InfrastructureSet::default(),
+        ),
+    )
+    .expect("b starts");
+
+    a.configure_direct(endpoints()).await.expect("a endpoints");
+    b.configure_direct(endpoints()).await.expect("b endpoints");
+    let a_address = a
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
+        .await
+        .expect("a listens");
+
+    a.dial(silent_peer.clone(), silent_address)
+        .await
+        .expect("command")
+        .expect("admitted");
+    b.dial(a_peer.clone(), a_address)
+        .await
+        .expect("command")
+        .expect("admitted");
+
+    // Drain `a` only until both connections exist. After this nothing
+    // reads its events, which is the condition under test.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let mut connected = 0;
+    while connected < 2 {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(!left.is_zero(), "both connections within 20s");
+        if let Ok(Some(interweave_transport_libp2p::runtime::SwarmEvent::Connected { .. })) =
+            tokio::time::timeout(left, a.next_event()).await
+        {
+            connected += 1;
+        }
+    }
+
+    // `a` dispatches to the silent peer and, WHILE that is in flight,
+    // `b` floods it with deliveries.
+    let (own, _flood) = tokio::join!(
+        tokio::time::timeout(
+            Duration::from_secs(25),
+            a.send_direct(silent_peer, legal_message()),
+        ),
+        async {
+            for id in 40..60u8 {
+                let mut frame = legal_message();
+                frame.message_id = MessageId::from_bytes([id; 16]);
+                // EACH SEND IS BOUNDED. If `a` has stopped polling these
+                // never answer, and awaiting them serially would make a
+                // FAILING run take three minutes instead of seconds —
+                // the flood only has to fill `a`'s outbox, not succeed.
+                let _ = tokio::time::timeout(
+                    Duration::from_millis(500),
+                    b.send_direct(a_peer.clone(), frame),
+                )
+                .await;
+            }
+        }
+    );
+
+    // Bounded rather than hung: the exchange reaches its own deadline
+    // and reports it. With the slack shared, polling stops and nothing
+    // ever settles this.
+    let settled = own.expect("a's exchange settled rather than freezing behind deliveries");
+    assert!(
+        settled.expect("the command reaches the task").is_err(),
+        "the silent peer never answers, so this is an error either way"
+    );
+}

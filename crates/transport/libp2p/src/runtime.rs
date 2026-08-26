@@ -518,6 +518,56 @@ fn admit_outbound<'a>(
 /// becomes an argument when the API that needs it exists.
 const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Whether the Swarm may be polled.
+///
+/// The outbox is bounded so a stalled consumer cannot make this process
+/// buffer without limit — but polling is also what SETTLES the callers
+/// waiting on in-flight work, so the bound has to leave room for them or
+/// it stops the very progress that would drain it.
+///
+/// Two kinds of caller earn that room: listeners awaiting an address,
+/// and direct exchanges awaiting a response. Both are bounded elsewhere
+/// (`max_pending_listens`, and `admit_outbound` at 128), so the slack is
+/// bounded too.
+///
+/// THIS PREDICATE HAS BEEN WRONG TWICE. First it counted listeners and
+/// not exchanges, and `send_direct` froze past its deadline. Then the
+/// slack it added was shared with delivery events, so a peer could
+/// refill it and reach the same freeze — which is why
+/// [`may_buffer_delivery`] exists and why both are functions with tests
+/// rather than an expression inside a `select!` arm.
+const fn polling_room(
+    buffered: usize,
+    event_capacity: usize,
+    pending_listens: usize,
+    pending_exchanges: usize,
+) -> bool {
+    buffered
+        < event_capacity
+            .saturating_add(pending_listens)
+            .saturating_add(pending_exchanges)
+}
+
+/// Whether an accepted delivery may be buffered for the consumer.
+///
+/// The BASE capacity only: the slack [`polling_room`] adds for in-flight
+/// work is reserved for progress and never spent on notifications. A
+/// delivery buffered into that slack is a peer taking a slot this
+/// process needs to settle its own exchanges.
+///
+/// Refusing here drops a NOTIFICATION, not a message. The event is
+/// already in the endpoint's bounded queue — the admission `AcceptedV2`
+/// promised (ADR-0018) — and `drain_endpoint` still returns it. What is
+/// lost under sustained backpressure is a wake-up, and only for a
+/// consumer that by construction is not reading.
+const fn may_buffer_delivery(
+    buffered: usize,
+    event_capacity: usize,
+    pending_listens: usize,
+) -> bool {
+    buffered < event_capacity.saturating_add(pending_listens)
+}
+
 /// Outbound direct exchanges allowed at once, in total.
 ///
 /// The `direct inflight total` row of `resource-limits.md` (128, ceiling
@@ -746,11 +796,12 @@ impl SwarmRuntime {
                 // branch below is inert then.
                 let grace_deadline = stopping.as_ref().map(|(deadline, _)| *deadline);
 
-                let room = outbox.len()
-                    < config
-                        .event_capacity
-                        .saturating_add(listens.len())
-                        .saturating_add(pending_direct.len());
+                let room = polling_room(
+                    outbox.len(),
+                    config.event_capacity,
+                    listens.len(),
+                    pending_direct.len(),
+                );
 
                 tokio::select! {
                     // THE RECONNECT SCHEDULER. `due_retries` used to
@@ -1007,14 +1058,25 @@ impl SwarmRuntime {
                         // `settle_outcome` — which takes the event by
                         // reference precisely so it can run before the
                         // shape conversion.
+                        // COMPUTED BEFORE THE MUTABLE BORROW, and from
+                        // the BASE capacity: the pending-exchange slack
+                        // belongs to progress alone.
+                        let may_buffer = may_buffer_delivery(
+                            outbox.len(),
+                            config.event_capacity,
+                            listens.len(),
+                        );
                         let event = match handle_direct(
                             event,
                             &mut swarm,
                             &mut direct_state,
                             &mut pending_direct,
                             &mut outbox,
-                            now_ms(started),
-                            manager.is_draining(),
+                            DirectTick {
+                                now_ms: now_ms(started),
+                                draining: manager.is_draining(),
+                                may_buffer_delivery: may_buffer,
+                            },
                         ) {
                             DirectHandled::Consumed => continue,
                             DirectHandled::Passed(event) => *event,
@@ -2366,6 +2428,24 @@ impl DirectEndpoints {
     }
 }
 
+/// The facts one loop iteration hands to direct handling.
+///
+/// A struct rather than three more parameters: they are all properties
+/// of THIS iteration rather than of the connection or the state, and
+/// grouping them keeps the reason they travel together visible.
+#[derive(Debug, Clone, Copy)]
+struct DirectTick {
+    /// Monotonic milliseconds since the runtime started.
+    now_ms: u64,
+    /// Whether the node has begun draining.
+    draining: bool,
+    /// Whether an accepted delivery may be buffered for the consumer.
+    ///
+    /// Decided by [`may_buffer_delivery`] from the BASE capacity, so a
+    /// delivery cannot spend the slack reserved for in-flight work.
+    may_buffer_delivery: bool,
+}
+
 /// Whether a swarm event was a direct-protocol one.
 enum DirectHandled {
     /// It was, and has been fully handled.
@@ -2385,9 +2465,13 @@ fn handle_direct(
     state: &mut DirectState,
     pending: &mut HashMap<libp2p::request_response::OutboundRequestId, PendingDirect>,
     outbox: &mut std::collections::VecDeque<SwarmEvent>,
-    now_ms: u64,
-    draining: bool,
+    tick: DirectTick,
 ) -> DirectHandled {
+    let DirectTick {
+        now_ms,
+        draining,
+        may_buffer_delivery,
+    } = tick;
     use crate::direct_codec::DirectResponse;
     use libp2p::request_response::{Event as RrEvent, Message as RrMessage};
 
@@ -2523,10 +2607,26 @@ fn handle_direct(
 
             if let AdmissionOutcome::Accepted { resolved_endpoint } = outcome {
                 let _ = answered;
-                outbox.push_back(SwarmEvent::DirectDelivered {
-                    endpoint: resolved_endpoint,
-                    peer: source,
-                });
+                // PROGRESS CAPACITY IS RESERVED FROM DELIVERIES, not
+                // shared with them. The Swarm is polled while the outbox
+                // has room for the exchanges still in flight; buffering
+                // deliveries into that same allowance lets a peer refill
+                // it and stop the polling that settles those exchanges —
+                // the freeze this slack was added to prevent, reached
+                // one layer down.
+                //
+                // DROPPING THE NOTIFICATION IS NOT DROPPING THE MESSAGE.
+                // The event is already in the endpoint's bounded queue —
+                // that admission is what `AcceptedV2` promised (ADR-0018)
+                // — and `drain_endpoint` still returns it. What is lost
+                // under sustained backpressure is a wake-up, from a
+                // consumer that by construction is not reading.
+                if may_buffer_delivery {
+                    outbox.push_back(SwarmEvent::DirectDelivered {
+                        endpoint: resolved_endpoint,
+                        peer: source,
+                    });
+                }
             }
             DirectHandled::Consumed
         }
@@ -3149,5 +3249,67 @@ mod outbound_bound_tests {
             admit_outbound(held.iter(), &loud).is_ok(),
             "the bound is a ceiling reached, not one approached"
         );
+    }
+}
+
+#[cfg(test)]
+mod backpressure_tests {
+    use super::{may_buffer_delivery, polling_room};
+
+    /// The bound still bounds: with nothing in flight, the base capacity
+    /// is the whole allowance.
+    #[test]
+    fn a_stalled_consumer_with_nothing_in_flight_stops_polling() {
+        assert!(polling_room(0, 1, 0, 0));
+        assert!(!polling_room(1, 1, 0, 0));
+    }
+
+    /// In-flight exchanges buy room, because polling is what settles
+    /// them. Without this `send_direct` waits past its own deadline for
+    /// a response nothing will ever process.
+    #[test]
+    fn in_flight_exchanges_keep_polling_alive() {
+        assert!(
+            polling_room(1, 1, 0, 1),
+            "one exchange in flight, one event buffered: still polling"
+        );
+        assert!(
+            !polling_room(2, 1, 0, 1),
+            "and the slack is exactly one, not unbounded"
+        );
+    }
+
+    /// THE SECOND DEFECT. Deliveries may fill the base capacity and no
+    /// further, so the slack an in-flight exchange bought stays its own.
+    /// Sharing it lets a peer refill the allowance and stop the polling
+    /// that would settle the exchange — the same freeze, one layer down.
+    #[test]
+    fn a_delivery_may_not_spend_the_slack_an_exchange_bought() {
+        // One exchange in flight, base capacity one, one event already
+        // buffered. Polling continues...
+        assert!(polling_room(1, 1, 0, 1));
+        // ...and that remaining slot is NOT available to a delivery.
+        assert!(
+            !may_buffer_delivery(1, 1, 0),
+            "the slot belongs to progress, not to another notification"
+        );
+    }
+
+    /// Below the base capacity a delivery is buffered normally — the
+    /// reservation is a ceiling on deliveries, not a refusal of them.
+    #[test]
+    fn a_delivery_within_the_base_capacity_is_buffered() {
+        assert!(may_buffer_delivery(0, 1, 0));
+        assert!(may_buffer_delivery(3, 4, 0));
+    }
+
+    /// Listener slack is shared with deliveries, and deliberately: a
+    /// pending listener is waiting on a command reply rather than on a
+    /// response the Swarm must carry, so a buffered delivery cannot
+    /// starve it.
+    #[test]
+    fn listener_slack_is_shared() {
+        assert!(may_buffer_delivery(1, 1, 1));
+        assert!(!may_buffer_delivery(2, 1, 1));
     }
 }
