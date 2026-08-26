@@ -282,9 +282,14 @@ const MATRIX: &[Clause] = &[
     },
     Clause {
         doc: DIRECT,
+        // The waiter test calls `waiter_response` with an absent owner
+        // and never exhausts the map, so it proved nothing about
+        // overflow. This clause is about the reservation bound, and
+        // "never creates a parallel enqueue path" is the half a fix
+        // would break.
         text: "overflow is `overloaded` and never creates a parallel enqueue path",
         error: "overloaded",
-        proof: Proof::Test("a_waiter_with_no_recorded_owner_is_told_overloaded_not_nothing"),
+        proof: Proof::Test("an_exhausted_reservation_budget_is_overloaded_and_enqueues_nothing"),
     },
     Clause {
         doc: DIRECT,
