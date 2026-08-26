@@ -10,7 +10,17 @@
     "allow": [
       "Bash(git add*)",
       "Bash(git commit*)",
-      "Bash(gh pr *)",
+      "Bash(gh pr view*)",
+      "Bash(gh pr list*)",
+      "Bash(gh pr create*)",
+      "Bash(gh pr comment*)",
+      "Bash(gh pr diff*)",
+      "Bash(gh pr checks*)",
+      "Bash(gh pr status*)",
+      "Bash(gh pr ready*)",
+      "Bash(gh pr edit*)",
+      "Bash(gh pr review*)",
+      "Bash(git push*)",
       "Bash(gh issue *)",
       "Bash(gh run *)",
       "Bash(gh workflow *)",
@@ -25,7 +35,7 @@
       "Bash(gh status*)"
     ],
     "ask": [
-      "Bash(git push*)"
+      "Bash(gh pr merge*)"
     ],
     "deny": [
       "Bash(gh auth token*)",

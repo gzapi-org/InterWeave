@@ -297,17 +297,17 @@ Commit messages are project files for the purposes of §7 — do not cite unrela
 
 Steps 4–5 are **unconditional**: the step-2 lookup only speaks when a PR already exists.
 
-### `git push` is the human authorization point — and it is enforced
+### Arming the merge is the human authorization point — and it is enforced
 
-Everything downstream of a push is machinery: push → checks → merge queue → `main`, with no further human step in that chain. The push is therefore the last moment a person can change the outcome, which is where the authorization belongs.
+The chain that lands code is `gh pr merge --auto` → checks → merge queue → `main`, with no further human step in it. **Arming is standing consent**: it lands the PR at the first moment every required check goes green, whether or not anyone is still looking. That is the last point a person can change the outcome, so that is where the authorization belongs.
 
-`.claude/settings.json` carries `"ask": ["Bash(git push*)"]`, so every push surfaces a confirmation prompt. `git fetch`, `git log`, and the rest are untouched.
+`.claude/settings.json` carries `"ask": ["Bash(gh pr merge*)"]`, so arming — and any other merge invocation — surfaces a confirmation prompt.
 
-**Therefore `git push` MUST be its own Bash call.** Never bundle it with the commands that precede it — no `git add … && git commit … && git push`, no heredoc script ending in a push. Permission rules are prefix-matched, so a bundled push slips the gate entirely, and approving a bundle authorizes pushing a tree that does not exist yet.
+**`git push` is NOT gated.** A push to a task branch lands nothing: `main` is protected, a pull request is required, and an unarmed PR sits there indefinitely. Gating it bought a prompt for an action with no irreversible consequence, and paid for it by making every review round wait on a human who had already said yes to the work. Pushing early and often is how a review sees the current tree.
 
-A session cannot see its own permission prompts, so do not try to verify this gate from the transcript: an approved push and an auto-allowed push produce an identical tool result.
+That trade only holds while the two are genuinely separate. **Never bundle `gh pr merge` with the commands before it** — permission rules are prefix-matched, so a bundled merge slips the gate entirely and approving a bundle authorizes landing a tree that does not exist yet.
 
-`gh pr merge` is deliberately NOT gated. The tree was authorized at its push; gating the merge would ask for the same decision twice.
+A session cannot see its own permission prompts, so do not try to verify this gate from the transcript: an approved merge and an auto-allowed one produce an identical tool result.
 
 ### Merge / PR discipline
 
@@ -332,10 +332,10 @@ A session cannot see its own permission prompts, so do not try to verify this ga
 7.  add its tests
 8.  run the impacted tests
 9.  commit (one per root cause, per package)
-10. git push                                   ← its own Bash call
+10. git push
 ```
 
-Commits are cheap and local. Accumulate commits, verify locally, push once: many commits and a single push per branch is the intended shape, not an accident.
+Commits are cheap and local, and pushing is now ungated — so push whenever the branch is worth showing, and always before asking for a review, because a review reads what is on the remote and nothing else.
 
 **Phase 3 — integration**
 
@@ -354,7 +354,7 @@ Step 13 matters because required checks are **not strict**: a branch can be gree
 
 ```
 17. gh pr create --base main --head "$BRANCH"
-18. gh pr merge <n> --auto                     # ONLY when the branch is done
+18. gh pr merge <n> --auto                     # ONLY when done; its own Bash call
 19. tools/gh/wait-merged.sh <n> &              # background; its exit is the callback
 19b. tools/gh/pr-review-status.sh <n> --wait 30m --automated-only &
 ```
@@ -406,11 +406,16 @@ Never post a reply body through `gh api -f body="…"`: replies quote code, and 
 
 #### When to open a NEW PR
 
-**Never open a new PR while your current one is still open.** One PR at a time, per session. If the branch you are on has an open PR, the next piece of work is another commit on it. Corollary: documentation of a thing belongs in the PR that adds the thing.
+**A PR waiting on review does not block the next task.** Review rounds take minutes to hours and a session that idles through them wastes most of its time, so start the next piece of work on its own branch rather than waiting. Come back to the open PR when its review lands.
 
-With the current PR landed, open a new one when: it depends on something being *merged* rather than merely written; the current branch is already queued or merged; it touches a slow or flaky surface that would hold the rest hostage; urgency differs; or the batch has grown past comfortable review (~6–8 commits — a reason to stop adding and land, not to open a second PR alongside).
+What makes that safe is that each task is a separate branch off fresh `origin/main`, so concurrent work shares nothing but the base. Two rules keep it that way:
 
-Not on that list: "different concerns", "different packages", "different root causes". Those are commit boundaries, satisfied by committing separately on the same branch.
+- **Partition by file set, not by intent.** Two open PRs touching the same file will conflict, and the second to land pays for it — with a rebase you did not plan and a re-review of a tree neither review saw. Before starting alongside an open PR, check what it touches. A refactor of a file is a hard exclusion: nothing else may touch that file until it lands.
+- **A PR that depends on another being MERGED still waits.** Not merely written — merged. Building on an unmerged branch means either duplicating its commits or a base nobody reviewed.
+
+Within one branch, the old rule stands: if the work belongs to the task the branch is for, it is another commit on it, not a second PR. "Different concerns", "different packages" and "different root causes" are commit boundaries, satisfied by committing separately. A batch past ~6–8 commits is a reason to stop adding and land, not to open a second PR alongside.
+
+**Track what is outstanding.** With several PRs open, `tools/gh/pr-sessions.sh /unresolved` is the list of what still owes a reply, and Phase 6 applies to every one of them. Nothing else reminds you: a PR merges with findings outstanding and no red check ever appears.
 
 #### Never race your own CI
 
