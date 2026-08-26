@@ -301,19 +301,23 @@ Commit messages are project files for the purposes of §7 — do not cite unrela
 
 Steps 4–5 are **unconditional**: the step-2 lookup only speaks when a PR already exists.
 
-### Arming the merge is the human authorization point — and it is enforced
+### Nothing prompts before code lands — the discipline below is all there is
 
-The chain that lands code is `gh pr merge --auto` → checks → merge queue → `main`, with no further human step in it. **Arming is standing consent**: it lands the PR at the first moment every required check goes green, whether or not anyone is still looking. That is the last point a person can change the outcome, so that is where the authorization belongs.
+`.claude/settings.json` carries an empty `"ask"`. `git push`, `gh pr merge`, and the GraphQL mutations that do the same job (`enablePullRequestAutoMerge`, `enqueuePullRequest`) all run without a confirmation prompt. **This is deliberate**, and it was chosen knowing the cost: a session idling through review rounds for a human who had already approved the work spends most of its time waiting.
 
-`.claude/settings.json` carries `"ask": ["Bash(gh pr merge*)"]`, so arming — and any other merge invocation — surfaces a confirmation prompt.
+So read the rest of this section as the whole of the protection, not as a reminder attached to one.
 
-**`git push` is NOT gated.** A push to a task branch lands nothing: `main` is protected, a pull request is required, and an unarmed PR sits there indefinitely. Gating it bought a prompt for an action with no irreversible consequence, and paid for it by making every review round wait on a human who had already said yes to the work. Pushing early and often is how a review sees the current tree.
+The chain that lands code is `gh pr merge --auto` → checks → merge queue → `main`. **Arming is standing consent**: it lands the PR at the first moment every required check goes green, whether or not anyone is still looking, and whether or not a review ever arrived. Nothing asks first, nothing blocks it, and no red check appears afterwards to say it was premature.
 
-That trade only holds while the two are genuinely separate. **Never bundle `gh pr merge` with the commands before it** — permission rules are prefix-matched, so a bundled merge slips the gate entirely and approving a bundle authorizes landing a tree that does not exist yet.
+What that leaves load-bearing, each stated in full below:
 
-A session cannot see its own permission prompts, so do not try to verify this gate from the transcript: an approved merge and an auto-allowed one produce an identical tool result.
+- **Arm only when the branch is finished.** Arming while more commits are coming lands a tree that predates them.
+- **A security-boundary change waits for its automated review on the CURRENT head.** Green checks are not a review. This one has caught real defects repeatedly, including in fixes written for earlier findings in the same PR — it is the rule with the most evidence behind it and the least mechanism.
+- **Zero unresolved P1/P2 findings before a stage is called complete.** A PR merges with findings outstanding and nothing announces it.
 
-**The GraphQL API arms too, and prefix matching cannot tell it apart.** `gh api graphql -f query='mutation{enablePullRequestAutoMerge…}'` and `enqueuePullRequest` land a PR exactly as `gh pr merge --auto` does, and a permission rule matching command prefixes cannot see a mutation name inside a quoted query string. So `gh api graphql` is no longer blanket-allowed, and **landing goes through `gh pr merge`** — not because the mutation is worse, but because it is the form the gate can actually see. A gate with a documented way around it is not a gate.
+`git push` never landed anything even when it did prompt: `main` is protected, a pull request is required, and an unarmed PR sits indefinitely. Push early and often — a review reads what is on the remote and nothing else.
+
+A session cannot see its own permission prompts, so do not try to infer any of this from the transcript: an approved action and an auto-allowed one produce an identical tool result. The only way to know what is gated is to read `.claude/settings.json`.
 
 ### Merge / PR discipline
 
@@ -360,7 +364,7 @@ Step 13 matters because required checks are **not strict**: a branch can be gree
 
 ```
 17. gh pr create --base main --head "$BRANCH"
-18. gh pr merge <n> --auto                     # ONLY when done; its own Bash call
+18. gh pr merge <n> --auto                     # ONLY when done — nothing asks
 19. tools/gh/wait-merged.sh <n> &              # background; its exit is the callback
 19b. tools/gh/pr-review-status.sh <n> --wait 30m --automated-only &
 ```
