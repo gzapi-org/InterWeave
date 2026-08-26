@@ -92,6 +92,11 @@ fn tree_checks() -> Vec<Task> {
             &["tools/checks/check_required_contexts.sh"],
         ),
         Task::new(
+            "no first-party source selects the vulnerable yamux muxer",
+            "bash",
+            &["tools/checks/check_yamux_muxer.sh"],
+        ),
+        Task::new(
             "dependency policy — advisories, licences, bans, sources",
             "bash",
             &["tools/checks/check_dependencies.sh"],
