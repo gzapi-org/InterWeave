@@ -381,6 +381,12 @@ const MATRIX: &[Clause] = &[
         error: "EndpointInUse",
         proof: Proof::Stage(13, "the endpoint handshake is part of desktop IPC v2"),
     },
+    Clause {
+        doc: DIRECT,
+        text: "different content is rejected as malformed/duplicate conflict",
+        error: "malformed",
+        proof: Proof::Test("the_same_id_with_a_different_body_is_a_conflict"),
+    },
     // `no_route` here is the STIMULUS, not the local result — the clause
     // reads "remote `no_route` -> `RemoteEndpointUnavailable`". The local
     // half is the row above; this is the remote half, proven where the
@@ -448,6 +454,62 @@ fn rust_spelling(code: &str) -> String {
         .collect()
 }
 
+/// Does this line name `code`, with or without Markdown backticks?
+///
+/// Requiring `` `code` `` was the first version and it left a real rule
+/// invisible: `DIRECT.md` says different content "is rejected as
+/// malformed/duplicate conflict" with no backticks, so the scan skipped
+/// a condition-to-error mapping while reporting totality.
+///
+/// Dropping the requirement costs precision, because four of these
+/// documents' bare-word occurrences are the English adjective rather
+/// than the wire code — "malformed EndpointId" describes the input, and
+/// the error it maps to is `InvalidArgument`. The scan cannot tell those
+/// apart, so it does not try: it reports both, and [`PROSE`] records the
+/// ones that are English, with the reason.
+fn names_code(line: &str, code: &str) -> bool {
+    if line.contains(&format!("`{code}`")) {
+        return true;
+    }
+    // A bare word, not a substring of a longer identifier.
+    line.match_indices(code).any(|(i, _)| {
+        let before = line[..i].chars().next_back();
+        let after = line[i + code.len()..].chars().next();
+        let boundary = |c: Option<char>| c.is_none_or(|c| !c.is_alphanumeric() && c != '_');
+        boundary(before) && boundary(after)
+    })
+}
+
+/// Bare-word occurrences that are English, not the wire code.
+///
+/// Each entry is (document, a verbatim fragment of the line, the code it
+/// is NOT, why). The fragment must still appear in the document, so an
+/// entry cannot outlive the sentence that justified it — the same
+/// discipline as `tools/checks/domain_fn_exempt.txt`. These are
+/// deliberately few and deliberately explicit: the alternative is a
+/// scanner that silently guesses which uses of a common word are
+/// normative.
+const PROSE: &[(&str, &str, &str, &str)] = &[
+    (
+        ENDPOINTS,
+        "malformed EndpointId -> local `InvalidArgument`",
+        "malformed",
+        "describes the input; the error it maps to is InvalidArgument",
+    ),
+    (
+        ENDPOINTS,
+        "malformed/noncanonical endpoint input is `InvalidArgument`",
+        "malformed",
+        "describes the input; the error it maps to is InvalidArgument",
+    ),
+    (
+        ENDPOINTS,
+        "endpoint handshake error mapping is exact: malformed=`InvalidArgument`",
+        "malformed",
+        "names the handshake condition; its mapping is the row for InvalidArgument",
+    ),
+];
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -484,7 +546,7 @@ fn error_clauses(doc: &str, vocab: &BTreeSet<String>) -> Vec<(usize, String)> {
     read(doc)
         .lines()
         .enumerate()
-        .filter(|(_, line)| vocab.iter().any(|c| line.contains(&format!("`{c}`"))))
+        .filter(|(_, line)| vocab.iter().any(|c| names_code(line, c)))
         .map(|(i, line)| (i + 1, line.to_string()))
         .collect()
 }
@@ -531,11 +593,14 @@ fn the_contracts_name_no_error_this_matrix_has_missed() {
             // covered because one row matched it meant a rule could be
             // appended to any already-covered line while the totality
             // test stayed green.
-            for code in vocab.iter().filter(|c| line.contains(&format!("`{c}`"))) {
+            for code in vocab.iter().filter(|c| names_code(&line, c)) {
                 let covered = MATRIX
                     .iter()
                     .any(|c| c.doc == doc && c.error == code && line.contains(c.text));
-                if !covered {
+                let is_prose = PROSE
+                    .iter()
+                    .any(|(d, frag, c, _)| *d == doc && c == code && line.contains(frag));
+                if !covered && !is_prose {
                     let shown: String = line.chars().take(140).collect();
                     uncovered.push(format!("  {doc}:{line_no}  `{code}`\n    {shown}"));
                 }
@@ -645,6 +710,28 @@ fn every_row_records_the_code_its_quotation_names() {
          Quote the fragment that states the mapping, or record the code \
          that fragment actually names:\n{}",
         mismatched.join("\n")
+    );
+}
+
+/// Every prose exception still quotes a sentence that exists.
+///
+/// An entry that outlives its sentence stops describing anything and
+/// starts hiding whatever takes its place.
+#[test]
+fn every_prose_exception_still_quotes_the_contract() {
+    let mut stale = Vec::new();
+    for (doc, fragment, code, _) in PROSE {
+        if !read(doc).contains(fragment) {
+            stale.push(format!(
+                "  {doc}: `{code}` — {fragment:?} is no longer in the contract"
+            ));
+        }
+    }
+    assert!(
+        stale.is_empty(),
+        "these prose exceptions quote text that has changed. Re-read the \
+         sentence: if the word is now the wire code, it needs a row:\n{}",
+        stale.join("\n")
     );
 }
 
