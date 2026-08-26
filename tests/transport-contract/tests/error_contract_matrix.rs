@@ -166,7 +166,7 @@ const MATRIX: &[Clause] = &[
     Clause {
         doc: ENDPOINTS,
         text: "A retry rejected by the current direct-ingress token bucket receives coarse `overloaded` before dedup lookup",
-        error: "Overloaded",
+        error: "overloaded",
         proof: Proof::Test("a_trusted_peer_is_refused_once_its_burst_is_spent"),
     },
 
@@ -179,7 +179,7 @@ const MATRIX: &[Clause] = &[
     },
     Clause {
         doc: ENDPOINTS,
-        text: "endpoint handshake error mapping is exact",
+        text: "malformed=`InvalidArgument`",
         error: "InvalidArgument",
         proof: Proof::Stage(13, "the endpoint handshake is part of desktop IPC v2"),
     },
@@ -339,6 +339,12 @@ const MATRIX: &[Clause] = &[
     // Totality is matched per CODE, not per line, so the second rule on
     // a shared line needs its own row. Without these the handshake line
     // recorded one of six mappings and the retry paragraph one of two.
+    Clause {
+        doc: ENDPOINTS,
+        text: "Capacity exhaustion rejects the new request as coarse wire `overloaded` / local `Overloaded`",
+        error: "Overloaded",
+        proof: Proof::Test("a_full_endpoint_queue_is_overloaded_and_never_falsely_accepted"),
+    },
     Clause {
         doc: ENDPOINTS,
         text: "Capacity exhaustion rejects the new request as coarse wire `overloaded` / local `Overloaded`",
@@ -611,6 +617,34 @@ fn every_proof_this_matrix_cites_exists() {
         broken.is_empty(),
         "these rows cite a proof that does not hold up:\n{}",
         broken.join("\n")
+    );
+}
+
+/// A row records the code its own quotation names.
+///
+/// Without this a row can drift into claiming a mapping its clause does
+/// not state, and the totality scan will not notice because it only asks
+/// whether SOME row matched the line. Two rows had drifted: the
+/// direct-ingress retry clause quotes the coarse wire `overloaded` and
+/// the row recorded the distinct local `Overloaded`, so nothing linked
+/// that condition to the error the contract actually specifies for it.
+#[test]
+fn every_row_records_the_code_its_quotation_names() {
+    let mut mismatched = Vec::new();
+    for clause in MATRIX {
+        if !clause.text.contains(clause.error) {
+            mismatched.push(format!(
+                "  {} records {} but quotes:\n    {:?}",
+                clause.doc, clause.error, clause.text
+            ));
+        }
+    }
+    assert!(
+        mismatched.is_empty(),
+        "these rows record a code their own quotation does not name. \
+         Quote the fragment that states the mapping, or record the code \
+         that fragment actually names:\n{}",
+        mismatched.join("\n")
     );
 }
 
