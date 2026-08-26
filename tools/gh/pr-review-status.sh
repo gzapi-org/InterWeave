@@ -481,64 +481,41 @@ probe() {
             head_born="$forced"
         fi
 
-        # ORDINARY PUSHES LEAVE NO TIMELINE EVENT AT ALL. Only a
-        # force-push does, so everything above still reads the commit
-        # date for the common case — and a commit date is when the
-        # commit was WRITTEN, not when it reached the remote. Commit at
-        # 10:00, ask `@codex review` at 11:00 against the head of the
-        # moment, push the older commit as a fast-forward at 12:00, and
-        # the ask looks newer than a head born at 10:00: it reads as
-        # pending forever and `--wait` burns its whole timeout.
+        # ORDINARY PUSHES ARE NOT TRACKED, AND THE ATTEMPT WAS WORSE
+        # THAN THE GAP. Only a force-push leaves a timeline event, so
+        # for an ordinary push the commit date is all there is — and a
+        # commit date is when the commit was WRITTEN, not when it
+        # reached the remote. On one head here the two were five minutes
+        # apart. A stale ask therefore reads as pending and `--wait`
+        # burns its whole timeout.
         #
-        # A check suite is created when GitHub first sees the SHA, which
-        # is the push. The EARLIEST one is therefore the closest
-        # observable stand-in for the transition — later suites are
-        # re-runs. On the head of this very PR the gap was five minutes,
-        # so the commit date is not an approximation of the push, it is
-        # a different quantity.
+        # Check-suite creation was used to close that, and it is
+        # withdrawn. A suite proves the SHA existed by then; it does not
+        # prove the SHA became the head then, and GitHub lets a suite be
+        # created for an existing head_sha at any later moment. The two
+        # cases are indistinguishable in the data:
         #
-        # ONLY SUITES ASSOCIATED WITH THIS PR COUNT. The endpoint lists
-        # suites for a Git REFERENCE, not head transitions for a PR: a
-        # commit built on another branch first carries that older
-        # branch's suite, and taking the earliest of everything would
-        # date this head to a build that happened before it was ever
-        # this PR's head. Filtering on the association is what makes the
-        # earliest suite mean "first built AS this PR".
+        #   commit 10:00, ask 11:00, suite 12:00 — push after the ask,
+        #     so the ask is stale and exit 5 is right;
+        #   commit 10:00, ask 11:00, suite 12:00 — suite created late
+        #     for the head the ask already targeted, so the ask stands.
         #
-        # `--arg`, not `--argjson`: `$PR` is whatever the caller typed
-        # and is never validated as a number, so it is compared as a
-        # string rather than injected as JSON.
+        # Same timestamps, opposite correct answers, and the failure it
+        # produced is the DANGEROUS direction. A later `head_born` makes
+        # more asks look stale, so the heuristic manufactures exit 5 —
+        # "no review is coming" about a review that is — which is the
+        # false negative this whole script exists to prevent. The gap it
+        # closed costs a timeout and a second ask.
         #
-        # THE RESIDUAL LIMITATION, and its direction. If GitHub never
-        # associates a suite — a fork PR, a repository with no workflows,
-        # or a fast-forward that creates no new suite because the SHA was
-        # already built — the filter yields nothing and the commit date
-        # stands alone. That is the behaviour that existed before this
-        # block: the ask reads as pending and `--wait` waits. This lookup
-        # can only move `head_born` LATER, so a case it cannot see costs
-        # a wait and never produces a false "no review is coming".
+        # An earlier comment here claimed the lookup "can only move
+        # head_born LATER, so a case it cannot see costs a wait and never
+        # produces a false no-review-is-coming". The premise was right
+        # and the conclusion backwards: later is exactly what produces
+        # the false one.
         #
-        # Fetched raw and filtered locally for the same reason the two
-        # calls above are, and it costs a call only when there IS an ask.
-        local suites_raw pushed
-        # PAGINATED, like the two calls above. A commit with many
-        # workflow runs or reruns has more than one page of suites, and
-        # the PR-associated one that first saw the push can be on a later
-        # page — selecting the earliest of page one alone then dates the
-        # head too late and reports a live ask as stale.
-        suites_raw="$(gh api --paginate "repos/$REPO/commits/$head/check-suites" 2>/dev/null)" \
-            || suites_raw=""
-        pushed="$(printf '%s' "$suites_raw" \
-            | jq -rs --arg pr "$PR" \
-                '[.[]? | .check_suites[]?
-                  | select([.pull_requests[]?.number | tostring] | index($pr))
-                  | .created_at]
-                 | sort | first // ""' 2>/dev/null)" || pushed=""
-        # GitHub stamps this, so it is trusted like a force-push event
-        # and unlike a commit date — there is no future-date discard.
-        if [[ -n "$pushed" && "$pushed" > "$head_born" ]]; then
-            head_born="$pushed"
-        fi
+        # There is no other signal. GraphQL `Commit.pushedDate` returns
+        # null — GitHub retired it — and the PR timeline carries no
+        # ordinary-push event.
 
         # Unreadable falls back to PENDING, which costs a longer wait and
         # never a false "nothing is coming".

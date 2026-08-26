@@ -182,43 +182,6 @@ if [[ "$1" == "api" && "$*" == *"/timeline"* ]]; then
   exit 0
 fi
 
-# gh api repos/o/r/commits/<sha>/check-suites — when GitHub first saw
-# the SHA, which for an ordinary push is the only observable transition
-# time. state/pushed holds one ISO instant, or is absent for a
-# repository with no workflows.
-#
-# BEFORE the bare /commits/ branch below, which would otherwise swallow
-# this URL and answer it with a date string.
-if [[ "$1" == "api" && "$*" == *"/check-suites"* ]]; then
-  # state/pushed        — a suite ASSOCIATED with this PR (number 77)
-  # state/pushed_other  — a suite for the same SHA with no association,
-  #                       which is what a build on another branch leaves
-  #                       behind. Deliberately emitted FIRST, because it
-  #                       is the earlier one and the whole question is
-  #                       whether it is allowed to win.
-  pushed="$(cat "$S/pushed" 2>/dev/null || true)"
-  other="$(cat "$S/pushed_other" 2>/dev/null || true)"
-  # TWO PAGES, and the PR-associated suite is on the SECOND one.
-  #
-  # This endpoint is paginated and a commit with many runs or reruns has
-  # more than one page. Serving the associated suite only on page two is
-  # what makes the `--paginate` flag load-bearing here: without it the
-  # script sees the unassociated suite alone, finds no transition time,
-  # and falls back to the commit date.
-  {
-    printf '{"total_count":0,"check_suites":['
-    if [[ -n "$other" ]]; then
-      printf '{"created_at":"%s","pull_requests":[]}' "$other"
-    fi
-    printf ']}\n'
-    if [[ "$*" == *"--paginate"* && -n "$pushed" ]]; then
-      printf '{"total_count":0,"check_suites":[{"created_at":"%s","pull_requests":[{"number":77}]}]}\n' \
-        "$pushed"
-    fi
-  }
-  exit 0
-fi
-
 # gh api repos/o/r/commits/<sha> — when the head was born, which is how
 # an ask is told from an answer.
 if [[ "$1" == "api" && "$*" == *"/commits/"* ]]; then
@@ -272,8 +235,7 @@ run() {
     # every timestamp these cases use, so an ask written by a case is an
     # ask about the current head unless the case says otherwise.
     : > "$SANDBOX/state/asks"
-    rm -f "$SANDBOX/state/head_born_fail" "$SANDBOX/state/forced" \
-          "$SANDBOX/state/pushed" "$SANDBOX/state/pushed_other"
+    rm -f "$SANDBOX/state/head_born_fail" "$SANDBOX/state/forced"
     printf '2026-08-07T09:00:00Z\n' > "$SANDBOX/state/head_born"
     shift 2
     RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
@@ -736,116 +698,37 @@ run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" 
 assert_rc       "an ask on the head's own second is pending too" 1
 assert_contains "  and reported outstanding"                     "in flight"
 
-echo "pr-review-status: an ORDINARY push is a head transition too"
-# ONLY A FORCE-PUSH LEAVES A TIMELINE EVENT. Everything above reads the
-# commit date for the ordinary case, and a commit date is when the commit
-# was WRITTEN, not when it reached the remote — on this repository's own
-# head the two were five minutes apart.
+echo "pr-review-status: an ordinary push is a KNOWN gap, not a silent one"
+# Only a force-push leaves a timeline event, so for an ordinary push the
+# commit date is all there is — and it is when the commit was WRITTEN,
+# not when it reached the remote. A stale ask therefore reads as pending
+# and `--wait` burns its timeout.
 #
-# Write a commit at 09:00, ask `@codex review` at 11:00 about the head of
-# that moment, then fast-forward the older commit into place at 12:00.
-# The ask (11:00) outranks a head born at 09:00, reads as pending
-# forever, and `--wait` burns its whole timeout on an answered ask.
+# THAT IS THE ACCEPTED FAILURE, asserted so nobody re-closes it with the
+# heuristic that was withdrawn. Check-suite creation was used here and
+# removed: a suite proves the SHA existed by then, not that it became
+# the head then, and GitHub lets one be created for an existing head_sha
+# at any later moment. The stale-ask case and the late-suite case carry
+# identical timestamps and want opposite answers, and the heuristic's
+# failure was the dangerous direction — manufacturing exit 5, "no review
+# is coming", about a review that is.
 run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
         "me,2026-08-07T11:00:00Z" "2026-08-07T09:00:00Z"
-printf '2026-08-07T12:00:00Z\n' > "$SANDBOX/state/pushed"
-: > "$SANDBOX/state/n"
-RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
-    timeout 20 bash "$UNDER_TEST" 77 o/r 2>&1)"; RUN_RC=$?
-assert_rc    "an ask predating an ordinary push does not suppress exit 5" 5
-assert_lacks "  and is not reported as outstanding"                       "in flight"
+assert_rc       "an ordinary push leaves the ask reading as pending" 1
+assert_contains "  which costs a wait, never a false 'nothing is coming'" "in flight"
 
-# ...and an ask AFTER that push is still pending, so the push time is a
-# real boundary rather than merely a way to reach 5.
-run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
-        "me,2026-08-07T13:00:00Z" "2026-08-07T09:00:00Z"
-printf '2026-08-07T12:00:00Z\n' > "$SANDBOX/state/pushed"
-: > "$SANDBOX/state/n"
-RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
-    timeout 20 bash "$UNDER_TEST" 77 o/r 2>&1)"; RUN_RC=$?
-assert_rc       "an ask after the push is still outstanding" 1
-assert_contains "  reported as in flight"                    "in flight"
-
-# The same equality rule the force-push path takes: a push and the ask it
-# prompts land on the same second routinely.
-run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
-        "me,2026-08-07T12:00:00Z" "2026-08-07T09:00:00Z"
-printf '2026-08-07T12:00:00Z\n' > "$SANDBOX/state/pushed"
-: > "$SANDBOX/state/n"
-RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
-    timeout 20 bash "$UNDER_TEST" 77 o/r 2>&1)"; RUN_RC=$?
-assert_rc       "an ask on the push's own second is pending" 1
-assert_contains "  and reported outstanding"                 "in flight"
-
-# A REPOSITORY WITH NO WORKFLOWS HAS NO SUITES, and must keep exactly the
-# behaviour it had before this lookup existed: the commit date stands
-# alone and the ask reads as pending.
+# THE FORCE-PUSH PATH IS UNTOUCHED, because that event is a real head
+# transition rather than a proxy for one. Re-asserted here so the
+# withdrawal above is visibly scoped to the heuristic and not to the
+# lookup that works.
 run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
         "me,2026-08-07T11:00:00Z" "2026-08-07T09:00:00Z"
-assert_rc       "with no check suites the commit date still stands" 1
-assert_contains "  and the ask is in flight"                        "in flight"
-
-echo "pr-review-status: a suite from ANOTHER branch is not this PR's push"
-# The endpoint lists suites for a git REFERENCE, not head transitions for
-# a PR. Build a commit on some other branch at 10:00, then fast-forward
-# it into this PR at 12:00: the SHA now carries two suites, and the
-# earlier one describes a build that happened before this was ever the
-# head here. Taking the earliest of EVERYTHING dates the head to 10:00,
-# an ask at 11:00 outranks it, and the timeout burns exactly as it did
-# before the lookup existed.
-printf '2026-08-07T10:00:00Z\n' > "$SANDBOX/state/pushed_other"
-run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T09:30:00Z" \
-        "me,2026-08-07T11:00:00Z" "2026-08-07T09:00:00Z"
-printf '2026-08-07T10:00:00Z\n' > "$SANDBOX/state/pushed_other"
-printf '2026-08-07T12:00:00Z\n' > "$SANDBOX/state/pushed"
+printf '2026-08-07T13:00:00Z\n' > "$SANDBOX/state/forced"
 : > "$SANDBOX/state/n"
 RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
     timeout 20 bash "$UNDER_TEST" 77 o/r 2>&1)"; RUN_RC=$?
-assert_rc    "an unassociated earlier suite does not date the head" 5
-assert_lacks "  so the stale ask is not reported outstanding"       "in flight"
-
-# ...and with ONLY the unassociated suite there is no signal at all, so
-# the commit date stands alone. Unseen costs a wait; it never invents a
-# transition time, which is the direction this whole lookup errs in.
-printf '2026-08-07T10:00:00Z\n' > "$SANDBOX/state/pushed_other"
-run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T09:30:00Z" \
-        "me,2026-08-07T11:00:00Z" "2026-08-07T09:00:00Z"
-printf '2026-08-07T10:00:00Z\n' > "$SANDBOX/state/pushed_other"
-: > "$SANDBOX/state/n"
-RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
-    timeout 20 bash "$UNDER_TEST" 77 o/r 2>&1)"; RUN_RC=$?
-assert_rc       "an unassociated suite alone leaves the commit date standing" 1
-assert_contains "  and the ask is still in flight"                            "in flight"
-
-echo "pr-review-status: an unreadable head date waits rather than concluding"
-# The fallback direction matters: unreadable must mean PENDING. Guessing
-# "answered" turns a lookup failure into a confident "nothing is coming"
-# about a review that is on its way.
-run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
-        "me,2026-08-07T08:00:00Z" "2026-08-07T09:00:00Z"
-: > "$SANDBOX/state/n"
-touch "$SANDBOX/state/head_born_fail"
-RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
-    timeout 20 bash "$UNDER_TEST" 77 o/r 2>&1)"; RUN_RC=$?
-rm -f "$SANDBOX/state/head_born_fail"
-assert_rc "an unreadable head date keeps the ask pending" 1
-
-echo "pr-review-status: a covered head does not report an unanswered ask"
-# Decides no exit — head_reviewed wins first — but a line reading
-# "nothing has answered it yet" beside "head reviewed? yes" is false.
-run_ask "OPEN:abc123:0" "chatgpt-codex-connector,abc123,2026-08-07T10:00:00Z" \
-        "me,2026-08-07T11:00:00Z" "2026-08-07T09:00:00Z"
-assert_rc       "the head is covered" 0
-assert_contains "  and the ask reads as answered" "already answered"
-assert_lacks    "  not as outstanding"            "in flight"
-
-echo "pr-review-status: --help documents the flag §9 now requires"
-RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" bash "$UNDER_TEST" --help 2>&1)"; RUN_RC=$?
-assert_rc       "exits 0" 0
-assert_contains "names the flag"        "--automated-only"
-assert_contains "says why it exists"    "repository is PUBLIC"
-assert_contains "and that the bare command is not enough" \
-                "does not satisfy"
+assert_rc    "a real force-push still dates the head" 5
+assert_lacks "  and the stale ask is not reported outstanding" "in flight"
 
 echo "pr-review-status: a failed comments lookup is UNREADABLE, not empty"
 # Same contract as the reviews endpoint: swallowing the failure would
