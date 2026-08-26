@@ -549,27 +549,34 @@ const fn shutdown_settled(
 /// waiting on in-flight work, so the bound has to leave room for them or
 /// it stops the very progress that would drain it.
 ///
-/// Two kinds of caller earn that room: listeners awaiting an address,
-/// and direct exchanges awaiting a response. Both are bounded elsewhere
-/// (`max_pending_listens`, and `admit_outbound` at 128), so the slack is
-/// bounded too.
+/// Three kinds of caller earn that room: listeners awaiting an address,
+/// outbound exchanges awaiting a response, and inbound requests whose
+/// answer is queued but not yet written. All three are reachable only
+/// through admission, which is itself rate limited, and the first two
+/// are separately bounded (`max_pending_listens`, and `admit_outbound`
+/// at 128).
 ///
-/// THIS PREDICATE HAS BEEN WRONG TWICE. First it counted listeners and
-/// not exchanges, and `send_direct` froze past its deadline. Then the
-/// slack it added was shared with delivery events, so a peer could
-/// refill it and reach the same freeze — which is why
-/// [`may_buffer_delivery`] exists and why both are functions with tests
-/// rather than an expression inside a `select!` arm.
+/// THIS PREDICATE HAS BEEN WRONG THREE TIMES, which is why it is a
+/// function with tests rather than an expression inside a `select!` arm.
+/// It counted listeners and not outbound exchanges, and `send_direct`
+/// froze past its deadline. Its slack was then shared with delivery
+/// events, so a peer could refill it and reach the same freeze. And it
+/// omitted inbound answers on the argument that their count is loosely
+/// bounded — which traded a liveness failure for a tidier bound: an
+/// admitted message's response could never be written, and the remote
+/// timed out and retried until an unrelated local consumer drained.
 const fn polling_room(
     buffered: usize,
     event_capacity: usize,
     pending_listens: usize,
     pending_exchanges: usize,
+    answering_inbound: usize,
 ) -> bool {
     buffered
         < event_capacity
             .saturating_add(pending_listens)
             .saturating_add(pending_exchanges)
+            .saturating_add(answering_inbound)
 }
 
 /// Whether an accepted delivery may be buffered for the consumer.
@@ -827,6 +834,7 @@ impl SwarmRuntime {
                     config.event_capacity,
                     listens.len(),
                     pending_direct.len(),
+                    direct_state.answering(),
                 );
 
                 tokio::select! {
@@ -2407,13 +2415,13 @@ impl DirectState {
     /// response would never be written and the sender would retry into a
     /// node that had already accepted it.
     ///
-    /// Deliberately NOT read by `polling_room`. The outbox bound exists
-    /// to stop a stalled consumer making this process buffer without
-    /// limit, and this count is bounded only by however many inbound
-    /// streams the connections allow — slack that large would weaken the
-    /// bound more than the stall it would relieve. An unsent answer
-    /// under a full outbox is retried into dedup; a lost shutdown is not
-    /// retried at all.
+    /// Read by `polling_room` as well as by shutdown. An earlier version
+    /// of this comment argued the opposite — that the count is too
+    /// loosely bounded to buy polling slack — and that was a tidier
+    /// bound bought with a liveness failure: with the outbox full and no
+    /// other work in flight, polling stopped, the queued answer was
+    /// never written, and the remote timed out and retried until an
+    /// unrelated local consumer happened to drain.
     fn answering(&self) -> usize {
         self.answering.len()
     }
@@ -3471,8 +3479,8 @@ mod backpressure_tests {
     /// is the whole allowance.
     #[test]
     fn a_stalled_consumer_with_nothing_in_flight_stops_polling() {
-        assert!(polling_room(0, 1, 0, 0));
-        assert!(!polling_room(1, 1, 0, 0));
+        assert!(polling_room(0, 1, 0, 0, 0));
+        assert!(!polling_room(1, 1, 0, 0, 0));
     }
 
     /// In-flight exchanges buy room, because polling is what settles
@@ -3481,11 +3489,11 @@ mod backpressure_tests {
     #[test]
     fn in_flight_exchanges_keep_polling_alive() {
         assert!(
-            polling_room(1, 1, 0, 1),
+            polling_room(1, 1, 0, 1, 0),
             "one exchange in flight, one event buffered: still polling"
         );
         assert!(
-            !polling_room(2, 1, 0, 1),
+            !polling_room(2, 1, 0, 1, 0),
             "and the slack is exactly one, not unbounded"
         );
     }
@@ -3498,11 +3506,28 @@ mod backpressure_tests {
     fn a_delivery_may_not_spend_the_slack_an_exchange_bought() {
         // One exchange in flight, base capacity one, one event already
         // buffered. Polling continues...
-        assert!(polling_room(1, 1, 0, 1));
+        assert!(polling_room(1, 1, 0, 1, 0));
         // ...and that remaining slot is NOT available to a delivery.
         assert!(
             !may_buffer_delivery(1, 1, 0),
             "the slot belongs to progress, not to another notification"
+        );
+    }
+
+    /// AN INBOUND ANSWER EARNS ROOM TOO. It is queued and unwritten,
+    /// and only polling writes it — so a full outbox that stopped
+    /// polling would strand it, and the remote would time out and retry
+    /// until an unrelated local consumer drained. This omission is the
+    /// third way this predicate has been wrong.
+    #[test]
+    fn a_queued_inbound_answer_keeps_polling_alive() {
+        assert!(
+            polling_room(1, 1, 0, 0, 1),
+            "nothing else in flight, but an answer is waiting to be written"
+        );
+        assert!(
+            !polling_room(2, 1, 0, 0, 1),
+            "and that slack is exactly one, like the others"
         );
     }
 
