@@ -2808,6 +2808,20 @@ fn outbound_error(error: &libp2p::request_response::OutboundFailure) -> DirectEr
         // distinguishable and reporting them apart would surface
         // scheduler luck as a diagnosis. Both are "the exchange did not
         // complete", which is what `PeerUnreachable` says.
+        // OUR OWN DECODER'S VERDICT ARRIVES AS `Io`. `read_response`
+        // reports an unknown tag, a bad endpoint label, trailing bytes
+        // or an over-ceiling response as `InvalidData`, and
+        // request-response wraps that in the same variant a broken
+        // socket produces. Reading them alike told the caller the peer
+        // was unreachable when the peer had in fact answered — with
+        // bytes this protocol refuses.
+        //
+        // The KIND is what separates them, and only that kind: every
+        // other io error stays a reachability answer, so finding 1's
+        // timeout/EOF race below is untouched.
+        OutboundFailure::Io(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+            DirectError::ProtocolViolation
+        }
         OutboundFailure::Timeout | OutboundFailure::Io(_) => DirectError::PeerUnreachable,
         // FINDING 3: the major-version signal. A peer that does not speak
         // this protocol id is not unreachable — it is incompatible, and

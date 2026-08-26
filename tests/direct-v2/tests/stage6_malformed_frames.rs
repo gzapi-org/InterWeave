@@ -28,7 +28,7 @@ use interweave_profile_config::{
 };
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::{
-    DirectMessageV2, DirectRejectReason, EndpointId, MediaType, MessageId, Payload,
+    DirectMessageV2, DirectRejectReason, EndpointId, MediaType, MessageId, Payload, TransportError,
     TransportIdentity,
 };
 use interweave_transport_libp2p::direct_codec::{DIRECT_PROTOCOL, DirectResponse, decode_response};
@@ -710,5 +710,113 @@ async fn inbound_deliveries_cannot_starve_an_outbound_exchange() {
     assert!(
         settled.expect("the command reaches the task").is_err(),
         "the silent peer never answers, so this is an error either way"
+    );
+}
+
+/// A peer that answers with unreadable bytes violated the protocol; it
+/// is not unreachable.
+///
+/// `read_response` reports an unknown tag, a bad endpoint label,
+/// trailing bytes or an over-ceiling response as `InvalidData`, and
+/// request-response wraps that in `OutboundFailure::Io` — the same
+/// variant a broken socket produces. Reading them alike told the caller
+/// the peer could not be reached, when the peer had answered and the
+/// answer was refused by this side's own decoder.
+///
+/// The peer here is reachable throughout: it accepts the request and
+/// replies. Only its bytes are wrong.
+#[tokio::test]
+async fn an_unreadable_response_is_a_protocol_violation() {
+    let rude_keys = libp2p::identity::Keypair::generate_ed25519();
+    let rude_peer = TransportIdentity::parse(rude_keys.public().to_peer_id().to_string())
+        .expect("a valid peer id");
+
+    let mut rude = SwarmBuilder::with_existing_identity(rude_keys)
+        .with_tokio()
+        .with_tcp(
+            libp2p::tcp::Config::default(),
+            libp2p::noise::Config::new,
+            libp2p::yamux::Config::default,
+        )
+        .expect("the same transport stack")
+        .with_behaviour(|_| {
+            request_response::Behaviour::<RawCodec>::new(
+                [(DIRECT_PROTOCOL, ProtocolSupport::Full)],
+                request_response::Config::default(),
+            )
+        })
+        .expect("behaviour")
+        .build();
+    rude.listen_on("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
+        .expect("listens");
+    let address = loop {
+        if let Libp2pSwarmEvent::NewListenAddr { address, .. } = rude.select_next_some().await {
+            break address;
+        }
+    };
+
+    // Answers every request with a tag no response uses.
+    tokio::spawn(async move {
+        loop {
+            if let Libp2pSwarmEvent::Behaviour(request_response::Event::Message {
+                message: request_response::Message::Request { channel, .. },
+                ..
+            }) = rude.select_next_some().await
+            {
+                let _ = rude
+                    .behaviour_mut()
+                    .send_response(channel, vec![0xFF, 0xFF, 0xFF]);
+            }
+        }
+    });
+
+    let sender_id = ProfileIdentity::generate();
+    let mut sender = SwarmRuntime::start(
+        &sender_id,
+        SubstrateConfig::default(),
+        TrustSources::new(
+            PeerTrustPolicy::new([rude_peer.clone()]).expect("a one-peer allowlist"),
+            InfrastructureSet::default(),
+        ),
+    )
+    .expect("the sender starts");
+    sender
+        .configure_direct(endpoints())
+        .await
+        .expect("endpoints install");
+    sender
+        .dial(rude_peer.clone(), address)
+        .await
+        .expect("command")
+        .expect("admitted");
+
+    // THE CONNECTION MUST EXIST FIRST. Without this the send is refused
+    // as unreachable before any exchange happens — which is the very
+    // answer under test, so the test would pass for the wrong reason
+    // and then fail for it.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(!left.is_zero(), "no connection within 20s");
+        if let Ok(Some(interweave_transport_libp2p::runtime::SwarmEvent::Connected { .. })) =
+            tokio::time::timeout(left, sender.next_event()).await
+        {
+            break;
+        }
+    }
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(20),
+        sender.send_direct(rude_peer, legal_message()),
+    )
+    .await
+    .expect("the exchange settled")
+    .expect("the command reaches the task")
+    .expect_err("the answer was unreadable");
+
+    assert_eq!(
+        error,
+        TransportError::ProtocolViolation,
+        "the peer answered — badly — so this is not a reachability failure"
     );
 }
