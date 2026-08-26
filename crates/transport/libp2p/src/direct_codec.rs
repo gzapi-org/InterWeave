@@ -59,15 +59,43 @@ use interweave_transport_api::{
 /// case stays an `io::Error` and is dropped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InboundRequest {
-    /// A frame that decoded.
-    Frame(Box<DirectMessageV2>),
-    /// A frame that did not, and the code its sender is owed.
-    Unparsable {
-        /// Recovered from the first sixteen bytes.
-        message_id: MessageId,
-        /// From [`interweave_transport_api::FrameError::to_wire`].
-        reason: DirectRejectReason,
+    /// A frame this node is SENDING.
+    ///
+    /// The only variant `write_request` accepts; `read_request` never
+    /// produces one.
+    Outbound(Box<DirectMessageV2>),
+    /// Bytes as they arrived, NOT yet parsed.
+    ///
+    /// Decoding is deferred to the handler so that trust, drain state
+    /// and the ingress buckets are consulted first. Parsing a maximum
+    /// frame allocates a second payload buffer, and doing that before
+    /// admission let an infrastructure-only connection — which is
+    /// excluded from direct v2 outright — or a peer already over its
+    /// rate, choose how much work this node did on its behalf.
+    Inbound {
+        /// At most `MAX_REQUEST_BYTES + 1`, so the read itself stays
+        /// bounded whatever the peer sends.
+        bytes: Vec<u8>,
+        /// Whether the ceiling was passed, decided during the read
+        /// because that is where the extra byte is visible.
+        oversize: bool,
     },
+}
+
+impl InboundRequest {
+    /// The message id, when enough of the frame arrived to carry one.
+    ///
+    /// Sixteen bytes off the front, which is the ONLY work done before
+    /// admission: a response has to echo the id it answers, so a
+    /// rejection is impossible without it. `None` means the frame is too
+    /// short to answer at all.
+    #[must_use]
+    pub fn message_id(&self) -> Option<MessageId> {
+        match self {
+            Self::Outbound(frame) => Some(frame.message_id),
+            Self::Inbound { bytes, .. } => recover_id(bytes),
+        }
+    }
 }
 
 /// The protocol this codec speaks (ADR-0030).
@@ -160,34 +188,7 @@ const fn reason_from_code(code: u8) -> Option<DirectRejectReason> {
 
 /// The codec itself. Stateless.
 #[derive(Debug, Clone, Default)]
-pub struct DirectCodec {
-    /// The profile's EFFECTIVE payload limit.
-    ///
-    /// Not the hard ceiling. A profile may configure a lower
-    /// `max_payload_bytes`, and decoding every frame against the
-    /// architecture maximum accepted payloads that profile had already
-    /// refused — the limit existed in the contract and reached no
-    /// decoder. Clamped at construction so a configuration cannot widen
-    /// a frozen ceiling.
-    max_payload_bytes: usize,
-}
-
-impl DirectCodec {
-    /// A codec bounded by this profile's effective payload limit.
-    ///
-    /// `limit` is clamped to [`MAX_PAYLOAD_BYTES`]: configuration may
-    /// narrow the frozen ceiling and never widen it.
-    #[must_use]
-    pub const fn new(limit: usize) -> Self {
-        Self {
-            max_payload_bytes: if limit < MAX_PAYLOAD_BYTES {
-                limit
-            } else {
-                MAX_PAYLOAD_BYTES
-            },
-        }
-    }
-}
+pub struct DirectCodec;
 
 /// Read at most `limit` bytes, then insist the substream had ended.
 ///
@@ -228,28 +229,35 @@ where
     Ok((buffer, oversize))
 }
 
-/// The rejection an over-ceiling frame is owed.
+/// Parse an inbound request's bytes, AFTER admission has allowed it.
 ///
-/// Separate from the decode path because it runs BEFORE decoding: there
-/// is no `FrameError` to map, only a length that was already too big.
-fn oversize_request(bytes: &[u8]) -> InboundRequest {
-    // A frame past the request ceiling always carries sixteen bytes, so
-    // the fallback is unreachable there — written as a rejection rather
-    // than a panic because the lint policy treats a reachable panic in a
-    // transport daemon as a defect and this function is public to the
-    // crate.
-    let message_id = recover_id(bytes).unwrap_or(MessageId::from_bytes([0; MessageId::LEN]));
-    InboundRequest::Unparsable {
-        message_id,
-        reason: DirectRejectReason::TooLarge,
+/// Returns the decoded frame, or the coarse code its sender is owed and
+/// the id to echo it under. Separated from the read so that no parsing
+/// happens for a peer trust or the rate buckets are about to refuse.
+///
+/// # Errors
+/// The reject reason, when the bytes do not decode. `None` for the id
+/// means the frame is too short to carry one, so nothing can be
+/// answered at all.
+pub fn parse_inbound(
+    bytes: &[u8],
+    oversize: bool,
+    max_payload_bytes: usize,
+) -> Result<DirectMessageV2, (Option<MessageId>, DirectRejectReason)> {
+    if oversize {
+        // TOO BIG TO DECODE, BIG ENOUGH TO ANSWER: the bytes already
+        // read start with the id, which is all a rejection needs.
+        return Err((recover_id(bytes), DirectRejectReason::TooLarge));
     }
+    DirectMessageV2::decode(bytes, max_payload_bytes)
+        .map_err(|error| (recover_id(bytes), error.to_wire()))
 }
 
 /// The message id, when enough of the frame arrived to carry one.
 ///
 /// It is the FIRST field, so it survives every failure occurring after
 /// it — which is every failure the contract names a code for.
-fn recover_id(bytes: &[u8]) -> Option<MessageId> {
+pub fn recover_id(bytes: &[u8]) -> Option<MessageId> {
     let head = bytes.get(..MessageId::LEN)?;
     let mut id = [0u8; MessageId::LEN];
     id.copy_from_slice(head);
@@ -267,32 +275,10 @@ impl Codec for DirectCodec {
         T: futures::AsyncRead + Unpin + Send,
     {
         let (bytes, oversize) = read_bounded_or_oversize(io, MAX_REQUEST_BYTES).await?;
-        if oversize {
-            // TOO BIG TO DECODE, BIG ENOUGH TO ANSWER. The frame passed
-            // the ceiling, so nothing here will parse it — but the bytes
-            // already read start with the message id, which is all a
-            // rejection needs. This is the failure mode `too_large`
-            // exists for, and it used to be the one that got no answer.
-            return Ok(oversize_request(&bytes));
-        }
-        match DirectMessageV2::decode(&bytes, self.max_payload_bytes) {
-            Ok(frame) => Ok(InboundRequest::Frame(Box::new(frame))),
-            Err(error) => {
-                // THE ID COMES FIRST IN THE FRAME, so it outlives every
-                // later field's failure. Without it there is nothing to
-                // echo and therefore nothing that can be sent back.
-                let Some(message_id) = recover_id(&bytes) else {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        error.to_string(),
-                    ));
-                };
-                Ok(InboundRequest::Unparsable {
-                    message_id,
-                    reason: error.to_wire(),
-                })
-            }
-        }
+        // NO DECODE HERE. The handler parses only once trust, drain
+        // state and the ingress buckets have admitted the peer — see
+        // `InboundRequest::Inbound`.
+        Ok(InboundRequest::Inbound { bytes, oversize })
     }
 
     async fn read_response<T>(
@@ -321,7 +307,7 @@ impl Codec for DirectCodec {
         // constructs it nowhere. Reported rather than panicked: the lint
         // policy here treats a reachable panic in a transport daemon as
         // a defect, and this is reachable by a caller mistake.
-        let InboundRequest::Frame(frame) = request else {
+        let InboundRequest::Outbound(frame) = request else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "a rejection is not a sendable request",
@@ -602,13 +588,10 @@ mod tests {
         let at = frame.len() - 4 - 2;
         frame[at..at + 4].copy_from_slice(&u32::MAX.to_be_bytes());
 
-        let read = read_one_request(&frame).await.expect("answerable");
+        let (bytes, oversize) = read_one_request(&frame).await.expect("read");
         assert_eq!(
-            read,
-            InboundRequest::Unparsable {
-                message_id: message_id(),
-                reason: DirectRejectReason::TooLarge,
-            },
+            parse_inbound(&bytes, oversize, MAX_PAYLOAD_BYTES),
+            Err((Some(message_id()), DirectRejectReason::TooLarge)),
             "the sender is told its payload was too large"
         );
     }
@@ -627,13 +610,10 @@ mod tests {
         // Claim a source endpoint longer than the bytes that follow.
         frame[MessageId::LEN + 8] = 200;
 
-        let read = read_one_request(&frame).await.expect("answerable");
+        let (bytes, oversize) = read_one_request(&frame).await.expect("read");
         assert_eq!(
-            read,
-            InboundRequest::Unparsable {
-                message_id: message_id(),
-                reason: DirectRejectReason::Malformed,
-            },
+            parse_inbound(&bytes, oversize, MAX_PAYLOAD_BYTES),
+            Err((Some(message_id()), DirectRejectReason::Malformed)),
             "and a bad field is malformed, not too_large"
         );
     }
@@ -644,9 +624,11 @@ mod tests {
     #[tokio::test]
     async fn a_frame_too_short_to_carry_an_id_stays_an_error() {
         let truncated = vec![0u8; MessageId::LEN - 1];
-        assert!(
-            read_one_request(&truncated).await.is_err(),
-            "nothing to echo, so nothing to send"
+        let (bytes, oversize) = read_one_request(&truncated).await.expect("read");
+        assert_eq!(
+            parse_inbound(&bytes, oversize, MAX_PAYLOAD_BYTES),
+            Err((None, DirectRejectReason::Malformed)),
+            "nothing to echo, so nothing can be sent"
         );
     }
 
@@ -658,13 +640,13 @@ mod tests {
     #[tokio::test]
     async fn writing_a_rejection_as_a_request_is_refused() {
         let mut sink: Vec<u8> = Vec::new();
-        let written = DirectCodec::new(MAX_PAYLOAD_BYTES)
+        let written = DirectCodec
             .write_request(
                 &DIRECT_PROTOCOL,
                 &mut futures::io::Cursor::new(&mut sink),
-                InboundRequest::Unparsable {
-                    message_id: message_id(),
-                    reason: DirectRejectReason::Malformed,
+                InboundRequest::Inbound {
+                    bytes: vec![0u8; 4],
+                    oversize: false,
                 },
             )
             .await;
@@ -672,10 +654,17 @@ mod tests {
         assert!(sink.is_empty(), "and nothing was written");
     }
 
-    /// Run `read_request` over a byte slice.
-    async fn read_one_request(bytes: &[u8]) -> io::Result<InboundRequest> {
-        DirectCodec::new(MAX_PAYLOAD_BYTES)
+    /// Run `read_request` over a byte slice, returning what it kept.
+    ///
+    /// It no longer decodes: parsing is the handler's job, once trust
+    /// and the rate buckets have admitted the peer.
+    async fn read_one_request(bytes: &[u8]) -> io::Result<(Vec<u8>, bool)> {
+        match DirectCodec
             .read_request(&DIRECT_PROTOCOL, &mut futures::io::Cursor::new(bytes))
-            .await
+            .await?
+        {
+            InboundRequest::Inbound { bytes, oversize } => Ok((bytes, oversize)),
+            InboundRequest::Outbound(_) => panic!("read_request never produces an outbound frame"),
+        }
     }
 }

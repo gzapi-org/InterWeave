@@ -287,13 +287,33 @@ pub fn admit_inbound(
     clocks: Clocks,
     ctx: &mut AdmissionContext<'_>,
 ) -> Outcome {
+    if let Err(refusal) = admit_prefix(source_peer, clocks.monotonic_ms, ctx) {
+        return Outcome::Refused(refusal);
+    }
+    admit_structured(frame, source_peer, clocks, ctx)
+}
+
+/// The half of admission that needs a decoded frame.
+///
+/// Split from [`admit_prefix`] so a caller that has already run the
+/// gates does not run them twice — the buckets are spent by the first
+/// call, and charging a second token per message halved every peer's
+/// burst. The backend runs the prefix BEFORE parsing, so that parsing a
+/// maximum frame is work an unadmitted peer cannot ask for; this is what
+/// it calls afterwards.
+///
+/// [`admit_inbound`] is the two together, for callers holding a frame
+/// already.
+pub fn admit_structured(
+    frame: &DirectMessageV2,
+    source_peer: &TransportIdentity,
+    clocks: Clocks,
+    ctx: &mut AdmissionContext<'_>,
+) -> Outcome {
     let Clocks {
         monotonic_ms: now_ms,
         wall_ms,
     } = clocks;
-    if let Err(refusal) = admit_prefix(source_peer, now_ms, ctx) {
-        return Outcome::Refused(refusal);
-    }
 
     // 4. CONTENT IDENTITY. Needed by both the cache and the reservation,
     //    and it excludes `sent_at_ms` — a retry may carry a different one.
@@ -546,6 +566,57 @@ mod tests {
 
     /// TRUST BEFORE RATE. An untrusted peer must not spend a token, so it
     /// cannot exhaust the allowance of peers that are authorized.
+    /// The prefix charges exactly one token, and the structured half
+    /// charges none.
+    ///
+    /// The backend runs them separately — gates first, so that parsing a
+    /// maximum frame is work an unadmitted peer cannot ask for — and a
+    /// structured half that charged again would halve every peer's
+    /// burst. It did, briefly: thirty-two became sixteen.
+    #[test]
+    fn the_two_halves_charge_one_token_between_them() {
+        let mut w = World::new();
+        let f = frame(Some("claude"), b"hi", 11);
+        let clocks = Clocks {
+            monotonic_ms: 0,
+            wall_ms: 0,
+        };
+
+        // Spend the whole burst through the split path the backend uses.
+        for _ in 0..32 {
+            let mut ctx = AdmissionContext {
+                trust: &w.trust,
+                ingress: &mut w.ingress,
+                dedup: &mut w.dedup,
+                reservations: &mut w.reservations,
+                registry: &w.registry,
+                queues: &mut w.queues,
+                draining: w.draining,
+            };
+            assert!(
+                admit_prefix(&peer(P1), 0, &mut ctx).is_ok(),
+                "the burst is thirty-two, and the split path spends one each"
+            );
+            let _ = admit_structured(&f, &peer(P1), clocks, &mut ctx);
+        }
+
+        // The thirty-third is over it, which pins the count at exactly
+        // one per message rather than merely "not two".
+        let mut ctx = AdmissionContext {
+            trust: &w.trust,
+            ingress: &mut w.ingress,
+            dedup: &mut w.dedup,
+            reservations: &mut w.reservations,
+            registry: &w.registry,
+            queues: &mut w.queues,
+            draining: w.draining,
+        };
+        assert_eq!(
+            admit_prefix(&peer(P1), 0, &mut ctx),
+            Err(Refusal::RateLimited)
+        );
+    }
+
     #[test]
     fn a_draining_node_refuses_without_spending_ingress_or_queueing() {
         let mut w = World::new();

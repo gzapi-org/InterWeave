@@ -45,7 +45,7 @@ use interweave_transport_api::{
     DirectMessageV2, DirectRejectReason, EndpointId, TransportIdentity,
 };
 use interweave_transport_runtime::direct_inbound::{
-    AdmissionContext, Outcome as AdmissionOutcome, admit_inbound, admit_prefix,
+    AdmissionContext, Outcome as AdmissionOutcome, admit_prefix, admit_structured,
 };
 use interweave_transport_runtime::endpoint_queue::EndpointQueues;
 use interweave_transport_runtime::endpoint_registry::{EndpointRegistry, RegisteredEndpoint};
@@ -646,9 +646,7 @@ impl SwarmRuntime {
                 yamux::Config::default,
             )
             .map_err(|e| SubstrateError::Transport(e.to_string()))?
-            .with_behaviour(|key| {
-                SubstrateBehaviour::new(key.public(), config.preauth, config.max_payload_bytes)
-            })
+            .with_behaviour(|key| SubstrateBehaviour::new(key.public(), config.preauth))
             .map_err(|e| SubstrateError::Transport(e.to_string()))?
             .with_swarm_config(|c| c.with_idle_connection_timeout(config.idle_timeout))
             // THE HANDSHAKE TIMEOUT, taken from the same limits the
@@ -1107,6 +1105,7 @@ impl SwarmRuntime {
                             &mut outbox,
                             DirectTick {
                                 now_ms: now_ms(started),
+                                max_payload_bytes: config.max_payload_bytes,
                                 wall_ms: wall_ms(),
                                 draining: manager.is_draining(),
                                 may_buffer_delivery: may_buffer,
@@ -2568,6 +2567,8 @@ impl DirectEndpoints {
 struct DirectTick {
     /// Monotonic milliseconds since the runtime started.
     now_ms: u64,
+    /// The profile's effective payload limit, for the deferred parse.
+    max_payload_bytes: usize,
     /// Unix-epoch milliseconds, for the receipt time on a delivery.
     ///
     /// Separate from `now_ms`, which is monotonic-since-startup and
@@ -2606,6 +2607,7 @@ fn handle_direct(
 ) -> DirectHandled {
     let DirectTick {
         now_ms,
+        max_payload_bytes,
         wall_ms,
         draining,
         may_buffer_delivery,
@@ -2636,59 +2638,78 @@ fn handle_direct(
                 return DirectHandled::Consumed;
             };
 
-            // AN UNPARSABLE FRAME IS ANSWERED AND GOES NO FURTHER. It
-            // never reaches admission: there is no frame to fingerprint,
-            // no source endpoint to key on, and no reservation worth
-            // taking. The peer gets the code the contract owes it —
-            // `too_large` for an over-ceiling payload, `malformed` for
-            // anything else — instead of a broken exchange.
-            let request = match request {
-                crate::direct_codec::InboundRequest::Frame(frame) => *frame,
-                crate::direct_codec::InboundRequest::Unparsable { message_id, reason } => {
-                    // THE GATES RUN FIRST, EVEN HERE. A frame that failed
-                    // to decode still arrived from some peer, over some
-                    // connection, at some rate — and answering it is
-                    // work. Answering before trust, draining and the rate
-                    // buckets let a peer spend no allowance to make this
-                    // node encode and send a rejection, and let a peer
-                    // with no data-plane trust draw a data-plane
-                    // response. `admit_prefix` is the same three gates
-                    // `admit_inbound` runs, in the same order, so the two
-                    // paths cannot drift.
-                    //
-                    // A gate's refusal OUTRANKS the parse failure: an
-                    // untrusted peer learns it is untrusted, not that its
-                    // frame was malformed.
-                    let gated = {
-                        let mut ctx = AdmissionContext {
-                            trust: &state.trust,
-                            ingress: &mut state.ingress,
-                            dedup: &mut state.dedup,
-                            reservations: &mut state.reservations,
-                            registry: &state.registry,
-                            queues: &mut state.queues,
-                            draining,
-                        };
-                        admit_prefix(&source, now_ms, &mut ctx)
-                    };
-                    let reason = match gated {
-                        Ok(()) => reason,
-                        Err(refusal) => refusal.to_wire(),
-                    };
-                    // SPIKE-002 finding 2 applies here as everywhere: a
-                    // produced response is not evidence the peer heard
-                    // it. Nothing is retried — the peer that sent an
-                    // unparsable frame and then vanished is owed
-                    // nothing further.
-                    if swarm
-                        .answer_direct(channel, DirectResponse::Rejected { message_id, reason })
-                        .is_ok()
-                    {
+            // ADMISSION RUNS BEFORE THE FRAME IS PARSED. The codec
+            // keeps only the bytes it read, because decoding a maximum
+            // frame allocates a second payload buffer and doing that
+            // first let an infrastructure-only connection — excluded
+            // from direct v2 outright — or a peer already over its rate
+            // choose how much work this node did for it.
+            //
+            // Sixteen bytes for the id is the only exception, and it has
+            // to be: a response echoes the id it answers, so without one
+            // nothing can be refused on the wire at all.
+            let crate::direct_codec::InboundRequest::Inbound { bytes, oversize } = request else {
+                // `Outbound` is what this node SENDS; the codec never
+                // reads one.
+                return DirectHandled::Consumed;
+            };
+
+            let gated = {
+                let mut ctx = AdmissionContext {
+                    trust: &state.trust,
+                    ingress: &mut state.ingress,
+                    dedup: &mut state.dedup,
+                    reservations: &mut state.reservations,
+                    registry: &state.registry,
+                    queues: &mut state.queues,
+                    draining,
+                };
+                admit_prefix(&source, now_ms, &mut ctx)
+            };
+
+            // A GATE'S REFUSAL OUTRANKS THE BYTES. An untrusted or
+            // rate-limited peer learns that, not that its frame was
+            // malformed — and learns it without this node parsing the
+            // frame to find out.
+            if let Err(refusal) = gated {
+                if let Some(message_id) = crate::direct_codec::recover_id(&bytes) {
+                    let _answered = swarm
+                        .answer_direct(
+                            channel,
+                            DirectResponse::Rejected {
+                                message_id,
+                                reason: refusal.to_wire(),
+                            },
+                        )
+                        .is_ok();
+                    if _answered {
                         state.answering.insert(request_id);
                     }
-                    return DirectHandled::Consumed;
                 }
-            };
+                return DirectHandled::Consumed;
+            }
+
+            let request =
+                match crate::direct_codec::parse_inbound(&bytes, oversize, max_payload_bytes) {
+                    Ok(frame) => frame,
+                    Err((message_id, reason)) => {
+                        // SPIKE-002 finding 2: a produced response is not
+                        // evidence the peer heard it. Nothing is retried —
+                        // a peer that sent an unparsable frame and vanished
+                        // is owed nothing further.
+                        if let Some(message_id) = message_id
+                            && swarm
+                                .answer_direct(
+                                    channel,
+                                    DirectResponse::Rejected { message_id, reason },
+                                )
+                                .is_ok()
+                        {
+                            state.answering.insert(request_id);
+                        }
+                        return DirectHandled::Consumed;
+                    }
+                };
 
             let outcome = {
                 let mut ctx = AdmissionContext {
@@ -2700,7 +2721,7 @@ fn handle_direct(
                     queues: &mut state.queues,
                     draining,
                 };
-                admit_inbound(
+                admit_structured(
                     &request,
                     &source,
                     interweave_transport_runtime::Clocks {

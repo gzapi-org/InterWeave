@@ -234,7 +234,7 @@ impl GatedSwarm {
         }
         Ok(self.inner.behaviour_mut().direct.send_request(
             peer,
-            crate::direct_codec::InboundRequest::Frame(Box::new(frame)),
+            crate::direct_codec::InboundRequest::Outbound(Box::new(frame)),
         ))
     }
 
