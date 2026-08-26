@@ -408,7 +408,7 @@ async fn malformed_frames_spend_ingress_allowance() {
     );
 }
 
-/// A PHYSICALLY oversized frame is answered `too_large`.
+/// A physically oversized frame is answered, and for the RIGHT reason.
 ///
 /// The distinction the earlier tests missed. They overstated a declared
 /// length inside a short buffer, so the frame still fitted under
@@ -421,9 +421,16 @@ async fn malformed_frames_spend_ingress_allowance() {
 /// The reader now keeps the bytes it already had, and the first sixteen
 /// of them are the message id.
 #[tokio::test]
-async fn a_physically_oversized_frame_is_answered_too_large() {
+async fn a_physically_oversized_frame_is_answered_for_the_right_reason() {
+    // TRAILING GARBAGE AFTER A COMPLETE LEGAL FRAME. Its declared
+    // payload length is untouched and legal, so this is `malformed` —
+    // the frame overran the request ceiling for a reason that has
+    // nothing to do with payload size.
+    //
+    // This test asserted `too_large` when it was written, which was the
+    // misclassification rather than evidence of it: telling a sender to
+    // shrink a payload that was already within the ceiling.
     let mut frame = legal_frame();
-    // Past the REQUEST ceiling, not merely past the payload ceiling.
     frame.extend(std::iter::repeat_n(0u8, 64 * 1024));
 
     let answer = what_the_receiver_answers(frame).await;
@@ -431,9 +438,9 @@ async fn a_physically_oversized_frame_is_answered_too_large() {
         answer,
         DirectResponse::Rejected {
             message_id: MessageId::from_bytes([7; 16]),
-            reason: DirectRejectReason::TooLarge,
+            reason: DirectRejectReason::Malformed,
         },
-        "answered under its own id rather than dropped"
+        "answered under its own id, and for the right reason"
     );
 }
 
@@ -818,5 +825,169 @@ async fn an_unreadable_response_is_a_protocol_violation() {
         error,
         TransportError::ProtocolViolation,
         "the peer answered — badly — so this is not a reachability failure"
+    );
+}
+
+/// A declared payload past the ceiling IS `too_large`.
+///
+/// The other half of the oversize split. Here the frame overruns the
+/// request ceiling because its `payload_len` field genuinely claims more
+/// than the profile allows — the one case the contract names
+/// `too_large`, and the one a sender can act on by sending less.
+#[tokio::test]
+async fn a_declared_payload_past_the_ceiling_is_too_large() {
+    let mut frame = legal_frame();
+    // Overstate `payload_len`, then pad so the frame also overruns the
+    // request ceiling and takes the pre-decode path.
+    let at = frame.len() - 4 - 5;
+    frame[at..at + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+    frame.extend(std::iter::repeat_n(0u8, 64 * 1024));
+
+    let answer = what_the_receiver_answers(frame).await;
+    assert_eq!(
+        answer,
+        DirectResponse::Rejected {
+            message_id: MessageId::from_bytes([7; 16]),
+            reason: DirectRejectReason::TooLarge,
+        },
+        "the declared length is what makes this too_large"
+    );
+}
+
+/// A non-direct notification cannot starve an in-flight exchange either.
+///
+/// `polling_room` adds slack so the callers waiting on in-flight work
+/// get settled. `DirectDelivered` was taught to respect the base
+/// capacity, but every OTHER swarm event — `Connected`, `DialFailed`,
+/// an `Identify` result — went through `translate` and was appended
+/// unconditionally. One of those takes the progress slot, `room` goes
+/// false on the next iteration, and the direct response or its timeout
+/// can no longer be polled.
+///
+/// Here `a` holds an exchange with a peer that never answers, its event
+/// capacity is one, nothing drains it — and then a second peer connects,
+/// which is a notification and not a delivery.
+#[tokio::test]
+async fn a_notification_cannot_starve_an_outbound_exchange() {
+    let silent_keys = libp2p::identity::Keypair::generate_ed25519();
+    let silent_peer = TransportIdentity::parse(silent_keys.public().to_peer_id().to_string())
+        .expect("a valid peer id");
+    let mut silent = SwarmBuilder::with_existing_identity(silent_keys)
+        .with_tokio()
+        .with_tcp(
+            libp2p::tcp::Config::default(),
+            libp2p::noise::Config::new,
+            libp2p::yamux::Config::default,
+        )
+        .expect("the same transport stack")
+        .with_behaviour(|_| {
+            request_response::Behaviour::<RawCodec>::new(
+                [(DIRECT_PROTOCOL, ProtocolSupport::Full)],
+                request_response::Config::default(),
+            )
+        })
+        .expect("behaviour")
+        .build();
+    silent
+        .listen_on("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
+        .expect("listens");
+    let silent_address = loop {
+        if let Libp2pSwarmEvent::NewListenAddr { address, .. } = silent.select_next_some().await {
+            break address;
+        }
+    };
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        loop {
+            if let Libp2pSwarmEvent::Behaviour(request_response::Event::Message {
+                message: request_response::Message::Request { channel, .. },
+                ..
+            }) = silent.select_next_some().await
+            {
+                held.push(channel);
+            }
+        }
+    });
+
+    let a_id = ProfileIdentity::generate();
+    let a_peer = a_id.transport_identity().expect("peer id");
+    let b_id = ProfileIdentity::generate();
+    let b_peer = b_id.transport_identity().expect("peer id");
+    let c_id = ProfileIdentity::generate();
+    let c_peer = c_id.transport_identity().expect("peer id");
+
+    let mut a = SwarmRuntime::start(
+        &a_id,
+        SubstrateConfig {
+            event_capacity: 1,
+            ..SubstrateConfig::default()
+        },
+        TrustSources::new(
+            PeerTrustPolicy::new([silent_peer.clone(), b_peer, c_peer]).expect("three peers"),
+            InfrastructureSet::default(),
+        ),
+    )
+    .expect("a starts");
+    let b = SwarmRuntime::start(
+        &b_id,
+        SubstrateConfig::default(),
+        TrustSources::new(
+            PeerTrustPolicy::new([a_peer.clone()]).expect("one peer"),
+            InfrastructureSet::default(),
+        ),
+    )
+    .expect("b starts");
+    let c = SwarmRuntime::start(
+        &c_id,
+        SubstrateConfig::default(),
+        TrustSources::new(
+            PeerTrustPolicy::new([a_peer.clone()]).expect("one peer"),
+            InfrastructureSet::default(),
+        ),
+    )
+    .expect("c starts");
+
+    a.configure_direct(endpoints()).await.expect("a endpoints");
+    b.configure_direct(endpoints()).await.expect("b endpoints");
+    c.configure_direct(endpoints()).await.expect("c endpoints");
+    let a_address = a
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
+        .await
+        .expect("a listens");
+    a.dial(silent_peer.clone(), silent_address)
+        .await
+        .expect("command")
+        .expect("admitted");
+
+    // Drain only until `a` is connected to the silent peer. After this
+    // nothing reads its events.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(!left.is_zero(), "no connection within 20s");
+        if let Ok(Some(interweave_transport_libp2p::runtime::SwarmEvent::Connected { .. })) =
+            tokio::time::timeout(left, a.next_event()).await
+        {
+            break;
+        }
+    }
+
+    // `a` dispatches to the silent peer and, while that is in flight,
+    // `b` connects — producing a NOTIFICATION on `a`, not a delivery.
+    let (own, _) = tokio::join!(
+        tokio::time::timeout(
+            Duration::from_secs(25),
+            a.send_direct(silent_peer, legal_message()),
+        ),
+        async {
+            let _ = b.dial(a_peer.clone(), a_address.clone()).await;
+            let _ = c.dial(a_peer.clone(), a_address).await;
+        }
+    );
+
+    let settled = own.expect("a's exchange settled rather than freezing behind a notification");
+    assert!(
+        settled.expect("the command reaches the task").is_err(),
+        "the silent peer never answers, so this is an error either way"
     );
 }

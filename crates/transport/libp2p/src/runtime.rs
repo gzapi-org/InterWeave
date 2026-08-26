@@ -1160,7 +1160,23 @@ impl SwarmRuntime {
                                 None
                             }
                         };
-                        if let Some(event) = translated {
+                        // NOTIFICATIONS SEE THE BASE CAPACITY, like
+                        // deliveries. `polling_room` adds slack so the
+                        // callers waiting on in-flight work can be
+                        // settled; an `Identify::Received` buffered into
+                        // that slack takes the slot a direct response or
+                        // its timeout needed, `room` goes false on the
+                        // next iteration, and `send_direct` waits on an
+                        // answer nothing will ever poll.
+                        //
+                        // Dropped rather than queued when there is no
+                        // base room: these are informational, nothing
+                        // downstream blocks on them, and the alternative
+                        // is an outbox that grows with whatever the
+                        // network sends.
+                        if let Some(event) = translated
+                            && may_buffer_delivery(outbox.len(), config.event_capacity)
+                        {
                             outbox.push_back(event);
                         }
                         // A caller that stopped awaiting `listen` — a
@@ -1265,15 +1281,6 @@ impl SwarmRuntime {
         peer: TransportIdentity,
         frame: DirectMessageV2,
     ) -> Result<Result<EndpointId, DirectError>, SubstrateError> {
-        // SENDING TO SELF IS A CALLER ERROR, not a network one. DIRECT.md
-        // is explicit that the local profile PeerId is `InvalidArgument`
-        // and that self-dial never occurs. Left to the swarm, libp2p
-        // cannot hold a self-connection and the caller would be told
-        // `PeerUnreachable` — a network verdict about a local mistake,
-        // and a misleading one, since the peer is right here.
-        if peer == self.local_peer {
-            return Ok(Err(DirectError::InvalidArgument));
-        }
         let (reply, answer) = oneshot::channel();
         self.commands
             .send(SwarmCommand::SendDirect {
@@ -2101,6 +2108,33 @@ fn handle_command(
             }
             if manager.is_draining() {
                 let _ = reply.send(Err(DirectError::ShuttingDown));
+                return;
+            }
+            // SENDING TO SELF IS A CALLER ERROR, not a network one.
+            // `DIRECT.md` says the local profile PeerId is
+            // `InvalidArgument` and that self-dial never occurs; left to
+            // the swarm, libp2p cannot hold a self-connection and the
+            // caller would be told `PeerUnreachable` — a network verdict
+            // on a local mistake, about a peer that is right here.
+            //
+            // AFTER THE LEASE GATE, which is what `ENDPOINTS.md`
+            // requires: step 1 is "caller must own an active endpoint
+            // lease or receive `EndpointNotRegistered`". This used to
+            // sit in the public method ahead of everything, so a frame
+            // naming an unleased source AND the local peer reported
+            // `InvalidArgument` — sending a caller to fix the
+            // destination while the missing prerequisite was the lease.
+            //
+            // BEFORE the trust check, though the contract numbers self
+            // as step 5 and profile trust as step 4. Taken literally,
+            // step 5 is unreachable: `classify` answers `Unauthorized`
+            // for this node's own PeerId — correct for a dial, since
+            // this is not a peer to connect to — and step 4 would
+            // swallow every self-send as `UnauthorizedPeer`. The
+            // contract's OUTCOME is that a self-send is
+            // `InvalidArgument`, and this ordering is what delivers it.
+            if manager.is_local_peer(&peer) {
+                let _ = reply.send(Err(DirectError::InvalidArgument));
                 return;
             }
             if manager.classify(&peer) != ConnectionClass::DataPlaneTrusted {
