@@ -130,6 +130,12 @@ jobs:
       - name: Required check contexts match the workflow's job names
         run: bash tools/checks/check_required_contexts.sh
 
+      # A domain function nothing calls is a rule that binds nothing, and
+      # its own green unit tests are what make it look covered. Stage 6
+      # shipped two that way and both came back as P1 findings.
+      - name: Every public domain function has a caller
+        run: bash tools/checks/check_domain_fns_are_called.sh
+
       # cargo-deny cannot catch this one: yamux has no RustSec advisory,
       # so the dependency check below reports clean and always will.
       - name: No first-party source selects the vulnerable yamux muxer

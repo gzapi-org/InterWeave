@@ -92,6 +92,11 @@ fn tree_checks() -> Vec<Task> {
             &["tools/checks/check_required_contexts.sh"],
         ),
         Task::new(
+            "every public domain function has a caller",
+            "bash",
+            &["tools/checks/check_domain_fns_are_called.sh"],
+        ),
+        Task::new(
             "no first-party source selects the vulnerable yamux muxer",
             "bash",
             &["tools/checks/check_yamux_muxer.sh"],

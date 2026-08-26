@@ -200,17 +200,6 @@ impl Refusal {
     }
 }
 
-impl Outcome {
-    /// The wire answer, when this is a refusal.
-    #[must_use]
-    pub const fn refusal_wire(&self) -> Option<DirectRejectReason> {
-        match self {
-            Self::Refused(r) => Some(r.to_wire()),
-            _ => None,
-        }
-    }
-}
-
 /// Run one inbound direct-v2 request through admission.
 ///
 /// `source_peer` is the **authenticated** remote identity — Noise proved
@@ -424,6 +413,19 @@ pub fn dedup_key(frame: &DirectMessageV2, source_peer: &TransportIdentity) -> De
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+
+    /// The wire reason the backend would send for this outcome.
+    ///
+    /// Mirrors the single production site in the libp2p runtime, which
+    /// matches `Outcome::Refused(refusal)` and sends `refusal.to_wire()`.
+    /// Deliberately test-only: a production wrapper for this would be a
+    /// second, uncalled spelling of a one-line match.
+    fn refusal_wire(outcome: &Outcome) -> Option<DirectRejectReason> {
+        match outcome {
+            Outcome::Refused(r) => Some(r.to_wire()),
+            _ => None,
+        }
+    }
 
     use interweave_local_client_api::Generation;
     use interweave_transport_api::{MediaType, MessageId, Payload};
@@ -754,7 +756,7 @@ mod tests {
             "the conflicting body was not delivered"
         );
         assert_eq!(
-            outcome.refusal_wire(),
+            refusal_wire(&outcome),
             Some(DirectRejectReason::Malformed),
             "and it is not distinguishable as a routing failure"
         );
@@ -866,7 +868,7 @@ mod tests {
             outcome,
             Outcome::Refused(Refusal::Queue(QueueRefusal::Full { bound: 1 }))
         );
-        assert_eq!(outcome.refusal_wire(), Some(DirectRejectReason::Overloaded));
+        assert_eq!(refusal_wire(&outcome), Some(DirectRejectReason::Overloaded));
         assert_eq!(w.queues.len(&endpoint("claude")), 1, "still exactly one");
     }
 
@@ -950,7 +952,7 @@ mod tests {
         for outcome in [&unknown, &offline] {
             assert!(matches!(outcome, Outcome::Refused(Refusal::NoRoute(_))));
             assert_eq!(
-                outcome.refusal_wire(),
+                refusal_wire(outcome),
                 Some(DirectRejectReason::NoRoute),
                 "endpoint presence must not be observable"
             );

@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# Public domain functions with no in-tree caller yet, each keyed to the
+# stage that will call it.
+#
+# Format:  <fn name>  <stage-N>  <reason>
+#
+# The stage is a DEADLINE, not a note. check_domain_fns_are_called.sh
+# fails once the open stage is past the one named here, so an exemption
+# cannot quietly become permanent — which is the failure mode it exists
+# to prevent. `authorize_outbound` was written in the stage that was
+# supposed to call it and shipped uncalled anyway.
+#
+# Stage numbers are read from the canonical plan's section for the
+# package. Where the plan does not name a consumer outright, the entry
+# records the earliest stage that plausibly needs it; an entry firing
+# early costs one line of triage, an entry set too late costs nothing
+# until it is useless.
+
+# --- Stage 7, GossipSub broadcast: the ingress policy surface ---------
+may_publish              stage-7   publisher authorization, applied when a topic exists to publish to
+backend_should_subscribe stage-7   mesh subscription decision, no mesh before Stage 7
+subscribers              stage-7   subscriber introspection for the broadcast path
+prune_idle               stage-7   idle-subscription reclamation on the broadcast path
+as_error                 stage-7   ReplyResolution -> caller error; reply routes arrive with channels
+
+# --- Stage 8, endpoint directory: leases cross a session boundary -----
+default_endpoint         stage-8   configured remote default, read when a caller may omit a destination
+set_enabled              stage-8   endpoint disable + lease revocation, needs a session to revoke from
+to_endpoint              stage-8   EndpointId projection used by the directory
+authorize_direct_send    stage-8   plan L588: the lease-derived source endpoint is wired to transport here
+endpoint_lease           stage-8   plan L588
+port_id                  stage-8   plan L588
+session_id               stage-8   plan L588
+
+# --- Stage 10, Kademlia: the driver port ------------------------------
+can_become_healthy           stage-10  Kademlia control port, inert until the DHT is activated
+effective_target             stage-10  Kademlia control port
+is_saturated                 stage-10  Kademlia control port
+is_target_satisfied          stage-10  Kademlia control port
+next_exploration_interval_ms stage-10  Kademlia control port
+parse_all                    stage-10  Kademlia control port
+validate_limits              stage-10  Kademlia control port
+
+# --- Stage 11, mandatory Internet connectivity: address introspection -
+address_entries   stage-11  per-address backoff introspection, first read by AutoNAT/relay selection
+is_clear_at       stage-11  address quarantine state
+is_dialable_at    stage-11  address quarantine state
+is_known_good     stage-11  address quarantine state
+is_punitive_at    stage-11  address quarantine state
+peer_entries      stage-11  per-peer backoff introspection
+prune             stage-11  backoff-table reclamation
+
+# --- Stage 12, full TransportRuntime composition ----------------------
+with_local_peer   stage-12  trust policy bound to the local peer, at composition
+
+# --- Stage 13, daemon and desktop IPC v2 ------------------------------
+as_admin                       stage-13  handshake authority domain, needs two real sockets
+as_data                        stage-13  handshake authority domain, needs two real sockets
+into_parts                     stage-13  payload decomposition at the IPC frame boundary
+max_global_attempts_per_window stage-13  pre-auth admission counters, surfaced by `admin.*` status
+max_sources                    stage-13  pre-auth admission counters
+rate_window_ms                 stage-13  pre-auth admission counters
+tracked_sources                stage-13  pre-auth admission counters
