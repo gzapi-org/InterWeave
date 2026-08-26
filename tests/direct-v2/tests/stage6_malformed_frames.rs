@@ -22,6 +22,10 @@
 
 use std::time::Duration;
 
+use interweave_profile_config::{
+    DirectoryConfig, EndpointConfig, EndpointsConfig, ProfileConfig, RegistrationPolicy,
+    TrustConfig, TrustPolicyKind,
+};
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::{
     DirectMessageV2, DirectRejectReason, EndpointId, MediaType, MessageId, Payload,
@@ -30,6 +34,7 @@ use interweave_transport_api::{
 use interweave_transport_libp2p::direct_codec::{DIRECT_PROTOCOL, DirectResponse, decode_response};
 use interweave_transport_libp2p::runtime::{DirectEndpoints, SubstrateConfig, SwarmRuntime};
 use interweave_transport_runtime::{Generation, TrustSources};
+use interweave_trust_api::EndpointTrustPolicy;
 use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 
 use async_trait::async_trait;
@@ -100,13 +105,45 @@ fn endpoint(name: &str) -> EndpointId {
     EndpointId::parse(name).expect("valid endpoint id")
 }
 
-fn endpoints() -> DirectEndpoints {
-    DirectEndpoints {
-        endpoints: vec![endpoint("human"), endpoint("claude")],
-        default: Some(endpoint("human")),
-        queue_bound: 8,
-        epoch: Generation::parse("malformed_______").expect("valid generation"),
+/// A profile carrying these endpoints, which is now the ONLY way to
+/// reach `DirectEndpoints` — the runtime derives its state from the
+/// canonical validated configuration rather than from a second model
+/// assembled here.
+fn profile_with(entries: Vec<EndpointConfig>, default: Option<&str>) -> ProfileConfig {
+    ProfileConfig {
+        schema_version: 2,
+        trust: TrustConfig {
+            policy: TrustPolicyKind::default(),
+            allowed_peers: std::collections::BTreeSet::new(),
+        },
+        endpoints: EndpointsConfig {
+            registration_policy: RegistrationPolicy::default(),
+            default_direct_endpoint: default.map(endpoint),
+            directory: DirectoryConfig::default(),
+            entries,
+        },
     }
+}
+
+/// One endpoint entry with default policies.
+fn entry(name: &str) -> EndpointConfig {
+    EndpointConfig {
+        id: endpoint(name),
+        enabled: true,
+        advertise: false,
+        allowed_client_kinds: Vec::new(),
+        inbound: EndpointTrustPolicy::default(),
+        outbound: EndpointTrustPolicy::default(),
+    }
+}
+
+fn endpoints() -> DirectEndpoints {
+    DirectEndpoints::from_profile(
+        &profile_with(vec![entry("human"), entry("claude")], Some("human")),
+        8,
+        Generation::parse("malformed_______").expect("valid generation"),
+    )
+    .expect("a valid profile")
 }
 
 /// A legal frame, which each test then corrupts in one specific way.

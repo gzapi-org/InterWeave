@@ -19,6 +19,10 @@
 
 use std::time::Duration;
 
+use interweave_profile_config::{
+    DirectoryConfig, EndpointConfig, EndpointsConfig, ProfileConfig, RegistrationPolicy,
+    TrustConfig, TrustPolicyKind,
+};
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::{
     DirectMessageV2, EndpointId, MediaType, MessageId, Payload, TransportError, TransportIdentity,
@@ -27,6 +31,7 @@ use interweave_transport_libp2p::runtime::{
     DirectEndpoints, SubstrateConfig, SwarmEvent, SwarmRuntime,
 };
 use interweave_transport_runtime::{Generation, TrustSources};
+use interweave_trust_api::EndpointTrustPolicy;
 use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 
 /// The contract default, restated so a change to it fails here rather
@@ -63,13 +68,45 @@ fn endpoint(name: &str) -> EndpointId {
     EndpointId::parse(name).expect("valid endpoint id")
 }
 
-fn endpoints() -> DirectEndpoints {
-    DirectEndpoints {
-        endpoints: vec![endpoint("human"), endpoint("claude")],
-        default: Some(endpoint("human")),
-        queue_bound: QUEUE_BOUND,
-        epoch: Generation::parse("ingress_________").expect("valid generation"),
+/// A profile carrying these endpoints, which is now the ONLY way to
+/// reach `DirectEndpoints` — the runtime derives its state from the
+/// canonical validated configuration rather than from a second model
+/// assembled here.
+fn profile_with(entries: Vec<EndpointConfig>, default: Option<&str>) -> ProfileConfig {
+    ProfileConfig {
+        schema_version: 2,
+        trust: TrustConfig {
+            policy: TrustPolicyKind::default(),
+            allowed_peers: std::collections::BTreeSet::new(),
+        },
+        endpoints: EndpointsConfig {
+            registration_policy: RegistrationPolicy::default(),
+            default_direct_endpoint: default.map(endpoint),
+            directory: DirectoryConfig::default(),
+            entries,
+        },
     }
+}
+
+/// One endpoint entry with default policies.
+fn entry(name: &str) -> EndpointConfig {
+    EndpointConfig {
+        id: endpoint(name),
+        enabled: true,
+        advertise: false,
+        allowed_client_kinds: Vec::new(),
+        inbound: EndpointTrustPolicy::default(),
+        outbound: EndpointTrustPolicy::default(),
+    }
+}
+
+fn endpoints() -> DirectEndpoints {
+    DirectEndpoints::from_profile(
+        &profile_with(vec![entry("human"), entry("claude")], Some("human")),
+        QUEUE_BOUND,
+        Generation::parse("ingress_________").expect("valid generation"),
+    )
+    .expect("a valid profile")
 }
 
 /// The SENDER's endpoints, which are not the receiver's.
@@ -82,16 +119,16 @@ fn endpoints() -> DirectEndpoints {
 /// which is exactly what it would see from an attacker running its own
 /// software and holding no leases at all.
 fn sender_endpoints() -> DirectEndpoints {
-    let mut endpoints = vec![endpoint("human"), endpoint("claude")];
+    let mut entries = vec![entry("human"), entry("claude")];
     for id in 0..INVENTED_SOURCES {
-        endpoints.push(endpoint(&format!("source-{id}")));
+        entries.push(entry(&format!("source-{id}")));
     }
-    DirectEndpoints {
-        endpoints,
-        default: Some(endpoint("human")),
-        queue_bound: QUEUE_BOUND,
-        epoch: Generation::parse("ingress_________").expect("valid generation"),
-    }
+    DirectEndpoints::from_profile(
+        &profile_with(entries, Some("human")),
+        QUEUE_BOUND,
+        Generation::parse("ingress_________").expect("valid generation"),
+    )
+    .expect("a valid profile")
 }
 
 /// Distinct `id` per call, because a repeated message id is a DUPLICATE

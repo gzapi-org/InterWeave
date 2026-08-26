@@ -16,6 +16,10 @@
 
 use std::time::Duration;
 
+use interweave_profile_config::{
+    DirectoryConfig, EndpointConfig, EndpointsConfig, ProfileConfig, RegistrationPolicy,
+    TrustConfig, TrustPolicyKind,
+};
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::{
     DirectMessageV2, EndpointId, MediaType, MessageId, Payload, TransportError, TransportIdentity,
@@ -24,6 +28,7 @@ use interweave_transport_libp2p::runtime::{
     DirectEndpoints, SubstrateConfig, SubstrateError, SwarmEvent, SwarmRuntime,
 };
 use interweave_transport_runtime::{Generation, TrustSources};
+use interweave_trust_api::EndpointTrustPolicy;
 use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 
 fn who() -> (ProfileIdentity, TransportIdentity) {
@@ -46,18 +51,50 @@ fn endpoint(name: &str) -> EndpointId {
     EndpointId::parse(name).expect("valid endpoint id")
 }
 
+/// A profile carrying these endpoints, which is now the ONLY way to
+/// reach `DirectEndpoints` — the runtime derives its state from the
+/// canonical validated configuration rather than from a second model
+/// assembled here.
+fn profile_with(entries: Vec<EndpointConfig>, default: Option<&str>) -> ProfileConfig {
+    ProfileConfig {
+        schema_version: 2,
+        trust: TrustConfig {
+            policy: TrustPolicyKind::default(),
+            allowed_peers: std::collections::BTreeSet::new(),
+        },
+        endpoints: EndpointsConfig {
+            registration_policy: RegistrationPolicy::default(),
+            default_direct_endpoint: default.map(endpoint),
+            directory: DirectoryConfig::default(),
+            entries,
+        },
+    }
+}
+
+/// One endpoint entry with default policies.
+fn entry(name: &str) -> EndpointConfig {
+    EndpointConfig {
+        id: endpoint(name),
+        enabled: true,
+        advertise: false,
+        allowed_client_kinds: Vec::new(),
+        inbound: EndpointTrustPolicy::default(),
+        outbound: EndpointTrustPolicy::default(),
+    }
+}
+
 fn generation() -> Generation {
     Generation::parse("stage6__________").expect("valid generation")
 }
 
 /// `human` and `claude`, with `human` the default.
 fn endpoints(queue_bound: usize) -> DirectEndpoints {
-    DirectEndpoints {
-        endpoints: vec![endpoint("human"), endpoint("claude")],
-        default: Some(endpoint("human")),
+    DirectEndpoints::from_profile(
+        &profile_with(vec![entry("human"), entry("claude")], Some("human")),
         queue_bound,
-        epoch: generation(),
-    }
+        generation(),
+    )
+    .expect("a valid profile")
 }
 
 /// Like [`frame`], with the SOURCE endpoint chosen by the caller —
@@ -284,10 +321,14 @@ async fn a_matching_retry_replays_the_stored_route_after_the_default_moves() {
         .expect("answers");
     assert_eq!(delivered.len(), 1);
     receiver
-        .configure_direct(DirectEndpoints {
-            default: Some(endpoint("claude")),
-            ..endpoints(8)
-        })
+        .configure_direct(
+            DirectEndpoints::from_profile(
+                &profile_with(vec![entry("human"), entry("claude")], Some("claude")),
+                8,
+                generation(),
+            )
+            .expect("a valid profile"),
+        )
         .await
         .expect("reconfigures");
 
@@ -721,109 +762,107 @@ async fn revoking_trust_stops_direct_sends_before_the_close_lands() {
     assert_eq!(delivered[0].payload.bytes(), b"trusted");
 }
 
-/// A configuration past the endpoint ceiling is refused, not retained.
+/// A configuration the canonical validator refuses never becomes state.
 ///
-/// `configure` builds a registry entry and a delivery queue per
-/// endpoint, so an oversized configuration does not merely pass — it
-/// becomes runtime state for the life of the process. `DirectEndpoints`
-/// has no validating constructor and the command used to reply success
-/// whatever it was handed.
-///
-/// The ceiling is `MAX_ENDPOINTS`, deliberately not a `64` written here:
-/// `EndpointId::MAX_BYTES` is also 64, and two unrelated limits sharing
-/// a number are the pair someone later unifies.
+/// The endpoint-count ceiling used to be re-checked in
+/// `configure_direct`, which is the pattern that caused the endpoint
+/// policy defects: every rule restated here is a rule that can drift
+/// from `ProfileConfig::validate`. It is not restated any more — this
+/// asserts the validator's own verdict arrives.
 #[tokio::test]
-async fn a_configuration_past_the_endpoint_ceiling_is_refused() {
-    let (identity, _peer) = who();
-    let runtime = SwarmRuntime::start(&identity, SubstrateConfig::default(), trusting(&[]))
-        .expect("the runtime starts");
-
-    let too_many: Vec<EndpointId> = (0..=interweave_profile_config::MAX_ENDPOINTS)
-        .map(|i| endpoint(&format!("endpoint-{i}")))
+async fn a_configuration_the_validator_refuses_never_becomes_state() {
+    let too_many: Vec<EndpointConfig> = (0..=interweave_profile_config::MAX_ENDPOINTS)
+        .map(|i| entry(&format!("endpoint-{i}")))
         .collect();
     assert_eq!(too_many.len(), interweave_profile_config::MAX_ENDPOINTS + 1);
 
-    let error = runtime
-        .configure_direct(DirectEndpoints {
-            endpoints: too_many,
-            default: None,
-            queue_bound: 8,
-            epoch: generation(),
-        })
-        .await
+    let error = DirectEndpoints::from_profile(&profile_with(too_many, None), 8, generation())
         .expect_err("one past the ceiling is one too many");
     assert!(
-        matches!(
-            error,
-            SubstrateError::InvalidConfig {
-                field: "direct.endpoints",
-                ..
-            }
-        ),
-        "refused as a configuration error, got {error:?}"
+        matches!(error, SubstrateError::InvalidProfile(_)),
+        "refused by the profile validator, got {error:?}"
     );
 
-    // EXACTLY AT THE CEILING IS ALLOWED, so the check is a ceiling and
-    // not an off-by-one that happens to reject the case tested above.
-    let exactly: Vec<EndpointId> = (0..interweave_profile_config::MAX_ENDPOINTS)
-        .map(|i| endpoint(&format!("endpoint-{i}")))
+    // EXACTLY AT THE CEILING IS ALLOWED, so this is a ceiling and not an
+    // off-by-one that also refuses the largest legal configuration.
+    let exactly: Vec<EndpointConfig> = (0..interweave_profile_config::MAX_ENDPOINTS)
+        .map(|i| entry(&format!("endpoint-{i}")))
         .collect();
-    runtime
-        .configure_direct(DirectEndpoints {
-            endpoints: exactly,
-            default: None,
-            queue_bound: 8,
-            epoch: generation(),
-        })
-        .await
+    DirectEndpoints::from_profile(&profile_with(exactly, None), 8, generation())
         .expect("the ceiling itself is permitted");
 }
 
-/// A queue depth past the ceiling is refused, not silently clamped.
+/// A duplicate id, an absent default and a disabled default are all
+/// refused, and none of those rules is written in the direct layer.
+///
+/// This is the whole point of deriving: the runtime inherits every rule
+/// the canonical configuration already enforces, including ones nobody
+/// remembered to restate.
+#[tokio::test]
+async fn the_canonical_rules_are_inherited_rather_than_restated() {
+    let duplicated = profile_with(vec![entry("human"), entry("human")], Some("human"));
+    assert!(
+        matches!(
+            DirectEndpoints::from_profile(&duplicated, 8, generation()),
+            Err(SubstrateError::InvalidProfile(_))
+        ),
+        "a duplicate endpoint id is refused"
+    );
+
+    let absent = profile_with(vec![entry("human")], Some("claude"));
+    assert!(
+        matches!(
+            DirectEndpoints::from_profile(&absent, 8, generation()),
+            Err(SubstrateError::InvalidProfile(_))
+        ),
+        "a default naming an endpoint that does not exist is refused"
+    );
+
+    let mut off = entry("human");
+    off.enabled = false;
+    let disabled = profile_with(vec![off], Some("human"));
+    assert!(
+        matches!(
+            DirectEndpoints::from_profile(&disabled, 8, generation()),
+            Err(SubstrateError::InvalidProfile(_))
+        ),
+        "a default naming a disabled endpoint is refused"
+    );
+}
+
+/// A queue depth outside `1..=MAX_EVENT_QUEUE` is refused.
 ///
 /// `EndpointQueues::open` raises a zero to one and lowered nothing, so a
 /// caller asking for a million got a million — memory a remote peer then
-/// fills, bounded only by its rate allowance, for the life of the
-/// process. Refused rather than clamped: clamping installs a
-/// configuration the caller never asked for and never learns about.
+/// fills, bounded only by its rate allowance. Refused rather than
+/// clamped: clamping installs a configuration the caller never asked for
+/// and never learns about.
+///
+/// This one IS a property of the runtime rather than of the profile, so
+/// it lives beside the derivation instead of in the validator.
 #[tokio::test]
-async fn a_queue_depth_past_the_ceiling_is_refused() {
-    let (identity, _peer) = who();
-    let runtime = SwarmRuntime::start(&identity, SubstrateConfig::default(), trusting(&[]))
-        .expect("the runtime starts");
+async fn a_queue_depth_outside_its_range_is_refused() {
+    let profile = profile_with(vec![entry("human")], None);
 
-    let too_deep = interweave_local_client_api::MAX_EVENT_QUEUE + 1;
-    let error = runtime
-        .configure_direct(DirectEndpoints {
-            endpoints: vec![endpoint("human")],
-            default: None,
-            queue_bound: too_deep,
-            epoch: generation(),
-        })
-        .await
-        .expect_err("one past the ceiling is one too many");
-    assert!(
-        matches!(
-            error,
-            SubstrateError::InvalidConfig {
-                field: "direct.queue_bound",
-                ..
-            }
-        ),
-        "refused as a configuration error naming the field, got {error:?}"
-    );
+    for bad in [0, interweave_local_client_api::MAX_EVENT_QUEUE + 1] {
+        let error = DirectEndpoints::from_profile(&profile, bad, generation())
+            .expect_err("outside the permitted range");
+        assert!(
+            matches!(
+                error,
+                SubstrateError::InvalidConfig {
+                    field: "direct.queue_bound",
+                    ..
+                }
+            ),
+            "refused as a configuration error naming the field, got {error:?}"
+        );
+    }
 
-    // The ceiling itself installs, so this is a ceiling and not an
-    // off-by-one that also refuses the largest legal depth.
-    runtime
-        .configure_direct(DirectEndpoints {
-            endpoints: vec![endpoint("human")],
-            default: None,
-            queue_bound: interweave_local_client_api::MAX_EVENT_QUEUE,
-            epoch: generation(),
-        })
-        .await
-        .expect("the ceiling itself is permitted");
+    // Both ends of the range itself are permitted.
+    for good in [1, interweave_local_client_api::MAX_EVENT_QUEUE] {
+        DirectEndpoints::from_profile(&profile, good, generation()).expect("inside the range");
+    }
 }
 
 /// A full user-event channel cannot freeze a direct exchange.
@@ -1103,5 +1142,211 @@ async fn a_narrow_sender_refuses_its_own_oversized_payload() {
             .expect("answers")
             .is_empty(),
         "nothing crossed the wire"
+    );
+}
+
+/// The source endpoint's outbound policy narrows a send the PROFILE
+/// still permits.
+///
+/// `EndpointRegistry::authorize_outbound` applies profile trust first
+/// and the endpoint's outbound subset second, and it had no production
+/// caller at all — the narrowing existed in the domain layer and bound
+/// nothing, so an endpoint configured to reach only some peers could
+/// reach any profile-trusted one.
+///
+/// The peer here IS profile-trusted and the connection IS available, so
+/// a refusal can only be the endpoint's own policy. `CapabilityDenied`
+/// rather than `UnauthorizedPeer` says exactly that: the endpoint lacked
+/// the authority, not the profile the trust.
+#[tokio::test]
+async fn the_source_endpoints_outbound_policy_narrows_a_trusted_peer() {
+    let (sender_id, sender_peer) = who();
+    let (receiver_id, receiver_peer) = who();
+
+    // `human` may reach nobody; `claude` inherits profile trust. Both
+    // are leased by the sender, so the lease check cannot be what
+    // refuses below.
+    let mut narrowed = entry("human");
+    narrowed.outbound = EndpointTrustPolicy::StaticSubset {
+        allowed_peers: std::collections::BTreeSet::new(),
+    };
+    let sender_profile = profile_with(vec![narrowed, entry("claude")], Some("claude"));
+
+    let mut receiver = SwarmRuntime::start(
+        &receiver_id,
+        SubstrateConfig::default(),
+        trusting(&[&sender_peer]),
+    )
+    .expect("starts");
+    let sender = SwarmRuntime::start(
+        &sender_id,
+        SubstrateConfig::default(),
+        trusting(&[&receiver_peer]),
+    )
+    .expect("starts");
+
+    sender
+        .configure_direct(
+            DirectEndpoints::from_profile(&sender_profile, 8, generation())
+                .expect("a valid profile"),
+        )
+        .await
+        .expect("the sender's endpoints install");
+    receiver
+        .configure_direct(endpoints(8))
+        .await
+        .expect("endpoints install");
+    let address = receiver
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
+        .await
+        .expect("listens");
+    sender
+        .dial(receiver_peer.clone(), address)
+        .await
+        .expect("command")
+        .expect("admitted");
+    wait_connected(&mut receiver).await;
+
+    let error = sender
+        .send_direct(
+            receiver_peer.clone(),
+            frame_from("human", Some("claude"), b"narrowed out", 90),
+        )
+        .await
+        .expect("the command reaches the task")
+        .expect_err("the endpoint's outbound subset excludes this peer");
+    assert_eq!(
+        error,
+        TransportError::CapabilityDenied,
+        "the ENDPOINT lacked authority; the profile still trusts the peer"
+    );
+
+    // THE SAME PEER, FROM AN ENDPOINT THAT INHERITS, still sends — so
+    // the refusal was narrowing and not a broken connection.
+    sender
+        .send_direct(
+            receiver_peer,
+            frame_from("claude", Some("claude"), b"permitted", 91),
+        )
+        .await
+        .expect("command")
+        .expect("an inheriting endpoint reaches a profile-trusted peer");
+
+    let delivered = receiver
+        .drain_endpoint(endpoint("claude"))
+        .await
+        .expect("answers");
+    assert_eq!(delivered.len(), 1, "only the permitted one arrived");
+    assert_eq!(delivered[0].payload.bytes(), b"permitted");
+}
+
+/// A destination endpoint's INBOUND policy refuses a profile-trusted
+/// sender, coarsely.
+///
+/// `DirectEndpoints` used to carry bare ids and `configure` filled in
+/// `RegisteredEndpoint::default()`, whose inbound policy inherits
+/// profile trust — so a configured narrowing was discarded on the way in
+/// and the excluded peer was accepted and queued.
+///
+/// The wire answer must be `no_route`, indistinguishable from unknown,
+/// disabled and offline: telling a peer "that endpoint exists but
+/// refuses you" is the endpoint-presence oracle the collapse exists to
+/// prevent.
+#[tokio::test]
+async fn a_destination_endpoints_inbound_policy_is_coarse_no_route() {
+    let (sender_id, sender_peer) = who();
+    let (receiver_id, receiver_peer) = who();
+
+    // `claude` admits nobody; `human` inherits. The sender is
+    // profile-trusted either way.
+    let mut narrowed = entry("claude");
+    narrowed.inbound = EndpointTrustPolicy::StaticSubset {
+        allowed_peers: std::collections::BTreeSet::new(),
+    };
+    let receiver_profile = profile_with(vec![entry("human"), narrowed], Some("human"));
+
+    let mut receiver = SwarmRuntime::start(
+        &receiver_id,
+        SubstrateConfig::default(),
+        trusting(&[&sender_peer]),
+    )
+    .expect("starts");
+    let sender = SwarmRuntime::start(
+        &sender_id,
+        SubstrateConfig::default(),
+        trusting(&[&receiver_peer]),
+    )
+    .expect("starts");
+
+    sender
+        .configure_direct(endpoints(8))
+        .await
+        .expect("the sender's endpoints install");
+    receiver
+        .configure_direct(
+            DirectEndpoints::from_profile(&receiver_profile, 8, generation())
+                .expect("a valid profile"),
+        )
+        .await
+        .expect("endpoints install");
+    let address = receiver
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
+        .await
+        .expect("listens");
+    sender
+        .dial(receiver_peer.clone(), address)
+        .await
+        .expect("command")
+        .expect("admitted");
+    wait_connected(&mut receiver).await;
+
+    let error = sender
+        .send_direct(
+            receiver_peer.clone(),
+            frame(Some("claude"), b"excluded", 92),
+        )
+        .await
+        .expect("the command reaches the task")
+        .expect_err("the endpoint's inbound policy excludes this peer");
+    assert_eq!(
+        error,
+        TransportError::RemoteEndpointUnavailable,
+        "coarse no_route — the SAME answer an unknown endpoint gives"
+    );
+
+    // NOTHING WAS QUEUED. A policy that refused on the wire and enqueued
+    // anyway would be the defect wearing a different answer.
+    assert!(
+        receiver
+            .drain_endpoint(endpoint("claude"))
+            .await
+            .expect("answers")
+            .is_empty(),
+        "the excluded message reached no queue"
+    );
+
+    // INDISTINGUISHABLE FROM ABSENT, which is what makes it coarse: an
+    // endpoint that does not exist answers exactly the same way.
+    let unknown = sender
+        .send_direct(receiver_peer.clone(), frame(Some("nonexistent"), b"x", 93))
+        .await
+        .expect("command")
+        .expect_err("no such endpoint");
+    assert_eq!(unknown, error, "policy denial and absence are one answer");
+
+    // ...and the endpoint that inherits still accepts, so the receiver
+    // is not simply refusing everything.
+    sender
+        .send_direct(receiver_peer, frame(Some("human"), b"welcome", 94))
+        .await
+        .expect("command")
+        .expect("an inheriting endpoint admits a profile-trusted peer");
+    assert_eq!(
+        receiver
+            .drain_endpoint(endpoint("human"))
+            .await
+            .expect("answers")
+            .len(),
+        1
     );
 }

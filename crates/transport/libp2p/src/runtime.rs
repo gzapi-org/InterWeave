@@ -48,7 +48,7 @@ use interweave_transport_runtime::direct_inbound::{
     AdmissionContext, Outcome as AdmissionOutcome, admit_inbound, admit_prefix,
 };
 use interweave_transport_runtime::endpoint_queue::EndpointQueues;
-use interweave_transport_runtime::endpoint_registry::EndpointRegistry;
+use interweave_transport_runtime::endpoint_registry::{EndpointRegistry, RegisteredEndpoint};
 use interweave_transport_runtime::preauth::PreAuthLimits;
 use interweave_transport_runtime::{
     ConnectionClass, ConnectionManager, ConnectionPolicy, ConnectionSlot, DialDenial, DialOrigin,
@@ -400,6 +400,13 @@ pub enum SubstrateError {
     /// process, and this is a transport daemon whose lint policy treats a
     /// reachable panic as a defect — a configuration mistake must not be
     /// the thing that takes it down.
+    /// A profile configuration the canonical validator refused.
+    ///
+    /// Carries every broken rule rather than the first: an operator
+    /// fixing sixty endpoints should not find their mistakes one run
+    /// apart.
+    InvalidProfile(Vec<String>),
+    /// A [`SubstrateConfig`] value outside its permitted range.
     InvalidConfig {
         /// Which field.
         field: &'static str,
@@ -416,6 +423,13 @@ impl core::fmt::Display for SubstrateError {
             Self::Transport(d) => write!(f, "transport: {d}"),
             Self::Stopped => write!(f, "the swarm task has stopped"),
             Self::Identity(d) => write!(f, "identity: {d}"),
+            Self::InvalidProfile(broken) => {
+                write!(
+                    f,
+                    "the profile configuration is invalid: {}",
+                    broken.join("; ")
+                )
+            }
             Self::InvalidConfig {
                 field,
                 got,
@@ -1177,38 +1191,12 @@ impl SwarmRuntime {
     /// # Errors
     /// [`SubstrateError::Stopped`] if the task is gone.
     pub async fn configure_direct(&self, config: DirectEndpoints) -> Result<(), SubstrateError> {
-        // THE CEILING IS CHECKED BEFORE THE CONFIGURATION BECOMES STATE.
-        // `configure` builds a registry entry and a queue per endpoint,
-        // so an oversized configuration is not merely accepted, it is
-        // retained — and the command used to reply success unconditionally
-        // because `DirectEndpoints` has no validating constructor.
-        //
-        // `MAX_ENDPOINTS` rather than a 64 written here: the byte ceiling
-        // on an EndpointId is also 64, and two unrelated limits that
-        // happen to share a number are exactly the pair someone later
-        // "unifies".
-        if config.endpoints.len() > interweave_profile_config::MAX_ENDPOINTS {
-            return Err(SubstrateError::InvalidConfig {
-                field: "direct.endpoints",
-                got: config.endpoints.len(),
-                allowed: (0, interweave_profile_config::MAX_ENDPOINTS),
-            });
-        }
-        // THE QUEUE DEPTH IS A CEILING TOO, and refused rather than
-        // clamped. `EndpointQueues::open` raises a zero to one and
-        // nothing lowered anything, so a caller asking for a million got
-        // a million — memory a remote peer then fills, bounded only by
-        // its rate allowance, for the life of the process. Clamping
-        // silently would install a configuration the caller did not ask
-        // for and never learns about, which is how a bound becomes a
-        // surprise later.
-        if config.queue_bound > interweave_local_client_api::MAX_EVENT_QUEUE {
-            return Err(SubstrateError::InvalidConfig {
-                field: "direct.queue_bound",
-                got: config.queue_bound,
-                allowed: (1, interweave_local_client_api::MAX_EVENT_QUEUE),
-            });
-        }
+        // NO VALIDATION HERE. `DirectEndpoints` can only be built by
+        // `from_profile`, which runs the canonical `ProfileConfig`
+        // validator — duplicate ids, a default naming an absent or
+        // disabled endpoint, the endpoint-count ceiling and the queue
+        // depth are all decided there. A second copy of those rules on
+        // this path is how the two drift.
         let (reply, answer) = oneshot::channel();
         self.commands
             .send(SwarmCommand::ConfigureDirect {
@@ -1998,6 +1986,34 @@ fn handle_command(
                 let _ = reply.send(Err(DirectError::UnauthorizedPeer));
                 return;
             }
+            // THE SOURCE ENDPOINT'S OWN POLICY NARROWS THIS SEND.
+            // `authorize_outbound` applies profile trust first and the
+            // endpoint's outbound subset second, and until now it had no
+            // production caller at all — the narrowing existed in the
+            // domain layer and bound nothing. An endpoint configured to
+            // reach only some peers could reach any profile-trusted one.
+            //
+            // AFTER the profile check, not before it, and the order is
+            // the meaning. A peer the profile has stopped trusting must
+            // hear `UnauthorizedPeer`; running this first reported
+            // `CapabilityDenied` for a revoked peer, which says the
+            // endpoint lacked authority when the profile is what denied
+            // it. Distinct from the profile check: this refuses a peer
+            // the PROFILE still trusts, which is the whole meaning of
+            // narrowing. `CapabilityDenied` says the endpoint lacked the
+            // authority, where `UnauthorizedPeer` would claim the profile
+            // did not trust the peer — a different and untrue statement.
+            if !matches!(
+                direct_state.registry.authorize_outbound(
+                    &frame.source_endpoint,
+                    &peer,
+                    &direct_state.trust
+                ),
+                interweave_trust_api::TrustDecision::Allowed
+            ) {
+                let _ = reply.send(Err(DirectError::CapabilityDenied));
+                return;
+            }
             let peer_id = match to_peer_id(&peer) {
                 Ok(id) => id,
                 Err(()) => {
@@ -2182,8 +2198,8 @@ impl DirectState {
         use interweave_transport_runtime::endpoint_registry::LocalSessionId;
 
         let mut endpoints = std::collections::BTreeMap::new();
-        for name in &config.endpoints {
-            endpoints.insert(name.clone(), Default::default());
+        for (name, configured) in &config.endpoints {
+            endpoints.insert(name.clone(), configured.clone());
         }
         let mut registry = EndpointRegistry::new(endpoints, config.default.clone());
 
@@ -2192,7 +2208,7 @@ impl DirectState {
         // real IPC claim, and the registry cannot tell the difference —
         // which is the point of it holding leases rather than sessions.
         let mut queues = EndpointQueues::new();
-        for name in &config.endpoints {
+        for (name, _) in &config.endpoints {
             if registry
                 .claim(
                     name,
@@ -2255,21 +2271,99 @@ impl DirectState {
 /// Endpoint configuration for this profile's direct routing.
 ///
 /// Stage 6 shape: every configured endpoint is leased in-process. Stage 8
-/// replaces the leasing half with real IPC claims and keeps the rest.
-#[derive(Debug, Clone)]
+/// The direct runtime's endpoint state, DERIVED from a validated
+/// profile configuration.
+///
+/// # Why this is not its own configuration model
+///
+/// It used to be one: a list of bare ids, a default, a depth and an
+/// epoch, assembled by hand at the call site. Every field the canonical
+/// `ProfileConfig` had and this did not was a field silently replaced by
+/// `RegisteredEndpoint::default()` — and the two that mattered were the
+/// inbound and outbound trust policies, whose default INHERITS profile
+/// trust. An endpoint configured to exclude a peer accepted that peer.
+///
+/// The answer is not more checks here. Each one would restate a rule
+/// `ProfileConfig::validate` already enforces, and the next field added
+/// there would be silently dropped here exactly as these were. So there
+/// is one constructor, it takes the canonical configuration, and it
+/// refuses anything that configuration would refuse — duplicate ids, a
+/// default naming an absent or disabled endpoint, and too many
+/// endpoints all come from the validator rather than from code written
+/// again here.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectEndpoints {
-    /// Every endpoint this profile accepts directed messages on.
-    pub endpoints: Vec<EndpointId>,
+    /// Every endpoint, with the configuration it was actually given.
+    endpoints: Vec<(EndpointId, RegisteredEndpoint)>,
     /// The endpoint an omitted destination resolves to.
     ///
     /// `None` means a message with no destination is `no_route` — which
     /// is a configuration, not a failure: a profile may require every
     /// sender to name where it is going.
-    pub default: Option<EndpointId>,
+    default: Option<EndpointId>,
     /// Bound on each endpoint's delivery queue.
-    pub queue_bound: usize,
+    queue_bound: usize,
     /// The lease epoch to grant.
-    pub epoch: interweave_transport_runtime::Generation,
+    epoch: interweave_transport_runtime::Generation,
+}
+
+impl DirectEndpoints {
+    /// Derive runtime endpoint state from a profile configuration.
+    ///
+    /// # Errors
+    /// [`SubstrateError::InvalidProfile`] carrying every rule the
+    /// configuration broke — reported together rather than one at a
+    /// time, because an operator fixing sixty endpoints should not
+    /// discover their mistakes one run apart.
+    ///
+    /// Also [`SubstrateError::InvalidConfig`] when `queue_bound` is
+    /// outside `1..=MAX_EVENT_QUEUE`, which is a property of this
+    /// runtime rather than of the profile.
+    pub fn from_profile(
+        profile: &interweave_profile_config::ProfileConfig,
+        queue_bound: usize,
+        epoch: interweave_transport_runtime::Generation,
+    ) -> Result<Self, SubstrateError> {
+        let errors = profile.validate();
+        if !errors.is_empty() {
+            return Err(SubstrateError::InvalidProfile(
+                errors.iter().map(ToString::to_string).collect(),
+            ));
+        }
+        if queue_bound == 0 || queue_bound > interweave_local_client_api::MAX_EVENT_QUEUE {
+            return Err(SubstrateError::InvalidConfig {
+                field: "direct.queue_bound",
+                got: queue_bound,
+                allowed: (1, interweave_local_client_api::MAX_EVENT_QUEUE),
+            });
+        }
+        let endpoints = profile
+            .endpoints
+            .entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.id.clone(),
+                    RegisteredEndpoint {
+                        enabled: entry.enabled,
+                        allowed_client_kinds: entry
+                            .allowed_client_kinds
+                            .iter()
+                            .map(|k| k.as_str().to_owned())
+                            .collect(),
+                        inbound: entry.inbound.clone(),
+                        outbound: entry.outbound.clone(),
+                    },
+                )
+            })
+            .collect();
+        Ok(Self {
+            endpoints,
+            default: profile.endpoints.default_direct_endpoint.clone(),
+            queue_bound,
+            epoch,
+        })
+    }
 }
 
 /// Whether a swarm event was a direct-protocol one.

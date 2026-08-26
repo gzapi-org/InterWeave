@@ -15,6 +15,10 @@
 
 use std::time::Duration;
 
+use interweave_profile_config::{
+    DirectoryConfig, EndpointConfig, EndpointsConfig, ProfileConfig, RegistrationPolicy,
+    TrustConfig, TrustPolicyKind,
+};
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::{
     DirectMessageV2, EndpointId, MediaType, MessageId, Payload, TransportIdentity,
@@ -23,6 +27,7 @@ use interweave_transport_libp2p::runtime::{
     DirectEndpoints, SubstrateConfig, SwarmEvent, SwarmRuntime,
 };
 use interweave_transport_runtime::{Generation, TrustSources};
+use interweave_trust_api::EndpointTrustPolicy;
 use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 
 fn who() -> (ProfileIdentity, TransportIdentity) {
@@ -42,16 +47,51 @@ fn endpoint(name: &str) -> EndpointId {
     EndpointId::parse(name).expect("valid endpoint id")
 }
 
+/// A profile carrying these endpoints, which is now the ONLY way to
+/// reach `DirectEndpoints` — the runtime derives its state from the
+/// canonical validated configuration rather than from a second model
+/// assembled here.
+fn profile_with(entries: Vec<EndpointConfig>, default: Option<&str>) -> ProfileConfig {
+    ProfileConfig {
+        schema_version: 2,
+        trust: TrustConfig {
+            policy: TrustPolicyKind::default(),
+            allowed_peers: std::collections::BTreeSet::new(),
+        },
+        endpoints: EndpointsConfig {
+            registration_policy: RegistrationPolicy::default(),
+            default_direct_endpoint: default.map(endpoint),
+            directory: DirectoryConfig::default(),
+            entries,
+        },
+    }
+}
+
+/// One endpoint entry with default policies.
+fn entry(name: &str) -> EndpointConfig {
+    EndpointConfig {
+        id: endpoint(name),
+        enabled: true,
+        advertise: false,
+        allowed_client_kinds: Vec::new(),
+        inbound: EndpointTrustPolicy::default(),
+        outbound: EndpointTrustPolicy::default(),
+    }
+}
+
 /// ONE PROFILE, SEVERAL ENDPOINTS. `human` is the default; `claude` and
 /// a third name that does not exist yet share the same PeerId, which is
 /// the arrangement Model B describes.
 fn endpoints() -> DirectEndpoints {
-    DirectEndpoints {
-        endpoints: vec![endpoint("human"), endpoint("claude"), endpoint("gpt-5")],
-        default: Some(endpoint("human")),
-        queue_bound: 8,
-        epoch: Generation::parse("modelb__________").expect("valid generation"),
-    }
+    DirectEndpoints::from_profile(
+        &profile_with(
+            vec![entry("human"), entry("claude"), entry("gpt-5")],
+            Some("human"),
+        ),
+        8,
+        Generation::parse("modelb__________").expect("valid generation"),
+    )
+    .expect("a valid profile")
 }
 
 /// A frame from `from`, to `to`, carrying `body` under `id`.
