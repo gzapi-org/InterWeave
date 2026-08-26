@@ -1216,6 +1216,18 @@ impl ConnectionManager {
         self.shutting_down.load(Ordering::Acquire)
     }
 
+    /// Whether `peer` is this profile's own PeerId.
+    ///
+    /// `classify` already answers `Unauthorized` for it, which is right
+    /// for a DIAL — this node is not a peer it may connect to. A direct
+    /// SEND owes a different answer: `DIRECT.md` makes the local PeerId
+    /// `InvalidArgument`, a caller mistake, not a trust verdict. Asked
+    /// separately so the two do not have to share one code.
+    #[must_use]
+    pub fn is_local_peer(&self, peer: &TransportIdentity) -> bool {
+        self.local_peer.as_ref() == Some(peer)
+    }
+
     /// Begin draining. Admission refuses from the next snapshot on.
     pub fn begin_shutdown(&mut self) {
         self.shutting_down.store(true, Ordering::Release);
