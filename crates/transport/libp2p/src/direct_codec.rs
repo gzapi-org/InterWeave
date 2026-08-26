@@ -407,7 +407,16 @@ pub fn decode_response(bytes: &[u8]) -> Result<DirectResponse, String> {
             if !extra.is_empty() {
                 return Err(format!("{} byte(s) after a rejection", extra.len()));
             }
-            let reason = reason_from_code(code).unwrap_or(DirectRejectReason::Unsupported);
+            // AN UNASSIGNED CODE IS MALFORMED METADATA, not a version
+            // problem. This coerced it to `Unsupported`, which surfaces
+            // as `ProtocolUnsupported` and tells a caller to go looking
+            // for a negotiation failure — from a peer that demonstrably
+            // negotiated direct v2 and answered on it. Refused instead,
+            // so the response decoder reports `InvalidData` and the
+            // exchange ends as `ProtocolViolation`.
+            let Some(reason) = reason_from_code(code) else {
+                return Err(format!("an unassigned rejection reason {code}"));
+            };
             Ok(DirectResponse::Rejected { message_id, reason })
         }
         other => Err(format!("an unknown response tag {other}")),
@@ -478,18 +487,19 @@ mod tests {
     /// interpret, not a decode failure. A future peer must be able to
     /// refuse us for a new reason without breaking the exchange.
     #[test]
-    fn an_unknown_reason_code_reads_as_unsupported() {
+    fn an_unknown_reason_code_is_refused() {
         let mut bytes = encode_response(&DirectResponse::Rejected {
             message_id: message_id(),
             reason: DirectRejectReason::NoRoute,
         });
         *bytes.last_mut().expect("a reason byte") = 200;
-        assert_eq!(
-            decode_response(&bytes),
-            Ok(DirectResponse::Rejected {
-                message_id: message_id(),
-                reason: DirectRejectReason::Unsupported
-            })
+        // MALFORMED METADATA, not a version problem. Coercing it to
+        // `Unsupported` surfaced as `ProtocolUnsupported` and sent a
+        // caller looking for a negotiation failure — from a peer that
+        // had demonstrably negotiated direct v2 and answered on it.
+        assert!(
+            decode_response(&bytes).is_err(),
+            "an unassigned reason code is refused, not reinterpreted"
         );
     }
 
