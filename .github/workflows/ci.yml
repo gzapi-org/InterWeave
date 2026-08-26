@@ -130,6 +130,11 @@ jobs:
       - name: Required check contexts match the workflow's job names
         run: bash tools/checks/check_required_contexts.sh
 
+      # cargo-deny cannot catch this one: yamux has no RustSec advisory,
+      # so the dependency check below reports clean and always will.
+      - name: No first-party source selects the vulnerable yamux muxer
+        run: bash tools/checks/check_yamux_muxer.sh
+
       # Installed from the upstream release binary, verified by checksum,
       # rather than through a third-party action.
       #
