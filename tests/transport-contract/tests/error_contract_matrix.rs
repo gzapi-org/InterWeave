@@ -688,15 +688,23 @@ fn every_proof_this_matrix_cites_exists() {
         // by "one of them proves it", which is looser than unique
         // resolution would be and the reason the name must still be a
         // test that names the error.
-        let bodies: Vec<String> = sources
-            .iter()
-            .filter(|s| s.contains(&needle))
-            .filter_map(|s| proof_body(s, name))
-            .collect();
-        if bodies.is_empty() {
-            broken.push(format!("  `{name}` — no test by that name exists"));
+        let declaring: Vec<&String> = sources.iter().filter(|s| s.contains(&needle)).collect();
+        if declaring.is_empty() {
+            broken.push(format!("  `{name}` — no function by that name exists"));
             continue;
         }
+        // Declared somewhere is not the same as declared as a test.
+        if !declaring.iter().any(|s| declared_as_test(s, name)) {
+            broken.push(format!(
+                "  `{name}` — exists, but carries no #[test] attribute, so it \
+                 does not run"
+            ));
+            continue;
+        }
+        let bodies: Vec<String> = declaring
+            .iter()
+            .filter_map(|s| proof_body(s, name))
+            .collect();
         // The proof must speak about the error it claims, in ITS OWN
         // body. Searching the whole file was the first version of this
         // and it was worthless: any unrelated test, comment, or
@@ -836,6 +844,36 @@ fn the_matrix_has_no_duplicate_or_dead_rows() {
 /// Brace counting is deliberately naive — a brace inside a string
 /// literal would confuse it. Test bodies do not do that, and the failure
 /// mode is a parse error this test reports rather than a silent pass.
+/// Is `name` declared as a TEST in this source?
+///
+/// Resolving `fn <name>(` alone was not enough: a cited proof that loses
+/// its `#[test]` or `#[tokio::test]` attribute stops running, while the
+/// matrix goes on reporting that a real proof exists. That is the defect
+/// this whole file exists to prevent, one level up — a claim that reads
+/// as covered with nothing behind it.
+///
+/// The attribute is looked for in the few lines above the declaration
+/// rather than immediately before it, because doc comments and other
+/// attributes sit between them.
+fn declared_as_test(source: &str, name: &str) -> bool {
+    let Some(at) = source.find(&format!("fn {name}(")) else {
+        return false;
+    };
+    let preamble_start = source[..at]
+        .char_indices()
+        .rev()
+        .filter(|(_, c)| *c == '\n')
+        .nth(12)
+        .map_or(0, |(i, _)| i);
+    let preamble = &source[preamble_start..at];
+    // Only the attribute that makes a function RUN counts. `#[cfg(test)]`
+    // on a module does not: every helper in a test module carries it and
+    // none of them are tests.
+    preamble.contains("#[test]")
+        || preamble.contains("#[tokio::test")
+        || preamble.contains("#[test_case")
+}
+
 fn proof_body(source: &str, name: &str) -> Option<String> {
     let own = span(source, &format!("fn {name}("))?;
     let mut all = own.clone();
