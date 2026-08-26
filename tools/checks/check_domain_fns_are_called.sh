@@ -321,6 +321,15 @@ for file in "${domain[@]}"; do
             expr="${exempt_call[$qualified]}"
             found_call=0
             for other in "${all_rs[@]}"; do
+                # The defining file does not count, exactly as it does
+                # not for the ordinary caller scan. A `call` exemption
+                # exists because the check cannot attribute a METHOD CALL
+                # to a type — not because same-file use should count.
+                # Same-file production use was its own mechanism and was
+                # removed for producing a hole in two consecutive review
+                # rounds; letting it back in through the exemption path
+                # would undo that quietly.
+                [[ "$other" == "$file" ]] && continue
                 if grep -qF -- "$expr" <<<"$(production_of "$other")"; then
                     found_call=1
                     break
