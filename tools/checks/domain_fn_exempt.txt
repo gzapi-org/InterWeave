@@ -1,0 +1,132 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# Public domain functions and types with no PRODUCTION caller.
+#
+# A test is not a caller. `authorize_outbound` had unit tests and no
+# production caller, which is the whole defect this guard exists for, so
+# counting tests would let the original P1 straight through. That is why
+# this ledger is long: at Stage 6 most of the neutral API is written and
+# not yet wired, and this is the list of what.
+#
+# Two kinds of entry, both qualified as `Type::name` — a bare `new` would
+# exempt eighteen unrelated constructors, and `is_punitive_at` exists on
+# two types.
+#
+#   <Type::name>  stage-N  <reason>   nothing calls it YET. The stage
+#                                     that will is a DEADLINE: the check
+#                                     fails once the open stage is past
+#                                     it, so an entry cannot quietly
+#                                     become permanent.
+#
+#   <Type::name>  call <expr>         it IS called from production, in
+#                                     method position the check cannot
+#                                     attribute to a type. `<expr>` is
+#                                     the literal call, and the check
+#                                     fails unless it still appears in a
+#                                     production source.
+#
+# A bare `Type` entry (no `::`) covers a type with no production consumer
+# at all: its methods are uncalled for one reason rather than several,
+# and the type comes back for review as a whole when its stage opens.
+#
+# Stages are assigned from the canonical plan's section for the package,
+# not researched per function. An entry firing a stage early costs one
+# line of triage; firing late costs everything the deadline was for.
+
+
+# --- called from production, not attributable from the call site ---
+FrameError::to_wire                              call  error.to_wire(
+Refusal::to_wire                                 call  refusal.to_wire(
+
+# --- stage-7 -----------------------------------------------------
+IngressLimiter::prune_idle                       stage-7   broadcast subscription surface, no mesh before GossipSub
+IngressLimiter::tracked_peers                    stage-7   broadcast subscription surface, no mesh before GossipSub
+ReplyResolution::as_error                        stage-7   reply routes arrive with channels
+ReplyTokenTable::clear                           stage-7   reply routes arrive with channels
+ReplyTokenTable::expire                          stage-7   reply routes arrive with channels
+ReplyTokenTable::is_empty                        stage-7   reply routes arrive with channels
+ReplyTokenTable::len                             stage-7   reply routes arrive with channels
+ReplyTokenTable::mint                            stage-7   reply routes arrive with channels
+ReplyTokenTable::new                             stage-7   reply routes arrive with channels
+ReplyTokenTable::resolve                         stage-7   reply routes arrive with channels
+SubscriptionRegistry::backend_should_subscribe   stage-7   broadcast subscription surface, no mesh before GossipSub
+SubscriptionRegistry::join                       stage-7   broadcast subscription surface, no mesh before GossipSub
+SubscriptionRegistry::leave                      stage-7   broadcast subscription surface, no mesh before GossipSub
+SubscriptionRegistry::may_publish                stage-7   broadcast subscription surface, no mesh before GossipSub
+SubscriptionRegistry::new                        stage-7   broadcast subscription surface, no mesh before GossipSub
+SubscriptionRegistry::release_session            stage-7   broadcast subscription surface, no mesh before GossipSub
+SubscriptionRegistry::subscribers                stage-7   broadcast subscription surface, no mesh before GossipSub
+SubscriptionRegistry::subscriptions              stage-7   broadcast subscription surface, no mesh before GossipSub
+
+# --- stage-8 -----------------------------------------------------
+DirectDestination::to_default                    stage-8   identifier projections used by the endpoint directory
+DirectDestination::to_endpoint                   stage-8   identifier projections used by the endpoint directory
+EndpointQueues::is_open                          stage-8   needs a session on the other side of the lease boundary
+EndpointRegistry::default_endpoint               stage-8   needs a session on the other side of the lease boundary
+EndpointRegistry::release_session                stage-8   needs a session on the other side of the lease boundary
+EndpointRegistry::set_default                    stage-8   needs a session on the other side of the lease boundary
+EndpointRegistry::set_enabled                    stage-8   needs a session on the other side of the lease boundary
+LocalAdminPort                                   stage-8   plan L588: the lease boundary is wired to transport here
+LocalDataSession                                 stage-8   plan L588: the lease boundary is wired to transport here
+MessageId::parse_hex                             stage-8   identifier projections used by the endpoint directory
+MessageId::to_hex                                stage-8   identifier projections used by the endpoint directory
+
+# --- stage-9 -----------------------------------------------------
+CandidatePeer::validate                          stage-9   provider descriptors validated when a provider exists to supply them
+ProtocolId                                       stage-9   provider descriptors validated when a provider exists to supply them
+ProviderDescriptor                               stage-9   provider descriptors validated when a provider exists to supply them
+
+# --- stage-10 ----------------------------------------------------
+ObservedCandidates                               stage-10  Kademlia control port, inert until the DHT is activated
+OfferedAddress                                   stage-10  Kademlia control port, inert until the DHT is activated
+OfferedAddresses                                 stage-10  Kademlia control port, inert until the DHT is activated
+RoutingView                                      stage-10  Kademlia control port, inert until the DHT is activated
+validate_limits                                  stage-10  Kademlia control port, inert until the DHT is activated
+
+# --- stage-11 ----------------------------------------------------
+AddressState::is_dialable_at                     stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
+AddressState::is_known_good                      stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
+AddressState::is_punitive_at                     stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
+ConnectionManager::connections                   stage-11  dial-management introspection, first read by the reachability stack
+ConnectionManager::is_retry_due                  stage-11  dial-management introspection, first read by the reachability stack
+ConnectionManager::revision                      stage-11  dial-management introspection, first read by the reachability stack
+ConnectionManager::scheduled_retries             stage-11  dial-management introspection, first read by the reachability stack
+ConnectionPolicy::address_entries                stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
+ConnectionPolicy::peer_entries                   stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
+ConnectionPolicy::prune                          stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
+PeerBackoff::is_clear_at                         stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
+PeerBackoff::is_punitive_at                      stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
+PolicySnapshot::admit                            stage-11  dial-management introspection, first read by the reachability stack
+PolicySnapshot::classify                         stage-11  dial-management introspection, first read by the reachability stack
+PolicySnapshot::connections                      stage-11  dial-management introspection, first read by the reachability stack
+PolicySnapshot::pending_dials                    stage-11  dial-management introspection, first read by the reachability stack
+PolicySnapshot::revision                         stage-11  dial-management introspection, first read by the reachability stack
+SnapshotHandle::admit                            stage-11  dial-management introspection, first read by the reachability stack
+SnapshotHandle::load                             stage-11  dial-management introspection, first read by the reachability stack
+
+# --- stage-12 ----------------------------------------------------
+DedupCache::expire                               stage-12  expiry and introspection driven at runtime composition
+PeerTrustPolicy::with_local_peer                 stage-12  bound at runtime composition
+ReservationMap::outstanding                      stage-12  expiry and introspection driven at runtime composition
+TransportCapabilities::clamped                   stage-12  capability clamping happens at runtime composition
+TrustDecision::is_allowed                        stage-12  bound at runtime composition
+
+# --- stage-13 ----------------------------------------------------
+ContentFingerprint::as_bytes                     stage-13  fingerprint rendering, surfaced by diagnostics
+ContentFingerprint::to_hex                       stage-13  fingerprint rendering, surfaced by diagnostics
+HandshakeSlot::source                            stage-13  pre-auth admission counters, surfaced by `admin.*` status
+Hello::evaluate                                  stage-13  handshake authority domain, needs two real sockets
+Payload::at_ceiling                              stage-13  payload decomposition at the IPC frame boundary
+Payload::into_parts                              stage-13  payload decomposition at the IPC frame boundary
+PreAuthGate::tracked_sources                     stage-13  pre-auth admission counters, surfaced by `admin.*` status
+PreAuthLimits::max_attempts_per_window           stage-13  pre-auth admission counters, surfaced by `admin.*` status
+PreAuthLimits::max_global_attempts_per_window    stage-13  pre-auth admission counters, surfaced by `admin.*` status
+PreAuthLimits::max_pending_per_source            stage-13  pre-auth admission counters, surfaced by `admin.*` status
+PreAuthLimits::max_pending_total                 stage-13  pre-auth admission counters, surfaced by `admin.*` status
+PreAuthLimits::max_sources                       stage-13  pre-auth admission counters, surfaced by `admin.*` status
+PreAuthLimits::rate_window_ms                    stage-13  pre-auth admission counters, surfaced by `admin.*` status
+PreAuthLimitsBuilder                             stage-13  pre-auth admission counters, surfaced by `admin.*` status
+RequestedCapability::as_admin                    stage-13  handshake authority domain, needs two real sockets
+RequestedCapability::as_data                     stage-13  handshake authority domain, needs two real sockets
+source_bucket                                    stage-13  pre-auth admission counters, surfaced by `admin.*` status
