@@ -241,11 +241,7 @@ The same file forbids git dependencies and any registry other than crates.io. A 
 
 #### The advisory check sees RustSec, and GitHub sees more
 
-`cargo-deny` resolves advisories against the RustSec database. A vulnerability published only as a GHSA has no RUSTSEC id, so the check cannot see it and reports clean — accurately, for the question it asks.
-
-The live example is **`yamux`**, which has no RustSec advisory at all. `libp2p-yamux` depends on BOTH 0.12.1 and the patched 0.13.10; `Config::default()` selects 0.13.10, which is what `crates/transport/libp2p` uses. But every tuning setter — `set_max_num_streams`, `set_receive_window_size`, `set_max_buffer_size`, `set_window_update_mode` — routes through `Config::set`, which replaces the config with `Config012::default()` and silently moves the muxer onto 0.12.1 and its remote-panic DoS (GHSA-vxx9-2994-q338). Bounding stream counts is exactly what §6 pushes toward, so the natural next change reintroduces the vulnerability without touching a version number and with every check green.
-
-`tools/checks/check_yamux_muxer.sh` is the guard that catches it, because `cargo-deny` cannot. Treat Dependabot as a second, non-overlapping source rather than a duplicate of the dependency check.
+`cargo-deny` resolves advisories against the RustSec database. A vulnerability published only as a GHSA has no RUSTSEC id, so the check cannot see it and reports clean — accurately, for the question it asks. Treat Dependabot as a second, non-overlapping source rather than a duplicate of the dependency check.
 
 ### Licence headers are checked
 
@@ -316,6 +312,8 @@ The chain that lands code is `gh pr merge --auto` → checks → merge queue →
 That trade only holds while the two are genuinely separate. **Never bundle `gh pr merge` with the commands before it** — permission rules are prefix-matched, so a bundled merge slips the gate entirely and approving a bundle authorizes landing a tree that does not exist yet.
 
 A session cannot see its own permission prompts, so do not try to verify this gate from the transcript: an approved merge and an auto-allowed one produce an identical tool result.
+
+**The GraphQL API arms too, and prefix matching cannot tell it apart.** `gh api graphql -f query='mutation{enablePullRequestAutoMerge…}'` and `enqueuePullRequest` land a PR exactly as `gh pr merge --auto` does, and a permission rule matching command prefixes cannot see a mutation name inside a quoted query string. So `gh api graphql` is no longer blanket-allowed, and **landing goes through `gh pr merge`** — not because the mutation is worse, but because it is the form the gate can actually see. A gate with a documented way around it is not a gate.
 
 ### Merge / PR discipline
 

@@ -28,7 +28,6 @@
       "Bash(gh label *)",
       "Bash(gh cache *)",
       "Bash(gh browse *)",
-      "Bash(gh api graphql *)",
       "Bash(gh auth status*)",
       "Bash(gh repo view*)",
       "Bash(gh release view*)",
