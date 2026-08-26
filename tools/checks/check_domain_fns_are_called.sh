@@ -31,13 +31,30 @@
 # whose whole purpose is to be called from a backend. Only `pub`;
 # `pub(crate)` announces a narrower audience and is out of scope.
 #
-# WHAT COUNTS AS A CALLER. Any mention of the name in a different
-# tracked `.rs` file. Deliberately loose: this asks "does anyone
-# anywhere know this exists", not "is there a call edge". A trait impl,
-# a re-export or a doc link all count.
+# WHAT COUNTS AS A CALLER. A mention of the name in a different tracked
+# `.rs` file — and, for a method, a mention of its enclosing type in
+# that same file, OR a call in method position. Deliberately loose about
+# the call itself: this asks
+# "does anyone anywhere know this exists", not "is there a call edge".
+# A trait impl, a re-export or a doc link all count.
+#
+# The enclosing type is not a refinement, it is the difference between
+# working and not. Matching a bare name means every `new`, `len` and
+# `is_empty` in the tree vouches for every other one: `ObservedCandidates
+# ::new` is referenced nowhere outside its own file, and sixteen
+# unrelated `new` methods were enough to let it pass. Requiring the type
+# name to appear too costs nothing for a genuinely-used method — a file
+# that calls `EndpointQueues::len` names `EndpointQueues` — and removes
+# the whole class.
+#
+# Method position is the necessary escape: `refusal.to_wire()` never
+# writes `Refusal`, so requiring the type alone reports a function that
+# is called twice. `.new(` is not idiomatic Rust for a constructor, so
+# this escape does not hand the masking back.
 #
 # EXEMPTIONS carry a DEADLINE. `tools/checks/domain_fn_exempt.txt` holds
-# `<name> <stage-N> <reason>`, and an exemption expires once the open
+# `<Type::name> <stage-N> <reason>` — qualified, because a bare `new`
+# would exempt sixteen unrelated constructors at once, and an exemption expires once the open
 # stage — `workspace.metadata.interweave.status` — is past stage N. That
 # is the whole point: a flat allow-list is a snooze button, and
 # `authorize_outbound` was written *in* the stage that was supposed to
@@ -105,34 +122,64 @@ problems=0
 declare -A seen_exempt
 
 for file in "${domain[@]}"; do
-    while IFS= read -r name; do
+    while IFS=$'\t' read -r name owner; do
         [[ -z "$name" ]] && continue
 
         # One grep per name across every tracked source, rather than one
         # per (name, file) pair: the same answer, a fraction of the forks.
+        # A method additionally requires its type to be named in the same
+        # file, or every same-named method in the tree vouches for it.
         elsewhere=0
         while IFS= read -r hit; do
-            [[ "$hit" != "$file" ]] && { elsewhere=1; break; }
+            [[ "$hit" == "$file" ]] && continue
+            if [[ -n "$owner" ]] \
+               && ! grep -qw -- "$owner" "$hit" 2>/dev/null \
+               && ! grep -qF -- ".$name(" "$hit" 2>/dev/null; then
+                continue
+            fi
+            elsewhere=1
+            break
         done < <(grep -lw -- "$name" "${all_rs[@]}" 2>/dev/null)
 
-        if [[ -n "${exempt_stage[$name]:-}" ]]; then
-            seen_exempt["$name"]=1
+        qualified="$name"
+        [[ -n "$owner" ]] && qualified="$owner::$name"
+
+        if [[ -n "${exempt_stage[$qualified]:-}" ]]; then
+            seen_exempt["$qualified"]=1
             if (( elsewhere == 1 )); then
-                echo "check_domain_fns_are_called: $EXEMPT_FILE: \`$name\` is exempt but IS referred to elsewhere — drop the entry." >&2
+                echo "check_domain_fns_are_called: $EXEMPT_FILE: \`$qualified\` is exempt but IS referred to elsewhere — drop the entry." >&2
                 problems=$((problems + 1))
-            elif (( exempt_stage[$name] < open_stage )); then
-                echo "check_domain_fns_are_called: $file: \`$name\` is exempt until stage ${exempt_stage[$name]}, but stage $open_stage is open — the deadline passed." >&2
+            elif (( exempt_stage[$qualified] < open_stage )); then
+                echo "check_domain_fns_are_called: $file: \`$qualified\` is exempt until stage ${exempt_stage[$qualified]}, but stage $open_stage is open — the deadline passed." >&2
                 problems=$((problems + 1))
             fi
             continue
         fi
 
         if (( elsewhere == 0 )); then
-            echo "check_domain_fns_are_called: $file: \`$name\` is referred to nowhere else." >&2
+            echo "check_domain_fns_are_called: $file: \`$qualified\` is referred to nowhere else." >&2
             problems=$((problems + 1))
         fi
-    done < <(grep -oE '^[[:space:]]*pub (const |async )?fn [a-z_][a-z0-9_]*' "$file" 2>/dev/null \
-                | sed 's/.*fn //' | sort -u)
+    done < <(awk '
+        # Top-level `impl` opens an owner; the matching top-level `}`
+        # closes it. `impl Trait for Type` owns Type, not Trait.
+        /^impl/ {
+            line = $0
+            sub(/^impl(<[^>]*>)?[[:space:]]*/, "", line)
+            if (line ~ / for /) { sub(/.* for /, "", line) }
+            sub(/[[:space:]]*[{<].*/, "", line)
+            gsub(/[^A-Za-z0-9_]/, "", line)
+            owner = line
+            next
+        }
+        /^}/ { owner = "" }
+        /^[[:space:]]*pub (const |async )?fn [a-z_]/ {
+            n = $0
+            sub(/.*fn /, "", n)
+            sub(/[^a-z0-9_].*/, "", n)
+            print n "\t" owner
+        }
+    ' "$file" 2>/dev/null | sort -u)
 done
 
 # An exemption naming a function that no longer exists stops protecting

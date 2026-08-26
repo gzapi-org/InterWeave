@@ -117,6 +117,37 @@ run_against "$CALLED" "$BACKEND_CALLS" \
 assert_rc   "an exemption naming no function fails" 1
 assert_says "  and it calls the entry stale" 'stale entry'
 
+# --- a method is qualified by its type -------------------------------
+#
+# The reviewer's case on PR #41: matching a bare name lets every `new` in
+# the tree vouch for every other one. `ObservedCandidates::new` was
+# referenced nowhere outside its own file and passed anyway, because
+# sixteen unrelated `new` methods existed.
+ALPHA_NEW='impl Alpha {
+    pub fn new() -> u8 { 0 }
+}'
+run_against "$ALPHA_NEW" 'fn go() { let _ = Beta::new(); }' "" ""
+assert_rc   "a same-named method on an unrelated type is not a caller" 1
+assert_says "  and it reports the qualified name" 'Alpha::new'
+
+run_against "$ALPHA_NEW" 'fn go() { let _ = Alpha::new(); }' "" ""
+assert_rc   "naming the type makes it a caller" 0
+
+# But requiring the type NAME alone would report a function that is
+# called twice: `refusal.to_wire()` never writes `Refusal`.
+run_against 'impl Refusal {
+    pub fn to_wire(&self) -> u8 { 0 }
+}' 'fn go(r: X) { let _ = r.to_wire(); }' "" ""
+assert_rc   "a call in method position counts without naming the type" 0
+
+# --- exemptions are qualified too ------------------------------------
+run_against "$ALPHA_NEW" "$BACKEND_IDLE" 'new stage-9 a bare name must not cover a method' ""
+assert_rc   "a bare exemption does not cover a qualified method" 1
+assert_says "  the qualified name is still reported" 'Alpha::new'
+
+run_against "$ALPHA_NEW" "$BACKEND_IDLE" 'Alpha::new stage-9 qualified and ahead' ""
+assert_rc   "a qualified exemption covers it" 0
+
 # --- a malformed exemption file is a hard error, not a pass -----------
 run_against "$UNCALLED" "$BACKEND_IDLE" 'authorize_outbound no reason and no stage' ""
 assert_rc   "an exemption without a stage-N deadline is exit 2" 2

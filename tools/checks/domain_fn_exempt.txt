@@ -4,7 +4,11 @@
 # Public domain functions with no in-tree caller yet, each keyed to the
 # stage that will call it.
 #
-# Format:  <fn name>  <stage-N>  <reason>
+# Format:  <Type::name>  <stage-N>  <reason>
+#
+# QUALIFIED, not bare. A bare `new` would exempt sixteen unrelated
+# constructors at once, and `is_punitive_at` exists on both AddressState
+# and PeerBackoff — one entry must not vouch for the other.
 #
 # The stage is a DEADLINE, not a note. check_domain_fns_are_called.sh
 # fails once the open stage is past the one named here, so an exemption
@@ -12,54 +16,69 @@
 # to prevent. `authorize_outbound` was written in the stage that was
 # supposed to call it and shipped uncalled anyway.
 #
-# Stage numbers are read from the canonical plan's section for the
-# package. Where the plan does not name a consumer outright, the entry
-# records the earliest stage that plausibly needs it; an entry firing
-# early costs one line of triage, an entry set too late costs nothing
-# until it is useless.
+# Stage numbers come from the canonical plan's section for the package.
+# Where the plan does not name a consumer outright, the entry records the
+# earliest stage that plausibly needs it: firing early costs one line of
+# triage, firing late costs everything the deadline was for.
 
-# --- Stage 7, GossipSub broadcast: the ingress policy surface ---------
-may_publish              stage-7   publisher authorization, applied when a topic exists to publish to
-backend_should_subscribe stage-7   mesh subscription decision, no mesh before Stage 7
-subscribers              stage-7   subscriber introspection for the broadcast path
-prune_idle               stage-7   idle-subscription reclamation on the broadcast path
-as_error                 stage-7   ReplyResolution -> caller error; reply routes arrive with channels
 
-# --- Stage 8, endpoint directory: leases cross a session boundary -----
-default_endpoint         stage-8   configured remote default, read when a caller may omit a destination
-set_enabled              stage-8   endpoint disable + lease revocation, needs a session to revoke from
-to_endpoint              stage-8   EndpointId projection used by the directory
-authorize_direct_send    stage-8   plan L588: the lease-derived source endpoint is wired to transport here
-endpoint_lease           stage-8   plan L588
-port_id                  stage-8   plan L588
-session_id               stage-8   plan L588
+# --- stage 7 ---------------------------------------------------------
+IngressLimiter::prune_idle                       stage-7   broadcast subscription surface, no mesh before GossipSub
+SubscriptionRegistry::backend_should_subscribe   stage-7   broadcast subscription surface, no mesh before GossipSub
+SubscriptionRegistry::leave                      stage-7   broadcast subscription surface, no mesh before GossipSub
+SubscriptionRegistry::may_publish                stage-7   broadcast subscription surface, no mesh before GossipSub
+SubscriptionRegistry::new                        stage-7   broadcast subscription surface, no mesh before GossipSub
+SubscriptionRegistry::subscribers                stage-7   broadcast subscription surface, no mesh before GossipSub
+SubscriptionRegistry::subscriptions              stage-7   broadcast subscription surface, no mesh before GossipSub
+ReplyResolution::as_error                        stage-7   reply routes arrive with channels
+ReplyTokenTable::mint                            stage-7   reply routes arrive with channels
+ReplyTokenTable::new                             stage-7   reply routes arrive with channels
+ReplyTokenTable::resolve                         stage-7   reply routes arrive with channels
 
-# --- Stage 10, Kademlia: the driver port ------------------------------
-can_become_healthy           stage-10  Kademlia control port, inert until the DHT is activated
-effective_target             stage-10  Kademlia control port
-is_saturated                 stage-10  Kademlia control port
-is_target_satisfied          stage-10  Kademlia control port
-next_exploration_interval_ms stage-10  Kademlia control port
-parse_all                    stage-10  Kademlia control port
-validate_limits              stage-10  Kademlia control port
+# --- stage 8 ---------------------------------------------------------
+LocalDataSession::authorize_direct_send          stage-8   plan L588: the lease-derived source endpoint is wired to transport here
+LocalDataSession::endpoint_lease                 stage-8   plan L588
+LocalDataSession::session_id                     stage-8   plan L588
+DirectDestination::to_endpoint                   stage-8   EndpointId projection used by the endpoint directory
+EndpointRegistry::default_endpoint               stage-8   needs a session to revoke from or default for
+EndpointRegistry::set_enabled                    stage-8   needs a session to revoke from or default for
 
-# --- Stage 11, mandatory Internet connectivity: address introspection -
-address_entries   stage-11  per-address backoff introspection, first read by AutoNAT/relay selection
-is_clear_at       stage-11  address quarantine state
-is_dialable_at    stage-11  address quarantine state
-is_known_good     stage-11  address quarantine state
-is_punitive_at    stage-11  address quarantine state
-peer_entries      stage-11  per-peer backoff introspection
-prune             stage-11  backoff-table reclamation
+# --- stage 10 --------------------------------------------------------
+ObservedCandidates::new                          stage-10  Kademlia control port, inert until the DHT is activated
+OfferedAddresses::new                            stage-10  Kademlia control port, inert until the DHT is activated
+OfferedAddresses::parse_all                      stage-10  Kademlia control port, inert until the DHT is activated
+RoutingView::can_become_healthy                  stage-10  Kademlia control port, inert until the DHT is activated
+RoutingView::effective_target                    stage-10  Kademlia control port, inert until the DHT is activated
+RoutingView::is_saturated                        stage-10  Kademlia control port, inert until the DHT is activated
+RoutingView::is_target_satisfied                 stage-10  Kademlia control port, inert until the DHT is activated
+RoutingView::next_exploration_interval_ms        stage-10  Kademlia control port, inert until the DHT is activated
+validate_limits                                  stage-10  Kademlia control port, inert until the DHT is activated
 
-# --- Stage 12, full TransportRuntime composition ----------------------
-with_local_peer   stage-12  trust policy bound to the local peer, at composition
+# --- stage 11 --------------------------------------------------------
+AddressState::is_dialable_at                     stage-11  address/peer backoff introspection, first read by AutoNAT and relay selection
+AddressState::is_known_good                      stage-11  address/peer backoff introspection, first read by AutoNAT and relay selection
+AddressState::is_punitive_at                     stage-11  address/peer backoff introspection, first read by AutoNAT and relay selection
+ConnectionPolicy::address_entries                stage-11  address/peer backoff introspection, first read by AutoNAT and relay selection
+ConnectionPolicy::peer_entries                   stage-11  address/peer backoff introspection, first read by AutoNAT and relay selection
+ConnectionPolicy::prune                          stage-11  address/peer backoff introspection, first read by AutoNAT and relay selection
+PeerBackoff::is_clear_at                         stage-11  address/peer backoff introspection, first read by AutoNAT and relay selection
+PeerBackoff::is_punitive_at                      stage-11  address/peer backoff introspection, first read by AutoNAT and relay selection
 
-# --- Stage 13, daemon and desktop IPC v2 ------------------------------
-as_admin                       stage-13  handshake authority domain, needs two real sockets
-as_data                        stage-13  handshake authority domain, needs two real sockets
-into_parts                     stage-13  payload decomposition at the IPC frame boundary
-max_global_attempts_per_window stage-13  pre-auth admission counters, surfaced by `admin.*` status
-max_sources                    stage-13  pre-auth admission counters
-rate_window_ms                 stage-13  pre-auth admission counters
-tracked_sources                stage-13  pre-auth admission counters
+# --- stage 12 --------------------------------------------------------
+TransportCapabilities::clamped                   stage-12  capability clamping happens at runtime composition
+PeerTrustPolicy::with_local_peer                 stage-12  trust policy bound to the local peer, at composition
+
+# --- stage 13 --------------------------------------------------------
+RequestedCapability::as_admin                    stage-13  handshake authority domain, needs two real sockets
+RequestedCapability::as_data                     stage-13  handshake authority domain, needs two real sockets
+LocalAdminPort::endpoint_lease                   stage-13  proves an admin port holds no application lease
+LocalAdminPort::holds                            stage-13  admin authority check, needs an admin IPC socket
+LocalAdminPort::new                              stage-13  admin port constructed by the daemon
+LocalAdminPort::port_id                          stage-13  admin port identity, surfaced over admin IPC
+Payload::into_parts                              stage-13  payload decomposition at the IPC frame boundary
+PreAuthGate::tracked_sources                     stage-13  pre-auth admission counters, surfaced by `admin.*` status
+PreAuthLimits::max_attempts_per_window           stage-13  pre-auth admission counters, surfaced by `admin.*` status
+PreAuthLimits::max_global_attempts_per_window    stage-13  pre-auth admission counters, surfaced by `admin.*` status
+PreAuthLimits::max_pending_per_source            stage-13  pre-auth admission counters, surfaced by `admin.*` status
+PreAuthLimits::max_sources                       stage-13  pre-auth admission counters, surfaced by `admin.*` status
+PreAuthLimits::rate_window_ms                    stage-13  pre-auth admission counters, surfaced by `admin.*` status
