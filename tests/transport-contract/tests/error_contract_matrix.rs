@@ -220,7 +220,7 @@ const MATRIX: &[Clause] = &[
         doc: ENDPOINTS,
         text: "If no default exists, or the default endpoint has no active local lease, the remote request receives the same coarse `no_route` rejection",
         error: "no_route",
-        proof: Proof::Test("every_routing_refusal_is_indistinguishable_on_the_wire"),
+        proof: Proof::Test("a_default_that_cannot_receive_is_indistinguishable_no_route"),
     },
     Clause {
         doc: ENDPOINTS,
@@ -256,7 +256,7 @@ const MATRIX: &[Clause] = &[
         doc: ENDPOINTS,
         text: "no default -> coarse remote `no_route`",
         error: "no_route",
-        proof: Proof::Test("every_routing_refusal_is_indistinguishable_on_the_wire"),
+        proof: Proof::Test("a_default_that_cannot_receive_is_indistinguishable_no_route"),
     },
     Clause {
         doc: DIRECT,
@@ -272,7 +272,7 @@ const MATRIX: &[Clause] = &[
         doc: DIRECT,
         text: "`no_route` deliberately collapses endpoint unknown, endpoint disabled, no active lease, missing default endpoint, and endpoint-specific policy denial.",
         error: "no_route",
-        proof: Proof::Test("every_routing_refusal_is_indistinguishable_on_the_wire"),
+        proof: Proof::Test("a_default_that_cannot_receive_is_indistinguishable_no_route"),
     },
     Clause {
         doc: DIRECT,

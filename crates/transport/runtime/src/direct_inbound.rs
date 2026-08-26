@@ -791,6 +791,65 @@ mod tests {
         );
     }
 
+    /// A default that cannot receive is `no_route`, like any other.
+    ///
+    /// `ENDPOINTS.md` states both halves: "If no default exists, or the
+    /// default endpoint has no active local lease, the remote request
+    /// receives the same coarse `no_route` rejection used for
+    /// unknown/unavailable/endpoint-policy-denied routes."
+    ///
+    /// Both are asserted here because they are separate branches that a
+    /// change can break independently, and because the point of the
+    /// clause is that neither is distinguishable from the others — a
+    /// sender must not be able to tell a missing default from a
+    /// revoked one from an endpoint that was never configured.
+    #[test]
+    fn a_default_that_cannot_receive_is_indistinguishable_no_route() {
+        // No default configured at all.
+        let mut none_configured = World::new();
+        let mut endpoints = BTreeMap::new();
+        endpoints.insert(endpoint("human"), RegisteredEndpoint::default());
+        none_configured.registry = EndpointRegistry::new(endpoints, None);
+        let absent = none_configured.admit(&frame(None, b"hi", 31), &peer(P1), 0);
+
+        // A default that exists but holds no live lease.
+        let mut revoked = World::new();
+        revoked.registry.revoke(&endpoint("human"));
+        let unleased = revoked.admit(&frame(None, b"hi", 32), &peer(P1), 0);
+
+        // An explicitly named endpoint that was never configured, which
+        // is the answer the other two must be indistinguishable from.
+        let mut unknown_world = World::new();
+        let unknown = unknown_world.admit(&frame(Some("nonexistent"), b"hi", 33), &peer(P1), 0);
+
+        for (label, outcome) in [
+            ("no default configured", &absent),
+            ("default lease revoked", &unleased),
+            ("endpoint never configured", &unknown),
+        ] {
+            assert!(
+                matches!(outcome, Outcome::Refused(Refusal::NoRoute(_))),
+                "{label} should be a no-route refusal, got {outcome:?}"
+            );
+            assert_eq!(
+                refusal_wire(outcome),
+                Some(DirectRejectReason::NoRoute),
+                "{label} must be the same coarse code on the wire"
+            );
+        }
+
+        assert_eq!(
+            none_configured.queues.len(&endpoint("human")),
+            0,
+            "nothing was delivered on the missing-default path"
+        );
+        assert_eq!(
+            revoked.queues.len(&endpoint("human")),
+            0,
+            "nothing was delivered on the revoked-default path"
+        );
+    }
+
     /// Reservation exhaustion is `overloaded`, and enqueues nothing.
     ///
     /// `ENDPOINTS.md` states capacity exhaustion as coarse wire
