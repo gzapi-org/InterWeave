@@ -2749,7 +2749,11 @@ fn validate_response(
             DirectRejectReason::Malformed => DirectError::ProtocolViolation,
             DirectRejectReason::TooLarge => DirectError::PayloadTooLarge,
             DirectRejectReason::ShuttingDown => DirectError::BackendUnavailable,
-            DirectRejectReason::Unsupported => DirectError::CapabilityDenied,
+            // NOT `CapabilityDenied`. The vocabulary has a variant for
+            // exactly this — the remote does not support the protocol —
+            // and reusing the authorization one leaves a caller unable
+            // to tell version incompatibility from being refused.
+            DirectRejectReason::Unsupported => DirectError::ProtocolUnsupported,
         }),
     }
 }
@@ -2768,7 +2772,10 @@ fn outbound_error(error: &libp2p::request_response::OutboundFailure) -> DirectEr
         // FINDING 3: the major-version signal. A peer that does not speak
         // this protocol id is not unreachable — it is incompatible, and
         // an operator fixes that differently.
-        OutboundFailure::UnsupportedProtocols => DirectError::CapabilityDenied,
+        // The same misclassification on the negotiation path, and the
+        // same answer. SPIKE-002 finding 3 makes this the MAJOR-VERSION
+        // signal, which is a protocol fact and not an authorization one.
+        OutboundFailure::UnsupportedProtocols => DirectError::ProtocolUnsupported,
         OutboundFailure::DialFailure => DirectError::PeerUnreachable,
         OutboundFailure::ConnectionClosed => DirectError::PeerUnreachable,
     }
