@@ -170,14 +170,41 @@ fi
 # off the remaining files.
 mapfile -t all_rs < <(git ls-files '*.rs' 2>/dev/null | grep -vE '(^|/)tests/')
 
-# The production half of a source file, cached once per file.
-declare -A PROD
+# The production half of every source file, stripped ONCE up front.
+#
+# Not lazily inside the accessor. `production_of` is only ever called
+# from command substitution, which Bash runs in a subshell, so a cache
+# populated there is discarded the moment it returns — the file was
+# re-read and re-stripped for every function, in a required CI check.
+# Filling the map in the main shell is what makes it a cache at all.
+# Two indexes, both built in ONE pass over the tree:
+#
+#   PROD[file]        the production text, for the substring match a
+#                     `call` exemption needs.
+#   HASWORD[file|id]  every identifier that text contains.
+#
+# The word index is what makes this affordable. Asking `grep` whether a
+# file mentions a name costs a process per (name, file) pair — roughly
+# two hundred names against a hundred files — and the answer never
+# changes during a run. Precomputing turns every one of those into an
+# associative-array lookup.
+declare -A PROD HASWORD
+for _f in "${all_rs[@]}"; do
+    _prod="$(sed "/$TEST_MODULE_MARKER/q" "$_f" 2>/dev/null | sed 's,//.*,,')"
+    PROD["$_f"]="$_prod"
+    while IFS= read -r _w; do
+        [[ -n "$_w" ]] && HASWORD["$_f|$_w"]=1
+    done < <(grep -oE '[A-Za-z_][A-Za-z0-9_]*' <<<"$_prod" 2>/dev/null | sort -u)
+done
+unset _f _prod _w
+
 production_of() {
-    local f="$1"
-    if [[ -z "${PROD[$f]+set}" ]]; then
-        PROD["$f"]="$(sed "/$TEST_MODULE_MARKER/q" "$f" 2>/dev/null | sed 's,//.*,,')"
-    fi
-    printf '%s' "${PROD[$f]}"
+    printf '%s' "${PROD[$1]:-}"
+}
+
+# Does this file's production text contain `$2` as a whole identifier?
+mentions() {
+    [[ -n "${HASWORD[$1|$2]:-}" ]]
 }
 
 # Is this owner type referenced by any production source other than its
@@ -204,7 +231,7 @@ owner_is_wired() {
         OWNER_WIRED["$owner"]=1
         for f in "${all_rs[@]}"; do
             [[ "$f" == "$home" ]] && continue
-            if grep -qw -- "$owner" <<<"$(production_of "$f")"; then
+            if mentions "$f" "$owner"; then
                 OWNER_WIRED["$owner"]=0
                 break
             fi
@@ -232,9 +259,8 @@ for file in "${domain[@]}"; do
             # conformance matrix's own doc comment happened to name both
             # `to_wire` and `Refusal`, so a paragraph ABOUT the check was
             # what made the check green.
-            stripped="$(production_of "$hit")"
-            grep -qw -- "$name" <<<"$stripped" || continue
-            if [[ -n "$owner" ]] && ! grep -qw -- "$owner" <<<"$stripped"; then
+            mentions "$hit" "$name" || continue
+            if [[ -n "$owner" ]] && ! mentions "$hit" "$owner"; then
                 continue
             fi
             elsewhere=1
