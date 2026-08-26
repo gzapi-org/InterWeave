@@ -57,6 +57,13 @@ enum Proof {
     /// without that, "unrepresentable" is an assertion about code
     /// somebody remembers writing.
     Unrepresentable(&'static str),
+    /// The line declares the vocabulary rather than stating a
+    /// condition. `DIRECT.md` line 58 lists the seven coarse reason
+    /// codes; what makes that list correct is the schema it copies, and
+    /// the round-trip that drives every local category through
+    /// `to_wire` into that schema. Holding it to naming each code in a
+    /// test body would demand seven tests of a list.
+    Vocabulary(&'static str),
     /// Not reachable until a later stage opens, with the stage that will
     /// make it reachable. Checked against the open stage, so this cannot
     /// quietly become permanent — the same discipline as
@@ -291,6 +298,93 @@ const MATRIX: &[Clause] = &[
         error: "shutting_down",
         proof: Proof::Test("draining_is_shutting_down_on_the_wire"),
     },
+    Clause {
+        doc: DIRECT,
+        text: "Coarse reason codes: `no_route`, `unauthorized_peer`, `overloaded`, `malformed`, `too_large`, `shutting_down`, `unsupported`.",
+        error: "no_route",
+        proof: Proof::Vocabulary("every_direct_reject_reason_validates"),
+    },
+    Clause {
+        doc: DIRECT,
+        text: "Coarse reason codes: `no_route`, `unauthorized_peer`, `overloaded`, `malformed`, `too_large`, `shutting_down`, `unsupported`.",
+        error: "unauthorized_peer",
+        proof: Proof::Vocabulary("every_direct_reject_reason_validates"),
+    },
+    Clause {
+        doc: DIRECT,
+        text: "Coarse reason codes: `no_route`, `unauthorized_peer`, `overloaded`, `malformed`, `too_large`, `shutting_down`, `unsupported`.",
+        error: "malformed",
+        proof: Proof::Vocabulary("every_direct_reject_reason_validates"),
+    },
+    Clause {
+        doc: DIRECT,
+        text: "Coarse reason codes: `no_route`, `unauthorized_peer`, `overloaded`, `malformed`, `too_large`, `shutting_down`, `unsupported`.",
+        error: "too_large",
+        proof: Proof::Vocabulary("every_direct_reject_reason_validates"),
+    },
+    Clause {
+        doc: DIRECT,
+        text: "Coarse reason codes: `no_route`, `unauthorized_peer`, `overloaded`, `malformed`, `too_large`, `shutting_down`, `unsupported`.",
+        error: "shutting_down",
+        proof: Proof::Vocabulary("every_direct_reject_reason_validates"),
+    },
+    Clause {
+        doc: DIRECT,
+        text: "Coarse reason codes: `no_route`, `unauthorized_peer`, `overloaded`, `malformed`, `too_large`, `shutting_down`, `unsupported`.",
+        error: "unsupported",
+        proof: Proof::Vocabulary("every_direct_reject_reason_validates"),
+    },
+    // --- one line, several rules ------------------------------------
+    //
+    // Totality is matched per CODE, not per line, so the second rule on
+    // a shared line needs its own row. Without these the handshake line
+    // recorded one of six mappings and the retry paragraph one of two.
+    Clause {
+        doc: ENDPOINTS,
+        text: "Capacity exhaustion rejects the new request as coarse wire `overloaded` / local `Overloaded`",
+        error: "overloaded",
+        proof: Proof::Test("a_full_endpoint_queue_is_overloaded_and_never_falsely_accepted"),
+    },
+    Clause {
+        doc: ENDPOINTS,
+        text: "absent=`EndpointUnknown`",
+        error: "EndpointUnknown",
+        proof: Proof::Stage(13, "the endpoint handshake is part of desktop IPC v2"),
+    },
+    Clause {
+        doc: ENDPOINTS,
+        text: "disabled=`EndpointDisabled`",
+        error: "EndpointDisabled",
+        proof: Proof::Stage(13, "the endpoint handshake is part of desktop IPC v2"),
+    },
+    Clause {
+        doc: ENDPOINTS,
+        text: "kind mismatch=`EndpointClientKindDenied`",
+        error: "EndpointClientKindDenied",
+        proof: Proof::Stage(13, "the endpoint handshake is part of desktop IPC v2"),
+    },
+    Clause {
+        doc: ENDPOINTS,
+        text: "capability denied=`CapabilityDenied`",
+        error: "CapabilityDenied",
+        proof: Proof::Stage(13, "the endpoint handshake is part of desktop IPC v2"),
+    },
+    Clause {
+        doc: ENDPOINTS,
+        text: "collision=`EndpointInUse`",
+        error: "EndpointInUse",
+        proof: Proof::Stage(13, "the endpoint handshake is part of desktop IPC v2"),
+    },
+    // `no_route` here is the STIMULUS, not the local result — the clause
+    // reads "remote `no_route` -> `RemoteEndpointUnavailable`". The local
+    // half is the row above; this is the remote half, proven where the
+    // wire code is actually asserted.
+    Clause {
+        doc: DIRECT,
+        text: "successful v2 exchange but remote `no_route`",
+        error: "no_route",
+        proof: Proof::Test("every_routing_refusal_is_indistinguishable_on_the_wire"),
+    },
 ];
 
 /// The error vocabularies, read from the schemas that define them.
@@ -424,10 +518,21 @@ fn the_contracts_name_no_error_this_matrix_has_missed() {
     let mut uncovered = Vec::new();
     for doc in [ENDPOINTS, DIRECT] {
         for (line_no, line) in error_clauses(doc, &vocab) {
-            let covered = MATRIX.iter().any(|c| c.doc == doc && line.contains(c.text));
-            if !covered {
-                let shown: String = line.chars().take(160).collect();
-                uncovered.push(format!("  {doc}:{line_no}\n    {shown}"));
+            // Per CODE, not per line. A single line often states more
+            // than one rule — the handshake line maps six conditions,
+            // and the resolution paragraph gives `no_route` for steps
+            // 5-7 and `overloaded` for step 8. Marking a whole line
+            // covered because one row matched it meant a rule could be
+            // appended to any already-covered line while the totality
+            // test stayed green.
+            for code in vocab.iter().filter(|c| line.contains(&format!("`{c}`"))) {
+                let covered = MATRIX
+                    .iter()
+                    .any(|c| c.doc == doc && c.error == code && line.contains(c.text));
+                if !covered {
+                    let shown: String = line.chars().take(140).collect();
+                    uncovered.push(format!("  {doc}:{line_no}  `{code}`\n    {shown}"));
+                }
             }
         }
     }
@@ -462,7 +567,7 @@ fn every_proof_this_matrix_cites_exists() {
         // proof to mention something it exists to make impossible.
         let (name, must_name_error) = match clause.proof {
             Proof::Test(n) => (n, true),
-            Proof::Unrepresentable(n) => (n, false),
+            Proof::Unrepresentable(n) | Proof::Vocabulary(n) => (n, false),
             Proof::Stage(..) => continue,
         };
         let needle = format!("fn {name}(");
@@ -544,10 +649,11 @@ fn the_matrix_has_no_duplicate_or_dead_rows() {
     let mut seen = BTreeSet::new();
     for clause in MATRIX {
         assert!(
-            seen.insert((clause.doc, clause.text)),
-            "MATRIX quotes {:?} from {} twice",
+            seen.insert((clause.doc, clause.text, clause.error)),
+            "MATRIX quotes {:?} from {} for {} twice",
             clause.text,
-            clause.doc
+            clause.doc,
+            clause.error
         );
         assert!(
             vocab.contains(clause.error),
