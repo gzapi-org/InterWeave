@@ -247,10 +247,46 @@ pub fn parse_inbound(
     if oversize {
         // TOO BIG TO DECODE, BIG ENOUGH TO ANSWER: the bytes already
         // read start with the id, which is all a rejection needs.
-        return Err((recover_id(bytes), DirectRejectReason::TooLarge));
+        //
+        // BUT `too_large` IS NOT THE ANSWER TO EVERY OVERSIZE. Only a
+        // declared payload past the ceiling is `too_large`; a frame
+        // that overruns for any other reason — trailing garbage after a
+        // complete legal frame, an over-long field — is `malformed`,
+        // the same as it would be under the ceiling. Answering
+        // `too_large` for all of them told a sender to shrink a payload
+        // that was already legal.
+        let reason = match declared_payload_len(bytes) {
+            Some(declared) if declared > max_payload_bytes => DirectRejectReason::TooLarge,
+            _ => DirectRejectReason::Malformed,
+        };
+        return Err((recover_id(bytes), reason));
     }
     DirectMessageV2::decode(bytes, max_payload_bytes)
         .map_err(|error| (recover_id(bytes), error.to_wire()))
+}
+
+/// The payload length a frame DECLARES, read from its header.
+///
+/// Needed only for an over-ceiling frame, where the body cannot be
+/// decoded but the header is intact: the fields before `payload_len`
+/// are bounded at 287 bytes in total, so they are always inside a buffer
+/// that overran the request ceiling.
+///
+/// Walks the variable-length fields rather than indexing a fixed offset,
+/// because the source, destination and media-type labels each carry
+/// their own length byte. `None` when the header itself is truncated —
+/// then nothing is declared and `malformed` is the honest answer.
+fn declared_payload_len(bytes: &[u8]) -> Option<usize> {
+    // message_id + sent_at_ms
+    let mut at = MessageId::LEN + 8;
+    // source, destination and media type, each a length byte then bytes
+    for _ in 0..3 {
+        let len = *bytes.get(at)? as usize;
+        at = at.checked_add(1)?.checked_add(len)?;
+    }
+    let raw = bytes.get(at..at.checked_add(4)?)?;
+    let declared = u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]);
+    Some(declared as usize)
 }
 
 /// The message id, when enough of the frame arrived to carry one.
