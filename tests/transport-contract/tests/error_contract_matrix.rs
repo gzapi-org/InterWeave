@@ -468,16 +468,29 @@ fn rust_spelling(code: &str) -> String {
 /// apart, so it does not try: it reports both, and [`PROSE`] records the
 /// ones that are English, with the reason.
 fn names_code(line: &str, code: &str) -> bool {
-    if line.contains(&format!("`{code}`")) {
-        return true;
-    }
-    // A bare word, not a substring of a longer identifier.
-    line.match_indices(code).any(|(i, _)| {
-        let before = line[..i].chars().next_back();
-        let after = line[i + code.len()..].chars().next();
-        let boundary = |c: Option<char>| c.is_none_or(|c| !c.is_alphanumeric() && c != '_');
-        boundary(before) && boundary(after)
-    })
+    count_code(line, code) > 0
+}
+
+/// How many times this line names `code` as a word.
+///
+/// The count is the point, not presence. `ENDPOINTS.md:193` states two
+/// separate mappings to `overloaded` — one for the rate-limit refusal
+/// and one for reservation capacity — and asking only whether SOME row
+/// covered the code let either row vouch for both. Deleting the capacity
+/// row passed. A third rule could have been appended to that line
+/// silently.
+///
+/// A backticked occurrence is also a bare-word one, since a backtick is
+/// not alphanumeric, so this counts both forms without double-counting.
+fn count_code(line: &str, code: &str) -> usize {
+    line.match_indices(code)
+        .filter(|(i, _)| {
+            let before = line[..*i].chars().next_back();
+            let after = line[i + code.len()..].chars().next();
+            let boundary = |c: Option<char>| c.is_none_or(|c| !c.is_alphanumeric() && c != '_');
+            boundary(before) && boundary(after)
+        })
+        .count()
 }
 
 /// Bare-word occurrences that are English, not the wire code.
@@ -593,16 +606,29 @@ fn the_contracts_name_no_error_this_matrix_has_missed() {
             // covered because one row matched it meant a rule could be
             // appended to any already-covered line while the totality
             // test stayed green.
-            for code in vocab.iter().filter(|c| names_code(&line, c)) {
-                let covered = MATRIX
+            for code in vocab.iter() {
+                let stated = count_code(&line, code);
+                if stated == 0 {
+                    continue;
+                }
+                // DISTINCT quotations, so one row cannot answer for two
+                // rules, and PROSE entries account for the occurrences
+                // that are English rather than the code.
+                let rows: BTreeSet<&str> = MATRIX
                     .iter()
-                    .any(|c| c.doc == doc && c.error == code && line.contains(c.text));
-                let is_prose = PROSE
+                    .filter(|c| c.doc == doc && c.error == code && line.contains(c.text))
+                    .map(|c| c.text)
+                    .collect();
+                let prose = PROSE
                     .iter()
-                    .any(|(d, frag, c, _)| *d == doc && c == code && line.contains(frag));
-                if !covered && !is_prose {
+                    .filter(|(d, frag, c, _)| *d == doc && c == code && line.contains(frag))
+                    .count();
+                let accounted = rows.len() + prose;
+                if accounted < stated {
                     let shown: String = line.chars().take(140).collect();
-                    uncovered.push(format!("  {doc}:{line_no}  `{code}`\n    {shown}"));
+                    uncovered.push(format!(
+                        "  {doc}:{line_no}  `{code}` stated {stated}x, {accounted} accounted for\n    {shown}"
+                    ));
                 }
             }
         }
