@@ -194,6 +194,12 @@ pub struct MessageId([u8; 16]);
 impl MessageId {
     /// Characters in the canonical printable form.
     pub const HEX_CHARS: usize = 32;
+    /// Length in bytes.
+    ///
+    /// Named because the direct-v2 frame puts the id FIRST, and a reader
+    /// recovering it from a frame that failed to parse needs to say how
+    /// many bytes that is without restating 16.
+    pub const LEN: usize = 16;
 
     /// Wrap raw bytes. Any 128-bit value is a legal identifier.
     #[must_use]

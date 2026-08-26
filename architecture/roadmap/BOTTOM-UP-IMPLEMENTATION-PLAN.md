@@ -488,12 +488,11 @@ Every claim above was verified by breaking the code and watching the
 test fail, which is the only evidence that distinguishes a test of the
 behaviour from a test written from the same belief as the code.
 
-Stage 6 does not open on this alone: its prerequisite is SPIKE-002.
+Stage 6 did not open on this alone: its prerequisite was SPIKE-002.
 That spike was run and closed **PASS** on 2026-08-23 — see
-[`spikes/spike-002/`](../../spikes/spike-002/README.md) — so the
-remaining step is the deliberate act of opening Stage 6 and moving
-`workspace.metadata.interweave.status` with it. Nothing is blocking
-that except the decision to take it.
+[`spikes/spike-002/`](../../spikes/spike-002/README.md) — and Stage 6
+was opened on 2026-08-25, once that record had merged, by moving
+`workspace.metadata.interweave.status` to `stage-6-direct-v2`.
 
 ## 9. Stage 6 — direct protocol v2
 
@@ -579,6 +578,16 @@ Under `tests/pubsub`:
 Broadcast and direct semantics are independently functional and do not substitute for each other.
 
 ## 11. Stage 8 — endpoint directory
+
+### Inherited obligation: bind the source endpoint to the caller's lease
+
+Carried forward from Stage 6 by an explicit maintainer decision recorded on PR #38, not by oversight.
+
+Stage 6 enforces that a frame's `source_endpoint` names a lease the node actually holds, so an invented label is refused. It does **not** derive the source from the *caller's* lease: `configure_direct` leases every enabled endpoint, so a caller may name any configured one, have that endpoint's outbound policy applied, and be observed by the remote as that sender.
+
+That gap is unreachable in Stage 6 — the runtime handle is the only caller and owns every endpoint, so "caller A names endpoint B" has no second party — and becomes real the moment IPC sessions exist, which is here. The property already exists one layer up: `local-client-api` derives the source endpoint from the lease and offers no API accepting one (Stage 1). This stage wires that boundary to the transport.
+
+The shape: `send_direct` takes session or lease context and constructs or overwrites `source_endpoint` from it, rather than trusting the supplied frame. `contracts/ENDPOINTS.md` outbound step 1 and CLAUDE.md §5 are the governing text.
 
 ### Implement
 

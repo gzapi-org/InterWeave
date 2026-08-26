@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# The Stage 6 exit gate: `/interweave/direct/2.0.0` between real Rust
+# peers over loopback. TEST-ONLY; nothing depends on this package.
+#
+# Every clause here is about what the WIRE does — a frame that decodes,
+# an `AcceptedV2` that arrives only after queue admission, a retry that
+# replays a stored route — so it runs against a real Swarm rather than a
+# mock. A mocked transport proves the translation layer compiles; the
+# spike that opened this stage found its findings only because it did
+# not mock.
+[package]
+name = "interweave-direct-v2-tests"
+version = "0.0.0"
+publish = false
+description = "Stage 6 direct protocol v2 exit-gate tests for InterWeave."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+interweave-profile-identity = { path = "../../crates/identity/profile-identity" }
+interweave-transport-api = { path = "../../crates/api/transport-api" }
+interweave-transport-libp2p = { path = "../../crates/transport/libp2p" }
+interweave-transport-runtime = { path = "../../crates/transport/runtime" }
+interweave-profile-config = { path = "../../crates/config/profile-config" }
+interweave-trust-api = { path = "../../crates/api/trust-api" }
+interweave-local-client-api = { path = "../../crates/api/local-client-api" }
+interweave-test-support = { path = "../support" }
+libp2p = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

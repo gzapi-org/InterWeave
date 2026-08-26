@@ -31,7 +31,11 @@ workspace = true
 interweave-profile-identity = { path = "../../identity/profile-identity" }
 interweave-transport-api = { path = "../../api/transport-api" }
 interweave-transport-runtime = { path = "../runtime" }
+interweave-profile-config = { path = "../../config/profile-config" }
+interweave-local-client-api = { path = "../../api/local-client-api" }
+interweave-trust-api = { path = "../../api/trust-api" }
 futures = { workspace = true }
+async-trait = { workspace = true }
 libp2p = { workspace = true }
 tokio = { workspace = true }
 
@@ -39,6 +43,5 @@ tokio = { workspace = true }
 # Trust sources are constructed by tests, not by this crate: the
 # substrate passes a `TrustSources` through to the manager and never
 # names the two authorities inside it.
-interweave-trust-api = { path = "../../api/trust-api" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }

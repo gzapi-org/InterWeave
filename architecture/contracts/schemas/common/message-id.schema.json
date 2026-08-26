@@ -8,7 +8,7 @@
   "examples": ["9f2c1d4e7a0b48c3915ed6f0a72b3c58"],
   "x-contract": {
     "name": "common.message-id",
-    "status": "approved",
+    "status": "active",
     "version": "1.0.0",
     "adr": ["0019"],
     "specification": "architecture/contracts/ENDPOINTS.md"

@@ -21,7 +21,7 @@
   },
   "x-contract": {
     "name": "direct.dedup-key",
-    "status": "approved",
+    "status": "active",
     "version": "1.0.0",
     "adr": ["0019", "0030"],
     "specification": "architecture/transport/libp2p/DIRECT.md",

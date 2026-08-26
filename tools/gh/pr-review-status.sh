@@ -481,6 +481,42 @@ probe() {
             head_born="$forced"
         fi
 
+        # ORDINARY PUSHES ARE NOT TRACKED, AND THE ATTEMPT WAS WORSE
+        # THAN THE GAP. Only a force-push leaves a timeline event, so
+        # for an ordinary push the commit date is all there is — and a
+        # commit date is when the commit was WRITTEN, not when it
+        # reached the remote. On one head here the two were five minutes
+        # apart. A stale ask therefore reads as pending and `--wait`
+        # burns its whole timeout.
+        #
+        # Check-suite creation was used to close that, and it is
+        # withdrawn. A suite proves the SHA existed by then; it does not
+        # prove the SHA became the head then, and GitHub lets a suite be
+        # created for an existing head_sha at any later moment. The two
+        # cases are indistinguishable in the data:
+        #
+        #   commit 10:00, ask 11:00, suite 12:00 — push after the ask,
+        #     so the ask is stale and exit 5 is right;
+        #   commit 10:00, ask 11:00, suite 12:00 — suite created late
+        #     for the head the ask already targeted, so the ask stands.
+        #
+        # Same timestamps, opposite correct answers, and the failure it
+        # produced is the DANGEROUS direction. A later `head_born` makes
+        # more asks look stale, so the heuristic manufactures exit 5 —
+        # "no review is coming" about a review that is — which is the
+        # false negative this whole script exists to prevent. The gap it
+        # closed costs a timeout and a second ask.
+        #
+        # An earlier comment here claimed the lookup "can only move
+        # head_born LATER, so a case it cannot see costs a wait and never
+        # produces a false no-review-is-coming". The premise was right
+        # and the conclusion backwards: later is exactly what produces
+        # the false one.
+        #
+        # There is no other signal. GraphQL `Commit.pushedDate` returns
+        # null — GitHub retired it — and the PR timeline carries no
+        # ordinary-push event.
+
         # Unreadable falls back to PENDING, which costs a longer wait and
         # never a false "nothing is coming".
         #

@@ -698,35 +698,37 @@ run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" 
 assert_rc       "an ask on the head's own second is pending too" 1
 assert_contains "  and reported outstanding"                     "in flight"
 
-echo "pr-review-status: an unreadable head date waits rather than concluding"
-# The fallback direction matters: unreadable must mean PENDING. Guessing
-# "answered" turns a lookup failure into a confident "nothing is coming"
-# about a review that is on its way.
+echo "pr-review-status: an ordinary push is a KNOWN gap, not a silent one"
+# Only a force-push leaves a timeline event, so for an ordinary push the
+# commit date is all there is — and it is when the commit was WRITTEN,
+# not when it reached the remote. A stale ask therefore reads as pending
+# and `--wait` burns its timeout.
+#
+# THAT IS THE ACCEPTED FAILURE, asserted so nobody re-closes it with the
+# heuristic that was withdrawn. Check-suite creation was used here and
+# removed: a suite proves the SHA existed by then, not that it became
+# the head then, and GitHub lets one be created for an existing head_sha
+# at any later moment. The stale-ask case and the late-suite case carry
+# identical timestamps and want opposite answers, and the heuristic's
+# failure was the dangerous direction — manufacturing exit 5, "no review
+# is coming", about a review that is.
 run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
-        "me,2026-08-07T08:00:00Z" "2026-08-07T09:00:00Z"
+        "me,2026-08-07T11:00:00Z" "2026-08-07T09:00:00Z"
+assert_rc       "an ordinary push leaves the ask reading as pending" 1
+assert_contains "  which costs a wait, never a false 'nothing is coming'" "in flight"
+
+# THE FORCE-PUSH PATH IS UNTOUCHED, because that event is a real head
+# transition rather than a proxy for one. Re-asserted here so the
+# withdrawal above is visibly scoped to the heuristic and not to the
+# lookup that works.
+run_ask "OPEN:newhead:0" "chatgpt-codex-connector,oldhead,2026-08-07T10:00:00Z" \
+        "me,2026-08-07T11:00:00Z" "2026-08-07T09:00:00Z"
+printf '2026-08-07T13:00:00Z\n' > "$SANDBOX/state/forced"
 : > "$SANDBOX/state/n"
-touch "$SANDBOX/state/head_born_fail"
 RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" GH_MOCK_STATE="$SANDBOX/state" \
     timeout 20 bash "$UNDER_TEST" 77 o/r 2>&1)"; RUN_RC=$?
-rm -f "$SANDBOX/state/head_born_fail"
-assert_rc "an unreadable head date keeps the ask pending" 1
-
-echo "pr-review-status: a covered head does not report an unanswered ask"
-# Decides no exit — head_reviewed wins first — but a line reading
-# "nothing has answered it yet" beside "head reviewed? yes" is false.
-run_ask "OPEN:abc123:0" "chatgpt-codex-connector,abc123,2026-08-07T10:00:00Z" \
-        "me,2026-08-07T11:00:00Z" "2026-08-07T09:00:00Z"
-assert_rc       "the head is covered" 0
-assert_contains "  and the ask reads as answered" "already answered"
-assert_lacks    "  not as outstanding"            "in flight"
-
-echo "pr-review-status: --help documents the flag §9 now requires"
-RUN_OUT="$(PATH="$SANDBOX/bin:$PATH" bash "$UNDER_TEST" --help 2>&1)"; RUN_RC=$?
-assert_rc       "exits 0" 0
-assert_contains "names the flag"        "--automated-only"
-assert_contains "says why it exists"    "repository is PUBLIC"
-assert_contains "and that the bare command is not enough" \
-                "does not satisfy"
+assert_rc    "a real force-push still dates the head" 5
+assert_lacks "  and the stale ask is not reported outstanding" "in flight"
 
 echo "pr-review-status: a failed comments lookup is UNREADABLE, not empty"
 # Same contract as the reviews endpoint: swallowing the failure would

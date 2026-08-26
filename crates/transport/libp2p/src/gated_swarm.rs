@@ -162,6 +162,22 @@ impl core::fmt::Debug for GatedSwarm {
     }
 }
 
+/// The peer has no live connection to send over.
+///
+/// Distinct from every dial refusal: nothing was attempted, because
+/// attempting it would mean a behaviour-originated dial the outbound
+/// gate is required to refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotConnected;
+
+/// The response channel is no longer answerable.
+///
+/// The connection that carried the request closed while it was being
+/// decided. The local delivery still happened; the remote will not learn
+/// that it did, and will retry into dedup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unanswerable;
+
 impl GatedSwarm {
     /// Wrap a built Swarm.
     #[must_use]
@@ -186,6 +202,65 @@ impl GatedSwarm {
     /// Ungated on purpose: refusing a connection is never the operation
     /// admission exists to constrain, and the ceiling needs a way to
     /// decline an inbound connection it cannot account for.
+    /// Start one directed exchange with an ALREADY-CONNECTED peer.
+    ///
+    /// The single behaviour method this wrapper exposes, and it is
+    /// narrow on purpose: a general `behaviour_mut` would hand every
+    /// caller the ability to originate whatever a behaviour can, which
+    /// is precisely what [`OutboundAdmission`](crate::outbound_gate)
+    /// exists to prevent.
+    ///
+    /// # Why connectivity is a precondition rather than a convenience
+    ///
+    /// `send_request` DIALS when the peer is not connected, and that
+    /// dial is behaviour-originated — so the outbound gate refuses it,
+    /// correctly, because no ticket was issued for it. Rather than
+    /// emitting a request whose implicit dial is guaranteed to be denied,
+    /// this refuses up front and says so. `DIRECT.md` allows the
+    /// ConnectionManager to dial under the command deadline; sequencing
+    /// that admitted dial before the send is the caller's job, and doing
+    /// it here would mean this method awaited, which the Swarm task
+    /// cannot.
+    ///
+    /// # Errors
+    /// [`NotConnected`] when the peer has no live connection.
+    pub fn send_direct(
+        &mut self,
+        peer: &libp2p::PeerId,
+        frame: interweave_transport_api::DirectMessageV2,
+    ) -> Result<libp2p::request_response::OutboundRequestId, NotConnected> {
+        if !self.inner.is_connected(peer) {
+            return Err(NotConnected);
+        }
+        Ok(self.inner.behaviour_mut().direct.send_request(
+            peer,
+            crate::direct_codec::InboundRequest::Outbound(Box::new(frame)),
+        ))
+    }
+
+    /// Answer one inbound directed exchange.
+    ///
+    /// # Errors
+    /// [`Unanswerable`] when the connection that carried the request is
+    /// gone. SPIKE-002 finding 2: producing a response is not evidence
+    /// the peer heard it, so this result is reported rather than
+    /// discarded.
+    pub fn answer_direct(
+        &mut self,
+        channel: libp2p::request_response::ResponseChannel<crate::direct_codec::DirectResponse>,
+        response: crate::direct_codec::DirectResponse,
+    ) -> Result<(), Unanswerable> {
+        self.inner
+            .behaviour_mut()
+            .direct
+            .send_response(channel, response)
+            .map_err(|_| Unanswerable)
+    }
+
+    /// Close one connection by id.
+    ///
+    /// Returns whether the Swarm knew it. A connection this profile has
+    /// decided not to keep is closed here rather than left open.
     pub fn close_connection(&mut self, id: ConnectionId) -> bool {
         self.inner.close_connection(id)
     }

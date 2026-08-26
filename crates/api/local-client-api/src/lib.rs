@@ -37,6 +37,15 @@ pub const MAX_CLIENT_KIND_BYTES: usize = 64;
 pub const MAX_GRANTED_CAPABILITIES: usize = 8;
 /// Default bound on a session's event queue.
 pub const DEFAULT_EVENT_QUEUE: usize = 256;
+/// Hard architectural ceiling on one session's event queue.
+///
+/// `resource-limits.md` gives the `LocalDataSession event queue` row as
+/// 256 default and 1024 ceiling. The ceiling is what this type enforces:
+/// a narrower deployment value is configuration, and this is the bound
+/// below which the design stops being bounded. Without it the DEFAULT
+/// was the only number written down, and a caller could ask for any
+/// depth at all.
+pub const MAX_EVENT_QUEUE: usize = 1_024;
 
 /// An authority a **data-plane** session may hold.
 ///
@@ -144,6 +153,15 @@ pub enum SessionError {
     /// to this session would be refused — a configuration that reads like
     /// "unbounded" and behaves like "closed".
     ZeroEventQueue,
+    /// An event queue past the architectural ceiling.
+    ///
+    /// The other half of the bound. Refusing zero and accepting any
+    /// depth at all leaves the memory a session can pin unbounded, which
+    /// is the same defect the zero check exists to name.
+    EventQueueTooDeep {
+        /// The depth asked for.
+        got: usize,
+    },
 }
 
 impl core::fmt::Display for SessionError {
@@ -168,6 +186,12 @@ impl core::fmt::Display for SessionError {
                 )
             }
             Self::ZeroEventQueue => write!(f, "an event queue of zero admits nothing"),
+            Self::EventQueueTooDeep { got } => {
+                write!(
+                    f,
+                    "an event queue of {got} exceeds the ceiling of {MAX_EVENT_QUEUE}"
+                )
+            }
         }
     }
 }
@@ -261,6 +285,9 @@ impl LocalDataSession {
         }
         if event_queue == 0 {
             return Err(SessionError::ZeroEventQueue);
+        }
+        if event_queue > MAX_EVENT_QUEUE {
+            return Err(SessionError::EventQueueTooDeep { got: event_queue });
         }
         Ok(Self {
             session_id,
@@ -610,6 +637,25 @@ mod tests {
             LocalDataSession::new(generation("sess"), "k", None, [], 0),
             Err(SessionError::ZeroEventQueue)
         );
+    }
+
+    #[test]
+    fn an_event_queue_past_the_ceiling_is_refused() {
+        assert_eq!(
+            LocalDataSession::new(generation("sess"), "k", None, [], MAX_EVENT_QUEUE + 1),
+            Err(SessionError::EventQueueTooDeep {
+                got: MAX_EVENT_QUEUE + 1
+            }),
+            "the memory one session can pin is bounded at both ends"
+        );
+    }
+
+    #[test]
+    fn the_ceiling_itself_is_permitted() {
+        // A CEILING REACHED, not one approached — otherwise the test
+        // above would pass against an off-by-one that also refuses the
+        // largest legal depth.
+        assert!(LocalDataSession::new(generation("sess"), "k", None, [], MAX_EVENT_QUEUE).is_ok());
     }
 
     #[test]

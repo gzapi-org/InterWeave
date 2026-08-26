@@ -18,13 +18,25 @@
 // document itself.
 #![allow(missing_docs, reason = "variants of the derive-generated event enum")]
 
+use std::time::Duration;
+
+use libp2p::request_response::{self, ProtocolSupport};
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::{identify, identity};
 
 use interweave_transport_runtime::preauth::PreAuthLimits;
 
+use crate::direct_codec::{DIRECT_PROTOCOL, DirectCodec};
 use crate::outbound_gate::OutboundAdmission;
 use crate::preauth_gate::PreAuthAdmission;
+
+/// The total deadline for one direct exchange (`DIRECT.md`).
+///
+/// Ten seconds, and it is the REQUESTER's patience rather than a promise
+/// about the responder: SPIKE-002 finding 1 showed that when both sides
+/// time out the attribution is a race, so this bounds how long a caller
+/// waits and nothing more.
+pub const DIRECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The Identify protocol name this profile advertises.
 ///
@@ -53,6 +65,16 @@ pub struct SubstrateBehaviour {
     pub outbound: OutboundAdmission,
     /// Peer metadata exchange on an already-established connection.
     pub identify: identify::Behaviour,
+    /// Directed messaging, `/interweave/direct/2.0.0`.
+    ///
+    /// LAST, and after both gates, because the derive calls each field's
+    /// handlers in declaration order. This behaviour originates outbound
+    /// dials when a caller sends to a peer it is not connected to, so it
+    /// is added to a Swarm where `outbound` already refuses an unadmitted
+    /// dial and `preauth` already answers before Noise — the ordering
+    /// CLAUDE.md §3 requires, and the reason Stage 5 had to be green
+    /// before this field could exist at all.
+    pub direct: request_response::Behaviour<DirectCodec>,
 }
 
 impl SubstrateBehaviour {
@@ -66,6 +88,16 @@ impl SubstrateBehaviour {
                 IDENTIFY_PROTOCOL.to_owned(),
                 public_key,
             )),
+            direct: request_response::Behaviour::with_codec(
+                DirectCodec,
+                // FULL, because a profile both sends and receives directed
+                // messages. Inbound-only would make this peer unable to
+                // initiate, which is not a security posture — an
+                // unauthorized peer is refused by trust, not by declining
+                // to speak.
+                [(DIRECT_PROTOCOL, ProtocolSupport::Full)],
+                request_response::Config::default().with_request_timeout(DIRECT_TIMEOUT),
+            ),
         }
     }
 }

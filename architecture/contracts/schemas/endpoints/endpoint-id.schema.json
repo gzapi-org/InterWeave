@@ -10,7 +10,7 @@
   "examples": ["human", "claude", "automation.build"],
   "x-contract": {
     "name": "endpoints.endpoint-id",
-    "status": "approved",
+    "status": "active",
     "version": "1.0.0",
     "adr": ["0030"],
     "specification": "architecture/contracts/ENDPOINTS.md"
