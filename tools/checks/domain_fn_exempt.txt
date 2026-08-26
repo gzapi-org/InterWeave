@@ -1,84 +1,70 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Andrea Benetton
 #
-# Public domain functions with no in-tree caller yet, each keyed to the
-# stage that will call it.
+# Public domain functions the check cannot see a caller for. Two kinds,
+# both qualified as `Type::name` — a bare `new` would exempt sixteen
+# unrelated constructors, and `is_punitive_at` exists on two types.
 #
-# Format:  <Type::name>  <stage-N>  <reason>
+#   <Type::name> stage-N <reason>   nothing calls it YET. The stage that
+#                                   will is a DEADLINE: the check fails
+#                                   once the open stage is past it, so an
+#                                   exemption cannot quietly become
+#                                   permanent. `authorize_outbound` was
+#                                   written in the stage meant to call it
+#                                   and shipped uncalled anyway.
 #
-# QUALIFIED, not bare. A bare `new` would exempt sixteen unrelated
-# constructors at once, and `is_punitive_at` exists on both AddressState
-# and PeerBackoff — one entry must not vouch for the other.
+#   <Type::name> call <expr>        it IS called, in method position the
+#                                   check cannot attribute to a type.
+#                                   `<expr>` is the literal call, and the
+#                                   check fails unless that text still
+#                                   appears in another tracked source.
 #
-# The stage is a DEADLINE, not a note. check_domain_fns_are_called.sh
-# fails once the open stage is past the one named here, so an exemption
-# cannot quietly become permanent — which is the failure mode it exists
-# to prevent. `authorize_outbound` was written in the stage that was
-# supposed to call it and shipped uncalled anyway.
-#
-# Stage numbers come from the canonical plan's section for the package.
-# Where the plan does not name a consumer outright, the entry records the
-# earliest stage that plausibly needs it: firing early costs one line of
-# triage, firing late costs everything the deadline was for.
+# The second kind exists because textual analysis cannot tell what type a
+# Rust receiver has. Rather than guess — a receiver heuristic reported
+# seven genuinely-called functions as uncalled — the call is written down
+# and machine-anchored. It is a human claim, but not an unverifiable one:
+# it goes stale on its own the moment the call site changes.
 
+
+# --- called, but not attributable from the call site --------------------
+ContentFingerprint::to_hex      call  computed.to_hex(
+FrameError::to_wire             call  error.to_wire(
+PolicySnapshot::pending_dials   call  .pending_dials(
 
 # --- stage 7 ---------------------------------------------------------
-IngressLimiter::prune_idle                       stage-7   broadcast subscription surface, no mesh before GossipSub
+ReplyResolution::as_error                        stage-7   broadcast subscription surface, no mesh before GossipSub
+ReplyTokenTable::mint                            stage-7   broadcast subscription surface, no mesh before GossipSub
+ReplyTokenTable::resolve                         stage-7   broadcast subscription surface, no mesh before GossipSub
 SubscriptionRegistry::backend_should_subscribe   stage-7   broadcast subscription surface, no mesh before GossipSub
+SubscriptionRegistry::join                       stage-7   broadcast subscription surface, no mesh before GossipSub
 SubscriptionRegistry::leave                      stage-7   broadcast subscription surface, no mesh before GossipSub
 SubscriptionRegistry::may_publish                stage-7   broadcast subscription surface, no mesh before GossipSub
-SubscriptionRegistry::new                        stage-7   broadcast subscription surface, no mesh before GossipSub
+SubscriptionRegistry::release_session            stage-7   broadcast subscription surface, no mesh before GossipSub
 SubscriptionRegistry::subscribers                stage-7   broadcast subscription surface, no mesh before GossipSub
-SubscriptionRegistry::subscriptions              stage-7   broadcast subscription surface, no mesh before GossipSub
-ReplyResolution::as_error                        stage-7   reply routes arrive with channels
-ReplyTokenTable::mint                            stage-7   reply routes arrive with channels
-ReplyTokenTable::new                             stage-7   reply routes arrive with channels
-ReplyTokenTable::resolve                         stage-7   reply routes arrive with channels
 
 # --- stage 8 ---------------------------------------------------------
-LocalDataSession::authorize_direct_send          stage-8   plan L588: the lease-derived source endpoint is wired to transport here
-LocalDataSession::endpoint_lease                 stage-8   plan L588
-LocalDataSession::session_id                     stage-8   plan L588
-DirectDestination::to_endpoint                   stage-8   EndpointId projection used by the endpoint directory
-EndpointRegistry::default_endpoint               stage-8   needs a session to revoke from or default for
-EndpointRegistry::set_enabled                    stage-8   needs a session to revoke from or default for
+DirectDestination::to_endpoint                   stage-8   needs a session on the other side of the lease boundary
+EndpointQueues::is_open                          stage-8   needs a session on the other side of the lease boundary
+EndpointRegistry::default_endpoint               stage-8   needs a session on the other side of the lease boundary
+EndpointRegistry::release_session                stage-8   needs a session on the other side of the lease boundary
+EndpointRegistry::set_enabled                    stage-8   needs a session on the other side of the lease boundary
+LocalDataSession::authorize_direct_send          stage-8   needs a session on the other side of the lease boundary
 
 # --- stage 10 --------------------------------------------------------
-ObservedCandidates::new                          stage-10  Kademlia control port, inert until the DHT is activated
-OfferedAddresses::new                            stage-10  Kademlia control port, inert until the DHT is activated
+OfferedAddress::as_str                           stage-10  Kademlia control port, inert until the DHT is activated
 OfferedAddresses::parse_all                      stage-10  Kademlia control port, inert until the DHT is activated
-RoutingView::can_become_healthy                  stage-10  Kademlia control port, inert until the DHT is activated
-RoutingView::effective_target                    stage-10  Kademlia control port, inert until the DHT is activated
-RoutingView::is_saturated                        stage-10  Kademlia control port, inert until the DHT is activated
-RoutingView::is_target_satisfied                 stage-10  Kademlia control port, inert until the DHT is activated
+RoutingView::health                              stage-10  Kademlia control port, inert until the DHT is activated
 RoutingView::next_exploration_interval_ms        stage-10  Kademlia control port, inert until the DHT is activated
 validate_limits                                  stage-10  Kademlia control port, inert until the DHT is activated
 
 # --- stage 11 --------------------------------------------------------
-AddressState::is_dialable_at                     stage-11  address/peer backoff introspection, first read by AutoNAT and relay selection
-AddressState::is_known_good                      stage-11  address/peer backoff introspection, first read by AutoNAT and relay selection
-AddressState::is_punitive_at                     stage-11  address/peer backoff introspection, first read by AutoNAT and relay selection
-ConnectionPolicy::address_entries                stage-11  address/peer backoff introspection, first read by AutoNAT and relay selection
-ConnectionPolicy::peer_entries                   stage-11  address/peer backoff introspection, first read by AutoNAT and relay selection
-ConnectionPolicy::prune                          stage-11  address/peer backoff introspection, first read by AutoNAT and relay selection
-PeerBackoff::is_clear_at                         stage-11  address/peer backoff introspection, first read by AutoNAT and relay selection
-PeerBackoff::is_punitive_at                      stage-11  address/peer backoff introspection, first read by AutoNAT and relay selection
+ConnectionPolicy::address_entries                stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
+ConnectionPolicy::peer_entries                   stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
 
 # --- stage 12 --------------------------------------------------------
-TransportCapabilities::clamped                   stage-12  capability clamping happens at runtime composition
-PeerTrustPolicy::with_local_peer                 stage-12  trust policy bound to the local peer, at composition
+PeerTrustPolicy::with_local_peer                 stage-12  bound at runtime composition
+TransportCapabilities::clamped                   stage-12  bound at runtime composition
 
 # --- stage 13 --------------------------------------------------------
-RequestedCapability::as_admin                    stage-13  handshake authority domain, needs two real sockets
-RequestedCapability::as_data                     stage-13  handshake authority domain, needs two real sockets
-LocalAdminPort::endpoint_lease                   stage-13  proves an admin port holds no application lease
-LocalAdminPort::holds                            stage-13  admin authority check, needs an admin IPC socket
-LocalAdminPort::new                              stage-13  admin port constructed by the daemon
-LocalAdminPort::port_id                          stage-13  admin port identity, surfaced over admin IPC
-Payload::into_parts                              stage-13  payload decomposition at the IPC frame boundary
-PreAuthGate::tracked_sources                     stage-13  pre-auth admission counters, surfaced by `admin.*` status
-PreAuthLimits::max_attempts_per_window           stage-13  pre-auth admission counters, surfaced by `admin.*` status
-PreAuthLimits::max_global_attempts_per_window    stage-13  pre-auth admission counters, surfaced by `admin.*` status
-PreAuthLimits::max_pending_per_source            stage-13  pre-auth admission counters, surfaced by `admin.*` status
-PreAuthLimits::max_sources                       stage-13  pre-auth admission counters, surfaced by `admin.*` status
-PreAuthLimits::rate_window_ms                    stage-13  pre-auth admission counters, surfaced by `admin.*` status
+Payload::into_parts                              stage-13  surfaced over desktop IPC v2 and `admin.*` status
+PreAuthGate::tracked_sources                     stage-13  surfaced over desktop IPC v2 and `admin.*` status

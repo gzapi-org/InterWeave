@@ -47,14 +47,34 @@
 # that calls `EndpointQueues::len` names `EndpointQueues` — and removes
 # the whole class.
 #
-# Method position is the necessary escape: `refusal.to_wire()` never
-# writes `Refusal`, so requiring the type alone reports a function that
-# is called twice. `.new(` is not idiomatic Rust for a constructor, so
-# this escape does not hand the masking back.
+# There is deliberately NO implicit escape for a method call. Two were
+# tried and both handed back the false-green the type rule removed. A
+# bare `.<name>(` let unrelated `.len(` calls vouch for
+# `OfferedAddresses::len`. Matching the receiver identifier against the
+# owner's snake_case then reported seven genuinely-called functions as
+# uncalled — `queues.is_open()`, `handle.admit()`, `r.release_session()`
+# — because Rust receivers are named for their role, not their type.
 #
-# EXEMPTIONS carry a DEADLINE. `tools/checks/domain_fn_exempt.txt` holds
-# `<Type::name> <stage-N> <reason>` — qualified, because a bare `new`
-# would exempt sixteen unrelated constructors at once, and an exemption expires once the open
+# Textual analysis cannot attribute a method call to a type, so the check
+# does not pretend to. A call it cannot see is recorded explicitly and
+# VERIFIED, which is what `call` exemptions below are for.
+#
+# EXEMPTIONS come in two kinds, both in `tools/checks/domain_fn_exempt.txt`
+# and both qualified as `Type::name`, because a bare `new` would exempt
+# sixteen unrelated constructors at once.
+#
+#   <Type::name> stage-N <reason>   nothing calls it YET; the stage that
+#                                   will is a deadline (see below).
+#   <Type::name> call <expr>        it IS called, in method position the
+#                                   check cannot attribute. `<expr>` is
+#                                   the literal call, e.g.
+#                                   `refusal.to_wire(`, and the check
+#                                   fails unless that text still appears
+#                                   in some other tracked source.
+#
+# The second kind is the difference between "trust me, it is called" and
+# "here is the call". A snooze button would be the former; this one goes
+# stale on its own the moment the call site changes, and an exemption expires once the open
 # stage — `workspace.metadata.interweave.status` — is past stage N. That
 # is the whole point: a flat allow-list is a snooze button, and
 # `authorize_outbound` was written *in* the stage that was supposed to
@@ -80,6 +100,8 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 fi
 
 EXEMPT_FILE="${INTERWEAVE_DOMAIN_FN_EXEMPT:-tools/checks/domain_fn_exempt.txt}"
+# Everything from here down in a source file is tests, not callers.
+TEST_MODULE_MARKER="#\[cfg(test)\]"
 MANIFEST="${INTERWEAVE_MANIFEST:-Cargo.toml}"
 
 # The open stage, from the one machine-readable place it is recorded.
@@ -92,13 +114,22 @@ if ! [[ "$open_stage" =~ ^[0-9]+$ ]]; then
 fi
 
 # name -> "stage reason", parsed once.
-declare -A exempt_stage exempt_reason
+declare -A exempt_stage exempt_reason exempt_call
 exempt_count=0
 if [[ -f "$EXEMPT_FILE" ]]; then
     while read -r name stage reason; do
         [[ -z "${name:-}" || "$name" == \#* ]] && continue
+        if [[ "$stage" == "call" ]]; then
+            if [[ -z "${reason// /}" ]]; then
+                echo "check_domain_fns_are_called: $EXEMPT_FILE: \`$name\` is exempt as called but names no call expression." >&2
+                exit 2
+            fi
+            exempt_call["$name"]="$reason"
+            exempt_count=$((exempt_count + 1))
+            continue
+        fi
         if ! [[ "$stage" =~ ^stage-([0-9]+)$ ]]; then
-            echo "check_domain_fns_are_called: $EXEMPT_FILE: \`$name\` has no \`stage-N\` deadline (got '${stage:-}')." >&2
+            echo "check_domain_fns_are_called: $EXEMPT_FILE: \`$name\` has neither a \`stage-N\` deadline nor \`call\` (got '${stage:-}')." >&2
             exit 2
         fi
         if [[ -z "${reason// /}" ]]; then
@@ -110,6 +141,7 @@ if [[ -f "$EXEMPT_FILE" ]]; then
         exempt_count=$((exempt_count + 1))
     done < "$EXEMPT_FILE"
 fi
+
 
 mapfile -t domain < <(git ls-files 'crates/api/*.rs' 'crates/transport/runtime/*.rs' 2>/dev/null)
 if [[ ${#domain[@]} -eq 0 ]]; then
@@ -129,12 +161,31 @@ for file in "${domain[@]}"; do
         # per (name, file) pair: the same answer, a fraction of the forks.
         # A method additionally requires its type to be named in the same
         # file, or every same-named method in the tree vouches for it.
-        elsewhere=0
+        # Production use inside the DEFINING file counts. Same-file use
+        # is discounted so a unit test cannot vouch for its own subject,
+        # but that must not discard a real caller: `FrameError::to_wire`
+        # is invoked by `parse_inbound` a few lines below its definition,
+        # which is exactly the wiring a P1 finding asked for. So the
+        # defining file is re-read with its test module cut off, and a
+        # mention beyond the declaration itself is a caller.
+        own="$(sed "/$TEST_MODULE_MARKER/q" "$file" 2>/dev/null | sed 's,//.*,,')"
+        uses_in_own=$(grep -ow -- "$name" <<<"$own" | wc -l)
+        if (( uses_in_own > 1 )); then
+            elsewhere=1
+        else
+            elsewhere=0
+        fi
+
         while IFS= read -r hit; do
+            (( elsewhere == 1 )) && break
             [[ "$hit" == "$file" ]] && continue
-            if [[ -n "$owner" ]] \
-               && ! grep -qw -- "$owner" "$hit" 2>/dev/null \
-               && ! grep -qF -- ".$name(" "$hit" 2>/dev/null; then
+            # Comments are stripped first. Prose vouched for a function
+            # once already: `Refusal::to_wire` passed only because the
+            # conformance matrix's own doc comment happened to name both
+            # `to_wire` and `Refusal`, so a paragraph ABOUT the check was
+            # what made the check green.
+            stripped="$(sed 's,//.*,,' "$hit" 2>/dev/null)"
+            if [[ -n "$owner" ]] && ! grep -qw -- "$owner" <<<"$stripped"; then
                 continue
             fi
             elsewhere=1
@@ -143,6 +194,21 @@ for file in "${domain[@]}"; do
 
         qualified="$name"
         [[ -n "$owner" ]] && qualified="$owner::$name"
+
+        if [[ -n "${exempt_call[$qualified]:-}" ]]; then
+            seen_exempt["$qualified"]=1
+            expr="${exempt_call[$qualified]}"
+            found_call=0
+            for other in "${all_rs[@]}"; do
+                [[ "$other" == "$file" ]] && continue
+                if grep -qF -- "$expr" "$other" 2>/dev/null; then found_call=1; break; fi
+            done
+            if (( found_call == 0 )); then
+                echo "check_domain_fns_are_called: $EXEMPT_FILE: \`$qualified\` is exempt as called via \`$expr\`, but no other source contains that call." >&2
+                problems=$((problems + 1))
+            fi
+            continue
+        fi
 
         if [[ -n "${exempt_stage[$qualified]:-}" ]]; then
             seen_exempt["$qualified"]=1
@@ -187,7 +253,7 @@ done
 # `${!arr[@]}` on an empty associative array trips `set -u`, so the
 # iteration is guarded rather than the array pre-seeded: a sentinel entry
 # would be an exemption nobody wrote.
-for name in ${exempt_stage[@]+"${!exempt_stage[@]}"}; do
+for name in ${exempt_stage[@]+"${!exempt_stage[@]}"} ${exempt_call[@]+"${!exempt_call[@]}"}; do
     [[ -n "${seen_exempt[$name]:-}" ]] && continue
     echo "check_domain_fns_are_called: $EXEMPT_FILE: \`$name\` names no public domain function — stale entry." >&2
     problems=$((problems + 1))

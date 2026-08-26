@@ -83,8 +83,9 @@ assert_rc   "a pub fn the backend calls passes" 0
 # A caller in the SAME file is not a caller: `authorize_outbound` had
 # unit tests beside it and that is precisely why it looked covered.
 run_against "$UNCALLED
+#[cfg(test)]
 mod t { use super::*; fn probe() { let _ = authorize_outbound(1); } }" "$BACKEND_IDLE" "" ""
-assert_rc   "a caller in the defining file alone does not count" 1
+assert_rc   "a unit test beside it does not count as a caller" 1
 
 # --- scope ------------------------------------------------------------
 run_against 'pub(crate) fn narrow(x: u8) -> u8 { x }' "$BACKEND_IDLE" "" ""
@@ -133,12 +134,57 @@ assert_says "  and it reports the qualified name" 'Alpha::new'
 run_against "$ALPHA_NEW" 'fn go() { let _ = Alpha::new(); }' "" ""
 assert_rc   "naming the type makes it a caller" 0
 
-# But requiring the type NAME alone would report a function that is
-# called twice: `refusal.to_wire()` never writes `Refusal`.
+# There is NO implicit escape for a method call. A bare `.<name>(` let
+# unrelated `.len(` calls vouch for `OfferedAddresses::len`, and matching
+# the receiver name reported seven genuinely-called functions as uncalled.
 run_against 'impl Refusal {
     pub fn to_wire(&self) -> u8 { 0 }
 }' 'fn go(r: X) { let _ = r.to_wire(); }' "" ""
-assert_rc   "a call in method position counts without naming the type" 0
+assert_rc   "a bare method call does not vouch without the type" 1
+
+# --- production use inside the defining file counts -------------------
+#
+# Same-file use is discounted so a unit test cannot vouch for its own
+# subject. That must not discard a real caller: `FrameError::to_wire` is
+# invoked by `parse_inbound` a few lines below its own definition.
+run_against 'impl Frame {
+    pub fn to_wire(&self) -> u8 { 0 }
+}
+fn parse(f: Frame) -> u8 { f.to_wire() }' "$BACKEND_IDLE" "" ""
+assert_rc   "a production caller in the defining file counts" 0
+
+run_against 'impl Frame {
+    pub fn to_wire(&self) -> u8 { 0 }
+}
+#[cfg(test)]
+mod t { use super::*; fn probe(f: Frame) -> u8 { f.to_wire() } }' "$BACKEND_IDLE" "" ""
+assert_rc   "a caller in the defining file's TEST module does not" 1
+
+# --- a comment is not a caller ---------------------------------------
+#
+# Prose vouched for a function once: `Refusal::to_wire` passed only
+# because the conformance matrix's doc comment named both `to_wire` and
+# `Refusal`, so a paragraph ABOUT the check was what made it green.
+run_against "$ALPHA_NEW" '// Alpha::new is described here but never called.
+fn go() {}' "" ""
+assert_rc   "a comment naming both the type and the method is not a caller" 1
+
+# --- `call` exemptions are verified, not asserted ---------------------
+run_against 'impl Refusal {
+    pub fn to_wire(&self) -> u8 { 0 }
+}' 'fn go(r: X) { let _ = refusal.to_wire(); }' 'Refusal::to_wire call refusal.to_wire(' ""
+assert_rc   "a call exemption naming a real call expression passes" 0
+
+run_against 'impl Refusal {
+    pub fn to_wire(&self) -> u8 { 0 }
+}' "$BACKEND_IDLE" 'Refusal::to_wire call refusal.to_wire(' ""
+assert_rc   "a call exemption whose call does not exist fails" 1
+assert_says "  and it says no source contains that call" 'no other source contains that call'
+
+run_against 'impl Refusal {
+    pub fn to_wire(&self) -> u8 { 0 }
+}' "$BACKEND_IDLE" 'Refusal::to_wire call' ""
+assert_rc   "a call exemption with no expression is exit 2" 2
 
 # --- exemptions are qualified too ------------------------------------
 run_against "$ALPHA_NEW" "$BACKEND_IDLE" 'new stage-9 a bare name must not cover a method' ""
