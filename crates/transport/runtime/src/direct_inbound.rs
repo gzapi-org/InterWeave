@@ -200,17 +200,6 @@ impl Refusal {
     }
 }
 
-impl Outcome {
-    /// The wire answer, when this is a refusal.
-    #[must_use]
-    pub const fn refusal_wire(&self) -> Option<DirectRejectReason> {
-        match self {
-            Self::Refused(r) => Some(r.to_wire()),
-            _ => None,
-        }
-    }
-}
-
 /// Run one inbound direct-v2 request through admission.
 ///
 /// `source_peer` is the **authenticated** remote identity — Noise proved
@@ -424,6 +413,19 @@ pub fn dedup_key(frame: &DirectMessageV2, source_peer: &TransportIdentity) -> De
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+
+    /// The wire reason the backend would send for this outcome.
+    ///
+    /// Mirrors the single production site in the libp2p runtime, which
+    /// matches `Outcome::Refused(refusal)` and sends `refusal.to_wire()`.
+    /// Deliberately test-only: a production wrapper for this would be a
+    /// second, uncalled spelling of a one-line match.
+    fn refusal_wire(outcome: &Outcome) -> Option<DirectRejectReason> {
+        match outcome {
+            Outcome::Refused(r) => Some(r.to_wire()),
+            _ => None,
+        }
+    }
 
     use interweave_local_client_api::Generation;
     use interweave_transport_api::{MediaType, MessageId, Payload};
@@ -754,7 +756,7 @@ mod tests {
             "the conflicting body was not delivered"
         );
         assert_eq!(
-            outcome.refusal_wire(),
+            refusal_wire(&outcome),
             Some(DirectRejectReason::Malformed),
             "and it is not distinguishable as a routing failure"
         );
@@ -786,6 +788,122 @@ mod tests {
             w.queues.len(&endpoint("claude")),
             0,
             "and never creates a parallel enqueue path"
+        );
+    }
+
+    /// A default that cannot receive is `no_route`, like any other.
+    ///
+    /// `ENDPOINTS.md` states both halves: "If no default exists, or the
+    /// default endpoint has no active local lease, the remote request
+    /// receives the same coarse `no_route` rejection used for
+    /// unknown/unavailable/endpoint-policy-denied routes."
+    ///
+    /// Both are asserted here because they are separate branches that a
+    /// change can break independently, and because the point of the
+    /// clause is that neither is distinguishable from the others — a
+    /// sender must not be able to tell a missing default from a
+    /// revoked one from an endpoint that was never configured.
+    #[test]
+    fn a_default_that_cannot_receive_is_indistinguishable_no_route() {
+        // No default configured at all.
+        let mut none_configured = World::new();
+        let mut endpoints = BTreeMap::new();
+        endpoints.insert(endpoint("human"), RegisteredEndpoint::default());
+        none_configured.registry = EndpointRegistry::new(endpoints, None);
+        let absent = none_configured.admit(&frame(None, b"hi", 31), &peer(P1), 0);
+
+        // A default that exists but holds no live lease.
+        let mut revoked = World::new();
+        revoked.registry.revoke(&endpoint("human"));
+        let unleased = revoked.admit(&frame(None, b"hi", 32), &peer(P1), 0);
+
+        // An explicitly named endpoint that was never configured, which
+        // is the answer the other two must be indistinguishable from.
+        let mut unknown_world = World::new();
+        let unknown = unknown_world.admit(&frame(Some("nonexistent"), b"hi", 33), &peer(P1), 0);
+
+        for (label, outcome) in [
+            ("no default configured", &absent),
+            ("default lease revoked", &unleased),
+            ("endpoint never configured", &unknown),
+        ] {
+            assert!(
+                matches!(outcome, Outcome::Refused(Refusal::NoRoute(_))),
+                "{label} should be a no-route refusal, got {outcome:?}"
+            );
+            assert_eq!(
+                refusal_wire(outcome),
+                Some(DirectRejectReason::NoRoute),
+                "{label} must be the same coarse code on the wire"
+            );
+        }
+
+        assert_eq!(
+            none_configured.queues.len(&endpoint("human")),
+            0,
+            "nothing was delivered on the missing-default path"
+        );
+        assert_eq!(
+            revoked.queues.len(&endpoint("human")),
+            0,
+            "nothing was delivered on the revoked-default path"
+        );
+    }
+
+    /// Reservation exhaustion is `overloaded`, and enqueues nothing.
+    ///
+    /// `ENDPOINTS.md` states capacity exhaustion as coarse wire
+    /// `overloaded` / local `Overloaded`, and adds that it "must not fall
+    /// through to a second enqueue path". Both halves are asserted here
+    /// because the second is the one a fix would break: an exhausted
+    /// reservation that still delivered would be at-least-once
+    /// presentation under a bound that reads as satisfied.
+    ///
+    /// This is the RESERVATION bound, not the endpoint delivery queue.
+    /// The two produce the same wire code by different routes, and the
+    /// conformance matrix cited the queue test for both until a review
+    /// pointed out that reservation exhaustion had no proof at all.
+    #[test]
+    fn an_exhausted_reservation_budget_is_overloaded_and_enqueues_nothing() {
+        let mut w = World::new();
+
+        // Fill this peer's per-peer allowance with owners that have not
+        // resolved, which is what concurrent in-flight requests look
+        // like to the next arrival.
+        let mut held = 0;
+        for id in 100..140u8 {
+            let f = frame(Some("claude"), b"held", id);
+            let key = dedup_key(&f, &peer(P1));
+            let fingerprint = direct_content_fingerprint_v1(Some("text/plain"), b"held")
+                .expect("a fingerprintable body");
+            match w.reservations.acquire(&key, fingerprint) {
+                Ok(Reservation::Owner) => held += 1,
+                Err(ReservationFailure::Overloaded) => break,
+                other => panic!("unexpected reservation outcome: {other:?}"),
+            }
+        }
+        assert!(
+            held > 0,
+            "the budget must admit something before it is spent"
+        );
+
+        let depth_before = w.queues.len(&endpoint("claude"));
+        let outcome = w.admit(&frame(Some("claude"), b"new", 200), &peer(P1), 0);
+
+        assert_eq!(
+            outcome,
+            Outcome::Refused(Refusal::Overloaded),
+            "an exhausted reservation budget is coarse overloaded"
+        );
+        assert_eq!(
+            refusal_wire(&outcome),
+            Some(DirectRejectReason::Overloaded),
+            "and it says so on the wire"
+        );
+        assert_eq!(
+            w.queues.len(&endpoint("claude")),
+            depth_before,
+            "and it did not fall through to a second enqueue path"
         );
     }
 
@@ -866,7 +984,7 @@ mod tests {
             outcome,
             Outcome::Refused(Refusal::Queue(QueueRefusal::Full { bound: 1 }))
         );
-        assert_eq!(outcome.refusal_wire(), Some(DirectRejectReason::Overloaded));
+        assert_eq!(refusal_wire(&outcome), Some(DirectRejectReason::Overloaded));
         assert_eq!(w.queues.len(&endpoint("claude")), 1, "still exactly one");
     }
 
@@ -950,7 +1068,7 @@ mod tests {
         for outcome in [&unknown, &offline] {
             assert!(matches!(outcome, Outcome::Refused(Refusal::NoRoute(_))));
             assert_eq!(
-                outcome.refusal_wire(),
+                refusal_wire(outcome),
                 Some(DirectRejectReason::NoRoute),
                 "endpoint presence must not be observable"
             );
