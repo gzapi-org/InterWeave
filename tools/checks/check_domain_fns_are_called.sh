@@ -47,6 +47,20 @@
 # that calls `EndpointQueues::len` names `EndpointQueues` — and removes
 # the whole class.
 #
+# WHAT THIS GUARD CANNOT DO, stated because four review rounds went into
+# discovering it. Rust method calls cannot be attributed to a type by
+# reading text: `queues.is_open()` names neither `EndpointQueues` nor
+# anything derivable from it. Every rule tried here has therefore been a
+# co-occurrence heuristic with a residual hole, and this one's is that a
+# production file naming type `Alpha` AND calling some other type's
+# `new()` vouches for `Alpha::new`.
+#
+# So read this as a SMELL DETECTOR, not a proof. It reliably catches the
+# case it was built for — a function nothing anywhere refers to — and it
+# does not claim more. The exemption ledger is where the residue is
+# recorded, and `call` entries are checked against a real production call
+# rather than believed.
+#
 # There is deliberately NO implicit escape for a method call. Two were
 # tried and both handed back the false-green the type rule removed. A
 # bare `.<name>(` let unrelated `.len(` calls vouch for
@@ -148,10 +162,59 @@ if [[ ${#domain[@]} -eq 0 ]]; then
     echo "check_domain_fns_are_called: no domain sources yet; nothing to check."
     exit 0
 fi
-mapfile -t all_rs < <(git ls-files '*.rs' 2>/dev/null)
+# PRODUCTION sources only. A test is not a caller: `authorize_outbound`
+# had unit tests and no production caller, which is the entire defect
+# this guard exists for, so counting tests would let the original P1
+# through. Integration suites under `tests/` and any `tests/` directory
+# inside a crate are excluded wholesale; `#[cfg(test)]` modules are cut
+# off the remaining files.
+mapfile -t all_rs < <(git ls-files '*.rs' 2>/dev/null | grep -vE '(^|/)tests/')
+
+# The production half of a source file, cached once per file.
+declare -A PROD
+production_of() {
+    local f="$1"
+    if [[ -z "${PROD[$f]+set}" ]]; then
+        PROD["$f"]="$(sed "/$TEST_MODULE_MARKER/q" "$f" 2>/dev/null | sed 's,//.*,,')"
+    fi
+    printf '%s' "${PROD[$f]}"
+}
+
+# Is this owner type referenced by any production source other than its
+# own file?
+#
+# NARROWING, deliberate. When a whole type has no production consumer,
+# every one of its methods is uncalled for one reason — the type is not
+# wired yet — and reporting each separately turns one fact into five
+# entries. `OfferedAddresses` alone contributed `new`, `len`, `is_empty`,
+# `as_slice` and `parse_all`. So an unwired type is reported ONCE, as the
+# type, and its methods are not policed individually until something
+# uses it.
+#
+# The cost is real and worth stating: a method added to an already-wired
+# type is policed, but a method added to an unwired one is not. That is
+# the right trade only because the type-level entry carries the same
+# stage deadline, so the whole type comes back for review when its stage
+# opens.
+declare -A OWNER_WIRED
+owner_is_wired() {
+    local owner="$1" home="$2" f
+    [[ -z "$owner" ]] && return 0
+    if [[ -z "${OWNER_WIRED[$owner]+set}" ]]; then
+        OWNER_WIRED["$owner"]=1
+        for f in "${all_rs[@]}"; do
+            [[ "$f" == "$home" ]] && continue
+            if grep -qw -- "$owner" <<<"$(production_of "$f")"; then
+                OWNER_WIRED["$owner"]=0
+                break
+            fi
+        done
+    fi
+    [[ "${OWNER_WIRED[$owner]}" == "0" ]]
+}
 
 problems=0
-declare -A seen_exempt
+declare -A seen_exempt reported_owner
 
 for file in "${domain[@]}"; do
     while IFS=$'\t' read -r name owner; do
@@ -161,38 +224,16 @@ for file in "${domain[@]}"; do
         # per (name, file) pair: the same answer, a fraction of the forks.
         # A method additionally requires its type to be named in the same
         # file, or every same-named method in the tree vouches for it.
-        # Production use inside the DEFINING file counts, and it is a
-        # USE only if it outnumbers the declarations. Same-file use
-        # is discounted so a unit test cannot vouch for its own subject,
-        # but that must not discard a real caller: `FrameError::to_wire`
-        # is invoked by `parse_inbound` a few lines below its definition,
-        # which is exactly the wiring a P1 finding asked for. So the
-        # defining file is re-read with its test module cut off, and a
-        # mention beyond the declaration itself is a caller.
-        own="$(sed "/$TEST_MODULE_MARKER/q" "$file" 2>/dev/null | sed 's,//.*,,')"
-        uses_in_own=$(grep -ow -- "$name" <<<"$own" | wc -l)
-        # Subtract EVERY declaration of the name, not one. Counting a
-        # single declaration assumed the name is declared once per file,
-        # and `as_slice` is declared twice in the Kademlia port — on
-        # `OfferedAddresses` and on `ObservedCandidates`. Each then saw
-        # two occurrences, counted the other's declaration as its own
-        # caller, and passed with no caller anywhere.
-        decls_in_own=$(grep -oE "fn $name\b" <<<"$own" | wc -l)
-        if (( uses_in_own > decls_in_own )); then
-            elsewhere=1
-        else
-            elsewhere=0
-        fi
-
+        elsewhere=0
         while IFS= read -r hit; do
-            (( elsewhere == 1 )) && break
             [[ "$hit" == "$file" ]] && continue
             # Comments are stripped first. Prose vouched for a function
             # once already: `Refusal::to_wire` passed only because the
             # conformance matrix's own doc comment happened to name both
             # `to_wire` and `Refusal`, so a paragraph ABOUT the check was
             # what made the check green.
-            stripped="$(sed 's,//.*,,' "$hit" 2>/dev/null)"
+            stripped="$(production_of "$hit")"
+            grep -qw -- "$name" <<<"$stripped" || continue
             if [[ -n "$owner" ]] && ! grep -qw -- "$owner" <<<"$stripped"; then
                 continue
             fi
@@ -203,16 +244,36 @@ for file in "${domain[@]}"; do
         qualified="$name"
         [[ -n "$owner" ]] && qualified="$owner::$name"
 
+        # An unwired type is one finding, not one per method.
+        if [[ -n "$owner" ]] && ! owner_is_wired "$owner" "$file"; then
+            if [[ -z "${reported_owner[$owner]:-}" ]]; then
+                reported_owner["$owner"]=1
+                if [[ -n "${exempt_stage[$owner]:-}" ]]; then
+                    seen_exempt["$owner"]=1
+                    if (( exempt_stage[$owner] < open_stage )); then
+                        echo "check_domain_fns_are_called: $file: type \`$owner\` is exempt until stage ${exempt_stage[$owner]}, but stage $open_stage is open — the deadline passed." >&2
+                        problems=$((problems + 1))
+                    fi
+                else
+                    echo "check_domain_fns_are_called: $file: type \`$owner\` has no production consumer at all." >&2
+                    problems=$((problems + 1))
+                fi
+            fi
+            continue
+        fi
+
         if [[ -n "${exempt_call[$qualified]:-}" ]]; then
             seen_exempt["$qualified"]=1
             expr="${exempt_call[$qualified]}"
             found_call=0
             for other in "${all_rs[@]}"; do
-                [[ "$other" == "$file" ]] && continue
-                if grep -qF -- "$expr" "$other" 2>/dev/null; then found_call=1; break; fi
+                if grep -qF -- "$expr" <<<"$(production_of "$other")"; then
+                    found_call=1
+                    break
+                fi
             done
             if (( found_call == 0 )); then
-                echo "check_domain_fns_are_called: $EXEMPT_FILE: \`$qualified\` is exempt as called via \`$expr\`, but no other source contains that call." >&2
+                echo "check_domain_fns_are_called: $EXEMPT_FILE: \`$qualified\` is exempt as called via \`$expr\`, but no PRODUCTION source contains that call." >&2
                 problems=$((problems + 1))
             fi
             continue

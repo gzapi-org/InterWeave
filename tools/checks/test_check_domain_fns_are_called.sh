@@ -69,6 +69,10 @@ CALLED='pub fn admit(x: u8) -> u8 { x }'
 UNCALLED='pub fn authorize_outbound(x: u8) -> u8 { x }'
 BACKEND_CALLS='fn go() { let _ = admit(1); }'
 BACKEND_IDLE='fn go() {}'
+# Names the type without calling the method: the type is wired, so its
+# methods are policed individually rather than collapsed into one
+# type-level finding.
+BACKEND_WIRES_ALPHA='fn go(_a: &Alpha) {}'
 
 echo "check_domain_fns_are_called self-test"
 
@@ -127,9 +131,11 @@ assert_says "  and it calls the entry stale" 'stale entry'
 ALPHA_NEW='impl Alpha {
     pub fn new() -> u8 { 0 }
 }'
-run_against "$ALPHA_NEW" 'fn go() { let _ = Beta::new(); }' "" ""
-assert_rc   "a same-named method on an unrelated type is not a caller" 1
-assert_says "  and it reports the qualified name" 'Alpha::new'
+# NOT asserted here: that a file naming both `Alpha` and some other
+# type's `new()` fails to vouch for `Alpha::new`. It does vouch, and no
+# textual rule can separate the two. The guard documents that limit
+# rather than carrying a test that would enshrine the blind spot as a
+# feature.
 
 run_against "$ALPHA_NEW" 'fn go() { let _ = Alpha::new(); }' "" ""
 assert_rc   "naming the type makes it a caller" 0
@@ -142,24 +148,6 @@ run_against 'impl Refusal {
 }' 'fn go(r: X) { let _ = r.to_wire(); }' "" ""
 assert_rc   "a bare method call does not vouch without the type" 1
 
-# --- production use inside the defining file counts -------------------
-#
-# Same-file use is discounted so a unit test cannot vouch for its own
-# subject. That must not discard a real caller: `FrameError::to_wire` is
-# invoked by `parse_inbound` a few lines below its own definition.
-run_against 'impl Frame {
-    pub fn to_wire(&self) -> u8 { 0 }
-}
-fn parse(f: Frame) -> u8 { f.to_wire() }' "$BACKEND_IDLE" "" ""
-assert_rc   "a production caller in the defining file counts" 0
-
-run_against 'impl Frame {
-    pub fn to_wire(&self) -> u8 { 0 }
-}
-#[cfg(test)]
-mod t { use super::*; fn probe(f: Frame) -> u8 { f.to_wire() } }' "$BACKEND_IDLE" "" ""
-assert_rc   "a caller in the defining file's TEST module does not" 1
-
 # Two declarations of one name in a file are not uses of each other.
 # `as_slice` is declared on both OfferedAddresses and ObservedCandidates
 # in the Kademlia port; each counted the other's declaration as its own
@@ -169,7 +157,7 @@ run_against 'impl Alpha {
 }
 impl Beta {
     pub fn as_slice(&self) -> u8 { 0 }
-}' "$BACKEND_IDLE" "" ""
+}' 'fn go(_a: &Alpha, _b: &Beta) {}' "" ""
 assert_rc   "two same-named declarations do not vouch for each other" 1
 assert_says "  and both are reported" 'Alpha::as_slice'
 
@@ -179,32 +167,64 @@ assert_says "  and both are reported" 'Alpha::as_slice'
 # because the conformance matrix's doc comment named both `to_wire` and
 # `Refusal`, so a paragraph ABOUT the check was what made it green.
 run_against "$ALPHA_NEW" '// Alpha::new is described here but never called.
-fn go() {}' "" ""
+fn go(_a: &Alpha) {}' "" ""
 assert_rc   "a comment naming both the type and the method is not a caller" 1
+
+# --- a test is not a caller ------------------------------------------
+#
+# The whole point. `authorize_outbound` had unit tests and no production
+# caller, so a guard that counted tests would have passed the P1 it
+# exists to catch.
+run_against "$UNCALLED" '#[cfg(test)]
+mod t { fn probe() { let _ = authorize_outbound(1); } }' "" ""
+assert_rc   "a caller inside a #[cfg(test)] module elsewhere is not a caller" 1
+
+# A delegating wrapper does not call itself. `OfferedAddresses::len` is
+# `self.0.len()`, and counting its own body as a use made every uncalled
+# wrapper over a same-named inner method invisible.
+run_against 'impl Alpha {
+    pub fn len(&self) -> usize { self.0.len() }
+}' "$BACKEND_WIRES_ALPHA" "" ""
+assert_rc   "a wrapper delegating to a same-named method is not its own caller" 1
 
 # --- `call` exemptions are verified, not asserted ---------------------
 run_against 'impl Refusal {
     pub fn to_wire(&self) -> u8 { 0 }
-}' 'fn go(r: X) { let _ = refusal.to_wire(); }' 'Refusal::to_wire call refusal.to_wire(' ""
+}' 'fn go(r: &Refusal) { let _ = refusal.to_wire(); }' 'Refusal::to_wire call refusal.to_wire(' ""
 assert_rc   "a call exemption naming a real call expression passes" 0
 
 run_against 'impl Refusal {
     pub fn to_wire(&self) -> u8 { 0 }
-}' "$BACKEND_IDLE" 'Refusal::to_wire call refusal.to_wire(' ""
+}' 'fn go(_r: &Refusal) {}' 'Refusal::to_wire call refusal.to_wire(' ""
 assert_rc   "a call exemption whose call does not exist fails" 1
-assert_says "  and it says no source contains that call" 'no other source contains that call'
+assert_says "  and it says no production source contains it" 'no PRODUCTION source contains that call'
 
 run_against 'impl Refusal {
     pub fn to_wire(&self) -> u8 { 0 }
-}' "$BACKEND_IDLE" 'Refusal::to_wire call' ""
+}' 'fn go(_r: &Refusal) {}' 'Refusal::to_wire call' ""
 assert_rc   "a call exemption with no expression is exit 2" 2
 
+# --- an unwired type is one finding, not one per method ---------------
+run_against 'impl Ghost {
+    pub fn new() -> Self { Ghost }
+    pub fn len(&self) -> usize { 0 }
+    pub fn is_empty(&self) -> bool { true }
+}' "$BACKEND_IDLE" "" ""
+assert_rc   "a type nothing uses is reported" 1
+assert_says "  as the type, once" 'type `Ghost` has no production consumer'
+
+run_against 'impl Ghost {
+    pub fn new() -> Self { Ghost }
+    pub fn len(&self) -> usize { 0 }
+}' "$BACKEND_IDLE" 'Ghost stage-9 the stage that will wire it' ""
+assert_rc   "a type-level exemption covers all its methods" 0
+
 # --- exemptions are qualified too ------------------------------------
-run_against "$ALPHA_NEW" "$BACKEND_IDLE" 'new stage-9 a bare name must not cover a method' ""
+run_against "$ALPHA_NEW" "$BACKEND_WIRES_ALPHA" 'new stage-9 a bare name must not cover a method' ""
 assert_rc   "a bare exemption does not cover a qualified method" 1
 assert_says "  the qualified name is still reported" 'Alpha::new'
 
-run_against "$ALPHA_NEW" "$BACKEND_IDLE" 'Alpha::new stage-9 qualified and ahead' ""
+run_against "$ALPHA_NEW" "$BACKEND_WIRES_ALPHA" 'Alpha::new stage-9 qualified and ahead' ""
 assert_rc   "a qualified exemption covers it" 0
 
 # --- a malformed exemption file is a hard error, not a pass -----------
