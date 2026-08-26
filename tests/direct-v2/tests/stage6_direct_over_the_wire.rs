@@ -1155,9 +1155,13 @@ async fn a_narrow_sender_refuses_its_own_oversized_payload() {
 /// reach any profile-trusted one.
 ///
 /// The peer here IS profile-trusted and the connection IS available, so
-/// a refusal can only be the endpoint's own policy. `CapabilityDenied`
-/// rather than `UnauthorizedPeer` says exactly that: the endpoint lacked
-/// the authority, not the profile the trust.
+/// a refusal can only be the endpoint's own policy — which the send
+/// from an INHERITING endpoint at the end confirms, since it reaches the
+/// same peer over the same connection.
+///
+/// `UnauthorizedPeer` because `ENDPOINTS.md` outbound step 3 requires
+/// it. The code alone cannot distinguish this from a profile denial, and
+/// deliberately: the contract does not offer the sender a finer answer.
 #[tokio::test]
 async fn the_source_endpoints_outbound_policy_narrows_a_trusted_peer() {
     let (sender_id, sender_peer) = who();
@@ -1217,8 +1221,8 @@ async fn the_source_endpoints_outbound_policy_narrows_a_trusted_peer() {
         .expect_err("the endpoint's outbound subset excludes this peer");
     assert_eq!(
         error,
-        TransportError::CapabilityDenied,
-        "the ENDPOINT lacked authority; the profile still trusts the peer"
+        TransportError::UnauthorizedPeer,
+        "ENDPOINTS.md outbound step 3: narrowing denial is UnauthorizedPeer"
     );
 
     // THE SAME PEER, FROM AN ENDPOINT THAT INHERITS, still sends — so

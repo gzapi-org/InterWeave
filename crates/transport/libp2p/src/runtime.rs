@@ -2100,21 +2100,23 @@ fn handle_command(
             }
             // THE SOURCE ENDPOINT'S OWN POLICY NARROWS THIS SEND.
             // `authorize_outbound` applies profile trust first and the
-            // endpoint's outbound subset second, and until now it had no
-            // production caller at all — the narrowing existed in the
-            // domain layer and bound nothing. An endpoint configured to
-            // reach only some peers could reach any profile-trusted one.
+            // endpoint's outbound subset second, and until recently it
+            // had no production caller at all — the narrowing existed in
+            // the domain layer and bound nothing.
             //
-            // AFTER the profile check, not before it, and the order is
-            // the meaning. A peer the profile has stopped trusting must
-            // hear `UnauthorizedPeer`; running this first reported
-            // `CapabilityDenied` for a revoked peer, which says the
-            // endpoint lacked authority when the profile is what denied
-            // it. Distinct from the profile check: this refuses a peer
-            // the PROFILE still trusts, which is the whole meaning of
-            // narrowing. `CapabilityDenied` says the endpoint lacked the
-            // authority, where `UnauthorizedPeer` would claim the profile
-            // did not trust the peer — a different and untrue statement.
+            // `UnauthorizedPeer`, because `ENDPOINTS.md` outbound step 3
+            // says so outright: "a destination excluded by that
+            // narrowing policy returns `UnauthorizedPeer` locally". This
+            // returned `CapabilityDenied` on the reasoning that the
+            // ENDPOINT lacked authority rather than the profile — which
+            // reads well and is not what the contract specifies, and
+            // `CapabilityDenied` tells a caller its local session is
+            // missing a capability, sending it after the wrong fix.
+            //
+            // That also settles the ordering against the profile check.
+            // Both answers are now the same, so which runs first is
+            // unobservable — where it was not, when the two codes
+            // differed and a revoked peer was told the wrong one.
             if !matches!(
                 direct_state.registry.authorize_outbound(
                     &frame.source_endpoint,
@@ -2123,7 +2125,7 @@ fn handle_command(
                 ),
                 interweave_trust_api::TrustDecision::Allowed
             ) {
-                let _ = reply.send(Err(DirectError::CapabilityDenied));
+                let _ = reply.send(Err(DirectError::UnauthorizedPeer));
                 return;
             }
             let peer_id = match to_peer_id(&peer) {
