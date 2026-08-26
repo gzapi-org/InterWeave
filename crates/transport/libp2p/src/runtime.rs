@@ -518,6 +518,30 @@ fn admit_outbound<'a>(
 /// becomes an argument when the API that needs it exists.
 const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Whether a shutdown that is waiting out its grace may finish now.
+///
+/// Two ways out, and the caller is answered on either: everything in
+/// flight has settled, or the deadline passed.
+///
+/// BOTH DIRECTIONS COUNT. `pending_direct` tracks outbound exchanges
+/// only, so a verdict reading it alone would break the loop while an
+/// admitted request's answer was still queued — dropping the accepted
+/// queue and the unsent response, and leaving the sender to retry into
+/// a node that had already accepted it.
+///
+/// A function because the window it protects cannot be reached over a
+/// real socket: a response small enough to fit the kernel's send buffer
+/// completes even against a peer that has stopped reading, so
+/// `ResponseSent` arrives before any shutdown could race it. The
+/// arithmetic is testable even where the race is not.
+const fn shutdown_settled(
+    pending_outbound: usize,
+    answering_inbound: usize,
+    past_deadline: bool,
+) -> bool {
+    past_deadline || (pending_outbound == 0 && answering_inbound == 0)
+}
+
 /// Whether the Swarm may be polled.
 ///
 /// The outbox is bounded so a stalled consumer cannot make this process
@@ -783,7 +807,11 @@ impl SwarmRuntime {
                 // last exchange settling, and the deadline passing —
                 // leave through one place and answer the caller once.
                 if let Some((deadline, _)) = &stopping
-                    && (pending_direct.is_empty() || tokio::time::Instant::now() >= *deadline)
+                    && shutdown_settled(
+                        pending_direct.len(),
+                        direct_state.answering(),
+                        tokio::time::Instant::now() >= *deadline,
+                    )
                 {
                     if let Some((_, reply)) = stopping.take() {
                         let _ = reply.send(());
@@ -980,7 +1008,12 @@ impl SwarmRuntime {
                             Some(SwarmCommand::Shutdown { reply }) => {
                                 // NOTHING IN FLIGHT IS THE COMMON CASE,
                                 // and it still stops immediately.
-                                if pending_direct.is_empty() || stopping.is_some() {
+                                if shutdown_settled(
+                                    pending_direct.len(),
+                                    direct_state.answering(),
+                                    false,
+                                ) || stopping.is_some()
+                                {
                                     let _ = reply.send(());
                                     break;
                                 }
@@ -2240,6 +2273,14 @@ pub struct DirectState {
     registry: EndpointRegistry,
     /// Open delivery queues.
     queues: EndpointQueues,
+    /// Inbound responses queued but not yet written.
+    ///
+    /// `pending_direct` counts OUTBOUND exchanges only, so a shutdown
+    /// that consulted it alone would break the loop while an admitted
+    /// request's answer was still queued — dropping the accepted queue
+    /// and the unsent response, and leaving the sender to retry into a
+    /// restarted node. Counted here so the grace covers both directions.
+    answering: usize,
 }
 
 impl DirectState {
@@ -2327,6 +2368,23 @@ impl DirectState {
         Ok(())
     }
 
+    /// Whether an admitted request's answer is still queued.
+    ///
+    /// Read by shutdown, which must not break the loop while one is: the
+    /// response would never be written and the sender would retry into a
+    /// node that had already accepted it.
+    ///
+    /// Deliberately NOT read by `polling_room`. The outbox bound exists
+    /// to stop a stalled consumer making this process buffer without
+    /// limit, and this count is bounded only by however many inbound
+    /// streams the connections allow — slack that large would weaken the
+    /// bound more than the stall it would relieve. An unsent answer
+    /// under a full outbox is retried into dedup; a lost shutdown is not
+    /// retried at all.
+    const fn answering(&self) -> usize {
+        self.answering
+    }
+
     /// Take everything waiting for `endpoint`.
     fn drain(&mut self, endpoint: &EndpointId) -> Vec<interweave_transport_runtime::DirectEvent> {
         self.queues.drain(endpoint)
@@ -2359,6 +2417,7 @@ impl DirectState {
         Self {
             trust: interweave_transport_runtime::PeerTrustPolicy::default(),
             ingress: interweave_transport_runtime::ingress::IngressLimiter::with_defaults(now_ms),
+            answering: 0,
             dedup: DedupCache::new(DEFAULT_MAX_ENTRIES, DEFAULT_TTL_MS),
             reservations: ReservationMap::new(
                 DEFAULT_MAX_RESERVATIONS,
@@ -2578,9 +2637,12 @@ fn handle_direct(
                     // it. Nothing is retried — the peer that sent an
                     // unparsable frame and then vanished is owed
                     // nothing further.
-                    let _answered = swarm
+                    if swarm
                         .answer_direct(channel, DirectResponse::Rejected { message_id, reason })
-                        .is_ok();
+                        .is_ok()
+                    {
+                        state.answering = state.answering.saturating_add(1);
+                    }
                     return DirectHandled::Consumed;
                 }
             };
@@ -2644,6 +2706,9 @@ fn handle_direct(
             // remote simply will not learn that it arrived, and will
             // retry, which dedup answers.
             let answered = swarm.answer_direct(channel, response).is_ok();
+            if answered {
+                state.answering = state.answering.saturating_add(1);
+            }
 
             if let AdmissionOutcome::Accepted { resolved_endpoint } = outcome {
                 let _ = answered;
@@ -2704,7 +2769,15 @@ fn handle_direct(
         // An inbound failure means a request we were answering is gone.
         // Nothing to undo: admission already decided, and the remote will
         // retry into dedup.
-        RrEvent::InboundFailure { .. } | RrEvent::ResponseSent { .. } => DirectHandled::Consumed,
+        RrEvent::InboundFailure { .. } | RrEvent::ResponseSent { .. } => {
+            // EITHER WAY THE ANSWER IS NO LONGER PENDING: it was written,
+            // or the stream carrying it died. Both release the grace's
+            // hold, and neither is a reason to undo the delivery —
+            // admission already decided, and the remote retries into
+            // dedup.
+            state.answering = state.answering.saturating_sub(1);
+            DirectHandled::Consumed
+        }
     }
 }
 
@@ -3372,5 +3445,39 @@ mod backpressure_tests {
     fn listener_slack_is_shared() {
         assert!(may_buffer_delivery(1, 1, 1));
         assert!(!may_buffer_delivery(2, 1, 1));
+    }
+}
+
+#[cfg(test)]
+mod shutdown_grace_tests {
+    use super::shutdown_settled;
+
+    #[test]
+    fn nothing_in_flight_finishes_at_once() {
+        assert!(shutdown_settled(0, 0, false));
+    }
+
+    #[test]
+    fn an_outbound_exchange_holds_the_grace() {
+        assert!(!shutdown_settled(1, 0, false));
+    }
+
+    /// THE SECOND DIRECTION. `pending_direct` counts outbound only, so a
+    /// verdict reading it alone breaks the loop while an admitted
+    /// request's answer is still queued — the response never written and
+    /// the sender left to retry into a restarted node.
+    #[test]
+    fn an_inbound_answer_holds_it_too() {
+        assert!(
+            !shutdown_settled(0, 1, false),
+            "an answer queued but unwritten is still work in flight"
+        );
+    }
+
+    /// The deadline ends it either way, which is what makes the grace
+    /// BOUNDED rather than a second protocol timeout.
+    #[test]
+    fn the_deadline_outranks_both() {
+        assert!(shutdown_settled(5, 5, true));
     }
 }
