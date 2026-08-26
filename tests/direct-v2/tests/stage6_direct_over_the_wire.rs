@@ -1438,3 +1438,65 @@ async fn an_endpoint_restricted_to_a_client_kind_still_leases() {
     assert_eq!(delivered.len(), 1, "and its queue was opened");
     assert_eq!(delivered[0].payload.bytes(), b"restricted");
 }
+
+/// Nothing to dial and could-not-reach are different answers.
+///
+/// `DIRECT.md` separates them: no usable candidate addresses is
+/// `PeerUnknown`, without ad hoc discovery; a peer with candidates that
+/// is simply not connected is `PeerUnreachable`. Both used to be
+/// `PeerUnreachable`, on a comment claiming this layer "knows only that
+/// there is no connection" — while the ConnectionManager, in scope at
+/// that call, knows whether any address was ever recorded.
+///
+/// The distinction is what an operator acts on: nothing to dial is a
+/// configuration or discovery problem, something that did not answer is
+/// a network one.
+#[tokio::test]
+async fn an_unknown_peer_and_an_unreachable_one_are_told_apart() {
+    let (sender_id, _sender_peer) = who();
+    let (_a_id, never_seen) = who();
+    let (_b_id, has_an_address) = who();
+
+    let sender = SwarmRuntime::start(
+        &sender_id,
+        SubstrateConfig::default(),
+        trusting(&[&never_seen, &has_an_address]),
+    )
+    .expect("starts");
+    sender
+        .configure_direct(endpoints(8))
+        .await
+        .expect("endpoints install");
+
+    // NEITHER IS CONNECTED. The only difference is whether the manager
+    // holds an address for it.
+    sender
+        .add_address(
+            has_an_address.clone(),
+            "/ip4/127.0.0.1/tcp/1".parse().expect("a loopback address"),
+        )
+        .await
+        .expect("the command reaches the task");
+
+    let unknown = sender
+        .send_direct(never_seen, frame(Some("claude"), b"nowhere", 96))
+        .await
+        .expect("the command reaches the task")
+        .expect_err("no candidate addresses");
+    assert_eq!(
+        unknown,
+        TransportError::PeerUnknown,
+        "nothing to dial is a configuration answer, not a network one"
+    );
+
+    let unreachable = sender
+        .send_direct(has_an_address, frame(Some("claude"), b"somewhere", 97))
+        .await
+        .expect("the command reaches the task")
+        .expect_err("an address, but no connection");
+    assert_eq!(
+        unreachable,
+        TransportError::PeerUnreachable,
+        "something to dial that is not connected is a network answer"
+    );
+}

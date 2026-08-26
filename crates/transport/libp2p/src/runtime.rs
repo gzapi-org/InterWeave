@@ -2178,12 +2178,38 @@ fn handle_command(
                         },
                     );
                 }
-                // NOT CONNECTED. `DIRECT.md` distinguishes "no usable
-                // candidate addresses" from "could not reach"; this
-                // layer knows only that there is no connection to send
-                // over, and says the honest one.
+                // NOT CONNECTED, and `DIRECT.md` separates two cases
+                // that this used to collapse. Its comment claimed the
+                // layer "knows only that there is no connection" — but
+                // the manager is right here and knows whether any
+                // address was ever recorded:
+                //
+                //   no usable candidate addresses -> `PeerUnknown`,
+                //     without ad hoc discovery;
+                //   usable candidates -> could not reach it now.
+                //
+                // The distinction is what an operator acts on. Nothing
+                // to dial is a configuration or discovery problem;
+                // something to dial that did not answer is a network
+                // one, and telling them apart is the difference between
+                // adding an address and chasing a firewall.
+                //
+                // The contract also allows the ConnectionManager to dial
+                // under the command deadline — "may", not must — and
+                // this does not. Sequencing a gated dial and then the
+                // exchange means holding the caller's reply across a
+                // connection outcome, which is a deferred-reply state
+                // machine the command loop has nowhere to put yet. The
+                // retry scheduler already re-dials known peers, so a
+                // send after an idle disconnect recovers on the next
+                // tick rather than staying broken.
                 Err(NotConnected) => {
-                    let _ = reply.send(Err(DirectError::PeerUnreachable));
+                    let known = manager.known_addresses(&peer);
+                    let _ = reply.send(Err(if known == 0 {
+                        DirectError::PeerUnknown
+                    } else {
+                        DirectError::PeerUnreachable
+                    }));
                 }
             }
         }
