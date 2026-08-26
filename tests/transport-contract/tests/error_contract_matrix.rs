@@ -160,7 +160,7 @@ const MATRIX: &[Clause] = &[
         doc: ENDPOINTS,
         text: "A retry rejected by the current direct-ingress token bucket receives coarse `overloaded` before dedup lookup",
         error: "Overloaded",
-        proof: Proof::Test("a_rate_limited_retry_does_not_erase_the_accepted_route"),
+        proof: Proof::Test("a_trusted_peer_is_refused_once_its_burst_is_spent"),
     },
 
     // --- endpoint directory and handshake (later stages) -------------
@@ -325,22 +325,39 @@ fn every_proof_this_matrix_cites_exists() {
     let mut broken = Vec::new();
 
     for clause in MATRIX {
-        let name = match clause.proof {
-            Proof::Test(n) | Proof::Unrepresentable(n) => n,
+        // The two kinds of proof are checked differently, because they
+        // claim different things. A `Test` asserts the caller sees this
+        // error, so its body must name it. An `Unrepresentable` proves
+        // the condition cannot be built at all — `EndpointId` rejects a
+        // malformed string in its constructor, returning its own type's
+        // error and never `TransportError::InvalidArgument`, which the
+        // caller never reaches. Demanding the error name there asks the
+        // proof to mention something it exists to make impossible.
+        let (name, must_name_error) = match clause.proof {
+            Proof::Test(n) => (n, true),
+            Proof::Unrepresentable(n) => (n, false),
             Proof::Stage(..) => continue,
         };
         let needle = format!("fn {name}(");
-        let Some(body) = sources.iter().find(|s| s.contains(&needle)) else {
+        let Some(source) = sources.iter().find(|s| s.contains(&needle)) else {
             broken.push(format!("  `{name}` — no test by that name exists"));
             continue;
         };
-        // The proof must at least speak about the error it claims. This
-        // is weak on its own and deliberately so: it catches the citation
-        // that drifted onto an unrelated test, which is the realistic
-        // failure. It is not a substitute for the test itself.
-        if !body.contains(clause.error) {
+        let Some(body) = proof_body(source, name) else {
+            broken.push(format!("  `{name}` — found, but its body does not parse"));
+            continue;
+        };
+        // The proof must speak about the error it claims, in ITS OWN
+        // body. Searching the whole file was the first version of this
+        // and it was worthless: any unrelated test, comment, or
+        // production code in the same file satisfied it, which is how a
+        // row citing `a_rate_limited_retry_does_not_erase_the_accepted_route`
+        // for `Overloaded` passed while that test asserts
+        // `Refusal::RateLimited` and never mentions the wire code.
+        if must_name_error && !body.contains(clause.error) {
             broken.push(format!(
-                "  `{name}` — exists, but its file never mentions {}",
+                "  `{name}` — exists, but neither it nor the helpers it \
+                 calls mention {}",
                 clause.error
             ));
         }
@@ -399,6 +416,53 @@ fn the_matrix_has_no_duplicate_or_dead_rows() {
             clause.error
         );
     }
+}
+
+/// The named function's body, plus the bodies of same-file helpers it
+/// calls.
+///
+/// One level of expansion, and it is not optional: assertions are
+/// routinely lifted into a shared helper, so
+/// `a_trusted_peer_is_refused_once_its_burst_is_spent` proves
+/// `Overloaded` entirely through `assert_only_overloaded`. Checking the
+/// literal body alone would call that citation broken, which is a false
+/// negative, and a check that cries wolf gets deleted.
+///
+/// Brace counting is deliberately naive — a brace inside a string
+/// literal would confuse it. Test bodies do not do that, and the failure
+/// mode is a parse error this test reports rather than a silent pass.
+fn proof_body(source: &str, name: &str) -> Option<String> {
+    let own = span(source, &format!("fn {name}("))?;
+    let mut all = own.clone();
+    for word in own.split(|c: char| !c.is_alphanumeric() && c != '_') {
+        if word.is_empty() || word == name {
+            continue;
+        }
+        if let Some(helper) = span(source, &format!("fn {word}(")) {
+            all.push_str(&helper);
+        }
+    }
+    Some(all)
+}
+
+/// The `{ .. }` block that follows `needle`, balanced.
+fn span(source: &str, needle: &str) -> Option<String> {
+    let start = source.find(needle)?;
+    let open = start + source[start..].find('{')?;
+    let mut depth = 0usize;
+    for (i, ch) in source[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(source[open..=open + i].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn tracked_rust_sources() -> Vec<String> {
