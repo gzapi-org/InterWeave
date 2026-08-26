@@ -104,12 +104,17 @@ libp2p = { version = "0.56", default-features = false, features = [
     "tokio",
     "macros",
     "ed25519",
-    # Stage 6. The direct v2 request-response primitive and the CBOR
-    # codec its responses ride on. Absent until this stage opened, so a
-    # behaviour that dials could not exist before the admission funnel
-    # it must pass through (CLAUDE.md §3).
+    # Stage 6. The direct v2 request-response primitive. Absent until
+    # this stage opened, so a behaviour that dials could not exist
+    # before the admission funnel it must pass through (CLAUDE.md §3).
+    #
+    # NOT `cbor`. It was enabled here on the assumption that direct v2
+    # responses would ride on it; `DirectCodec` encodes and decodes the
+    # frozen binary shapes by hand instead, pinned by
+    # `fixtures/direct-v2/`, and nothing in the tree ever referred to
+    # cbor. A feature nobody uses is dependency surface bought for
+    # nothing.
     "request-response",
-    "cbor",
 ] }
 # The async runtime the Swarm is driven on. Bounded channels only (§6).
 tokio = { version = "1", default-features = false, features = [
