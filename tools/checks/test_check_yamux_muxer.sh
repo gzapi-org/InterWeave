@@ -87,21 +87,36 @@ echo "check_yamux_muxer.sh — what it must NOT flag"
 run_against 'let cfg = yamux::Config::default();'
 assert_rc "a plain default is fine" 0
 
-# AN IDENTICALLY-NAMED SETTER ON SOMETHING ELSE. Without the context
-# window this fails on unrelated code, gets called noisy, and gets
-# deleted — which is how a guard dies.
+# AN IDENTICALLY-NAMED SETTER IN A FILE WITH NO YAMUX. This is what
+# keeps the guard from crying wolf across the tree; without it the check
+# fails on unrelated code and gets deleted, which is how a guard dies.
 run_against 'let mut pool = ConnectionPool::new();
 pool.set_max_num_streams(8);'
-assert_rc "the same setter on an unrelated type is not flagged" 0
+assert_rc "the same setter in a file that never mentions yamux is not flagged" 0
 
-# The context window is two lines, so a yamux mention further away does
-# not reach. Asserted rather than assumed, because it is the boundary
-# between the two cases above.
-run_against 'let cfg = yamux::Config::default();
-let a = 1;
-let b = 2;
-other.set_max_num_streams(8);'
-assert_rc "and a yamux mention four lines up does not reach" 0
+echo "check_yamux_muxer.sh — distance must not hide the call"
+
+# THE BLIND SPOT THIS REPLACES. The first version required `yamux`
+# within two lines of the setter, and a self-test asserted that a
+# mention four lines up "does not reach" — testing the limitation as
+# though it were a feature. Anything between the declaration and the
+# call defeated it, and the call still selects 0.12.1 whatever sits
+# above it.
+run_against 'let mut config = yamux::Config::default();
+// validation, a conditional, or just an explanation
+// spanning more than the old two-line window
+config.set_max_num_streams(64);'
+assert_rc       "a setter four lines below the declaration is caught" 1
+assert_contains "  and the line is still named"                       "src/lib.rs:4"
+
+# Distance in the other direction too: the declaration may follow.
+run_against 'fn configure(config: &mut yamux::Config) {
+    // an argument rather than a local, and the mention is on line 1
+    let bound = 64;
+    let _ = bound;
+    config.set_receive_window_size(bound);
+}'
+assert_rc "and a setter on a yamux-typed argument is caught" 1
 
 if [[ -s "$GUARD_MARKER" ]]; then
     echo "  ✗ self-test called undefined helpers:" >&2

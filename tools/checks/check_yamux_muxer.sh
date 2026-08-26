@@ -75,22 +75,27 @@ if [[ ${#sources[@]} -eq 0 ]]; then
     exit 0
 fi
 
+# FILE-SCOPED, not line-scoped. An earlier version required `yamux`
+# within two lines of the call, which any validation, conditional or
+# explanatory comment between the declaration and the setter defeats —
+# and the setter still selects 0.12.1 whatever sits above it. Worse, the
+# self-test asserted that blind spot as though it were a feature.
+#
+# So: if a file mentions yamux at all, every one of these setters in it
+# is reported. The cost is a false positive in a file that both uses
+# yamux and calls an identically-named setter on something else, which
+# the message below tells a reader how to resolve; the cost of the line
+# window was a miss, and a guard that misses is the thing this replaces.
 found=0
-for setter in "${SETTERS[@]}"; do
-    # `yamux` must appear on the same line or the preceding two, so an
-    # unrelated `set_max_num_streams` on some other type does not trip
-    # this. Yamux config is always built as `yamux::Config` here.
-    while IFS= read -r hit; do
-        [[ -z "$hit" ]] && continue
-        file="${hit%%:*}"
-        rest="${hit#*:}"
-        line="${rest%%:*}"
-        context="$(sed -n "$((line > 2 ? line - 2 : 1)),${line}p" "$file")"
-        if [[ "$context" == *yamux* ]]; then
-            echo "check_yamux_muxer: $file:$line calls $setter on a yamux Config." >&2
+for file in "${sources[@]}"; do
+    grep -q -- "yamux" "$file" 2>/dev/null || continue
+    for setter in "${SETTERS[@]}"; do
+        while IFS= read -r hit; do
+            [[ -z "$hit" ]] && continue
+            echo "check_yamux_muxer: $file:${hit%%:*} calls $setter on a yamux Config." >&2
             found=$((found + 1))
-        fi
-    done < <(grep -Hn -- "\.$setter(" "${sources[@]}" 2>/dev/null)
+        done < <(grep -n -- "\.$setter(" "$file" 2>/dev/null)
+    done
 done
 
 if (( found > 0 )); then

@@ -239,6 +239,14 @@ Adding a dependency whose licence is not already listed therefore fails the chec
 
 The same file forbids git dependencies and any registry other than crates.io. A git dependency has no version, no yank mechanism, and no advisory database, so it is outside every other control in this section.
 
+#### The advisory check sees RustSec, and GitHub sees more
+
+`cargo-deny` resolves advisories against the RustSec database. A vulnerability published only as a GHSA has no RUSTSEC id, so the check cannot see it and reports clean — accurately, for the question it asks. Treat Dependabot as a second, non-overlapping source rather than a duplicate.
+
+The live example is **`yamux`**, which has no RustSec advisory at all. `libp2p-yamux` depends on BOTH 0.12.1 and the patched 0.13.10; `Config::default()` selects 0.13.10, which is what `crates/transport/libp2p` uses. But every tuning setter — `set_max_num_streams`, `set_receive_window_size`, `set_max_buffer_size`, `set_window_update_mode` — routes through `Config::set`, which replaces the config with `Config012::default()` and silently moves the muxer onto 0.12.1 and its remote-panic DoS (GHSA-vxx9-2994-q338). Bounding stream counts is exactly what §6 pushes toward, so the natural next change reintroduces the vulnerability without touching a version number and with every check green.
+
+`tools/checks/check_yamux_muxer.sh` is the guard for that, because `cargo-deny` structurally cannot be. Banning the version would not work either: 0.12.1 is in the graph unconditionally as libp2p-yamux's alternate, so a ban fails every run whether or not anything selected it. What is dangerous is first-party code choosing it, which is what the guard looks for.
+
 ### Licence headers are checked
 
 Every first-party source file carries an `SPDX-License-Identifier: Apache-2.0` header in its opening lines. `tools/checks/check_license_headers.sh` enforces that, and also fails on foreign licence terms — an SPDX tag naming another licence, or rights-reserved / confidential boilerplate — anywhere in the tracked or about-to-be-committed tree. It scans untracked-but-not-ignored files too, because the file about to be committed is exactly the one worth catching.
