@@ -2273,14 +2273,28 @@ pub struct DirectState {
     registry: EndpointRegistry,
     /// Open delivery queues.
     queues: EndpointQueues,
-    /// Inbound responses queued but not yet written.
+    /// Inbound requests whose answer is queued but not yet written.
     ///
     /// `pending_direct` counts OUTBOUND exchanges only, so a shutdown
     /// that consulted it alone would break the loop while an admitted
     /// request's answer was still queued — dropping the accepted queue
     /// and the unsent response, and leaving the sender to retry into a
-    /// restarted node. Counted here so the grace covers both directions.
-    answering: usize,
+    /// restarted node. Tracked here so the grace covers both directions.
+    ///
+    /// A SET OF IDS, not a count, and the type is the enforcement.
+    /// `InboundFailure` is emitted for requests that never reached
+    /// `handle_direct` at all — a frame the codec refused before
+    /// delivery — and those registered no answer. A bare counter
+    /// decremented on every completion event consumed some OTHER
+    /// exchange's entry, and a shutdown racing that saw zero and dropped
+    /// an answer it had promised.
+    ///
+    /// There is no unit test for this because there is no arithmetic
+    /// left to get wrong: removing an id that was never inserted is a
+    /// no-op, so the miscount is unrepresentable rather than merely
+    /// avoided. `InboundRequestId` has no public constructor either, so
+    /// a test could only have exercised `BTreeSet` itself.
+    answering: std::collections::BTreeSet<libp2p::request_response::InboundRequestId>,
 }
 
 impl DirectState {
@@ -2381,8 +2395,8 @@ impl DirectState {
     /// bound more than the stall it would relieve. An unsent answer
     /// under a full outbox is retried into dedup; a lost shutdown is not
     /// retried at all.
-    const fn answering(&self) -> usize {
-        self.answering
+    fn answering(&self) -> usize {
+        self.answering.len()
     }
 
     /// Take everything waiting for `endpoint`.
@@ -2417,7 +2431,7 @@ impl DirectState {
         Self {
             trust: interweave_transport_runtime::PeerTrustPolicy::default(),
             ingress: interweave_transport_runtime::ingress::IngressLimiter::with_defaults(now_ms),
-            answering: 0,
+            answering: std::collections::BTreeSet::new(),
             dedup: DedupCache::new(DEFAULT_MAX_ENTRIES, DEFAULT_TTL_MS),
             reservations: ReservationMap::new(
                 DEFAULT_MAX_RESERVATIONS,
@@ -2581,9 +2595,13 @@ fn handle_direct(
     match direct {
         RrEvent::Message {
             peer,
-            message: RrMessage::Request {
-                request, channel, ..
-            },
+            message:
+                RrMessage::Request {
+                    request,
+                    channel,
+                    request_id,
+                    ..
+                },
             ..
         } => {
             let Ok(source) = to_transport_identity(&peer) else {
@@ -2641,7 +2659,7 @@ fn handle_direct(
                         .answer_direct(channel, DirectResponse::Rejected { message_id, reason })
                         .is_ok()
                     {
-                        state.answering = state.answering.saturating_add(1);
+                        state.answering.insert(request_id);
                     }
                     return DirectHandled::Consumed;
                 }
@@ -2707,7 +2725,7 @@ fn handle_direct(
             // retry, which dedup answers.
             let answered = swarm.answer_direct(channel, response).is_ok();
             if answered {
-                state.answering = state.answering.saturating_add(1);
+                state.answering.insert(request_id);
             }
 
             if let AdmissionOutcome::Accepted { resolved_endpoint } = outcome {
@@ -2769,13 +2787,16 @@ fn handle_direct(
         // An inbound failure means a request we were answering is gone.
         // Nothing to undo: admission already decided, and the remote will
         // retry into dedup.
-        RrEvent::InboundFailure { .. } | RrEvent::ResponseSent { .. } => {
-            // EITHER WAY THE ANSWER IS NO LONGER PENDING: it was written,
-            // or the stream carrying it died. Both release the grace's
-            // hold, and neither is a reason to undo the delivery —
-            // admission already decided, and the remote retries into
-            // dedup.
-            state.answering = state.answering.saturating_sub(1);
+        RrEvent::InboundFailure { request_id, .. } | RrEvent::ResponseSent { request_id, .. } => {
+            // EITHER WAY THAT ANSWER IS NO LONGER PENDING: it was
+            // written, or the stream carrying it died. Neither is a
+            // reason to undo the delivery — admission already decided,
+            // and the remote retries into dedup.
+            //
+            // BY ID, so a failure for a request this side never answered
+            // — one the codec refused before delivery — releases nothing
+            // that belongs to another exchange.
+            state.answering.remove(&request_id);
             DirectHandled::Consumed
         }
     }
