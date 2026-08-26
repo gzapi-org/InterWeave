@@ -1,0 +1,23 @@
+--- crates/transport/runtime/src/endpoint_queue.rs
++++ replace EndpointQueues::close -> usize with 0
+@@ -171,19 +171,17 @@
+         );
+     }
+ 
+     /// Close `endpoint`'s queue, discarding anything still in it.
+     ///
+     /// Returns how many events were dropped, so a caller can log a real
+     /// number rather than assert a silent one.
+     pub fn close(&mut self, endpoint: &EndpointId) -> usize {
+-        self.queues
+-            .remove(endpoint)
+-            .map_or(0, |queue| queue.events.len())
++        0 /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// Whether a queue is open for `endpoint`.
+     #[must_use]
+     pub fn is_open(&self, endpoint: &EndpointId) -> bool {
+         self.queues.contains_key(endpoint)
+     }
+ 

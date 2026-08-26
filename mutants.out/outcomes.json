@@ -1,0 +1,991 @@
+{
+  "outcomes": [
+    {
+      "scenario": "Baseline",
+      "summary": "Success",
+      "log_path": "log/baseline.log",
+      "diff_path": null,
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 18.002004505,
+          "process_status": "Success",
+          "argv": [
+            "cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.353339138,
+          "process_status": "Success",
+          "argv": [
+            "cargo",
+            "test",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/transport/runtime/src/endpoint_queue.rs:110:9: replace QueueRefusal::to_wire -> DirectRejectReason with Default::default()",
+          "package": "interweave-transport-runtime",
+          "file": "crates/transport/runtime/src/endpoint_queue.rs",
+          "function": {
+            "function_name": "QueueRefusal::to_wire",
+            "return_type": "-> DirectRejectReason",
+            "span": {
+              "start": {
+                "line": 101,
+                "column": 5
+              },
+              "end": {
+                "line": 114,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 110,
+              "column": 9
+            },
+            "end": {
+              "line": 113,
+              "column": 10
+            }
+          },
+          "replacement": "Default::default()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/crates__transport__runtime__src__endpoint_queue.rs_line_110_col_9.log",
+      "diff_path": "diff/crates__transport__runtime__src__endpoint_queue.rs_line_110_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.606415107,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/transport/runtime/src/endpoint_queue.rs:119:9: replace <impl core::fmt::Display for QueueRefusal>::fmt -> core::fmt::Result with Ok(Default::default())",
+          "package": "interweave-transport-runtime",
+          "file": "crates/transport/runtime/src/endpoint_queue.rs",
+          "function": {
+            "function_name": "<impl core::fmt::Display for QueueRefusal>::fmt",
+            "return_type": "-> core::fmt::Result",
+            "span": {
+              "start": {
+                "line": 118,
+                "column": 5
+              },
+              "end": {
+                "line": 123,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 119,
+              "column": 9
+            },
+            "end": {
+              "line": 122,
+              "column": 10
+            }
+          },
+          "replacement": "Ok(Default::default())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__transport__runtime__src__endpoint_queue.rs_line_119_col_9.log",
+      "diff_path": "diff/crates__transport__runtime__src__endpoint_queue.rs_line_119_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.579578412,
+          "process_status": "Success",
+          "argv": [
+            "cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.505093358,
+          "process_status": "Success",
+          "argv": [
+            "cargo",
+            "test",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/transport/runtime/src/endpoint_queue.rs:165:9: replace EndpointQueues::open with ()",
+          "package": "interweave-transport-runtime",
+          "file": "crates/transport/runtime/src/endpoint_queue.rs",
+          "function": {
+            "function_name": "EndpointQueues::open",
+            "return_type": "",
+            "span": {
+              "start": {
+                "line": 151,
+                "column": 5
+              },
+              "end": {
+                "line": 172,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 165,
+              "column": 9
+            },
+            "end": {
+              "line": 171,
+              "column": 11
+            }
+          },
+          "replacement": "()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__transport__runtime__src__endpoint_queue.rs_line_165_col_9.log",
+      "diff_path": "diff/crates__transport__runtime__src__endpoint_queue.rs_line_165_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 7.562379815,
+          "process_status": "Success",
+          "argv": [
+            "cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.408140735,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "cargo",
+            "test",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/transport/runtime/src/endpoint_queue.rs:179:9: replace EndpointQueues::close -> usize with 0",
+          "package": "interweave-transport-runtime",
+          "file": "crates/transport/runtime/src/endpoint_queue.rs",
+          "function": {
+            "function_name": "EndpointQueues::close",
+            "return_type": "-> usize",
+            "span": {
+              "start": {
+                "line": 174,
+                "column": 5
+              },
+              "end": {
+                "line": 182,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 179,
+              "column": 9
+            },
+            "end": {
+              "line": 181,
+              "column": 51
+            }
+          },
+          "replacement": "0",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__transport__runtime__src__endpoint_queue.rs_line_179_col_9.log",
+      "diff_path": "diff/crates__transport__runtime__src__endpoint_queue.rs_line_179_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 9.201261218,
+          "process_status": "Success",
+          "argv": [
+            "cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.865347332,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "cargo",
+            "test",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/transport/runtime/src/endpoint_queue.rs:193:9: replace EndpointQueues::len -> usize with 0",
+          "package": "interweave-transport-runtime",
+          "file": "crates/transport/runtime/src/endpoint_queue.rs",
+          "function": {
+            "function_name": "EndpointQueues::len",
+            "return_type": "-> usize",
+            "span": {
+              "start": {
+                "line": 190,
+                "column": 5
+              },
+              "end": {
+                "line": 194,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 193,
+              "column": 9
+            },
+            "end": {
+              "line": 193,
+              "column": 64
+            }
+          },
+          "replacement": "0",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__transport__runtime__src__endpoint_queue.rs_line_193_col_9.log",
+      "diff_path": "diff/crates__transport__runtime__src__endpoint_queue.rs_line_193_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 13.457517663,
+          "process_status": "Success",
+          "argv": [
+            "cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.353830378,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "cargo",
+            "test",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/transport/runtime/src/endpoint_queue.rs:193:9: replace EndpointQueues::len -> usize with 1",
+          "package": "interweave-transport-runtime",
+          "file": "crates/transport/runtime/src/endpoint_queue.rs",
+          "function": {
+            "function_name": "EndpointQueues::len",
+            "return_type": "-> usize",
+            "span": {
+              "start": {
+                "line": 190,
+                "column": 5
+              },
+              "end": {
+                "line": 194,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 193,
+              "column": 9
+            },
+            "end": {
+              "line": 193,
+              "column": 64
+            }
+          },
+          "replacement": "1",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__transport__runtime__src__endpoint_queue.rs_line_193_col_9_001.log",
+      "diff_path": "diff/crates__transport__runtime__src__endpoint_queue.rs_line_193_col_9_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.421100074,
+          "process_status": "Success",
+          "argv": [
+            "cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.353673527,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "cargo",
+            "test",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/transport/runtime/src/endpoint_queue.rs:199:9: replace EndpointQueues::is_empty -> bool with true",
+          "package": "interweave-transport-runtime",
+          "file": "crates/transport/runtime/src/endpoint_queue.rs",
+          "function": {
+            "function_name": "EndpointQueues::is_empty",
+            "return_type": "-> bool",
+            "span": {
+              "start": {
+                "line": 196,
+                "column": 5
+              },
+              "end": {
+                "line": 200,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 199,
+              "column": 9
+            },
+            "end": {
+              "line": 199,
+              "column": 31
+            }
+          },
+          "replacement": "true",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__transport__runtime__src__endpoint_queue.rs_line_199_col_9.log",
+      "diff_path": "diff/crates__transport__runtime__src__endpoint_queue.rs_line_199_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.912180107,
+          "process_status": "Success",
+          "argv": [
+            "cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.922339829,
+          "process_status": "Success",
+          "argv": [
+            "cargo",
+            "test",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/transport/runtime/src/endpoint_queue.rs:199:9: replace EndpointQueues::is_empty -> bool with false",
+          "package": "interweave-transport-runtime",
+          "file": "crates/transport/runtime/src/endpoint_queue.rs",
+          "function": {
+            "function_name": "EndpointQueues::is_empty",
+            "return_type": "-> bool",
+            "span": {
+              "start": {
+                "line": 196,
+                "column": 5
+              },
+              "end": {
+                "line": 200,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 199,
+              "column": 9
+            },
+            "end": {
+              "line": 199,
+              "column": 31
+            }
+          },
+          "replacement": "false",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__transport__runtime__src__endpoint_queue.rs_line_199_col_9_001.log",
+      "diff_path": "diff/crates__transport__runtime__src__endpoint_queue.rs_line_199_col_9_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.872906753,
+          "process_status": "Success",
+          "argv": [
+            "cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.677167197,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "cargo",
+            "test",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/transport/runtime/src/endpoint_queue.rs:216:9: replace EndpointQueues::push -> Result<(), QueueRefusal> with Ok(())",
+          "package": "interweave-transport-runtime",
+          "file": "crates/transport/runtime/src/endpoint_queue.rs",
+          "function": {
+            "function_name": "EndpointQueues::push",
+            "return_type": "-> Result<(), QueueRefusal>",
+            "span": {
+              "start": {
+                "line": 202,
+                "column": 5
+              },
+              "end": {
+                "line": 224,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 216,
+              "column": 9
+            },
+            "end": {
+              "line": 223,
+              "column": 15
+            }
+          },
+          "replacement": "Ok(())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__transport__runtime__src__endpoint_queue.rs_line_216_col_9.log",
+      "diff_path": "diff/crates__transport__runtime__src__endpoint_queue.rs_line_216_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 5.942332842,
+          "process_status": "Success",
+          "argv": [
+            "cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.35425031,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "cargo",
+            "test",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/transport/runtime/src/endpoint_queue.rs:179:9: replace EndpointQueues::close -> usize with 1",
+          "package": "interweave-transport-runtime",
+          "file": "crates/transport/runtime/src/endpoint_queue.rs",
+          "function": {
+            "function_name": "EndpointQueues::close",
+            "return_type": "-> usize",
+            "span": {
+              "start": {
+                "line": 174,
+                "column": 5
+              },
+              "end": {
+                "line": 182,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 179,
+              "column": 9
+            },
+            "end": {
+              "line": 181,
+              "column": 51
+            }
+          },
+          "replacement": "1",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__transport__runtime__src__endpoint_queue.rs_line_179_col_9_001.log",
+      "diff_path": "diff/crates__transport__runtime__src__endpoint_queue.rs_line_179_col_9_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 36.659082621,
+          "process_status": "Success",
+          "argv": [
+            "cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.507644071,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "cargo",
+            "test",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/transport/runtime/src/endpoint_queue.rs:219:31: replace >= with < in EndpointQueues::push",
+          "package": "interweave-transport-runtime",
+          "file": "crates/transport/runtime/src/endpoint_queue.rs",
+          "function": {
+            "function_name": "EndpointQueues::push",
+            "return_type": "-> Result<(), QueueRefusal>",
+            "span": {
+              "start": {
+                "line": 202,
+                "column": 5
+              },
+              "end": {
+                "line": 224,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 219,
+              "column": 31
+            },
+            "end": {
+              "line": 219,
+              "column": 33
+            }
+          },
+          "replacement": "<",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__transport__runtime__src__endpoint_queue.rs_line_219_col_31.log",
+      "diff_path": "diff/crates__transport__runtime__src__endpoint_queue.rs_line_219_col_31.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.915417575,
+          "process_status": "Success",
+          "argv": [
+            "cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.555052943,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "cargo",
+            "test",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/transport/runtime/src/endpoint_queue.rs:187:9: replace EndpointQueues::is_open -> bool with false",
+          "package": "interweave-transport-runtime",
+          "file": "crates/transport/runtime/src/endpoint_queue.rs",
+          "function": {
+            "function_name": "EndpointQueues::is_open",
+            "return_type": "-> bool",
+            "span": {
+              "start": {
+                "line": 184,
+                "column": 5
+              },
+              "end": {
+                "line": 188,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 187,
+              "column": 9
+            },
+            "end": {
+              "line": 187,
+              "column": 43
+            }
+          },
+          "replacement": "false",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__transport__runtime__src__endpoint_queue.rs_line_187_col_9_001.log",
+      "diff_path": "diff/crates__transport__runtime__src__endpoint_queue.rs_line_187_col_9_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 36.307703437,
+          "process_status": "Success",
+          "argv": [
+            "cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.657212629,
+          "process_status": "Success",
+          "argv": [
+            "cargo",
+            "test",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/transport/runtime/src/endpoint_queue.rs:187:9: replace EndpointQueues::is_open -> bool with true",
+          "package": "interweave-transport-runtime",
+          "file": "crates/transport/runtime/src/endpoint_queue.rs",
+          "function": {
+            "function_name": "EndpointQueues::is_open",
+            "return_type": "-> bool",
+            "span": {
+              "start": {
+                "line": 184,
+                "column": 5
+              },
+              "end": {
+                "line": 188,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 187,
+              "column": 9
+            },
+            "end": {
+              "line": 187,
+              "column": 43
+            }
+          },
+          "replacement": "true",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__transport__runtime__src__endpoint_queue.rs_line_187_col_9.log",
+      "diff_path": "diff/crates__transport__runtime__src__endpoint_queue.rs_line_187_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 36.995080905,
+          "process_status": "Success",
+          "argv": [
+            "cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.554632466,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "cargo",
+            "test",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/transport/runtime/src/endpoint_queue.rs:232:9: replace EndpointQueues::drain -> Vec<DirectEvent> with vec![Default::default()]",
+          "package": "interweave-transport-runtime",
+          "file": "crates/transport/runtime/src/endpoint_queue.rs",
+          "function": {
+            "function_name": "EndpointQueues::drain",
+            "return_type": "-> Vec<DirectEvent>",
+            "span": {
+              "start": {
+                "line": 226,
+                "column": 5
+              },
+              "end": {
+                "line": 236,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 232,
+              "column": 9
+            },
+            "end": {
+              "line": 235,
+              "column": 33
+            }
+          },
+          "replacement": "vec![Default::default()]",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/crates__transport__runtime__src__endpoint_queue.rs_line_232_col_9_001.log",
+      "diff_path": "diff/crates__transport__runtime__src__endpoint_queue.rs_line_232_col_9_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.963512841,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/transport/runtime/src/endpoint_queue.rs:232:9: replace EndpointQueues::drain -> Vec<DirectEvent> with vec![]",
+          "package": "interweave-transport-runtime",
+          "file": "crates/transport/runtime/src/endpoint_queue.rs",
+          "function": {
+            "function_name": "EndpointQueues::drain",
+            "return_type": "-> Vec<DirectEvent>",
+            "span": {
+              "start": {
+                "line": 226,
+                "column": 5
+              },
+              "end": {
+                "line": 236,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 232,
+              "column": 9
+            },
+            "end": {
+              "line": 235,
+              "column": 33
+            }
+          },
+          "replacement": "vec![]",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__transport__runtime__src__endpoint_queue.rs_line_232_col_9.log",
+      "diff_path": "diff/crates__transport__runtime__src__endpoint_queue.rs_line_232_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 4.936963535,
+          "process_status": "Success",
+          "argv": [
+            "cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.254726506,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "cargo",
+            "test",
+            "--verbose",
+            "--package=interweave-transport-runtime@0.0.0"
+          ]
+        }
+      ]
+    }
+  ],
+  "total_mutants": 15,
+  "missed": 3,
+  "caught": 10,
+  "timeout": 0,
+  "unviable": 2,
+  "success": 0,
+  "start_time": "2026-08-26T18:58:29.204100577Z",
+  "end_time": "2026-08-26T18:59:56.707234737Z",
+  "cargo_mutants_version": "27.1.0"
+}

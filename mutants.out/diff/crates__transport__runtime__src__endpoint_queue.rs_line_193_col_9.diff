@@ -1,0 +1,21 @@
+--- crates/transport/runtime/src/endpoint_queue.rs
++++ replace EndpointQueues::len -> usize with 0
+@@ -185,17 +185,17 @@
+     #[must_use]
+     pub fn is_open(&self, endpoint: &EndpointId) -> bool {
+         self.queues.contains_key(endpoint)
+     }
+ 
+     /// How many events are waiting for `endpoint`.
+     #[must_use]
+     pub fn len(&self, endpoint: &EndpointId) -> usize {
+-        self.queues.get(endpoint).map_or(0, |q| q.events.len())
++        0 /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// Whether any queue is open.
+     #[must_use]
+     pub fn is_empty(&self) -> bool {
+         self.queues.is_empty()
+     }
+ 

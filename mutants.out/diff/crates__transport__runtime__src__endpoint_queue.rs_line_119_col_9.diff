@@ -1,0 +1,24 @@
+--- crates/transport/runtime/src/endpoint_queue.rs
++++ replace <impl core::fmt::Display for QueueRefusal>::fmt -> core::fmt::Result with Ok(Default::default())
+@@ -111,20 +111,17 @@
+             Self::Full { .. } => DirectRejectReason::Overloaded,
+             Self::NotOpen => DirectRejectReason::NoRoute,
+         }
+     }
+ }
+ 
+ impl core::fmt::Display for QueueRefusal {
+     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+-        match self {
+-            Self::Full { bound } => write!(f, "the endpoint queue is at its bound of {bound}"),
+-            Self::NotOpen => write!(f, "no queue is open for that endpoint"),
+-        }
++        Ok(Default::default()) /* ~ changed by cargo-mutants ~ */
+     }
+ }
+ 
+ /// One endpoint's bounded FIFO.
+ #[derive(Debug)]
+ struct Queue {
+     events: VecDeque<DirectEvent>,
+     bound: usize,

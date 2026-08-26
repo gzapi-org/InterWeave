@@ -1,0 +1,24 @@
+--- crates/transport/runtime/src/endpoint_queue.rs
++++ replace QueueRefusal::to_wire -> DirectRejectReason with Default::default()
+@@ -102,20 +102,17 @@
+     ///
+     /// The two differ, and the difference is deliberate. `Full` is
+     /// `overloaded` — a true resource answer that an honest sender may
+     /// retry. `NotOpen` collapses into `no_route` with endpoint unknown,
+     /// disabled, unleased and policy-denied, because distinguishing it
+     /// would make this protocol an endpoint-presence oracle.
+     #[must_use]
+     pub const fn to_wire(self) -> DirectRejectReason {
+-        match self {
+-            Self::Full { .. } => DirectRejectReason::Overloaded,
+-            Self::NotOpen => DirectRejectReason::NoRoute,
+-        }
++        Default::default() /* ~ changed by cargo-mutants ~ */
+     }
+ }
+ 
+ impl core::fmt::Display for QueueRefusal {
+     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+         match self {
+             Self::Full { bound } => write!(f, "the endpoint queue is at its bound of {bound}"),
+             Self::NotOpen => write!(f, "no queue is open for that endpoint"),

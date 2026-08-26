@@ -1,0 +1,10 @@
+crates/transport/runtime/src/endpoint_queue.rs:165:9: replace EndpointQueues::open with ()
+crates/transport/runtime/src/endpoint_queue.rs:179:9: replace EndpointQueues::close -> usize with 0
+crates/transport/runtime/src/endpoint_queue.rs:193:9: replace EndpointQueues::len -> usize with 0
+crates/transport/runtime/src/endpoint_queue.rs:193:9: replace EndpointQueues::len -> usize with 1
+crates/transport/runtime/src/endpoint_queue.rs:199:9: replace EndpointQueues::is_empty -> bool with false
+crates/transport/runtime/src/endpoint_queue.rs:216:9: replace EndpointQueues::push -> Result<(), QueueRefusal> with Ok(())
+crates/transport/runtime/src/endpoint_queue.rs:179:9: replace EndpointQueues::close -> usize with 1
+crates/transport/runtime/src/endpoint_queue.rs:219:31: replace >= with < in EndpointQueues::push
+crates/transport/runtime/src/endpoint_queue.rs:187:9: replace EndpointQueues::is_open -> bool with true
+crates/transport/runtime/src/endpoint_queue.rs:232:9: replace EndpointQueues::drain -> Vec<DirectEvent> with vec![]

@@ -1,0 +1,24 @@
+--- crates/transport/runtime/src/endpoint_queue.rs
++++ replace EndpointQueues::drain -> Vec<DirectEvent> with vec![Default::default()]
+@@ -224,20 +224,17 @@
+     }
+ 
+     /// Take everything waiting for `endpoint`, oldest first.
+     ///
+     /// Empty for an endpoint with no open queue, which is the same answer
+     /// as an open-but-idle one. A drainer learns nothing about presence
+     /// it did not already have — it holds the lease.
+     pub fn drain(&mut self, endpoint: &EndpointId) -> Vec<DirectEvent> {
+-        self.queues
+-            .get_mut(endpoint)
+-            .map(|q| q.events.drain(..).collect())
+-            .unwrap_or_default()
++        vec![Default::default()] /* ~ changed by cargo-mutants ~ */
+     }
+ }
+ 
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+ 
+     const P1: &str = "12D3KooWA9hFCGwGCpCbWWfLmYSpqPzXgLmPvbBrgWGNvNGSDVpS";

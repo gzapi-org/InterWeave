@@ -678,40 +678,37 @@ fn every_proof_this_matrix_cites_exists() {
             Proof::Unrepresentable(n) | Proof::Vocabulary(n) => (n, false),
             Proof::Stage(..) => continue,
         };
-        let needle = format!("fn {name}(");
-        // EVERY file declaring that name, not the first. The name
-        // `the_same_id_with_a_different_body_is_a_conflict` exists in
-        // both `dedup.rs` and `direct_inbound.rs`, and taking the first
-        // match reported a sound citation as broken — the dedup test
-        // asserts the conflict, the admission test asserts the
-        // `malformed` it becomes on the wire. A shared name is resolved
-        // by "one of them proves it", which is looser than unique
-        // resolution would be and the reason the name must still be a
-        // test that names the error.
-        let declaring: Vec<&String> = sources.iter().filter(|s| s.contains(&needle)).collect();
-        if declaring.is_empty() {
+        // ONE declaration must be both the test and the proof. Asking
+        // "some declaration is a test" and "some declaration names the
+        // error" separately let two different same-named functions
+        // satisfy the two halves: strip `#[test]` from the
+        // `direct_inbound.rs` copy of
+        // `the_same_id_with_a_different_body_is_a_conflict` and the
+        // `dedup.rs` copy answered for it, while the dead function went
+        // on supplying the error.
+        let mut any_declaration = false;
+        let mut bodies: Vec<String> = Vec::new();
+        for source in &sources {
+            for at in declarations(source, name) {
+                any_declaration = true;
+                if is_test_at(source, at)
+                    && let Some(body) = proof_body(source, at)
+                {
+                    bodies.push(body);
+                }
+            }
+        }
+        if !any_declaration {
             broken.push(format!("  `{name}` — no function by that name exists"));
             continue;
         }
-        // Declared somewhere is not the same as declared as a test.
-        if !declaring.iter().any(|s| declared_as_test(s, name)) {
+        if bodies.is_empty() {
             broken.push(format!(
-                "  `{name}` — exists, but carries no #[test] attribute, so it \
-                 does not run"
+                "  `{name}` — exists, but no declaration of it carries a \
+                 #[test] attribute, so none of them run"
             ));
             continue;
         }
-        let bodies: Vec<String> = declaring
-            .iter()
-            .filter_map(|s| proof_body(s, name))
-            .collect();
-        // The proof must speak about the error it claims, in ITS OWN
-        // body. Searching the whole file was the first version of this
-        // and it was worthless: any unrelated test, comment, or
-        // production code in the same file satisfied it, which is how a
-        // row citing `a_rate_limited_retry_does_not_erase_the_accepted_route`
-        // for `Overloaded` passed while that test asserts
-        // `Refusal::RateLimited` and never mentions the wire code.
         let names_it = bodies
             .iter()
             .any(|b| b.contains(clause.error) || b.contains(&rust_spelling(clause.error)));
@@ -831,67 +828,64 @@ fn the_matrix_has_no_duplicate_or_dead_rows() {
     }
 }
 
-/// The named function's body, plus the bodies of same-file helpers it
-/// calls.
+/// Every offset in `source` where `name` is declared.
 ///
-/// One level of expansion, and it is not optional: assertions are
-/// routinely lifted into a shared helper, so
-/// `a_trusted_peer_is_refused_once_its_burst_is_spent` proves
-/// `Overloaded` entirely through `assert_only_overloaded`. Checking the
-/// literal body alone would call that citation broken, which is a false
-/// negative, and a check that cries wolf gets deleted.
+/// All of them: a name can be declared more than once in the tree, and
+/// whether it is a test differs per declaration.
+fn declarations(source: &str, name: &str) -> Vec<usize> {
+    let needle = format!("fn {name}(");
+    source.match_indices(&needle).map(|(i, _)| i).collect()
+}
+
+/// Is the declaration at `at` attributed as a test?
+///
+/// The preamble is the CONTIGUOUS run of attributes, doc comments and
+/// blank lines immediately above it, stopping at the first line that is
+/// none of those — the `}` closing the previous item, typically.
+///
+/// A fixed line window was the first version and it did not work. Some
+/// lookback is needed, because doc comments and other attributes sit
+/// between `#[test]` and `fn`. But a thirteen-line window reaches back
+/// past the previous item, and a neighbouring test's attribute then
+/// qualified a plain function: removing `#[test]` from
+/// `draining_is_shutting_down_on_the_wire` still passed, which is the
+/// exact regression this check exists to catch.
+fn is_test_at(source: &str, at: usize) -> bool {
+    // From the START of the declaration's own line. Walking back from
+    // the `fn` offset leaves the partial text before it as the first
+    // "line", and for `async fn ...` that partial is `async`, which is
+    // neither blank nor an attribute — so the walk stopped there and
+    // every `#[tokio::test]` in the tree looked like a plain function.
+    let line_start = source[..at].rfind('\n').map_or(0, |i| i + 1);
+    let mut found = false;
+    for line in source[..line_start].lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        if trimmed.starts_with("#[") || trimmed.starts_with("#!") {
+            // `#[cfg(test)]` deliberately does not count: every helper in
+            // a test module carries it and none of them are tests.
+            if trimmed.starts_with("#[test]")
+                || trimmed.starts_with("#[tokio::test")
+                || trimmed.starts_with("#[test_case")
+            {
+                found = true;
+            }
+            continue;
+        }
+        break;
+    }
+    found
+}
+
+/// The balanced `{ .. }` block belonging to the declaration at `at`.
 ///
 /// Brace counting is deliberately naive — a brace inside a string
 /// literal would confuse it. Test bodies do not do that, and the failure
 /// mode is a parse error this test reports rather than a silent pass.
-/// Is `name` declared as a TEST in this source?
-///
-/// Resolving `fn <name>(` alone was not enough: a cited proof that loses
-/// its `#[test]` or `#[tokio::test]` attribute stops running, while the
-/// matrix goes on reporting that a real proof exists. That is the defect
-/// this whole file exists to prevent, one level up — a claim that reads
-/// as covered with nothing behind it.
-///
-/// The attribute is looked for in the few lines above the declaration
-/// rather than immediately before it, because doc comments and other
-/// attributes sit between them.
-fn declared_as_test(source: &str, name: &str) -> bool {
-    let Some(at) = source.find(&format!("fn {name}(")) else {
-        return false;
-    };
-    let preamble_start = source[..at]
-        .char_indices()
-        .rev()
-        .filter(|(_, c)| *c == '\n')
-        .nth(12)
-        .map_or(0, |(i, _)| i);
-    let preamble = &source[preamble_start..at];
-    // Only the attribute that makes a function RUN counts. `#[cfg(test)]`
-    // on a module does not: every helper in a test module carries it and
-    // none of them are tests.
-    preamble.contains("#[test]")
-        || preamble.contains("#[tokio::test")
-        || preamble.contains("#[test_case")
-}
-
-fn proof_body(source: &str, name: &str) -> Option<String> {
-    let own = span(source, &format!("fn {name}("))?;
-    let mut all = own.clone();
-    for word in own.split(|c: char| !c.is_alphanumeric() && c != '_') {
-        if word.is_empty() || word == name {
-            continue;
-        }
-        if let Some(helper) = span(source, &format!("fn {word}(")) {
-            all.push_str(&helper);
-        }
-    }
-    Some(all)
-}
-
-/// The `{ .. }` block that follows `needle`, balanced.
-fn span(source: &str, needle: &str) -> Option<String> {
-    let start = source.find(needle)?;
-    let open = start + source[start..].find('{')?;
+fn body_at(source: &str, at: usize) -> Option<String> {
+    let open = at + source[at..].find('{')?;
     let mut depth = 0usize;
     for (i, ch) in source[open..].char_indices() {
         match ch {
@@ -906,6 +900,32 @@ fn span(source: &str, needle: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The body of the declaration at `at`, plus same-file helpers it calls.
+///
+/// One level of expansion, and it is not optional: assertions are
+/// routinely lifted into a shared helper, so
+/// `a_trusted_peer_is_refused_once_its_burst_is_spent` proves
+/// `Overloaded` entirely through `assert_only_overloaded`. Checking the
+/// literal body alone would call that citation broken, which is a false
+/// negative, and a check that cries wolf gets deleted.
+fn proof_body(source: &str, at: usize) -> Option<String> {
+    let own = body_at(source, at)?;
+    let mut all = own.clone();
+    for word in own.split(|c: char| !c.is_alphanumeric() && c != '_') {
+        if word.is_empty() {
+            continue;
+        }
+        for helper in declarations(source, word) {
+            if helper != at
+                && let Some(body) = body_at(source, helper)
+            {
+                all.push_str(&body);
+            }
+        }
+    }
+    Some(all)
 }
 
 fn tracked_rust_sources() -> Vec<String> {

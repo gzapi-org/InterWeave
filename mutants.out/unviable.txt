@@ -1,0 +1,2 @@
+crates/transport/runtime/src/endpoint_queue.rs:110:9: replace QueueRefusal::to_wire -> DirectRejectReason with Default::default()
+crates/transport/runtime/src/endpoint_queue.rs:232:9: replace EndpointQueues::drain -> Vec<DirectEvent> with vec![Default::default()]
