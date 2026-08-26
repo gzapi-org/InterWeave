@@ -50,8 +50,13 @@ EndpointRegistry::release_session                stage-8   needs a session on th
 EndpointRegistry::set_enabled                    stage-8   needs a session on the other side of the lease boundary
 LocalDataSession::authorize_direct_send          stage-8   needs a session on the other side of the lease boundary
 
+# --- stage 9 -------------------------------------------------------------
+ProviderDescriptor::validate    stage-9   provider descriptors are validated when a provider exists to supply them
+
 # --- stage 10 --------------------------------------------------------
 OfferedAddress::as_str                           stage-10  Kademlia control port, inert until the DHT is activated
+ObservedCandidates::as_slice    stage-10  Kademlia control port, inert until the DHT is activated
+OfferedAddresses::as_slice      stage-10  Kademlia control port, inert until the DHT is activated
 OfferedAddresses::parse_all                      stage-10  Kademlia control port, inert until the DHT is activated
 RoutingView::health                              stage-10  Kademlia control port, inert until the DHT is activated
 RoutingView::next_exploration_interval_ms        stage-10  Kademlia control port, inert until the DHT is activated

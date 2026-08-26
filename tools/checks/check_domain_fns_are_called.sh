@@ -161,7 +161,8 @@ for file in "${domain[@]}"; do
         # per (name, file) pair: the same answer, a fraction of the forks.
         # A method additionally requires its type to be named in the same
         # file, or every same-named method in the tree vouches for it.
-        # Production use inside the DEFINING file counts. Same-file use
+        # Production use inside the DEFINING file counts, and it is a
+        # USE only if it outnumbers the declarations. Same-file use
         # is discounted so a unit test cannot vouch for its own subject,
         # but that must not discard a real caller: `FrameError::to_wire`
         # is invoked by `parse_inbound` a few lines below its definition,
@@ -170,7 +171,14 @@ for file in "${domain[@]}"; do
         # mention beyond the declaration itself is a caller.
         own="$(sed "/$TEST_MODULE_MARKER/q" "$file" 2>/dev/null | sed 's,//.*,,')"
         uses_in_own=$(grep -ow -- "$name" <<<"$own" | wc -l)
-        if (( uses_in_own > 1 )); then
+        # Subtract EVERY declaration of the name, not one. Counting a
+        # single declaration assumed the name is declared once per file,
+        # and `as_slice` is declared twice in the Kademlia port — on
+        # `OfferedAddresses` and on `ObservedCandidates`. Each then saw
+        # two occurrences, counted the other's declaration as its own
+        # caller, and passed with no caller anywhere.
+        decls_in_own=$(grep -oE "fn $name\b" <<<"$own" | wc -l)
+        if (( uses_in_own > decls_in_own )); then
             elsewhere=1
         else
             elsewhere=0

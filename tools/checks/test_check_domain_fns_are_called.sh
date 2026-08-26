@@ -160,6 +160,19 @@ run_against 'impl Frame {
 mod t { use super::*; fn probe(f: Frame) -> u8 { f.to_wire() } }' "$BACKEND_IDLE" "" ""
 assert_rc   "a caller in the defining file's TEST module does not" 1
 
+# Two declarations of one name in a file are not uses of each other.
+# `as_slice` is declared on both OfferedAddresses and ObservedCandidates
+# in the Kademlia port; each counted the other's declaration as its own
+# caller and passed with no caller anywhere.
+run_against 'impl Alpha {
+    pub fn as_slice(&self) -> u8 { 0 }
+}
+impl Beta {
+    pub fn as_slice(&self) -> u8 { 0 }
+}' "$BACKEND_IDLE" "" ""
+assert_rc   "two same-named declarations do not vouch for each other" 1
+assert_says "  and both are reported" 'Alpha::as_slice'
+
 # --- a comment is not a caller ---------------------------------------
 #
 # Prose vouched for a function once: `Refusal::to_wire` passed only
