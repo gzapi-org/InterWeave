@@ -239,6 +239,10 @@ Adding a dependency whose licence is not already listed therefore fails the chec
 
 The same file forbids git dependencies and any registry other than crates.io. A git dependency has no version, no yank mechanism, and no advisory database, so it is outside every other control in this section.
 
+#### The advisory check sees RustSec, and GitHub sees more
+
+`cargo-deny` resolves advisories against the RustSec database. A vulnerability published only as a GHSA has no RUSTSEC id, so the check cannot see it and reports clean — accurately, for the question it asks. Treat Dependabot as a second, non-overlapping source rather than a duplicate of the dependency check.
+
 ### Licence headers are checked
 
 Every first-party source file carries an `SPDX-License-Identifier: Apache-2.0` header in its opening lines. `tools/checks/check_license_headers.sh` enforces that, and also fails on foreign licence terms — an SPDX tag naming another licence, or rights-reserved / confidential boilerplate — anywhere in the tracked or about-to-be-committed tree. It scans untracked-but-not-ignored files too, because the file about to be committed is exactly the one worth catching.
@@ -297,17 +301,23 @@ Commit messages are project files for the purposes of §7 — do not cite unrela
 
 Steps 4–5 are **unconditional**: the step-2 lookup only speaks when a PR already exists.
 
-### `git push` is the human authorization point — and it is enforced
+### Nothing prompts before code lands — the discipline below is all there is
 
-Everything downstream of a push is machinery: push → checks → merge queue → `main`, with no further human step in that chain. The push is therefore the last moment a person can change the outcome, which is where the authorization belongs.
+`.claude/settings.json` carries an empty `"ask"`. `git push`, `gh pr merge`, and the GraphQL mutations that do the same job (`enablePullRequestAutoMerge`, `enqueuePullRequest`) all run without a confirmation prompt. **This is deliberate**, and it was chosen knowing the cost: a session idling through review rounds for a human who had already approved the work spends most of its time waiting.
 
-`.claude/settings.json` carries `"ask": ["Bash(git push*)"]`, so every push surfaces a confirmation prompt. `git fetch`, `git log`, and the rest are untouched.
+So read the rest of this section as the whole of the protection, not as a reminder attached to one.
 
-**Therefore `git push` MUST be its own Bash call.** Never bundle it with the commands that precede it — no `git add … && git commit … && git push`, no heredoc script ending in a push. Permission rules are prefix-matched, so a bundled push slips the gate entirely, and approving a bundle authorizes pushing a tree that does not exist yet.
+The chain that lands code is `gh pr merge --auto` → checks → merge queue → `main`. **Arming is standing consent**: it lands the PR at the first moment every required check goes green, whether or not anyone is still looking, and whether or not a review ever arrived. Nothing asks first, nothing blocks it, and no red check appears afterwards to say it was premature.
 
-A session cannot see its own permission prompts, so do not try to verify this gate from the transcript: an approved push and an auto-allowed push produce an identical tool result.
+What that leaves load-bearing, each stated in full below:
 
-`gh pr merge` is deliberately NOT gated. The tree was authorized at its push; gating the merge would ask for the same decision twice.
+- **Arm only when the branch is finished.** Arming while more commits are coming lands a tree that predates them.
+- **A security-boundary change waits for its automated review on the CURRENT head.** Green checks are not a review. This one has caught real defects repeatedly, including in fixes written for earlier findings in the same PR — it is the rule with the most evidence behind it and the least mechanism.
+- **Zero unresolved P1/P2 findings before a stage is called complete.** A PR merges with findings outstanding and nothing announces it.
+
+`git push` never landed anything even when it did prompt: `main` is protected, a pull request is required, and an unarmed PR sits indefinitely. Push early and often — a review reads what is on the remote and nothing else.
+
+A session cannot see its own permission prompts, so do not try to infer any of this from the transcript: an approved action and an auto-allowed one produce an identical tool result. The only way to know what is gated is to read `.claude/settings.json`.
 
 ### Merge / PR discipline
 
@@ -332,10 +342,10 @@ A session cannot see its own permission prompts, so do not try to verify this ga
 7.  add its tests
 8.  run the impacted tests
 9.  commit (one per root cause, per package)
-10. git push                                   ← its own Bash call
+10. git push
 ```
 
-Commits are cheap and local. Accumulate commits, verify locally, push once: many commits and a single push per branch is the intended shape, not an accident.
+Commits are cheap and local, and pushing is now ungated — so push whenever the branch is worth showing, and always before asking for a review, because a review reads what is on the remote and nothing else.
 
 **Phase 3 — integration**
 
@@ -354,7 +364,7 @@ Step 13 matters because required checks are **not strict**: a branch can be gree
 
 ```
 17. gh pr create --base main --head "$BRANCH"
-18. gh pr merge <n> --auto                     # ONLY when the branch is done
+18. gh pr merge <n> --auto                     # ONLY when done — nothing asks
 19. tools/gh/wait-merged.sh <n> &              # background; its exit is the callback
 19b. tools/gh/pr-review-status.sh <n> --wait 30m --automated-only &
 ```
@@ -406,11 +416,16 @@ Never post a reply body through `gh api -f body="…"`: replies quote code, and 
 
 #### When to open a NEW PR
 
-**Never open a new PR while your current one is still open.** One PR at a time, per session. If the branch you are on has an open PR, the next piece of work is another commit on it. Corollary: documentation of a thing belongs in the PR that adds the thing.
+**A PR waiting on review does not block the next task.** Review rounds take minutes to hours and a session that idles through them wastes most of its time, so start the next piece of work on its own branch rather than waiting. Come back to the open PR when its review lands.
 
-With the current PR landed, open a new one when: it depends on something being *merged* rather than merely written; the current branch is already queued or merged; it touches a slow or flaky surface that would hold the rest hostage; urgency differs; or the batch has grown past comfortable review (~6–8 commits — a reason to stop adding and land, not to open a second PR alongside).
+What makes that safe is that each task is a separate branch off fresh `origin/main`, so concurrent work shares nothing but the base. Two rules keep it that way:
 
-Not on that list: "different concerns", "different packages", "different root causes". Those are commit boundaries, satisfied by committing separately on the same branch.
+- **Partition by file set, not by intent.** Two open PRs touching the same file will conflict, and the second to land pays for it — with a rebase you did not plan and a re-review of a tree neither review saw. Before starting alongside an open PR, check what it touches. A refactor of a file is a hard exclusion: nothing else may touch that file until it lands.
+- **A PR that depends on another being MERGED still waits.** Not merely written — merged. Building on an unmerged branch means either duplicating its commits or a base nobody reviewed.
+
+Within one branch, the old rule stands: if the work belongs to the task the branch is for, it is another commit on it, not a second PR. "Different concerns", "different packages" and "different root causes" are commit boundaries, satisfied by committing separately. A batch past ~6–8 commits is a reason to stop adding and land, not to open a second PR alongside.
+
+**Track what is outstanding.** With several PRs open, `tools/gh/pr-sessions.sh /unresolved` is the list of what still owes a reply, and Phase 6 applies to every one of them. Nothing else reminds you: a PR merges with findings outstanding and no red check ever appears.
 
 #### Never race your own CI
 
@@ -522,7 +537,7 @@ For repository-wide changes, verify at minimum:
 - `tools/checks/check_stage_status.sh` is clean — every human-facing statement of the open stage agrees with `workspace.metadata.interweave.status`;
 - `tools/checks/check_component_status.sh` is clean — no component README calls itself an unimplemented placeholder while its own directory holds a manifest and source;
 - `tools/checks/check_required_contexts.sh` is clean — the workflow's job names and §9's list of required contexts are the same set;
-- `tools/checks/check_dependencies.sh` is clean — the graph satisfies `deny.toml`: no advisory or yanked version, every licence on the allow-list, no wildcard requirement or shipped executable, and crates.io as the only source;
+- `tools/checks/check_dependencies.sh` is clean — the graph satisfies `deny.toml`: no **RustSec-advisory** or yanked version, every licence on the allow-list, no wildcard requirement or shipped executable, and crates.io as the only source. RustSec is the qualifier, not decoration: `cargo-deny` reads that database and nothing else, so a GitHub-only advisory is invisible to it and the check passes truthfully while Dependabot reports a high. That gap is real today — see the `yamux` note below;
 - no forbidden production artifacts were introduced outside the active stage;
 - `git fsck --full` passes before archive handoff when a full repository ZIP is requested.
 
