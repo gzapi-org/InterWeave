@@ -579,6 +579,16 @@ Broadcast and direct semantics are independently functional and do not substitut
 
 ## 11. Stage 8 — endpoint directory
 
+### Inherited obligation: bind the source endpoint to the caller's lease
+
+Carried forward from Stage 6 by an explicit maintainer decision recorded on PR #38, not by oversight.
+
+Stage 6 enforces that a frame's `source_endpoint` names a lease the node actually holds, so an invented label is refused. It does **not** derive the source from the *caller's* lease: `configure_direct` leases every enabled endpoint, so a caller may name any configured one, have that endpoint's outbound policy applied, and be observed by the remote as that sender.
+
+That gap is unreachable in Stage 6 — the runtime handle is the only caller and owns every endpoint, so "caller A names endpoint B" has no second party — and becomes real the moment IPC sessions exist, which is here. The property already exists one layer up: `local-client-api` derives the source endpoint from the lease and offers no API accepting one (Stage 1). This stage wires that boundary to the transport.
+
+The shape: `send_direct` takes session or lease context and constructs or overwrites `source_endpoint` from it, rather than trusting the supplied frame. `contracts/ENDPOINTS.md` outbound step 1 and CLAUDE.md §5 are the governing text.
+
 ### Implement
 
 ```text
