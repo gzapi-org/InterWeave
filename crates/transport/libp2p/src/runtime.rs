@@ -281,8 +281,8 @@ pub enum SwarmCommand {
     ConfigureDirect {
         /// The configuration to install.
         config: Box<DirectEndpoints>,
-        /// Answered once installed.
-        reply: oneshot::Sender<()>,
+        /// Answered once installed, or with why it was not.
+        reply: oneshot::Sender<Result<(), SubstrateError>>,
     },
     /// End one endpoint's lease, closing its queue with it.
     ///
@@ -1267,7 +1267,7 @@ impl SwarmRuntime {
             })
             .await
             .map_err(|_| SubstrateError::Stopped)?;
-        answer.await.map_err(|_| SubstrateError::Stopped)
+        answer.await.map_err(|_| SubstrateError::Stopped)?
     }
 
     /// End one endpoint's lease and close its queue with it.
@@ -2127,8 +2127,7 @@ fn handle_command(
             }
         }
         SwarmCommand::ConfigureDirect { config, reply } => {
-            direct_state.configure(*config);
-            let _ = reply.send(());
+            let _ = reply.send(direct_state.configure(*config));
         }
         SwarmCommand::RevokeEndpoint { endpoint, reply } => {
             let _ = reply.send(direct_state.revoke(&endpoint));
@@ -2256,7 +2255,7 @@ impl DirectState {
     }
 
     /// Install endpoint configuration and open a queue for each lease.
-    fn configure(&mut self, config: DirectEndpoints) {
+    fn configure(&mut self, config: DirectEndpoints) -> Result<(), SubstrateError> {
         use interweave_transport_runtime::endpoint_registry::LocalSessionId;
 
         let mut endpoints = std::collections::BTreeMap::new();
@@ -2270,21 +2269,62 @@ impl DirectState {
         // real IPC claim, and the registry cannot tell the difference —
         // which is the point of it holding leases rather than sessions.
         let mut queues = EndpointQueues::new();
-        for (name, _) in &config.endpoints {
-            if registry
+        for (name, configured) in &config.endpoints {
+            // A DISABLED ENDPOINT IS NOT A FAILURE. It is configured and
+            // deliberately closed, so it holds no lease and opens no
+            // queue, and inbound routing answers `no_route` for it
+            // through `resolve_inbound` rather than through an absence
+            // here.
+            if !configured.enabled {
+                continue;
+            }
+            // THE SYNTHETIC KIND MUST BE ONE THE ENDPOINT PERMITS.
+            // `allowed_client_kinds` used to arrive empty, because the
+            // configuration was rebuilt from `RegisteredEndpoint::
+            // default()`; now that the real profile reaches here, a
+            // hard-coded `in-process` is refused outright by any
+            // endpoint restricted to `human-client` or `claude-channel`
+            // — which the example profiles are.
+            //
+            // Stage 8 replaces this with the claim a real session makes,
+            // and this stand-in exists only until there is one.
+            let kind = configured
+                .allowed_client_kinds
+                .first()
+                .map_or("in-process", String::as_str);
+            // AND THE RESULT IS NOT DISCARDED. It used to be `.is_ok()`,
+            // so an endpoint that failed to claim got no lease and no
+            // queue while `configure_direct` still reported success —
+            // every send from it then `EndpointNotRegistered` and every
+            // message to it `no_route`, for a configuration the caller
+            // was told had installed.
+            //
+            // NO TEST REACHES THIS ARM, and that is stated rather than
+            // implied: with a permitted kind chosen above, a disabled
+            // endpoint skipped, names unique per session and duplicates
+            // refused by `ProfileConfig::validate`, none of the four
+            // `ClaimFailure` variants is currently reachable here. The
+            // propagation is what makes a FUTURE change fail loudly
+            // instead of producing a silently dead endpoint, which is
+            // what the discarded result did.
+            registry
                 .claim(
                     name,
                     LocalSessionId(format!("in-process-{}", name.as_str())),
-                    "in-process",
+                    kind,
                     config.epoch.clone(),
                 )
-                .is_ok()
-            {
-                queues.open(name.clone(), config.queue_bound);
-            }
+                .map_err(|failure| {
+                    SubstrateError::InvalidProfile(vec![format!(
+                        "endpoint {} could not be leased: {failure:?}",
+                        name.as_str()
+                    )])
+                })?;
+            queues.open(name.clone(), config.queue_bound);
         }
         self.registry = registry;
         self.queues = queues;
+        Ok(())
     }
 
     /// Take everything waiting for `endpoint`.

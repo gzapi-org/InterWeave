@@ -1350,3 +1350,87 @@ async fn a_destination_endpoints_inbound_policy_is_coarse_no_route() {
         1
     );
 }
+
+/// An endpoint restricted to a real client kind still works.
+///
+/// The synthetic in-process lease used a hard-coded `in-process` kind.
+/// That passed while `DirectEndpoints` rebuilt every endpoint from
+/// `RegisteredEndpoint::default()`, whose kind list is empty and
+/// restricts nothing. Once the real profile reached the registry, any
+/// endpoint restricted to `human-client` or `claude-channel` — which the
+/// example profiles are — refused the claim outright.
+///
+/// The refusal was then SWALLOWED by an `.is_ok()`: no lease, no queue,
+/// and `configure_direct` still reported success. Every send from that
+/// endpoint answered `EndpointNotRegistered` and every message to it
+/// `no_route`, for a configuration the caller was told had installed.
+#[tokio::test]
+async fn an_endpoint_restricted_to_a_client_kind_still_leases() {
+    let restricted = |name: &str, kind: &str| {
+        let mut e = entry(name);
+        e.allowed_client_kinds =
+            vec![interweave_profile_config::ClientKind::parse(kind).expect("a valid client kind")];
+        e
+    };
+    let profile = profile_with(
+        vec![
+            restricted("human", "human-client"),
+            restricted("claude", "claude-channel"),
+        ],
+        Some("human"),
+    );
+
+    let (sender_id, sender_peer) = who();
+    let (receiver_id, receiver_peer) = who();
+    let mut receiver = SwarmRuntime::start(
+        &receiver_id,
+        SubstrateConfig::default(),
+        trusting(&[&sender_peer]),
+    )
+    .expect("starts");
+    let sender = SwarmRuntime::start(
+        &sender_id,
+        SubstrateConfig::default(),
+        trusting(&[&receiver_peer]),
+    )
+    .expect("starts");
+
+    let installed =
+        DirectEndpoints::from_profile(&profile, 8, generation()).expect("a valid profile");
+    sender
+        .configure_direct(installed.clone())
+        .await
+        .expect("the sender's restricted endpoints install");
+    receiver
+        .configure_direct(installed)
+        .await
+        .expect("the receiver's restricted endpoints install");
+
+    let address = receiver
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
+        .await
+        .expect("listens");
+    sender
+        .dial(receiver_peer.clone(), address)
+        .await
+        .expect("command")
+        .expect("admitted");
+    wait_connected(&mut receiver).await;
+
+    // A LEASE EXISTS ON BOTH SIDES, which is the whole claim. The send
+    // needs the sender's lease and the delivery needs the receiver's, so
+    // one message proves both.
+    let resolved = sender
+        .send_direct(receiver_peer, frame(Some("claude"), b"restricted", 95))
+        .await
+        .expect("the command reaches the task")
+        .expect("a restricted endpoint is still a leased endpoint");
+    assert_eq!(resolved, endpoint("claude"));
+
+    let delivered = receiver
+        .drain_endpoint(endpoint("claude"))
+        .await
+        .expect("answers");
+    assert_eq!(delivered.len(), 1, "and its queue was opened");
+    assert_eq!(delivered[0].payload.bytes(), b"restricted");
+}
