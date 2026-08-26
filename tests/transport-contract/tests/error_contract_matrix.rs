@@ -202,25 +202,151 @@ const MATRIX: &[Clause] = &[
         error: "PeerUnreachable",
         proof: Proof::Test("an_unknown_peer_and_an_unreachable_one_are_told_apart"),
     },
+
+    // --- coarse wire rejections -------------------------------------
+    //
+    // Every one of these was invisible to the first version of this
+    // matrix: the curated code list held only the local `ErrorCode`
+    // vocabulary, so `ENDPOINTS.md` and `DIRECT.md` could state a wire
+    // rule and the totality test would not look for it.
+    Clause {
+        doc: ENDPOINTS,
+        text: "If no default exists, or the default endpoint has no active local lease, the remote request receives the same coarse `no_route` rejection",
+        error: "no_route",
+        proof: Proof::Test("every_routing_refusal_is_indistinguishable_on_the_wire"),
+    },
+    Clause {
+        doc: ENDPOINTS,
+        text: "overflow returns coarse `overloaded`",
+        error: "overloaded",
+        proof: Proof::Test("a_trusted_peer_is_refused_once_its_burst_is_spent"),
+    },
+    Clause {
+        doc: ENDPOINTS,
+        text: "the wire response is the coarse `no_route` rejection",
+        error: "no_route",
+        proof: Proof::Test("a_destination_endpoints_inbound_policy_is_coarse_no_route"),
+    },
+    Clause {
+        doc: ENDPOINTS,
+        text: "Queue admission failure at step 8 returns coarse `overloaded`, not `Accepted`",
+        error: "overloaded",
+        proof: Proof::Test("a_full_endpoint_queue_is_overloaded_and_never_falsely_accepted"),
+    },
+    Clause {
+        doc: ENDPOINTS,
+        text: "different fingerprint under the same dedup key -> reject as a duplicate-ID/content conflict (`malformed` on the coarse wire",
+        error: "malformed",
+        proof: Proof::Test("the_same_id_with_a_different_body_is_a_conflict"),
+    },
+    Clause {
+        doc: ENDPOINTS,
+        text: "a trusted peer denied by an endpoint-specific inbound policy receives `no_route`, not an oracle",
+        error: "no_route",
+        proof: Proof::Test("a_destination_endpoints_inbound_policy_is_coarse_no_route"),
+    },
+    Clause {
+        doc: ENDPOINTS,
+        text: "no default -> coarse remote `no_route`",
+        error: "no_route",
+        proof: Proof::Test("every_routing_refusal_is_indistinguishable_on_the_wire"),
+    },
+    Clause {
+        doc: DIRECT,
+        // This line declares the vocabulary rather than stating a
+        // condition, so its proof is the round-trip that drives every
+        // local category through `to_wire` and validates the result
+        // against the schema that defines the list.
+        text: "Coarse reason codes: `no_route`, `unauthorized_peer`, `overloaded`, `malformed`, `too_large`, `shutting_down`, `unsupported`.",
+        error: "overloaded",
+        proof: Proof::Test("every_direct_reject_reason_validates"),
+    },
+    Clause {
+        doc: DIRECT,
+        text: "`no_route` deliberately collapses endpoint unknown, endpoint disabled, no active lease, missing default endpoint, and endpoint-specific policy denial.",
+        error: "no_route",
+        proof: Proof::Test("every_routing_refusal_is_indistinguishable_on_the_wire"),
+    },
+    Clause {
+        doc: DIRECT,
+        text: "A rate-limited retry may instead receive coarse `overloaded`",
+        error: "overloaded",
+        proof: Proof::Test("a_trusted_peer_is_refused_once_its_burst_is_spent"),
+    },
+    Clause {
+        doc: DIRECT,
+        text: "overflow is `overloaded` and never creates a parallel enqueue path",
+        error: "overloaded",
+        proof: Proof::Test("a_waiter_with_no_recorded_owner_is_told_overloaded_not_nothing"),
+    },
+    Clause {
+        doc: DIRECT,
+        text: "successful v2 exchange but remote `no_route` -> `RemoteEndpointUnavailable` locally.",
+        error: "RemoteEndpointUnavailable",
+        proof: Proof::Test("an_unknown_endpoint_is_indistinguishable_no_route"),
+    },
+    Clause {
+        doc: DIRECT,
+        text: "Stop accepting new direct requests, respond `shutting_down` where possible",
+        error: "shutting_down",
+        proof: Proof::Test("draining_is_shutting_down_on_the_wire"),
+    },
 ];
 
-/// Every error code the matrix knows how to look for. Used to re-derive
-/// the clause list from the documents in the totality test, so a code
-/// added to the vocabulary but never to a contract cannot slip past.
-const CODES: &[&str] = &[
-    "EndpointNotRegistered",
-    "InvalidArgument",
-    "UnauthorizedPeer",
-    "CapabilityDenied",
-    "PeerUnknown",
-    "PeerUnreachable",
-    "ProtocolViolation",
-    "Overloaded",
-    "EndpointUnknown",
-    "EndpointDisabled",
-    "EndpointClientKindDenied",
-    "EndpointInUse",
-];
+/// The error vocabularies, read from the schemas that define them.
+///
+/// **Not a list in this file.** A curated list is only as total as
+/// whoever last curated it, and the first version of this matrix proved
+/// exactly that: `RemoteEndpointUnavailable` was missing, so `DIRECT.md`
+/// line 97 named an error nothing here looked for, and the totality test
+/// passed while missing twelve clauses it claimed to enumerate. A matrix
+/// that can be incomplete without failing is the defect it exists to
+/// prevent.
+///
+/// Both vocabularies count. The local `ErrorCode` is what a caller sees;
+/// the lowercase `DirectRejectReason` is what crosses the wire, and both
+/// documents state rules about each.
+const ERROR_CODE_SCHEMA: &str = "architecture/contracts/schemas/ipc/error-code.schema.json";
+const REJECT_REASON_SCHEMA: &str =
+    "architecture/contracts/schemas/direct/reject-reason.schema.json";
+
+fn vocabulary() -> BTreeSet<String> {
+    let mut all = BTreeSet::new();
+    for schema in [ERROR_CODE_SCHEMA, REJECT_REASON_SCHEMA] {
+        let doc: serde_json::Value =
+            serde_json::from_str(&read(schema)).expect("the schema is valid JSON");
+        let variants = doc
+            .get("enum")
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or_else(|| panic!("{schema} declares no `enum` of codes"));
+        for v in variants {
+            all.insert(
+                v.as_str()
+                    .expect("every code in the enum is a string")
+                    .to_string(),
+            );
+        }
+    }
+    assert!(!all.is_empty(), "the error vocabulary cannot be empty");
+    all
+}
+
+/// The Rust spelling of a wire reason: `no_route` -> `NoRoute`.
+///
+/// The schemas speak the wire's snake_case and the tests assert
+/// `DirectRejectReason::NoRoute`, so a proof is accepted under either
+/// spelling of the same code.
+fn rust_spelling(code: &str) -> String {
+    code.split('_')
+        .map(|part| {
+            let mut c = part.chars();
+            match c.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -254,11 +380,11 @@ fn open_stage() -> u32 {
 /// Lines of a document that name an error code, with their 1-based
 /// numbers — the clause list, re-derived from the source of truth
 /// instead of from this file.
-fn error_clauses(doc: &str) -> Vec<(usize, String)> {
+fn error_clauses(doc: &str, vocab: &BTreeSet<String>) -> Vec<(usize, String)> {
     read(doc)
         .lines()
         .enumerate()
-        .filter(|(_, line)| CODES.iter().any(|c| line.contains(&format!("`{c}`"))))
+        .filter(|(_, line)| vocab.iter().any(|c| line.contains(&format!("`{c}`"))))
         .map(|(i, line)| (i + 1, line.to_string()))
         .collect()
 }
@@ -294,9 +420,10 @@ fn every_cited_clause_still_reads_that_way() {
 /// Stage 6 accumulated seventeen contract-code mismatches.
 #[test]
 fn the_contracts_name_no_error_this_matrix_has_missed() {
+    let vocab = vocabulary();
     let mut uncovered = Vec::new();
     for doc in [ENDPOINTS, DIRECT] {
-        for (line_no, line) in error_clauses(doc) {
+        for (line_no, line) in error_clauses(doc, &vocab) {
             let covered = MATRIX.iter().any(|c| c.doc == doc && line.contains(c.text));
             if !covered {
                 let shown: String = line.chars().take(160).collect();
@@ -339,14 +466,24 @@ fn every_proof_this_matrix_cites_exists() {
             Proof::Stage(..) => continue,
         };
         let needle = format!("fn {name}(");
-        let Some(source) = sources.iter().find(|s| s.contains(&needle)) else {
+        // EVERY file declaring that name, not the first. The name
+        // `the_same_id_with_a_different_body_is_a_conflict` exists in
+        // both `dedup.rs` and `direct_inbound.rs`, and taking the first
+        // match reported a sound citation as broken — the dedup test
+        // asserts the conflict, the admission test asserts the
+        // `malformed` it becomes on the wire. A shared name is resolved
+        // by "one of them proves it", which is looser than unique
+        // resolution would be and the reason the name must still be a
+        // test that names the error.
+        let bodies: Vec<String> = sources
+            .iter()
+            .filter(|s| s.contains(&needle))
+            .filter_map(|s| proof_body(s, name))
+            .collect();
+        if bodies.is_empty() {
             broken.push(format!("  `{name}` — no test by that name exists"));
             continue;
-        };
-        let Some(body) = proof_body(source, name) else {
-            broken.push(format!("  `{name}` — found, but its body does not parse"));
-            continue;
-        };
+        }
         // The proof must speak about the error it claims, in ITS OWN
         // body. Searching the whole file was the first version of this
         // and it was worthless: any unrelated test, comment, or
@@ -354,7 +491,10 @@ fn every_proof_this_matrix_cites_exists() {
         // row citing `a_rate_limited_retry_does_not_erase_the_accepted_route`
         // for `Overloaded` passed while that test asserts
         // `Refusal::RateLimited` and never mentions the wire code.
-        if must_name_error && !body.contains(clause.error) {
+        let names_it = bodies
+            .iter()
+            .any(|b| b.contains(clause.error) || b.contains(&rust_spelling(clause.error)));
+        if must_name_error && !names_it {
             broken.push(format!(
                 "  `{name}` — exists, but neither it nor the helpers it \
                  calls mention {}",
@@ -400,6 +540,7 @@ fn no_clause_is_deferred_to_a_stage_that_has_already_passed() {
 /// No two rows claim the same clause, and none is dead.
 #[test]
 fn the_matrix_has_no_duplicate_or_dead_rows() {
+    let vocab = vocabulary();
     let mut seen = BTreeSet::new();
     for clause in MATRIX {
         assert!(
@@ -409,9 +550,9 @@ fn the_matrix_has_no_duplicate_or_dead_rows() {
             clause.doc
         );
         assert!(
-            CODES.contains(&clause.error),
-            "MATRIX row for {:?} names {}, which is not in CODES — the \
-             totality test cannot look for it",
+            vocab.contains(clause.error),
+            "MATRIX row for {:?} names {}, which is in neither schema \
+             vocabulary — the totality test cannot look for it",
             clause.text,
             clause.error
         );
