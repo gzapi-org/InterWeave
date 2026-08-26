@@ -333,6 +333,10 @@ pub fn admit_inbound(
         destination_endpoint: resolved.clone(),
         message_id: frame.message_id,
         payload: frame.payload.clone(),
+        // AT ADMISSION, not at drain. The queue is bounded and an event
+        // may wait in it, so a drain-time stamp would drift by however
+        // long the consumer was behind.
+        received_at: now_ms,
     };
     if let Err(refusal) = ctx.queues.push(event) {
         ctx.reservations.release(&key);
@@ -679,6 +683,30 @@ mod tests {
     /// THE ACCEPTANCE POINT. A full queue is `overloaded`, and nothing was
     /// accepted — the exit gate's scenario 9.
     #[test]
+    fn the_receipt_time_is_taken_at_admission() {
+        // `message-received.schema.json` requires `received_at` and
+        // `contracts/ENDPOINTS.md` names it. It has to be captured when
+        // the event is admitted rather than when a client drains: the
+        // queue is bounded and an event may wait in it, so a drain-time
+        // stamp would drift by however long the consumer was behind and
+        // report congestion as lateness in the message.
+        let mut w = World::new();
+        let admitted_at = 1_700_000_000_000;
+        assert!(matches!(
+            w.admit(&frame(Some("claude"), b"hi", 7), &peer(P1), admitted_at),
+            Outcome::Accepted { .. }
+        ));
+
+        // Drained much later; the stamp is still the admission moment.
+        let drained = w.queues.drain(&endpoint("claude"));
+        assert_eq!(drained.len(), 1);
+        assert_eq!(
+            drained[0].received_at, admitted_at,
+            "the moment it arrived, not the moment it was collected"
+        );
+    }
+
+    #[test]
     fn a_full_queue_refuses_rather_than_accepting_falsely() {
         let mut w = World::new();
         w.queues.close(&endpoint("claude"));
@@ -713,6 +741,7 @@ mod tests {
                 destination_endpoint: endpoint("claude"),
                 message_id: MessageId::from_bytes([99; 16]),
                 payload: Payload::at_ceiling(None, b"filler".to_vec()).expect("fits"),
+                received_at: 0,
             })
             .expect("the queue takes one");
 

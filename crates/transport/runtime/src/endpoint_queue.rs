@@ -60,6 +60,21 @@ pub struct DirectEvent {
     pub message_id: MessageId,
     /// The application bytes and their advisory media type.
     pub payload: Payload,
+    /// LOCAL receipt time in milliseconds, taken at admission.
+    ///
+    /// Required by `message-received.schema.json` and named by
+    /// `contracts/ENDPOINTS.md`, and it has to be captured HERE rather
+    /// than when a client drains: the queue is bounded and an event may
+    /// wait in it, so a drain-time stamp would drift by however long the
+    /// consumer was behind — reporting congestion as lateness in the
+    /// message.
+    ///
+    /// Local, and distinct from the remote's `sent_at_ms`, which stays
+    /// absent because it is diagnostic on the wire and would read as
+    /// authoritative here. Excluded from the content fingerprint for the
+    /// same reason `sent_at_ms` is: a retry of the same message arrives
+    /// at a different moment and is still the same message.
+    pub received_at: u64,
 }
 
 /// Why a local delivery was not admitted.
@@ -242,6 +257,7 @@ mod tests {
             destination_endpoint: endpoint(destination),
             message_id: MessageId::from_bytes([7; 16]),
             payload: Payload::at_ceiling(None, body.to_vec()).expect("within the ceiling"),
+            received_at: 0,
         }
     }
 
