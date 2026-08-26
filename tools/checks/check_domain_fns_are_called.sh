@@ -114,8 +114,36 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 fi
 
 EXEMPT_FILE="${INTERWEAVE_DOMAIN_FN_EXEMPT:-tools/checks/domain_fn_exempt.txt}"
-# Everything from here down in a source file is tests, not callers.
-TEST_MODULE_MARKER="#\[cfg(test)\]"
+# Drop every `#[cfg(test)]` ITEM, and only those items.
+#
+# Truncating at the first `#[cfg(test)]` was wrong, and wrong in the
+# direction that produces false ledger entries. That attribute decorates
+# an item, not necessarily a terminal module: `connection_manager.rs`
+# applies it to a `thread_local!` two-thirds of the way up, so everything
+# below vanished — including the real call to
+# `ConnectionPolicy::record_address_failure`, which the ledger then
+# deferred to stage 11 while production called it all along. A ledger
+# entry that says "nothing calls this" about something that IS called is
+# worse than noise: removing the real call would have stayed green.
+#
+# Brace counting is naive about braces inside string literals, the same
+# caveat as elsewhere here. An item that ends before its first brace is
+# terminated by the `;`.
+strip_test_items() {
+    awk '
+        skip == 1 {
+            opens = gsub(/\{/, "{")
+            closes = gsub(/\}/, "}")
+            depth += opens - closes
+            if (opened == 0 && opens > 0) { opened = 1 }
+            if (opened == 1 && depth <= 0) { skip = 0; opened = 0; depth = 0 }
+            else if (opened == 0 && /;[[:space:]]*$/) { skip = 0 }
+            next
+        }
+        /^[[:space:]]*#\[cfg\(test\)\]/ { skip = 1; depth = 0; opened = 0; next }
+        { print }
+    ' "$1" 2>/dev/null
+}
 MANIFEST="${INTERWEAVE_MANIFEST:-Cargo.toml}"
 
 # The open stage, from the one machine-readable place it is recorded.
@@ -190,7 +218,7 @@ mapfile -t all_rs < <(git ls-files '*.rs' 2>/dev/null | grep -vE '(^|/)tests/')
 # associative-array lookup.
 declare -A PROD HASWORD
 for _f in "${all_rs[@]}"; do
-    _prod="$(sed "/$TEST_MODULE_MARKER/q" "$_f" 2>/dev/null | sed 's,//.*,,')"
+    _prod="$(strip_test_items "$_f" | sed 's,//.*,,')"
     PROD["$_f"]="$_prod"
     while IFS= read -r _w; do
         [[ -n "$_w" ]] && HASWORD["$_f|$_w"]=1

@@ -93,12 +93,8 @@ ConnectionManager::is_retry_due                  stage-11  dial-management intro
 ConnectionManager::revision                      stage-11  dial-management introspection, first read by the reachability stack
 ConnectionManager::scheduled_retries             stage-11  dial-management introspection, first read by the reachability stack
 ConnectionPolicy::address_entries                stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
-ConnectionPolicy::is_address_dialable            stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
 ConnectionPolicy::peer_entries                   stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
-ConnectionPolicy::preferred_addresses            stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
 ConnectionPolicy::prune                          stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
-ConnectionPolicy::record_address_failure         stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
-DialOrigin::is_data_plane                        stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
 PeerBackoff::is_clear_at                         stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
 PeerBackoff::is_punitive_at                      stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
 PolicySnapshot::admit                            stage-11  dial-management introspection, first read by the reachability stack
@@ -111,8 +107,6 @@ SnapshotHandle::load                             stage-11  dial-management intro
 
 # --- stage-12 ----------------------------------------------------
 DedupCache::expire                               stage-12  expiry and introspection driven at runtime composition
-InfrastructureSet::is_empty                      stage-12  bound at runtime composition
-InfrastructureSet::len                           stage-12  bound at runtime composition
 PeerTrustPolicy::with_local_peer                 stage-12  bound at runtime composition
 ReservationMap::outstanding                      stage-12  expiry and introspection driven at runtime composition
 TransportCapabilities::clamped                   stage-12  capability clamping happens at runtime composition

@@ -204,6 +204,30 @@ run_against 'impl Refusal {
 }' 'fn go(_r: &Refusal) {}' 'Refusal::to_wire call' ""
 assert_rc   "a call exemption with no expression is exit 2" 2
 
+# --- `#[cfg(test)]` marks an ITEM, not the rest of the file -----------
+#
+# Truncating at the first occurrence discarded every production caller
+# below it. `connection_manager.rs` attributes a `thread_local!`
+# two-thirds of the way up, so the real call to
+# `record_address_failure` vanished and the ledger deferred an
+# already-called method to a later stage.
+run_against 'impl Alpha {
+    pub fn probe(&self) -> u8 { 0 }
+}' '#[cfg(test)]
+const ONLY_IN_TESTS: u8 = 1;
+
+fn go(a: &Alpha) { let _ = a.probe(); }' "" ""
+assert_rc   "production after an attributed item is still read" 0
+
+# The terminal test module must still be dropped, or a unit test beside
+# the function vouches for it.
+run_against 'impl Alpha {
+    pub fn probe(&self) -> u8 { 0 }
+}' 'fn go(_a: &Alpha) {}
+#[cfg(test)]
+mod t { fn probe_it(a: &Alpha) { let _ = a.probe(); } }' "" ""
+assert_rc   "a caller inside an attributed module is still not a caller" 1
+
 # --- an unwired type is one finding, not one per method ---------------
 run_against 'impl Ghost {
     pub fn new() -> Self { Ghost }
