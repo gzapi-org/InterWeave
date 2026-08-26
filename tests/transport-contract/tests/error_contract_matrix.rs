@@ -341,15 +341,21 @@ const MATRIX: &[Clause] = &[
     // recorded one of six mappings and the retry paragraph one of two.
     Clause {
         doc: ENDPOINTS,
+        // The RESERVATION bound, not the endpoint delivery queue. Both
+        // produce this code, by different routes, and both rows cited
+        // the queue test until a review pointed out that reservation
+        // exhaustion had no proof at all — so the matrix stayed green
+        // whether or not that path still produced `overloaded`, and
+        // whether or not it fell through to a second enqueue.
         text: "Capacity exhaustion rejects the new request as coarse wire `overloaded` / local `Overloaded`",
         error: "Overloaded",
-        proof: Proof::Test("a_full_endpoint_queue_is_overloaded_and_never_falsely_accepted"),
+        proof: Proof::Test("an_exhausted_reservation_budget_is_overloaded_and_enqueues_nothing"),
     },
     Clause {
         doc: ENDPOINTS,
         text: "Capacity exhaustion rejects the new request as coarse wire `overloaded` / local `Overloaded`",
         error: "overloaded",
-        proof: Proof::Test("a_full_endpoint_queue_is_overloaded_and_never_falsely_accepted"),
+        proof: Proof::Test("an_exhausted_reservation_budget_is_overloaded_and_enqueues_nothing"),
     },
     Clause {
         doc: ENDPOINTS,

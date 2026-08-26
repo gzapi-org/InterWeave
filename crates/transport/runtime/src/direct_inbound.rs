@@ -791,6 +791,63 @@ mod tests {
         );
     }
 
+    /// Reservation exhaustion is `overloaded`, and enqueues nothing.
+    ///
+    /// `ENDPOINTS.md` states capacity exhaustion as coarse wire
+    /// `overloaded` / local `Overloaded`, and adds that it "must not fall
+    /// through to a second enqueue path". Both halves are asserted here
+    /// because the second is the one a fix would break: an exhausted
+    /// reservation that still delivered would be at-least-once
+    /// presentation under a bound that reads as satisfied.
+    ///
+    /// This is the RESERVATION bound, not the endpoint delivery queue.
+    /// The two produce the same wire code by different routes, and the
+    /// conformance matrix cited the queue test for both until a review
+    /// pointed out that reservation exhaustion had no proof at all.
+    #[test]
+    fn an_exhausted_reservation_budget_is_overloaded_and_enqueues_nothing() {
+        let mut w = World::new();
+
+        // Fill this peer's per-peer allowance with owners that have not
+        // resolved, which is what concurrent in-flight requests look
+        // like to the next arrival.
+        let mut held = 0;
+        for id in 100..140u8 {
+            let f = frame(Some("claude"), b"held", id);
+            let key = dedup_key(&f, &peer(P1));
+            let fingerprint = direct_content_fingerprint_v1(Some("text/plain"), b"held")
+                .expect("a fingerprintable body");
+            match w.reservations.acquire(&key, fingerprint) {
+                Ok(Reservation::Owner) => held += 1,
+                Err(ReservationFailure::Overloaded) => break,
+                other => panic!("unexpected reservation outcome: {other:?}"),
+            }
+        }
+        assert!(
+            held > 0,
+            "the budget must admit something before it is spent"
+        );
+
+        let depth_before = w.queues.len(&endpoint("claude"));
+        let outcome = w.admit(&frame(Some("claude"), b"new", 200), &peer(P1), 0);
+
+        assert_eq!(
+            outcome,
+            Outcome::Refused(Refusal::Overloaded),
+            "an exhausted reservation budget is coarse overloaded"
+        );
+        assert_eq!(
+            refusal_wire(&outcome),
+            Some(DirectRejectReason::Overloaded),
+            "and it says so on the wire"
+        );
+        assert_eq!(
+            w.queues.len(&endpoint("claude")),
+            depth_before,
+            "and it did not fall through to a second enqueue path"
+        );
+    }
+
     /// THE ACCEPTANCE POINT. A full queue is `overloaded`, and nothing was
     /// accepted — the exit gate's scenario 9.
     #[test]
