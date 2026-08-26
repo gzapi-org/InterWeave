@@ -581,22 +581,26 @@ const fn polling_room(
 
 /// Whether an accepted delivery may be buffered for the consumer.
 ///
-/// The BASE capacity only: the slack [`polling_room`] adds for in-flight
-/// work is reserved for progress and never spent on notifications. A
-/// delivery buffered into that slack is a peer taking a slot this
-/// process needs to settle its own exchanges.
+/// The BASE capacity only: every slot [`polling_room`] adds beyond it is
+/// reserved for progress and never spent on notifications. A delivery
+/// buffered into that slack is a peer taking a slot this process needs
+/// to settle its own work.
+///
+/// THAT INCLUDES THE LISTENER SLACK, which this used to share. The
+/// argument for sharing was that "a pending listener is waiting on a
+/// command reply rather than on a response the Swarm must carry" — and
+/// it is wrong. A listener waits for `NewListenAddr`, which is a Swarm
+/// event and needs a slot in this same outbox. Letting a delivery take
+/// it means `listen()` waits for an address that arrives only once some
+/// unrelated consumer drains.
 ///
 /// Refusing here drops a NOTIFICATION, not a message. The event is
 /// already in the endpoint's bounded queue — the admission `AcceptedV2`
 /// promised (ADR-0018) — and `drain_endpoint` still returns it. What is
 /// lost under sustained backpressure is a wake-up, and only for a
 /// consumer that by construction is not reading.
-const fn may_buffer_delivery(
-    buffered: usize,
-    event_capacity: usize,
-    pending_listens: usize,
-) -> bool {
-    buffered < event_capacity.saturating_add(pending_listens)
+const fn may_buffer_delivery(buffered: usize, event_capacity: usize) -> bool {
+    buffered < event_capacity
 }
 
 /// Outbound direct exchanges allowed at once, in total.
@@ -1100,11 +1104,8 @@ impl SwarmRuntime {
                         // COMPUTED BEFORE THE MUTABLE BORROW, and from
                         // the BASE capacity: the pending-exchange slack
                         // belongs to progress alone.
-                        let may_buffer = may_buffer_delivery(
-                            outbox.len(),
-                            config.event_capacity,
-                            listens.len(),
-                        );
+                        let may_buffer =
+                            may_buffer_delivery(outbox.len(), config.event_capacity);
                         let event = match handle_direct(
                             event,
                             &mut swarm,
@@ -3509,7 +3510,7 @@ mod backpressure_tests {
         assert!(polling_room(1, 1, 0, 1, 0));
         // ...and that remaining slot is NOT available to a delivery.
         assert!(
-            !may_buffer_delivery(1, 1, 0),
+            !may_buffer_delivery(1, 1),
             "the slot belongs to progress, not to another notification"
         );
     }
@@ -3535,18 +3536,34 @@ mod backpressure_tests {
     /// reservation is a ceiling on deliveries, not a refusal of them.
     #[test]
     fn a_delivery_within_the_base_capacity_is_buffered() {
-        assert!(may_buffer_delivery(0, 1, 0));
-        assert!(may_buffer_delivery(3, 4, 0));
+        assert!(may_buffer_delivery(0, 1));
+        assert!(may_buffer_delivery(3, 4));
     }
 
-    /// Listener slack is shared with deliveries, and deliberately: a
-    /// pending listener is waiting on a command reply rather than on a
-    /// response the Swarm must carry, so a buffered delivery cannot
-    /// starve it.
+    /// A LISTENER'S SLOT IS RESERVED FROM DELIVERIES TOO.
+    ///
+    /// This test asserted the opposite, on the reasoning that "a pending
+    /// listener is waiting on a command reply rather than on a response
+    /// the Swarm must carry". That is wrong: a listener waits for
+    /// `NewListenAddr`, which is a Swarm event needing a slot in this
+    /// same outbox. A delivery allowed into that slot leaves `listen()`
+    /// waiting for an address that arrives only once some unrelated
+    /// consumer drains — and the delivery's own exchange finishing frees
+    /// nothing, because `answering` drops back to zero and polling stops
+    /// before the queued `NewListenAddr` is ever processed.
+    ///
+    /// The fourth way this pair has been wrong in one stage, and the
+    /// fourth to be a comment that sounded reasonable.
     #[test]
-    fn listener_slack_is_shared() {
-        assert!(may_buffer_delivery(1, 1, 1));
-        assert!(!may_buffer_delivery(2, 1, 1));
+    fn a_listeners_slot_is_not_available_to_a_delivery() {
+        // Outbox full at base capacity, one listener waiting. Polling
+        // continues on the listener's account...
+        assert!(polling_room(1, 1, 1, 0, 0));
+        // ...and that slot is NOT a delivery's to take.
+        assert!(
+            !may_buffer_delivery(1, 1),
+            "the listener's slot carries its own address event"
+        );
     }
 }
 
