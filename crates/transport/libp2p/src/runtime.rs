@@ -1107,6 +1107,7 @@ impl SwarmRuntime {
                             &mut outbox,
                             DirectTick {
                                 now_ms: now_ms(started),
+                                wall_ms: wall_ms(),
                                 draining: manager.is_draining(),
                                 may_buffer_delivery: may_buffer,
                             },
@@ -1808,6 +1809,23 @@ enum Announce {
 /// Monotonic and relative. The policy is a state machine over elapsed
 /// time, so an origin of zero is as good as any epoch and immune to a
 /// wall-clock adjustment moving a quarantine deadline.
+/// Unix-epoch milliseconds.
+///
+/// Distinct from [`now_ms`], and both exist because they answer
+/// different questions. This one can step backwards — NTP, an operator
+/// — so nothing that must not go backwards may read it: rate buckets,
+/// dedup TTLs and deadlines all use the monotonic clock. What it is for
+/// is a RECEIPT TIME, which has to survive a restart and order against
+/// another process lifetime.
+///
+/// A clock before 1970 is not a receipt time either, so the error case
+/// answers zero rather than panicking in a transport daemon.
+fn wall_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
 fn now_ms(started: tokio::time::Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
@@ -2550,6 +2568,12 @@ impl DirectEndpoints {
 struct DirectTick {
     /// Monotonic milliseconds since the runtime started.
     now_ms: u64,
+    /// Unix-epoch milliseconds, for the receipt time on a delivery.
+    ///
+    /// Separate from `now_ms`, which is monotonic-since-startup and
+    /// governs rate limits and deadlines. A receipt time taken from that
+    /// clock restarts near zero with the process.
+    wall_ms: u64,
     /// Whether the node has begun draining.
     draining: bool,
     /// Whether an accepted delivery may be buffered for the consumer.
@@ -2582,6 +2606,7 @@ fn handle_direct(
 ) -> DirectHandled {
     let DirectTick {
         now_ms,
+        wall_ms,
         draining,
         may_buffer_delivery,
     } = tick;
@@ -2675,7 +2700,15 @@ fn handle_direct(
                     queues: &mut state.queues,
                     draining,
                 };
-                admit_inbound(&request, &source, now_ms, &mut ctx)
+                admit_inbound(
+                    &request,
+                    &source,
+                    interweave_transport_runtime::Clocks {
+                        monotonic_ms: now_ms,
+                        wall_ms,
+                    },
+                    &mut ctx,
+                )
             };
 
             let response = match &outcome {

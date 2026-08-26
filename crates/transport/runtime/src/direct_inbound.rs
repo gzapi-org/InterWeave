@@ -76,6 +76,27 @@ use crate::endpoint_registry::{EndpointRegistry, ResolveFailure};
 use crate::fingerprint::direct_content_fingerprint_v1;
 use crate::ingress::IngressLimiter;
 
+/// The two clocks one admission needs, named so they cannot be swapped.
+///
+/// They measure different things and neither substitutes for the other.
+/// `monotonic_ms` never goes backwards and is what rate buckets, dedup
+/// TTLs and deadlines are computed from — a wall clock stepped by NTP or
+/// an operator would hand a peer free allowance or expire an entry
+/// early. `wall_ms` is Unix-epoch milliseconds and is what a RECEIPT
+/// TIME has to be: it survives a restart, orders against events from
+/// another process lifetime, and converts to the RFC3339 the contract
+/// asks a client to show.
+///
+/// `received_at` was first taken from the monotonic clock, which made
+/// every delivered event start near zero after a restart.
+#[derive(Debug, Clone, Copy)]
+pub struct Clocks {
+    /// Milliseconds since this runtime started. Never goes backwards.
+    pub monotonic_ms: u64,
+    /// Milliseconds since the Unix epoch.
+    pub wall_ms: u64,
+}
+
 /// Everything admission reads and writes, borrowed for one decision.
 ///
 /// A struct rather than eight parameters because the ORDER they are used
@@ -263,9 +284,13 @@ pub fn admit_prefix(
 pub fn admit_inbound(
     frame: &DirectMessageV2,
     source_peer: &TransportIdentity,
-    now_ms: u64,
+    clocks: Clocks,
     ctx: &mut AdmissionContext<'_>,
 ) -> Outcome {
+    let Clocks {
+        monotonic_ms: now_ms,
+        wall_ms,
+    } = clocks;
     if let Err(refusal) = admit_prefix(source_peer, now_ms, ctx) {
         return Outcome::Refused(refusal);
     }
@@ -333,10 +358,15 @@ pub fn admit_inbound(
         destination_endpoint: resolved.clone(),
         message_id: frame.message_id,
         payload: frame.payload.clone(),
-        // AT ADMISSION, not at drain. The queue is bounded and an event
+        // AT ADMISSION, not at drain: the queue is bounded and an event
         // may wait in it, so a drain-time stamp would drift by however
         // long the consumer was behind.
-        received_at: now_ms,
+        //
+        // And from the WALL clock, not the monotonic one that governs
+        // rate limits and deadlines. A receipt time must survive a
+        // restart and order against events from another process
+        // lifetime; milliseconds-since-startup does neither.
+        received_at: wall_ms,
     };
     if let Err(refusal) = ctx.queues.push(event) {
         ctx.reservations.release(&key);
@@ -473,7 +503,15 @@ mod tests {
                 queues: &mut self.queues,
                 draining: self.draining,
             };
-            admit_inbound(frame, from, now, &mut ctx)
+            admit_inbound(
+                frame,
+                from,
+                Clocks {
+                    monotonic_ms: now,
+                    wall_ms: now,
+                },
+                &mut ctx,
+            )
         }
     }
 
@@ -697,12 +735,48 @@ mod tests {
             Outcome::Accepted { .. }
         ));
 
-        // Drained much later; the stamp is still the admission moment.
         let drained = w.queues.drain(&endpoint("claude"));
         assert_eq!(drained.len(), 1);
         assert_eq!(
             drained[0].received_at, admitted_at,
             "the moment it arrived, not the moment it was collected"
+        );
+    }
+
+    /// And from the WALL clock, not the monotonic one.
+    ///
+    /// The two are separate arguments precisely so this is checkable:
+    /// milliseconds-since-startup restarts near zero with the process,
+    /// so a receipt time taken from it cannot be converted to a real
+    /// instant and misorders against events from another lifetime.
+    #[test]
+    fn the_receipt_time_is_wall_clock_not_monotonic() {
+        let mut w = World::new();
+        // A node running for three seconds, on a machine whose clock
+        // says 2023 — the shape of every real process.
+        let clocks = Clocks {
+            monotonic_ms: 3_000,
+            wall_ms: 1_700_000_000_000,
+        };
+        let f = frame(Some("claude"), b"hi", 8);
+        let mut ctx = AdmissionContext {
+            trust: &w.trust,
+            ingress: &mut w.ingress,
+            dedup: &mut w.dedup,
+            reservations: &mut w.reservations,
+            registry: &w.registry,
+            queues: &mut w.queues,
+            draining: w.draining,
+        };
+        assert!(matches!(
+            admit_inbound(&f, &peer(P1), clocks, &mut ctx),
+            Outcome::Accepted { .. }
+        ));
+
+        let drained = w.queues.drain(&endpoint("claude"));
+        assert_eq!(
+            drained[0].received_at, 1_700_000_000_000,
+            "the epoch instant, not the three seconds since startup"
         );
     }
 

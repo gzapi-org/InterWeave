@@ -32,7 +32,7 @@ pub use dedup::{
     Admission, DedupCache, DedupKey, DestinationSelector, Reservation, ReservationFailure,
     ReservationMap,
 };
-pub use direct_inbound::{AdmissionContext, Outcome, Refusal, admit_inbound};
+pub use direct_inbound::{AdmissionContext, Clocks, Outcome, Refusal, admit_inbound};
 // RE-EXPORTED, so a backend composing admission does not have to name
 // `trust-api` itself. `AdmissionContext` holds a `PeerTrustPolicy`, so
 // the type is already in this crate's public API — a consumer that could
