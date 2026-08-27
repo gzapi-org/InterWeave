@@ -539,7 +539,8 @@ Under `tests/direct-v2` and `tests/endpoint-routing`:
 - omitted destination -> configured default;
 - offline/unknown/policy-denied -> coarse `no_route`;
 - Accepted only after exact endpoint queue admission;
-- concurrent same-key retransmission -> one enqueue (**not met** — see
+- concurrent same-key retransmission -> one enqueue (proven in process;
+  the WIRE test is owed from the stage whose admission yields — see
   below);
 - same ID/different body -> conflict;
 - retry after default endpoint change returns original accepted route;
@@ -609,16 +610,20 @@ rather than re-derived.
 Verified by breaking the code and watching the specific test fail, not by
 reading the tests and agreeing with them.
 
-**Not met:** the concurrent same-key retransmission clause. The runtime
-does not implement the waiter contract — see below. Every other clause of
-the implement list and the required-test list is proven above.
+**The concurrent same-key retransmission clause is met by SCOPE, not by a
+wire test**, and the distinction is recorded rather than glossed: the
+ADR-0019 amendment of 2026-08-27 binds waiter retention from the first
+stage whose admission yields while holding a reservation, and this
+stage's admission does not yield. See below for what that leaves
+unimplemented and what it does not excuse. Every other clause of the
+implement list and the required-test list is proven above.
 
-#### Not met: the concurrent-retransmission clause
+#### Met by scope: the concurrent-retransmission clause
 
 Two separate things are true here, and an earlier draft of this section
 conflated them into a claim of proof that does not exist.
 
-**1. The runtime does not implement the waiter contract.**
+**1. The runtime does not retain a waiter's channel, and is not yet required to.**
 `handle_direct` passes `AttachedAsWaiter` straight to `waiter_response`,
 which reads the dedup cache: a record means the owner already finished
 and the waiter is answered with the stored route, and, **as this gap was found**, no record meant
@@ -627,11 +632,20 @@ was still in flight was refused rather than held. The reply is corrected
 (the helper returns `None` and the caller asserts the branch is
 unreachable); what remains unimplemented is the retention itself.
 
-`contracts/ENDPOINTS.md` requires the opposite — "an attached waiter
-holds a response channel until the owner's admission resolves" — and
-`transport/libp2p/DIRECT.md` says matching concurrent duplicates "attach
-as waiters and receive the same eventual response". Neither is
-implemented. This is a contract-to-code gap, not a documentation one.
+`contracts/ENDPOINTS.md` still requires that "an attached waiter holds a
+response channel until the owner's admission resolves", and
+`transport/libp2p/DIRECT.md` still says matching concurrent duplicates
+"attach as waiters and receive the same eventual response". Both
+sentences now carry the amendment's scoping beside them: the retention
+binds from the stage whose admission yields, and a synchronous admission
+may treat the branch as unreachable provided it does not answer it as
+exhaustion.
+
+So this is no longer a contract-to-code gap. It is a requirement with a
+stated start, and this stage is before it — which is why the clause
+above reads met by scope rather than met by proof. An earlier draft of
+this section called it a gap, and that was accurate until the amendment
+landed.
 
 **2. Nothing tests it, and the in-process test does not.**
 `a_concurrent_matching_copy_attaches_instead_of_enqueuing` asserts that
