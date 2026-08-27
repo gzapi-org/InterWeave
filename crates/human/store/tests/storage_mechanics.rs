@@ -302,11 +302,68 @@ fn backup_eligible_content_excludes_pending_outbound() {
 
 #[test]
 fn recheck_health_clears_degradation_when_the_medium_recovers() {
-    let mut store = memory();
+    // THIS TEST USED TO DEGRADE NOTHING. It opened a fresh in-memory
+    // store, which is Healthy already, and asserted it was Healthy —
+    // proving that a healthy store stays healthy, while its name claims
+    // it proves recovery. Deleting the assignment in `recheck_health`
+    // outright would have passed it.
+    //
+    // So the store is really filled, really degraded, and really drained
+    // before the probe is asked anything.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    let mut store = HumanStore::open(
+        &path,
+        StoreOptions {
+            max_pages: Some(64),
+        },
+    )
+    .expect("opens");
+
+    let big = vec![0_u8; interweave_transport_api::MAX_PAYLOAD_BYTES];
+    let mut rows = Vec::new();
+    for i in 0..8_u32 {
+        let id = format!("{i:032x}");
+        match store.commit_unread_inbound(&inbound(&id, big.clone())) {
+            Ok(row) => rows.push(row),
+            Err(_) => break,
+        }
+    }
+    assert_eq!(
+        store.health(),
+        StorageHealth::Degraded,
+        "the medium must actually be full before recovery means anything"
+    );
+    assert!(!rows.is_empty(), "at least one message fit");
+
+    // A FAILED INSERT LEAVES NO ROW. The statement that hit the quota
+    // must not have half-written one: the table holds exactly what was
+    // acknowledged, or a caller told "not stored" would find it stored.
+    assert_eq!(
+        store.unread_inbound().expect("read").len(),
+        rows.len(),
+        "the refused commit must have left nothing behind"
+    );
+
+    // The receiver reads its backlog, which is what frees the pages.
+    // `mark_read` is deliberately not gated on degradation — a store that
+    // could not be drained could never recover.
+    for row in rows {
+        store
+            .mark_read(row, 1_000)
+            .expect("reading is still possible");
+    }
+
     assert_eq!(
         store.recheck_health().expect("probe"),
-        StorageHealth::Healthy
+        StorageHealth::Healthy,
+        "a drained medium must clear the degradation"
     );
+
+    // And the store is usable again, not merely relabelled.
+    store
+        .commit_unread_inbound(&inbound(ID_A, b"after recovery".to_vec()))
+        .expect("a recovered store accepts content again");
 }
 
 #[test]
