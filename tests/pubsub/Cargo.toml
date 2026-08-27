@@ -27,3 +27,4 @@ workspace = true
 
 [dev-dependencies]
 interweave-test-support = { path = "../support" }
+interweave-transport-api = { path = "../../crates/api/transport-api" }
