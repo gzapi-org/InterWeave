@@ -108,6 +108,17 @@ async fn node(
     desired: &[&str],
     config: SubstrateConfig,
 ) -> SwarmRuntime {
+    node_with_queue(identity, peers, desired, config, 64).await
+}
+
+/// The same, with an explicit per-session queue bound.
+async fn node_with_queue(
+    identity: &ProfileIdentity,
+    peers: &[&TransportIdentity],
+    desired: &[&str],
+    config: SubstrateConfig,
+    queue_bound: usize,
+) -> SwarmRuntime {
     let runtime = SwarmRuntime::start(identity, config, trusting(peers)).expect("the node starts");
     runtime
         .configure_direct(
@@ -122,7 +133,8 @@ async fn node(
         .expect("direct endpoints install");
     runtime
         .configure_broadcast(
-            BroadcastChannels::from_profile(&profile(desired), 64).expect("a valid profile"),
+            BroadcastChannels::from_profile(&profile(desired), queue_bound)
+                .expect("a valid profile"),
         )
         .await
         .expect("broadcast channels install");
@@ -1074,6 +1086,267 @@ async fn shutdown_unsubscribes_before_dropping_the_swarm() {
     );
 
     a.shutdown().await.expect("a stops");
+}
+
+/// Publishing into an empty mesh is local success, not an error.
+///
+/// `NoPeersSubscribedToTopic` means nobody is listening yet, which is the
+/// ordinary state of a node that just started. Broadcast is fire-and-forget
+/// (ADR-0029): a publisher gets no per-message answer about reach, so the
+/// only honest local answer is that the message was accepted for sending.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn publishing_into_an_empty_mesh_is_local_success() {
+    let (a_id, _) = who();
+    let a = node(&a_id, &[], &["general"], SubstrateConfig::default()).await;
+    a.join(channel("general"), "only")
+        .await
+        .expect("lands")
+        .expect("accepted");
+
+    let answer = a
+        .publish(channel("general"), "only", envelope(1, b"into the void"))
+        .await
+        .expect("the command lands");
+    assert!(
+        answer.is_ok(),
+        "an empty mesh is not a publish failure: {answer:?}"
+    );
+
+    a.shutdown().await.expect("a stops");
+}
+
+/// A full session queue drops for that session, and the mesh still
+/// forwards to everyone else.
+///
+/// The distinction the whole delivery path rests on: a local queue is a
+/// LOCAL fact. A relay whose own consumer is behind must go on carrying
+/// traffic for its neighbours, because the alternative is one slow client
+/// degrading a channel for every peer downstream of it.
+///
+/// A—B—C, with C reachable only through B. B's session holds one and drops
+/// the rest; C's holds both, which it can only do if B forwarded while
+/// dropping.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_full_session_queue_drops_for_that_session_and_the_mesh_still_forwards() {
+    let (a_id, a_peer) = who();
+    let (b_id, b_peer) = who();
+    let (c_id, c_peer) = who();
+
+    let mut a = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
+    // B keeps room for exactly ONE delivery per session.
+    let mut b = node_with_queue(
+        &b_id,
+        &[&a_peer, &c_peer],
+        &["general"],
+        SubstrateConfig::default(),
+        1,
+    )
+    .await;
+    // C trusts A, the ORIGINAL publisher — trust is answered about the
+    // author, not the relay that carried the message. C trusting only B
+    // would make C ignore everything A sends and this test would read a
+    // forwarding failure that was not one.
+    let mut c = node(
+        &c_id,
+        &[&b_peer, &a_peer],
+        &["general"],
+        SubstrateConfig::default(),
+    )
+    .await;
+
+    connect(&mut a, &mut b, &b_peer).await;
+    connect(&mut c, &mut b, &b_peer).await;
+
+    for r in [&a, &b, &c] {
+        r.join(channel("general"), "sub")
+            .await
+            .expect("lands")
+            .expect("accepted");
+    }
+
+    publish_repeatedly(&a, "sub", 1, b"first").await;
+    publish_repeatedly(&a, "sub", 2, b"second").await;
+
+    let at_c = drain_until(&c, "sub", PATIENCE).await;
+    assert_eq!(
+        at_c.len(),
+        2,
+        "the relay must forward both even though its own session could hold only one"
+    );
+    let at_b = drain_until(&b, "sub", Duration::from_secs(1)).await;
+    assert_eq!(at_b.len(), 1, "the bounded session held exactly its bound");
+
+    a.shutdown().await.expect("a stops");
+    b.shutdown().await.expect("b stops");
+    c.shutdown().await.expect("c stops");
+}
+
+/// A signed but malformed envelope is Reject, and does not wedge later
+/// valid traffic from the same publisher.
+///
+/// Objective invalidity — a body that is not a `BroadcastMessageV1` — is
+/// Reject under ADR-0029, and later valid traffic from the same publisher
+/// is unaffected.
+///
+/// # What it does NOT prove
+///
+/// Not that the Reject was REPORTED. Mutation says so: suppressing the
+/// report on the Reject arm leaves this test passing, because an
+/// unreported message sits in the backend's cache without blocking a
+/// later message with a different id. The cost of not reporting is
+/// unreclaimed cache, which has no end-to-end signal.
+///
+/// The report is not unverified in general — suppressing it on the ACCEPT
+/// arm fails `an_unauthorized_publisher_is_ignored_not_delivered_and_not_relayed_further`,
+/// whose positive control depends on a relay forwarding, and forwarding is
+/// what the report releases. Accept is covered; Reject and Ignore are
+/// argued from the shared code path, not observed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_signed_but_malformed_envelope_is_reject_and_does_not_wedge_later_valid_traffic() {
+    use futures::StreamExt;
+
+    let (v_id, _v_peer) = who();
+    let forger_keys = libp2p::identity::Keypair::generate_ed25519();
+    let forger_peer = TransportIdentity::parse(
+        libp2p::PeerId::from_public_key(&forger_keys.public()).to_base58(),
+    )
+    .expect("a canonical peer id");
+
+    let mut victim = node(
+        &v_id,
+        &[&forger_peer],
+        &["general"],
+        SubstrateConfig::default(),
+    )
+    .await;
+    victim
+        .join(channel("general"), "sub")
+        .await
+        .expect("lands")
+        .expect("accepted");
+    let address = victim
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("a loopback address"))
+        .await
+        .expect("the victim listens");
+
+    let topic = libp2p::gossipsub::IdentTopic::new(
+        interweave_transport_runtime::topic::topic_key_v1(&channel("general")).wire_string(),
+    );
+    let valid = envelope(7, b"well formed").encode();
+
+    let publisher = tokio::spawn(async move {
+        let mut swarm = libp2p::SwarmBuilder::with_existing_identity(forger_keys)
+            .with_tokio()
+            .with_tcp(
+                libp2p::tcp::Config::default(),
+                libp2p::noise::Config::new,
+                libp2p::yamux::Config::default,
+            )
+            .expect("the same transport stack the victim uses")
+            .with_behaviour(|keys| {
+                libp2p::gossipsub::Behaviour::<
+                    libp2p::gossipsub::IdentityTransform,
+                    libp2p::gossipsub::AllowAllSubscriptionFilter,
+                >::new(
+                    // SIGNED, and by its own key: everything about this
+                    // publisher is valid except the bytes it sends, so the
+                    // verdict can only come from decoding.
+                    libp2p::gossipsub::MessageAuthenticity::Signed(keys.clone()),
+                    libp2p::gossipsub::ConfigBuilder::default()
+                        .build()
+                        .expect("a default config"),
+                )
+                .expect("the behaviour builds")
+            })
+            .expect("behaviour")
+            .build();
+
+        swarm.behaviour_mut().subscribe(&topic).expect("subscribes");
+        swarm.dial(address).expect("dials the victim");
+
+        // Garbage first, repeatedly, then the well-formed envelope.
+        for round in 0..40 {
+            let body = if round < 30 {
+                vec![0xff; 24 + round]
+            } else {
+                valid.clone()
+            };
+            let _ = swarm.behaviour_mut().publish(topic.hash(), body);
+            let _ = tokio::time::timeout(Duration::from_millis(50), swarm.select_next_some()).await;
+        }
+    });
+
+    // POSITIVE CONTROL: the publisher really reached the victim.
+    wait_for(
+        &mut victim,
+        "the publisher's connection",
+        |e| matches!(e, SwarmEvent::Connected { peer } if *peer == forger_peer),
+    )
+    .await;
+    let _ = publisher.await;
+
+    let held = drain_until(&victim, "sub", PATIENCE).await;
+    assert_eq!(
+        held.len(),
+        1,
+        "exactly the well-formed envelope is delivered, and the malformed ones neither \
+         reached the session nor wedged it: {held:?}"
+    );
+    assert_eq!(held[0].payload.bytes(), b"well formed");
+
+    victim.shutdown().await.expect("the victim stops");
+}
+
+/// GossipSub originates no dial.
+///
+/// The behaviour is composed for mesh traffic on connections the root gate
+/// already admitted; it must never reach for a peer on its own. A known
+/// address the node was never told to dial is the case that would expose
+/// it — gossipsub sees the peer in its address book and, if it dialed at
+/// all, would dial here.
+///
+/// This pins the claim in `behaviour.rs` and `Cargo.toml` to a test, per
+/// CLAUDE.md §4: an invariant stated in a comment owes one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gossipsub_never_originates_a_dial() {
+    let (a_id, a_peer) = who();
+    let (b_id, b_peer) = who();
+
+    let mut a = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
+    let b = node(&b_id, &[&a_peer], &["general"], SubstrateConfig::default()).await;
+    let address = b
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("a loopback address"))
+        .await
+        .expect("b listens");
+
+    // A knows exactly where B is, and subscribes — but is never told to
+    // dial. Only an autonomous behaviour would connect from here.
+    a.add_address(b_peer.clone(), address)
+        .await
+        .expect("the address is recorded");
+    a.join(channel("general"), "sub")
+        .await
+        .expect("lands")
+        .expect("accepted");
+
+    let connected = tokio::time::timeout(SILENCE, async {
+        loop {
+            match a.next_event().await {
+                Some(SwarmEvent::Connected { peer }) if peer == b_peer => return true,
+                Some(_) => {}
+                None => return false,
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+    assert!(
+        !connected,
+        "gossipsub must not dial a peer the admission gate was never asked about"
+    );
+
+    a.shutdown().await.expect("a stops");
+    b.shutdown().await.expect("b stops");
 }
 
 /// Publish the same envelope a few times while the mesh forms.

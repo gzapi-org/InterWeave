@@ -269,6 +269,15 @@ pub(super) fn handle_broadcast(
 
     // FIRST, AND ON EVERY ARM. Not conditional on outbox room, not
     // conditional on what admission decides afterwards.
+    //
+    // Only the ACCEPT arm has a test that fails when this is skipped:
+    // `an_unauthorized_publisher_is_ignored_not_delivered_and_not_relayed_further`
+    // needs a relay to forward, and forwarding is what reporting Accept
+    // releases. Suppressing the report on Reject or Ignore is invisible
+    // end to end — the message stays in the backend's cache, which costs
+    // memory and blocks nothing — so those two arms rest on sharing this
+    // one call rather than on a test of their own. Said plainly because
+    // an unqualified "every arm" would read as verified.
     swarm.report_broadcast_validation(
         &message_id,
         &propagation_source,
