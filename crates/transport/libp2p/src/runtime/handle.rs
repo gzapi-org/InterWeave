@@ -63,6 +63,133 @@ impl SwarmRuntime {
         answer.await.map_err(|_| SubstrateError::Stopped)
     }
 
+    /// Install broadcast configuration and hold the desired channels.
+    ///
+    /// # Errors
+    /// [`SubstrateError::Stopped`] if the task is gone, or
+    /// [`SubstrateError::Transport`] if the configuration was refused.
+    pub async fn configure_broadcast(
+        &self,
+        config: crate::runtime::broadcast::BroadcastChannels,
+    ) -> Result<(), SubstrateError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(SwarmCommand::ConfigureBroadcast {
+                config: Box::new(config),
+                reply,
+            })
+            .await
+            .map_err(|_| SubstrateError::Stopped)?;
+        answer
+            .await
+            .map_err(|_| SubstrateError::Stopped)?
+            .map_err(SubstrateError::Transport)
+    }
+
+    /// Take a local join reference on `channel` for `session`.
+    ///
+    /// A join is what makes this session a consumer: without one it
+    /// receives nothing and may not publish, whatever the profile
+    /// desires.
+    ///
+    /// # Errors
+    /// [`SubstrateError::Stopped`] if the task is gone. A refusal by a
+    /// subscription ceiling is `Ok(Err(..))`: the command was delivered
+    /// and answered, and the answer was no.
+    pub async fn join(
+        &self,
+        channel: interweave_transport_api::ChannelId,
+        session: impl Into<String>,
+    ) -> Result<Result<(), interweave_transport_api::TransportError>, SubstrateError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(SwarmCommand::Join {
+                channel,
+                session: session.into(),
+                reply,
+            })
+            .await
+            .map_err(|_| SubstrateError::Stopped)?;
+        answer.await.map_err(|_| SubstrateError::Stopped)
+    }
+
+    /// Release `session`'s join reference on `channel`.
+    ///
+    /// Idempotent: leaving a channel this session does not hold is not an
+    /// error, and does not disturb any other session's join.
+    ///
+    /// # Errors
+    /// [`SubstrateError::Stopped`] if the task is gone.
+    pub async fn leave(
+        &self,
+        channel: interweave_transport_api::ChannelId,
+        session: impl Into<String>,
+    ) -> Result<(), SubstrateError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(SwarmCommand::Leave {
+                channel,
+                session: session.into(),
+                reply,
+            })
+            .await
+            .map_err(|_| SubstrateError::Stopped)?;
+        answer.await.map_err(|_| SubstrateError::Stopped)
+    }
+
+    /// Publish one envelope to `channel` on `session`'s own join.
+    ///
+    /// Success means the local backend accepted the publish. It does NOT
+    /// mean any remote peer received it — PUBSUB.md makes local
+    /// acceptance the only synchronous claim, and publishing into a mesh
+    /// with no peers succeeds.
+    ///
+    /// # Errors
+    /// [`SubstrateError::Stopped`] if the task is gone. `ChannelNotJoined`
+    /// when this session holds no join, and the other local refusals, are
+    /// `Ok(Err(..))`.
+    pub async fn publish(
+        &self,
+        channel: interweave_transport_api::ChannelId,
+        session: impl Into<String>,
+        frame: interweave_transport_api::BroadcastMessageV1,
+    ) -> Result<Result<(), interweave_transport_api::TransportError>, SubstrateError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(SwarmCommand::Publish {
+                channel,
+                session: session.into(),
+                frame: Box::new(frame),
+                reply,
+            })
+            .await
+            .map_err(|_| SubstrateError::Stopped)?;
+        answer.await.map_err(|_| SubstrateError::Stopped)
+    }
+
+    /// Take everything waiting on one session's broadcast queue.
+    ///
+    /// The in-process stand-in for what Stage 8's IPC session does, the
+    /// same way `drain_endpoint` is for direct.
+    ///
+    /// # Errors
+    /// [`SubstrateError::Stopped`] if the task is gone.
+    pub async fn drain_session(
+        &self,
+        session: impl Into<String>,
+    ) -> Result<Vec<interweave_transport_runtime::session_queue::BroadcastEvent>, SubstrateError>
+    {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(SwarmCommand::DrainSession {
+                session: session.into(),
+                reply,
+            })
+            .await
+            .map_err(|_| SubstrateError::Stopped)?;
+        answer.await.map_err(|_| SubstrateError::Stopped)
+    }
+
     /// Dial `peer` at `address`, subject to the admission policy.
     ///
     /// # Errors

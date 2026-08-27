@@ -51,6 +51,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::behaviour::SubstrateBehaviour;
 use crate::gated_swarm::{GatedSwarm, mesh_admits};
 
+mod broadcast;
 mod commands;
 mod config;
 mod dialing;
@@ -67,6 +68,7 @@ use dialing::{
 };
 use direct::{DirectHandled, DirectTick, handle_direct};
 
+pub use broadcast::{BroadcastChannels, BroadcastState};
 pub use direct::{DirectEndpoints, DirectState};
 
 pub use messages::{DialRefusal, SwarmCommand, SwarmEvent};
@@ -443,6 +445,10 @@ impl SwarmRuntime {
         // differ, and the one a directed message meets must be the one
         // that admitted its connection.
         direct_state.adopt_trust(&trust);
+        // Broadcast holds its own copy for the same reason, and its own
+        // ingress buckets: ADR-0026's amendment accounts the two modes
+        // apart so neither can spend the other's allowance.
+        let mut broadcast_state = broadcast::BroadcastState::new(&trust);
 
         // A shutdown that is waiting for in-flight exchanges: the
         // deadline it must not pass, and the caller to answer when it
@@ -749,6 +755,7 @@ impl SwarmRuntime {
                                     &mut active,
                                     &mut pending_direct,
                                     &mut direct_state,
+                                    &mut broadcast_state,
                                     &mut in_flight,
                                     config.max_pending_listens,
                                     config.max_active_listeners,
@@ -798,6 +805,28 @@ impl SwarmRuntime {
                         // belongs to progress alone.
                         let may_buffer =
                             may_buffer_delivery(outbox.len(), config.event_capacity);
+                        // BROADCAST FIRST, and it consumes its own
+                        // events before `translate` sees them — the same
+                        // shape direct uses, for the same reason: a
+                        // shape conversion knows nothing about admission
+                        // and would announce a message this node has not
+                        // decided about.
+                        let event = match broadcast::handle_broadcast(
+                            event,
+                            &mut swarm,
+                            &mut broadcast_state,
+                            &mut outbox,
+                            broadcast::BroadcastTick {
+                                now_ms: now_ms(started),
+                                wall_ms: wall_ms(),
+                                max_payload_bytes: config.max_payload_bytes,
+                                draining: manager.is_draining(),
+                                may_buffer_delivery: may_buffer,
+                            },
+                        ) {
+                            broadcast::BroadcastHandled::Consumed => continue,
+                            broadcast::BroadcastHandled::Passed(event) => *event,
+                        };
                         let event = match handle_direct(
                             event,
                             &mut swarm,

@@ -37,6 +37,59 @@ pub enum SwarmCommand {
         /// or dial.
         reply: oneshot::Sender<Result<Multiaddr, String>>,
     },
+    /// Install broadcast configuration and hold the desired channels.
+    ///
+    /// Unlike `ConfigureDirect`, which discards every open queue because
+    /// a lease changing hands must not inherit the previous holder's
+    /// messages, this REPLACES the desired set and KEEPS live session
+    /// joins. A reconfigure is an operator action on warm-mesh policy,
+    /// not a client disconnect.
+    ConfigureBroadcast {
+        /// The validated configuration.
+        config: Box<crate::runtime::broadcast::BroadcastChannels>,
+        /// Answered once installed.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Take a local join reference on a channel.
+    Join {
+        /// The channel to join.
+        channel: interweave_transport_api::ChannelId,
+        /// The session taking the reference.
+        session: String,
+        /// Answered with the local outcome.
+        reply: oneshot::Sender<Result<(), interweave_transport_api::TransportError>>,
+    },
+    /// Release one session's join reference.
+    Leave {
+        /// The channel to leave.
+        channel: interweave_transport_api::ChannelId,
+        /// The session releasing it.
+        session: String,
+        /// Answered once released.
+        reply: oneshot::Sender<()>,
+    },
+    /// Publish one envelope to a channel.
+    ///
+    /// Carries a caller-built frame for the same reason `SendDirect`
+    /// does: the runtime mints no identifiers and reads no clock on a
+    /// caller's behalf.
+    Publish {
+        /// The channel to publish on.
+        channel: interweave_transport_api::ChannelId,
+        /// The session publishing, whose own join authorizes it.
+        session: String,
+        /// The envelope to send.
+        frame: Box<interweave_transport_api::BroadcastMessageV1>,
+        /// Answered with the local outcome.
+        reply: oneshot::Sender<Result<(), interweave_transport_api::TransportError>>,
+    },
+    /// Take everything waiting on one session's broadcast queue.
+    DrainSession {
+        /// The session draining.
+        session: String,
+        /// Answered with the events, oldest first.
+        reply: oneshot::Sender<Vec<interweave_transport_runtime::session_queue::BroadcastEvent>>,
+    },
     /// Stop a listener, naming it by an address `listen` returned.
     ///
     /// Answers `true` when a listener was serving that address and has
@@ -214,6 +267,24 @@ pub enum SwarmEvent {
         endpoint: EndpointId,
         /// The authenticated sender.
         peer: TransportIdentity,
+    },
+    /// A broadcast was admitted onto a local session's queue.
+    ///
+    /// Reported AFTER queue admission, so a consumer seeing this knows
+    /// the event is retrievable — not merely that a message arrived. One
+    /// per receiving session, because a broadcast fans out and each
+    /// session drains its own queue.
+    ///
+    /// Carries NO endpoint: ADR-0030 keeps EndpointId out of broadcast,
+    /// so two local endpoints on one PeerId are indistinguishable as
+    /// originators. The absence is structural rather than an omission.
+    BroadcastDelivered {
+        /// The channel it arrived on, derived from the topic.
+        channel: interweave_transport_api::ChannelId,
+        /// The authenticated original publisher, not the relay.
+        source_peer: TransportIdentity,
+        /// The local session whose queue took it.
+        session: String,
     },
     /// An outbound dial failed after being admitted.
     DialFailed {

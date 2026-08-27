@@ -46,6 +46,7 @@ TrustSources::classify                call  self.trust.classify(
 EndpointRegistry::lease               call  .lease(&frame.source_endpoint)
 PreAuthLimits::handshake_timeout_ms   call  preauth.handshake_timeout_ms(
 SubscriptionRegistry::subscribers     call  subs.subscribers(
+SubscriptionRegistry::set_desired     call  broadcast_state.subs.set_desired(
 FrameError::to_wire                              call  error.to_wire(
 Refusal::to_wire                                 call  refusal.to_wire(
 

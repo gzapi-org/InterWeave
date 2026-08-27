@@ -42,6 +42,7 @@ pub(super) fn handle_command(
     active: &mut ActiveListeners,
     pending_direct: &mut HashMap<libp2p::request_response::OutboundRequestId, PendingDirect>,
     direct_state: &mut DirectState,
+    broadcast_state: &mut super::broadcast::BroadcastState,
     in_flight: &mut HashMap<libp2p::swarm::ConnectionId, DialTicket>,
     max_pending_listens: usize,
     max_active_listeners: usize,
@@ -109,6 +110,105 @@ pub(super) fn handle_command(
                     let _ = reply.send(false);
                 }
             }
+        }
+        SwarmCommand::ConfigureBroadcast { config, reply } => {
+            // The desired set is replaced; live joins are kept. See the
+            // command's own doc for why this differs from ConfigureDirect.
+            broadcast_state.queue_bound = config.queue_bound;
+            let desired: std::collections::BTreeSet<_> = config.desired.iter().cloned().collect();
+            match broadcast_state.subs.set_desired(desired) {
+                Ok(()) => {
+                    // SUBSCRIBE AFTER the registry accepted the set, so a
+                    // refused configuration leaves the mesh untouched
+                    // rather than half-applied.
+                    for channel in &config.desired {
+                        let topic = broadcast_state.remember(channel);
+                        let _ = swarm.subscribe_topic(&topic);
+                    }
+                    let _ = reply.send(Ok(()));
+                }
+                Err(denial) => {
+                    let _ = reply.send(Err(format!("{denial:?}")));
+                }
+            }
+        }
+        SwarmCommand::Join {
+            channel,
+            session,
+            reply,
+        } => {
+            match broadcast_state.subs.join(channel.clone(), session.clone()) {
+                Ok(()) => {
+                    // The queue is opened by the JOIN, which is what
+                    // bounds the key set by local state rather than by
+                    // anything a remote peer names.
+                    if !broadcast_state.queues.is_open(&session) {
+                        broadcast_state
+                            .queues
+                            .open(session, broadcast_state.queue_bound);
+                    }
+                    let topic = broadcast_state.remember(&channel);
+                    let _ = swarm.subscribe_topic(&topic);
+                    let _ = reply.send(Ok(()));
+                }
+                Err(_) => {
+                    // A ceiling, not a policy: the session asked for more
+                    // than the profile may hold.
+                    let _ = reply.send(Err(DirectError::Overloaded));
+                }
+            }
+        }
+        SwarmCommand::Leave {
+            channel,
+            session,
+            reply,
+        } => {
+            broadcast_state.subs.leave(&channel, &session);
+            // UNSUBSCRIBE ONLY WHEN NOBODY HOLDS IT, joined or desired.
+            // A profile that desires the channel keeps the mesh warm with
+            // no local consumer, which is the whole point of `desired`.
+            if !broadcast_state.subs.backend_should_subscribe(&channel) {
+                let topic = broadcast_state.forget(&channel);
+                let _ = swarm.unsubscribe_topic(&topic);
+            }
+            let _ = reply.send(());
+        }
+        SwarmCommand::Publish {
+            channel,
+            session,
+            frame,
+            reply,
+        } => {
+            // 1. THE CALLER'S OWN JOIN. PUBSUB.md: the runtime does not
+            //    implicitly subscribe and does not borrow another local
+            //    client's reference. Checked before any byte reaches the
+            //    backend, so a refusal is invisible on the wire.
+            if !broadcast_state.subs.may_publish(&channel, &session) {
+                let _ = reply.send(Err(DirectError::ChannelNotJoined));
+                return;
+            }
+            if frame.payload.len() > effective_payload {
+                let _ = reply.send(Err(DirectError::PayloadTooLarge));
+                return;
+            }
+            if manager.is_draining() {
+                let _ = reply.send(Err(DirectError::ShuttingDown));
+                return;
+            }
+            let topic = broadcast_state.remember(&channel);
+            match swarm.publish_broadcast(topic.hash(), frame.encode()) {
+                Ok(_) => {
+                    let _ = reply.send(Ok(()));
+                }
+                Err(error) => {
+                    // `None` is local success with degraded reachability,
+                    // not an error. See `publish_error`.
+                    let _ = reply.send(super::broadcast::publish_error(&error).map_or(Ok(()), Err));
+                }
+            }
+        }
+        SwarmCommand::DrainSession { session, reply } => {
+            let _ = reply.send(broadcast_state.queues.drain(&session));
         }
         SwarmCommand::Dial {
             peer,
@@ -186,6 +286,12 @@ pub(super) fn handle_command(
             // admission on the old policy would refuse the peer's
             // connection and accept its message.
             direct_state.adopt_trust(&trust);
+            // AND BROADCAST'S, which is a separate copy and so a separate
+            // way to be stale. Without this a revoked peer's connection
+            // closes while its next broadcast is still admitted by the
+            // policy that trusted it -- the same divergence the direct
+            // line above exists to prevent, in the mode that fans out.
+            broadcast_state.adopt_trust(&trust);
             let revoked = manager.set_trust(*trust, &live);
 
             // AND THE MESH MOVES WITH IT, for every live peer rather than

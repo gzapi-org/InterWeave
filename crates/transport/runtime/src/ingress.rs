@@ -297,6 +297,28 @@ impl SubscriptionRegistry {
         })
     }
 
+    /// Replace the profile's desired set, keeping every live join.
+    ///
+    /// A reconfigure is an operator action on warm-mesh policy, not a
+    /// client disconnect — so unlike opening an endpoint queue, which
+    /// discards what the previous lease holder held, this leaves client
+    /// joins alone. A session that joined a channel the new profile no
+    /// longer desires still holds it.
+    ///
+    /// # Errors
+    /// [`SubscriptionDenial::TooManySubscriptions`] if the resulting set
+    /// would exceed [`MAX_SUBSCRIPTIONS`]. Counted against the joins
+    /// already held rather than against the new set alone, because both
+    /// cost the same and the ceiling is on what this profile holds.
+    pub fn set_desired(&mut self, desired: BTreeSet<ChannelId>) -> Result<(), SubscriptionDenial> {
+        let joined_elsewhere = self.joins.keys().filter(|c| !desired.contains(*c)).count();
+        if joined_elsewhere.saturating_add(desired.len()) > MAX_SUBSCRIPTIONS {
+            return Err(SubscriptionDenial::TooManySubscriptions);
+        }
+        self.desired = desired;
+        Ok(())
+    }
+
     /// Record that a session joined a channel.
     ///
     /// Idempotent: re-joining a channel this session already holds
