@@ -350,6 +350,53 @@ where
 /// declares this field `list[PeerId, max=256]`, while
 /// `endpoints/endpoint-config.schema.json` declares the subset
 /// `uniqueItems: true`.
+/// The desired channels, counted as the array the file supplied.
+///
+/// Bounded HERE and not only in `validate`, for the reason
+/// `wire_allowed_peers` and `wire_entries` are: a ceiling checked after
+/// the whole `Vec` exists has already paid for the memory it was meant to
+/// refuse. A profile naming a million channels must cost a comparison,
+/// not a million allocations.
+///
+/// Duplicates are NOT rejected here. `validate` reports them as
+/// `DuplicateDesiredChannel`, naming the offending channel, and an
+/// operator fixing a long list needs that message rather than a parse
+/// failure at an offset — the same division `wire_entries` draws.
+fn wire_desired_channels<'de, D>(deserializer: D) -> Result<Vec<ChannelId>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Bounded;
+
+    impl<'de> serde::de::Visitor<'de> for Bounded {
+        type Value = Vec<ChannelId>;
+
+        fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(f, "at most {MAX_DESIRED_CHANNELS} channel ids")
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut out = Vec::new();
+            let mut count = 0usize;
+            while let Some(channel) = seq.next_element::<ChannelId>()? {
+                count = count.saturating_add(1);
+                if count > MAX_DESIRED_CHANNELS {
+                    return Err(serde::de::Error::custom(format!(
+                        "at most {MAX_DESIRED_CHANNELS} desired channels, got more"
+                    )));
+                }
+                out.push(channel);
+            }
+            Ok(out)
+        }
+    }
+
+    deserializer.deserialize_seq(Bounded)
+}
+
 fn wire_allowed_peers<'de, D>(deserializer: D) -> Result<BTreeSet<TransportIdentity>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -506,7 +553,7 @@ pub struct ChannelsConfig {
     /// nothing, and no client may publish merely because the profile
     /// lists it. What it buys is that the topic's mesh is already formed
     /// when a client does join.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "wire_desired_channels")]
     pub desired: Vec<ChannelId>,
 }
 
@@ -1297,6 +1344,43 @@ mod tests {
             serde_json::from_str::<ProfileConfig>(&doc).is_err(),
             "a misspelled key must not silently desire nothing"
         );
+    }
+
+    #[test]
+    fn an_over_length_channel_list_is_refused_while_reading_it() {
+        // The ceiling must bind on the READ path, not only in `validate`:
+        // a limit checked after the whole Vec exists has already paid for
+        // the memory it was meant to refuse. The same reason
+        // `wire_allowed_peers` counts the array rather than the set.
+        let names: Vec<String> = (0..=MAX_DESIRED_CHANNELS)
+            .map(|i| format!("\"c{i}\""))
+            .collect();
+        let doc = format!(
+            r#"{{"schema_version":2,
+                 "trust":{{"policy":"static-allowlist","allowed_peers":["{P1}"]}},
+                 "endpoints":{{"entries":[]}},
+                 "channels":{{"desired":[{}]}}}}"#,
+            names.join(",")
+        );
+        let err = serde_json::from_str::<ProfileConfig>(&doc)
+            .expect_err("an over-length list must be refused")
+            .to_string();
+        assert!(
+            err.contains("at most"),
+            "the read path must refuse it, not the validator: {err}"
+        );
+
+        // And exactly at the ceiling still parses, so the test above
+        // failed for the length and not for the shape.
+        let doc = format!(
+            r#"{{"schema_version":2,
+                 "trust":{{"policy":"static-allowlist","allowed_peers":["{P1}"]}},
+                 "endpoints":{{"entries":[]}},
+                 "channels":{{"desired":[{}]}}}}"#,
+            names[..MAX_DESIRED_CHANNELS].join(",")
+        );
+        let parsed: ProfileConfig = serde_json::from_str(&doc).expect("at the ceiling");
+        assert_eq!(parsed.channels.desired.len(), MAX_DESIRED_CHANNELS);
     }
 
     #[test]
