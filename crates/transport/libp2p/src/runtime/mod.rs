@@ -936,6 +936,45 @@ impl SwarmRuntime {
                     }
                 }
             }
+            // LEAVE THE MESH BEFORE DROPPING IT. A dropped swarm closes
+            // connections, and a peer that sees a connection close learns
+            // nothing about subscriptions -- it keeps this node in its
+            // topic set until its own timers age the entry out, and goes
+            // on forwarding to a peer that is gone. Unsubscribing first
+            // sends the leave while there is still a connection to send
+            // it on.
+            //
+            // `shutdown_settled`'s arithmetic decided WHEN to get here and
+            // is deliberately untouched: three prior mistakes are recorded
+            // in its comment, and this is not a fourth.
+            let leaving = !broadcast_state.channels.is_empty();
+            for wire in broadcast_state.channels.keys() {
+                swarm.unsubscribe_topic(&libp2p::gossipsub::IdentTopic::new(wire.clone()));
+            }
+
+            // AND THEN POLL, because unsubscribing only queues the RPC
+            // into the behaviour. Dropping the swarm here would discard
+            // it unsent, and the leave would exist in this node's memory
+            // and nowhere else -- a shutdown that looks correct from the
+            // inside and changes nothing on the wire. The first version
+            // of this passed its test in isolation on exactly that
+            // timing luck, and failed under a loaded suite.
+            //
+            // Bounded, because this runs after the caller was answered:
+            // a peer that cannot accept the leave promptly must not hold
+            // shutdown open. What it costs when it expires is the same
+            // stale topic entry that not sending at all would leave.
+            if leaving {
+                let flush = tokio::time::sleep(Duration::from_millis(250));
+                tokio::pin!(flush);
+                loop {
+                    tokio::select! {
+                        () = &mut flush => break,
+                        _ = swarm.select_next_some() => {}
+                    }
+                }
+            }
+
             // `swarm` drops here, closing listeners and connections. The
             // join handle completing is what proves it happened.
         });

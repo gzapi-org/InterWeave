@@ -1020,6 +1020,62 @@ async fn leaving_a_desired_channel_keeps_the_mesh_warm() {
     b.shutdown().await.expect("b stops");
 }
 
+/// Shutdown leaves the mesh before the swarm drops.
+///
+/// A dropped swarm closes connections, and a closing connection says
+/// nothing about subscriptions: the peer keeps this node in its topic set
+/// until its own timers age it out. The unsubscription must therefore go
+/// out while the connection is still alive, which means A observes it
+/// BEFORE the disconnection rather than instead of it.
+///
+/// The ordering is the assertion. Draining until `Disconnected` and
+/// asserting the unsubscription was seen somewhere in that prefix is what
+/// makes this a test of "before the swarm drops" rather than of "at some
+/// point".
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_unsubscribes_before_dropping_the_swarm() {
+    let (a_id, a_peer) = who();
+    let (b_id, b_peer) = who();
+
+    let mut a = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
+    let mut b = node(&b_id, &[&a_peer], &["general"], SubstrateConfig::default()).await;
+    connect(&mut a, &mut b, &b_peer).await;
+
+    wait_for(
+        &mut a,
+        "B's subscription",
+        |e| matches!(e, SwarmEvent::PeerSubscribed { peer, .. } if *peer == b_peer),
+    )
+    .await;
+
+    b.shutdown().await.expect("b stops");
+
+    // Drain A until B's disconnection, remembering whether the
+    // unsubscription arrived first.
+    let mut unsubscribed_first = false;
+    let ordering = tokio::time::timeout(PATIENCE, async {
+        loop {
+            match a.next_event().await {
+                Some(SwarmEvent::PeerUnsubscribed { peer, .. }) if peer == b_peer => {
+                    unsubscribed_first = true;
+                }
+                Some(SwarmEvent::Disconnected { peer, .. }) if peer == b_peer => return true,
+                Some(_) => {}
+                None => return false,
+            }
+        }
+    })
+    .await
+    .expect("B's disconnection reached A");
+    assert!(ordering, "the event stream ended before B disconnected");
+    assert!(
+        unsubscribed_first,
+        "the unsubscription must go out while the connection is still alive"
+    );
+
+    a.shutdown().await.expect("a stops");
+}
+
 /// Publish the same envelope a few times while the mesh forms.
 ///
 /// A single publish immediately after connecting reaches nobody: GossipSub
