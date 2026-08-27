@@ -539,9 +539,8 @@ Under `tests/direct-v2` and `tests/endpoint-routing`:
 - omitted destination -> configured default;
 - offline/unknown/policy-denied -> coarse `no_route`;
 - Accepted only after exact endpoint queue admission;
-- concurrent same-key retransmission -> one enqueue, proven in process
-  while admission cannot yield; the wire test is owed when it can (see
-  the resolution below);
+- concurrent same-key retransmission -> one enqueue (**not met** — see
+  below);
 - same ID/different body -> conflict;
 - retry after default endpoint change returns original accepted route;
 - 48 KiB payload boundary;
@@ -610,58 +609,61 @@ rather than re-derived.
 Verified by breaking the code and watching the specific test fail, not by
 reading the tests and agreeing with them.
 
-Every clause of the implement list and the required-test list is proven.
-The concurrent same-key retransmission clause is proven at the only layer
-that can observe it in this design, and the resolution below records both
-why the wire cannot reach it and the condition under which a wire test
-becomes owed.
+**Not met:** the concurrent same-key retransmission clause. The runtime
+does not implement the waiter contract — see below. Every other clause of
+the implement list and the required-test list is proven above.
 
-#### Resolved 2026-08-27: the concurrent-retransmission clause
+#### Not met: the concurrent-retransmission clause
 
-**The wire test is not owed yet, and the clause was wrong to ask for it
-unconditionally.** Settled by reading SPIKE-002/A11's harness against
-`handle_direct`, which is what the open question this replaces demanded.
+Two separate things are true here, and an earlier draft of this section
+conflated them into a claim of proof that does not exist.
 
-`handle_direct` is a synchronous `fn` holding `&mut DirectState`, and
-`admit_structured` acquires the reservation, resolves the route, enqueues
-and releases inside that one call without yielding —
-`every_decided_path_returns_its_reservation` asserts the map is empty
-afterwards. Two admissions cannot overlap in the swarm event loop, so a
-second arrival is always a dedup **cache** hit and never a reservation
-**waiter**. A wire test of the waiter path cannot exist against this
-design; one was written and deleted after mutating `Reservation::Waiter`
-failed to break it.
+**1. The runtime does not implement the waiter contract.**
+`handle_direct` passes `AttachedAsWaiter` straight to `waiter_response`,
+which reads the dedup cache: a record means the owner already finished
+and the waiter is answered with the stored route, and **no record means
+the waiter is answered `overloaded`**. A waiter attaching while the owner
+is still in flight is therefore refused rather than held.
 
-**A11 did not observe something this runtime lost.** Its harness parks
-the owner's `ResponseChannel` and defers admission by a synthetic 600 ms
-— `admission_due = now + ADMISSION` — draining the parked channels when
-it fires. That delay is what let 39 waiters accumulate from 40 copies. It
-models an admission that YIELDS, which is what admission becomes once it
-crosses the `LocalDataSession` / IPC boundary, not what it does today.
+`contracts/ENDPOINTS.md` requires the opposite — "an attached waiter
+holds a response channel until the owner's admission resolves" — and
+`transport/libp2p/DIRECT.md` says matching concurrent duplicates "attach
+as waiters and receive the same eventual response". Neither is
+implemented. This is a contract-to-code gap, not a documentation one.
 
-Three consequences, and the second is the one worth carrying:
+**2. Nothing tests it, and the in-process test does not.**
+`a_concurrent_matching_copy_attaches_instead_of_enqueuing` asserts that
+`admit_structured` returns `AttachedAsWaiter` and that nothing was
+enqueued. It never calls `waiter_response`, so it cannot observe the
+refusal above. Citing it as proof of the clause was wrong.
 
-1. `contracts/ENDPOINTS.md` needs no amendment. Its bounded-waiter rule
-   describes the contract correctly for the design it anticipates, and
-   the capacity ceilings derived from A11 bound a real future cost.
-2. **The waiter accounting is not dead weight, and must not be removed.**
-   An earlier draft of this section suggested it might be. A11 measured
-   the unbounded version as a memory-exhaustion vector — 40 copies, 39
-   attached, **zero refusals** — and charging waiters against the same
-   per-peer and global budgets as owners is the fix. It is inert today
-   and becomes live the moment admission yields. Deleting it would
-   reintroduce the vulnerability the spike exists to have found.
-3. The required-test clause is corrected above rather than marked unmet.
-   The wire test is **owed when `handle_direct` gains an await inside
-   admission**, which is a checkable trigger rather than a standing
-   debt. Stage 13's IPC boundary is the first candidate.
+**Why no wire test exists either.** `handle_direct` is synchronous and
+`admit_structured` acquires, resolves, enqueues and releases inside one
+call without yielding, so two admissions cannot overlap and a second
+arrival is always a dedup cache hit. SPIKE-002/A11 reached the waiter
+path only because its harness parks the owner's `ResponseChannel` and
+defers admission by a synthetic 600 ms — it models an admission that
+yields, which is what admission becomes at the IPC boundary.
 
-What proves the behaviour today, at the layer that can observe it:
+So the path is unreachable today AND unimplemented, and the second fact
+is the one that blocks: an unreachable path that is wrong is still wrong,
+and it becomes reachable the moment admission yields.
 
-- over the wire, `one_id_from_one_source_delivers_once` — the dedup cache
-  path, which is the path a real retransmission takes in this design;
-- in process, `a_concurrent_matching_copy_attaches_instead_of_enqueuing`
-  — the waiter path, driven directly because the wire cannot reach it.
+**One thing this does NOT license.** The reservation map's waiter
+accounting must not be removed as dead weight — A11 measured the
+unbounded version as a memory-exhaustion vector, 40 copies attaching 39
+waiters with zero refusals, and charging waiters against the same budgets
+as owners is the fix. The bound is correct; what is missing is the
+channel retention above it.
+
+**Required before Stage 6 closes**, one of:
+
+- implement the waiter contract — retain the `ResponseChannel` until the
+  owner's admission resolves, answer every waiter with the owner's
+  outcome — and test it at the layer that can drive it; or
+- amend `ENDPOINTS.md` and `DIRECT.md` with an explicit decision that
+  waiters are refused rather than held until admission yields, which is a
+  wire-visible behaviour change and therefore an ADR question.
 
 ## 10. Stage 7 — GossipSub broadcast
 
