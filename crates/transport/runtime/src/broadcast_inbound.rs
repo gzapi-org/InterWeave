@@ -41,7 +41,7 @@ use interweave_transport_api::{BroadcastMessageV1, ChannelId, TransportIdentity}
 use interweave_trust_api::{PeerTrustPolicy, TrustDecision};
 
 use crate::dedup::{Admission, DedupCache, DedupKey, RecordedRoute};
-use crate::direct_inbound::{PrefixContext, Refusal, admit_prefix};
+use crate::direct_inbound::{Clocks, PrefixContext, Refusal, admit_prefix};
 use crate::fingerprint::direct_content_fingerprint_v1;
 use crate::ingress::SubscriptionRegistry;
 use crate::session_queue::{BroadcastEvent, SessionDrop, SessionQueues};
@@ -167,14 +167,14 @@ pub fn admit_broadcast(
     frame: &BroadcastMessageV1,
     channel: &ChannelId,
     source: &TransportIdentity,
-    now_ms: u64,
+    clocks: Clocks,
     ctx: &mut BroadcastContext<'_>,
 ) -> BroadcastAdmission {
     // 3. THE SHARED GATES, in the one order they are written in. Trust is
     //    re-answered here and passes trivially, which is the point: there
     //    is one implementation of these three and no broadcast-shaped
     //    copy that could drift from it.
-    if let Err(refusal) = admit_prefix(source, now_ms, &mut ctx.prefix) {
+    if let Err(refusal) = admit_prefix(source, clocks.monotonic_ms, &mut ctx.prefix) {
         return BroadcastAdmission::Refused(refusal);
     }
 
@@ -197,7 +197,7 @@ pub fn admit_broadcast(
 
     // 5. DEDUP. A duplicate is not re-delivered and a conflict is not
     //    delivered at all — and neither is reported to the mesh.
-    match ctx.dedup.admit(&key, fingerprint, now_ms) {
+    match ctx.dedup.admit(&key, fingerprint, clocks.monotonic_ms) {
         Admission::DuplicateAccepted { .. } => return BroadcastAdmission::Duplicate,
         Admission::Conflict => return BroadcastAdmission::Conflict,
         Admission::Fresh => {}
@@ -213,8 +213,12 @@ pub fn admit_broadcast(
         // inside the TTL and be treated as fresh — and if a session
         // joined in between, that copy WOULD be delivered, which is the
         // replay PUBSUB.md forbids by another route.
-        ctx.dedup
-            .record_accepted(key, RecordedRoute::Broadcast, fingerprint, now_ms);
+        ctx.dedup.record_accepted(
+            key,
+            RecordedRoute::Broadcast,
+            fingerprint,
+            clocks.monotonic_ms,
+        );
         return BroadcastAdmission::NobodyJoined;
     }
 
@@ -226,6 +230,9 @@ pub fn admit_broadcast(
             channel: channel.clone(),
             message_id: frame.message_id,
             payload: frame.payload.clone(),
+            // THE WALL CLOCK, and stamped once here so every session's
+            // copy of one message reports the same receipt time.
+            received_at: clocks.wall_ms,
         };
         match ctx.queues.push(&session, event) {
             Ok(()) => sessions.push(session),
@@ -238,8 +245,12 @@ pub fn admit_broadcast(
     // Recorded even when every session dropped it: the message was
     // admitted and a retry of the same id must not be treated as fresh
     // just because this node was busy when the first copy arrived.
-    ctx.dedup
-        .record_accepted(key, RecordedRoute::Broadcast, fingerprint, now_ms);
+    ctx.dedup.record_accepted(
+        key,
+        RecordedRoute::Broadcast,
+        fingerprint,
+        clocks.monotonic_ms,
+    );
     BroadcastAdmission::Delivered { sessions, dropped }
 }
 
@@ -253,6 +264,9 @@ mod tests {
     use crate::ingress::IngressLimiter;
 
     const P1: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+    /// A plausible Unix-epoch millisecond, so a monotonic value cannot
+    /// pass for it in a test.
+    const WALL_AT_RECEIPT: u64 = 1_786_600_000_000;
     const P2: &str = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
 
     fn peer(s: &str) -> TransportIdentity {
@@ -306,6 +320,10 @@ mod tests {
         }
 
         fn admit(&mut self, f: &BroadcastMessageV1, from: &str, now: u64) -> BroadcastAdmission {
+            let clocks = Clocks {
+                monotonic_ms: now,
+                wall_ms: WALL_AT_RECEIPT + now,
+            };
             let mut ctx = BroadcastContext {
                 prefix: PrefixContext {
                     trust: &self.trust,
@@ -316,7 +334,7 @@ mod tests {
                 subs: &self.subs,
                 queues: &mut self.queues,
             };
-            admit_broadcast(f, &channel(), &peer(from), now, &mut ctx)
+            admit_broadcast(f, &channel(), &peer(from), clocks, &mut ctx)
         }
     }
 
@@ -514,6 +532,54 @@ mod tests {
             "a different timestamp does not make it a different message"
         );
         assert_eq!(w.queues.drain("human").len(), 1);
+    }
+
+    #[test]
+    fn every_delivered_copy_carries_the_wall_clock_receipt_time() {
+        // `MessageReceived` in contracts/TRANSPORT.md requires
+        // `received_at` unconditionally — the `?` markers there are on the
+        // endpoint and channel fields, not on this one. Stamping it at
+        // DRAIN instead would report a time arbitrarily later than
+        // receipt, and omitting it would leave an adapter unable to
+        // populate a required field at all.
+        let mut w = World::new(&["human", "claude"]);
+        w.subs.join(channel(), "claude".to_owned()).expect("joins");
+
+        assert!(matches!(
+            w.admit(&frame(13, b"body"), P1, 5),
+            BroadcastAdmission::Delivered { .. }
+        ));
+
+        let expected = WALL_AT_RECEIPT + 5;
+        for session in ["human", "claude"] {
+            let held = w.queues.drain(session);
+            assert_eq!(held.len(), 1, "{session} received it");
+            assert_eq!(
+                held[0].received_at, expected,
+                "{session} must see the wall clock, not the monotonic one"
+            );
+        }
+    }
+
+    #[test]
+    fn the_receipt_time_is_the_wall_clock_and_not_the_monotonic_one() {
+        // The two are separated by `Clocks` precisely because this has
+        // been got wrong once already: taking `received_at` from the
+        // monotonic clock made every direct event start near zero after a
+        // restart. A monotonic millisecond is a small number; a receipt
+        // time is a Unix epoch.
+        let mut w = World::new(&["human"]);
+        assert!(matches!(
+            w.admit(&frame(14, b"body"), P1, 7),
+            BroadcastAdmission::Delivered { .. }
+        ));
+        let held = w.queues.drain("human");
+        assert!(
+            held[0].received_at > 1_600_000_000_000,
+            "a monotonic value would be far too small to be a Unix epoch: {}",
+            held[0].received_at
+        );
+        assert_ne!(held[0].received_at, 7, "and it is not the monotonic input");
     }
 
     #[test]

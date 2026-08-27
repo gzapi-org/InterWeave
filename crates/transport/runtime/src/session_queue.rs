@@ -60,6 +60,25 @@ pub struct BroadcastEvent {
     pub message_id: MessageId,
     /// The application bytes and their advisory media type.
     pub payload: Payload,
+    /// Unix-epoch milliseconds at which THIS node admitted the message.
+    ///
+    /// Required unconditionally by `MessageReceived` in
+    /// `contracts/TRANSPORT.md` — the `?` markers there are on the
+    /// endpoint and channel fields, not on this one — and stamped here
+    /// rather than at drain, which may be arbitrarily later than receipt.
+    ///
+    /// Local, and distinct from the remote's `sent_at_ms`, which stays
+    /// absent because it is diagnostic on the wire and would read as
+    /// authoritative here. The two are different clocks owned by
+    /// different parties, and omitting the peer's says nothing about
+    /// omitting our own.
+    ///
+    /// Wall, never monotonic: a receipt time has to survive a restart and
+    /// order against another process lifetime. Taking it from the
+    /// monotonic clock made every direct event start near zero after a
+    /// restart, which is why [`crate::direct_inbound::Clocks`] names the
+    /// two separately.
+    pub received_at: u64,
 }
 
 /// Why a session did not receive its copy.
@@ -190,6 +209,7 @@ mod tests {
             channel: ChannelId::parse("general").expect("valid channel"),
             message_id: MessageId::from_bytes([7; 16]),
             payload: Payload::at_ceiling(None, body.to_vec()).expect("within the ceiling"),
+            received_at: 1_786_600_000_000,
         }
     }
 
