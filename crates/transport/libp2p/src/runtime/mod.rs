@@ -244,6 +244,59 @@ const fn may_buffer_delivery(buffered: usize, event_capacity: usize) -> bool {
 /// happen to carry the same numbers and bound inbound work instead —
 /// naming them separately is what stops one being "fixed" to match the
 /// other.
+/// What a scheduled retry leaves behind on the peer's claim.
+#[derive(Debug, PartialEq, Eq)]
+enum RetryClaim {
+    /// A ticket owns it. `record_success` / `record_failure` /
+    /// `record_permanent_failure` will settle it when the outcome
+    /// arrives, so this tick must not touch it.
+    Held,
+    /// Offer this peer again on the next tick, without waiting out a
+    /// fresh backoff it did not earn. "A denied dial must not reset
+    /// retry state" applies to the scheduler exactly as it does to every
+    /// other dial origin.
+    Released,
+    /// Do not reconsider until something else changes. Retrying an
+    /// unauthorized, non-data-plane or draining peer on the very next
+    /// tick would not become true by waiting a second.
+    Cleared,
+}
+
+/// Does this refusal end the walk through a peer's candidate addresses?
+///
+/// A refusal about the PEER settles every address at once, so trying the
+/// next one asks a question already answered. A refusal about this
+/// address does not.
+const fn refusal_settles_the_peer(refusal: &DialRefusal) -> bool {
+    matches!(
+        refusal,
+        DialRefusal::Policy(
+            DialDenial::Unauthorized
+                | DialDenial::NotAuthorizedForDataPlane
+                | DialDenial::ShuttingDown
+        )
+    )
+}
+
+/// The claim verdict for one peer after its candidates were walked.
+///
+/// Extracted from the retry arm because it was unreachable from a test:
+/// the decision sat inside a `tokio::select!` branch that needs a live
+/// interval, a Swarm and a ConnectionManager to enter at all. The rule
+/// it encodes — release on an ordinary refusal, clear only when
+/// authorization itself no longer holds — is the difference between a
+/// peer that reconnects on the next tick and one that waits out a
+/// backoff it never earned.
+const fn retry_claim(ticketed: bool, last: Option<&DialRefusal>) -> RetryClaim {
+    if ticketed {
+        return RetryClaim::Held;
+    }
+    match last {
+        Some(refusal) if refusal_settles_the_peer(refusal) => RetryClaim::Cleared,
+        _ => RetryClaim::Released,
+    }
+}
+
 const MAX_OUTBOUND_DIRECT: usize = 128;
 
 /// Outbound direct exchanges allowed at once with any one peer.
@@ -566,28 +619,19 @@ impl SwarmRuntime {
                                     Err(DialRefusal::Backend(reason)) => {
                                         last = Some(DialRefusal::Backend(reason));
                                     }
-                                    Err(refusal @ DialRefusal::Policy(
-                                        DialDenial::Unauthorized
-                                        | DialDenial::NotAuthorizedForDataPlane
-                                        | DialDenial::ShuttingDown,
-                                    )) => {
-                                        last = Some(refusal);
-                                        break;
-                                    }
                                     Err(refusal) => {
+                                        let settled = refusal_settles_the_peer(&refusal);
                                         last = Some(refusal);
+                                        if settled {
+                                            break;
+                                        }
                                     }
                                 }
                             }
-                            if !ticketed {
-                                match &last {
-                                    Some(DialRefusal::Policy(
-                                        DialDenial::Unauthorized
-                                        | DialDenial::NotAuthorizedForDataPlane
-                                        | DialDenial::ShuttingDown,
-                                    )) => manager.clear_retry_claim(&peer),
-                                    _ => manager.release_retry_claim(&peer),
-                                }
+                            match retry_claim(ticketed, last.as_ref()) {
+                                RetryClaim::Held => {}
+                                RetryClaim::Cleared => manager.clear_retry_claim(&peer),
+                                RetryClaim::Released => manager.release_retry_claim(&peer),
                             }
                             // REPORTED, because nobody asked for this
                             // dial and so nobody is holding a reply
@@ -1051,5 +1095,80 @@ mod shutdown_grace_tests {
     #[test]
     fn the_deadline_outranks_both() {
         assert!(shutdown_settled(5, 5, true));
+    }
+}
+
+#[cfg(test)]
+mod retry_claim_tests {
+    use super::{DialDenial, DialRefusal, RetryClaim, refusal_settles_the_peer, retry_claim};
+
+    /// A ticket owns the claim, so the tick leaves it alone.
+    ///
+    /// Settling it here would race the outcome: `record_success` and its
+    /// siblings are what release it when the dial actually resolves, and
+    /// a second release from this tick would let the next one start a
+    /// parallel dial for the same peer.
+    #[test]
+    fn a_ticketed_peer_keeps_its_claim() {
+        assert_eq!(retry_claim(true, None), RetryClaim::Held);
+        assert_eq!(
+            retry_claim(true, Some(&DialRefusal::Backend("ignored".into()))),
+            RetryClaim::Held,
+            "a refusal from an earlier candidate does not undo the ticket"
+        );
+    }
+
+    /// An ordinary refusal RELEASES, so the peer is offered again next
+    /// tick without waiting out a backoff it did not earn.
+    #[test]
+    fn an_ordinary_refusal_releases_rather_than_clearing() {
+        for refusal in [
+            DialRefusal::Backend("transport said no".into()),
+            DialRefusal::Policy(DialDenial::PeerBackoff),
+        ] {
+            assert_eq!(
+                retry_claim(false, Some(&refusal)),
+                RetryClaim::Released,
+                "{refusal:?} must not reset retry state"
+            );
+        }
+    }
+
+    /// Authorization that no longer holds CLEARS.
+    ///
+    /// Waiting a second does not make an unauthorized peer authorized,
+    /// so re-offering it every tick is a busy loop against a decision
+    /// that will not change on its own.
+    #[test]
+    fn authorization_failures_clear_the_claim() {
+        for denial in [
+            DialDenial::Unauthorized,
+            DialDenial::NotAuthorizedForDataPlane,
+            DialDenial::ShuttingDown,
+        ] {
+            assert_eq!(
+                retry_claim(false, Some(&DialRefusal::Policy(denial))),
+                RetryClaim::Cleared,
+                "{denial:?} will not become true by waiting"
+            );
+            assert!(
+                refusal_settles_the_peer(&DialRefusal::Policy(denial)),
+                "{denial:?} settles every address, so the walk stops"
+            );
+        }
+    }
+
+    /// An address-specific refusal does not settle the peer.
+    ///
+    /// The next candidate is a different question, so the walk continues
+    /// — which is the whole reason a peer has more than one address.
+    #[test]
+    fn an_address_refusal_leaves_the_other_candidates_worth_trying() {
+        assert!(!refusal_settles_the_peer(&DialRefusal::Backend(
+            "bad addr".into()
+        )));
+        assert!(!refusal_settles_the_peer(&DialRefusal::Policy(
+            DialDenial::PeerBackoff
+        )));
     }
 }
