@@ -158,12 +158,25 @@ or fixture change. What *is* frozen is above: the topic key, the message
 identity function, the envelope, and the validation mapping.
 
 One value is not tuning and must be set deliberately: the backend's
-maximum transmit size must admit a full envelope, which is
-`max_payload_bytes` plus the 158-byte fixed maximum of every other field
-(`1 + 16 + 8 + 1 + 128 + 4`). A backend default larger than that would let
-a peer send a frame the transport accepts and the envelope decoder must
-then reject; sizing it exactly means an oversized frame is refused before
-it is buffered.
+maximum transmit size must admit a full envelope **inside its own
+framing**. The envelope's fixed maximum is `max_payload_bytes` plus 158
+bytes (`1 + 16 + 8 + 1 + 128 + 4`), but a GossipSub maximum transmit size
+bounds the ENCODED RPC rather than the message data — and a signed RPC
+also carries the publisher's PeerId, the sequence number, the topic
+string, a signature, the publisher's public key, and protobuf tags and
+length prefixes. A ceiling sized for the envelope alone therefore refuses
+the largest LEGAL broadcast.
+
+The ceiling must exceed the envelope maximum by an allowance for that
+framing, and the allowance is deliberately generous rather than exact:
+every term in it belongs to an encoding the application does not control,
+so an exact figure is a re-derivation that goes silently wrong when the
+backend changes. Being generous costs nothing, because the envelope's own
+limit is enforced separately by the decoder — an oversized envelope is
+still refused, and what a larger transmit ceiling admits is only framing
+around a legal one. What must NOT happen is the reverse: a ceiling below
+the envelope maximum makes the largest legal broadcast unsendable, with no
+error until a publish fails.
 
 The GossipSub duplicate cache and the runtime dedup TTL are **intentionally
 different layers with different lifetimes** — a short mesh-level window

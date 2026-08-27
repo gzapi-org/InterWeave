@@ -18,8 +18,8 @@ use interweave_profile_config::{
 };
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::{
-    BroadcastMessageV1, ChannelId, EndpointId, MediaType, MessageId, Payload, TransportError,
-    TransportIdentity,
+    BroadcastMessageV1, ChannelId, EndpointId, MAX_MEDIA_TYPE_BYTES, MAX_PAYLOAD_BYTES, MediaType,
+    MessageId, Payload, TransportError, TransportIdentity,
 };
 use interweave_transport_libp2p::runtime::{
     BroadcastChannels, DirectEndpoints, SubstrateConfig, SwarmEvent, SwarmRuntime,
@@ -1343,6 +1343,74 @@ async fn gossipsub_never_originates_a_dial() {
     assert!(
         !connected,
         "gossipsub must not dial a peer the admission gate was never asked about"
+    );
+
+    a.shutdown().await.expect("a stops");
+    b.shutdown().await.expect("b stops");
+}
+
+/// The largest LEGAL broadcast crosses the wire.
+///
+/// `max_transmit_size` bounds the encoded GossipSub RPC, not the envelope
+/// inside it, so a ceiling sized for the envelope alone silently refuses
+/// the biggest message the application is allowed to send. Nothing local
+/// catches that: the publisher's own limit check passes, and the failure
+/// appears only when the backend declines to frame it.
+///
+/// Arithmetic cannot prove this — the framing belongs to the backend's
+/// encoding, which is exactly why the ceiling is not computed exactly.
+/// Only a maximum envelope actually arriving does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_largest_legal_broadcast_crosses_the_wire() {
+    let (a_id, a_peer) = who();
+    let (b_id, b_peer) = who();
+
+    let mut a = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
+    let mut b = node(&b_id, &[&a_peer], &["general"], SubstrateConfig::default()).await;
+    connect(&mut a, &mut b, &b_peer).await;
+    for r in [&a, &b] {
+        r.join(channel("general"), "sub")
+            .await
+            .expect("lands")
+            .expect("accepted");
+    }
+
+    // EVERY field at its maximum, not just the payload: the longest legal
+    // media type too, since it is part of what the framing must carry.
+    let longest_media_type = format!("text/{}", "x".repeat(MAX_MEDIA_TYPE_BYTES - 5));
+    let biggest = BroadcastMessageV1 {
+        message_id: MessageId::from_bytes([0xab; 16]),
+        sent_at_ms: u64::MAX,
+        payload: Payload::at_ceiling(
+            Some(MediaType::parse(&longest_media_type).expect("a legal media type")),
+            vec![0xcd; MAX_PAYLOAD_BYTES],
+        )
+        .expect("exactly at the ceiling"),
+    };
+    // Republished while the mesh forms, exactly as `publish_repeatedly`
+    // does: a single publish races subscription propagation, and the same
+    // envelope id makes the repeats harmless.
+    let mut published = None;
+    for _ in 0..12 {
+        published = Some(
+            a.publish(channel("general"), "sub", biggest.clone())
+                .await
+                .expect("the command lands"),
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let answer = published.expect("at least one publish");
+    assert!(
+        answer.is_ok(),
+        "the largest legal envelope publishes: {answer:?}"
+    );
+
+    let held = drain_until(&b, "sub", PATIENCE).await;
+    assert_eq!(held.len(), 1, "it reached the other peer");
+    assert_eq!(
+        held[0].payload.bytes().len(),
+        MAX_PAYLOAD_BYTES,
+        "and arrived whole"
     );
 
     a.shutdown().await.expect("a stops");

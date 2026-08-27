@@ -48,15 +48,39 @@ pub const DIRECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// change is a new string rather than a silent reinterpretation.
 pub const IDENTIFY_PROTOCOL: &str = "/interweave/id/1.0.0";
 
-/// The largest GossipSub message this node will send or accept.
+/// What the signed GossipSub RPC adds around one application envelope.
 ///
-/// The payload ceiling plus the envelope's fixed maximum overhead, and
-/// sized deliberately rather than left at the backend's default. A
-/// transmit ceiling ABOVE this would let a peer send a frame the
-/// transport buffers in full and the envelope decoder must then refuse;
-/// sized exactly, an oversized frame is refused before it is buffered.
+/// `max_transmit_size` bounds the ENCODED RPC, not `message.data`. A
+/// ceiling sized for the envelope alone therefore refuses the largest
+/// LEGAL broadcast, because the signed RPC also carries the publisher's
+/// PeerId, the sequence number, the topic string, an Ed25519 signature,
+/// the publisher's public key, and protobuf tags and length prefixes for
+/// all of it.
+///
+/// Sized generously rather than exactly, because every term is a foreign
+/// encoding this crate does not control: a multihash whose length depends
+/// on the key type, a protobuf varint whose width depends on the value,
+/// and a topic string this node derives but the backend frames. An exact
+/// figure would be a re-derivation of someone else's format that goes
+/// silently wrong when it changes; 512 bytes is far above the ~250 the
+/// current terms occupy and far below anything that would let an
+/// oversized envelope through, since the envelope's own limit is
+/// enforced separately by the decoder.
+const GOSSIPSUB_RPC_OVERHEAD: usize = 512;
+
+/// The largest GossipSub RPC this node will send or accept.
+///
+/// The payload ceiling, plus the envelope's fixed maximum overhead, plus
+/// the RPC framing above — sized deliberately rather than left at the
+/// backend's default. Too LOW and the largest legal broadcast cannot be
+/// sent at all; too HIGH and a peer can make this node buffer a frame in
+/// full that the envelope decoder must then refuse.
+///
+/// The envelope limit is still enforced on its own by `decode`, so this
+/// ceiling being generous does not widen what the application accepts.
 /// PUBSUB.md states the same arithmetic.
-pub const MAX_BROADCAST_TRANSMIT: usize = MAX_PAYLOAD_BYTES + broadcast_v1::MAX_FRAME_OVERHEAD;
+pub const MAX_BROADCAST_TRANSMIT: usize =
+    MAX_PAYLOAD_BYTES + broadcast_v1::MAX_FRAME_OVERHEAD + GOSSIPSUB_RPC_OVERHEAD;
 
 /// The frozen mesh duplicate identity of one GossipSub message.
 ///
@@ -252,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn the_transmit_ceiling_admits_a_real_maximum_envelope_exactly() {
+    fn the_transmit_ceiling_leaves_rpc_room_above_a_maximum_envelope() {
         // Sized from the envelope rather than left at the backend's
         // default: a larger ceiling buffers frames the decoder must then
         // refuse, and a smaller one refuses legal maximum-size messages
@@ -278,14 +302,18 @@ mod tests {
         };
 
         let encoded = widest.encode();
+        // The ceiling is NOT the envelope maximum: it is that plus room
+        // for the RPC the backend wraps around it. Asserting equality
+        // here is what the ceiling looked like when it was wrong, and
+        // the assertion passed for exactly as long as the bug existed.
         assert_eq!(
             encoded.len(),
-            MAX_BROADCAST_TRANSMIT,
-            "the ceiling must be exactly the largest legal frame"
+            MAX_PAYLOAD_BYTES + broadcast_v1::MAX_FRAME_OVERHEAD,
+            "the envelope's own maximum is its declared fixed overhead"
         );
         assert!(
-            encoded.len() <= MAX_BROADCAST_TRANSMIT,
-            "and a legal maximum message must fit under it"
+            encoded.len() + GOSSIPSUB_RPC_OVERHEAD <= MAX_BROADCAST_TRANSMIT,
+            "and the ceiling leaves the whole RPC allowance above it"
         );
     }
 }
