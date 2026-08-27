@@ -166,17 +166,24 @@ impl SubstrateConfig {
         // prevents it.
         //
         // Measured in whole milliseconds, so a sub-millisecond tick is
-        // refused rather than truncated to the zero this rejects. That is
-        // also the right policy on its own terms: the field is documented
-        // as a heartbeat slow enough that backoff determines the delay,
-        // and a scheduler walking the retry table every few microseconds
-        // is the burst the tick exists to spread out.
+        // refused rather than truncated to the zero this rejects. A
+        // heartbeat of a few microseconds is a busy loop that starves the
+        // select loop it shares a task with — silently, which is worse
+        // than the panic above.
+        //
+        // AND THERE IS NO UPPER BOUND. An earlier version compared this
+        // against `MAX_CONFIGURED_CAPACITY`, which is 65,536 — a ceiling
+        // on ALLOCATION SIZES, reused here as though it were a duration.
+        // That rejected a five-minute retry heartbeat, which is an
+        // ordinary thing to configure and neither panics nor allocates
+        // anything. A slow tick is a policy; the guard is only against
+        // the abort and the busy loop.
         let tick_ms = usize::try_from(self.retry_tick.as_millis()).unwrap_or(usize::MAX);
-        if tick_ms == 0 || tick_ms > MAX_CONFIGURED_CAPACITY {
+        if tick_ms == 0 {
             return Err(SubstrateError::InvalidConfig {
                 field: "retry_tick_ms",
                 got: tick_ms,
-                allowed: (1, MAX_CONFIGURED_CAPACITY),
+                allowed: (1, usize::MAX),
             });
         }
         Ok(())

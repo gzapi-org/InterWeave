@@ -588,16 +588,22 @@ async fn a_zero_capacity_configuration_is_an_error_not_a_panic() {
     }
 
     // And a heartbeat that is merely slow still starts — the guard is
-    // against the abort, not an opinion about tuning.
-    let slow = SubstrateConfig {
-        retry_tick: Duration::from_secs(30),
-        ..SubstrateConfig::default()
-    };
-    SwarmRuntime::start(&identity, slow, trusting(&[]))
-        .expect("a slow heartbeat is a policy, not an abort")
-        .shutdown()
-        .await
-        .expect("stops");
+    // against the abort, not an opinion about tuning. Five minutes is
+    // past `MAX_CONFIGURED_CAPACITY` read as milliseconds, which is what
+    // an earlier version of this check compared against: an ALLOCATION
+    // ceiling reused as a duration, rejecting an ordinary configuration
+    // that neither panics nor allocates.
+    for slow in [Duration::from_secs(30), Duration::from_secs(300)] {
+        let config = SubstrateConfig {
+            retry_tick: slow,
+            ..SubstrateConfig::default()
+        };
+        SwarmRuntime::start(&identity, config, trusting(&[]))
+            .expect("a slow heartbeat is a policy, not an abort")
+            .shutdown()
+            .await
+            .expect("stops");
+    }
 
     // And an absurd request is refused rather than allocated: a ceiling
     // is what stops "tuning" from being the denial of service.
