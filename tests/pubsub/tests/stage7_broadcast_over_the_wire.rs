@@ -920,6 +920,106 @@ async fn invalid_signature_traffic_cannot_poison_the_cache_for_authentic_traffic
     victim.shutdown().await.expect("the victim stops");
 }
 
+/// The last leave on a channel the profile does not desire drops the
+/// backend subscription — observed at the OTHER peer.
+///
+/// Backend subscription state has no local witness worth trusting: this
+/// node's own bookkeeping is the thing under test. What a peer sees is
+/// the mesh's actual behaviour, so A watches for B's `PeerUnsubscribed`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_last_leave_on_an_undesired_channel_drops_the_backend_subscription() {
+    let (a_id, a_peer) = who();
+    let (b_id, b_peer) = who();
+
+    // B desires NOTHING, so a join is the only thing holding the topic.
+    let mut a = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
+    let mut b = node(&b_id, &[&a_peer], &[], SubstrateConfig::default()).await;
+    connect(&mut a, &mut b, &b_peer).await;
+
+    b.join(channel("general"), "only")
+        .await
+        .expect("lands")
+        .expect("accepted");
+    wait_for(&mut a, "B's subscription", |e| {
+        matches!(e, SwarmEvent::PeerSubscribed { peer, channel: c } if *peer == b_peer && *c == channel("general"))
+    })
+    .await;
+
+    b.leave(channel("general"), "only")
+        .await
+        .expect("the leave lands");
+
+    wait_for(&mut a, "B's unsubscription", |e| {
+        matches!(e, SwarmEvent::PeerUnsubscribed { peer, channel: c } if *peer == b_peer && *c == channel("general"))
+    })
+    .await;
+
+    a.shutdown().await.expect("a stops");
+    b.shutdown().await.expect("b stops");
+}
+
+/// Leaving a channel the profile desires keeps the mesh warm.
+///
+/// The negative twin of the test above, and the reason `desired` exists:
+/// a client leaving must not tear down a subscription the operator asked
+/// the daemon to hold.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn leaving_a_desired_channel_keeps_the_mesh_warm() {
+    let (a_id, a_peer) = who();
+    let (b_id, b_peer) = who();
+
+    // B DESIRES the channel.
+    let mut a = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
+    let mut b = node(&b_id, &[&a_peer], &["general"], SubstrateConfig::default()).await;
+    connect(&mut a, &mut b, &b_peer).await;
+
+    b.join(channel("general"), "only")
+        .await
+        .expect("lands")
+        .expect("accepted");
+    b.leave(channel("general"), "only")
+        .await
+        .expect("the leave lands");
+
+    // POSITIVE CONTROL and the assertion in one: A must still be able to
+    // reach a session on B afterwards, which needs B's subscription to
+    // be live. A second session joins after the leave and receives.
+    b.join(channel("general"), "later")
+        .await
+        .expect("lands")
+        .expect("accepted");
+    a.join(channel("general"), "pub")
+        .await
+        .expect("lands")
+        .expect("accepted");
+    publish_repeatedly(&a, "pub", 40, b"still warm").await;
+    assert_eq!(
+        drain_until(&b, "later", PATIENCE).await.len(),
+        1,
+        "the desired subscription survived the leave"
+    );
+
+    // And A never saw an unsubscription in the interval.
+    let seen = tokio::time::timeout(SILENCE, async {
+        loop {
+            match a.next_event().await {
+                Some(SwarmEvent::PeerUnsubscribed { peer, .. }) if peer == b_peer => return true,
+                Some(_) => {}
+                None => return false,
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+    assert!(
+        !seen,
+        "a desired channel must not be unsubscribed by a client's leave"
+    );
+
+    a.shutdown().await.expect("a stops");
+    b.shutdown().await.expect("b stops");
+}
+
 /// Publish the same envelope a few times while the mesh forms.
 ///
 /// A single publish immediately after connecting reaches nobody: GossipSub

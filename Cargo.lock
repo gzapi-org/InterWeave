@@ -1700,10 +1700,16 @@ dependencies = [
 name = "interweave-pubsub-tests"
 version = "0.0.0"
 dependencies = [
+ "futures",
+ "interweave-profile-config",
+ "interweave-profile-identity",
  "interweave-test-support",
  "interweave-transport-api",
+ "interweave-transport-libp2p",
  "interweave-transport-runtime",
+ "interweave-trust-api",
  "libp2p",
+ "tokio",
 ]
 
 [[package]]

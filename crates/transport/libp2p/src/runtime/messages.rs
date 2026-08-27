@@ -286,6 +286,30 @@ pub enum SwarmEvent {
         /// The local session whose queue took it.
         session: String,
     },
+    /// A connected peer subscribed to a channel this node holds.
+    ///
+    /// The one honest signal of BACKEND subscription state: it is
+    /// observed at the other end of the connection, not read out of this
+    /// node's own bookkeeping. A test that wants to know whether a leave
+    /// really unsubscribed the mesh asks the peer, which is the only party
+    /// the answer matters to.
+    ///
+    /// Only for channels this node has derived a topic for; a peer's
+    /// subscription to a topic this node never held is dropped rather than
+    /// announced under a channel it could only guess.
+    PeerSubscribed {
+        /// The subscribing peer.
+        peer: TransportIdentity,
+        /// The channel, mapped back from the topic.
+        channel: interweave_transport_api::ChannelId,
+    },
+    /// A connected peer unsubscribed from a channel this node holds.
+    PeerUnsubscribed {
+        /// The unsubscribing peer.
+        peer: TransportIdentity,
+        /// The channel, mapped back from the topic.
+        channel: interweave_transport_api::ChannelId,
+    },
     /// An outbound dial failed after being admitted.
     DialFailed {
         /// The peer that was being dialed, when known.

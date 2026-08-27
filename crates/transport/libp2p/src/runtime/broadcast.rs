@@ -200,15 +200,47 @@ pub(super) fn handle_broadcast(
     outbox: &mut std::collections::VecDeque<SwarmEvent>,
     tick: BroadcastTick,
 ) -> BroadcastHandled {
-    let libp2p::swarm::SwarmEvent::Behaviour(SubstrateBehaviourEvent::Broadcast(
+    let libp2p::swarm::SwarmEvent::Behaviour(SubstrateBehaviourEvent::Broadcast(inner)) = event
+    else {
+        return BroadcastHandled::Passed(Box::new(event));
+    };
+
+    let (propagation_source, message_id, message) = match inner {
         gossipsub::Event::Message {
             propagation_source,
             message_id,
             message,
-        },
-    )) = event
-    else {
-        return BroadcastHandled::Passed(Box::new(event));
+        } => (propagation_source, message_id, message),
+        // SUBSCRIPTION CHANGES ARE ANNOUNCED, under the channel this
+        // node derived the topic from. A topic it never held maps to
+        // nothing and is dropped: announcing it would mean naming a
+        // channel by guessing, and a guessed channel is worse than none.
+        gossipsub::Event::Subscribed { peer_id, topic } => {
+            if let (Some(channel), Ok(peer)) = (
+                state.channel_of(&topic).cloned(),
+                to_transport_identity(&peer_id),
+            ) && tick.may_buffer_delivery
+            {
+                outbox.push_back(SwarmEvent::PeerSubscribed { peer, channel });
+            }
+            return BroadcastHandled::Consumed;
+        }
+        gossipsub::Event::Unsubscribed { peer_id, topic } => {
+            if let (Some(channel), Ok(peer)) = (
+                state.channel_of(&topic).cloned(),
+                to_transport_identity(&peer_id),
+            ) && tick.may_buffer_delivery
+            {
+                outbox.push_back(SwarmEvent::PeerUnsubscribed { peer, channel });
+            }
+            return BroadcastHandled::Consumed;
+        }
+        // Informational and consumed: a peer that does not speak the
+        // protocol simply never joins a mesh, and a slow peer is the
+        // backend's queue accounting, not a delivery fact.
+        gossipsub::Event::GossipsubNotSupported { .. } | gossipsub::Event::SlowPeer { .. } => {
+            return BroadcastHandled::Consumed;
+        }
     };
 
     // Strict validation guarantees a source; a message without one never
