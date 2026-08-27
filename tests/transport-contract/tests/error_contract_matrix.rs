@@ -851,6 +851,11 @@ fn declarations(source: &str, name: &str) -> Vec<usize> {
 /// `draining_is_shutting_down_on_the_wire` still passed, which is the
 /// exact regression this check exists to catch.
 fn is_test_at(source: &str, at: usize) -> bool {
+    // A test that does not RUN is not a proof. `#[ignore]` and a
+    // `#[cfg(...)]` gate both leave the attribute in place while the
+    // ordinary test run skips the function, so the matrix would report a
+    // proof that never executes — the exact shape this file exists to
+    // catch, one level up.
     // From the START of the declaration's own line. Walking back from
     // the `fn` offset leaves the partial text before it as the first
     // "line", and for `async fn ...` that partial is `async`, which is
@@ -864,8 +869,15 @@ fn is_test_at(source: &str, at: usize) -> bool {
             continue;
         }
         if trimmed.starts_with("#[") || trimmed.starts_with("#!") {
-            // `#[cfg(test)]` deliberately does not count: every helper in
-            // a test module carries it and none of them are tests.
+            // Disqualifying attributes win regardless of order, so an
+            // `#[ignore]` above or below the `#[test]` both count.
+            // `#[cfg(test)]` is the one gate that does NOT disqualify:
+            // it is how every test in a unit-test module is written.
+            if trimmed.starts_with("#[ignore")
+                || (trimmed.starts_with("#[cfg(") && !trimmed.starts_with("#[cfg(test)]"))
+            {
+                return false;
+            }
             if trimmed.starts_with("#[test]")
                 || trimmed.starts_with("#[tokio::test")
                 || trimmed.starts_with("#[test_case")
