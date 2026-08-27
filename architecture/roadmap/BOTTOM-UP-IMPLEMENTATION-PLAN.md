@@ -552,8 +552,15 @@ Direct v2 is correct end-to-end between real Rust peers before IPC or UI integra
 
 Flip to `active` (ADR-0049): `contracts/schemas/direct`, and the
 direct-routing shapes of `contracts/schemas/endpoints` —
-`direct-destination`, `endpoint-id`, `message-received`. From
-`contracts/schemas/common`, `message-id` and `peer-id` only.
+`direct-destination` and `endpoint-id`. From `contracts/schemas/common`,
+`message-id` and `peer-id` only.
+
+`endpoints/message-received` stays `approved`. It describes a JSON IPC
+event with a required `mode` field; the in-process `DirectEvent` this
+stage delivers has no such field and is not serialized at all, and the
+direct wire carries the frozen binary frames instead. Marking it `active`
+would tell a consumer that an unimplemented Stage 13 shape is current
+behaviour.
 
 `common/channel-id` stays `approved`. ADR-0049 defines `active` as
 describing the **current wire**, and ChannelId addresses broadcast
@@ -597,39 +604,52 @@ rather than re-derived.
 Verified by breaking the code and watching the specific test fail, not by
 reading the tests and agreeing with them.
 
-#### Amendment 2026-08-27: the concurrent-retransmission clause
+**Not met:** the concurrent same-key retransmission clause. See the open
+question below. Every other clause of the implement list and the
+required-test list is proven above.
 
-The required-test list asked for concurrent same-key retransmission over
-the wire. **That test cannot exist against this design, and the clause is
-what is wrong, not the code.**
+#### Open question 2026-08-27: the concurrent-retransmission clause
 
-`handle_direct` is a synchronous `fn` holding `&mut DirectState`, and
-`admit_structured` acquires the reservation, resolves the route, enqueues
-and releases inside that one call without yielding —
+**Not resolved here, and deliberately not resolvable here.** The required
+-test list asks for concurrent same-key retransmission over the wire, and
+no such test currently exists — one was written and deleted because it
+did not reach the path it claimed. What that means is a question for
+`contracts/ENDPOINTS.md`, not for this roadmap.
+
+The observation. `handle_direct` is a synchronous `fn` holding
+`&mut DirectState`, and `admit_structured` acquires the reservation,
+resolves, enqueues and releases inside that one call without yielding —
 `every_decided_path_returns_its_reservation` asserts the map is empty
-afterwards. Two admissions therefore cannot overlap in the swarm event
-loop, so a second arrival is always a dedup **cache** hit and never a
+afterwards. In the swarm event loop as written, two admissions cannot
+overlap, so a second arrival is a dedup **cache** hit rather than a
 reservation **waiter**.
 
-What is proven, and where:
+The contradiction. `contracts/ENDPOINTS.md` requires concurrent same-key
+requests to attach as bounded waiters, charges each outstanding request
+rather than each key, and releases the owner's and every waiter's share
+together. That is not speculative: it records **SPIKE-002/A11 measured 39
+attached with zero refusals** before the rule was written. Waiters were
+observed. So either the spike harness reached a concurrency this runtime
+does not, or the runtime lost it — and the difference matters, because
+the contract's capacity numbers were derived from the measurement.
 
-- over the wire, `one_id_from_one_source_delivers_once` — the cache path,
-  which is the path a real retransmission actually takes;
+Neither possibility can be settled by editing this file. The contract
+outranks the roadmap (CLAUDE.md §2), and a roadmap that declares the
+wire path impossible while the contract requires it hands the next
+person two contradictory instructions.
+
+What is proven today, and where:
+
+- over the wire, `one_id_from_one_source_delivers_once` — the cache path;
 - in process, `a_concurrent_matching_copy_attaches_instead_of_enqueuing`
-  — the waiter path, driven directly because the wire cannot reach it.
+  — the waiter path, driven directly.
 
-A wire test was written for the waiter path and then deleted: it passed,
-and mutating `Reservation::Waiter` to enqueue for itself did not break
-it, which proved it never reached the branch it claimed to cover.
-
-**Carried forward as an open question, not closed here:** if the waiter
-path is unreachable, the reservation map's waiter accounting is currently
-dead weight. SPIKE-002 found the bounded reservation map necessary under
-real request-response scheduling, so the mechanism may become live when
-something later yields inside admission — the IPC boundary in Stage 13 is
-the first candidate. Whether to keep it inert until then or remove it is
-an ADR question and is deliberately left open rather than settled by a
-test.
+**Required before this clause is called met:** determine whether the
+waiter path is reachable in the current runtime, by re-reading
+SPIKE-002/A11's harness against `handle_direct`. If it is, the wire test
+is owed. If it is not, `ENDPOINTS.md` and the reservation accounting need
+an amendment with the measurement re-examined — an ADR question, since
+the capacity ceilings depend on it.
 
 ## 10. Stage 7 — GossipSub broadcast
 

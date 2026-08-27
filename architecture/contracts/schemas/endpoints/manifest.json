@@ -20,7 +20,7 @@
     {
       "name": "message-received",
       "file": "message-received.schema.json",
-      "status": "active"
+      "status": "approved"
     },
     {
       "name": "directory-response",
