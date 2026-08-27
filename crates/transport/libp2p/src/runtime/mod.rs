@@ -62,7 +62,8 @@ mod messages;
 // this split moved code, not the public surface.
 use commands::{handle_command, translate};
 use dialing::{
-    Announce, OpenConnection, PendingListens, attempt_dial, now_ms, settle_outcome, wall_ms,
+    ActiveListeners, Announce, OpenConnection, PendingListens, attempt_dial, now_ms,
+    settle_outcome, wall_ms,
 };
 use direct::{DirectHandled, DirectTick, handle_direct};
 
@@ -415,6 +416,8 @@ impl SwarmRuntime {
         // then can only be a placeholder, and a caller cannot advertise
         // or dial a placeholder.
         let mut listens: PendingListens = HashMap::new();
+        // Listeners that have bound. See `ActiveListeners`.
+        let mut active: ActiveListeners = HashMap::new();
 
         // Outbound direct exchanges awaiting an answer.
         //
@@ -734,10 +737,12 @@ impl SwarmRuntime {
                                     &open,
                                     &mut refuse,
                                     &mut listens,
+                                    &mut active,
                                     &mut pending_direct,
                                     &mut direct_state,
                                     &mut in_flight,
                                     config.max_pending_listens,
+                                    config.max_active_listeners,
                                     config.max_payload_bytes,
                                     now_ms(started),
                                     command,
@@ -828,7 +833,9 @@ impl SwarmRuntime {
                         // immediately after the revocation that refused
                         // it.
                         let translated = match announce {
-                            Announce::Yes => translate(event, &mut listens, &mut abandoned),
+                            Announce::Yes => {
+                                translate(event, &mut listens, &mut active, &mut abandoned)
+                            }
                             Announce::Suppress => {
                                 // `translate` also answers pending
                                 // `listen` calls, and a suppressed event

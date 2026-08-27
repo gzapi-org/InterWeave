@@ -37,6 +37,17 @@ pub enum SwarmCommand {
         /// or dial.
         reply: oneshot::Sender<Result<Multiaddr, String>>,
     },
+    /// Stop a listener, naming it by an address `listen` returned.
+    ///
+    /// Answers `true` when a listener was serving that address and has
+    /// been removed, `false` when none was. Without this a bound listener
+    /// could only be closed by stopping the whole runtime.
+    StopListening {
+        /// An address the listener bound.
+        address: Multiaddr,
+        /// Whether a listener was found and removed.
+        reply: oneshot::Sender<bool>,
+    },
     /// Dial a peer at an address.
     ///
     /// Carries the EXPECTED PeerId, and it is bound into the dial rather
@@ -159,6 +170,20 @@ pub enum SwarmEvent {
     Listening {
         /// The address it bound to.
         address: Multiaddr,
+    },
+    /// A listener that had bound is no longer listening.
+    ///
+    /// The counterpart of [`Self::Listening`], and it exists because the
+    /// absence of one was silent: a listener that died AFTER binding
+    /// answered no pending `listen` reply, so the arm that handles it had
+    /// nothing to report to and returned nothing. A node could stop
+    /// accepting connections on every address it had and no caller was
+    /// ever told.
+    ListeningStopped {
+        /// The addresses it had bound, as libp2p reports them.
+        addresses: Vec<Multiaddr>,
+        /// Why it closed. `None` for an orderly close.
+        reason: Option<String>,
     },
     /// A connection was established and Noise authenticated the peer.
     Connected {

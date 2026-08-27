@@ -10,12 +10,14 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
+use std::os::unix::fs::PermissionsExt;
+
 use interweave_human_core::retention::{StorageHealth, TerminalCause};
 use interweave_human_store::{
     AppMessageId, HumanStore, InboundOrigin, NewInbound, NewOutbound, OutboundDestination,
     PageLimits, StoreError, StoreOptions,
 };
-use interweave_transport_api::{DirectDestination, MediaType, TransportIdentity};
+use interweave_transport_api::{DirectDestination, EndpointId, MediaType, TransportIdentity};
 
 const PEER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
 const PEER_B: &str = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
@@ -35,6 +37,17 @@ fn inbound_from(who: TransportIdentity, id: &str, payload: Vec<u8>) -> NewInboun
         origin: InboundOrigin {
             peer: who,
             endpoint: None,
+            channel: None,
+        },
+        ..inbound(id, payload)
+    }
+}
+
+fn inbound_via(endpoint: &str, id: &str, payload: Vec<u8>) -> NewInbound {
+    NewInbound {
+        origin: InboundOrigin {
+            peer: peer(),
+            endpoint: Some(EndpointId::parse(endpoint).expect("test endpoint is canonical")),
             channel: None,
         },
         ..inbound(id, payload)
@@ -289,11 +302,68 @@ fn backup_eligible_content_excludes_pending_outbound() {
 
 #[test]
 fn recheck_health_clears_degradation_when_the_medium_recovers() {
-    let mut store = memory();
+    // THIS TEST USED TO DEGRADE NOTHING. It opened a fresh in-memory
+    // store, which is Healthy already, and asserted it was Healthy —
+    // proving that a healthy store stays healthy, while its name claims
+    // it proves recovery. Deleting the assignment in `recheck_health`
+    // outright would have passed it.
+    //
+    // So the store is really filled, really degraded, and really drained
+    // before the probe is asked anything.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    let mut store = HumanStore::open(
+        &path,
+        StoreOptions {
+            max_pages: Some(64),
+        },
+    )
+    .expect("opens");
+
+    let big = vec![0_u8; interweave_transport_api::MAX_PAYLOAD_BYTES];
+    let mut rows = Vec::new();
+    for i in 0..8_u32 {
+        let id = format!("{i:032x}");
+        match store.commit_unread_inbound(&inbound(&id, big.clone())) {
+            Ok(row) => rows.push(row),
+            Err(_) => break,
+        }
+    }
+    assert_eq!(
+        store.health(),
+        StorageHealth::Degraded,
+        "the medium must actually be full before recovery means anything"
+    );
+    assert!(!rows.is_empty(), "at least one message fit");
+
+    // A FAILED INSERT LEAVES NO ROW. The statement that hit the quota
+    // must not have half-written one: the table holds exactly what was
+    // acknowledged, or a caller told "not stored" would find it stored.
+    assert_eq!(
+        store.unread_inbound().expect("read").len(),
+        rows.len(),
+        "the refused commit must have left nothing behind"
+    );
+
+    // The receiver reads its backlog, which is what frees the pages.
+    // `mark_read` is deliberately not gated on degradation — a store that
+    // could not be drained could never recover.
+    for row in rows {
+        store
+            .mark_read(row, 1_000)
+            .expect("reading is still possible");
+    }
+
     assert_eq!(
         store.recheck_health().expect("probe"),
-        StorageHealth::Healthy
+        StorageHealth::Healthy,
+        "a drained medium must clear the degradation"
     );
+
+    // And the store is usable again, not merely relabelled.
+    store
+        .commit_unread_inbound(&inbound(ID_A, b"after recovery".to_vec()))
+        .expect("a recovered store accepts content again");
 }
 
 #[test]
@@ -620,8 +690,10 @@ fn a_new_column_inside_a_permitted_table_is_a_retention_violation() {
 #[test]
 fn the_unique_key_and_the_autoincrement_are_part_of_the_verified_shape() {
     // Both are invisible to a `SELECT type, name FROM sqlite_master`
-    // check and both are load-bearing. The peer-scoped UNIQUE is what
-    // stops one peer colliding with another's message id (migration 2);
+    // check and both are load-bearing. The peer- AND endpoint-scoped
+    // UNIQUE is what stops one peer colliding with another's message id
+    // (migration 2) and one peer's two endpoints colliding with each
+    // other (migration 3);
     // AUTOINCREMENT is what stops a deleted row's id being handed to
     // the next insert, which in a store that deletes constantly means
     // handing a caller someone else's body.
@@ -880,4 +952,451 @@ fn a_negative_stored_timestamp_is_corruption_and_not_a_zero() {
     drop(conn);
     let store = HumanStore::open(&path, StoreOptions::default()).expect("reopens");
     assert_eq!(store.pending_outbound().expect("reads").len(), 2);
+}
+
+#[test]
+fn two_endpoints_on_one_peer_may_use_the_same_application_id() {
+    // `ENDPOINTS.md`: "Including `source_endpoint` prevents a message ID
+    // collision between two endpoints on the same authenticated peer from
+    // suppressing an independent delivery."
+    //
+    // The store was one scope level short of that. `migration_2` stopped
+    // two PEERS colliding; a peer's own `human` and `automation` endpoints
+    // still aliased, so the second message never reached durable state
+    // while the caller was told it had — the same harm, one level down.
+    let mut store = memory();
+
+    let human = store
+        .commit_unread_inbound(&inbound_via("human", ID_A, b"from human".to_vec()))
+        .expect("the first endpoint commits");
+    let automation = store
+        .commit_unread_inbound(&inbound_via(
+            "automation",
+            ID_A,
+            b"from automation".to_vec(),
+        ))
+        .expect("a different endpoint on the same peer may reuse the id");
+    assert_ne!(human, automation, "they are independent deliveries");
+
+    let unread = store.unread_inbound().expect("read");
+    assert_eq!(unread.len(), 2, "both are held");
+    let mut bodies: Vec<&[u8]> = unread.iter().map(|r| r.payload.as_slice()).collect();
+    bodies.sort_unstable();
+    assert_eq!(
+        bodies,
+        vec![b"from automation".as_slice(), b"from human".as_slice()],
+        "neither body was replaced by the other"
+    );
+}
+
+#[test]
+fn one_endpoint_reusing_its_own_id_for_new_content_is_still_a_conflict() {
+    // Widening a uniqueness key is exactly how a dedup guard gets removed
+    // by accident. Scoping to the endpoint must not turn a single
+    // endpoint's id reuse into two rows: within one endpoint the conflict
+    // that `one_peer_reusing_its_own_id_for_new_content_is_a_conflict`
+    // proves for the NULL-endpoint case must still fire.
+    let mut store = memory();
+
+    let first = store
+        .commit_unread_inbound(&inbound_via("human", ID_A, b"original".to_vec()))
+        .expect("commit");
+    let held = store.mark_read(first, 1_000).expect("read");
+    store.keep(&held, 2_000).expect("keep");
+
+    let second = store
+        .commit_unread_inbound(&inbound_via("human", ID_A, b"replacement".to_vec()))
+        .expect("a new arrival is admitted");
+    let second_held = store.mark_read(second, 3_000).expect("read");
+
+    assert!(
+        matches!(
+            store.keep(&second_held, 4_000),
+            Err(StoreError::IdentityConflict { .. })
+        ),
+        "the same endpoint reusing its id for new content still conflicts"
+    );
+
+    let kept = store.kept_inbound().expect("read");
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].payload, b"original".to_vec());
+}
+
+#[test]
+fn an_absent_source_endpoint_still_dedups() {
+    // THE TRAP IN THE OBVIOUS FIX. `source_endpoint` is nullable, and
+    // SQLite treats NULLs in a UNIQUE key as DISTINCT — so spelling the
+    // key `UNIQUE(source_peer, source_endpoint, app_message_id)` silently
+    // removes dedup for every row that has no asserted endpoint, which is
+    // every row the rest of this suite creates.
+    //
+    // `source_endpoint_key` collapses NULL to the empty string, which is
+    // not a legal EndpointId and so cannot alias a real one. Break that
+    // and this fails while the fix above still passes.
+    let mut store = memory();
+
+    let first = store
+        .commit_unread_inbound(&inbound(ID_A, b"original".to_vec()))
+        .expect("commit");
+    let held = store.mark_read(first, 1_000).expect("read");
+    store.keep(&held, 2_000).expect("keep");
+
+    let second = store
+        .commit_unread_inbound(&inbound(ID_A, b"replacement".to_vec()))
+        .expect("admitted");
+    let second_held = store.mark_read(second, 3_000).expect("read");
+
+    assert!(
+        matches!(
+            store.keep(&second_held, 4_000),
+            Err(StoreError::IdentityConflict { .. })
+        ),
+        "a NULL endpoint must not read as a distinct key on every insert"
+    );
+    assert_eq!(store.kept_inbound().expect("read").len(), 1);
+}
+
+#[test]
+fn a_v2_database_migrates_to_the_endpoint_scoped_key_without_losing_rows() {
+    // The rebuild in `migration_3` drops and recreates both inbound
+    // tables. A migration that widened the key but lost the content would
+    // pass every assertion above, because they all start from an empty
+    // store.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).expect("state dir");
+    // The store refuses a state directory anyone else can read, so the
+    // fixture has to be as tight as the one `open` would have created.
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))
+        .expect("tighten the fixture state directory");
+    let path = state.join("human.sqlite3");
+
+    // A v2 database, written by hand exactly as that build left it.
+    let conn = rusqlite::Connection::open(&path).expect("create");
+    conn.execute_batch(
+        "
+        CREATE TABLE pending_outbound (
+            row_id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id        TEXT    NOT NULL UNIQUE,
+            destination_peer      TEXT    NOT NULL,
+            destination_endpoint  TEXT,
+            channel_id            TEXT,
+            media_type            TEXT,
+            payload               BLOB    NOT NULL,
+            created_at            INTEGER NOT NULL,
+            last_attempt_at       INTEGER,
+            attempts              INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE unread_inbound (
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            media_type      TEXT,
+            payload         BLOB    NOT NULL,
+            received_at     INTEGER NOT NULL,
+            UNIQUE(source_peer, app_message_id)
+        );
+        CREATE TABLE kept_inbound (
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            media_type      TEXT,
+            payload         BLOB    NOT NULL,
+            received_at     INTEGER NOT NULL,
+            read_at         INTEGER NOT NULL,
+            kept_at         INTEGER NOT NULL,
+            UNIQUE(source_peer, app_message_id)
+        );
+        CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        PRAGMA user_version = 2;
+        ",
+    )
+    .expect("the v2 schema is legal SQLite");
+    conn.execute(
+        "INSERT INTO unread_inbound
+            (app_message_id, source_peer, source_endpoint, payload, received_at)
+         VALUES (?1, ?2, 'human', ?3, 2000)",
+        rusqlite::params![ID_A, PEER, b"carried across".to_vec()],
+    )
+    .expect("seed a v2 row");
+    drop(conn);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        .expect("tighten the fixture database");
+
+    let mut store = HumanStore::open(&path, StoreOptions::default())
+        .expect("a v2 database migrates rather than being refused");
+
+    let unread = store.unread_inbound().expect("read");
+    assert_eq!(unread.len(), 1, "the v2 row survived the rebuild");
+    assert_eq!(unread[0].payload, b"carried across".to_vec());
+
+    // And the widened key is actually in force afterwards.
+    store
+        .commit_unread_inbound(&inbound_via("automation", ID_A, b"new endpoint".to_vec()))
+        .expect("the migrated table is scoped by endpoint");
+    assert_eq!(store.unread_inbound().expect("read").len(), 2);
+}
+
+#[test]
+fn a_generated_key_with_the_right_name_and_a_different_expression_is_refused() {
+    // THE NAME IS NOT THE CONTRACT, THE EXPRESSION IS. `table_info` does
+    // not report a generated column at all and `index_info` reports only
+    // its name, so a `source_endpoint_key` redefined as the constant ''
+    // presents an identical column list AND an identical unique key —
+    // while collapsing every endpoint back into one, which is precisely
+    // the suppression migration_3 exists to stop.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
+
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    conn.execute_batch(
+        "
+        ALTER TABLE unread_inbound RENAME TO unread_inbound_old;
+        CREATE TABLE unread_inbound (
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            media_type      TEXT,
+            payload         BLOB    NOT NULL,
+            received_at     INTEGER NOT NULL,
+            source_endpoint_key TEXT GENERATED ALWAYS AS ('') VIRTUAL,
+            UNIQUE(source_peer, source_endpoint_key, app_message_id)
+        );
+        DROP TABLE unread_inbound_old;
+        ",
+    )
+    .expect("the rebuild is legal SQLite");
+    drop(conn);
+
+    let refused = HumanStore::open(&path, StoreOptions::default());
+    assert!(
+        matches!(refused, Err(StoreError::Migration(_))),
+        "a generated column with a different expression must be refused, got {refused:?}"
+    );
+}
+
+#[test]
+fn a_stored_generated_column_is_not_the_virtual_one_this_build_wrote() {
+    // STORED rather than VIRTUAL is a different schema: it occupies a
+    // real value per row, which is a content surface ADR-0044 did not
+    // budget for. `table_xinfo` reports 3 for it and 2 for VIRTUAL, and
+    // the declaration text differs, so it is caught twice over.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
+
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    conn.execute_batch(
+        "
+        ALTER TABLE kept_inbound RENAME TO kept_inbound_old;
+        CREATE TABLE kept_inbound (
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            media_type      TEXT,
+            payload         BLOB    NOT NULL,
+            received_at     INTEGER NOT NULL,
+            read_at         INTEGER NOT NULL,
+            kept_at         INTEGER NOT NULL,
+            source_endpoint_key TEXT GENERATED ALWAYS AS (IFNULL(source_endpoint, '')) STORED,
+            UNIQUE(source_peer, source_endpoint_key, app_message_id)
+        );
+        DROP TABLE kept_inbound_old;
+        ",
+    )
+    .expect("the rebuild is legal SQLite");
+    drop(conn);
+
+    assert!(
+        matches!(
+            HumanStore::open(&path, StoreOptions::default()),
+            Err(StoreError::Migration(_))
+        ),
+        "a STORED generated column is not what this build wrote"
+    );
+}
+
+#[test]
+fn an_extra_generated_column_is_a_retention_violation_table_info_cannot_see() {
+    // A generated column is INVISIBLE to `PRAGMA table_info`, so the
+    // column check that refuses `ADD COLUMN archive_payload BLOB` cannot
+    // see this one at all — and a virtual column reading `payload` is a
+    // second durable view of the body in the table whose whole contract
+    // is that the body disappears when the message is read.
+    //
+    // `table_xinfo` is what makes it visible, which is why the hidden set
+    // is enumerated rather than assumed empty.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
+
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    conn.execute_batch(
+        "ALTER TABLE unread_inbound
+             ADD COLUMN archive_payload BLOB GENERATED ALWAYS AS (payload) VIRTUAL",
+    )
+    .expect("SQLite permits adding a virtual generated column");
+    drop(conn);
+
+    let refused = HumanStore::open(&path, StoreOptions::default());
+    assert!(
+        matches!(refused, Err(StoreError::Migration(_))),
+        "a second view of the body must be refused however it is spelled, got {refused:?}"
+    );
+}
+
+#[test]
+fn a_decoy_comment_carrying_the_expected_declaration_does_not_excuse_a_constant() {
+    // SQLite PRESERVES COMMENTS in `sqlite_master.sql`, so a column
+    // generated from a constant can carry the expected declaration
+    // verbatim inside `/* ... */`. The name matches, the hidden set
+    // matches, the unique key matches, and any substring test over the
+    // stored SQL finds the text it was looking for -- inside the comment
+    // -- while endpoints collapse back into one.
+    //
+    // This is why the expression is EVALUATED rather than read.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
+
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    conn.execute_batch(
+        "
+        ALTER TABLE unread_inbound RENAME TO unread_inbound_old;
+        CREATE TABLE unread_inbound (
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            media_type      TEXT,
+            payload         BLOB    NOT NULL,
+            received_at     INTEGER NOT NULL,
+            source_endpoint_key TEXT GENERATED ALWAYS AS ('') VIRTUAL
+                /* source_endpoint_key TEXT GENERATED ALWAYS AS (IFNULL(source_endpoint, '')) VIRTUAL */,
+            UNIQUE(source_peer, source_endpoint_key, app_message_id)
+        );
+        DROP TABLE unread_inbound_old;
+        ",
+    )
+    .expect("the rebuild is legal SQLite");
+
+    // The decoy really is in the stored SQL: this test is only meaningful
+    // if a substring check WOULD have been fooled by it.
+    let stored: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'unread_inbound'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("read the stored ddl");
+    assert!(
+        stored.contains("GENERATED ALWAYS AS (IFNULL(source_endpoint, ''))"),
+        "the decoy must be present, or this test proves nothing"
+    );
+    drop(conn);
+
+    let refused = HumanStore::open(&path, StoreOptions::default());
+    assert!(
+        matches!(refused, Err(StoreError::Migration(_))),
+        "a constant expression must be refused however it is decorated, got {refused:?}"
+    );
+}
+
+#[test]
+fn a_truncating_generated_key_is_refused_even_though_it_matches_short_probes() {
+    // THE SAMPLE HAS TO REACH THE GRAMMAR'S EDGE. An earlier version of
+    // this guard probed one 14-character endpoint and NULL, so
+    // `IFNULL(substr(source_endpoint, 1, 14), '')` reproduced both values
+    // exactly and passed — while every id longer than 14 characters was
+    // truncated into a collision with anything sharing its prefix, which
+    // is the suppression migration_3 exists to stop.
+    //
+    // The probe set now reaches 64 characters, the longest legal
+    // EndpointId, so no truncation can hide inside it.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
+
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    conn.execute_batch(
+        "
+        ALTER TABLE unread_inbound RENAME TO unread_inbound_old;
+        CREATE TABLE unread_inbound (
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            media_type      TEXT,
+            payload         BLOB    NOT NULL,
+            received_at     INTEGER NOT NULL,
+            source_endpoint_key TEXT
+                GENERATED ALWAYS AS (IFNULL(substr(source_endpoint, 1, 14), '')) VIRTUAL,
+            UNIQUE(source_peer, source_endpoint_key, app_message_id)
+        );
+        DROP TABLE unread_inbound_old;
+        ",
+    )
+    .expect("the rebuild is legal SQLite");
+    drop(conn);
+
+    let refused = HumanStore::open(&path, StoreOptions::default());
+    assert!(
+        matches!(refused, Err(StoreError::Migration(_))),
+        "a truncating expression must be refused, got {refused:?}"
+    );
+}
+
+#[test]
+fn a_generated_key_that_drops_a_legal_character_class_is_refused() {
+    // EndpointId admits `.`, `-`, `_` and digits. An expression that
+    // filters one of them agrees with every alphabetic probe and then
+    // collides `a.b` with `ab` — so the probe set carries one id per
+    // legal character class rather than a handful of plausible names.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
+
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    conn.execute_batch(
+        "
+        ALTER TABLE kept_inbound RENAME TO kept_inbound_old;
+        CREATE TABLE kept_inbound (
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            media_type      TEXT,
+            payload         BLOB    NOT NULL,
+            received_at     INTEGER NOT NULL,
+            read_at         INTEGER NOT NULL,
+            kept_at         INTEGER NOT NULL,
+            source_endpoint_key TEXT
+                GENERATED ALWAYS AS (IFNULL(replace(source_endpoint, '.', ''), '')) VIRTUAL,
+            UNIQUE(source_peer, source_endpoint_key, app_message_id)
+        );
+        DROP TABLE kept_inbound_old;
+        ",
+    )
+    .expect("the rebuild is legal SQLite");
+    drop(conn);
+
+    assert!(
+        matches!(
+            HumanStore::open(&path, StoreOptions::default()),
+            Err(StoreError::Migration(_))
+        ),
+        "an expression that drops a legal character must be refused"
+    );
 }

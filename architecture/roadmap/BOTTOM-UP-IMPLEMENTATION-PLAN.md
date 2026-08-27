@@ -778,6 +778,26 @@ Flip to `active`: `contracts/schemas/discovery` (ADR-0049).
 
 Run and close **SPIKE-003**.
 
+**Decide the capability-observation mapping in the architecture before
+writing code.** `PeerCache::candidates` exports `protocol_observations`
+**empty**, and that is a deferral — not a statement that a peer has no
+observations. `providers/peer-cache.md` has the Kademlia provider read
+fresh capability evidence "through normal candidate/hint data", which is
+that field, and the "targeted lookup only with locally computable fresh
+server-capability evidence" item below is the consumer that needs it.
+
+The mapping is not specified anywhere, which is why the code declined to
+guess one: a stored observation is `(protocol_family, wire_major,
+network_hash, role)`, while a `ProtocolObservation` carries a single
+`protocol_id`. ADR-0047's canonical
+`/interweave/kad/1.0.0/<network-hash>` gives three of those four an
+evident home and `role` none, and "wire_major 1 means 1.0.0" is an
+inference no document states.
+
+Specify it, then fill in `crates/discovery/cache/src/cache.rs`. A
+targeted lookup built on the empty set does not fail loudly — it reads as
+"no peer supports this" and silently degrades to no targeting at all.
+
 ### Activate
 
 ```text

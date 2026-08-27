@@ -121,7 +121,6 @@ ReservationMap::outstanding                      stage-12  expiry and introspect
 TransportCapabilities::clamped                   stage-12  capability clamping happens at runtime composition
 TrustDecision::is_allowed                        stage-12  bound at runtime composition
 
-Generation::parse                     stage-13  parsed from an IPC hello; only test helpers build one today
 
 # --- stage-13 ----------------------------------------------------
 ContentFingerprint::as_bytes                     stage-13  fingerprint rendering, surfaced by diagnostics

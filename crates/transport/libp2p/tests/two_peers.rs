@@ -565,6 +565,74 @@ async fn a_zero_capacity_configuration_is_an_error_not_a_panic() {
         runtime.shutdown().await.expect("stops");
     }
 
+    // A ZERO HEARTBEAT IS THE SAME ABORT, one type away from the loop
+    // that catches the others. `tokio::time::interval` panics on a zero
+    // period, and `retry_tick` is a `Duration`, so it was not in the
+    // `usize` table every other depth is checked by.
+    for (label, tick) in [
+        ("zero", Duration::ZERO),
+        // Sub-millisecond truncates to the zero above, so it is refused
+        // rather than silently becoming it.
+        ("sub-millisecond", Duration::from_micros(500)),
+    ] {
+        let config = SubstrateConfig {
+            retry_tick: tick,
+            ..SubstrateConfig::default()
+        };
+        match SwarmRuntime::start(&identity, config, trusting(&[])) {
+            Err(SubstrateError::InvalidConfig { field, .. }) => {
+                assert_eq!(field, "retry_tick_ms", "{label}");
+            }
+            other => panic!("{label}: expected InvalidConfig, got {other:?}"),
+        }
+    }
+
+    // And a heartbeat that is merely slow still starts — the guard is
+    // against the abort, not an opinion about tuning. Five minutes is
+    // past `MAX_CONFIGURED_CAPACITY` read as milliseconds, which is what
+    // an earlier version of this check compared against: an ALLOCATION
+    // ceiling reused as a duration, rejecting an ordinary configuration
+    // that neither panics nor allocates.
+    // A period the CLOCK cannot carry is the other abort. `Interval`
+    // saturates while it is on time, but a poll arriving >5ms late takes
+    // the missed-tick path, and the `Delay` behaviour this runtime
+    // selects computes `now + period` with plain `Instant` arithmetic:
+    // "overflow when adding duration to instant". The first tick is due
+    // immediately, so building a Swarm is enough of a delay to reach it.
+    for (label, tick) in [
+        ("Duration::MAX", Duration::MAX),
+        ("half of u64 seconds", Duration::from_secs(u64::MAX / 2)),
+    ] {
+        let config = SubstrateConfig {
+            retry_tick: tick,
+            ..SubstrateConfig::default()
+        };
+        match SwarmRuntime::start(&identity, config, trusting(&[])) {
+            Err(SubstrateError::InvalidConfig { field, .. }) => {
+                assert_eq!(field, "retry_tick_ms", "{label}");
+            }
+            other => panic!("{label}: expected InvalidConfig, got {other:?}"),
+        }
+    }
+
+    // And the bound is the CLOCK, not an opinion: a period far beyond any
+    // real heartbeat but still representable is accepted.
+    for slow in [
+        Duration::from_secs(30),
+        Duration::from_secs(300),
+        Duration::from_secs(1 << 40),
+    ] {
+        let config = SubstrateConfig {
+            retry_tick: slow,
+            ..SubstrateConfig::default()
+        };
+        SwarmRuntime::start(&identity, config, trusting(&[]))
+            .expect("a slow heartbeat is a policy, not an abort")
+            .shutdown()
+            .await
+            .expect("stops");
+    }
+
     // And an absurd request is refused rather than allocated: a ceiling
     // is what stops "tuning" from being the denial of service.
     let huge = SubstrateConfig {
@@ -596,14 +664,103 @@ async fn pending_listeners_are_bounded_and_abandoned_ones_are_closed() {
 
     let loopback: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse().expect("loopback multiaddr");
 
-    // Each of these resolves, so nothing is left pending — the bound is
-    // on listeners still AWAITING an address, and a resolved one is not.
+    // Each of these resolves, so nothing is left pending. This bound is
+    // on listeners still AWAITING an address, and a resolved one is not
+    // — which is why it is NOT the whole story, and why
+    // `bound_listeners_are_bounded_too` exists: this comment used to end
+    // here, and the sockets those four calls opened were counted by
+    // nothing at all.
     for _ in 0..4 {
         tokio::time::timeout(PATIENCE, runtime.listen(loopback.clone()))
             .await
             .expect("listen resolves")
             .expect("accepted");
     }
+
+    runtime.shutdown().await.expect("stops");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bound_listeners_are_bounded_too() {
+    // The pending bound above is spent the moment a listener reports its
+    // address, so binding in sequence used to be unbounded: four
+    // successive `listen` calls under `max_pending_listens: 2` all
+    // succeeded and left four sockets open, with nothing tracking them.
+    let identity = ProfileIdentity::generate();
+    let mut runtime = SwarmRuntime::start(
+        &identity,
+        SubstrateConfig {
+            max_active_listeners: 2,
+            ..SubstrateConfig::default()
+        },
+        trusting(&[]),
+    )
+    .expect("runtime");
+
+    let loopback: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse().expect("loopback multiaddr");
+
+    let mut bound = Vec::new();
+    for _ in 0..2 {
+        bound.push(
+            tokio::time::timeout(PATIENCE, runtime.listen(loopback.clone()))
+                .await
+                .expect("listen resolves")
+                .expect("within the ceiling"),
+        );
+    }
+
+    let refused = tokio::time::timeout(PATIENCE, runtime.listen(loopback.clone()))
+        .await
+        .expect("listen resolves");
+    assert!(
+        refused.is_err(),
+        "a third listener must be refused once two are bound, got {refused:?}"
+    );
+
+    // AND THE SLOT IS RELEASED, so the bound is a ceiling and not a
+    // one-way ratchet. Stopping one must let another bind.
+    assert!(
+        runtime
+            .stop_listening(bound[0].clone())
+            .await
+            .expect("the task answers"),
+        "a listener serving that address was found"
+    );
+
+    // The withdrawal is announced. Before this, a listener that stopped
+    // after binding produced no event at all: the arm that handles it
+    // returned `None` whenever no pending `listen` was owed a reply,
+    // which is exactly the case where it had been serving.
+    let stopped = tokio::time::timeout(PATIENCE, async {
+        loop {
+            match runtime.next_event().await {
+                Some(SwarmEvent::ListeningStopped { addresses, .. }) => return addresses,
+                Some(_) => continue,
+                None => panic!("the event stream ended before the withdrawal"),
+            }
+        }
+    })
+    .await
+    .expect("the withdrawal is announced");
+    assert!(
+        stopped.contains(&bound[0]),
+        "the stopped listener named the address it had bound, got {stopped:?}"
+    );
+
+    tokio::time::timeout(PATIENCE, runtime.listen(loopback.clone()))
+        .await
+        .expect("listen resolves")
+        .expect("the freed slot is reusable");
+
+    // An address nothing is serving is answered, not treated as an error.
+    let unknown: Multiaddr = "/ip4/127.0.0.1/tcp/1".parse().expect("multiaddr");
+    assert!(
+        !runtime
+            .stop_listening(unknown)
+            .await
+            .expect("the task answers"),
+        "no listener serves that address"
+    );
 
     runtime.shutdown().await.expect("stops");
 }

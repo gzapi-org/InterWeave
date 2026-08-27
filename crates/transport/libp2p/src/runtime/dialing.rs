@@ -455,6 +455,17 @@ pub(super) struct OpenConnection {
 /// Listen commands whose bound address has not arrived yet.
 pub(super) type PendingListens = HashMap<ListenerId, oneshot::Sender<Result<Multiaddr, String>>>;
 
+/// Listeners that have bound and are still serving.
+///
+/// The runtime used to forget a listener the moment its `listen` reply
+/// was answered, and every listener defect followed from that single
+/// omission: nothing could bound how many were open, nothing could close
+/// one, and a listener dying after it bound was reported to no one.
+///
+/// Keyed by id and holding every address that listener bound, because a
+/// caller names one by an address `listen` handed back.
+pub(super) type ActiveListeners = HashMap<ListenerId, Vec<Multiaddr>>;
+
 #[cfg(test)]
 mod tests {
     use super::{connections_to_close, is_permanent_dial_error, settle_undialable};

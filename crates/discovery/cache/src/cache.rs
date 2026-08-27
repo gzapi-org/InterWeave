@@ -581,7 +581,11 @@ impl PeerCache {
                     // same class of loss as dropping the whole set.
                     //
                     // Whoever opens Stage 10 decides the mapping in the
-                    // architecture first, then fills this in.
+                    // architecture first, then fills this in. That is
+                    // named as a prerequisite in the Stage 10 section of
+                    // the bottom-up implementation plan, so it is a step
+                    // that stage has to walk past rather than a note only
+                    // a reader of this file would ever see.
                     protocol_observations: Default::default(),
                 })
             })
