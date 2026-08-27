@@ -1417,6 +1417,86 @@ async fn the_largest_legal_broadcast_crosses_the_wire() {
     b.shutdown().await.expect("b stops");
 }
 
+/// A refused reconfiguration changes nothing, including the queue bound.
+///
+/// The bound used to be assigned before the registry was asked, so a
+/// configuration the registry REFUSED still moved it: the caller was told
+/// the configuration failed while every later session silently opened at
+/// the bound from the rejected request. A partially applied config is
+/// worse than a refused one, because nothing reports it.
+///
+/// The bound is observed rather than read: sessions opened after the
+/// refusal must still drop at the ORIGINAL bound of one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_reconfiguration_leaves_the_queue_bound_alone() {
+    let (a_id, a_peer) = who();
+    let (b_id, b_peer) = who();
+
+    let mut a = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
+    // B starts bounded at ONE.
+    let mut b = node_with_queue(
+        &b_id,
+        &[&a_peer],
+        &["general"],
+        SubstrateConfig::default(),
+        1,
+    )
+    .await;
+    connect(&mut a, &mut b, &b_peer).await;
+
+    // Push the registry past MAX_SUBSCRIPTIONS with joins, so that the
+    // next desired set cannot be accepted.
+    let mut filled = 0u32;
+    for i in 0..2_000u32 {
+        let c = ChannelId::parse(format!("bulk-{i}")).expect("a legal channel");
+        if b.join(c, "filler").await.expect("lands").is_err() {
+            break;
+        }
+        filled += 1;
+    }
+    assert!(
+        filled > 1_000,
+        "the registry filled to its ceiling before refusing: {filled}"
+    );
+
+    // A reconfiguration that asks for a LARGER bound and must be refused.
+    // TWO desired channels, because `join` fills to exactly one below the
+    // ceiling: a single desired channel lands on the boundary and is
+    // legally accepted.
+    let refused = b
+        .configure_broadcast(
+            BroadcastChannels::from_profile(&profile(&["general", "second"]), 64)
+                .expect("a valid profile"),
+        )
+        .await;
+    assert!(
+        refused.is_err(),
+        "the registry must refuse a set it cannot hold: {refused:?}"
+    );
+
+    // THE BOUND DID NOT MOVE. A session opened after the refusal still
+    // holds exactly one.
+    a.join(channel("general"), "pub")
+        .await
+        .expect("lands")
+        .expect("accepted");
+    b.join(channel("general"), "after")
+        .await
+        .expect("lands")
+        .expect("accepted");
+    publish_repeatedly(&a, "pub", 1, b"first").await;
+    publish_repeatedly(&a, "pub", 2, b"second").await;
+
+    assert_eq!(
+        drain_until(&b, "after", PATIENCE).await.len(),
+        1,
+        "the rejected configuration's bound must not have been applied"
+    );
+
+    a.shutdown().await.expect("a stops");
+    b.shutdown().await.expect("b stops");
+}
+
 /// Publish the same envelope a few times while the mesh forms.
 ///
 /// A single publish immediately after connecting reaches nobody: GossipSub

@@ -114,10 +114,15 @@ pub(super) fn handle_command(
         SwarmCommand::ConfigureBroadcast { config, reply } => {
             // The desired set is replaced; live joins are kept. See the
             // command's own doc for why this differs from ConfigureDirect.
-            broadcast_state.queue_bound = config.queue_bound;
             let desired: std::collections::BTreeSet<_> = config.desired.iter().cloned().collect();
             match broadcast_state.subs.set_desired(desired) {
                 Ok(()) => {
+                    // THE BOUND MOVES ONLY ON SUCCESS. Assigning it above
+                    // the match left a refused configuration partly
+                    // applied: the caller was told the configuration
+                    // failed while every later session silently opened at
+                    // the bound from the rejected request.
+                    broadcast_state.queue_bound = config.queue_bound;
                     // SUBSCRIBE AFTER the registry accepted the set, so a
                     // refused configuration leaves the mesh untouched
                     // rather than half-applied.
