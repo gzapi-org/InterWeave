@@ -481,10 +481,17 @@ async fn revoking_trust_stops_broadcast_delivery() {
 /// that the assertion would test the backpressure contract and report it
 /// as a broadcast defect.
 ///
-/// What is broadcast-specific is whether its deliveries consume the room
-/// a direct exchange needs while the node is otherwise healthy. So the
-/// receiver drains, the flood runs concurrently, and the direct exchange
-/// must still settle.
+/// It also does not carry the precise slack property. That one —
+/// a delivery may not spend the room an in-flight exchange bought — is
+/// deterministic and already unit-tested as
+/// `a_delivery_may_not_spend_the_slack_an_exchange_bought`, next to
+/// `polling_room` itself. Reproducing it end to end would mean timing the
+/// outbox to be near-full exactly while an exchange is in flight, which
+/// is a race, not a test.
+///
+/// What is left for this test is the coarse claim worth having over real
+/// sockets: a flood does not WEDGE the direct path. The receiver drains,
+/// the flood runs concurrently, and the exchange must still settle.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_broadcast_flood_does_not_wedge_the_direct_path() {
     let (a_id, a_peer) = who();
@@ -494,7 +501,7 @@ async fn a_broadcast_flood_does_not_wedge_the_direct_path() {
     // rather than fitting in it, while the receiver still drains and so
     // still polls its Swarm.
     let cramped = SubstrateConfig {
-        event_capacity: 2,
+        event_capacity: 8,
         ..SubstrateConfig::default()
     };
     let mut a = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
@@ -517,7 +524,16 @@ async fn a_broadcast_flood_does_not_wedge_the_direct_path() {
             .publish(channel("general"), "pub", envelope(i, b"flood"))
             .await
             .expect("the command lands");
-        let _ = tokio::time::timeout(Duration::from_millis(20), b.next_event()).await;
+        // Drain to empty rather than one event per publish. With a
+        // single poll the receiver's outbox could stay full under load,
+        // `polling_room` would go false, and the direct request would
+        // time out — a race between this loop and the flood rather than
+        // anything about broadcast. That made this test flaky under
+        // whole-suite contention and passing in isolation.
+        while tokio::time::timeout(Duration::from_millis(25), b.next_event())
+            .await
+            .is_ok()
+        {}
     }
 
     // AND THE DIRECT EXCHANGE STILL SETTLES. Bounded, because the failure
@@ -749,6 +765,159 @@ async fn an_unauthorized_publisher_is_ignored_not_delivered_and_not_relayed_furt
     for n in [a, r, c, d] {
         n.shutdown().await.expect("stops");
     }
+}
+
+/// Invalid-signature traffic cannot poison the cache against later
+/// authentic traffic (`PUBSUB.md`'s SPIKE-002/Phase 2 MUST).
+///
+/// A peer this node TRUSTS at the connection layer publishes messages
+/// claiming to originate from another peer, without a signature. Strict
+/// validation must refuse them before they can affect what the genuine
+/// publisher's later messages do.
+///
+/// # What this proves, and the collision it cannot construct
+///
+/// The MUST asks that invalid source/sequence messages be rejected
+/// before they create a lasting duplicate-cache entry. A literal
+/// collision — forging the exact `(source, sequence)` the genuine
+/// publisher will next use — is NOT constructible from outside the
+/// backend: `sequence_number` is assigned internally
+/// (`behaviour.rs`'s `last_seq_no.next()`), so no publisher, honest or
+/// otherwise, chooses it.
+///
+/// What is observable is the property the MUST exists to protect: after
+/// a stream of forged messages bearing the genuine publisher's identity,
+/// that publisher's real message is still delivered. If a forgery had
+/// created a valid-message cache entry, this is where it would show.
+///
+/// The ordering itself is visible in the vendored backend — validation
+/// at `behaviour.rs:1782` precedes `duplicate_cache.insert` at `:1827` —
+/// but reading it pins nothing across an upgrade, which is why the
+/// behavioural half is here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn invalid_signature_traffic_cannot_poison_the_cache_for_authentic_traffic() {
+    use futures::StreamExt;
+
+    let (a_id, a_peer) = who();
+    let (v_id, v_peer) = who();
+    let forger_keys = libp2p::identity::Keypair::generate_ed25519();
+    let forger_peer = TransportIdentity::parse(
+        libp2p::PeerId::from_public_key(&forger_keys.public()).to_base58(),
+    )
+    .expect("a canonical peer id");
+
+    // The victim trusts BOTH: the forger is a trusted peer abusing its
+    // connection, which is the only party that can reach the mesh at all.
+    let mut victim = node(
+        &v_id,
+        &[&a_peer, &forger_peer],
+        &["general"],
+        SubstrateConfig::default(),
+    )
+    .await;
+    let mut a = node(&a_id, &[&v_peer], &["general"], SubstrateConfig::default()).await;
+    victim
+        .join(channel("general"), "sub")
+        .await
+        .expect("lands")
+        .expect("accepted");
+    a.join(channel("general"), "pub")
+        .await
+        .expect("lands")
+        .expect("accepted");
+
+    let address = victim
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("a loopback address"))
+        .await
+        .expect("the victim listens");
+
+    // THE FORGER: a raw backend with no signing and no validation, which
+    // is the only way to emit what a conforming node cannot. It claims
+    // `a_peer` as the author and signs nothing.
+    let topic = libp2p::gossipsub::IdentTopic::new(
+        interweave_transport_runtime::topic::topic_key_v1(&channel("general")).wire_string(),
+    );
+    let forged_body = envelope(99, b"forged").encode();
+    let forger_address = address.clone();
+    let author = libp2p::PeerId::from_public_key(&a_id.swarm_keypair().public());
+
+    let forger = tokio::spawn(async move {
+        let mut swarm = libp2p::SwarmBuilder::with_existing_identity(forger_keys)
+            .with_tokio()
+            .with_tcp(
+                libp2p::tcp::Config::default(),
+                libp2p::noise::Config::new,
+                libp2p::yamux::Config::default,
+            )
+            .expect("the same transport stack the victim uses")
+            .with_behaviour(|_| {
+                libp2p::gossipsub::Behaviour::<
+                    libp2p::gossipsub::IdentityTransform,
+                    libp2p::gossipsub::AllowAllSubscriptionFilter,
+                >::new(
+                    // AUTHOR, not Signed: the message carries `a_peer` as
+                    // its source and no signature at all.
+                    libp2p::gossipsub::MessageAuthenticity::Author(author),
+                    libp2p::gossipsub::ConfigBuilder::default()
+                        .validation_mode(libp2p::gossipsub::ValidationMode::None)
+                        .build()
+                        .expect("a permissive config"),
+                )
+                .expect("the forging behaviour builds")
+            })
+            .expect("behaviour")
+            .build();
+
+        swarm.behaviour_mut().subscribe(&topic).expect("subscribes");
+        swarm.dial(forger_address).expect("dials the victim");
+
+        for _ in 0..40 {
+            let _ = swarm
+                .behaviour_mut()
+                .publish(topic.hash(), forged_body.clone());
+            let _ = tokio::time::timeout(Duration::from_millis(50), swarm.select_next_some()).await;
+        }
+    });
+
+    a.dial(v_peer.clone(), address)
+        .await
+        .expect("the command lands")
+        .expect("the dial is admitted");
+    wait_for(&mut a, "a connection to the victim", |e| {
+        matches!(e, SwarmEvent::Connected { .. })
+    })
+    .await;
+
+    // POSITIVE CONTROL: the forger really did reach the victim. Both
+    // assertions below hold trivially if it never connected, so without
+    // this the test would pass most loudly when it was testing nothing.
+    wait_for(
+        &mut victim,
+        "the forger's connection",
+        |e| matches!(e, SwarmEvent::Connected { peer } if *peer == forger_peer),
+    )
+    .await;
+
+    let _ = forger.await;
+
+    // THE GENUINE PUBLISHER STILL GETS THROUGH. If a forged message had
+    // created a lasting valid-message cache entry under the identity it
+    // claimed, this is what would fail.
+    publish_repeatedly(&a, "pub", 98, b"authentic").await;
+    let held = drain_until(&victim, "sub", PATIENCE).await;
+    assert!(
+        !held.is_empty(),
+        "the authentic publisher must still be delivered after forged traffic"
+    );
+
+    // And no forgery was ever delivered, whatever else happened.
+    assert!(
+        held.iter().all(|e| e.payload.bytes() != b"forged"),
+        "an unsigned message claiming another peer's identity must never be delivered"
+    );
+
+    a.shutdown().await.expect("a stops");
+    victim.shutdown().await.expect("the victim stops");
 }
 
 /// Publish the same envelope a few times while the mesh forms.
