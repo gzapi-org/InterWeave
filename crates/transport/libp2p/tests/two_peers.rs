@@ -593,7 +593,35 @@ async fn a_zero_capacity_configuration_is_an_error_not_a_panic() {
     // an earlier version of this check compared against: an ALLOCATION
     // ceiling reused as a duration, rejecting an ordinary configuration
     // that neither panics nor allocates.
-    for slow in [Duration::from_secs(30), Duration::from_secs(300)] {
+    // A period the CLOCK cannot carry is the other abort. `Interval`
+    // saturates while it is on time, but a poll arriving >5ms late takes
+    // the missed-tick path, and the `Delay` behaviour this runtime
+    // selects computes `now + period` with plain `Instant` arithmetic:
+    // "overflow when adding duration to instant". The first tick is due
+    // immediately, so building a Swarm is enough of a delay to reach it.
+    for (label, tick) in [
+        ("Duration::MAX", Duration::MAX),
+        ("half of u64 seconds", Duration::from_secs(u64::MAX / 2)),
+    ] {
+        let config = SubstrateConfig {
+            retry_tick: tick,
+            ..SubstrateConfig::default()
+        };
+        match SwarmRuntime::start(&identity, config, trusting(&[])) {
+            Err(SubstrateError::InvalidConfig { field, .. }) => {
+                assert_eq!(field, "retry_tick_ms", "{label}");
+            }
+            other => panic!("{label}: expected InvalidConfig, got {other:?}"),
+        }
+    }
+
+    // And the bound is the CLOCK, not an opinion: a period far beyond any
+    // real heartbeat but still representable is accepted.
+    for slow in [
+        Duration::from_secs(30),
+        Duration::from_secs(300),
+        Duration::from_secs(1 << 40),
+    ] {
         let config = SubstrateConfig {
             retry_tick: slow,
             ..SubstrateConfig::default()

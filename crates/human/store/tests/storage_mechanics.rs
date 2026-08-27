@@ -1253,3 +1253,61 @@ fn an_extra_generated_column_is_a_retention_violation_table_info_cannot_see() {
         "a second view of the body must be refused however it is spelled, got {refused:?}"
     );
 }
+
+#[test]
+fn a_decoy_comment_carrying_the_expected_declaration_does_not_excuse_a_constant() {
+    // SQLite PRESERVES COMMENTS in `sqlite_master.sql`, so a column
+    // generated from a constant can carry the expected declaration
+    // verbatim inside `/* ... */`. The name matches, the hidden set
+    // matches, the unique key matches, and any substring test over the
+    // stored SQL finds the text it was looking for -- inside the comment
+    // -- while endpoints collapse back into one.
+    //
+    // This is why the expression is EVALUATED rather than read.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
+
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    conn.execute_batch(
+        "
+        ALTER TABLE unread_inbound RENAME TO unread_inbound_old;
+        CREATE TABLE unread_inbound (
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            media_type      TEXT,
+            payload         BLOB    NOT NULL,
+            received_at     INTEGER NOT NULL,
+            source_endpoint_key TEXT GENERATED ALWAYS AS ('') VIRTUAL
+                /* source_endpoint_key TEXT GENERATED ALWAYS AS (IFNULL(source_endpoint, '')) VIRTUAL */,
+            UNIQUE(source_peer, source_endpoint_key, app_message_id)
+        );
+        DROP TABLE unread_inbound_old;
+        ",
+    )
+    .expect("the rebuild is legal SQLite");
+
+    // The decoy really is in the stored SQL: this test is only meaningful
+    // if a substring check WOULD have been fooled by it.
+    let stored: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'unread_inbound'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("read the stored ddl");
+    assert!(
+        stored.contains("GENERATED ALWAYS AS (IFNULL(source_endpoint, ''))"),
+        "the decoy must be present, or this test proves nothing"
+    );
+    drop(conn);
+
+    let refused = HumanStore::open(&path, StoreOptions::default());
+    assert!(
+        matches!(refused, Err(StoreError::Migration(_))),
+        "a constant expression must be refused however it is decorated, got {refused:?}"
+    );
+}

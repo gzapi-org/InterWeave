@@ -8,7 +8,7 @@
 //! ask for an allocation large enough to be the denial of service it was
 //! meant to prevent, and the request looks like ordinary tuning.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use interweave_transport_runtime::preauth::PreAuthLimits;
 
@@ -106,6 +106,40 @@ impl Default for SubstrateConfig {
     }
 }
 
+/// Head-room between validating a period and rescheduling on it.
+///
+/// `validate` runs before the runtime is built, so a period that is
+/// representable at this instant and not at the next would pass here and
+/// abort there.
+const CLOCK_MARGIN: Duration = Duration::from_secs(86_400);
+
+/// The largest whole-millisecond period this machine's clock can carry.
+///
+/// Computed rather than written down: the boundary is a property of
+/// `Instant` on the host, not a number this project gets to choose, and
+/// the last one written down here was an allocation ceiling that rejected
+/// a five-minute heartbeat. Sixty-four `checked_add` calls, once, at
+/// startup.
+fn max_representable_tick_ms() -> usize {
+    let addable = |ms: u64| {
+        Instant::now()
+            .checked_add(Duration::from_millis(ms))
+            .and_then(|t| t.checked_add(CLOCK_MARGIN))
+            .is_some()
+    };
+    let (mut lo, mut hi) = (0_u64, u64::MAX);
+    while lo < hi {
+        // Rounds up, so `lo` only ever moves to a value known addable.
+        let mid = lo + (hi - lo) / 2 + (hi - lo) % 2;
+        if addable(mid) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    usize::try_from(lo).unwrap_or(usize::MAX)
+}
+
 impl SubstrateConfig {
     /// Check every limit before anything is built.
     ///
@@ -171,19 +205,38 @@ impl SubstrateConfig {
         // select loop it shares a task with — silently, which is worse
         // than the panic above.
         //
-        // AND THERE IS NO UPPER BOUND. An earlier version compared this
-        // against `MAX_CONFIGURED_CAPACITY`, which is 65,536 — a ceiling
-        // on ALLOCATION SIZES, reused here as though it were a duration.
-        // That rejected a five-minute retry heartbeat, which is an
-        // ordinary thing to configure and neither panics nor allocates
-        // anything. A slow tick is a policy; the guard is only against
-        // the abort and the busy loop.
+        // THE UPPER BOUND IS THE CLOCK, not a capacity. An earlier
+        // version compared this against `MAX_CONFIGURED_CAPACITY`, which
+        // is 65,536 — a ceiling on ALLOCATION SIZES, reused as though it
+        // were a duration, and it rejected an ordinary five-minute
+        // heartbeat. Removing it went too far the other way: there IS a
+        // real ceiling, and it is the one `tokio::time::interval` can
+        // represent.
+        //
+        // `Interval` reschedules by `timeout.checked_add(period)` while
+        // it is on time, which saturates. But when a poll arrives more
+        // than 5ms after the deadline it takes the missed-tick path
+        // instead, and the `Delay` behaviour this runtime selects
+        // computes `now + period` with plain `Instant` arithmetic, which
+        // PANICS on overflow. The first tick is due immediately, so the
+        // very first poll takes that path whenever the task spent 5ms
+        // getting there — which building a Swarm does. `Duration::MAX`
+        // aborts the daemon; `Duration::from_secs(1 << 40)` does not.
+        // `checked_add` is exactly that boundary rather than a guess at
+        // it.
         let tick_ms = usize::try_from(self.retry_tick.as_millis()).unwrap_or(usize::MAX);
-        if tick_ms == 0 {
+        // The margin is because THIS runs before the interval is built:
+        // a period that is representable now and not a moment later
+        // would pass here and abort there.
+        let representable = Instant::now()
+            .checked_add(self.retry_tick)
+            .and_then(|t| t.checked_add(CLOCK_MARGIN))
+            .is_some();
+        if tick_ms == 0 || !representable {
             return Err(SubstrateError::InvalidConfig {
                 field: "retry_tick_ms",
                 got: tick_ms,
-                allowed: (1, usize::MAX),
+                allowed: (1, max_representable_tick_ms()),
             });
         }
         Ok(())

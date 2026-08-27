@@ -358,18 +358,23 @@ struct TableShape {
     /// Every UNIQUE key, as its ordered column list. Includes the
     /// implicit index behind a `TEXT PRIMARY KEY`.
     unique_keys: &'static [&'static [&'static str]],
-    /// Every generated column, as its complete normalised definition.
+    /// Every generated column, described by what it must COMPUTE.
     ///
-    /// THE NAME IS NOT ENOUGH, and checking only the name is how this
-    /// guard was first written. `PRAGMA table_info` hides generated
-    /// columns entirely and `PRAGMA index_info` reports only the NAME of
-    /// one used in a key, so a `source_endpoint_key` redefined as the
-    /// constant `''` presents an identical column list and an identical
-    /// unique key — while collapsing every endpoint back into one and
-    /// suppressing exactly the deliveries `migration_3` exists to keep
-    /// apart. The expression is the part that carries the meaning, so
-    /// the expression is what is compared.
-    generated: &'static [&'static str],
+    /// Neither the name nor the declaration text is enough, and this
+    /// guard has now been written both wrong ways. `PRAGMA table_info`
+    /// hides generated columns and `PRAGMA index_info` reports only the
+    /// NAME of one used in a key, so a `source_endpoint_key` redefined as
+    /// the constant `''` presents an identical column list and an
+    /// identical unique key while collapsing every endpoint back into
+    /// one. Comparing the declaration text instead fails too: SQLite
+    /// PRESERVES COMMENTS in `sqlite_master.sql`, so that same constant
+    /// column can carry `/* ...the expected declaration... */` and
+    /// satisfy any substring test. String literals inside the expression
+    /// would do the same.
+    ///
+    /// So the expression is EVALUATED rather than read. See
+    /// [`generated_columns_compute_what_we_wrote`].
+    generated: &'static [GeneratedColumn],
     /// Whether the rowid primary key is AUTOINCREMENT.
     ///
     /// Not visible through any pragma, and load-bearing: a bare
@@ -416,36 +421,168 @@ const fn pk(
 /// that its body disappears when the message is read. Under ADR-0044 an
 /// unknown column is not forward compatibility, it is a place a body
 /// can be kept, so it is refused.
-/// The endpoint dedup key, exactly as both inbound tables declare it.
-///
-/// Whitespace-normalised, because that is how it is compared.
-const GENERATED_ENDPOINT_KEY: &str =
-    "source_endpoint_key TEXT GENERATED ALWAYS AS (IFNULL(source_endpoint, '')) VIRTUAL";
-
-/// Collapse every run of whitespace to one space.
-///
-/// `ALTER TABLE ... RENAME` rewrites the stored SQL, so the text is not
-/// byte-stable across the migration that produced it; the tokens are.
-fn normalise_sql(sql: &str) -> String {
-    sql.split_whitespace().collect::<Vec<_>>().join(" ")
+/// One generated column, described by its behaviour.
+struct GeneratedColumn {
+    /// The column's name.
+    name: &'static str,
+    /// The column it derives from.
+    derived_from: &'static str,
+    /// What it must produce when `derived_from` is NULL.
+    ///
+    /// For the endpoint key this is the empty string, which is what makes
+    /// the UNIQUE key NULL-safe; SQLite would otherwise treat every NULL
+    /// as distinct and stop deduplicating unendpointed messages.
+    when_null: &'static str,
 }
+
+/// The endpoint dedup key, by what it computes.
+const GENERATED_ENDPOINT_KEY: GeneratedColumn = GeneratedColumn {
+    name: "source_endpoint_key",
+    derived_from: "source_endpoint",
+    when_null: "",
+};
 
 /// Names of the columns `PRAGMA table_info` does NOT report.
 ///
 /// `table_xinfo` adds a `hidden` column: 0 ordinary, 2 VIRTUAL
 /// generated, 3 STORED. Anything non-zero is invisible to the column
 /// check, which is why it is enumerated here rather than trusted.
-fn actual_hidden_columns(conn: &Connection, table: &str) -> Result<Vec<String>, StoreError> {
+fn actual_hidden_columns(conn: &Connection, table: &str) -> Result<Vec<(String, i64)>, StoreError> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_xinfo({table})"))?;
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, i64>(6)?)))?;
-    let mut hidden: Vec<String> = rows
+    let mut hidden: Vec<(String, i64)> = rows
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .filter(|(_, kind)| *kind != 0)
-        .map(|(name, _)| name)
         .collect();
     hidden.sort();
     Ok(hidden)
+}
+
+/// `table_xinfo`'s `hidden` value for a VIRTUAL generated column.
+///
+/// STORED is 3, and it is a DIFFERENT SCHEMA rather than a tuning
+/// choice: it materialises a value per row, which is content this store
+/// did not budget for, and the behavioural probe cannot tell the two
+/// apart because they compute the same thing.
+const HIDDEN_VIRTUAL: i64 = 2;
+
+/// A placeholder value of the right declared type.
+fn filler(decl_type: &str) -> &'static str {
+    match decl_type {
+        "INTEGER" => "0",
+        "BLOB" => "x'00'",
+        _ => "'x'",
+    }
+}
+
+/// Prove each generated column computes what this build wrote.
+///
+/// # Why the expression is run instead of read
+///
+/// Every cheaper check has a bypass, and both were tried here first. The
+/// NAME is reported identically by a column generated from a constant.
+/// The DECLARATION TEXT is defeated by a comment: SQLite preserves
+/// comments in `sqlite_master.sql`, so
+///
+/// ```sql
+/// source_endpoint_key TEXT GENERATED ALWAYS AS ('') VIRTUAL
+///   /* source_endpoint_key TEXT GENERATED ALWAYS AS (IFNULL(source_endpoint, '')) VIRTUAL */
+/// ```
+///
+/// contains the expected declaration verbatim while computing the
+/// constant, and the endpoints collapse again with every check green.
+///
+/// # Why a scratch database
+///
+/// The table's own DDL is replayed into a private in-memory connection
+/// and probed there, so this WRITES NOTHING to the caller's store. A
+/// probe against the real file would have to insert, and a full or
+/// read-only medium would then fail to open at all — a store that cannot
+/// be opened cannot report itself Degraded or release the human
+/// endpoint, which is the one thing ADR-0044 requires it to do.
+fn generated_columns_compute_what_we_wrote(
+    conn: &Connection,
+    shape: &TableShape,
+) -> Result<(), StoreError> {
+    if shape.generated.is_empty() {
+        return Ok(());
+    }
+    let sql: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [shape.name],
+            |r| r.get(0),
+        )
+        .map_err(|e| StoreError::Migration(e.to_string()))?;
+
+    let scratch = Connection::open_in_memory()?;
+    scratch.execute_batch(&sql).map_err(|e| {
+        StoreError::Migration(format!("table `{}` will not rebuild: {e}", shape.name))
+    })?;
+
+    for generated in shape.generated {
+        // Two rows: one carrying a value, one carrying NULL. Together
+        // they pin identity-on-a-value and the NULL substitute, which is
+        // the whole of what the expression has to do.
+        for (probe, expected) in [
+            (Some("probe-endpoint"), "probe-endpoint"),
+            (None, generated.when_null),
+        ] {
+            let mut names = Vec::new();
+            let mut values = Vec::new();
+            for (name, decl_type, _, primary_key) in shape.columns {
+                if *primary_key {
+                    continue;
+                }
+                names.push(*name);
+                if *name == generated.derived_from {
+                    values.push(match probe {
+                        Some(v) => format!("'{v}'"),
+                        None => "NULL".to_owned(),
+                    });
+                } else if *name == "app_message_id" {
+                    // Distinct per probe row, so a collapsed key cannot
+                    // turn a WRONG VALUE into a constraint error and
+                    // report the wrong reason.
+                    values.push(format!("'{}'", expected.len()));
+                } else {
+                    values.push(filler(decl_type).to_owned());
+                }
+            }
+            scratch
+                .execute(
+                    &format!(
+                        "INSERT INTO {} ({}) VALUES ({})",
+                        shape.name,
+                        names.join(", "),
+                        values.join(", ")
+                    ),
+                    [],
+                )
+                .map_err(|e| StoreError::Migration(e.to_string()))?;
+
+            let got: String = scratch
+                .query_row(
+                    &format!(
+                        "SELECT {} FROM {} ORDER BY rowid DESC LIMIT 1",
+                        generated.name, shape.name
+                    ),
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| StoreError::Migration(e.to_string()))?;
+
+            if got != expected {
+                return Err(StoreError::Migration(format!(
+                    "table `{}` column `{}` computed {got:?} from {probe:?}; this build wrote an \
+                     expression that yields {expected:?}",
+                    shape.name, generated.name
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 const EXPECTED_SCHEMA: &[TableShape] = &[
@@ -628,10 +765,10 @@ pub fn verify_shape(conn: &Connection) -> Result<(), StoreError> {
         // hidden-column set, so an extra or missing one is caught, and
         // the declaration text, so a changed expression is.
         let hidden = actual_hidden_columns(conn, shape.name)?;
-        let mut expected_hidden: Vec<String> = shape
+        let mut expected_hidden: Vec<(String, i64)> = shape
             .generated
             .iter()
-            .filter_map(|d| d.split_whitespace().next().map(ToOwned::to_owned))
+            .map(|g| (g.name.to_owned(), HIDDEN_VIRTUAL))
             .collect();
         expected_hidden.sort();
         if hidden != expected_hidden {
@@ -661,17 +798,9 @@ pub fn verify_shape(conn: &Connection) -> Result<(), StoreError> {
             )));
         }
 
-        // The declaration text, which is where the EXPRESSION lives.
-        let declared = normalise_sql(sql.as_deref().unwrap_or_default());
-        for definition in shape.generated {
-            if !declared.contains(&normalise_sql(definition)) {
-                return Err(StoreError::Migration(format!(
-                    "table `{}` does not declare `{definition}`; a generated column with the \
-                     right name and a different expression is a different schema",
-                    shape.name
-                )));
-            }
-        }
+        // And what the generated columns COMPUTE, which is the only
+        // question a rebuilt schema cannot lie about.
+        generated_columns_compute_what_we_wrote(conn, shape)?;
     }
 
     // AN ALLOWLIST, not a list of names someone thought of.
