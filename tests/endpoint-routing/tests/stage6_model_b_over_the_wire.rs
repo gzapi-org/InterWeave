@@ -16,8 +16,8 @@
 use std::time::Duration;
 
 use interweave_profile_config::{
-    DirectoryConfig, EndpointConfig, EndpointsConfig, ProfileConfig, RegistrationPolicy,
-    TrustConfig, TrustPolicyKind,
+    ChannelsConfig, DirectoryConfig, EndpointConfig, EndpointsConfig, ProfileConfig,
+    RegistrationPolicy, TrustConfig, TrustPolicyKind,
 };
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::{
@@ -64,6 +64,7 @@ fn profile_with(entries: Vec<EndpointConfig>, default: Option<&str>) -> ProfileC
             directory: DirectoryConfig::default(),
             entries,
         },
+        channels: ChannelsConfig::default(),
     }
 }
 

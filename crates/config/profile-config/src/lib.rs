@@ -26,7 +26,7 @@
 
 use std::collections::BTreeSet;
 
-use interweave_transport_api::{EndpointId, TransportIdentity};
+use interweave_transport_api::{ChannelId, EndpointId, TransportIdentity};
 use interweave_trust_api::{EndpointTrustPolicy, PeerTrustPolicy};
 use serde::{Deserialize, Serialize};
 
@@ -136,6 +136,12 @@ pub const MAX_ENDPOINTS: usize = 64;
 pub const MAX_ADVERTISED_CEILING: u32 = 32;
 /// Default `directory.max_advertised`.
 pub const DEFAULT_MAX_ADVERTISED: u32 = 16;
+/// Maximum channels a profile may desire.
+///
+/// `config.schema.yaml` states it as `list[ChannelId, max=128]`. A
+/// desired channel keeps a mesh warm and therefore costs what a joined
+/// one costs, which is why it is bounded rather than left to taste.
+pub const MAX_DESIRED_CHANNELS: usize = 128;
 /// Maximum peers in the profile allowlist.
 pub const MAX_ALLOWED_PEERS: usize = 4096;
 /// Maximum client kinds one endpoint may list.
@@ -489,6 +495,21 @@ pub struct EndpointsConfig {
     pub entries: Vec<EndpointConfig>,
 }
 
+/// Broadcast channels this profile holds open.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelsConfig {
+    /// Channels the daemon subscribes to whether or not a client joined.
+    ///
+    /// A **warm mesh, not a join.** PUBSUB.md is explicit: a desired
+    /// channel with no local consumer delivers to nobody and buffers
+    /// nothing, and no client may publish merely because the profile
+    /// lists it. What it buys is that the topic's mesh is already formed
+    /// when a client does join.
+    #[serde(default)]
+    pub desired: Vec<ChannelId>,
+}
+
 /// A profile's configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -499,6 +520,17 @@ pub struct ProfileConfig {
     pub trust: TrustConfig,
     /// Endpoints.
     pub endpoints: EndpointsConfig,
+    /// Broadcast channels.
+    ///
+    /// Defaulted, unlike `trust` and `endpoints`, and the difference is
+    /// deliberate. Those two are postures every profile author must at
+    /// least acknowledge — an empty allowlist is still an explicit
+    /// "trust nobody". "This profile desires no channels" is not a
+    /// decision anyone needs to state, and requiring it would have
+    /// invalidated every existing profile document to record a fact
+    /// their authors had no opinion about.
+    #[serde(default)]
+    pub channels: ChannelsConfig,
 }
 
 /// One violated rule, with enough context to fix it.
@@ -522,6 +554,16 @@ pub enum ConfigError {
     /// More entries than the profile may hold.
     TooManyEndpoints {
         /// Entries supplied.
+        got: usize,
+    },
+    /// Two desired channels are the same.
+    DuplicateDesiredChannel {
+        /// The repeated channel.
+        id: ChannelId,
+    },
+    /// More desired channels than the profile may hold.
+    TooManyDesiredChannels {
+        /// Channels supplied.
         got: usize,
     },
     /// The allowlist exceeded its ceiling.
@@ -614,6 +656,15 @@ impl core::fmt::Display for ConfigError {
             Self::TooManyEndpoints { got } => {
                 write!(f, "{got} endpoints exceeds the maximum of {MAX_ENDPOINTS}")
             }
+            Self::DuplicateDesiredChannel { id } => {
+                write!(f, "channel '{}' is desired more than once", id.as_str())
+            }
+            Self::TooManyDesiredChannels { got } => {
+                write!(
+                    f,
+                    "{got} desired channels exceeds the maximum of {MAX_DESIRED_CHANNELS}"
+                )
+            }
             Self::TooManyAllowedPeers { got } => {
                 write!(
                     f,
@@ -682,6 +733,22 @@ impl ProfileConfig {
             errors.push(ConfigError::TooManyAllowedPeers {
                 got: self.trust.allowed_peers.len(),
             });
+        }
+
+        let desired = &self.channels.desired;
+        if desired.len() > MAX_DESIRED_CHANNELS {
+            errors.push(ConfigError::TooManyDesiredChannels { got: desired.len() });
+        }
+        // Reported rather than collapsed. A `Vec` is what the document
+        // shape is -- `list[ChannelId, max=128]` -- and silently
+        // deduplicating would let a profile claim 200 channels while
+        // holding 128, which is the ceiling reading as satisfied when it
+        // is not.
+        let mut seen_channels: BTreeSet<&ChannelId> = BTreeSet::new();
+        for c in desired {
+            if !seen_channels.insert(c) {
+                errors.push(ConfigError::DuplicateDesiredChannel { id: c.clone() });
+            }
         }
 
         let entries = &self.endpoints.entries;
@@ -1019,6 +1086,7 @@ mod tests {
                 directory: DirectoryConfig::default(),
                 entries,
             },
+            channels: ChannelsConfig::default(),
         }
     }
 
@@ -1174,5 +1242,108 @@ mod tests {
         assert!(e.to_string().contains("human"));
         let e = ConfigError::TooManyAdvertised { got: 17, max: 16 };
         assert!(e.to_string().contains("17") && e.to_string().contains("16"));
+    }
+
+    /// A profile that desires channels, built from names.
+    fn with_channels(names: &[&str]) -> ProfileConfig {
+        let mut profile = config(Vec::new());
+        profile.channels.desired = names
+            .iter()
+            .map(|n| ChannelId::parse(*n).expect("valid channel id"))
+            .collect();
+        profile
+    }
+
+    #[test]
+    fn a_profile_omitting_channels_desires_nothing() {
+        // The compatibility case the `#[serde(default)]` exists for:
+        // every profile document written before broadcast existed still
+        // parses, and desires nothing.
+        let doc = format!(
+            r#"{{"schema_version":2,
+                 "trust":{{"policy":"static-allowlist","allowed_peers":["{P1}"]}},
+                 "endpoints":{{"entries":[]}}}}"#
+        );
+        let parsed: ProfileConfig = serde_json::from_str(&doc).expect("a v2 profile still parses");
+        assert!(parsed.channels.desired.is_empty());
+        assert!(parsed.validate().is_empty());
+    }
+
+    #[test]
+    fn desired_channels_are_read_from_the_document() {
+        let doc = format!(
+            r#"{{"schema_version":2,
+                 "trust":{{"policy":"static-allowlist","allowed_peers":["{P1}"]}},
+                 "endpoints":{{"entries":[]}},
+                 "channels":{{"desired":["general","team.eu:builds/nightly-1"]}}}}"#
+        );
+        let parsed: ProfileConfig = serde_json::from_str(&doc).expect("parses");
+        assert_eq!(parsed.channels.desired.len(), 2);
+        assert_eq!(parsed.channels.desired[0].as_str(), "general");
+        assert!(parsed.validate().is_empty());
+    }
+
+    #[test]
+    fn an_unknown_field_inside_channels_is_refused() {
+        // `deny_unknown_fields` on the nested struct too: a typo like
+        // `desire` must not read as "desires nothing".
+        let doc = format!(
+            r#"{{"schema_version":2,
+                 "trust":{{"policy":"static-allowlist","allowed_peers":["{P1}"]}},
+                 "endpoints":{{"entries":[]}},
+                 "channels":{{"desire":["general"]}}}}"#
+        );
+        assert!(
+            serde_json::from_str::<ProfileConfig>(&doc).is_err(),
+            "a misspelled key must not silently desire nothing"
+        );
+    }
+
+    #[test]
+    fn a_repeated_desired_channel_is_reported_and_names_itself() {
+        // Not collapsed. The document shape is a LIST, and deduplicating
+        // silently would let a profile claim two hundred channels while
+        // holding one hundred and twenty-eight -- the ceiling reading as
+        // satisfied when it is not.
+        let errors = with_channels(&["general", "general"]).validate();
+        assert_eq!(
+            errors,
+            vec![ConfigError::DuplicateDesiredChannel {
+                id: ChannelId::parse("general").expect("valid")
+            }]
+        );
+        assert!(
+            errors[0].to_string().contains("general"),
+            "an operator needs to know WHICH one: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn channels_differing_only_in_case_are_not_duplicates() {
+        // ADR-0025 makes ChannelId case-sensitive, so these are two
+        // channels and desiring both is legal.
+        assert!(with_channels(&["general", "General"]).validate().is_empty());
+    }
+
+    #[test]
+    fn more_desired_channels_than_the_ceiling_is_reported() {
+        let names: Vec<String> = (0..=MAX_DESIRED_CHANNELS)
+            .map(|i| format!("c{i}"))
+            .collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let errors = with_channels(&refs).validate();
+        assert!(
+            errors.contains(&ConfigError::TooManyDesiredChannels {
+                got: MAX_DESIRED_CHANNELS + 1
+            }),
+            "got {errors:?}"
+        );
+        // And exactly at the ceiling is fine.
+        assert!(
+            with_channels(&refs[..MAX_DESIRED_CHANNELS])
+                .validate()
+                .is_empty()
+        );
     }
 }
