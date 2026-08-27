@@ -10,12 +10,14 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
+use std::os::unix::fs::PermissionsExt;
+
 use interweave_human_core::retention::{StorageHealth, TerminalCause};
 use interweave_human_store::{
     AppMessageId, HumanStore, InboundOrigin, NewInbound, NewOutbound, OutboundDestination,
     PageLimits, StoreError, StoreOptions,
 };
-use interweave_transport_api::{DirectDestination, MediaType, TransportIdentity};
+use interweave_transport_api::{DirectDestination, EndpointId, MediaType, TransportIdentity};
 
 const PEER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
 const PEER_B: &str = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
@@ -35,6 +37,17 @@ fn inbound_from(who: TransportIdentity, id: &str, payload: Vec<u8>) -> NewInboun
         origin: InboundOrigin {
             peer: who,
             endpoint: None,
+            channel: None,
+        },
+        ..inbound(id, payload)
+    }
+}
+
+fn inbound_via(endpoint: &str, id: &str, payload: Vec<u8>) -> NewInbound {
+    NewInbound {
+        origin: InboundOrigin {
+            peer: peer(),
+            endpoint: Some(EndpointId::parse(endpoint).expect("test endpoint is canonical")),
             channel: None,
         },
         ..inbound(id, payload)
@@ -620,8 +633,10 @@ fn a_new_column_inside_a_permitted_table_is_a_retention_violation() {
 #[test]
 fn the_unique_key_and_the_autoincrement_are_part_of_the_verified_shape() {
     // Both are invisible to a `SELECT type, name FROM sqlite_master`
-    // check and both are load-bearing. The peer-scoped UNIQUE is what
-    // stops one peer colliding with another's message id (migration 2);
+    // check and both are load-bearing. The peer- AND endpoint-scoped
+    // UNIQUE is what stops one peer colliding with another's message id
+    // (migration 2) and one peer's two endpoints colliding with each
+    // other (migration 3);
     // AUTOINCREMENT is what stops a deleted row's id being handed to
     // the next insert, which in a store that deletes constantly means
     // handing a caller someone else's body.
@@ -880,4 +895,191 @@ fn a_negative_stored_timestamp_is_corruption_and_not_a_zero() {
     drop(conn);
     let store = HumanStore::open(&path, StoreOptions::default()).expect("reopens");
     assert_eq!(store.pending_outbound().expect("reads").len(), 2);
+}
+
+#[test]
+fn two_endpoints_on_one_peer_may_use_the_same_application_id() {
+    // `ENDPOINTS.md`: "Including `source_endpoint` prevents a message ID
+    // collision between two endpoints on the same authenticated peer from
+    // suppressing an independent delivery."
+    //
+    // The store was one scope level short of that. `migration_2` stopped
+    // two PEERS colliding; a peer's own `human` and `automation` endpoints
+    // still aliased, so the second message never reached durable state
+    // while the caller was told it had — the same harm, one level down.
+    let mut store = memory();
+
+    let human = store
+        .commit_unread_inbound(&inbound_via("human", ID_A, b"from human".to_vec()))
+        .expect("the first endpoint commits");
+    let automation = store
+        .commit_unread_inbound(&inbound_via(
+            "automation",
+            ID_A,
+            b"from automation".to_vec(),
+        ))
+        .expect("a different endpoint on the same peer may reuse the id");
+    assert_ne!(human, automation, "they are independent deliveries");
+
+    let unread = store.unread_inbound().expect("read");
+    assert_eq!(unread.len(), 2, "both are held");
+    let mut bodies: Vec<&[u8]> = unread.iter().map(|r| r.payload.as_slice()).collect();
+    bodies.sort_unstable();
+    assert_eq!(
+        bodies,
+        vec![b"from automation".as_slice(), b"from human".as_slice()],
+        "neither body was replaced by the other"
+    );
+}
+
+#[test]
+fn one_endpoint_reusing_its_own_id_for_new_content_is_still_a_conflict() {
+    // Widening a uniqueness key is exactly how a dedup guard gets removed
+    // by accident. Scoping to the endpoint must not turn a single
+    // endpoint's id reuse into two rows: within one endpoint the conflict
+    // that `one_peer_reusing_its_own_id_for_new_content_is_a_conflict`
+    // proves for the NULL-endpoint case must still fire.
+    let mut store = memory();
+
+    let first = store
+        .commit_unread_inbound(&inbound_via("human", ID_A, b"original".to_vec()))
+        .expect("commit");
+    let held = store.mark_read(first, 1_000).expect("read");
+    store.keep(&held, 2_000).expect("keep");
+
+    let second = store
+        .commit_unread_inbound(&inbound_via("human", ID_A, b"replacement".to_vec()))
+        .expect("a new arrival is admitted");
+    let second_held = store.mark_read(second, 3_000).expect("read");
+
+    assert!(
+        matches!(
+            store.keep(&second_held, 4_000),
+            Err(StoreError::IdentityConflict { .. })
+        ),
+        "the same endpoint reusing its id for new content still conflicts"
+    );
+
+    let kept = store.kept_inbound().expect("read");
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].payload, b"original".to_vec());
+}
+
+#[test]
+fn an_absent_source_endpoint_still_dedups() {
+    // THE TRAP IN THE OBVIOUS FIX. `source_endpoint` is nullable, and
+    // SQLite treats NULLs in a UNIQUE key as DISTINCT — so spelling the
+    // key `UNIQUE(source_peer, source_endpoint, app_message_id)` silently
+    // removes dedup for every row that has no asserted endpoint, which is
+    // every row the rest of this suite creates.
+    //
+    // `source_endpoint_key` collapses NULL to the empty string, which is
+    // not a legal EndpointId and so cannot alias a real one. Break that
+    // and this fails while the fix above still passes.
+    let mut store = memory();
+
+    let first = store
+        .commit_unread_inbound(&inbound(ID_A, b"original".to_vec()))
+        .expect("commit");
+    let held = store.mark_read(first, 1_000).expect("read");
+    store.keep(&held, 2_000).expect("keep");
+
+    let second = store
+        .commit_unread_inbound(&inbound(ID_A, b"replacement".to_vec()))
+        .expect("admitted");
+    let second_held = store.mark_read(second, 3_000).expect("read");
+
+    assert!(
+        matches!(
+            store.keep(&second_held, 4_000),
+            Err(StoreError::IdentityConflict { .. })
+        ),
+        "a NULL endpoint must not read as a distinct key on every insert"
+    );
+    assert_eq!(store.kept_inbound().expect("read").len(), 1);
+}
+
+#[test]
+fn a_v2_database_migrates_to_the_endpoint_scoped_key_without_losing_rows() {
+    // The rebuild in `migration_3` drops and recreates both inbound
+    // tables. A migration that widened the key but lost the content would
+    // pass every assertion above, because they all start from an empty
+    // store.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).expect("state dir");
+    // The store refuses a state directory anyone else can read, so the
+    // fixture has to be as tight as the one `open` would have created.
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))
+        .expect("tighten the fixture state directory");
+    let path = state.join("human.sqlite3");
+
+    // A v2 database, written by hand exactly as that build left it.
+    let conn = rusqlite::Connection::open(&path).expect("create");
+    conn.execute_batch(
+        "
+        CREATE TABLE pending_outbound (
+            row_id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id        TEXT    NOT NULL UNIQUE,
+            destination_peer      TEXT    NOT NULL,
+            destination_endpoint  TEXT,
+            channel_id            TEXT,
+            media_type            TEXT,
+            payload               BLOB    NOT NULL,
+            created_at            INTEGER NOT NULL,
+            last_attempt_at       INTEGER,
+            attempts              INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE unread_inbound (
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            media_type      TEXT,
+            payload         BLOB    NOT NULL,
+            received_at     INTEGER NOT NULL,
+            UNIQUE(source_peer, app_message_id)
+        );
+        CREATE TABLE kept_inbound (
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            media_type      TEXT,
+            payload         BLOB    NOT NULL,
+            received_at     INTEGER NOT NULL,
+            read_at         INTEGER NOT NULL,
+            kept_at         INTEGER NOT NULL,
+            UNIQUE(source_peer, app_message_id)
+        );
+        CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        PRAGMA user_version = 2;
+        ",
+    )
+    .expect("the v2 schema is legal SQLite");
+    conn.execute(
+        "INSERT INTO unread_inbound
+            (app_message_id, source_peer, source_endpoint, payload, received_at)
+         VALUES (?1, ?2, 'human', ?3, 2000)",
+        rusqlite::params![ID_A, PEER, b"carried across".to_vec()],
+    )
+    .expect("seed a v2 row");
+    drop(conn);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        .expect("tighten the fixture database");
+
+    let mut store = HumanStore::open(&path, StoreOptions::default())
+        .expect("a v2 database migrates rather than being refused");
+
+    let unread = store.unread_inbound().expect("read");
+    assert_eq!(unread.len(), 1, "the v2 row survived the rebuild");
+    assert_eq!(unread[0].payload, b"carried across".to_vec());
+
+    // And the widened key is actually in force afterwards.
+    store
+        .commit_unread_inbound(&inbound_via("automation", ID_A, b"new endpoint".to_vec()))
+        .expect("the migrated table is scoped by endpoint");
+    assert_eq!(store.unread_inbound().expect("read").len(), 2);
 }

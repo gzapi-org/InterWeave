@@ -27,7 +27,7 @@ use rusqlite::{Connection, Transaction};
 use crate::StoreError;
 
 /// The schema version this build writes and expects.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Every table the store is allowed to contain.
 ///
@@ -95,12 +95,110 @@ pub fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
     if current < 2 {
         migration_2(&tx)?;
     }
+    if current < 3 {
+        migration_3(&tx)?;
+    }
     // The version bump rides the SAME transaction as the DDL above, which
     // is what makes a crashed migration a no-op rather than a schema the
     // store misreads on the next open.
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
     Ok(())
+}
+
+/// v3 — inbound identity is scoped to the endpoint as well as the peer.
+///
+/// `ENDPOINTS.md` is explicit about why, and the store was one scope
+/// level short of it:
+///
+/// > Including `source_endpoint` prevents a message ID collision between
+/// > two endpoints on the same authenticated peer from suppressing an
+/// > independent delivery.
+///
+/// `direct/dedup-key.schema.json` says the same thing about transport's
+/// key. That is a different layer — `app_message_id` is HumanChatV2's
+/// application identity, not `DirectContentFingerprintV1` — but the harm
+/// is identical here, and it is the harm [`migration_2`] was written to
+/// stop: one peer's `human` and `automation` endpoints reusing an id
+/// collapsed into one row, and the second message silently never reached
+/// durable state while the caller was told it had.
+///
+/// # Why a generated column and not `UNIQUE(source_peer, source_endpoint, app_message_id)`
+///
+/// `source_endpoint` is nullable — direct inbound always carries one, but
+/// the record type permits `None` and broadcast has no source endpoint at
+/// all. SQLite treats NULLs in a UNIQUE key as DISTINCT, so the direct
+/// spelling silently removes dedup for every row whose endpoint is NULL:
+/// two identical unendpointed messages both insert, and the keep upsert's
+/// `ON CONFLICT` never fires. Widening the key that way would have
+/// reintroduced, for NULL endpoints, precisely the bug being fixed.
+///
+/// `source_endpoint_key` collapses NULL to the empty string. That cannot
+/// alias a real endpoint: `endpoints/endpoint-id.schema.json` gives the
+/// grammar as `^[a-z][a-z0-9._-]{0,63}$` with `minLength: 1`, so an
+/// EndpointId always has a leading lower-case letter and the empty string
+/// is outside the language. It is
+/// VIRTUAL: it computes on read and stores nothing, so it is not a second
+/// place a body can be kept and does not widen the content surface
+/// ADR-0044 bounds. `PRAGMA table_info` does not report generated columns
+/// at all, so [`EXPECTED_SCHEMA`] does not list it; `PRAGMA index_info`
+/// does report it BY NAME, which is what keeps [`verify_shape`]'s unique
+/// key assertion load-bearing. A bare expression index would have been
+/// reported with a NULL column name and silently dropped by
+/// [`actual_unique_keys`], leaving the guard passing a key it no longer
+/// checked.
+///
+/// The copy is a plain `INSERT`: this migration WIDENS the key, and a
+/// wider key cannot turn two distinct rows into a collision. A failure
+/// here is real corruption, not an expected duplicate, so it is not
+/// suppressed with `OR IGNORE`.
+fn migration_3(tx: &Transaction<'_>) -> Result<(), StoreError> {
+    tx.execute_batch(
+        "
+        CREATE TABLE unread_inbound_v3 (
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            media_type      TEXT,
+            payload         BLOB    NOT NULL,
+            received_at     INTEGER NOT NULL,
+            source_endpoint_key TEXT GENERATED ALWAYS AS (IFNULL(source_endpoint, '')) VIRTUAL,
+            UNIQUE(source_peer, source_endpoint_key, app_message_id)
+        );
+        INSERT INTO unread_inbound_v3
+            (row_id, app_message_id, source_peer, source_endpoint, channel_id,
+             media_type, payload, received_at)
+            SELECT row_id, app_message_id, source_peer, source_endpoint, channel_id,
+                   media_type, payload, received_at FROM unread_inbound;
+        DROP TABLE unread_inbound;
+        ALTER TABLE unread_inbound_v3 RENAME TO unread_inbound;
+
+        CREATE TABLE kept_inbound_v3 (
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            media_type      TEXT,
+            payload         BLOB    NOT NULL,
+            received_at     INTEGER NOT NULL,
+            read_at         INTEGER NOT NULL,
+            kept_at         INTEGER NOT NULL,
+            source_endpoint_key TEXT GENERATED ALWAYS AS (IFNULL(source_endpoint, '')) VIRTUAL,
+            UNIQUE(source_peer, source_endpoint_key, app_message_id)
+        );
+        INSERT INTO kept_inbound_v3
+            (row_id, app_message_id, source_peer, source_endpoint, channel_id,
+             media_type, payload, received_at, read_at, kept_at)
+            SELECT row_id, app_message_id, source_peer, source_endpoint, channel_id,
+                   media_type, payload, received_at, read_at, kept_at FROM kept_inbound;
+        DROP TABLE kept_inbound;
+        ALTER TABLE kept_inbound_v3 RENAME TO kept_inbound;
+        ",
+    )
+    .map_err(|e| StoreError::Migration(e.to_string()))
 }
 
 /// v2 — inbound identity is scoped to the peer that asserted it.
@@ -329,9 +427,11 @@ const EXPECTED_SCHEMA: &[TableShape] = &[
             col("payload", "BLOB", true),
             col("received_at", "INTEGER", true),
         ],
-        // SCOPED TO THE PEER. A bare UNIQUE on the id alone let one peer
-        // collide with another's message; see `migration_2`.
-        unique_keys: &[&["source_peer", "app_message_id"]],
+        // SCOPED TO THE PEER *AND THE ENDPOINT*. A bare UNIQUE on the id
+        // alone let one peer collide with another's message
+        // (`migration_2`); scoping only to the peer let one peer's two
+        // endpoints collide with each other (`migration_3`).
+        unique_keys: &[&["source_peer", "source_endpoint_key", "app_message_id"]],
         autoincrement: true,
     },
     TableShape {
@@ -348,7 +448,7 @@ const EXPECTED_SCHEMA: &[TableShape] = &[
             col("read_at", "INTEGER", true),
             col("kept_at", "INTEGER", true),
         ],
-        unique_keys: &[&["source_peer", "app_message_id"]],
+        unique_keys: &[&["source_peer", "source_endpoint_key", "app_message_id"]],
         autoincrement: true,
     },
     TableShape {
