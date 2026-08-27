@@ -337,6 +337,13 @@ where
 /// A `BTreeSet` collapses repeats before anything can count them, so
 /// any number of copies of one PeerId arrived as a set of one and
 /// passed the ceiling -- having been read in full on the way.
+///
+/// Once counted, a repeat is TOLERATED rather than refused, which is the
+/// opposite of what an endpoint's `static_subset` does. That asymmetry is
+/// the normative shape, not an inconsistency: `config.schema.yaml`
+/// declares this field `list[PeerId, max=256]`, while
+/// `endpoints/endpoint-config.schema.json` declares the subset
+/// `uniqueItems: true`.
 fn wire_allowed_peers<'de, D>(deserializer: D) -> Result<BTreeSet<TransportIdentity>, D::Error>
 where
     D: serde::Deserializer<'de>,

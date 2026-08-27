@@ -212,6 +212,16 @@ struct PeerTrustPolicyRepr {
     // Judged as the array that arrived, for the reason spelled out on
     // `wire_bounded_peers`: 4097 copies of one PeerId collapse into a set
     // of one before any count can see them.
+    //
+    // COLLAPSING is right here and REFUSING is right for a static subset,
+    // and the difference is not an oversight in either. It follows the
+    // normative shape: `config.schema.yaml` declares profile trust as
+    // `allowed_peers: list[PeerId, max=256]`, while
+    // `endpoints/endpoint-config.schema.json` declares the subset with
+    // `uniqueItems: true` — so `BoundedSubset` rejects a repeat and this
+    // does not. The bound that matters is enforced on both paths: it is
+    // the ARRAY that is counted, so a repeat cannot smuggle an oversized
+    // input past the ceiling.
     #[serde(default, deserialize_with = "wire_bounded_profile_peers")]
     allowed_peers: BTreeSet<TransportIdentity>,
     #[serde(default)]
