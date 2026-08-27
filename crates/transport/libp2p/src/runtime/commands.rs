@@ -26,7 +26,8 @@ use super::dialing::{OpenConnection, PendingListens, attempt_dial, connections_t
 use super::messages::{DialRefusal, SwarmCommand, SwarmEvent};
 
 // Still beside the loop that owns them; step 5 moves these out.
-use super::{DirectState, PendingDirect, admit_outbound, to_peer_id, to_transport_identity};
+use super::direct::DirectState;
+use super::{PendingDirect, admit_outbound, to_peer_id, to_transport_identity};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn handle_command(
