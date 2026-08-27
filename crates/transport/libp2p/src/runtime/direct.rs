@@ -75,6 +75,39 @@ pub struct DirectState {
     pub(super) answering: std::collections::BTreeSet<libp2p::request_response::InboundRequestId>,
 }
 
+/// One synthetic in-process session's lease epoch, distinct per endpoint.
+///
+/// `LOCAL-CLIENT.md` requires a "fresh 128-bit lease epoch for every
+/// grant". Stage 8 satisfies that directly: every real session mints its
+/// own at establishment. Until then `configure_direct` stands in for N
+/// sessions while being handed ONE value, and passing that value to every
+/// lease is not a harmless simplification — the epoch is how `revoke`
+/// tells a client WHICH routes to discard, so a shared epoch names routes
+/// that are still live on the endpoints that were not revoked.
+///
+/// The derivation keeps the supplied value as a prefix and appends the
+/// endpoint's index. The endpoint NAME is not used: `EndpointId` admits
+/// `.`, which is outside `Generation`'s `[A-Za-z0-9_-]`, so splicing a
+/// name in would make the epoch unparseable for a legal configuration.
+///
+/// Slicing by byte is safe because that same grammar is ASCII-only.
+fn derived_epoch(
+    base: &interweave_transport_runtime::Generation,
+    index: usize,
+) -> Result<interweave_transport_runtime::Generation, SubstrateError> {
+    use interweave_transport_runtime::Generation;
+
+    let suffix = format!("-{index}");
+    let room = Generation::MAX_BYTES.saturating_sub(suffix.len());
+    let base = base.as_str();
+    let keep = base.len().min(room);
+    Generation::parse(format!("{}{suffix}", &base[..keep])).map_err(|_| {
+        SubstrateError::InvalidProfile(vec![format!(
+            "endpoint {index} could not be given a distinct lease epoch"
+        )])
+    })
+}
+
 impl DirectState {
     /// Adopt the profile's data-plane trust.
     ///
@@ -102,7 +135,7 @@ impl DirectState {
         // real IPC claim, and the registry cannot tell the difference —
         // which is the point of it holding leases rather than sessions.
         let mut queues = EndpointQueues::new();
-        for (name, configured) in &config.endpoints {
+        for (index, (name, configured)) in config.endpoints.iter().enumerate() {
             // A DISABLED ENDPOINT IS NOT A FAILURE. It is configured and
             // deliberately closed, so it holds no lease and opens no
             // queue, and inbound routing answers `no_route` for it
@@ -145,7 +178,9 @@ impl DirectState {
                     name,
                     LocalSessionId(format!("in-process-{}", name.as_str())),
                     kind,
-                    config.epoch.clone(),
+                    // A DISTINCT EPOCH PER LEASE, not one shared value.
+                    // See `derived_epoch`.
+                    derived_epoch(&config.epoch, index)?,
                 )
                 .map_err(|failure| {
                     SubstrateError::InvalidProfile(vec![format!(
@@ -957,6 +992,43 @@ mod waiter_tests {
                 | DirectResponse::Rejected { message_id, .. },
             ) => assert_eq!(message_id, req.message_id),
             None => panic!("a settled owner must produce an answer"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod derived_epoch_tests {
+    use super::derived_epoch;
+    use interweave_transport_runtime::Generation;
+
+    fn base(seed: &str) -> Generation {
+        Generation::parse(format!("{seed:_<16}")).expect("valid generation")
+    }
+
+    #[test]
+    fn every_endpoint_index_gets_a_different_epoch() {
+        // The whole point. One shared epoch across N leases makes
+        // `revoke`'s answer name routes that are still live.
+        let b = base("cfg");
+        let a = derived_epoch(&b, 0).expect("index 0");
+        let c = derived_epoch(&b, 1).expect("index 1");
+        assert_ne!(a, c);
+        assert_ne!(a.as_str(), b.as_str(), "and none of them is the base");
+    }
+
+    #[test]
+    fn a_maximum_length_base_still_yields_a_legal_epoch() {
+        // `Generation` is 16..=64 bytes. Appending without making room
+        // would push a 64-byte base over the ceiling and fail to parse,
+        // turning a legal profile into a configuration error.
+        let long = Generation::parse("x".repeat(Generation::MAX_BYTES)).expect("64 bytes is legal");
+        for index in [0_usize, 9, 10, 99] {
+            let derived = derived_epoch(&long, index).expect("still parses");
+            assert!(
+                (Generation::MIN_BYTES..=Generation::MAX_BYTES).contains(&derived.as_str().len()),
+                "index {index} produced {} bytes",
+                derived.as_str().len()
+            );
         }
     }
 }

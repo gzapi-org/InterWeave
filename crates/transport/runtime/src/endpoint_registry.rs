@@ -70,7 +70,11 @@ impl Default for RegisteredEndpoint {
 pub struct ActiveLease {
     /// The session that owns it.
     pub owner: LocalSessionId,
-    /// The generation, fresh for every grant.
+    /// The generation, distinct across every live lease.
+    ///
+    /// [`EndpointRegistry::claim`] refuses an epoch another live lease
+    /// already carries. Freshness ACROSS RESTARTS is the minting side's
+    /// obligation and is not enforced here; see that method.
     pub epoch: Generation,
 }
 
@@ -125,6 +129,19 @@ pub enum ClaimFailure {
         /// The endpoint it already holds.
         held: EndpointId,
     },
+    /// A live lease already carries this epoch.
+    ///
+    /// `LOCAL-CLIENT.md` requires a "fresh 128-bit lease epoch for every
+    /// grant" and `ENDPOINTS.md` that "the value must not repeat". The
+    /// epoch is how a client is told WHICH routes to discard when a lease
+    /// ends -- [`EndpointRegistry::revoke`] returns it for exactly that
+    /// reason -- so two live leases sharing one makes that answer wrong:
+    /// revoking either tells the client to discard routes still served by
+    /// the other.
+    EpochInUse {
+        /// The endpoint whose live lease already carries it.
+        held: EndpointId,
+    },
 }
 
 impl From<ClaimFailure> for TransportError {
@@ -137,7 +154,9 @@ impl From<ClaimFailure> for TransportError {
             // Locally precise; the caller's own mistake rather than a
             // statement about the endpoint, so it is InvalidArgument
             // rather than an endpoint-existence answer.
-            ClaimFailure::SessionAlreadyLeased { .. } => Self::InvalidArgument,
+            ClaimFailure::SessionAlreadyLeased { .. } | ClaimFailure::EpochInUse { .. } => {
+                Self::InvalidArgument
+            }
         }
     }
 }
@@ -168,7 +187,8 @@ impl EndpointRegistry {
     ///
     /// # Errors
     /// Returns [`ClaimFailure`] when the endpoint is unknown, disabled,
-    /// closed to this client kind, or already leased.
+    /// closed to this client kind, already leased, or when `epoch` is one
+    /// a live lease already carries.
     pub fn claim(
         &mut self,
         endpoint: &EndpointId,
@@ -202,6 +222,22 @@ impl EndpointRegistry {
         // lease precisely so a caller cannot choose it.
         if let Some((held, _)) = self.leases.iter().find(|(_, l)| l.owner == session) {
             return Err(ClaimFailure::SessionAlreadyLeased { held: held.clone() });
+        }
+        // AND THE EPOCH IS DISTINCT ACROSS LIVE LEASES.
+        //
+        // What is enforced here is the bounded half of the contract's
+        // rule: no two CURRENTLY HELD leases share an epoch. That is the
+        // half `revoke` depends on, and it costs a scan of the lease map,
+        // which is bounded by the configured endpoint count.
+        //
+        // The other half -- that a value never repeats across daemon
+        // restarts -- is NOT enforceable here and is deliberately not
+        // claimed: it would need a record of every epoch ever issued,
+        // which is exactly the unbounded map the resource rules forbid.
+        // That half belongs to whoever mints the value at session
+        // establishment.
+        if let Some((held, _)) = self.leases.iter().find(|(_, l)| l.epoch == epoch) {
+            return Err(ClaimFailure::EpochInUse { held: held.clone() });
         }
         let lease = ActiveLease {
             owner: session,
@@ -525,6 +561,38 @@ mod tests {
         let ended = r.set_enabled(&ep("human"), false);
         assert_eq!(ended, Some(epoch("live")));
         assert!(r.lease(&ep("human")).is_none());
+    }
+
+    #[test]
+    fn two_live_leases_may_not_share_an_epoch() {
+        // LOCAL-CLIENT.md: "fresh 128-bit lease epoch for every grant".
+        // The epoch is what `revoke` returns so a client can discard the
+        // routes of the lease that ended; if two live leases carry the
+        // same value, revoking one names routes the other still serves.
+        let mut r = registry();
+        r.claim(&ep("human"), session("a"), "k", epoch("shared"))
+            .expect("the first grant takes it");
+
+        assert_eq!(
+            r.claim(&ep("claude"), session("b"), "k", epoch("shared")),
+            Err(ClaimFailure::EpochInUse { held: ep("human") }),
+            "a second live lease may not reuse the epoch"
+        );
+    }
+
+    #[test]
+    fn an_epoch_is_reusable_once_the_lease_holding_it_has_ended() {
+        // The rule is about LIVE leases. Refusing forever would need a
+        // record of every epoch ever issued, which is the unbounded map
+        // the resource rules forbid — so what is enforced is exactly what
+        // is bounded, and this pins that boundary.
+        let mut r = registry();
+        r.claim(&ep("human"), session("a"), "k", epoch("recycled"))
+            .expect("granted");
+        assert_eq!(r.revoke(&ep("human")), Some(epoch("recycled")));
+
+        r.claim(&ep("claude"), session("b"), "k", epoch("recycled"))
+            .expect("the epoch is free once no live lease carries it");
     }
 
     #[test]
