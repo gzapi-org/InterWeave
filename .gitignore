@@ -137,3 +137,8 @@ spikes/**/Cargo.lock
 # are exactly the kind of behaviour a patch release may change, so its
 # lock is committed and its direct requirements are pinned with `=`.
 !spikes/spike-002/harness/Cargo.lock
+
+# cargo-mutants writes its report tree into the working directory when
+# `--output` is not given. It is build output, and a `git add -A` swept
+# twenty-two of its files into a commit before this line existed.
+mutants.out*/

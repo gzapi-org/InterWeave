@@ -1,3 +1,0 @@
-crates/transport/runtime/src/endpoint_queue.rs:119:9: replace <impl core::fmt::Display for QueueRefusal>::fmt -> core::fmt::Result with Ok(Default::default())
-crates/transport/runtime/src/endpoint_queue.rs:199:9: replace EndpointQueues::is_empty -> bool with true
-crates/transport/runtime/src/endpoint_queue.rs:187:9: replace EndpointQueues::is_open -> bool with false
