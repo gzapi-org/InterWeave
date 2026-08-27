@@ -1140,3 +1140,116 @@ fn a_v2_database_migrates_to_the_endpoint_scoped_key_without_losing_rows() {
         .expect("the migrated table is scoped by endpoint");
     assert_eq!(store.unread_inbound().expect("read").len(), 2);
 }
+
+#[test]
+fn a_generated_key_with_the_right_name_and_a_different_expression_is_refused() {
+    // THE NAME IS NOT THE CONTRACT, THE EXPRESSION IS. `table_info` does
+    // not report a generated column at all and `index_info` reports only
+    // its name, so a `source_endpoint_key` redefined as the constant ''
+    // presents an identical column list AND an identical unique key —
+    // while collapsing every endpoint back into one, which is precisely
+    // the suppression migration_3 exists to stop.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
+
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    conn.execute_batch(
+        "
+        ALTER TABLE unread_inbound RENAME TO unread_inbound_old;
+        CREATE TABLE unread_inbound (
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            media_type      TEXT,
+            payload         BLOB    NOT NULL,
+            received_at     INTEGER NOT NULL,
+            source_endpoint_key TEXT GENERATED ALWAYS AS ('') VIRTUAL,
+            UNIQUE(source_peer, source_endpoint_key, app_message_id)
+        );
+        DROP TABLE unread_inbound_old;
+        ",
+    )
+    .expect("the rebuild is legal SQLite");
+    drop(conn);
+
+    let refused = HumanStore::open(&path, StoreOptions::default());
+    assert!(
+        matches!(refused, Err(StoreError::Migration(_))),
+        "a generated column with a different expression must be refused, got {refused:?}"
+    );
+}
+
+#[test]
+fn a_stored_generated_column_is_not_the_virtual_one_this_build_wrote() {
+    // STORED rather than VIRTUAL is a different schema: it occupies a
+    // real value per row, which is a content surface ADR-0044 did not
+    // budget for. `table_xinfo` reports 3 for it and 2 for VIRTUAL, and
+    // the declaration text differs, so it is caught twice over.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
+
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    conn.execute_batch(
+        "
+        ALTER TABLE kept_inbound RENAME TO kept_inbound_old;
+        CREATE TABLE kept_inbound (
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            media_type      TEXT,
+            payload         BLOB    NOT NULL,
+            received_at     INTEGER NOT NULL,
+            read_at         INTEGER NOT NULL,
+            kept_at         INTEGER NOT NULL,
+            source_endpoint_key TEXT GENERATED ALWAYS AS (IFNULL(source_endpoint, '')) STORED,
+            UNIQUE(source_peer, source_endpoint_key, app_message_id)
+        );
+        DROP TABLE kept_inbound_old;
+        ",
+    )
+    .expect("the rebuild is legal SQLite");
+    drop(conn);
+
+    assert!(
+        matches!(
+            HumanStore::open(&path, StoreOptions::default()),
+            Err(StoreError::Migration(_))
+        ),
+        "a STORED generated column is not what this build wrote"
+    );
+}
+
+#[test]
+fn an_extra_generated_column_is_a_retention_violation_table_info_cannot_see() {
+    // A generated column is INVISIBLE to `PRAGMA table_info`, so the
+    // column check that refuses `ADD COLUMN archive_payload BLOB` cannot
+    // see this one at all — and a virtual column reading `payload` is a
+    // second durable view of the body in the table whose whole contract
+    // is that the body disappears when the message is read.
+    //
+    // `table_xinfo` is what makes it visible, which is why the hidden set
+    // is enumerated rather than assumed empty.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
+
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    conn.execute_batch(
+        "ALTER TABLE unread_inbound
+             ADD COLUMN archive_payload BLOB GENERATED ALWAYS AS (payload) VIRTUAL",
+    )
+    .expect("SQLite permits adding a virtual generated column");
+    drop(conn);
+
+    let refused = HumanStore::open(&path, StoreOptions::default());
+    assert!(
+        matches!(refused, Err(StoreError::Migration(_))),
+        "a second view of the body must be refused however it is spelled, got {refused:?}"
+    );
+}

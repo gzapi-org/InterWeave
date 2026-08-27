@@ -141,12 +141,19 @@ pub fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
 /// VIRTUAL: it computes on read and stores nothing, so it is not a second
 /// place a body can be kept and does not widen the content surface
 /// ADR-0044 bounds. `PRAGMA table_info` does not report generated columns
-/// at all, so [`EXPECTED_SCHEMA`] does not list it; `PRAGMA index_info`
-/// does report it BY NAME, which is what keeps [`verify_shape`]'s unique
-/// key assertion load-bearing. A bare expression index would have been
-/// reported with a NULL column name and silently dropped by
-/// [`actual_unique_keys`], leaving the guard passing a key it no longer
-/// checked.
+/// at all, so [`EXPECTED_SCHEMA`] does not list it among the columns;
+/// `PRAGMA index_info` does report it BY NAME, which is what keeps
+/// [`verify_shape`]'s unique key assertion load-bearing. A bare
+/// expression index would have been reported with a NULL column name and
+/// silently dropped by [`actual_unique_keys`], leaving the guard passing
+/// a key it no longer checked.
+///
+/// The NAME alone is still not enough, and an earlier version of this
+/// comment stopped here as though it were: a column of the same name
+/// generated from a constant presents an identical column list and an
+/// identical unique key while collapsing every endpoint again. So
+/// [`verify_shape`] compares the declaration text, and
+/// [`TableShape::generated`] carries it.
 ///
 /// The copy is a plain `INSERT`: this migration WIDENS the key, and a
 /// wider key cannot turn two distinct rows into a collision. A failure
@@ -351,6 +358,18 @@ struct TableShape {
     /// Every UNIQUE key, as its ordered column list. Includes the
     /// implicit index behind a `TEXT PRIMARY KEY`.
     unique_keys: &'static [&'static [&'static str]],
+    /// Every generated column, as its complete normalised definition.
+    ///
+    /// THE NAME IS NOT ENOUGH, and checking only the name is how this
+    /// guard was first written. `PRAGMA table_info` hides generated
+    /// columns entirely and `PRAGMA index_info` reports only the NAME of
+    /// one used in a key, so a `source_endpoint_key` redefined as the
+    /// constant `''` presents an identical column list and an identical
+    /// unique key — while collapsing every endpoint back into one and
+    /// suppressing exactly the deliveries `migration_3` exists to keep
+    /// apart. The expression is the part that carries the meaning, so
+    /// the expression is what is compared.
+    generated: &'static [&'static str],
     /// Whether the rowid primary key is AUTOINCREMENT.
     ///
     /// Not visible through any pragma, and load-bearing: a bare
@@ -397,6 +416,38 @@ const fn pk(
 /// that its body disappears when the message is read. Under ADR-0044 an
 /// unknown column is not forward compatibility, it is a place a body
 /// can be kept, so it is refused.
+/// The endpoint dedup key, exactly as both inbound tables declare it.
+///
+/// Whitespace-normalised, because that is how it is compared.
+const GENERATED_ENDPOINT_KEY: &str =
+    "source_endpoint_key TEXT GENERATED ALWAYS AS (IFNULL(source_endpoint, '')) VIRTUAL";
+
+/// Collapse every run of whitespace to one space.
+///
+/// `ALTER TABLE ... RENAME` rewrites the stored SQL, so the text is not
+/// byte-stable across the migration that produced it; the tokens are.
+fn normalise_sql(sql: &str) -> String {
+    sql.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Names of the columns `PRAGMA table_info` does NOT report.
+///
+/// `table_xinfo` adds a `hidden` column: 0 ordinary, 2 VIRTUAL
+/// generated, 3 STORED. Anything non-zero is invisible to the column
+/// check, which is why it is enumerated here rather than trusted.
+fn actual_hidden_columns(conn: &Connection, table: &str) -> Result<Vec<String>, StoreError> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_xinfo({table})"))?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, i64>(6)?)))?;
+    let mut hidden: Vec<String> = rows
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|(_, kind)| *kind != 0)
+        .map(|(name, _)| name)
+        .collect();
+    hidden.sort();
+    Ok(hidden)
+}
+
 const EXPECTED_SCHEMA: &[TableShape] = &[
     TableShape {
         name: "pending_outbound",
@@ -413,6 +464,7 @@ const EXPECTED_SCHEMA: &[TableShape] = &[
             col("attempts", "INTEGER", true),
         ],
         unique_keys: &[&["app_message_id"]],
+        generated: &[],
         autoincrement: true,
     },
     TableShape {
@@ -432,6 +484,7 @@ const EXPECTED_SCHEMA: &[TableShape] = &[
         // (`migration_2`); scoping only to the peer let one peer's two
         // endpoints collide with each other (`migration_3`).
         unique_keys: &[&["source_peer", "source_endpoint_key", "app_message_id"]],
+        generated: &[GENERATED_ENDPOINT_KEY],
         autoincrement: true,
     },
     TableShape {
@@ -449,12 +502,14 @@ const EXPECTED_SCHEMA: &[TableShape] = &[
             col("kept_at", "INTEGER", true),
         ],
         unique_keys: &[&["source_peer", "source_endpoint_key", "app_message_id"]],
+        generated: &[GENERATED_ENDPOINT_KEY],
         autoincrement: true,
     },
     TableShape {
         name: "settings",
         columns: &[pk("key", "TEXT"), col("value", "TEXT", true)],
         unique_keys: &[&["key"]],
+        generated: &[],
         autoincrement: false,
     },
 ];
@@ -564,6 +619,28 @@ pub fn verify_shape(conn: &Connection) -> Result<(), StoreError> {
             )));
         }
 
+        // THE GENERATED COLUMNS, BY EXPRESSION AND NOT BY NAME.
+        //
+        // `table_info` above cannot see them at all, and the unique-key
+        // check sees only the name — so a `source_endpoint_key` rebuilt
+        // as a constant satisfies both while quietly restoring the
+        // collision `migration_3` removed. Both halves are checked: the
+        // hidden-column set, so an extra or missing one is caught, and
+        // the declaration text, so a changed expression is.
+        let hidden = actual_hidden_columns(conn, shape.name)?;
+        let mut expected_hidden: Vec<String> = shape
+            .generated
+            .iter()
+            .filter_map(|d| d.split_whitespace().next().map(ToOwned::to_owned))
+            .collect();
+        expected_hidden.sort();
+        if hidden != expected_hidden {
+            return Err(StoreError::Migration(format!(
+                "table `{}` has generated columns {hidden:?}; this build wrote {expected_hidden:?}",
+                shape.name
+            )));
+        }
+
         // AUTOINCREMENT is invisible to every pragma and is what stops
         // a deleted row's id being handed to the next insert.
         let sql: Option<String> = conn
@@ -582,6 +659,18 @@ pub fn verify_shape(conn: &Connection) -> Result<(), StoreError> {
                 "table `{}` autoincrement is {has}; this build wrote {}",
                 shape.name, shape.autoincrement
             )));
+        }
+
+        // The declaration text, which is where the EXPRESSION lives.
+        let declared = normalise_sql(sql.as_deref().unwrap_or_default());
+        for definition in shape.generated {
+            if !declared.contains(&normalise_sql(definition)) {
+                return Err(StoreError::Migration(format!(
+                    "table `{}` does not declare `{definition}`; a generated column with the \
+                     right name and a different expression is a different schema",
+                    shape.name
+                )));
+            }
         }
     }
 
