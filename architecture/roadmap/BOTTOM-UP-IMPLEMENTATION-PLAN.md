@@ -661,9 +661,16 @@ path only because its harness parks the owner's `ResponseChannel` and
 defers admission by a synthetic 600 ms — it models an admission that
 yields, which is what admission becomes at the IPC boundary.
 
-So the path is unreachable today AND unimplemented, and the second fact
-is the one that blocks: an unreachable path that is wrong is still wrong,
-and it becomes reachable the moment admission yields.
+So the path is unreachable today AND unimplemented. Before the amendment
+the second fact was the one that blocked this gate — an unreachable path
+that is wrong is still wrong. The amendment changed which of the two
+matters: the retention is not owed until admission yields, so leaving it
+unimplemented here is no longer a gate failure.
+
+What the amendment does NOT excuse is answering the branch wrongly, and
+that half was fixed rather than scoped away — `waiter_response` returns
+`None` and the caller asserts unreachability instead of replying
+`overloaded`. The wire test becomes owed the moment admission yields.
 
 **One thing this does NOT license.** The reservation map's waiter
 accounting must not be removed as dead weight — A11 measured the
