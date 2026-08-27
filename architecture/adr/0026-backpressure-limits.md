@@ -14,6 +14,8 @@ Direct inbound messages are rejected as overloaded before `AcceptedV2` when the 
 
 Broadcast retains bounded best-effort local drop behavior, and additionally consumes its own per-trusted-PeerId and global ingress buckets with the same defaults, accounted **separately from direct's**: one mode's traffic must not spend the other's allowance. A broadcast message over the rate is dropped before local delivery admission. It is not refused on the wire — GossipSub has no per-message refusal to a publisher, and a validation verdict answers whether the message was valid and authorized, which a local rate says nothing about — so the mesh still sees the node's ordinary Accept/Ignore/Reject report.
 
+What that bucket bounds is stated exactly, because it is less than a reader would assume. It bounds the per-message work this node does **after** the message has been validated and answered: content fingerprinting over the payload, the duplicate-cache insertion, and the per-session fan-out that copies the payload once per joined consumer. It does **not** bound signature and source verification, which the GossipSub backend performs before the runtime is given the message at all, and it does **not** bound envelope decoding, because the mesh is owed a validation verdict and that verdict depends on whether the envelope decodes. Those two are bounded per message by the transmit ceiling rather than per unit time. A limit that could refuse work before the verdict would have to answer the mesh without knowing whether the bytes were valid.
+
 ## Alternatives considered
 
 Unbounded channels; persistent overflow spool; acknowledge direct before local queue; all-client direct fan-out; unlimited endpoint directory; reduce payload just to fit smaller IPC.

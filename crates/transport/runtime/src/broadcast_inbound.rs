@@ -174,6 +174,20 @@ pub fn admit_broadcast(
     //    re-answered here and passes trivially, which is the point: there
     //    is one implementation of these three and no broadcast-shaped
     //    copy that could drift from it.
+    //
+    //    WHAT THE RATE BUCKET BOUNDS, and what it cannot. Everything
+    //    below it: the fingerprint hash over the payload, the dedup
+    //    insertion, and the fan-out that copies the payload once per
+    //    joined session. Not signature verification, which the backend
+    //    performs before this function is reachable. And not the envelope
+    //    decode in `classify_broadcast`, which is structural rather than
+    //    an oversight — the mesh is owed a verdict, the verdict depends
+    //    on whether the envelope decodes, so refusing to decode would
+    //    mean answering without knowing whether the bytes were valid.
+    //    Both of those are bounded per message by the transmit ceiling
+    //    rather than per unit time. ADR-0026's amendment says the same in
+    //    the same words, because a bound is worth exactly what its stated
+    //    scope is.
     if let Err(refusal) = admit_prefix(source, clocks.monotonic_ms, &mut ctx.prefix) {
         return BroadcastAdmission::Refused(refusal);
     }

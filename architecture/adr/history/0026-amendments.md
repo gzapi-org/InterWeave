@@ -39,3 +39,17 @@ in any case.
 The delivery-side rule is unchanged: broadcast local delivery may still
 drop under overload where direct must refuse before accepting, because
 broadcast makes no per-recipient acceptance promise to anyone.
+
+**What the bucket does not bound**, recorded because the first draft of
+this note claimed more than it delivers. It said the gap was "unbounded
+decode, signature-verification and dedup work". Fingerprinting, dedup and
+fan-out are bounded. Signature verification is not: the GossipSub backend
+performs it before the runtime is handed the message, so no runtime-layer
+limit can precede it. Envelope decoding is not either, and that one is
+structural rather than incidental — the mesh is owed an
+Accept/Ignore/Reject verdict, the verdict depends on whether the envelope
+decodes, so a limit that skipped decoding would have to answer without
+knowing whether the bytes were valid. Both are bounded per message by the
+transmit ceiling, which is why the remaining exposure is the repeated
+cost of hashing a 48 KiB payload and copying it once per joined session —
+which is what the bucket closes.
