@@ -286,6 +286,21 @@ pub enum SwarmEvent {
         /// The local session whose queue took it.
         session: String,
     },
+    /// A publish was accepted locally with NO mesh peers to carry it.
+    ///
+    /// PUBSUB.md: local acceptance is the only synchronous success claim,
+    /// and diagnostics "must expose `mesh_peer_count=0` as degraded
+    /// channel reachability rather than claiming delivery". Reading the
+    /// backend's `NoPeersSubscribedToTopic` straight to success is
+    /// correct for the CALLER -- the publish did happen, and broadcast
+    /// promises nothing about reach -- but it erased the one signal that
+    /// separates healthy propagation from a channel nobody is listening
+    /// on. Both answers are now given: `Ok` to the caller, this to the
+    /// operator.
+    BroadcastUnreachable {
+        /// The channel that has no mesh peers.
+        channel: interweave_transport_api::ChannelId,
+    },
     /// A broadcast was refused by one or more sessions' queues.
     ///
     /// The overload drop broadcast is allowed to take — a session whose

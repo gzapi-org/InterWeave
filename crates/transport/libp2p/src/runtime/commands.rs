@@ -49,6 +49,7 @@ pub(super) fn handle_command(
     effective_payload: usize,
     now_ms: u64,
     wall_ms: u64,
+    outbox: &mut std::collections::VecDeque<SwarmEvent>,
     command: SwarmCommand,
 ) {
     match command {
@@ -244,9 +245,16 @@ pub(super) fn handle_command(
             // -- and a fan-out hung off the Ok arm alone therefore missed
             // the one case Model B cares most about: two local clients on
             // a node with no peers at all.
+            let mut unreachable = false;
             let answer = match swarm.publish_broadcast(topic.hash(), frame.encode()) {
                 Ok(_) => Ok(()),
-                Err(error) => super::broadcast::publish_error(&error).map_or(Ok(()), Err),
+                Err(error) => {
+                    unreachable = matches!(
+                        error,
+                        libp2p::gossipsub::PublishError::NoPeersSubscribedToTopic
+                    );
+                    super::broadcast::publish_error(&error).map_or(Ok(()), Err)
+                }
             };
             if answer.is_ok() {
                 deliver_locally(
@@ -257,6 +265,16 @@ pub(super) fn handle_command(
                     &frame,
                     wall_ms,
                 );
+            }
+            // DEGRADED REACHABILITY IS STILL SUCCESS, and still worth
+            // saying. PUBSUB.md requires `mesh_peer_count=0` to surface as
+            // degraded rather than as delivery, and the caller's `Ok` is
+            // the wrong place for it -- broadcast promises the caller
+            // nothing about reach. The operator gets the other half.
+            if unreachable {
+                outbox.push_back(SwarmEvent::BroadcastUnreachable {
+                    channel: channel.clone(),
+                });
             }
             let _ = reply.send(answer);
         }

@@ -395,6 +395,9 @@ pub(super) fn publish_error(
         gossipsub::PublishError::NoPeersSubscribedToTopic | gossipsub::PublishError::Duplicate => {
             None
         }
+        // Both stay local success. `NoPeersSubscribedToTopic` is ALSO
+        // reported to the operator by the publish command, which is where
+        // the channel is in scope -- see `BroadcastUnreachable`.
         // Unreachable after the caller's own ceiling check, and mapped
         // rather than collapsed into Internal so that if it ever fires it
         // says what it is.

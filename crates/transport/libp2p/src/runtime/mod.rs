@@ -762,6 +762,7 @@ impl SwarmRuntime {
                                     config.max_payload_bytes,
                                     now_ms(started),
                                     wall_ms(),
+                                    &mut outbox,
                                     command,
                                 );
                                 // A revocation names connections; this

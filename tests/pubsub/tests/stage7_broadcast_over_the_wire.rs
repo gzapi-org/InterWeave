@@ -1852,6 +1852,37 @@ async fn two_local_sessions_on_one_profile_receive_each_others_broadcasts() {
     a.shutdown().await.expect("a stops");
 }
 
+/// A publish with no mesh peers is accepted AND reported as degraded.
+///
+/// PUBSUB.md: "Local publish acceptance is the only synchronous success
+/// claim… diagnostics must expose `mesh_peer_count=0` as degraded channel
+/// reachability rather than claiming delivery." Both halves are the
+/// point: the caller is told `Ok`, because the publish did happen and
+/// broadcast promises nothing about reach, and the operator is told the
+/// channel had nobody on it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_publish_with_no_mesh_peers_is_accepted_and_reported_degraded() {
+    let (a_id, _) = who();
+    let mut a = node(&a_id, &[], &["general"], SubstrateConfig::default()).await;
+    a.join(channel("general"), "only")
+        .await
+        .expect("lands")
+        .expect("accepted");
+
+    let answer = a
+        .publish(channel("general"), "only", envelope(6, b"nobody there"))
+        .await
+        .expect("the command lands");
+    assert!(answer.is_ok(), "the caller is still told it succeeded");
+
+    wait_for(&mut a, "the degraded-reachability report", |e| {
+        matches!(e, SwarmEvent::BroadcastUnreachable { channel: c } if *c == channel("general"))
+    })
+    .await;
+
+    a.shutdown().await.expect("a stops");
+}
+
 /// Publish the same envelope a few times while the mesh forms.
 ///
 /// A single publish immediately after connecting reaches nobody: GossipSub
