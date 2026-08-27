@@ -130,6 +130,27 @@ pub(super) fn handle_command(
                         let topic = broadcast_state.remember(channel);
                         let _ = swarm.subscribe_topic(&topic);
                     }
+
+                    // AND DROP WHAT IS NO LONGER HELD. Subscribing to the
+                    // new set is only half of applying it: a channel the
+                    // previous set desired, that no session still joins,
+                    // is held by nobody once the registry has answered --
+                    // and would otherwise stay subscribed, receiving and
+                    // relaying traffic this node no longer wants, with
+                    // each reconfiguration adding another.
+                    //
+                    // Asked of the REGISTRY, not of the old desired set:
+                    // the registry is what knows whether a live join still
+                    // holds the channel, which is the case that must not
+                    // be unsubscribed.
+                    let held: Vec<interweave_transport_api::ChannelId> =
+                        broadcast_state.channels.values().cloned().collect();
+                    for channel in held {
+                        if !broadcast_state.subs.backend_should_subscribe(&channel) {
+                            let topic = broadcast_state.forget(&channel);
+                            let _ = swarm.unsubscribe_topic(&topic);
+                        }
+                    }
                     let _ = reply.send(Ok(()));
                 }
                 Err(denial) => {

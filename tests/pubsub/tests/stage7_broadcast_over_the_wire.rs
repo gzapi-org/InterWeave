@@ -1497,6 +1497,89 @@ async fn a_refused_reconfiguration_leaves_the_queue_bound_alone() {
     b.shutdown().await.expect("b stops");
 }
 
+/// Reconfiguring away a desired channel leaves the mesh, and one still
+/// joined stays.
+///
+/// Subscribing to the new set is only half of applying it. A channel the
+/// PREVIOUS set desired, that no session joins, is held by nobody once the
+/// registry has answered — and used to stay subscribed anyway, receiving
+/// and relaying traffic the node no longer wanted, one more with every
+/// reconfiguration.
+///
+/// Both halves are asserted, because the dangerous fix is the
+/// over-eager one: unsubscribing a channel a live session still joins
+/// would silently stop delivering to it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reconfiguring_drops_channels_nobody_holds_and_keeps_the_ones_joined() {
+    let (a_id, a_peer) = who();
+    let (b_id, b_peer) = who();
+
+    let mut a = node(
+        &a_id,
+        &[&b_peer],
+        &["dropped", "kept"],
+        SubstrateConfig::default(),
+    )
+    .await;
+    let mut b = node(
+        &b_id,
+        &[&a_peer],
+        &["dropped", "kept"],
+        SubstrateConfig::default(),
+    )
+    .await;
+    connect(&mut a, &mut b, &b_peer).await;
+
+    // A session joins ONLY "kept", so "dropped" is held by the profile
+    // alone and "kept" is held by both.
+    b.join(channel("kept"), "sub")
+        .await
+        .expect("lands")
+        .expect("accepted");
+    wait_for(&mut a, "B's subscriptions", |e| {
+        matches!(e, SwarmEvent::PeerSubscribed { peer, channel: c } if *peer == b_peer && *c == channel("dropped"))
+    })
+    .await;
+
+    // Reconfigure to desire NEITHER. "kept" survives on its join;
+    // "dropped" is now held by nobody.
+    b.configure_broadcast(
+        BroadcastChannels::from_profile(&profile(&[]), 64).expect("a valid profile"),
+    )
+    .await
+    .expect("the empty desired set is accepted");
+
+    wait_for(&mut a, "the unsubscription of the dropped channel", |e| {
+        if let SwarmEvent::PeerUnsubscribed { peer, channel: c } = e
+            && *peer == b_peer
+        {
+            assert_ne!(
+                *c,
+                channel("kept"),
+                "a channel a live session joins must NOT be unsubscribed"
+            );
+            return *c == channel("dropped");
+        }
+        false
+    })
+    .await;
+
+    // AND "kept" IS STILL LIVE: a publish reaches the session that joined it.
+    a.join(channel("kept"), "pub")
+        .await
+        .expect("lands")
+        .expect("accepted");
+    publish_repeatedly_on(&a, "kept", "pub", 5, b"still joined").await;
+    assert_eq!(
+        drain_until(&b, "sub", PATIENCE).await.len(),
+        1,
+        "a channel a live session joins must survive the reconfiguration"
+    );
+
+    a.shutdown().await.expect("a stops");
+    b.shutdown().await.expect("b stops");
+}
+
 /// Publish the same envelope a few times while the mesh forms.
 ///
 /// A single publish immediately after connecting reaches nobody: GossipSub
@@ -1509,9 +1592,20 @@ async fn a_refused_reconfiguration_leaves_the_queue_bound_alone() {
 /// is (publisher, channel, message_id) and every attempt carries the same
 /// id, so at most one delivery can result however many attempts land.
 async fn publish_repeatedly(publisher: &SwarmRuntime, session: &str, id: u8, body: &[u8]) {
+    publish_repeatedly_on(publisher, "general", session, id, body).await;
+}
+
+/// The same, on a named channel.
+async fn publish_repeatedly_on(
+    publisher: &SwarmRuntime,
+    channel_name: &str,
+    session: &str,
+    id: u8,
+    body: &[u8],
+) {
     for _ in 0..12 {
         let _ = publisher
-            .publish(channel("general"), session, envelope(id, body))
+            .publish(channel(channel_name), session, envelope(id, body))
             .await
             .expect("the command lands");
         tokio::time::sleep(Duration::from_millis(250)).await;
