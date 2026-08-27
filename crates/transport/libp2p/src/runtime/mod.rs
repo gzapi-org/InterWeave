@@ -49,7 +49,7 @@ use libp2p::{PeerId, noise, tcp, yamux};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::behaviour::SubstrateBehaviour;
-use crate::gated_swarm::GatedSwarm;
+use crate::gated_swarm::{GatedSwarm, mesh_admits};
 
 mod commands;
 mod config;
@@ -868,6 +868,20 @@ impl SwarmRuntime {
                         // downstream blocks on them, and the alternative
                         // is an outbox that grows with whatever the
                         // network sends.
+                        // THE MESH LEARNS THE CLASS HERE. GossipSub does
+                        // no connection admission of its own, so a peer
+                        // reaching it has already passed the dial gate --
+                        // but the gate answers once, at connection time,
+                        // and a class can change while a connection stays
+                        // up. Syncing on every announced connection is the
+                        // half that costs nothing; `SetTrust` is the half
+                        // that matters.
+                        if let Some(SwarmEvent::Connected { peer }) = translated.as_ref()
+                            && let Ok(id) = to_peer_id(peer)
+                        {
+                            let trusted = mesh_admits(manager.classify(peer));
+                            swarm.sync_broadcast_admission(&id, trusted);
+                        }
                         if let Some(event) = translated
                             && may_buffer_delivery(outbox.len(), config.event_capacity)
                         {

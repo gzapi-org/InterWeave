@@ -21,7 +21,7 @@ use interweave_transport_api::TransportIdentity;
 use interweave_transport_runtime::{ConnectionClass, ConnectionManager, DialOrigin, DialTicket};
 
 use crate::behaviour::SubstrateBehaviourEvent;
-use crate::gated_swarm::{GatedSwarm, NotConnected};
+use crate::gated_swarm::{GatedSwarm, NotConnected, mesh_admits};
 
 use super::dialing::{
     ActiveListeners, OpenConnection, PendingListens, attempt_dial, connections_to_close,
@@ -187,6 +187,23 @@ pub(super) fn handle_command(
             // connection and accept its message.
             direct_state.adopt_trust(&trust);
             let revoked = manager.set_trust(*trust, &live);
+
+            // AND THE MESH MOVES WITH IT, for every live peer rather than
+            // only the revoked ones. A peer DEMOTED to infrastructure-only
+            // is not revoked -- ADR-0036 keeps its connection so it can
+            // carry AutoNAT and relay traffic -- so it survives the
+            // closing below and would otherwise keep receiving broadcast
+            // on a connection the data plane no longer authorizes. The
+            // promotion direction matters equally: a peer that becomes
+            // trusted must stop being blacklisted, or a revocation
+            // followed by a restoration would leave it permanently
+            // excluded from the mesh with nothing reporting why.
+            for peer in &live {
+                if let Ok(id) = to_peer_id(peer) {
+                    let trusted = mesh_admits(manager.classify(peer));
+                    swarm.sync_broadcast_admission(&id, trusted);
+                }
+            }
 
             // UNIQUE CONNECTIONS for the closing and the count. Every
             // connection is named at most once however many revoked
