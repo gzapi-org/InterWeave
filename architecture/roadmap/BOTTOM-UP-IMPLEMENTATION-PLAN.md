@@ -539,8 +539,9 @@ Under `tests/direct-v2` and `tests/endpoint-routing`:
 - omitted destination -> configured default;
 - offline/unknown/policy-denied -> coarse `no_route`;
 - Accepted only after exact endpoint queue admission;
-- concurrent same-key retransmission -> one enqueue (**not met over the
-  wire** — see the open question below);
+- concurrent same-key retransmission -> one enqueue, proven in process
+  while admission cannot yield; the wire test is owed when it can (see
+  the resolution below);
 - same ID/different body -> conflict;
 - retry after default endpoint change returns original accepted route;
 - 48 KiB payload boundary;
@@ -609,52 +610,58 @@ rather than re-derived.
 Verified by breaking the code and watching the specific test fail, not by
 reading the tests and agreeing with them.
 
-**Not met:** the concurrent same-key retransmission clause. See the open
-question below. Every other clause of the implement list and the
-required-test list is proven above.
+Every clause of the implement list and the required-test list is proven.
+The concurrent same-key retransmission clause is proven at the only layer
+that can observe it in this design, and the resolution below records both
+why the wire cannot reach it and the condition under which a wire test
+becomes owed.
 
-#### Open question 2026-08-27: the concurrent-retransmission clause
+#### Resolved 2026-08-27: the concurrent-retransmission clause
 
-**Not resolved here, and deliberately not resolvable here.** The required
--test list asks for concurrent same-key retransmission over the wire, and
-no such test currently exists — one was written and deleted because it
-did not reach the path it claimed. What that means is a question for
-`contracts/ENDPOINTS.md`, not for this roadmap.
+**The wire test is not owed yet, and the clause was wrong to ask for it
+unconditionally.** Settled by reading SPIKE-002/A11's harness against
+`handle_direct`, which is what the open question this replaces demanded.
 
-The observation. `handle_direct` is a synchronous `fn` holding
-`&mut DirectState`, and `admit_structured` acquires the reservation,
-resolves, enqueues and releases inside that one call without yielding —
+`handle_direct` is a synchronous `fn` holding `&mut DirectState`, and
+`admit_structured` acquires the reservation, resolves the route, enqueues
+and releases inside that one call without yielding —
 `every_decided_path_returns_its_reservation` asserts the map is empty
-afterwards. In the swarm event loop as written, two admissions cannot
-overlap, so a second arrival is a dedup **cache** hit rather than a
-reservation **waiter**.
+afterwards. Two admissions cannot overlap in the swarm event loop, so a
+second arrival is always a dedup **cache** hit and never a reservation
+**waiter**. A wire test of the waiter path cannot exist against this
+design; one was written and deleted after mutating `Reservation::Waiter`
+failed to break it.
 
-The contradiction. `contracts/ENDPOINTS.md` requires concurrent same-key
-requests to attach as bounded waiters, charges each outstanding request
-rather than each key, and releases the owner's and every waiter's share
-together. That is not speculative: it records **SPIKE-002/A11 measured 39
-attached with zero refusals** before the rule was written. Waiters were
-observed. So either the spike harness reached a concurrency this runtime
-does not, or the runtime lost it — and the difference matters, because
-the contract's capacity numbers were derived from the measurement.
+**A11 did not observe something this runtime lost.** Its harness parks
+the owner's `ResponseChannel` and defers admission by a synthetic 600 ms
+— `admission_due = now + ADMISSION` — draining the parked channels when
+it fires. That delay is what let 39 waiters accumulate from 40 copies. It
+models an admission that YIELDS, which is what admission becomes once it
+crosses the `LocalDataSession` / IPC boundary, not what it does today.
 
-Neither possibility can be settled by editing this file. The contract
-outranks the roadmap (CLAUDE.md §2), and a roadmap that declares the
-wire path impossible while the contract requires it hands the next
-person two contradictory instructions.
+Three consequences, and the second is the one worth carrying:
 
-What is proven today, and where:
+1. `contracts/ENDPOINTS.md` needs no amendment. Its bounded-waiter rule
+   describes the contract correctly for the design it anticipates, and
+   the capacity ceilings derived from A11 bound a real future cost.
+2. **The waiter accounting is not dead weight, and must not be removed.**
+   An earlier draft of this section suggested it might be. A11 measured
+   the unbounded version as a memory-exhaustion vector — 40 copies, 39
+   attached, **zero refusals** — and charging waiters against the same
+   per-peer and global budgets as owners is the fix. It is inert today
+   and becomes live the moment admission yields. Deleting it would
+   reintroduce the vulnerability the spike exists to have found.
+3. The required-test clause is corrected above rather than marked unmet.
+   The wire test is **owed when `handle_direct` gains an await inside
+   admission**, which is a checkable trigger rather than a standing
+   debt. Stage 13's IPC boundary is the first candidate.
 
-- over the wire, `one_id_from_one_source_delivers_once` — the cache path;
+What proves the behaviour today, at the layer that can observe it:
+
+- over the wire, `one_id_from_one_source_delivers_once` — the dedup cache
+  path, which is the path a real retransmission takes in this design;
 - in process, `a_concurrent_matching_copy_attaches_instead_of_enqueuing`
-  — the waiter path, driven directly.
-
-**Required before this clause is called met:** determine whether the
-waiter path is reachable in the current runtime, by re-reading
-SPIKE-002/A11's harness against `handle_direct`. If it is, the wire test
-is owed. If it is not, `ENDPOINTS.md` and the reservation accounting need
-an amendment with the measurement re-examined — an ADR question, since
-the capacity ceilings depend on it.
+  — the waiter path, driven directly because the wire cannot reach it.
 
 ## 10. Stage 7 — GossipSub broadcast
 
