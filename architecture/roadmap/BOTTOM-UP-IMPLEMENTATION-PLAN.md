@@ -597,9 +597,14 @@ rather than re-derived.
   `an_over_ceiling_payload_is_answered_too_large` and
   `a_declared_payload_past_the_ceiling_is_too_large` cover 48 KiB from
   both sides, including a declared length that never arrives.
-- **Ingress limits.** `stage6_ingress_rate_limits.rs` proves the burst is
-  spent, that inventing source endpoints mints no allowance, and that a
-  flooding peer does not spend a quiet peer's.
+- **Ingress limits.** `stage6_ingress_rate_limits.rs` proves the per-peer
+  burst is spent, that inventing source endpoints mints no allowance, and
+  that a flooding peer does not spend a quiet peer's. The GLOBAL bucket
+  needed its own case: the other three spend 64 and 96 against a burst of
+  256, so a regression disabling the shared bucket would have passed all
+  of them. `the_global_bucket_bounds_peers_that_are_each_within_their_own`
+  puts sixteen peers at exactly their own allowance, so no per-peer bucket
+  refuses anything and the 512 attempts are still cut down.
 
 Verified by breaking the code and watching the specific test fail, not by
 reading the tests and agreeing with them.
