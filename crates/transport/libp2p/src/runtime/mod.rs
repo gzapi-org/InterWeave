@@ -822,6 +822,7 @@ impl SwarmRuntime {
                                 max_payload_bytes: config.max_payload_bytes,
                                 draining: manager.is_draining(),
                                 may_buffer_delivery: may_buffer,
+                                event_capacity: config.event_capacity,
                             },
                         ) {
                             broadcast::BroadcastHandled::Consumed => continue,

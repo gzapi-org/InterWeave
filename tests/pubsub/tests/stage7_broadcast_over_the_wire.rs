@@ -1674,6 +1674,85 @@ async fn a_final_leave_closes_the_session_queue_and_a_partial_one_does_not() {
     b.shutdown().await.expect("b stops");
 }
 
+/// One broadcast cannot notify past the outbox bound, however many
+/// sessions joined.
+///
+/// A single message fans out to every joined session, so a capacity
+/// decision taken once before the loop lets one message append one
+/// notification per session on the strength of one free slot. Direct
+/// cannot do this — it notifies at most once per message — which is why
+/// the single boolean it uses was not enough here.
+///
+/// The bound is observed as the node STAYING ALIVE: an outbox past its
+/// capacity stops the Swarm being polled for every event class, so a node
+/// that overshot would no longer answer anything. A direct exchange after
+/// the fan-out is the probe.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_broadcast_to_many_sessions_cannot_overrun_the_outbox() {
+    let (a_id, a_peer) = who();
+    let (b_id, b_peer) = who();
+
+    let cramped = SubstrateConfig {
+        event_capacity: 4,
+        ..SubstrateConfig::default()
+    };
+    let mut a = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
+    let mut b = node(&b_id, &[&a_peer], &["general"], cramped).await;
+    connect(&mut a, &mut b, &b_peer).await;
+
+    // FAR more joined sessions than the outbox can hold notifications for.
+    for i in 0..32u32 {
+        b.join(channel("general"), format!("s{i}"))
+            .await
+            .expect("lands")
+            .expect("accepted");
+    }
+    a.join(channel("general"), "pub")
+        .await
+        .expect("lands")
+        .expect("accepted");
+    publish_repeatedly(&a, "pub", 3, b"fan out").await;
+
+    // THE NODE IS STILL SERVING. If the fan-out had appended one
+    // notification per session, the outbox would be past its capacity and
+    // B would have stopped polling the Swarm for everything.
+    let endpoint_frame = interweave_transport_api::DirectMessageV2 {
+        message_id: MessageId::from_bytes([77; 16]),
+        sent_at_ms: 1_786_600_000_000,
+        source_endpoint: endpoint("human"),
+        destination_endpoint: Some(endpoint("human")),
+        payload: Payload::at_ceiling(
+            Some(MediaType::parse("text/plain").expect("legal")),
+            b"still serving".to_vec(),
+        )
+        .expect("within the ceiling"),
+    };
+    let answered = tokio::time::timeout(PATIENCE, a.send_direct(b_peer.clone(), endpoint_frame))
+        .await
+        .expect("the exchange settled rather than hanging behind a fan-out")
+        .expect("the command lands");
+    assert!(
+        answered.is_ok(),
+        "a fan-out must not push the outbox past its bound: {answered:?}"
+    );
+
+    // And the deliveries themselves are all there: what a full outbox
+    // costs is the WAKE-UP, never the message.
+    let mut delivered = 0;
+    for i in 0..32u32 {
+        delivered += drain_until(&b, &format!("s{i}"), Duration::from_millis(500))
+            .await
+            .len();
+    }
+    assert_eq!(
+        delivered, 32,
+        "every joined session still holds the message"
+    );
+
+    a.shutdown().await.expect("a stops");
+    b.shutdown().await.expect("b stops");
+}
+
 /// Publish the same envelope a few times while the mesh forms.
 ///
 /// A single publish immediately after connecting reaches nobody: GossipSub

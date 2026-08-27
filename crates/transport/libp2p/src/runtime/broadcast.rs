@@ -172,6 +172,14 @@ pub(super) struct BroadcastTick {
     /// notification must not spend the room reserved for settling an
     /// in-flight direct exchange.
     pub(super) may_buffer_delivery: bool,
+    /// The BASE outbox capacity, for re-deciding during fan-out.
+    ///
+    /// One boolean is enough for direct, which pushes at most one
+    /// notification per message. Broadcast fans out to every joined
+    /// session, so a decision taken once before the loop would let a
+    /// single message append one notification per session on the
+    /// strength of a single free slot.
+    pub(super) event_capacity: usize,
 }
 
 /// Whether the event was consumed here or belongs to the caller.
@@ -330,7 +338,14 @@ pub(super) fn handle_broadcast(
             // events are treated the same way: informational, nothing
             // downstream blocks on them, and the alternative is an outbox
             // that grows with whatever the network sends.
-            if !tick.may_buffer_delivery {
+            //
+            // RE-DECIDED EVERY PUSH, not once before the loop. The
+            // boolean on the tick answers "was there room when this
+            // message arrived", which is the whole answer for direct and
+            // half of it here: one message can notify every joined
+            // session, so N pushes on the strength of one free slot is
+            // exactly how the bound gets passed.
+            if !crate::runtime::may_buffer_delivery(outbox.len(), tick.event_capacity) {
                 break;
             }
             outbox.push_back(SwarmEvent::BroadcastDelivered {
