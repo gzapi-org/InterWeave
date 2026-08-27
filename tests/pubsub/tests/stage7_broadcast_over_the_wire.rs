@@ -1883,6 +1883,117 @@ async fn a_publish_with_no_mesh_peers_is_accepted_and_reported_degraded() {
     a.shutdown().await.expect("a stops");
 }
 
+/// A republished envelope reaches a local sibling ONCE.
+///
+/// A publisher republishes while the mesh forms — `publish_repeatedly`
+/// sends the same envelope twelve times, and every test here relies on
+/// that being safe. Remotely it is: dedup collapses the copies. A local
+/// fan-out that pushed straight into the queues delivered twelve, which
+/// is invisible to any test that publishes once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_republished_envelope_reaches_a_local_sibling_once() {
+    let (a_id, _) = who();
+    let a = node(&a_id, &[], &["general"], SubstrateConfig::default()).await;
+    for s in ["human", "claude"] {
+        a.join(channel("general"), s)
+            .await
+            .expect("lands")
+            .expect("accepted");
+    }
+
+    publish_repeatedly(&a, "human", 8, b"republished").await;
+
+    assert_eq!(
+        drain_until(&a, "claude", PATIENCE).await.len(),
+        1,
+        "twelve attempts at one envelope are one delivery"
+    );
+    a.shutdown().await.expect("a stops");
+}
+
+/// A local publish reports the same outcomes as an inbound one.
+///
+/// The wake-up and the overload drop are what a consumer waiting on
+/// `next_event()` has; a local fan-out that reported neither left a
+/// message sitting in a queue nobody was told about, and lost one
+/// silently.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_local_publish_announces_delivery_and_overflow() {
+    let (a_id, _) = who();
+    // Room for one delivery per session, so the second publish overflows.
+    let mut a = node_with_queue(&a_id, &[], &["general"], SubstrateConfig::default(), 1).await;
+    for s in ["human", "claude"] {
+        a.join(channel("general"), s)
+            .await
+            .expect("lands")
+            .expect("accepted");
+    }
+
+    a.publish(channel("general"), "human", envelope(11, b"first"))
+        .await
+        .expect("lands")
+        .expect("accepted");
+    wait_for(
+        &mut a,
+        "the local delivery wake-up",
+        |e| matches!(e, SwarmEvent::BroadcastDelivered { session, .. } if session == "claude"),
+    )
+    .await;
+
+    a.publish(channel("general"), "human", envelope(12, b"second"))
+        .await
+        .expect("lands")
+        .expect("accepted");
+    wait_for(
+        &mut a,
+        "the local overload report",
+        |e| matches!(e, SwarmEvent::BroadcastDropped { sessions, .. } if *sessions == 1),
+    )
+    .await;
+
+    a.shutdown().await.expect("a stops");
+}
+
+/// Publishing into an empty channel cannot grow the outbox without bound.
+///
+/// `BroadcastUnreachable` is emitted per COMMAND rather than per received
+/// message, which makes it the easiest informational event to drive: a
+/// client that publishes in a loop while nothing drains the event stream
+/// would append one per publish forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_unreachable_publishes_cannot_grow_the_outbox() {
+    let (a_id, _) = who();
+    let cramped = SubstrateConfig {
+        event_capacity: 4,
+        ..SubstrateConfig::default()
+    };
+    let a = node(&a_id, &[], &["general"], cramped).await;
+    a.join(channel("general"), "only")
+        .await
+        .expect("lands")
+        .expect("accepted");
+
+    // Nothing drains the event stream while these run.
+    for i in 0..64u8 {
+        a.publish(channel("general"), "only", envelope(i, b"nobody there"))
+            .await
+            .expect("the command lands")
+            .expect("accepted locally");
+    }
+
+    // STILL SERVING. An outbox past its bound stops the Swarm being
+    // polled at all, so a node that grew one could not answer this.
+    let listened = tokio::time::timeout(
+        PATIENCE,
+        a.listen("/ip4/127.0.0.1/tcp/0".parse().expect("a loopback address")),
+    )
+    .await
+    .expect("the node still answers commands");
+    assert!(listened.is_ok(), "the outbox stayed within its bound");
+
+    a.shutdown().await.expect("a stops");
+}
+
 /// Publish the same envelope a few times while the mesh forms.
 ///
 /// A single publish immediately after connecting reaches nobody: GossipSub

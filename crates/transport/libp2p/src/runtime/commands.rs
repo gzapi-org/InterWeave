@@ -50,6 +50,7 @@ pub(super) fn handle_command(
     now_ms: u64,
     wall_ms: u64,
     outbox: &mut std::collections::VecDeque<SwarmEvent>,
+    event_capacity: usize,
     command: SwarmCommand,
 ) {
     match command {
@@ -260,10 +261,15 @@ pub(super) fn handle_command(
                 deliver_locally(
                     broadcast_state,
                     manager,
+                    outbox,
                     &channel,
                     &session,
                     &frame,
-                    wall_ms,
+                    LocalPublishTick {
+                        now_ms,
+                        wall_ms,
+                        event_capacity,
+                    },
                 );
             }
             // DEGRADED REACHABILITY IS STILL SUCCESS, and still worth
@@ -271,7 +277,13 @@ pub(super) fn handle_command(
             // degraded rather than as delivery, and the caller's `Ok` is
             // the wrong place for it -- broadcast promises the caller
             // nothing about reach. The operator gets the other half.
-            if unreachable {
+            //
+            // BOUNDED like every other informational event: a stalled
+            // consumer plus a client publishing into an empty channel is
+            // an unbounded outbox otherwise, and this one is emitted per
+            // COMMAND rather than per received message, so it is the
+            // easiest of them to drive.
+            if unreachable && super::may_buffer_delivery(outbox.len(), event_capacity) {
                 outbox.push_back(SwarmEvent::BroadcastUnreachable {
                     channel: channel.clone(),
                 });
@@ -638,50 +650,97 @@ pub(super) fn handle_command(
 /// that handles it cannot be reached from a test. The decision therefore
 /// lives where a test can reach it, the same reason `admit_outbound` was
 /// extracted.
-/// Hand a locally published broadcast to the OTHER sessions that joined.
+/// The clocks and the bound one local publish is admitted against.
 ///
-/// GossipSub does not loop a publish back to its own node: the backend
-/// records and forwards it, and a reflected copy is duplicate-suppressed.
-/// So without this, two local clients on one profile that have both
-/// joined a channel never see each other's messages -- which is exactly
-/// the case `human-client-model-b.md` specifies must work, and it says
-/// they receive because they explicitly joined, not because of anything
-/// about the wire.
+/// Named rather than passed as three more positional scalars: two of them
+/// are `u64` milliseconds that mean different things, and a call site that
+/// swapped them would compile.
+struct LocalPublishTick {
+    /// Monotonic milliseconds, for dedup TTLs.
+    now_ms: u64,
+    /// Wall-clock milliseconds, for the receipt stamp.
+    wall_ms: u64,
+    /// The BASE outbox capacity, re-read before every event.
+    event_capacity: usize,
+}
+
+/// Admit a locally published broadcast for the OTHER sessions that joined.
 ///
-/// The PUBLISHING session is excluded. It is the one participant that
-/// already has the message, and handing it back would make every client
-/// filter its own traffic to avoid acting on it twice.
+/// Through the SAME admission as an inbound message, not beside it.
+/// GossipSub does not loop a publish back to its own node, so without
+/// this two local clients on one profile never see each other's messages
+/// — the case `human-client-model-b.md` is built around.
 ///
-/// The same bounded queue and the same drop accounting as inbound
-/// delivery: a local publish is not a reason to exceed a session's bound,
-/// and a local drop is announced for the same reason a remote one is.
+/// The first version of this pushed straight into the queues, and every
+/// difference from inbound admission was a defect: retries of one
+/// envelope were delivered once remotely and once PER ATTEMPT locally,
+/// because only dedup collapses the republishing a publisher does while
+/// the mesh forms; same-key conflicting bodies that inbound refuses were
+/// delivered; and neither the delivery wake-up nor the overload drop was
+/// reported. Sharing the path is what stops the two drifting again.
 fn deliver_locally(
     broadcast_state: &mut super::broadcast::BroadcastState,
     manager: &ConnectionManager,
+    outbox: &mut std::collections::VecDeque<SwarmEvent>,
     channel: &interweave_transport_api::ChannelId,
     publisher_session: &str,
     frame: &interweave_transport_api::BroadcastMessageV1,
-    wall_ms: u64,
+    tick: LocalPublishTick,
 ) {
+    let LocalPublishTick {
+        now_ms,
+        wall_ms,
+        event_capacity,
+    } = tick;
     let Some(source_peer) = manager.local_peer().cloned() else {
         // Unbound only before the identity is installed, which is before
         // any session can have joined anything.
         return;
     };
-    for session in broadcast_state.subs.subscribers(channel) {
-        if session == publisher_session {
-            continue;
+    let admission = interweave_transport_runtime::broadcast_inbound::admit_local_broadcast(
+        frame,
+        channel,
+        &source_peer,
+        interweave_transport_runtime::direct_inbound::Clocks {
+            monotonic_ms: now_ms,
+            wall_ms,
+        },
+        Some(publisher_session),
+        &mut interweave_transport_runtime::broadcast_inbound::LocalContext {
+            dedup: &mut broadcast_state.dedup,
+            subs: &broadcast_state.subs,
+            queues: &mut broadcast_state.queues,
+        },
+    );
+
+    let interweave_transport_runtime::broadcast_inbound::BroadcastAdmission::Delivered {
+        sessions,
+        dropped,
+    } = admission
+    else {
+        return;
+    };
+
+    // THE SAME EVENTS AS INBOUND, under the same live capacity check.
+    // Every push here re-reads the outbox length: one publish can notify
+    // every joined session, which is exactly how a single free slot turns
+    // into N appended events.
+    if !dropped.is_empty() && super::may_buffer_delivery(outbox.len(), event_capacity) {
+        outbox.push_back(SwarmEvent::BroadcastDropped {
+            channel: channel.clone(),
+            source_peer: source_peer.clone(),
+            sessions: dropped.len(),
+        });
+    }
+    for session in sessions {
+        if !super::may_buffer_delivery(outbox.len(), event_capacity) {
+            break;
         }
-        let _ = broadcast_state.queues.push(
-            &session,
-            interweave_transport_runtime::session_queue::BroadcastEvent {
-                source_peer: source_peer.clone(),
-                channel: channel.clone(),
-                message_id: frame.message_id,
-                payload: frame.payload.clone(),
-                received_at: wall_ms,
-            },
-        );
+        outbox.push_back(SwarmEvent::BroadcastDelivered {
+            channel: channel.clone(),
+            source_peer: source_peer.clone(),
+            session,
+        });
     }
 }
 

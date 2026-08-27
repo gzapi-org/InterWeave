@@ -763,6 +763,7 @@ impl SwarmRuntime {
                                     now_ms(started),
                                     wall_ms(),
                                     &mut outbox,
+                                    config.event_capacity,
                                     command,
                                 );
                                 // A revocation names connections; this
