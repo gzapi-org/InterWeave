@@ -11,6 +11,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use libp2p::Multiaddr;
 use libp2p::core::transport::ListenerId;
 use libp2p::identify;
 use libp2p::swarm::SwarmEvent as Libp2pSwarmEvent;
@@ -428,6 +429,34 @@ pub(super) fn handle_command(
 /// gives backoff something to act on. Recording here without a scheduler
 /// would populate state nothing reads, and a half-wired feedback loop is
 /// harder to reason about than an absent one.
+/// Forget one address a listener is no longer serving.
+///
+/// Returns whether it was being tracked, so the caller reports a
+/// withdrawal only for an address a consumer was actually told about.
+///
+/// The ENTRY SURVIVES an emptied address list. The listener itself is
+/// still open — only one of its addresses went away — so it still holds
+/// a socket and must still count against `max_active_listeners`. Removing
+/// the entry here would hand its slot back while it was still serving.
+///
+/// A free function because `SwarmEvent` is `#[non_exhaustive]`: an
+/// `ExpiredListenAddr` cannot be constructed outside libp2p, so the arm
+/// that handles it cannot be reached from a test. The decision therefore
+/// lives where a test can reach it, the same reason `admit_outbound` was
+/// extracted.
+pub(super) fn forget_address(
+    active: &mut ActiveListeners,
+    listener: ListenerId,
+    address: &Multiaddr,
+) -> bool {
+    let Some(addresses) = active.get_mut(&listener) else {
+        return false;
+    };
+    let before = addresses.len();
+    addresses.retain(|a| a != address);
+    before != addresses.len()
+}
+
 pub(super) fn translate(
     event: Libp2pSwarmEvent<SubstrateBehaviourEvent>,
     listens: &mut PendingListens,
@@ -454,6 +483,23 @@ pub(super) fn translate(
             active.entry(listener_id).or_default().push(address.clone());
             Some(SwarmEvent::Listening { address })
         }
+        // ONE ADDRESS GONE IS NOT THE LISTENER GONE. libp2p reports an
+        // address going away without closing the listener, and only
+        // `ListenerClosed` used to touch this table — so the stale
+        // address stayed, `stop_listening` on it would have matched and
+        // killed a listener still serving its other addresses, and the
+        // consumer was never told the address had gone.
+        Libp2pSwarmEvent::ExpiredListenAddr {
+            listener_id,
+            address,
+        } => forget_address(active, listener_id, &address).then(|| {
+            SwarmEvent::ListeningStopped {
+                addresses: vec![address],
+                // Expiry is orderly: the address went away, nothing
+                // failed.
+                reason: None,
+            }
+        }),
         // A listener that dies before binding must not leave `listen`
         // waiting for an address that will never arrive.
         //
@@ -511,5 +557,70 @@ pub(super) fn translate(
             }
         }),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod expired_address_tests {
+    use super::{ActiveListeners, forget_address};
+    use libp2p::Multiaddr;
+    use libp2p::core::transport::ListenerId;
+
+    fn addr(port: u16) -> Multiaddr {
+        format!("/ip4/127.0.0.1/tcp/{port}")
+            .parse()
+            .expect("valid multiaddr")
+    }
+
+    #[test]
+    fn an_expired_address_stops_naming_its_listener() {
+        // The defect this closes: the stale address stayed in the table,
+        // so `stop_listening` on it matched and would have removed a
+        // listener that was still serving its other address.
+        let id = ListenerId::next();
+        let mut active: ActiveListeners = ActiveListeners::new();
+        active.insert(id, vec![addr(1), addr(2)]);
+
+        assert!(forget_address(&mut active, id, &addr(1)));
+        assert_eq!(
+            active.get(&id).map(Vec::as_slice),
+            Some([addr(2)].as_slice()),
+            "only the expired address goes"
+        );
+        assert!(
+            !active.values().any(|a| a.contains(&addr(1))),
+            "nothing can still resolve the expired address to this listener"
+        );
+    }
+
+    #[test]
+    fn a_listener_that_lost_every_address_still_holds_its_slot() {
+        // It is still open — only its addresses went away — so it still
+        // holds a socket and must still count against
+        // `max_active_listeners`. Dropping the entry would hand the slot
+        // back while the listener was still serving.
+        let id = ListenerId::next();
+        let mut active: ActiveListeners = ActiveListeners::new();
+        active.insert(id, vec![addr(3)]);
+
+        assert!(forget_address(&mut active, id, &addr(3)));
+        assert!(
+            active.contains_key(&id),
+            "the listener is still open and still counted"
+        );
+        assert_eq!(active.len(), 1);
+    }
+
+    #[test]
+    fn an_address_that_was_never_tracked_reports_no_withdrawal() {
+        // A consumer is told an address stopped serving only if it was
+        // told it started, so the caller reports on this answer rather
+        // than announcing a withdrawal nobody could match.
+        let id = ListenerId::next();
+        let mut active: ActiveListeners = ActiveListeners::new();
+        active.insert(id, vec![addr(4)]);
+
+        assert!(!forget_address(&mut active, id, &addr(5)));
+        assert!(!forget_address(&mut active, ListenerId::next(), &addr(4)));
     }
 }
