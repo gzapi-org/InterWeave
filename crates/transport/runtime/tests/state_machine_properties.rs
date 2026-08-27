@@ -409,12 +409,19 @@ proptest! {
                                 fingerprint(b"loud"));
         }
 
-        // The quiet peer arrives afterwards and must still get its first
-        // reservation.
-        let quiet = dedup_key(1, 200);
-        prop_assert!(
-            matches!(map.acquire(&quiet, fingerprint(b"quiet")), Ok(Reservation::Owner)),
-            "a flooding peer consumed a quiet peer's first reservation"
-        );
+        // The quiet peer arrives afterwards and must get its WHOLE
+        // allowance, not merely its first reservation. Checking only the
+        // first would pass an implementation that admits it and then
+        // counts the loud peer's outstanding requests when deciding the
+        // quiet peer's second — and the bounds property cannot catch
+        // that, because a premature refusal violates no upper bound.
+        for i in 0..max_per_peer {
+            let quiet = dedup_key(1, u8::try_from(200 + i).expect("in range"));
+            prop_assert!(
+                matches!(map.acquire(&quiet, fingerprint(b"quiet")), Ok(Reservation::Owner)),
+                "reservation {i} of {max_per_peer} was refused — a flooding \
+                 peer consumed a quiet peer's allowance"
+            );
+        }
     }
 }
