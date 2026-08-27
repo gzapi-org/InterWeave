@@ -177,7 +177,7 @@ overflow-checks = true
 # Do not restate the member list here. `[workspace].members` above is the
 # only roster, and a comment describing it goes stale the moment a stage
 # opens.
-status = "stage-6-direct-v2"
+status = "stage-7-gossipsub"
 architecture_root = "architecture"
 
 planned_members = [
