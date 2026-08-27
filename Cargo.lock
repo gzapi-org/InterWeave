@@ -1646,6 +1646,8 @@ version = "0.0.0"
 dependencies = [
  "interweave-test-support",
  "interweave-transport-api",
+ "interweave-transport-runtime",
+ "libp2p",
 ]
 
 [[package]]

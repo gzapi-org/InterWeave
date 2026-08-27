@@ -16,8 +16,10 @@ pub mod endpoint_queue;
 pub mod endpoint_registry;
 pub mod fingerprint;
 pub mod ingress;
+pub mod mesh_id;
 pub mod preauth;
 pub mod reply_token;
+pub mod topic;
 
 pub use connection_manager::{
     ADMIT_RELOAD_ATTEMPTS, ConnectionManager, ConnectionSlot, DEFAULT_MAX_ADDRESSES_PER_PEER,
@@ -50,6 +52,8 @@ pub use ingress::{
     SubscriptionRegistry,
 };
 pub use interweave_trust_api::{EndpointTrustPolicy, PeerTrustPolicy};
+pub use mesh_id::{MeshMessageId, gossipsub_message_id_v1};
+pub use topic::{TopicKey, topic_key_v1};
 // Same reason: `EndpointRegistry::claim` takes a `Generation`, so it is
 // already in this crate's public API and a caller that could not spell
 // it could not claim a lease.

@@ -28,3 +28,5 @@ workspace = true
 [dev-dependencies]
 interweave-test-support = { path = "../support" }
 interweave-transport-api = { path = "../../crates/api/transport-api" }
+interweave-transport-runtime = { path = "../../crates/transport/runtime" }
+libp2p = { workspace = true }
