@@ -193,16 +193,26 @@ run_against 'impl Refusal {
 }' 'fn go(r: &Refusal) { let _ = refusal.to_wire(); }' 'Refusal::to_wire call refusal.to_wire(' ""
 assert_rc   "a call exemption naming a real call expression passes" 0
 
-# A call inside the DEFINING file does not satisfy the exemption. The
-# exemption exists because a method call cannot be attributed to a type,
-# not because same-file use should count — that was its own mechanism and
-# was removed for producing holes.
+# A call inside the DEFINING file DOES satisfy an explicit exemption,
+# and only through this path. The ordinary caller scan still ignores the
+# defining file; what is different here is that a human wrote the call
+# down and this check verifies the exact text exists. Without it a
+# genuine caller is inexpressible: `TrustSources::classify` is called by
+# `self.trust.classify` inside its own file.
 run_against 'impl Refusal {
     pub fn to_wire(&self) -> u8 { 0 }
 }
 fn local(r: &Refusal) -> u8 { refusal.to_wire() }' 'fn go(_r: &Refusal) {}' \
     'Refusal::to_wire call refusal.to_wire(' ""
-assert_rc   "a call in the defining file does not satisfy a call exemption" 1
+assert_rc   "an explicit call exemption may name a call in the defining file" 0
+
+# But the ordinary scan is unchanged: without the exemption, a same-file
+# caller is still not a caller.
+run_against 'impl Refusal {
+    pub fn to_wire(&self) -> u8 { 0 }
+}
+fn local(r: &Refusal) -> u8 { refusal.to_wire() }' 'fn go(_r: &Refusal) {}' "" ""
+assert_rc   "  and same-file use alone still does not count" 1
 
 run_against 'impl Refusal {
     pub fn to_wire(&self) -> u8 { 0 }

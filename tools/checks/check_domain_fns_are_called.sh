@@ -320,16 +320,21 @@ for file in "${domain[@]}"; do
             seen_exempt["$qualified"]=1
             expr="${exempt_call[$qualified]}"
             found_call=0
+            # The DEFINING FILE COUNTS HERE, and only here.
+            #
+            # The ordinary caller scan still ignores it, and same-file
+            # production use is still not a mechanism — it was one, and
+            # it was removed for producing a hole in two consecutive
+            # review rounds. What is different about this path is that a
+            # human wrote the call down and the check verifies that exact
+            # text still exists. An implicit rule cannot tell a caller
+            # from a declaration; a recorded expression can be read.
+            #
+            # Without this, a genuine production caller is inexpressible:
+            # `TrustSources::classify` is called by `self.trust.classify`
+            # inside `connection_manager.rs`, its own file, and no
+            # exemption could say so.
             for other in "${all_rs[@]}"; do
-                # The defining file does not count, exactly as it does
-                # not for the ordinary caller scan. A `call` exemption
-                # exists because the check cannot attribute a METHOD CALL
-                # to a type — not because same-file use should count.
-                # Same-file production use was its own mechanism and was
-                # removed for producing a hole in two consecutive review
-                # rounds; letting it back in through the exemption path
-                # would undo that quietly.
-                [[ "$other" == "$file" ]] && continue
                 if grep -qF -- "$expr" <<<"$(production_of "$other")"; then
                     found_call=1
                     break
