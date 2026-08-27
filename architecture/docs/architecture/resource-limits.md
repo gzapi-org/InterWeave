@@ -32,6 +32,8 @@ Default values are conservative architecture targets, not performance promises. 
 | direct inflight/peer | 8 | 32 |
 | inbound direct requests/trusted peer/minute | 120, burst 32 | 6000/min, burst 512 |
 | inbound direct requests/global/minute | 1200, burst 256 | 60000/min, burst 2048 |
+| inbound broadcast messages/trusted peer/minute | 120, burst 32 | 6000/min, burst 512 |
+| inbound broadcast messages/global/minute | 1200, burst 256 | 60000/min, burst 2048 |
 | direct dedup in-flight reservations/global | 128 | 512 |
 | direct dedup in-flight reservations/source peer | 8 | 32 |
 | dedup IDs | 10,000 / 5 min | configurable bounded |

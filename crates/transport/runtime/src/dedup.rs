@@ -99,15 +99,37 @@ impl DedupKey {
     }
 }
 
-/// What a positive direct entry remembers.
+/// Where a positive entry was delivered, remembered so a retry replays
+/// the same route rather than re-resolving.
+///
+/// A mode-shaped enum rather than an `Option<EndpointId>` for the reason
+/// [`DedupKey`] is one: broadcast has no endpoint at all under ADR-0030,
+/// and an optional field invites a broadcast record to carry endpoint
+/// data, or a direct record to be written without the route its whole
+/// purpose is to remember.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordedRoute {
+    /// Delivered to every locally joined session on a channel.
+    ///
+    /// Carries nothing: the channel is already in the key, and there is
+    /// no per-recipient route to replay — a broadcast retry is suppressed,
+    /// not re-delivered anywhere.
+    Broadcast,
+    /// Delivered to one resolved local endpoint.
+    Direct {
+        /// The endpoint that actually accepted it, resolved at first
+        /// admission. A retry replays this rather than re-resolving,
+        /// which is what "the default changing does not reroute an
+        /// accepted retry" means concretely.
+        resolved_endpoint: EndpointId,
+    },
+}
+
+/// What a positive entry remembers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptedRecord {
-    /// The endpoint that actually accepted it, resolved at first admission.
-    ///
-    /// An outcome, not part of the key. A retry replays this stored route
-    /// rather than re-resolving, which is what "the default changing does
-    /// not reroute an accepted retry" means concretely.
-    pub resolved_endpoint: EndpointId,
+    /// Where it went, in the shape of its mode.
+    pub route: RecordedRoute,
     /// The content identity, so a conflicting body is detectable.
     pub fingerprint: ContentFingerprint,
     /// When the entry was created.
@@ -123,8 +145,8 @@ pub enum Admission {
     ///
     /// The caller must NOT re-enqueue. The message was already delivered.
     DuplicateAccepted {
-        /// The endpoint the first attempt resolved to.
-        resolved_endpoint: EndpointId,
+        /// Where the first attempt went.
+        route: RecordedRoute,
     },
     /// Same key, different content.
     ///
@@ -195,14 +217,14 @@ impl DedupCache {
         if record.fingerprint != fingerprint {
             return Admission::Conflict;
         }
-        let resolved_endpoint = record.resolved_endpoint.clone();
+        let route = record.route.clone();
         // LRU, so a HIT is a use. Without this a frequently retried entry
         // is evicted before a newer one nobody has touched, and the next
         // retry of the hot key reads as fresh — delivering it a second
         // time inside the TTL, which is the duplicate this cache exists
         // to suppress.
         self.touch(key);
-        Admission::DuplicateAccepted { resolved_endpoint }
+        Admission::DuplicateAccepted { route }
     }
 
     /// Move a key to the most-recently-used end.
@@ -224,7 +246,7 @@ impl DedupCache {
     pub fn record_accepted(
         &mut self,
         key: DedupKey,
-        resolved_endpoint: EndpointId,
+        route: RecordedRoute,
         fingerprint: ContentFingerprint,
         now_ms: u64,
     ) {
@@ -242,7 +264,7 @@ impl DedupCache {
         self.entries.insert(
             key,
             AcceptedRecord {
-                resolved_endpoint,
+                route,
                 fingerprint,
                 stored_at_ms: now_ms,
             },
@@ -485,17 +507,73 @@ mod tests {
         }
     }
 
+    /// The direct route a test means when it names an endpoint.
+    fn to(name: &str) -> RecordedRoute {
+        RecordedRoute::Direct {
+            resolved_endpoint: ep(name),
+        }
+    }
+
+    #[test]
+    fn a_broadcast_duplicate_is_recognised_without_an_endpoint() {
+        // The cache is shared between modes, and broadcast has no
+        // endpoint to record (ADR-0030). Before `RecordedRoute` the
+        // stored route was an `EndpointId` outright, so this could not be
+        // written at all -- the only way to reach it was to invent a
+        // sentinel endpoint for a message that has none, which is how a
+        // fabricated route ends up reported to a caller.
+        let mut c = DedupCache::default();
+        let key = DedupKey::Broadcast {
+            source_peer: TransportIdentity::parse(P1).expect("valid peer"),
+            channel: ChannelId::parse("general").expect("valid channel"),
+            message_id: mid(1),
+        };
+
+        assert_eq!(c.admit(&key, fp(b"hello"), 0), Admission::Fresh);
+        c.record_accepted(key.clone(), RecordedRoute::Broadcast, fp(b"hello"), 0);
+        assert_eq!(
+            c.admit(&key, fp(b"hello"), 1_000),
+            Admission::DuplicateAccepted {
+                route: RecordedRoute::Broadcast
+            },
+            "a broadcast retry is suppressed, and there is no route to replay"
+        );
+
+        // And the conflict rule is the same one, on the same cache: one
+        // id, two bodies, from one publisher on one channel.
+        assert_eq!(c.admit(&key, fp(b"different"), 1_001), Admission::Conflict);
+    }
+
+    #[test]
+    fn a_broadcast_and_a_direct_key_do_not_share_an_entry() {
+        // Same publisher, same message id, both modes. The two must not
+        // collapse: `mode` is part of the key precisely so one mode's
+        // dedup entry cannot suppress the other's delivery.
+        let mut c = DedupCache::default();
+        let broadcast = DedupKey::Broadcast {
+            source_peer: TransportIdentity::parse(P1).expect("valid peer"),
+            channel: ChannelId::parse("general").expect("valid channel"),
+            message_id: mid(9),
+        };
+        let direct_key = direct(DestinationSelector::Default, 9);
+
+        c.record_accepted(broadcast, RecordedRoute::Broadcast, fp(b"body"), 0);
+        assert_eq!(
+            c.admit(&direct_key, fp(b"body"), 1),
+            Admission::Fresh,
+            "the direct message has not been seen, whatever the broadcast cache holds"
+        );
+    }
+
     #[test]
     fn a_fresh_message_is_admitted_and_a_matching_retry_replays_its_route() {
         let mut c = DedupCache::default();
         let key = direct(DestinationSelector::Default, 1);
         assert_eq!(c.admit(&key, fp(b"hello"), 0), Admission::Fresh);
-        c.record_accepted(key.clone(), ep("human"), fp(b"hello"), 0);
+        c.record_accepted(key.clone(), to("human"), fp(b"hello"), 0);
         assert_eq!(
             c.admit(&key, fp(b"hello"), 1_000),
-            Admission::DuplicateAccepted {
-                resolved_endpoint: ep("human")
-            }
+            Admission::DuplicateAccepted { route: to("human") }
         );
     }
 
@@ -508,7 +586,7 @@ mod tests {
         // a second time to a different client.
         let mut c = DedupCache::default();
         let key = direct(DestinationSelector::Default, 7);
-        c.record_accepted(key.clone(), ep("human"), fp(b"body"), 0);
+        c.record_accepted(key.clone(), to("human"), fp(b"body"), 0);
 
         // The key is unchanged because the sender addressed it the same
         // way; only the receiver's configuration moved.
@@ -516,9 +594,7 @@ mod tests {
         assert_eq!(retry, key);
         assert_eq!(
             c.admit(&retry, fp(b"body"), 10),
-            Admission::DuplicateAccepted {
-                resolved_endpoint: ep("human")
-            }
+            Admission::DuplicateAccepted { route: to("human") }
         );
     }
 
@@ -530,7 +606,7 @@ mod tests {
         let explicit = direct(DestinationSelector::Explicit(ep("human")), 3);
         let by_default = direct(DestinationSelector::Default, 3);
         assert_ne!(explicit, by_default);
-        c.record_accepted(explicit, ep("human"), fp(b"x"), 0);
+        c.record_accepted(explicit, to("human"), fp(b"x"), 0);
         assert_eq!(c.admit(&by_default, fp(b"x"), 0), Admission::Fresh);
     }
 
@@ -538,7 +614,7 @@ mod tests {
     fn the_same_id_with_a_different_body_is_a_conflict() {
         let mut c = DedupCache::default();
         let key = direct(DestinationSelector::Default, 2);
-        c.record_accepted(key.clone(), ep("human"), fp(b"first"), 0);
+        c.record_accepted(key.clone(), to("human"), fp(b"first"), 0);
         assert_eq!(c.admit(&key, fp(b"second"), 0), Admission::Conflict);
     }
 
@@ -555,7 +631,7 @@ mod tests {
             message_id: mid(9),
         };
         assert_ne!(from_claude, from_human);
-        c.record_accepted(from_claude, ep("human"), fp(b"a"), 0);
+        c.record_accepted(from_claude, to("human"), fp(b"a"), 0);
         assert_eq!(c.admit(&from_human, fp(b"a"), 0), Admission::Fresh);
     }
 
@@ -576,7 +652,7 @@ mod tests {
     fn entries_expire_after_the_ttl() {
         let mut c = DedupCache::new(10, 1_000);
         let key = direct(DestinationSelector::Default, 4);
-        c.record_accepted(key.clone(), ep("human"), fp(b"x"), 0);
+        c.record_accepted(key.clone(), to("human"), fp(b"x"), 0);
         assert!(matches!(
             c.admit(&key, fp(b"x"), 999),
             Admission::DuplicateAccepted { .. }
@@ -593,7 +669,7 @@ mod tests {
         for i in 0..3u8 {
             c.record_accepted(
                 direct(DestinationSelector::Default, i),
-                ep("human"),
+                to("human"),
                 fp(b"x"),
                 u64::from(i),
             );
@@ -620,15 +696,15 @@ mod tests {
         let a = direct(DestinationSelector::Default, 1);
         let b = direct(DestinationSelector::Default, 2);
         let d = direct(DestinationSelector::Default, 3);
-        c.record_accepted(a.clone(), ep("human"), fp(b"x"), 0);
-        c.record_accepted(b.clone(), ep("human"), fp(b"x"), 1);
+        c.record_accepted(a.clone(), to("human"), fp(b"x"), 0);
+        c.record_accepted(b.clone(), to("human"), fp(b"x"), 1);
 
         assert!(matches!(
             c.admit(&a, fp(b"x"), 2),
             Admission::DuplicateAccepted { .. }
         ));
 
-        c.record_accepted(d, ep("human"), fp(b"x"), 3);
+        c.record_accepted(d, to("human"), fp(b"x"), 3);
         // A survives because it was used; B, untouched, is the eviction.
         assert!(matches!(
             c.admit(&a, fp(b"x"), 4),

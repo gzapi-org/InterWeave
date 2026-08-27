@@ -62,6 +62,17 @@ transport:
     # Network compatibility invariant: mesh duplicate suppression binds the
     # signed source PeerId plus GossipSub wire sequence number; application envelope IDs are never mesh keys.
     message_id_function: literal[source-peer-seqno-sha256-v1] = source-peer-seqno-sha256-v1
+    # Accounted SEPARATELY from direct.inbound_rate_limit above, so a
+    # broadcast flood cannot spend a peer's direct allowance or the
+    # reverse. Over-rate messages are dropped before local delivery and
+    # still reported to the mesh: a validation verdict answers validity
+    # and authorization, which a local rate says nothing about.
+    inbound_rate_limit:
+      enabled: literal[true] = true
+      per_peer_per_minute: integer[1..6000] = 120
+      per_peer_burst: integer[1..512] = 32
+      global_per_minute: integer[1..60000] = 1200
+      global_burst: integer[1..2048] = 256
   connectivity:
     # Mandatory standard-v1 reachability stack. Reduced builds that omit any
     # required client mechanism are non-standard and must declare that limitation.

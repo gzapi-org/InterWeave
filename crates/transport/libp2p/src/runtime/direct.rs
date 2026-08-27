@@ -20,8 +20,9 @@ use interweave_transport_api::{
     DirectMessageV2, DirectRejectReason, EndpointId, TransportIdentity,
 };
 use interweave_transport_runtime::TrustSources;
+use interweave_transport_runtime::dedup::RecordedRoute;
 use interweave_transport_runtime::direct_inbound::{
-    AdmissionContext, Outcome as AdmissionOutcome, admit_prefix, admit_structured,
+    AdmissionContext, Outcome as AdmissionOutcome, PrefixContext, admit_prefix, admit_structured,
 };
 use interweave_transport_runtime::endpoint_queue::EndpointQueues;
 use interweave_transport_runtime::endpoint_registry::{EndpointRegistry, RegisteredEndpoint};
@@ -454,13 +455,13 @@ pub(super) fn handle_direct(
             };
 
             let gated = {
-                let mut ctx = AdmissionContext {
+                // THE NARROW CONTEXT, and that is the point: these three
+                // gates are all this call reads, so it no longer has to
+                // borrow the registry and every open queue to ask whether
+                // a peer is trusted, draining, or over its rate.
+                let mut ctx = PrefixContext {
                     trust: &state.trust,
                     ingress: &mut state.ingress,
-                    dedup: &mut state.dedup,
-                    reservations: &mut state.reservations,
-                    registry: &state.registry,
-                    queues: &mut state.queues,
                     draining,
                 };
                 admit_prefix(&source, now_ms, &mut ctx)
@@ -512,13 +513,15 @@ pub(super) fn handle_direct(
 
             let outcome = {
                 let mut ctx = AdmissionContext {
-                    trust: &state.trust,
-                    ingress: &mut state.ingress,
+                    prefix: PrefixContext {
+                        trust: &state.trust,
+                        ingress: &mut state.ingress,
+                        draining,
+                    },
                     dedup: &mut state.dedup,
                     reservations: &mut state.reservations,
                     registry: &state.registry,
                     queues: &mut state.queues,
-                    draining,
                 };
                 admit_structured(
                     &request,
@@ -700,9 +703,18 @@ pub(super) fn waiter_response(
     // request that passed one is a different answer to a different
     // question, and the caller cannot tell the two apart if this
     // function invents one.
-    dedup.get(&key).map(|record| DirectResponse::Accepted {
-        message_id: request.message_id,
-        resolved_endpoint: record.resolved_endpoint.clone(),
+    //
+    // A BROADCAST ROUTE HERE IS ALSO `None`, and for the same reason: the
+    // key built above is a direct key, so a broadcast record cannot be
+    // stored under it — and if one somehow were, this function still has
+    // no endpoint to name. Answering with an invented one is exactly the
+    // fabrication the paragraph above refuses.
+    dedup.get(&key).and_then(|record| match &record.route {
+        RecordedRoute::Direct { resolved_endpoint } => Some(DirectResponse::Accepted {
+            message_id: request.message_id,
+            resolved_endpoint: resolved_endpoint.clone(),
+        }),
+        RecordedRoute::Broadcast => None,
     })
 }
 
@@ -907,7 +919,7 @@ mod waiter_tests {
     use interweave_transport_api::{
         DirectMessageV2, EndpointId, MediaType, MessageId, Payload, TransportIdentity,
     };
-    use interweave_transport_runtime::dedup::{DEFAULT_TTL_MS, DedupCache};
+    use interweave_transport_runtime::dedup::{DEFAULT_TTL_MS, DedupCache, RecordedRoute};
     use interweave_transport_runtime::direct_inbound::dedup_key;
     use interweave_transport_runtime::fingerprint::direct_content_fingerprint_v1;
 
@@ -942,7 +954,14 @@ mod waiter_tests {
         let mut dedup = DedupCache::new(64, DEFAULT_TTL_MS);
         let req = request();
         let fingerprint = direct_content_fingerprint_v1(Some("text/plain"), b"hi").expect("hashes");
-        dedup.record_accepted(dedup_key(&req, &peer()), endpoint("claude"), fingerprint, 0);
+        dedup.record_accepted(
+            dedup_key(&req, &peer()),
+            RecordedRoute::Direct {
+                resolved_endpoint: endpoint("claude"),
+            },
+            fingerprint,
+            0,
+        );
 
         assert_eq!(
             waiter_response(&dedup, &req, &peer()),
@@ -985,7 +1004,14 @@ mod waiter_tests {
         let mut dedup = DedupCache::new(64, DEFAULT_TTL_MS);
         let req = request();
         let fingerprint = direct_content_fingerprint_v1(Some("text/plain"), b"hi").expect("hashes");
-        dedup.record_accepted(dedup_key(&req, &peer()), endpoint("claude"), fingerprint, 0);
+        dedup.record_accepted(
+            dedup_key(&req, &peer()),
+            RecordedRoute::Direct {
+                resolved_endpoint: endpoint("claude"),
+            },
+            fingerprint,
+            0,
+        );
         match waiter_response(&dedup, &req, &peer()) {
             Some(
                 DirectResponse::Accepted { message_id, .. }

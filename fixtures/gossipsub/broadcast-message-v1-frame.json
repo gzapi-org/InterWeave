@@ -1,0 +1,85 @@
+{
+  "fixture": "BroadcastMessageV1 envelope framing",
+  "specification": "architecture/transport/libp2p/PUBSUB.md",
+  "adr": [
+    "0004",
+    "0025",
+    "0030"
+  ],
+  "status": "frozen",
+  "algorithm": {
+    "id": "broadcast-message-v1-frame",
+    "byte_order": "big-endian for every multi-byte integer (network byte order)",
+    "layout": "version:u8 || message_id:16 || sent_at_ms:u64be || media_type_len:u8 || media_type || payload_len:u32be || payload",
+    "notes": [
+      "version is 1 and is carried IN BAND. DirectMessageV2 needs no version byte because it takes one from the negotiated protocol name /interweave/direct/2.0.0; a GossipSub topic negotiates nothing, so the envelope is the only place a reader can learn what it is holding.",
+      "message_id is exactly 16 bytes - 128 bits - and is the APPLICATION identity. It is never an input to the mesh duplicate key, which is GossipSubMessageIdV1 over the authenticated source PeerId and the wire sequence number (ADR-0004).",
+      "There is no source_endpoint and no destination_endpoint. ADR-0030 keeps EndpointId out of broadcast entirely, so two local endpoints on one PeerId are intentionally indistinguishable as broadcast originators.",
+      "There is no channel field. The receiver learns the channel from the GossipSub topic the message arrived on, which it can always map back because it only receives topics it subscribed to. Carrying it twice would create a disagreement case with no right answer.",
+      "media_type_len = 0 encodes ABSENCE; no empty media-type string exists on the wire.",
+      "payload_len is u32be and precedes the payload even when the payload is empty.",
+      "sent_at_ms is diagnostic: not authorization, ordering, freshness, replay-window, or dedup input."
+    ]
+  },
+  "$comment": "Vectors are DERIVED from the layout decided in PUBSUB.md - no ADR publishes a golden envelope, so this file is anchored by its `adr` list rather than by a per-vector `frozen_by`, exactly as direct-message-v2-frame.json is. There is deliberately NO `contract` URN: the envelope is a fixed-width binary layout JSON Schema cannot express, which the schema manifest records under `not_modelled`. The payload ceiling of 49152 bytes is a DECODE-TIME bound proven in tests rather than frozen here; a 48 KiB vector would add 96 KiB of hex to this file and pin nothing the shorter vectors do not already pin.",
+  "vectors": [
+    {
+      "name": "absent-media-type",
+      "description": "The ordinary case. media_type_len = 0 encodes ABSENCE; no empty media-type string exists on this wire, exactly as in DirectMessageV2.",
+      "version": 1,
+      "message_id": "3ac9f1027b6e45d8ba10c4e93f5d7a26",
+      "sent_at_ms": 1786600000000,
+      "media_type": null,
+      "payload_hex": "68656c6c6f",
+      "payload_utf8": "hello",
+      "frame_hex": "013ac9f1027b6e45d8ba10c4e93f5d7a260000019ff9a88a00000000000568656c6c6f",
+      "frame_len": 35
+    },
+    {
+      "name": "with-media-type",
+      "description": "A present media type, 1..128 ASCII bytes.",
+      "version": 1,
+      "message_id": "3ac9f1027b6e45d8ba10c4e93f5d7a26",
+      "sent_at_ms": 1786600000000,
+      "media_type": "text/plain",
+      "payload_hex": "68656c6c6f",
+      "payload_utf8": "hello",
+      "frame_hex": "013ac9f1027b6e45d8ba10c4e93f5d7a260000019ff9a88a000a746578742f706c61696e0000000568656c6c6f",
+      "frame_len": 45
+    },
+    {
+      "name": "empty-payload",
+      "description": "payload_len = 0 with the u32be length still written. An empty payload is legal; an empty media type is not.",
+      "version": 1,
+      "message_id": "3ac9f1027b6e45d8ba10c4e93f5d7a26",
+      "sent_at_ms": 1786600000000,
+      "media_type": "application/octet-stream",
+      "payload_hex": "",
+      "frame_hex": "013ac9f1027b6e45d8ba10c4e93f5d7a260000019ff9a88a00186170706c69636174696f6e2f6f637465742d73747265616d00000000",
+      "frame_len": 54
+    },
+    {
+      "name": "max-media-type-128",
+      "description": "A media type at the 128-byte ceiling, the widest legal single-byte length.",
+      "version": 1,
+      "message_id": "3ac9f1027b6e45d8ba10c4e93f5d7a26",
+      "sent_at_ms": 1786600000000,
+      "media_type": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "payload_hex": "00",
+      "frame_hex": "013ac9f1027b6e45d8ba10c4e93f5d7a260000019ff9a88a008061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610000000100",
+      "frame_len": 159
+    },
+    {
+      "name": "sent-at-ms-is-only-bytes",
+      "description": "sent_at_ms at u64::MAX. It changes these bytes and nothing else: it is not authorization, ordering, freshness, replay-window, or dedup input, and no admission path may read it.",
+      "version": 1,
+      "message_id": "3ac9f1027b6e45d8ba10c4e93f5d7a26",
+      "sent_at_ms": 18446744073709551615,
+      "media_type": "text/plain",
+      "payload_hex": "68656c6c6f",
+      "payload_utf8": "hello",
+      "frame_hex": "013ac9f1027b6e45d8ba10c4e93f5d7a26ffffffffffffffff0a746578742f706c61696e0000000568656c6c6f",
+      "frame_len": 45
+    }
+  ]
+}

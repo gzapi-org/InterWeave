@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod broadcast_inbound;
 pub mod connection_manager;
 pub mod connection_policy;
 pub mod dedup;
@@ -16,8 +17,11 @@ pub mod endpoint_queue;
 pub mod endpoint_registry;
 pub mod fingerprint;
 pub mod ingress;
+pub mod mesh_id;
 pub mod preauth;
 pub mod reply_token;
+pub mod session_queue;
+pub mod topic;
 
 pub use connection_manager::{
     ADMIT_RELOAD_ATTEMPTS, ConnectionManager, ConnectionSlot, DEFAULT_MAX_ADDRESSES_PER_PEER,
@@ -29,16 +33,20 @@ pub use connection_policy::{
     PeerBackoff,
 };
 pub use dedup::{
-    Admission, DedupCache, DedupKey, DestinationSelector, Reservation, ReservationFailure,
-    ReservationMap,
+    Admission, DedupCache, DedupKey, DestinationSelector, RecordedRoute, Reservation,
+    ReservationFailure, ReservationMap,
 };
 pub use direct_inbound::{
-    AdmissionContext, Clocks, Outcome, Refusal, admit_inbound, admit_prefix, admit_structured,
+    AdmissionContext, Clocks, Outcome, PrefixContext, Refusal, admit_inbound, admit_prefix,
+    admit_structured,
 };
 // RE-EXPORTED, so a backend composing admission does not have to name
 // `trust-api` itself. `AdmissionContext` holds a `PeerTrustPolicy`, so
 // the type is already in this crate's public API — a consumer that could
 // not spell it could not build the context.
+pub use broadcast_inbound::{
+    BroadcastAdmission, ProtocolVerdict, admit_broadcast, classify_broadcast,
+};
 pub use endpoint_queue::{DirectEvent, EndpointQueues, QueueRefusal};
 pub use endpoint_registry::{
     ActiveLease, ClaimFailure, EndpointRegistry, LocalSessionId, RegisteredEndpoint, ResolveFailure,
@@ -49,6 +57,9 @@ pub use ingress::{
     SubscriptionRegistry,
 };
 pub use interweave_trust_api::{EndpointTrustPolicy, PeerTrustPolicy};
+pub use mesh_id::{MeshMessageId, gossipsub_message_id_v1};
+pub use session_queue::{BroadcastEvent, SessionDrop, SessionQueues};
+pub use topic::{TopicKey, topic_key_v1};
 // Same reason: `EndpointRegistry::claim` takes a `Generation`, so it is
 // already in this crate's public API and a caller that could not spell
 // it could not claim a lease.

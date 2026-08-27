@@ -142,6 +142,53 @@ def direct_message_v2_frame(vector: dict) -> str:
     return out.hex()
 
 
+def broadcast_message_v1_frame(vector: dict) -> str:
+    """Encode one BroadcastMessageV1 envelope, returning hex.
+
+    From architecture/transport/libp2p/PUBSUB.md §Envelope. The same
+    big-endian discipline as the direct frame, and the same two absences:
+    `media_type_len = 0` is ABSENCE rather than an empty string, and a
+    `payload_len` of zero is still written.
+
+    Two differences from `DirectMessageV2`, both deliberate. There are no
+    endpoint fields, because ADR-0030 keeps EndpointId out of broadcast
+    entirely. And there is a leading `version` byte, because direct takes
+    its version from the negotiated protocol name `/interweave/direct/
+    2.0.0` while a GossipSub topic negotiates nothing — the envelope is
+    the only place a broadcast reader can learn what it is holding.
+    """
+    version = int(vector["version"])
+    if version != 1:
+        raise ValueError(f"version is {version}; BroadcastMessageV1 frames are version 1")
+    out = bytes([version])
+
+    mid = bytes.fromhex(vector["message_id"])
+    if len(mid) != 16:
+        raise ValueError(f"message_id is {len(mid)} bytes; the envelope carries exactly 16 (128 bits)")
+    out += mid
+
+    sent_at = int(vector["sent_at_ms"])
+    if not 0 <= sent_at < 2**64:
+        raise ValueError(f"sent_at_ms {sent_at} does not fit the u64 the wire carries")
+    out += sent_at.to_bytes(8, "big")
+
+    media = vector.get("media_type")
+    media_b = media.encode("ascii") if media is not None else b""
+    if media is not None and not 1 <= len(media_b) <= 128:
+        raise ValueError("a present media type is 1..128 bytes; empty is absence, not a value")
+    out += bytes([len(media_b)]) + media_b
+
+    payload = bytes.fromhex(vector.get("payload_hex", ""))
+    out += len(payload).to_bytes(4, "big") + payload
+
+    # Recomputed for the same reason the direct frame recomputes it: a
+    # stored length nobody checks is what this script exists to prevent.
+    stated_len = vector.get("frame_len")
+    if stated_len is not None and stated_len != len(out):
+        raise ValueError(f"frame_len disagrees: stored {stated_len}, computed {len(out)}")
+    return out.hex()
+
+
 def _base58btc(data: bytes) -> str:
     alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
     n = int.from_bytes(data, "big")
@@ -520,6 +567,9 @@ def ipc_v2_payload_fit(vector: dict) -> str:
 ALGORITHMS = {
     "direct-content-fingerprint-v1": (
         direct_content_fingerprint_v1, "sha256", True, ("payload_hex", "payload_utf8"),
+    ),
+    "broadcast-message-v1-frame": (
+        broadcast_message_v1_frame, "frame_hex", True, ("payload_hex", "payload_utf8"),
     ),
     "direct-message-v2-frame": (
         direct_message_v2_frame, "frame_hex", True, ("payload_hex", "payload_utf8"),
