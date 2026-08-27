@@ -1,14 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Andrea Benetton
 #
-# Stage 4: the authenticated transport substrate, and nothing else.
+# The authenticated transport substrate, and the behaviours the open
+# stages have earned.
 #
-# TCP, Noise, Yamux, Identify. No GossipSub, no direct v2, no Kademlia,
-# no AutoNAT, no Relay, no DCUtR — and those are absent from the feature
-# list rather than merely unused, so a stray `use` cannot switch one on.
-# CLAUDE.md §3 forbids enabling autonomous libp2p behaviour and
+# TCP, Noise, Yamux and Identify from Stage 4; direct v2 over
+# request-response from Stage 6; signed GossipSub from Stage 7. No
+# Kademlia, no AutoNAT, no Relay, no DCUtR — and those are absent from the
+# feature list rather than merely unused, so a stray `use` cannot switch
+# one on. CLAUDE.md §3 forbids enabling autonomous libp2p behaviour and
 # retrofitting admission policy afterwards; a behaviour that is not
 # compiled cannot be enabled by accident.
+#
+# This header claimed "no direct v2" for a full stage after direct v2
+# shipped, which is why the rule about prose describing changed behaviour
+# names a manifest comment as prose that ships.
 #
 # This crate owns the Swarm. Nothing above it sees a `libp2p::` type:
 # the boundary speaks `TransportIdentity` and this crate's own command
@@ -18,7 +24,7 @@
 name = "interweave-transport-libp2p"
 version = "0.0.0"
 publish = false
-description = "InterWeave libp2p transport substrate: TCP, Noise, Yamux, Identify."
+description = "InterWeave libp2p transport substrate: TCP, Noise, Yamux, Identify, direct v2, GossipSub."
 license.workspace = true
 edition.workspace = true
 rust-version.workspace = true

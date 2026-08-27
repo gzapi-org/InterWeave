@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
-//! The network behaviour: pre-auth admission and Identify.
+//! The network behaviour: pre-auth admission, Identify, direct v2
+//! and signed GossipSub.
 //!
 //! One behaviour, deliberately. Every additional protocol here is a
 //! protocol that starts doing things on its own — Kademlia dials to fill
@@ -20,10 +21,13 @@
 
 use std::time::Duration;
 
+use libp2p::gossipsub;
 use libp2p::request_response::{self, ProtocolSupport};
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::{identify, identity};
 
+use interweave_transport_api::{MAX_PAYLOAD_BYTES, broadcast_v1};
+use interweave_transport_runtime::mesh_id::gossipsub_message_id_v1;
 use interweave_transport_runtime::preauth::PreAuthLimits;
 
 use crate::direct_codec::{DIRECT_PROTOCOL, DirectCodec};
@@ -43,6 +47,40 @@ pub const DIRECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Namespaced under `interweave` per ADR-0047, and versioned so a future
 /// change is a new string rather than a silent reinterpretation.
 pub const IDENTIFY_PROTOCOL: &str = "/interweave/id/1.0.0";
+
+/// The largest GossipSub message this node will send or accept.
+///
+/// The payload ceiling plus the envelope's fixed maximum overhead, and
+/// sized deliberately rather than left at the backend's default. A
+/// transmit ceiling ABOVE this would let a peer send a frame the
+/// transport buffers in full and the envelope decoder must then refuse;
+/// sized exactly, an oversized frame is refused before it is buffered.
+/// PUBSUB.md states the same arithmetic.
+pub const MAX_BROADCAST_TRANSMIT: usize = MAX_PAYLOAD_BYTES + broadcast_v1::MAX_FRAME_OVERHEAD;
+
+/// The frozen mesh duplicate identity of one GossipSub message.
+///
+/// A named function rather than a closure so it can be tested against
+/// `fixtures/gossipsub/gossipsub-message-id-v1.json` without a Swarm.
+/// The adapter is where the composition can go wrong — reading the wrong
+/// fields — and the closure form put it somewhere no test could reach.
+///
+/// **It reads only transport metadata.** `message.data` carries the
+/// InterWeave envelope and is deliberately not an input: PUBSUB.md makes
+/// it a MUST that the mesh key does not depend on the application
+/// envelope's `message_id`, because two publishers may legitimately
+/// choose the same 128 bits and a mesh that collapsed them would drop a
+/// message nobody sent twice.
+fn mesh_message_id(message: &gossipsub::Message) -> gossipsub::MessageId {
+    // Strict validation guarantees both are present for any message that
+    // reaches the application; see `validation_mode` where this is
+    // installed. The fallbacks are unreachable rather than meaningful,
+    // and are chosen so an impossible message hashes to something rather
+    // than panicking inside the backend's own poll.
+    let source = message.source.map(|p| p.to_bytes()).unwrap_or_default();
+    let id = gossipsub_message_id_v1(&source, message.sequence_number.unwrap_or(0));
+    gossipsub::MessageId::new(id.as_bytes())
+}
 
 /// The Stage 4 behaviour, plus the gate that decides who may begin.
 #[derive(NetworkBehaviour)]
@@ -75,18 +113,63 @@ pub struct SubstrateBehaviour {
     /// CLAUDE.md §3 requires, and the reason Stage 5 had to be green
     /// before this field could exist at all.
     pub direct: request_response::Behaviour<DirectCodec>,
+    /// Signed broadcast, GossipSub over hashed topics.
+    ///
+    /// LAST for the same reason `direct` is late, though for a weaker
+    /// reason than `direct` has: this behaviour originates NO dial of its
+    /// own. It acts only on connections the swarm already established,
+    /// and nothing here calls `add_explicit_peer`, which is the one API
+    /// that would make it dial. It is placed after both gates anyway
+    /// because the ordering rule is about where a behaviour sits relative
+    /// to the funnel, not about whether today's configuration happens to
+    /// exercise it.
+    ///
+    /// What it DOES need is the trust class kept in sync: it performs no
+    /// connection admission at all, so an untrusted peer never reaches it
+    /// only because the gated swarm refused the connection first.
+    pub broadcast: gossipsub::Behaviour,
 }
 
 impl SubstrateBehaviour {
-    /// Build the behaviour for `public_key`.
-    #[must_use]
-    pub fn new(public_key: identity::PublicKey, preauth: PreAuthLimits) -> Self {
-        Self {
+    /// Build the behaviour for `keypair`.
+    ///
+    /// Takes the whole keypair rather than the public key alone because
+    /// GossipSub signs every message this node publishes: PUBSUB.md
+    /// requires signed messages and strict validation, and
+    /// `MessageAuthenticity::Signed` is what binds the author and
+    /// sequence number the frozen mesh id is computed from.
+    ///
+    /// # Errors
+    /// Returns the backend's own message if the GossipSub configuration
+    /// is rejected — which it is, at construction, when authenticity and
+    /// validation mode disagree. That is a build-time contradiction
+    /// rather than a runtime condition, and it is propagated rather than
+    /// unwrapped so a future edit that introduced one fails to start
+    /// instead of panicking in a task.
+    pub fn new(keypair: &identity::Keypair, preauth: PreAuthLimits) -> Result<Self, &'static str> {
+        let broadcast_config = gossipsub::ConfigBuilder::default()
+            // STRICT, which is what makes the mesh id computable at all:
+            // it guarantees every message reaching the application has an
+            // authenticated `source` and a `sequence_number`, the two
+            // inputs GossipSubMessageIdV1 binds. Anything weaker admits a
+            // message with neither.
+            .validation_mode(gossipsub::ValidationMode::Strict)
+            // MANUAL REPORTING. Without this the backend forwards on its
+            // own and ADR-0029's Accept/Ignore/Reject mapping has nowhere
+            // to happen. With it, every message MUST be reported exactly
+            // once or it stays in the backend's cache forever.
+            .validate_messages()
+            .message_id_fn(mesh_message_id)
+            .max_transmit_size(MAX_BROADCAST_TRANSMIT)
+            .build()
+            .map_err(|_| "the GossipSub configuration is not buildable")?;
+
+        Ok(Self {
             preauth: PreAuthAdmission::new(preauth),
             outbound: OutboundAdmission::default(),
             identify: identify::Behaviour::new(identify::Config::new(
                 IDENTIFY_PROTOCOL.to_owned(),
-                public_key,
+                keypair.public(),
             )),
             direct: request_response::Behaviour::with_codec(
                 DirectCodec,
@@ -98,6 +181,111 @@ impl SubstrateBehaviour {
                 [(DIRECT_PROTOCOL, ProtocolSupport::Full)],
                 request_response::Config::default().with_request_timeout(DIRECT_TIMEOUT),
             ),
+            broadcast: gossipsub::Behaviour::new(
+                gossipsub::MessageAuthenticity::Signed(keypair.clone()),
+                broadcast_config,
+            )?,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::str::FromStr;
+
+    use libp2p::PeerId;
+
+    /// The repository zero-seed publisher, from the frozen vectors.
+    const P1: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+    const P2: &str = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
+
+    fn message(peer: &str, sequence: u64, data: &[u8]) -> gossipsub::Message {
+        gossipsub::Message {
+            source: Some(PeerId::from_str(peer).expect("valid peer id")),
+            data: data.to_vec(),
+            sequence_number: Some(sequence),
+            topic: gossipsub::TopicHash::from_raw("t"),
         }
+    }
+
+    #[test]
+    fn the_mesh_id_is_the_frozen_golden_for_the_zero_seed_publisher() {
+        // PUBSUB.md's golden, reproduced through the composition rather
+        // than through the derivation alone: this is what proves the
+        // adapter reads the fields the algorithm is defined over.
+        let id = mesh_message_id(&message(P1, 0, b"anything"));
+        let hex: String = id.0.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex, "7f037dd538d9cccfb1949ca26b875c469173e6b248f1b68553ccaeb16bf9cf89",
+            "the composed message_id_fn must reproduce the frozen golden"
+        );
+    }
+
+    #[test]
+    fn the_envelope_bytes_are_not_an_input() {
+        // The MUST. Two messages differing only in payload -- which is
+        // where the application envelope and its own message_id live --
+        // must share a mesh id, or the mesh key depends on application
+        // serialization.
+        assert_eq!(
+            mesh_message_id(&message(P1, 4, b"one body")),
+            mesh_message_id(&message(P1, 4, b"a completely different body")),
+        );
+    }
+
+    #[test]
+    fn two_publishers_at_one_sequence_number_do_not_collide() {
+        assert_ne!(
+            mesh_message_id(&message(P1, 0, b"same")),
+            mesh_message_id(&message(P2, 0, b"same")),
+        );
+    }
+
+    #[test]
+    fn one_publisher_at_two_sequence_numbers_does_not_collide() {
+        assert_ne!(
+            mesh_message_id(&message(P1, 0, b"same")),
+            mesh_message_id(&message(P1, 1, b"same")),
+        );
+    }
+
+    #[test]
+    fn the_transmit_ceiling_admits_a_real_maximum_envelope_exactly() {
+        // Sized from the envelope rather than left at the backend's
+        // default: a larger ceiling buffers frames the decoder must then
+        // refuse, and a smaller one refuses legal maximum-size messages
+        // as though the network had failed.
+        //
+        // Asserted by ENCODING one rather than by restating the
+        // arithmetic. A test that compared the constant to its own
+        // definition would agree with any miscalculation of the overhead,
+        // which is the only thing here that can be wrong.
+        let widest = interweave_transport_api::BroadcastMessageV1 {
+            message_id: interweave_transport_api::MessageId::from_bytes([0xab; 16]),
+            sent_at_ms: u64::MAX,
+            payload: interweave_transport_api::Payload::at_ceiling(
+                Some(
+                    interweave_transport_api::MediaType::parse(
+                        "a".repeat(interweave_transport_api::MAX_MEDIA_TYPE_BYTES),
+                    )
+                    .expect("a maximum-length media type"),
+                ),
+                vec![0u8; MAX_PAYLOAD_BYTES],
+            )
+            .expect("a maximum payload"),
+        };
+
+        let encoded = widest.encode();
+        assert_eq!(
+            encoded.len(),
+            MAX_BROADCAST_TRANSMIT,
+            "the ceiling must be exactly the largest legal frame"
+        );
+        assert!(
+            encoded.len() <= MAX_BROADCAST_TRANSMIT,
+            "and a legal maximum message must fit under it"
+        );
     }
 }

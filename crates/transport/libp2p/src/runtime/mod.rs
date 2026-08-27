@@ -345,7 +345,16 @@ impl SwarmRuntime {
                 yamux::Config::default,
             )
             .map_err(|e| SubstrateError::Transport(e.to_string()))?
-            .with_behaviour(|key| SubstrateBehaviour::new(key.public(), config.preauth))
+            // The behaviour is now fallible: GossipSub refuses a
+            // configuration whose authenticity and validation mode
+            // disagree, at construction. Boxed because the builder wants
+            // an error that implements `Error`, and a contradiction here
+            // should stop the runtime starting rather than panic inside
+            // the task that would have driven it.
+            .with_behaviour(|key| {
+                SubstrateBehaviour::new(key, config.preauth)
+                    .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
+            })
             .map_err(|e| SubstrateError::Transport(e.to_string()))?
             .with_swarm_config(|c| c.with_idle_connection_timeout(config.idle_timeout))
             // THE HANDSHAKE TIMEOUT, taken from the same limits the

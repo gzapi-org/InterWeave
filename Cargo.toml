@@ -94,12 +94,13 @@ sha2 = "0.10"
 # Brotli for the HumanChatV2 fit-fallback decode path. Used through its
 # streaming interface so the decompressed ceiling aborts mid-stream.
 brotli = { version = "8", default-features = false, features = ["std"] }
-# The libp2p substrate. Stage 4 enables exactly TCP, Noise, Yamux and
-# Identify — no Kademlia, no AutoNAT, no Relay, no DCUtR, no GossipSub.
-# Those are not merely unused here, they are absent from the feature list,
-# so a stray `use` cannot switch one on: CLAUDE.md §3 forbids turning on
-# autonomous libp2p behaviour and retrofitting admission policy later, and
-# a feature that is not compiled cannot be turned on by accident.
+# The libp2p substrate, one behaviour per stage. Stage 4 enabled TCP,
+# Noise, Yamux and Identify; Stage 6 added request-response for direct v2;
+# Stage 7 adds GossipSub. Kademlia, AutoNAT, Relay and DCUtR remain absent
+# from the feature list rather than merely unused, so a stray `use` cannot
+# switch one on: CLAUDE.md §3 forbids turning on autonomous libp2p
+# behaviour and retrofitting admission policy later, and a feature that is
+# not compiled cannot be turned on by accident.
 libp2p = { version = "0.56", default-features = false, features = [
     "tcp",
     "noise",
@@ -119,6 +120,13 @@ libp2p = { version = "0.56", default-features = false, features = [
     # cbor. A feature nobody uses is dependency surface bought for
     # nothing.
     "request-response",
+    # Stage 7. Signed GossipSub broadcast. It originates no dial of its
+    # own — it acts only on connections the gated swarm already admitted,
+    # and this crate never calls `add_explicit_peer` — so enabling it does
+    # not put an autonomous dialler behind the admission funnel. What it
+    # does need is the trust class kept in sync, which is why an
+    # infrastructure-only peer is blacklisted from the mesh.
+    "gossipsub",
 ] }
 # The async runtime the Swarm is driven on. Bounded channels only (§6).
 tokio = { version = "1", default-features = false, features = [
