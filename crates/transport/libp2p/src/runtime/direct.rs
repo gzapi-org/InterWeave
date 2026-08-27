@@ -862,8 +862,7 @@ mod waiter_tests {
     use super::waiter_response;
     use crate::direct_codec::DirectResponse;
     use interweave_transport_api::{
-        DirectMessageV2, DirectRejectReason, EndpointId, MediaType, MessageId, Payload,
-        TransportIdentity,
+        DirectMessageV2, EndpointId, MediaType, MessageId, Payload, TransportIdentity,
     };
     use interweave_transport_runtime::dedup::{DEFAULT_TTL_MS, DedupCache};
     use interweave_transport_runtime::direct_inbound::dedup_key;
