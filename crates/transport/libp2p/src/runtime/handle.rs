@@ -46,6 +46,23 @@ impl SwarmRuntime {
             .map_err(SubstrateError::Transport)
     }
 
+    /// Stop the listener serving `address`.
+    ///
+    /// Returns whether one was found and removed. Until this existed a
+    /// bound listener could only be closed by stopping the whole runtime,
+    /// so a node could not withdraw one address while keeping another.
+    ///
+    /// # Errors
+    /// Returns [`SubstrateError::Stopped`] if the task is gone.
+    pub async fn stop_listening(&self, address: Multiaddr) -> Result<bool, SubstrateError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(SwarmCommand::StopListening { address, reply })
+            .await
+            .map_err(|_| SubstrateError::Stopped)?;
+        answer.await.map_err(|_| SubstrateError::Stopped)
+    }
+
     /// Dial `peer` at `address`, subject to the admission policy.
     ///
     /// # Errors

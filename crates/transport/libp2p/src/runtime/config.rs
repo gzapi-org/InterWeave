@@ -64,6 +64,13 @@ pub struct SubstrateConfig {
     /// enough that an idle profile is not walking a table every
     /// moment.
     pub retry_tick: Duration,
+    /// Most listeners that may be bound at once.
+    ///
+    /// `max_pending_listens` bounds only listeners still AWAITING an
+    /// address; a resolved one left that table and was counted by
+    /// nothing, so any number could accumulate. This bounds the ones
+    /// actually holding a socket.
+    pub max_active_listeners: usize,
     /// Most peers the scheduler will dial in one tick.
     ///
     /// The retry table is bounded, so the whole of it could come due at
@@ -92,6 +99,7 @@ impl Default for SubstrateConfig {
             idle_timeout: Duration::from_secs(60),
             preauth: PreAuthLimits::default(),
             retry_tick: Duration::from_secs(1),
+            max_active_listeners: 64,
             max_retries_per_tick: 4,
             max_pending_listens: 64,
         }
@@ -118,6 +126,7 @@ impl SubstrateConfig {
             ("max_pending_dials", self.max_pending_dials, 0),
             ("max_connections", self.max_connections, 0),
             ("max_pending_listens", self.max_pending_listens, 0),
+            ("max_active_listeners", self.max_active_listeners, 0),
             // A tick that dialed the whole table would be a burst; zero
             // is a scheduler that never dials, which is the state this
             // stage exists to leave.

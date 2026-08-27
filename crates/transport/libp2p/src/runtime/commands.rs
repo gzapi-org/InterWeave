@@ -22,7 +22,9 @@ use interweave_transport_runtime::{ConnectionClass, ConnectionManager, DialOrigi
 use crate::behaviour::SubstrateBehaviourEvent;
 use crate::gated_swarm::{GatedSwarm, NotConnected};
 
-use super::dialing::{OpenConnection, PendingListens, attempt_dial, connections_to_close};
+use super::dialing::{
+    ActiveListeners, OpenConnection, PendingListens, attempt_dial, connections_to_close,
+};
 use super::messages::{DialRefusal, SwarmCommand, SwarmEvent};
 
 // Still beside the loop that owns them; step 5 moves these out.
@@ -36,10 +38,12 @@ pub(super) fn handle_command(
     open: &HashMap<libp2p::swarm::ConnectionId, OpenConnection>,
     refuse: &mut Vec<libp2p::swarm::ConnectionId>,
     listens: &mut PendingListens,
+    active: &mut ActiveListeners,
     pending_direct: &mut HashMap<libp2p::request_response::OutboundRequestId, PendingDirect>,
     direct_state: &mut DirectState,
     in_flight: &mut HashMap<libp2p::swarm::ConnectionId, DialTicket>,
     max_pending_listens: usize,
+    max_active_listeners: usize,
     effective_payload: usize,
     now_ms: u64,
     command: SwarmCommand,
@@ -59,6 +63,18 @@ pub(super) fn handle_command(
                 )));
                 return;
             }
+            // AND THE BOUND THAT SURVIVES BINDING. The check above counts
+            // only listeners still awaiting an address; a resolved one
+            // leaves that table, so binding four in sequence under a
+            // pending bound of two used to succeed and leave four sockets
+            // open. Pending and active are counted together because both
+            // hold an OS listener.
+            if listens.len().saturating_add(active.len()) >= max_active_listeners {
+                let _ = reply.send(Err(format!(
+                    "at most {max_active_listeners} listeners may be bound at once"
+                )));
+                return;
+            }
             match swarm.listen_on(address) {
                 // Held until `NewListenAddr` names the assigned address.
                 // Answering now could only mean answering with a
@@ -69,6 +85,27 @@ pub(super) fn handle_command(
                 }
                 Err(e) => {
                     let _ = reply.send(Err(e.to_string()));
+                }
+            }
+        }
+        SwarmCommand::StopListening { address, reply } => {
+            // Named by an address rather than an id: `listen` hands back
+            // an address and nothing else, so that is the only handle a
+            // caller holds.
+            let found = active
+                .iter()
+                .find(|(_, addrs)| addrs.contains(&address))
+                .map(|(id, _)| *id);
+            match found {
+                Some(id) => {
+                    // The table entry is left for `ListenerClosed` to
+                    // remove, so the withdrawal is reported by the same
+                    // path whether the close was asked for or not.
+                    let removed = swarm.remove_listener(id);
+                    let _ = reply.send(removed);
+                }
+                None => {
+                    let _ = reply.send(false);
                 }
             }
         }
@@ -394,6 +431,7 @@ pub(super) fn handle_command(
 pub(super) fn translate(
     event: Libp2pSwarmEvent<SubstrateBehaviourEvent>,
     listens: &mut PendingListens,
+    active: &mut ActiveListeners,
     abandoned: &mut Vec<ListenerId>,
 ) -> Option<SwarmEvent> {
     match event {
@@ -411,15 +449,36 @@ pub(super) fn translate(
                 // nobody. Close it rather than leave it bound.
                 abandoned.push(listener_id);
             }
+            // REMEMBERED FROM HERE ON. A listener may report several
+            // addresses, so this accumulates rather than replaces.
+            active.entry(listener_id).or_default().push(address.clone());
             Some(SwarmEvent::Listening { address })
         }
         // A listener that dies before binding must not leave `listen`
         // waiting for an address that will never arrive.
-        Libp2pSwarmEvent::ListenerClosed { listener_id, .. } => {
+        //
+        // AND ONE THAT DIES AFTER BINDING IS NOT SILENT. This arm used to
+        // return `None` whenever there was no pending reply, which is
+        // exactly the case where the listener was already serving: the
+        // node stopped accepting connections on those addresses and
+        // nothing said so. A caller that reported `Listening` to an
+        // operator had no way to withdraw it.
+        Libp2pSwarmEvent::ListenerClosed {
+            listener_id,
+            addresses,
+            reason,
+        } => {
             if let Some(reply) = listens.remove(&listener_id) {
                 let _ = reply.send(Err("the listener closed before binding".to_owned()));
+                // It never bound, so there is no `Listening` to withdraw
+                // and the caller has already been told directly.
+                return None;
             }
-            None
+            active.remove(&listener_id);
+            Some(SwarmEvent::ListeningStopped {
+                addresses,
+                reason: reason.err().map(|e| e.to_string()),
+            })
         }
         Libp2pSwarmEvent::ListenerError { listener_id, error } => {
             if let Some(reply) = listens.remove(&listener_id) {

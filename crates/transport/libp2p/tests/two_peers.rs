@@ -630,14 +630,103 @@ async fn pending_listeners_are_bounded_and_abandoned_ones_are_closed() {
 
     let loopback: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse().expect("loopback multiaddr");
 
-    // Each of these resolves, so nothing is left pending — the bound is
-    // on listeners still AWAITING an address, and a resolved one is not.
+    // Each of these resolves, so nothing is left pending. This bound is
+    // on listeners still AWAITING an address, and a resolved one is not
+    // — which is why it is NOT the whole story, and why
+    // `bound_listeners_are_bounded_too` exists: this comment used to end
+    // here, and the sockets those four calls opened were counted by
+    // nothing at all.
     for _ in 0..4 {
         tokio::time::timeout(PATIENCE, runtime.listen(loopback.clone()))
             .await
             .expect("listen resolves")
             .expect("accepted");
     }
+
+    runtime.shutdown().await.expect("stops");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bound_listeners_are_bounded_too() {
+    // The pending bound above is spent the moment a listener reports its
+    // address, so binding in sequence used to be unbounded: four
+    // successive `listen` calls under `max_pending_listens: 2` all
+    // succeeded and left four sockets open, with nothing tracking them.
+    let identity = ProfileIdentity::generate();
+    let mut runtime = SwarmRuntime::start(
+        &identity,
+        SubstrateConfig {
+            max_active_listeners: 2,
+            ..SubstrateConfig::default()
+        },
+        trusting(&[]),
+    )
+    .expect("runtime");
+
+    let loopback: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse().expect("loopback multiaddr");
+
+    let mut bound = Vec::new();
+    for _ in 0..2 {
+        bound.push(
+            tokio::time::timeout(PATIENCE, runtime.listen(loopback.clone()))
+                .await
+                .expect("listen resolves")
+                .expect("within the ceiling"),
+        );
+    }
+
+    let refused = tokio::time::timeout(PATIENCE, runtime.listen(loopback.clone()))
+        .await
+        .expect("listen resolves");
+    assert!(
+        refused.is_err(),
+        "a third listener must be refused once two are bound, got {refused:?}"
+    );
+
+    // AND THE SLOT IS RELEASED, so the bound is a ceiling and not a
+    // one-way ratchet. Stopping one must let another bind.
+    assert!(
+        runtime
+            .stop_listening(bound[0].clone())
+            .await
+            .expect("the task answers"),
+        "a listener serving that address was found"
+    );
+
+    // The withdrawal is announced. Before this, a listener that stopped
+    // after binding produced no event at all: the arm that handles it
+    // returned `None` whenever no pending `listen` was owed a reply,
+    // which is exactly the case where it had been serving.
+    let stopped = tokio::time::timeout(PATIENCE, async {
+        loop {
+            match runtime.next_event().await {
+                Some(SwarmEvent::ListeningStopped { addresses, .. }) => return addresses,
+                Some(_) => continue,
+                None => panic!("the event stream ended before the withdrawal"),
+            }
+        }
+    })
+    .await
+    .expect("the withdrawal is announced");
+    assert!(
+        stopped.contains(&bound[0]),
+        "the stopped listener named the address it had bound, got {stopped:?}"
+    );
+
+    tokio::time::timeout(PATIENCE, runtime.listen(loopback.clone()))
+        .await
+        .expect("listen resolves")
+        .expect("the freed slot is reusable");
+
+    // An address nothing is serving is answered, not treated as an error.
+    let unknown: Multiaddr = "/ip4/127.0.0.1/tcp/1".parse().expect("multiaddr");
+    assert!(
+        !runtime
+            .stop_listening(unknown)
+            .await
+            .expect("the task answers"),
+        "no listener serves that address"
+    );
 
     runtime.shutdown().await.expect("stops");
 }
