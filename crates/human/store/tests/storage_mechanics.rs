@@ -1311,3 +1311,92 @@ fn a_decoy_comment_carrying_the_expected_declaration_does_not_excuse_a_constant(
         "a constant expression must be refused however it is decorated, got {refused:?}"
     );
 }
+
+#[test]
+fn a_truncating_generated_key_is_refused_even_though_it_matches_short_probes() {
+    // THE SAMPLE HAS TO REACH THE GRAMMAR'S EDGE. An earlier version of
+    // this guard probed one 14-character endpoint and NULL, so
+    // `IFNULL(substr(source_endpoint, 1, 14), '')` reproduced both values
+    // exactly and passed — while every id longer than 14 characters was
+    // truncated into a collision with anything sharing its prefix, which
+    // is the suppression migration_3 exists to stop.
+    //
+    // The probe set now reaches 64 characters, the longest legal
+    // EndpointId, so no truncation can hide inside it.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
+
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    conn.execute_batch(
+        "
+        ALTER TABLE unread_inbound RENAME TO unread_inbound_old;
+        CREATE TABLE unread_inbound (
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            media_type      TEXT,
+            payload         BLOB    NOT NULL,
+            received_at     INTEGER NOT NULL,
+            source_endpoint_key TEXT
+                GENERATED ALWAYS AS (IFNULL(substr(source_endpoint, 1, 14), '')) VIRTUAL,
+            UNIQUE(source_peer, source_endpoint_key, app_message_id)
+        );
+        DROP TABLE unread_inbound_old;
+        ",
+    )
+    .expect("the rebuild is legal SQLite");
+    drop(conn);
+
+    let refused = HumanStore::open(&path, StoreOptions::default());
+    assert!(
+        matches!(refused, Err(StoreError::Migration(_))),
+        "a truncating expression must be refused, got {refused:?}"
+    );
+}
+
+#[test]
+fn a_generated_key_that_drops_a_legal_character_class_is_refused() {
+    // EndpointId admits `.`, `-`, `_` and digits. An expression that
+    // filters one of them agrees with every alphabetic probe and then
+    // collides `a.b` with `ab` — so the probe set carries one id per
+    // legal character class rather than a handful of plausible names.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
+
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    conn.execute_batch(
+        "
+        ALTER TABLE kept_inbound RENAME TO kept_inbound_old;
+        CREATE TABLE kept_inbound (
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            media_type      TEXT,
+            payload         BLOB    NOT NULL,
+            received_at     INTEGER NOT NULL,
+            read_at         INTEGER NOT NULL,
+            kept_at         INTEGER NOT NULL,
+            source_endpoint_key TEXT
+                GENERATED ALWAYS AS (IFNULL(replace(source_endpoint, '.', ''), '')) VIRTUAL,
+            UNIQUE(source_peer, source_endpoint_key, app_message_id)
+        );
+        DROP TABLE kept_inbound_old;
+        ",
+    )
+    .expect("the rebuild is legal SQLite");
+    drop(conn);
+
+    assert!(
+        matches!(
+            HumanStore::open(&path, StoreOptions::default()),
+            Err(StoreError::Migration(_))
+        ),
+        "an expression that drops a legal character must be refused"
+    );
+}

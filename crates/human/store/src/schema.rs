@@ -421,28 +421,63 @@ const fn pk(
 /// that its body disappears when the message is read. Under ADR-0044 an
 /// unknown column is not forward compatibility, it is a place a body
 /// can be kept, so it is refused.
-/// One generated column, described by its behaviour.
+/// One generated column, described by the expression it must agree with.
 struct GeneratedColumn {
     /// The column's name.
     name: &'static str,
-    /// The column it derives from.
+    /// The column it derives from, which is what the probe varies.
     derived_from: &'static str,
-    /// What it must produce when `derived_from` is NULL.
+    /// The canonical expression this build wrote.
     ///
-    /// For the endpoint key this is the empty string, which is what makes
-    /// the UNIQUE key NULL-safe; SQLite would otherwise treat every NULL
-    /// as distinct and stop deduplicating unendpointed messages.
-    when_null: &'static str,
+    /// Installed as a REFERENCE column beside the stored one and compared
+    /// by SQLite, rather than compared as text. See
+    /// [`generated_columns_compute_what_we_wrote`].
+    expression: &'static str,
 }
 
-/// The endpoint dedup key, by what it computes.
+/// The endpoint dedup key, by the expression it must agree with.
 const GENERATED_ENDPOINT_KEY: GeneratedColumn = GeneratedColumn {
     name: "source_endpoint_key",
     derived_from: "source_endpoint",
-    when_null: "",
+    expression: "IFNULL(source_endpoint, '')",
 };
 
-/// Names of the columns `PRAGMA table_info` does NOT report.
+/// Values the probe varies `derived_from` over.
+///
+/// Chosen against the `EndpointId` grammar `^[a-z][a-z0-9._-]{0,63}$`
+/// rather than picked for variety, because the expression only has to be
+/// right for values that can actually occur:
+///
+/// - `NULL`, the case the whole NULL collapse exists for;
+/// - one character, the shortest legal id;
+/// - SIXTY-FOUR characters, the longest. This is the one that matters
+///   most: a truncation defeats a short sample and cannot defeat a
+///   maximum-length one, and `substr(x, 1, 64)` IS the identity on every
+///   legal id, so it is not a defect to catch;
+/// - two ids differing only in their LAST character, so a comparison that
+///   stops early collapses them;
+/// - a prefix pair, for the same reason from the other side;
+/// - each legal character class, so a filter dropping `.`, `-`, `_` or a
+///   digit shows up.
+const ENDPOINT_PROBES: &[Option<&str>] = &[
+    None,
+    Some("a"),
+    Some("human"),
+    Some("automation"),
+    Some("ab"),
+    Some("abc"),
+    Some("a.b"),
+    Some("a-b"),
+    Some("a_b"),
+    Some("a0b"),
+    Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+    Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab"),
+];
+
+/// The reference column's name, chosen not to collide with a real one.
+const REFERENCE_COLUMN: &str = "__interweave_expected";
+
+/// Names of the columns `PRAGMA table_info` does NOT report, with kind.
 ///
 /// `table_xinfo` adds a `hidden` column: 0 ordinary, 2 VIRTUAL
 /// generated, 3 STORED. Anything non-zero is invisible to the column
@@ -463,7 +498,7 @@ fn actual_hidden_columns(conn: &Connection, table: &str) -> Result<Vec<(String, 
 ///
 /// STORED is 3, and it is a DIFFERENT SCHEMA rather than a tuning
 /// choice: it materialises a value per row, which is content this store
-/// did not budget for, and the behavioural probe cannot tell the two
+/// did not budget for, and the expression comparison cannot tell the two
 /// apart because they compute the same thing.
 const HIDDEN_VIRTUAL: i64 = 2;
 
@@ -476,22 +511,37 @@ fn filler(decl_type: &str) -> &'static str {
     }
 }
 
-/// Prove each generated column computes what this build wrote.
+/// Prove each generated column agrees with the expression this build wrote.
 ///
 /// # Why the expression is run instead of read
 ///
 /// Every cheaper check has a bypass, and both were tried here first. The
 /// NAME is reported identically by a column generated from a constant.
-/// The DECLARATION TEXT is defeated by a comment: SQLite preserves
-/// comments in `sqlite_master.sql`, so
+/// The DECLARATION TEXT is defeated by a comment, because SQLite
+/// preserves comments in `sqlite_master.sql`: a column computing `''`
+/// can carry the expected declaration verbatim inside `/* ... */` and
+/// satisfy any substring test. A string literal inside the expression
+/// does the same, which makes text comparison the wrong TOOL rather than
+/// a wrong pattern.
 ///
-/// ```sql
-/// source_endpoint_key TEXT GENERATED ALWAYS AS ('') VIRTUAL
-///   /* source_endpoint_key TEXT GENERATED ALWAYS AS (IFNULL(source_endpoint, '')) VIRTUAL */
-/// ```
+/// # Why SQLite does the comparing
 ///
-/// contains the expected declaration verbatim while computing the
-/// constant, and the endpoints collapse again with every check green.
+/// The canonical expression is installed as a second generated column
+/// beside the stored one and the two are compared BY THE DATABASE across
+/// [`ENDPOINT_PROBES`]. Two hand-written samples were not enough, and the
+/// gap was specific: with only a 14-character id and `NULL`,
+/// `IFNULL(substr(source_endpoint, 1, 14), '')` reproduced both and then
+/// truncated every longer id into a collision.
+///
+/// This is a SAMPLE, and it is worth being plain about that: it proves
+/// agreement on the probes, not equivalence over all inputs, which needs
+/// a SQL parser and an equivalence decision this store has no business
+/// carrying. What it does close is every transformation that acts on a
+/// legal id — truncation, collapsing, filtering a character class, a
+/// constant. An expression agreeing on the grammar's boundaries and
+/// diverging elsewhere is a deliberate construction in a database
+/// someone already rewrote at will, and this function is not the right
+/// last line of defence against that.
 ///
 /// # Why a scratch database
 ///
@@ -516,19 +566,20 @@ fn generated_columns_compute_what_we_wrote(
         )
         .map_err(|e| StoreError::Migration(e.to_string()))?;
 
-    let scratch = Connection::open_in_memory()?;
-    scratch.execute_batch(&sql).map_err(|e| {
-        StoreError::Migration(format!("table `{}` will not rebuild: {e}", shape.name))
-    })?;
-
     for generated in shape.generated {
-        // Two rows: one carrying a value, one carrying NULL. Together
-        // they pin identity-on-a-value and the NULL substitute, which is
-        // the whole of what the expression has to do.
-        for (probe, expected) in [
-            (Some("probe-endpoint"), "probe-endpoint"),
-            (None, generated.when_null),
-        ] {
+        let scratch = Connection::open_in_memory()?;
+        scratch.execute_batch(&sql).map_err(|e| {
+            StoreError::Migration(format!("table `{}` will not rebuild: {e}", shape.name))
+        })?;
+        scratch
+            .execute_batch(&format!(
+                "ALTER TABLE {} ADD COLUMN {REFERENCE_COLUMN} TEXT \
+                 GENERATED ALWAYS AS ({}) VIRTUAL",
+                shape.name, generated.expression
+            ))
+            .map_err(|e| StoreError::Migration(e.to_string()))?;
+
+        for (index, probe) in ENDPOINT_PROBES.iter().enumerate() {
             let mut names = Vec::new();
             let mut values = Vec::new();
             for (name, decl_type, _, primary_key) in shape.columns {
@@ -537,15 +588,15 @@ fn generated_columns_compute_what_we_wrote(
                 }
                 names.push(*name);
                 if *name == generated.derived_from {
-                    values.push(match probe {
-                        Some(v) => format!("'{v}'"),
-                        None => "NULL".to_owned(),
-                    });
+                    values.push(probe.map_or_else(
+                        || "NULL".to_owned(),
+                        |v| format!("'{}'", v.replace('\'', "''")),
+                    ));
                 } else if *name == "app_message_id" {
-                    // Distinct per probe row, so a collapsed key cannot
-                    // turn a WRONG VALUE into a constraint error and
-                    // report the wrong reason.
-                    values.push(format!("'{}'", expected.len()));
+                    // Distinct per row, so a COLLAPSED key surfaces as a
+                    // disagreement below rather than as a constraint
+                    // error blaming the wrong thing.
+                    values.push(format!("'probe-{index}'"));
                 } else {
                     values.push(filler(decl_type).to_owned());
                 }
@@ -561,25 +612,31 @@ fn generated_columns_compute_what_we_wrote(
                     [],
                 )
                 .map_err(|e| StoreError::Migration(e.to_string()))?;
+        }
 
-            let got: String = scratch
-                .query_row(
-                    &format!(
-                        "SELECT {} FROM {} ORDER BY rowid DESC LIMIT 1",
-                        generated.name, shape.name
-                    ),
-                    [],
-                    |r| r.get(0),
-                )
-                .map_err(|e| StoreError::Migration(e.to_string()))?;
-
-            if got != expected {
-                return Err(StoreError::Migration(format!(
-                    "table `{}` column `{}` computed {got:?} from {probe:?}; this build wrote an \
-                     expression that yields {expected:?}",
+        // `IS NOT` rather than `<>`, so a NULL on either side counts as a
+        // disagreement instead of an unknown that silently passes.
+        let disagreements: i64 = scratch
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {} WHERE {} IS NOT {REFERENCE_COLUMN}",
                     shape.name, generated.name
-                )));
-            }
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| StoreError::Migration(e.to_string()))?;
+
+        if disagreements != 0 {
+            return Err(StoreError::Migration(format!(
+                "table `{}` column `{}` disagrees with `{}` on {disagreements} of {} probed \
+                 endpoint values; a generated column with the right name and a different \
+                 expression is a different schema",
+                shape.name,
+                generated.name,
+                generated.expression,
+                ENDPOINT_PROBES.len()
+            )));
         }
     }
     Ok(())
