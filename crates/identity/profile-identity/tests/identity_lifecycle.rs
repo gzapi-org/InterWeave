@@ -197,21 +197,90 @@ fn a_corrupt_key_file_is_an_error_not_a_new_identity() {
     );
 }
 
+/// The checksum catches a transposition, on a phrase that cannot vary.
+///
+/// This used to be asserted against a freshly GENERATED phrase, and the
+/// assertion was false: a 24-word phrase carries an 8-bit checksum, so a
+/// transposition survives it about one time in 256. Measured at 78 of
+/// 20,000. The test therefore failed roughly four runs in a thousand,
+/// which is rare enough to read as noise and frequent enough to dequeue
+/// a pull request — which is how it was found.
+///
+/// The frozen golden vector removes the variance. `abandon` twenty-three
+/// times plus `art` is the standard all-zero BIP-39 vector, so swapping
+/// the ends is a fixed input with a fixed answer.
 #[test]
-fn a_mistyped_phrase_is_caught_by_the_checksum() {
-    let identity = ProfileIdentity::generate();
-    let phrase = identity.recovery_phrase().expect("phrase");
-    let words = phrase.expose_words();
-    let mut parts: Vec<&str> = words.split_whitespace().collect();
-    // Swap two words: still all valid BIP-39 words, still 24 of them.
-    parts.swap(0, 1);
+fn the_checksum_catches_a_transposition() {
+    let f = fixture();
+    let mnemonic = f["vectors"][0]["mnemonic"].as_str().expect("mnemonic");
+    let mut parts: Vec<&str> = mnemonic.split_whitespace().collect();
+    let last = parts.len() - 1;
+    parts.swap(0, last);
     let swapped = parts.join(" ");
-    if swapped == words {
-        return; // the first two words happened to be identical
-    }
+
+    assert_ne!(
+        swapped, mnemonic,
+        "the swap must actually change the phrase"
+    );
     assert!(
         RecoveryPhrase::parse(&swapped).is_err(),
-        "a reordered phrase must fail its checksum"
+        "this transposition of the golden phrase must fail its checksum"
+    );
+}
+
+/// The one-in-256 path where a transposition survives the checksum.
+///
+/// What is load-bearing here is that the path RUNS: a phrase whose
+/// checksum happens to validate after a transposition must reconstruct
+/// cleanly rather than error or panic, and no other test in this suite
+/// reaches that branch. Breaking reconstruction on it reddens this and
+/// nothing else.
+///
+/// The `assert_ne!` is deliberately kept but is NOT the point, and it is
+/// worth saying so rather than letting it read as the guarantee: two
+/// different entropies give two different Ed25519 keys by construction,
+/// so it asserts keygen injectivity. It stays because it documents what
+/// the surviving case means for the owner — a mistype reconstructs SOME
+/// identity, just not theirs.
+///
+/// The surviving case is SEARCHED FOR rather than waited for. Asserting
+/// only when a random phrase happens to collide would leave the
+/// assertion asleep in 255 runs out of 256, which is a test that mostly
+/// does nothing while reading as coverage. At one in 256 the search
+/// takes a few hundred generations and finding nothing in ten thousand
+/// is a probability of about 3e-17, so the bound cannot flake.
+#[test]
+fn a_transposition_that_survives_the_checksum_is_a_different_identity() {
+    let mut examined = 0;
+    for _ in 0..10_000 {
+        let identity = ProfileIdentity::generate();
+        let phrase = identity.recovery_phrase().expect("phrase");
+        let words = phrase.expose_words();
+        let mut parts: Vec<&str> = words.split_whitespace().collect();
+        // Still all valid BIP-39 words, still 24 of them.
+        parts.swap(0, 1);
+        let swapped = parts.join(" ");
+        if swapped == words {
+            continue; // the first two words happened to be identical
+        }
+        let Ok(other) = RecoveryPhrase::parse(&swapped) else {
+            continue; // caught by the checksum, which is the common case
+        };
+
+        examined += 1;
+        let rebuilt = ProfileIdentity::from_phrase(&other).expect("a parsed phrase reconstructs");
+        assert_ne!(
+            rebuilt.transport_identity().expect("peer id").as_str(),
+            identity.transport_identity().expect("peer id").as_str(),
+            "a transposed phrase reconstructed the SAME identity"
+        );
+        break;
+    }
+    assert_eq!(
+        examined, 1,
+        "no transposition survived the checksum in ten thousand attempts, \
+         which at one in 256 should be impossible — the checksum or the \
+         generator has changed"
     );
 }
 
