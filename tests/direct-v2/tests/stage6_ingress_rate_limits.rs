@@ -348,3 +348,68 @@ async fn a_flooding_peer_does_not_spend_a_quiet_peers_allowance() {
         "both peers' accepted messages are queued, and nothing else"
     );
 }
+
+/// The GLOBAL bucket bounds the aggregate, with every peer inside its own
+/// allowance.
+///
+/// The other tests here spend 64 and 96 against a global burst of 256, so
+/// none of them can tell whether the shared bucket exists at all — a
+/// wiring or configuration regression that disabled it would pass every
+/// one of them. This is the case that cannot be explained by per-peer
+/// accounting: sixteen peers each spend exactly their own 32-token burst,
+/// so no per-peer bucket refuses anything, and the 512 attempts still
+/// have to be cut down by the shared one.
+///
+/// The margin is deliberately wide rather than exact. The bucket refills
+/// while the test runs — 1,200 a minute is 20 a second — so an assertion
+/// pinned to 256 lands within a token or two of the boundary and decides
+/// on timing: the first version of this test asserted `<= 256 + refill`
+/// and failed at 267 against a ceiling of 266.6. Sixteen senders put the
+/// accepted total near 256 and the attempted total at 512, and no
+/// plausible refill closes that gap.
+#[tokio::test]
+async fn the_global_bucket_bounds_peers_that_are_each_within_their_own() {
+    const SENDERS: usize = 16;
+    let (senders, receiver, peer) = fan_in(SENDERS).await;
+
+    let mut accepted_total = 0usize;
+    let mut refusals = 0usize;
+    for sender in &senders {
+        let answers = flood(sender, &peer, PER_PEER_BURST, |_| "human".into()).await;
+        // EVERY refusal must be the limiter, as the sibling tests
+        // require. Counting bare `Err` would let a transport fault or a
+        // queue-capacity regression supply the refusals this test reads
+        // as proof of the shared bucket — and both assertions below
+        // would then pass with the global limiter disabled.
+        assert_only_overloaded(&answers);
+        accepted_total += accepted(&answers);
+        refusals += answers.len() - accepted(&answers);
+    }
+
+    let attempted = SENDERS * usize::from(PER_PEER_BURST);
+    assert_eq!(attempted, 512, "sixteen peers at their own burst");
+    assert!(
+        refusals > 0,
+        "every peer stayed inside its own allowance, so a refusal can only \
+         have come from the shared bucket — none arrived, which means the \
+         global bound is not wired"
+    );
+    assert!(
+        accepted_total < attempted * 3 / 4,
+        "the shared bucket must cut the aggregate well below {attempted}; \
+         {accepted_total} were accepted"
+    );
+
+    // And the queue was not the refuser: everything accepted was
+    // enqueued, so the shortfall is the limiter's doing and nothing
+    // else's.
+    let delivered = receiver
+        .drain_endpoint(endpoint("claude"))
+        .await
+        .expect("the receiver answers");
+    assert_eq!(
+        delivered.len(),
+        accepted_total,
+        "the queue took exactly what was accepted"
+    );
+}
