@@ -107,6 +107,23 @@ So the rule is mechanical, and the check is mechanical too:
 
 The words are a trigger, not the whole set — an invariant phrased without them owes the same test. The list exists so the rule can be applied without judgement, on sight.
 
+#### Prose that describes behaviour you changed is part of the change
+
+**When behaviour changes, search the tree for the OLD behaviour's own words and fix every place that still asserts them — before committing, not after a reviewer names one.**
+
+The rule exists because the failure is not carelessness in the reasoning. It is that the reasoning is correct in the file you are looking at, and its counterpart lives somewhere you are not looking. One change, one edit, one file — and the pair goes stale silently, because nothing compiles prose.
+
+The instances, so the shape is recognisable rather than abstract: a schema's `x-contract.status` flipped without its manifest entry; a stage's `Met.` block claiming evidence its tests did not have; a required-test bullet pointing at an amendment that had been withdrawn two commits earlier; a `README` status paragraph left behind by the very commit that changed the plan it summarises; an ADR amendment written in the present tense about a defect the next commit fixed; a comment opening "A WAITER IS ANSWERED, not dropped" directly above a branch that had just been made to drop deliberately.
+
+Every one was caught in review. None was caught by re-reading the diff, because the diff does not contain the file that was not edited.
+
+What to actually do, in order:
+
+- **Grep for the old behaviour's distinctive words**, not for the filename you edited. `grep -rn 'is answered \`overloaded\`' architecture/ crates/` found two stale claims a review had not named.
+- **Include comments, ADR history notes, `README`/`IMPLEMENTATION` status prose, contract text and plan sections.** A comment is prose that ships; an ADR history note written in the present tense becomes false the moment the behaviour it describes is fixed, and it is the one document a future reader trusts to say what was true *then*.
+- **Prefer past tense for a defect an amendment responds to.** "As this gap was found, X was answered Y" stays true forever; "X is answered Y" is false as soon as it is fixed — often in the same commit series.
+- **A pair is not always two files.** The waiter comment and the code it described were forty lines apart in one file.
+
 ### Fixtures vs test data
 
 - `fixtures/` = normative/frozen deterministic vectors. Changes require explicit protocol/spec review. Every vector file declares its algorithm and is recomputed by `tools/checks/verify_fixture_vectors.py`; a drifted vector is a protocol break, not a test failure.

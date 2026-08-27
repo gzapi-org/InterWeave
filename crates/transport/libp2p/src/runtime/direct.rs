@@ -504,29 +504,55 @@ pub(super) fn handle_direct(
                         resolved_endpoint: resolved_endpoint.clone(),
                     }
                 }
-                // A WAITER IS ANSWERED, not dropped. The previous version
-                // returned here and let the `ResponseChannel` fall out of
-                // scope, which sends nothing at all — the remote then
-                // waits out its own deadline for a message this profile
-                // had already decided about.
+                // A SETTLED WAITER IS ANSWERED, not dropped. When the
+                // owner has finished, its outcome is in the positive
+                // cache and that is what the waiter receives; letting the
+                // `ResponseChannel` fall out of scope there would send
+                // nothing at all, and the remote would wait out its own
+                // deadline for a message this profile had already decided
+                // about.
                 //
-                // It read as harmless because it is currently
+                // An UNSETTLED waiter is the opposite case and is
+                // deliberately not answered — see the `None` arm below.
+                // The two must not be conflated: one has an answer and
+                // must deliver it, the other has none and must not invent
+                // one.
+                //
+                // Both read as academic today because this arm is
                 // UNREACHABLE: `admit_inbound` acquires and releases the
                 // reservation inside one synchronous call, so nothing is
-                // ever in flight when the next request arrives. That is a
-                // property of today's admission, not of the protocol, and
-                // a silent drop waiting for admission to become async is
-                // the kind of thing that surfaces as an unexplained
-                // timeout much later.
+                // ever in flight when the next request arrives: a
+                // duplicate that follows is a positive-cache hit, and
+                // this arm is UNREACHABLE. That is a property of today's
+                // admission, not of the protocol.
                 //
-                // The owner has therefore already settled, and its result
-                // is in the dedup cache — which is exactly what the
-                // waiter should receive. A cache miss means the owner is
-                // genuinely still in flight (a future async admission) or
-                // was refused, and `overloaded` is the honest answer to
-                // "I cannot hold this open for you".
+                // It stops being unreachable at the first stage whose
+                // admission yields while holding a reservation — the
+                // local-client IPC boundary — and that is when the
+                // retention ADR-0019 requires must be built: hold the
+                // channel until the owner settles, then answer every
+                // waiter with the owner's outcome.
+                //
+                // Until then this must not ANSWER the branch. It
+                // previously replied `overloaded`, and the ADR-0019
+                // amendment of 2026-08-27 names that non-conforming:
+                // exhaustion is a refusal and a waiter was admitted, so
+                // the reply reported a limit the request never hit. Not
+                // answering is recoverable — the peer retries, the owner
+                // has settled by then, and dedup answers correctly —
+                // whereas a wrong answer is final.
                 AdmissionOutcome::AttachedAsWaiter => {
-                    waiter_response(&state.dedup, &request, &source)
+                    match waiter_response(&state.dedup, &request, &source) {
+                        Some(response) => response,
+                        None => {
+                            debug_assert!(
+                                false,
+                                "a waiter attached with no settled owner: admission \
+                                 yields now, so ADR-0019 waiter retention is owed"
+                            );
+                            return DirectHandled::Consumed;
+                        }
+                    }
                 }
                 AdmissionOutcome::Refused(refusal) => DirectResponse::Rejected {
                     message_id: request.message_id,
@@ -629,19 +655,20 @@ pub(super) fn waiter_response(
     dedup: &interweave_transport_runtime::dedup::DedupCache,
     request: &DirectMessageV2,
     source: &TransportIdentity,
-) -> crate::direct_codec::DirectResponse {
+) -> Option<crate::direct_codec::DirectResponse> {
     use crate::direct_codec::DirectResponse;
     let key = interweave_transport_runtime::direct_inbound::dedup_key(request, source);
-    match dedup.get(&key) {
-        Some(record) => DirectResponse::Accepted {
-            message_id: request.message_id,
-            resolved_endpoint: record.resolved_endpoint.clone(),
-        },
-        None => DirectResponse::Rejected {
-            message_id: request.message_id,
-            reason: DirectRejectReason::Overloaded,
-        },
-    }
+    // `None` means the owner has NOT settled, and this function has no
+    // answer to give. It used to return `overloaded` there, which the
+    // ADR-0019 amendment of 2026-08-27 names non-conforming: exhaustion
+    // is a refusal, and a waiter was ADMITTED. Reporting a limit for a
+    // request that passed one is a different answer to a different
+    // question, and the caller cannot tell the two apart if this
+    // function invents one.
+    dedup.get(&key).map(|record| DirectResponse::Accepted {
+        message_id: request.message_id,
+        resolved_endpoint: record.resolved_endpoint.clone(),
+    })
 }
 
 /// Validate a response before a caller may believe it.
@@ -843,8 +870,7 @@ mod waiter_tests {
     use super::waiter_response;
     use crate::direct_codec::DirectResponse;
     use interweave_transport_api::{
-        DirectMessageV2, DirectRejectReason, EndpointId, MediaType, MessageId, Payload,
-        TransportIdentity,
+        DirectMessageV2, EndpointId, MediaType, MessageId, Payload, TransportIdentity,
     };
     use interweave_transport_runtime::dedup::{DEFAULT_TTL_MS, DedupCache};
     use interweave_transport_runtime::direct_inbound::dedup_key;
@@ -885,27 +911,34 @@ mod waiter_tests {
 
         assert_eq!(
             waiter_response(&dedup, &req, &peer()),
-            DirectResponse::Accepted {
+            Some(DirectResponse::Accepted {
                 message_id: req.message_id,
                 resolved_endpoint: endpoint("claude"),
-            }
+            })
         );
     }
 
-    /// NEVER SILENCE. A cache miss means the owner is genuinely still in
-    /// flight or was refused; `overloaded` is the honest answer to "I
-    /// cannot hold this open for you", and it is an answer rather than a
-    /// dropped channel the remote waits out its deadline on.
+    /// NO ANSWER IS NOT THE SAME AS A REFUSAL. A cache miss means the
+    /// owner has not settled, and this function has none of the owner's
+    /// outcome to relay.
+    ///
+    /// It used to answer `overloaded` here, and its own documentation
+    /// called that "the honest answer to 'I cannot hold this open for
+    /// you'". The ADR-0019 amendment of 2026-08-27 names it
+    /// non-conforming instead: exhaustion is a REFUSAL, and a waiter was
+    /// ADMITTED, so the reply reported a limit the request never hit and
+    /// a sender could not tell the two apart.
+    ///
+    /// Returning `None` makes the absence something the caller must
+    /// handle rather than something this function papers over.
     #[test]
-    fn a_waiter_with_no_recorded_owner_is_told_overloaded_not_nothing() {
+    fn a_waiter_with_no_settled_owner_gets_no_fabricated_answer() {
         let dedup = DedupCache::new(64, DEFAULT_TTL_MS);
         let req = request();
         assert_eq!(
             waiter_response(&dedup, &req, &peer()),
-            DirectResponse::Rejected {
-                message_id: req.message_id,
-                reason: DirectRejectReason::Overloaded,
-            }
+            None,
+            "a missing owner outcome must not become a refusal"
         );
     }
 
@@ -914,13 +947,16 @@ mod waiter_tests {
     /// own id check.
     #[test]
     fn a_waiters_answer_echoes_the_request_id() {
-        let dedup = DedupCache::new(64, DEFAULT_TTL_MS);
+        let mut dedup = DedupCache::new(64, DEFAULT_TTL_MS);
         let req = request();
+        let fingerprint = direct_content_fingerprint_v1(Some("text/plain"), b"hi").expect("hashes");
+        dedup.record_accepted(dedup_key(&req, &peer()), endpoint("claude"), fingerprint, 0);
         match waiter_response(&dedup, &req, &peer()) {
-            DirectResponse::Accepted { message_id, .. }
-            | DirectResponse::Rejected { message_id, .. } => {
-                assert_eq!(message_id, req.message_id);
-            }
+            Some(
+                DirectResponse::Accepted { message_id, .. }
+                | DirectResponse::Rejected { message_id, .. },
+            ) => assert_eq!(message_id, req.message_id),
+            None => panic!("a settled owner must produce an answer"),
         }
     }
 }
