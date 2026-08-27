@@ -36,6 +36,15 @@
 
 
 # --- called from production, not attributable from the call site ---
+#
+# The three below were added when `runtime.rs` was decomposed. Nothing
+# about their callers changed: the call sites moved into files that reach
+# them through a field and never name the owning type, so the guard's
+# co-occurrence rule stopped seeing calls that were there all along.
+EndpointRegistry::authorize_outbound  call  registry.authorize_outbound(
+TrustSources::classify                call  self.trust.classify(
+EndpointRegistry::lease               call  .lease(&frame.source_endpoint)
+PreAuthLimits::handshake_timeout_ms   call  preauth.handshake_timeout_ms(
 FrameError::to_wire                              call  error.to_wire(
 Refusal::to_wire                                 call  refusal.to_wire(
 
@@ -111,6 +120,8 @@ PeerTrustPolicy::with_local_peer                 stage-12  bound at runtime comp
 ReservationMap::outstanding                      stage-12  expiry and introspection driven at runtime composition
 TransportCapabilities::clamped                   stage-12  capability clamping happens at runtime composition
 TrustDecision::is_allowed                        stage-12  bound at runtime composition
+
+Generation::parse                     stage-13  parsed from an IPC hello; only test helpers build one today
 
 # --- stage-13 ----------------------------------------------------
 ContentFingerprint::as_bytes                     stage-13  fingerprint rendering, surfaced by diagnostics
