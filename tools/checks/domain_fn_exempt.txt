@@ -49,6 +49,8 @@ FrameError::to_wire                              call  error.to_wire(
 Refusal::to_wire                                 call  refusal.to_wire(
 
 # --- stage-7 -----------------------------------------------------
+BroadcastMessageV1::decode                       stage-7   handle_broadcast calls it once the gossipsub behaviour is composed
+BroadcastMessageV1::encode                       stage-7   the publish command calls it once the gossipsub behaviour is composed
 IngressLimiter::prune_idle                       stage-7   broadcast subscription surface, no mesh before GossipSub
 IngressLimiter::tracked_peers                    stage-7   broadcast subscription surface, no mesh before GossipSub
 ReplyResolution::as_error                        stage-7   reply routes arrive with channels

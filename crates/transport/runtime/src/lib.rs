@@ -29,11 +29,12 @@ pub use connection_policy::{
     PeerBackoff,
 };
 pub use dedup::{
-    Admission, DedupCache, DedupKey, DestinationSelector, Reservation, ReservationFailure,
-    ReservationMap,
+    Admission, DedupCache, DedupKey, DestinationSelector, RecordedRoute, Reservation,
+    ReservationFailure, ReservationMap,
 };
 pub use direct_inbound::{
-    AdmissionContext, Clocks, Outcome, Refusal, admit_inbound, admit_prefix, admit_structured,
+    AdmissionContext, Clocks, Outcome, PrefixContext, Refusal, admit_inbound, admit_prefix,
+    admit_structured,
 };
 // RE-EXPORTED, so a backend composing admission does not have to name
 // `trust-api` itself. `AdmissionContext` holds a `PeerTrustPolicy`, so

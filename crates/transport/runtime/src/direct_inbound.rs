@@ -68,8 +68,8 @@ use interweave_transport_api::{
 use interweave_trust_api::{EndpointTrustPolicy, PeerTrustPolicy, TrustDecision};
 
 use crate::dedup::{
-    Admission, DedupCache, DedupKey, DestinationSelector, Reservation, ReservationFailure,
-    ReservationMap,
+    Admission, DedupCache, DedupKey, DestinationSelector, RecordedRoute, Reservation,
+    ReservationFailure, ReservationMap,
 };
 use crate::endpoint_queue::{DirectEvent, EndpointQueues, QueueRefusal};
 use crate::endpoint_registry::{EndpointRegistry, ResolveFailure};
@@ -104,10 +104,8 @@ pub struct Clocks {
 /// individually could also reach past this function and use them
 /// directly in some other order.
 pub struct AdmissionContext<'a> {
-    /// Who this profile trusts, at profile scope.
-    pub trust: &'a PeerTrustPolicy,
-    /// Direct-ingress token buckets.
-    pub ingress: &'a mut IngressLimiter,
+    /// The gates that need no frame. See [`PrefixContext`].
+    pub prefix: PrefixContext<'a>,
     /// The duplicate cache.
     pub dedup: &'a mut DedupCache,
     /// In-flight reservations.
@@ -116,6 +114,29 @@ pub struct AdmissionContext<'a> {
     pub registry: &'a EndpointRegistry,
     /// Open delivery queues.
     pub queues: &'a mut EndpointQueues,
+}
+
+/// The three gates that need no decoded frame.
+///
+/// Split out of [`AdmissionContext`] rather than passed alongside it
+/// because these are the only things [`admit_prefix`] reads, and a
+/// signature demanding a registry and open queues to answer "is this peer
+/// trusted, are we draining, is it over its rate" is a signature no other
+/// mode can satisfy. Broadcast runs the same three gates on a message
+/// that has no endpoint, no reservation and no per-endpoint queue.
+///
+/// It stays a struct for the reason the wider one does: the ORDER these
+/// are used in is this module's subject, and a caller handed them
+/// individually could use them in some other order.
+pub struct PrefixContext<'a> {
+    /// Who this profile trusts, at profile scope.
+    pub trust: &'a PeerTrustPolicy,
+    /// The ingress token buckets for this mode.
+    ///
+    /// Per mode, not shared: ADR-0026's 2026-08-27 amendment accounts
+    /// broadcast separately from direct so neither can spend the other's
+    /// allowance.
+    pub ingress: &'a mut IngressLimiter,
     /// Whether the node has begun draining.
     ///
     /// Draining is not stopping: existing connections stay up, so a peer
@@ -226,7 +247,7 @@ impl Refusal {
 pub fn admit_prefix(
     source_peer: &TransportIdentity,
     now_ms: u64,
-    ctx: &mut AdmissionContext<'_>,
+    ctx: &mut PrefixContext<'_>,
 ) -> Result<(), Refusal> {
     // 1. PROFILE TRUST. Before a token is charged, so an unauthorized
     //    peer cannot spend an authorized peer's allowance being refused.
@@ -276,7 +297,7 @@ pub fn admit_inbound(
     clocks: Clocks,
     ctx: &mut AdmissionContext<'_>,
 ) -> Outcome {
-    if let Err(refusal) = admit_prefix(source_peer, clocks.monotonic_ms, ctx) {
+    if let Err(refusal) = admit_prefix(source_peer, clocks.monotonic_ms, &mut ctx.prefix) {
         return Outcome::Refused(refusal);
     }
     admit_structured(frame, source_peer, clocks, ctx)
@@ -318,9 +339,20 @@ pub fn admit_structured(
     // 5. DEDUP. An already-accepted message replays its STORED route and
     //    is not delivered again, even if the default has since changed.
     match ctx.dedup.admit(&key, fingerprint, now_ms) {
-        Admission::DuplicateAccepted { resolved_endpoint } => {
+        Admission::DuplicateAccepted {
+            route: RecordedRoute::Direct { resolved_endpoint },
+        } => {
             return Outcome::DuplicateAccepted { resolved_endpoint };
         }
+        // A BROADCAST ROUTE UNDER A DIRECT KEY CANNOT HAPPEN, because
+        // `dedup_key` below builds only `DedupKey::Direct` and the cache
+        // stores the route beside the key it was recorded with. Refusing
+        // is still the right answer to the impossible: the alternative is
+        // inventing an endpoint to report, and a fabricated route is how a
+        // caller ends up told a message went somewhere it did not.
+        Admission::DuplicateAccepted {
+            route: RecordedRoute::Broadcast,
+        } => return Outcome::Refused(Refusal::DuplicateConflict),
         Admission::Conflict => return Outcome::Refused(Refusal::DuplicateConflict),
         Admission::Fresh => {}
     }
@@ -347,7 +379,7 @@ pub fn admit_structured(
         //      and widen it.
         |policy: &EndpointTrustPolicy| {
             matches!(
-                ctx.trust.decide_for_endpoint(source_peer, policy),
+                ctx.prefix.trust.decide_for_endpoint(source_peer, policy),
                 TrustDecision::Allowed
             )
         },
@@ -383,8 +415,14 @@ pub fn admit_structured(
     }
 
     // 10. RECORD, so a retry replays this route rather than re-resolving.
-    ctx.dedup
-        .record_accepted(key.clone(), resolved.clone(), fingerprint, now_ms);
+    ctx.dedup.record_accepted(
+        key.clone(),
+        RecordedRoute::Direct {
+            resolved_endpoint: resolved.clone(),
+        },
+        fingerprint,
+        now_ms,
+    );
     ctx.reservations.release(&key);
 
     Outcome::Accepted {
@@ -517,13 +555,15 @@ mod tests {
             now: u64,
         ) -> Outcome {
             let mut ctx = AdmissionContext {
-                trust: &self.trust,
-                ingress: &mut self.ingress,
+                prefix: PrefixContext {
+                    trust: &self.trust,
+                    ingress: &mut self.ingress,
+                    draining: self.draining,
+                },
                 dedup: &mut self.dedup,
                 reservations: &mut self.reservations,
                 registry: &self.registry,
                 queues: &mut self.queues,
-                draining: self.draining,
             };
             admit_inbound(
                 frame,
@@ -576,6 +616,43 @@ mod tests {
     /// structured half that charged again would halve every peer's
     /// burst. It did, briefly: thirty-two became sixteen.
     #[test]
+    fn admit_prefix_needs_only_trust_ingress_and_draining() {
+        // THE DECOUPLING, ASSERTED BY THE TYPE. Nothing here constructs an
+        // EndpointRegistry or EndpointQueues, so this does not compile if
+        // `admit_prefix` ever reaches for one again -- which is what makes
+        // the gates reusable by a mode that has neither. Broadcast has no
+        // endpoint, no reservation and no per-endpoint queue, and still
+        // owes exactly these three answers.
+        let trust = PeerTrustPolicy::new([peer(P1)]).expect("a small allowlist");
+        let mut ingress = IngressLimiter::with_defaults(0);
+
+        let mut ctx = PrefixContext {
+            trust: &trust,
+            ingress: &mut ingress,
+            draining: false,
+        };
+        assert_eq!(admit_prefix(&peer(P1), 0, &mut ctx), Ok(()));
+
+        // And the three gates still answer in their documented order: an
+        // untrusted peer is refused as untrusted, not as rate-limited,
+        // even though it has spent no allowance.
+        assert_eq!(
+            admit_prefix(&peer(P2), 0, &mut ctx),
+            Err(Refusal::UntrustedPeer)
+        );
+
+        let mut draining_ctx = PrefixContext {
+            trust: &trust,
+            ingress: &mut ingress,
+            draining: true,
+        };
+        assert_eq!(
+            admit_prefix(&peer(P1), 0, &mut draining_ctx),
+            Err(Refusal::Draining)
+        );
+    }
+
+    #[test]
     fn the_two_halves_charge_one_token_between_them() {
         let mut w = World::new();
         let f = frame(Some("claude"), b"hi", 11);
@@ -587,16 +664,18 @@ mod tests {
         // Spend the whole burst through the split path the backend uses.
         for _ in 0..32 {
             let mut ctx = AdmissionContext {
-                trust: &w.trust,
-                ingress: &mut w.ingress,
+                prefix: PrefixContext {
+                    trust: &w.trust,
+                    ingress: &mut w.ingress,
+                    draining: w.draining,
+                },
                 dedup: &mut w.dedup,
                 reservations: &mut w.reservations,
                 registry: &w.registry,
                 queues: &mut w.queues,
-                draining: w.draining,
             };
             assert!(
-                admit_prefix(&peer(P1), 0, &mut ctx).is_ok(),
+                admit_prefix(&peer(P1), 0, &mut ctx.prefix).is_ok(),
                 "the burst is thirty-two, and the split path spends one each"
             );
             let _ = admit_structured(&f, &peer(P1), clocks, &mut ctx);
@@ -605,16 +684,18 @@ mod tests {
         // The thirty-third is over it, which pins the count at exactly
         // one per message rather than merely "not two".
         let mut ctx = AdmissionContext {
-            trust: &w.trust,
-            ingress: &mut w.ingress,
+            prefix: PrefixContext {
+                trust: &w.trust,
+                ingress: &mut w.ingress,
+                draining: w.draining,
+            },
             dedup: &mut w.dedup,
             reservations: &mut w.reservations,
             registry: &w.registry,
             queues: &mut w.queues,
-            draining: w.draining,
         };
         assert_eq!(
-            admit_prefix(&peer(P1), 0, &mut ctx),
+            admit_prefix(&peer(P1), 0, &mut ctx.prefix),
             Err(Refusal::RateLimited)
         );
     }
@@ -702,8 +783,10 @@ mod tests {
         // The entry survives, so a later retry still replays the route.
         let key = dedup_key(&f, &peer(P1));
         assert_eq!(
-            w.dedup.get(&key).map(|r| r.resolved_endpoint.clone()),
-            Some(endpoint("claude")),
+            w.dedup.get(&key).map(|r| r.route.clone()),
+            Some(RecordedRoute::Direct {
+                resolved_endpoint: endpoint("claude")
+            }),
             "a flood must not delete an accepted route"
         );
     }
@@ -949,13 +1032,15 @@ mod tests {
         };
         let f = frame(Some("claude"), b"hi", 8);
         let mut ctx = AdmissionContext {
-            trust: &w.trust,
-            ingress: &mut w.ingress,
+            prefix: PrefixContext {
+                trust: &w.trust,
+                ingress: &mut w.ingress,
+                draining: w.draining,
+            },
             dedup: &mut w.dedup,
             reservations: &mut w.reservations,
             registry: &w.registry,
             queues: &mut w.queues,
-            draining: w.draining,
         };
         assert!(matches!(
             admit_inbound(&f, &peer(P1), clocks, &mut ctx),
