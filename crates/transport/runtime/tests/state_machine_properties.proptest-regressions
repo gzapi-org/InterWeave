@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 101087da37aaaeac9c4efd039a91978e5ac6a099958bfaead7513916525f5f28 # shrinks to bound = 0, pushes = [0, 0]
+cc 53cc74949097ef04921697baf7369c26469e6d10c3b15f33795ed940774fa49c # shrinks to max_global = 1, max_per_peer = 1, ops = [(0, 0, true), (1, 0, true)]
+cc 6a6048fe06bcabc4c904570f57f8860eaf353f4ea026d1612aa539f2b418e10c # shrinks to bound = 2, pushes = [4, 0]
+cc 07ef5a2f4eb1f75249d5c794f1a7665f49a19022f809a24f0ad396ca307fc469 # shrinks to bound = 2, ops = [(EndpointId("human"), 0), (EndpointId("human"), 1)]
