@@ -193,6 +193,17 @@ run_against 'impl Refusal {
 }' 'fn go(r: &Refusal) { let _ = refusal.to_wire(); }' 'Refusal::to_wire call refusal.to_wire(' ""
 assert_rc   "a call exemption naming a real call expression passes" 0
 
+# A call inside the DEFINING file does not satisfy the exemption. The
+# exemption exists because a method call cannot be attributed to a type,
+# not because same-file use should count — that was its own mechanism and
+# was removed for producing holes.
+run_against 'impl Refusal {
+    pub fn to_wire(&self) -> u8 { 0 }
+}
+fn local(r: &Refusal) -> u8 { refusal.to_wire() }' 'fn go(_r: &Refusal) {}' \
+    'Refusal::to_wire call refusal.to_wire(' ""
+assert_rc   "a call in the defining file does not satisfy a call exemption" 1
+
 run_against 'impl Refusal {
     pub fn to_wire(&self) -> u8 { 0 }
 }' 'fn go(_r: &Refusal) {}' 'Refusal::to_wire call refusal.to_wire(' ""
