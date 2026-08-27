@@ -504,13 +504,21 @@ pub(super) fn handle_direct(
                         resolved_endpoint: resolved_endpoint.clone(),
                     }
                 }
-                // A WAITER IS ANSWERED, not dropped. The previous version
-                // returned here and let the `ResponseChannel` fall out of
-                // scope, which sends nothing at all — the remote then
-                // waits out its own deadline for a message this profile
-                // had already decided about.
+                // A SETTLED WAITER IS ANSWERED, not dropped. When the
+                // owner has finished, its outcome is in the positive
+                // cache and that is what the waiter receives; letting the
+                // `ResponseChannel` fall out of scope there would send
+                // nothing at all, and the remote would wait out its own
+                // deadline for a message this profile had already decided
+                // about.
                 //
-                // It read as harmless because it is currently
+                // An UNSETTLED waiter is the opposite case and is
+                // deliberately not answered — see the `None` arm below.
+                // The two must not be conflated: one has an answer and
+                // must deliver it, the other has none and must not invent
+                // one.
+                //
+                // Both read as academic today because this arm is
                 // UNREACHABLE: `admit_inbound` acquires and releases the
                 // reservation inside one synchronous call, so nothing is
                 // ever in flight when the next request arrives: a

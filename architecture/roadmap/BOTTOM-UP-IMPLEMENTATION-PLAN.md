@@ -621,9 +621,11 @@ conflated them into a claim of proof that does not exist.
 **1. The runtime does not implement the waiter contract.**
 `handle_direct` passes `AttachedAsWaiter` straight to `waiter_response`,
 which reads the dedup cache: a record means the owner already finished
-and the waiter is answered with the stored route, and **no record means
-the waiter is answered `overloaded`**. A waiter attaching while the owner
-is still in flight is therefore refused rather than held.
+and the waiter is answered with the stored route, and, **as this gap was found**, no record meant
+the waiter was answered `overloaded` — a waiter attaching while the owner
+was still in flight was refused rather than held. The reply is corrected
+(the helper returns `None` and the caller asserts the branch is
+unreachable); what remains unimplemented is the retention itself.
 
 `contracts/ENDPOINTS.md` requires the opposite — "an attached waiter
 holds a response channel until the owner's admission resolves" — and
