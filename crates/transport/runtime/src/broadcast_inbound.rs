@@ -171,9 +171,14 @@ pub fn admit_broadcast(
     ctx: &mut BroadcastContext<'_>,
 ) -> BroadcastAdmission {
     // 3. THE SHARED GATES, in the one order they are written in. Trust is
-    //    re-answered here and passes trivially, which is the point: there
-    //    is one implementation of these three and no broadcast-shaped
-    //    copy that could drift from it.
+    //    re-answered here, and in correct code it passes because the
+    //    classifier already said Accept. It is NOT redundant: with the
+    //    classifier corrupted to accept an unauthorized publisher, this
+    //    gate still refused local delivery -- the four-peer exit-gate
+    //    test only caught that mutation at the forwarding hop. One
+    //    implementation of the three gates, no broadcast-shaped copy to
+    //    drift from it, and a second answer to the trust question that
+    //    does not share the first one's mistakes.
     //
     //    WHAT THE RATE BUCKET BOUNDS, and what it cannot. Everything
     //    below it: the fingerprint hash over the payload, the dedup

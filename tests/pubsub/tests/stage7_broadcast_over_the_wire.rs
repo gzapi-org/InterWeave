@@ -551,6 +551,206 @@ async fn a_broadcast_flood_does_not_wedge_the_direct_path() {
     b.shutdown().await.expect("b stops");
 }
 
+/// An infrastructure-only peer cannot join the mesh (testing.md 226).
+///
+/// Proven at the CONNECTION layer, and that is where the proof belongs:
+/// `settle_outcome` refuses an inbound connection from a peer whose class
+/// is `ConnectivityInfrastructureOnly`, so the socket closes before any
+/// protocol negotiates. GossipSub never sees the peer — not because the
+/// behaviour refused it, which it cannot, but because the gate did.
+/// `stage6_malformed_frames.rs` records the same fact for direct.
+///
+/// The mesh-level blacklist is the second layer, for the class changing
+/// after establishment. This test proves the first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_infrastructure_only_peer_cannot_join_the_mesh() {
+    let (infra_id, infra_peer) = who();
+    let (node_id, node_peer) = who();
+
+    // The node knows the infra peer for reachability control ONLY.
+    let node_trust = TrustSources::new(
+        PeerTrustPolicy::new([]).expect("nobody on the data plane"),
+        InfrastructureSet::new([infra_peer.clone()]).expect("one infrastructure peer"),
+    );
+    let mut victim = SwarmRuntime::start(&node_id, SubstrateConfig::default(), node_trust)
+        .expect("the node starts");
+    victim
+        .configure_broadcast(
+            BroadcastChannels::from_profile(&profile(&["general"]), 64).expect("valid"),
+        )
+        .await
+        .expect("installs");
+    victim
+        .join(channel("general"), "sub")
+        .await
+        .expect("lands")
+        .expect("accepted");
+
+    // The infra peer, for its part, treats the node as data-plane and
+    // tries to broadcast to it.
+    let infra = node(
+        &infra_id,
+        &[&node_peer],
+        &["general"],
+        SubstrateConfig::default(),
+    )
+    .await;
+    infra
+        .join(channel("general"), "pub")
+        .await
+        .expect("lands")
+        .expect("accepted");
+
+    let address = victim
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("a loopback address"))
+        .await
+        .expect("listens");
+    infra
+        .dial(node_peer.clone(), address)
+        .await
+        .expect("the command lands")
+        .expect("the dial is admitted on the infra side");
+
+    // THE NODE NEVER ANNOUNCES A CONNECTION. Either nothing arrives, or
+    // the close lands first; both mean no data-plane connection was
+    // retained.
+    let announced = tokio::time::timeout(SILENCE, async {
+        loop {
+            match victim.next_event().await {
+                Some(SwarmEvent::Connected { .. }) => return true,
+                Some(_) => {}
+                None => return false,
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+    assert!(
+        !announced,
+        "an infrastructure-only peer must not hold a data-plane connection"
+    );
+
+    // And whatever it publishes reaches nobody.
+    publish_repeatedly(&infra, "pub", 20, b"from infra").await;
+    assert!(
+        drain_until(&victim, "sub", SILENCE).await.is_empty(),
+        "nothing from an infrastructure-only peer may be delivered"
+    );
+
+    infra.shutdown().await.expect("infra stops");
+    victim.shutdown().await.expect("the node stops");
+}
+
+/// An unauthorized original publisher is Ignore: not delivered, not
+/// forwarded, and the relay is not penalised.
+///
+/// Four real peers in a chain, because each of the three claims needs a
+/// different observer:
+///
+/// ```text
+/// A (publisher) — R (relay, trusts A, C) — C (trusts R, D; NOT A) — D (trusts C, R, A)
+/// ```
+///
+/// - NOT DELIVERED is observed at C: its session drains empty.
+/// - NOT FORWARDED is observed only at D, which is reachable solely
+///   through C. D TRUSTS A, deliberately: if C forwarded, D would
+///   deliver. Were D not to trust A, its silence would be D ignoring the
+///   message itself and would prove nothing about C.
+/// - NOT PENALISED is observed by R still reaching C afterwards: a
+///   message R publishes itself is delivered, so R was neither closed
+///   nor pruned for having relayed something C did not authorize.
+///
+/// The positive control is what makes D's silence evidence, and D trusts
+/// R for the same reason it trusts A: the trust question is about the
+/// ORIGINAL publisher, so a control from R reaches D only if D authorizes
+/// R. The first version of this test had D trusting C alone, and D
+/// ignored the control — the test's own trust rule, applied to its
+/// author.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unauthorized_publisher_is_ignored_not_delivered_and_not_relayed_further() {
+    let (a_id, a_peer) = who();
+    let (r_id, r_peer) = who();
+    let (c_id, c_peer) = who();
+    let (d_id, d_peer) = who();
+
+    let mut a = node(&a_id, &[&r_peer], &["general"], SubstrateConfig::default()).await;
+    let mut r = node(
+        &r_id,
+        &[&a_peer, &c_peer],
+        &["general"],
+        SubstrateConfig::default(),
+    )
+    .await;
+    // C does NOT trust A.
+    let mut c = node(
+        &c_id,
+        &[&r_peer, &d_peer],
+        &["general"],
+        SubstrateConfig::default(),
+    )
+    .await;
+    // D trusts A so that a forwarded message WOULD be delivered — D's
+    // silence is then C not forwarding, not D ignoring.
+    let mut d = node(
+        &d_id,
+        &[&c_peer, &r_peer, &a_peer],
+        &["general"],
+        SubstrateConfig::default(),
+    )
+    .await;
+
+    connect(&mut a, &mut r, &r_peer).await;
+    connect(&mut r, &mut c, &c_peer).await;
+    connect(&mut c, &mut d, &d_peer).await;
+
+    for (n, session) in [(&a, "pub"), (&r, "relay"), (&c, "sub"), (&d, "far")] {
+        n.join(channel("general"), session)
+            .await
+            .expect("lands")
+            .expect("accepted");
+    }
+
+    // POSITIVE CONTROL FIRST: R publishes, and it reaches both C and D.
+    // This proves the chain forwards at all, so the silence below is
+    // Ignore doing its job and not a mesh that never formed.
+    publish_repeatedly(&r, "relay", 30, b"control").await;
+    assert_eq!(
+        drain_until(&c, "sub", PATIENCE).await.len(),
+        1,
+        "the control reaches C"
+    );
+    assert_eq!(
+        drain_until(&d, "far", PATIENCE).await.len(),
+        1,
+        "and is forwarded by C to D"
+    );
+
+    // NOW A PUBLISHES. R trusts A and forwards; C does not trust A.
+    publish_repeatedly(&a, "pub", 31, b"from an untrusted origin").await;
+
+    assert!(
+        drain_until(&c, "sub", SILENCE).await.is_empty(),
+        "NOT DELIVERED: C does not authorize A as a publisher"
+    );
+    assert!(
+        drain_until(&d, "far", SILENCE).await.is_empty(),
+        "NOT FORWARDED: D is reachable only through C, and C must not relay an Ignore"
+    );
+
+    // NOT PENALISED: R can still reach C afterwards. A `Reject` would
+    // have counted against R for forwarding it; `Ignore` does not.
+    publish_repeatedly(&r, "relay", 32, b"still here").await;
+    assert_eq!(
+        drain_until(&c, "sub", PATIENCE).await.len(),
+        1,
+        "R was not penalised for relaying a message C ignored"
+    );
+
+    for n in [a, r, c, d] {
+        n.shutdown().await.expect("stops");
+    }
+}
+
 /// Publish the same envelope a few times while the mesh forms.
 ///
 /// A single publish immediately after connecting reaches nobody: GossipSub
