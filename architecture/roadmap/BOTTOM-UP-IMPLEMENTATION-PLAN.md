@@ -669,13 +669,14 @@ unexercisable end to end, and that is the shape — implemented,
 unit-tested, called by nothing — that produced two P1s on PR #38 and
 motivated `tools/checks/check_domain_fns_are_called.sh`.
 
-**One code obligation remains before this clause is met.** The amendment
-says an implementation that cannot reach the branch must say so rather
-than answer it, and answering an attached waiter `overloaded` reports
-exhaustion for a request that was admitted. `handle_direct` still does
-exactly that. Making the unreachability explicit is a change to admission
-handling and belongs in its own commit, not folded into a documentation
-one.
+**The code now says so rather than answering.** `waiter_response` returns
+`Option`, so a missing owner outcome is an absence the caller must handle
+instead of a refusal the function invents, and `handle_direct` asserts
+the branch is unreachable rather than replying `overloaded`. If admission
+ever yields without the retention being built, that assertion fires in
+test builds; in release the exchange is left for the peer's retry, which
+a settled owner then answers from cache — recoverable, where a wrong
+answer would be final.
 
 ## 10. Stage 7 — GossipSub broadcast
 
