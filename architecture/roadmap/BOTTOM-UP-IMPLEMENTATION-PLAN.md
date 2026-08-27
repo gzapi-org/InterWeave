@@ -539,8 +539,8 @@ Under `tests/direct-v2` and `tests/endpoint-routing`:
 - omitted destination -> configured default;
 - offline/unknown/policy-denied -> coarse `no_route`;
 - Accepted only after exact endpoint queue admission;
-- concurrent same-key retransmission -> one enqueue (**not met over the
-  wire** — see the open question below);
+- concurrent same-key retransmission -> one enqueue (**not met** — see
+  below);
 - same ID/different body -> conflict;
 - retry after default endpoint change returns original accepted route;
 - 48 KiB payload boundary;
@@ -609,52 +609,76 @@ rather than re-derived.
 Verified by breaking the code and watching the specific test fail, not by
 reading the tests and agreeing with them.
 
-**Not met:** the concurrent same-key retransmission clause. See the open
-question below. Every other clause of the implement list and the
-required-test list is proven above.
+**Not met:** the concurrent same-key retransmission clause. The runtime
+does not implement the waiter contract — see below. Every other clause of
+the implement list and the required-test list is proven above.
 
-#### Open question 2026-08-27: the concurrent-retransmission clause
+#### Not met: the concurrent-retransmission clause
 
-**Not resolved here, and deliberately not resolvable here.** The required
--test list asks for concurrent same-key retransmission over the wire, and
-no such test currently exists — one was written and deleted because it
-did not reach the path it claimed. What that means is a question for
-`contracts/ENDPOINTS.md`, not for this roadmap.
+Two separate things are true here, and an earlier draft of this section
+conflated them into a claim of proof that does not exist.
 
-The observation. `handle_direct` is a synchronous `fn` holding
-`&mut DirectState`, and `admit_structured` acquires the reservation,
-resolves, enqueues and releases inside that one call without yielding —
-`every_decided_path_returns_its_reservation` asserts the map is empty
-afterwards. In the swarm event loop as written, two admissions cannot
-overlap, so a second arrival is a dedup **cache** hit rather than a
-reservation **waiter**.
+**1. The runtime does not implement the waiter contract.**
+`handle_direct` passes `AttachedAsWaiter` straight to `waiter_response`,
+which reads the dedup cache: a record means the owner already finished
+and the waiter is answered with the stored route, and, **as this gap was found**, no record meant
+the waiter was answered `overloaded` — a waiter attaching while the owner
+was still in flight was refused rather than held. The reply is corrected
+(the helper returns `None` and the caller asserts the branch is
+unreachable); what remains unimplemented is the retention itself.
 
-The contradiction. `contracts/ENDPOINTS.md` requires concurrent same-key
-requests to attach as bounded waiters, charges each outstanding request
-rather than each key, and releases the owner's and every waiter's share
-together. That is not speculative: it records **SPIKE-002/A11 measured 39
-attached with zero refusals** before the rule was written. Waiters were
-observed. So either the spike harness reached a concurrency this runtime
-does not, or the runtime lost it — and the difference matters, because
-the contract's capacity numbers were derived from the measurement.
+`contracts/ENDPOINTS.md` requires the opposite — "an attached waiter
+holds a response channel until the owner's admission resolves" — and
+`transport/libp2p/DIRECT.md` says matching concurrent duplicates "attach
+as waiters and receive the same eventual response". Neither is
+implemented. This is a contract-to-code gap, not a documentation one.
 
-Neither possibility can be settled by editing this file. The contract
-outranks the roadmap (CLAUDE.md §2), and a roadmap that declares the
-wire path impossible while the contract requires it hands the next
-person two contradictory instructions.
+**2. Nothing tests it, and the in-process test does not.**
+`a_concurrent_matching_copy_attaches_instead_of_enqueuing` asserts that
+`admit_structured` returns `AttachedAsWaiter` and that nothing was
+enqueued. It never calls `waiter_response`, so it cannot observe the
+refusal above. Citing it as proof of the clause was wrong.
 
-What is proven today, and where:
+**Why no wire test exists either.** `handle_direct` is synchronous and
+`admit_structured` acquires, resolves, enqueues and releases inside one
+call without yielding, so two admissions cannot overlap and a second
+arrival is always a dedup cache hit. SPIKE-002/A11 reached the waiter
+path only because its harness parks the owner's `ResponseChannel` and
+defers admission by a synthetic 600 ms — it models an admission that
+yields, which is what admission becomes at the IPC boundary.
 
-- over the wire, `one_id_from_one_source_delivers_once` — the cache path;
-- in process, `a_concurrent_matching_copy_attaches_instead_of_enqueuing`
-  — the waiter path, driven directly.
+So the path is unreachable today AND unimplemented, and the second fact
+is the one that blocks: an unreachable path that is wrong is still wrong,
+and it becomes reachable the moment admission yields.
 
-**Required before this clause is called met:** determine whether the
-waiter path is reachable in the current runtime, by re-reading
-SPIKE-002/A11's harness against `handle_direct`. If it is, the wire test
-is owed. If it is not, `ENDPOINTS.md` and the reservation accounting need
-an amendment with the measurement re-examined — an ADR question, since
-the capacity ceilings depend on it.
+**One thing this does NOT license.** The reservation map's waiter
+accounting must not be removed as dead weight — A11 measured the
+unbounded version as a memory-exhaustion vector, 40 copies attaching 39
+waiters with zero refusals, and charging waiters against the same budgets
+as owners is the fix. The bound is correct; what is missing is the
+channel retention above it.
+
+**Settled by the ADR-0019 amendment of 2026-08-27**, which scopes when the
+rule binds rather than weakening it: waiter retention takes effect at the
+first stage whose admission yields while holding a reservation — the
+local-client IPC boundary — and until then the branch may be treated as
+unreachable. The bound on waiters is untouched and mandatory in every
+stage.
+
+Retention was not implemented now on purpose. It would be a parking
+mechanism for a path that cannot execute for several stages,
+unexercisable end to end, and that is the shape — implemented,
+unit-tested, called by nothing — that produced two P1s on PR #38 and
+motivated `tools/checks/check_domain_fns_are_called.sh`.
+
+**The code now says so rather than answering.** `waiter_response` returns
+`Option`, so a missing owner outcome is an absence the caller must handle
+instead of a refusal the function invents, and `handle_direct` asserts
+the branch is unreachable rather than replying `overloaded`. If admission
+ever yields without the retention being built, that assertion fires in
+test builds; in release the exchange is left for the peer's retry, which
+a settled owner then answers from cache — recoverable, where a wrong
+answer would be final.
 
 ## 10. Stage 7 — GossipSub broadcast
 

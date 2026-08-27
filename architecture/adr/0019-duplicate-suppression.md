@@ -21,6 +21,12 @@ Direct caller retries reuse the same message ID. A positive direct entry stores 
 
 To close the concurrent-duplicate race, direct admission also maintains a bounded **in-flight reservation map** keyed identically to the positive cache. The first request becomes owner; matching concurrent duplicates wait on/share that owner's eventual result and never run a second enqueue path. A concurrent request with the same key but different content fingerprint fails immediately as a duplicate-ID/content conflict. Default reservation limits equal direct request admission limits: 128 global / 8 per source PeerId, ceilings 512 / 32. Reservation exhaustion returns `Overloaded` locally / `overloaded` on the coarse direct wire. When the owner is rejected, all matching waiters observe the same rejection and the reservation is removed without creating a positive cache entry, so a later retry can succeed after route recovery.
 
+**Waiter retention binds from the stage where admission yields.** The rule above — that a waiter's response channel is held until the owner's admission resolves — presumes an admission that can be interrupted while a reservation is held. It is not conditional on the deployment; it is conditional on that property of the admission path, and it takes effect in the first stage where admission acquires it, which is the local-client IPC boundary.
+
+Until then a conforming implementation MAY treat the waiter branch as unreachable and MUST NOT answer it as though the owner had resolved. In a synchronous admission the owner acquires, resolves, enqueues and releases within one call, so no second request can observe an in-flight reservation: a duplicate arriving afterwards is a positive-cache hit, which is the path the rules above already govern. Answering an attached waiter from an absent cache entry — `overloaded`, say — is NOT conforming, because it reports exhaustion for a request that was admitted.
+
+The **bound** is unaffected and remains mandatory in every stage. Waiters are charged against the same per-peer and global budgets as owners and released together, because SPIKE-002/A11 measured the unbounded form accumulating 39 waiters on one key with zero refusals — a memory-exhaustion path a peer controls. What this amendment scopes is when the channel must be HELD, never whether the accumulation must be bounded.
+
 ## Alternatives considered
 
 No local dedup; persistent ledger; key direct messages only by peer/message ID; include timestamps in replay identity.
@@ -44,3 +50,11 @@ After current trust/structural/direct-ingress rate admission, direct parsing con
 ## Revisit conditions
 
 Revisit if a higher-level protocol requires durable replay protection or cryptographically sequenced application messages.
+
+## Amendments
+
+Full notes: [`history/0019-amendments.md`](./history/0019-amendments.md).
+
+| Date | Amendment | Effect |
+|---|---|---|
+| 2026-08-27 | Waiter retention binds from the stage where admission yields | A synchronous admission may treat the waiter branch as unreachable, but must not answer it as exhaustion; the reservation bound is unchanged |
