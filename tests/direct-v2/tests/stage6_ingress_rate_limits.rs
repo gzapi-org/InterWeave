@@ -376,6 +376,12 @@ async fn the_global_bucket_bounds_peers_that_are_each_within_their_own() {
     let mut refusals = 0usize;
     for sender in &senders {
         let answers = flood(sender, &peer, PER_PEER_BURST, |_| "human".into()).await;
+        // EVERY refusal must be the limiter, as the sibling tests
+        // require. Counting bare `Err` would let a transport fault or a
+        // queue-capacity regression supply the refusals this test reads
+        // as proof of the shared bucket — and both assertions below
+        // would then pass with the global limiter disabled.
+        assert_only_overloaded(&answers);
         accepted_total += accepted(&answers);
         refusals += answers.len() - accepted(&answers);
     }
@@ -393,5 +399,17 @@ async fn the_global_bucket_bounds_peers_that_are_each_within_their_own() {
         "the shared bucket must cut the aggregate well below {attempted}; \
          {accepted_total} were accepted"
     );
-    drop(receiver);
+
+    // And the queue was not the refuser: everything accepted was
+    // enqueued, so the shortfall is the limiter's doing and nothing
+    // else's.
+    let delivered = receiver
+        .drain_endpoint(endpoint("claude"))
+        .await
+        .expect("the receiver answers");
+    assert_eq!(
+        delivered.len(),
+        accepted_total,
+        "the queue took exactly what was accepted"
+    );
 }

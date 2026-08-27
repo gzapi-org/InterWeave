@@ -539,8 +539,8 @@ Under `tests/direct-v2` and `tests/endpoint-routing`:
 - omitted destination -> configured default;
 - offline/unknown/policy-denied -> coarse `no_route`;
 - Accepted only after exact endpoint queue admission;
-- concurrent same-key retransmission -> one enqueue, **at the layer that
-  can observe it** (see the amendment below);
+- concurrent same-key retransmission -> one enqueue (**not met over the
+  wire** — see the open question below);
 - same ID/different body -> conflict;
 - retry after default endpoint change returns original accepted route;
 - 48 KiB payload boundary;
