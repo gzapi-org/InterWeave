@@ -49,7 +49,6 @@ use interweave_transport_runtime::direct_inbound::{
 };
 use interweave_transport_runtime::endpoint_queue::EndpointQueues;
 use interweave_transport_runtime::endpoint_registry::{EndpointRegistry, RegisteredEndpoint};
-use interweave_transport_runtime::preauth::PreAuthLimits;
 use interweave_transport_runtime::{
     ConnectionClass, ConnectionManager, ConnectionPolicy, ConnectionSlot, DialDenial, DialOrigin,
     DialRequest, DialTicket, Revoked, TrustSources,
@@ -63,146 +62,16 @@ use crate::behaviour::{SubstrateBehaviour, SubstrateBehaviourEvent};
 use crate::gated_swarm::NotConnected;
 use crate::gated_swarm::{AdmittedDial, GatedSwarm, UndialableAdmission};
 
+mod config;
+
+// Re-exported so `lib.rs` and every call site keep the paths they had:
+// this split moved code, not the public surface.
+pub use config::{
+    DEFAULT_COMMAND_CAPACITY, DEFAULT_EVENT_CAPACITY, MAX_CONFIGURED_CAPACITY, SubstrateConfig,
+    SubstrateError,
+};
+
 /// Default depth of the command channel.
-pub const DEFAULT_COMMAND_CAPACITY: usize = 64;
-
-/// Default depth of the event channel.
-///
-/// Deeper than commands because events arrive from the network and
-/// commands come from this process. It is still bounded: a burst of
-/// remote activity must cost the Swarm task backpressure, never
-/// unbounded local memory.
-pub const DEFAULT_EVENT_CAPACITY: usize = 256;
-
-/// Upper bound on every channel depth and table size below.
-///
-/// Not a tuning value — a ceiling. Without one a configuration can ask
-/// for an allocation large enough to be the denial of service it was
-/// meant to prevent, and the request looks like ordinary tuning.
-pub const MAX_CONFIGURED_CAPACITY: usize = 65_536;
-
-/// How the substrate is built.
-#[derive(Debug, Clone, Copy)]
-pub struct SubstrateConfig {
-    /// Depth of the command channel.
-    pub command_capacity: usize,
-    /// Depth of the event channel.
-    pub event_capacity: usize,
-    /// Maximum concurrent pending dials.
-    pub max_pending_dials: usize,
-    /// Maximum established connections.
-    pub max_connections: usize,
-    /// Idle connection timeout.
-    pub idle_timeout: Duration,
-    /// The profile's EFFECTIVE direct payload limit, in bytes.
-    ///
-    /// May narrow the frozen ceiling and never widen it: `validate`
-    /// refuses zero and anything above [`MAX_PAYLOAD_BYTES`]. Decoding
-    /// every frame against the architecture maximum accepted payloads a
-    /// profile had already refused, in both directions.
-    pub max_payload_bytes: usize,
-    /// Bounds on work done for a peer that has not authenticated.
-    ///
-    /// A `PreAuthLimits` value is proof its numbers were checked --
-    /// `PreAuthLimitsBuilder::build` is the only way to make one -- so
-    /// there is nothing for `validate` to re-check here.
-    pub preauth: PreAuthLimits,
-    /// How often the reconnect scheduler looks for due retries.
-    ///
-    /// A period, not a deadline: a retry becomes due when the policy
-    /// says so, and this is how long it may wait to be noticed. Short
-    /// enough that the backoff is what determines the delay, long
-    /// enough that an idle profile is not walking a table every
-    /// moment.
-    pub retry_tick: Duration,
-    /// Most peers the scheduler will dial in one tick.
-    ///
-    /// The retry table is bounded, so the whole of it could come due at
-    /// once -- and dialing all of it in one pass is a burst this
-    /// profile inflicts on itself. The rest stay due and are taken next
-    /// tick.
-    pub max_retries_per_tick: usize,
-    /// Maximum listeners with a caller still awaiting their address.
-    ///
-    /// The command channel bounds how many `Listen` commands can be
-    /// QUEUED, not how many can be accepted: the task drains commands
-    /// continuously, so pending replies and OS listeners accumulate past
-    /// any instantaneous queue depth. This is the bound on the table
-    /// itself.
-    pub max_pending_listens: usize,
-}
-
-impl Default for SubstrateConfig {
-    fn default() -> Self {
-        Self {
-            command_capacity: DEFAULT_COMMAND_CAPACITY,
-            event_capacity: DEFAULT_EVENT_CAPACITY,
-            max_payload_bytes: interweave_transport_api::MAX_PAYLOAD_BYTES,
-            max_pending_dials: 32,
-            max_connections: 256,
-            idle_timeout: Duration::from_secs(60),
-            preauth: PreAuthLimits::default(),
-            retry_tick: Duration::from_secs(1),
-            max_retries_per_tick: 4,
-            max_pending_listens: 64,
-        }
-    }
-}
-
-impl SubstrateConfig {
-    /// Check every limit before anything is built.
-    ///
-    /// # Errors
-    /// Returns [`SubstrateError::InvalidConfig`] naming the first field
-    /// outside `1..=`[`MAX_CONFIGURED_CAPACITY`].
-    pub fn validate(&self) -> Result<(), SubstrateError> {
-        // CHANNEL DEPTHS need at least one slot: `mpsc::channel(0)`
-        // panics, so zero here is not a strict policy but an abort.
-        let depths = [
-            ("command_capacity", self.command_capacity, 1),
-            ("event_capacity", self.event_capacity, 1),
-            // CAPS may be zero, and zero is not a mistake: a policy
-            // admitting no dial, holding no connection, or accepting no
-            // listen is a coherent thing to configure and is how the
-            // refusal paths are exercised. Rejecting it would turn a
-            // panic guard into a policy opinion.
-            ("max_pending_dials", self.max_pending_dials, 0),
-            ("max_connections", self.max_connections, 0),
-            ("max_pending_listens", self.max_pending_listens, 0),
-            // A tick that dialed the whole table would be a burst; zero
-            // is a scheduler that never dials, which is the state this
-            // stage exists to leave.
-            ("max_retries_per_tick", self.max_retries_per_tick, 1),
-        ];
-        for (field, got, min) in depths {
-            if got < min || got > MAX_CONFIGURED_CAPACITY {
-                return Err(SubstrateError::InvalidConfig {
-                    field,
-                    got,
-                    allowed: (min, MAX_CONFIGURED_CAPACITY),
-                });
-            }
-        }
-        // THE PAYLOAD LIMIT IS NOT A CHANNEL DEPTH, so it is checked
-        // against its own ceiling rather than added to the table above.
-        // Zero is refused because a profile that admits no payload
-        // admits no direct message at all — the same reasoning that
-        // refuses a zero-length event queue — and above the frozen
-        // ceiling is refused rather than clamped, so a caller learns its
-        // configuration was wrong instead of quietly getting another.
-        if self.max_payload_bytes == 0
-            || self.max_payload_bytes > interweave_transport_api::MAX_PAYLOAD_BYTES
-        {
-            return Err(SubstrateError::InvalidConfig {
-                field: "max_payload_bytes",
-                got: self.max_payload_bytes,
-                allowed: (1, interweave_transport_api::MAX_PAYLOAD_BYTES),
-            });
-        }
-        Ok(())
-    }
-}
-
 /// What the substrate can be asked to do.
 #[derive(Debug)]
 pub enum SwarmCommand {
@@ -380,66 +249,6 @@ pub enum SwarmEvent {
         detail: String,
     },
 }
-
-/// What can go wrong building or driving the substrate.
-#[derive(Debug)]
-pub enum SubstrateError {
-    /// The transport could not be constructed.
-    Transport(String),
-    /// The Swarm task is gone.
-    ///
-    /// Every command path returns this rather than panicking: the task
-    /// ending is a normal outcome of shutdown, and a caller racing it
-    /// should get an error, not an abort.
-    Stopped,
-    /// A stored or observed PeerId is not one the neutral contract accepts.
-    Identity(String),
-    /// A [`SubstrateConfig`] value outside its permitted range.
-    ///
-    /// Returned rather than panicked. `mpsc::channel(0)` aborts the
-    /// process, and this is a transport daemon whose lint policy treats a
-    /// reachable panic as a defect — a configuration mistake must not be
-    /// the thing that takes it down.
-    /// A profile configuration the canonical validator refused.
-    ///
-    /// Carries every broken rule rather than the first: an operator
-    /// fixing sixty endpoints should not find their mistakes one run
-    /// apart.
-    InvalidProfile(Vec<String>),
-    /// A [`SubstrateConfig`] value outside its permitted range.
-    InvalidConfig {
-        /// Which field.
-        field: &'static str,
-        /// The value supplied.
-        got: usize,
-        /// The permitted range, inclusive.
-        allowed: (usize, usize),
-    },
-}
-
-impl core::fmt::Display for SubstrateError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Transport(d) => write!(f, "transport: {d}"),
-            Self::Stopped => write!(f, "the swarm task has stopped"),
-            Self::Identity(d) => write!(f, "identity: {d}"),
-            Self::InvalidProfile(broken) => {
-                write!(
-                    f,
-                    "the profile configuration is invalid: {}",
-                    broken.join("; ")
-                )
-            }
-            Self::InvalidConfig {
-                field,
-                got,
-                allowed: (min, max),
-            } => write!(f, "{field} is {got}; it must be {min}..={max}"),
-        }
-    }
-}
-
-impl core::error::Error for SubstrateError {}
 
 /// The reverse conversion.
 ///
