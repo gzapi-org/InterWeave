@@ -48,6 +48,7 @@ pub(super) fn handle_command(
     max_active_listeners: usize,
     effective_payload: usize,
     now_ms: u64,
+    wall_ms: u64,
     command: SwarmCommand,
 ) {
     match command {
@@ -237,16 +238,27 @@ pub(super) fn handle_command(
                 return;
             }
             let topic = broadcast_state.remember(&channel);
-            match swarm.publish_broadcast(topic.hash(), frame.encode()) {
-                Ok(_) => {
-                    let _ = reply.send(Ok(()));
-                }
-                Err(error) => {
-                    // `None` is local success with degraded reachability,
-                    // not an error. See `publish_error`.
-                    let _ = reply.send(super::broadcast::publish_error(&error).map_or(Ok(()), Err));
-                }
+            // LOCAL ACCEPTANCE, not the backend's Ok. A lone node's
+            // publish comes back `NoPeersSubscribedToTopic`, which
+            // `publish_error` reads as success with degraded reachability
+            // -- and a fan-out hung off the Ok arm alone therefore missed
+            // the one case Model B cares most about: two local clients on
+            // a node with no peers at all.
+            let answer = match swarm.publish_broadcast(topic.hash(), frame.encode()) {
+                Ok(_) => Ok(()),
+                Err(error) => super::broadcast::publish_error(&error).map_or(Ok(()), Err),
+            };
+            if answer.is_ok() {
+                deliver_locally(
+                    broadcast_state,
+                    manager,
+                    &channel,
+                    &session,
+                    &frame,
+                    wall_ms,
+                );
             }
+            let _ = reply.send(answer);
         }
         SwarmCommand::DrainSession { session, reply } => {
             let _ = reply.send(broadcast_state.queues.drain(&session));
@@ -608,6 +620,53 @@ pub(super) fn handle_command(
 /// that handles it cannot be reached from a test. The decision therefore
 /// lives where a test can reach it, the same reason `admit_outbound` was
 /// extracted.
+/// Hand a locally published broadcast to the OTHER sessions that joined.
+///
+/// GossipSub does not loop a publish back to its own node: the backend
+/// records and forwards it, and a reflected copy is duplicate-suppressed.
+/// So without this, two local clients on one profile that have both
+/// joined a channel never see each other's messages -- which is exactly
+/// the case `human-client-model-b.md` specifies must work, and it says
+/// they receive because they explicitly joined, not because of anything
+/// about the wire.
+///
+/// The PUBLISHING session is excluded. It is the one participant that
+/// already has the message, and handing it back would make every client
+/// filter its own traffic to avoid acting on it twice.
+///
+/// The same bounded queue and the same drop accounting as inbound
+/// delivery: a local publish is not a reason to exceed a session's bound,
+/// and a local drop is announced for the same reason a remote one is.
+fn deliver_locally(
+    broadcast_state: &mut super::broadcast::BroadcastState,
+    manager: &ConnectionManager,
+    channel: &interweave_transport_api::ChannelId,
+    publisher_session: &str,
+    frame: &interweave_transport_api::BroadcastMessageV1,
+    wall_ms: u64,
+) {
+    let Some(source_peer) = manager.local_peer().cloned() else {
+        // Unbound only before the identity is installed, which is before
+        // any session can have joined anything.
+        return;
+    };
+    for session in broadcast_state.subs.subscribers(channel) {
+        if session == publisher_session {
+            continue;
+        }
+        let _ = broadcast_state.queues.push(
+            &session,
+            interweave_transport_runtime::session_queue::BroadcastEvent {
+                source_peer: source_peer.clone(),
+                channel: channel.clone(),
+                message_id: frame.message_id,
+                payload: frame.payload.clone(),
+                received_at: wall_ms,
+            },
+        );
+    }
+}
+
 pub(super) fn forget_address(
     active: &mut ActiveListeners,
     listener: ListenerId,

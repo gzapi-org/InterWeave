@@ -1801,6 +1801,57 @@ async fn a_session_queue_overflow_is_announced() {
     b.shutdown().await.expect("b stops");
 }
 
+/// Two local clients on one profile see each other's broadcasts.
+///
+/// `human-client-model-b.md`: "If human and Claude both join
+/// `project-alpha`, both receive broadcast events because both explicitly
+/// joined, not because they share a PeerId." GossipSub does not loop a
+/// publish back to its own node, so without a local fan-out this case —
+/// the one Model B is built around — silently delivered nothing.
+///
+/// The publishing session is deliberately excluded, and that is asserted
+/// too: it already has the message, and echoing it back would make every
+/// client filter its own traffic.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_local_sessions_on_one_profile_receive_each_others_broadcasts() {
+    let (a_id, _) = who();
+    let a = node(&a_id, &[], &["general"], SubstrateConfig::default()).await;
+
+    for s in ["human", "claude"] {
+        a.join(channel("general"), s)
+            .await
+            .expect("lands")
+            .expect("accepted");
+    }
+
+    a.publish(channel("general"), "human", envelope(4, b"from the human"))
+        .await
+        .expect("the command lands")
+        .expect("accepted locally");
+
+    let at_claude = drain_until(&a, "claude", PATIENCE).await;
+    assert_eq!(
+        at_claude.len(),
+        1,
+        "the other local session receives it, with no network involved"
+    );
+    assert_eq!(at_claude[0].payload.bytes(), b"from the human");
+    assert_eq!(
+        at_claude[0].channel,
+        channel("general"),
+        "under the channel it was published on"
+    );
+
+    assert!(
+        drain_until(&a, "human", Duration::from_millis(500))
+            .await
+            .is_empty(),
+        "the publishing session is not handed back its own message"
+    );
+
+    a.shutdown().await.expect("a stops");
+}
+
 /// Publish the same envelope a few times while the mesh forms.
 ///
 /// A single publish immediately after connecting reaches nobody: GossipSub
