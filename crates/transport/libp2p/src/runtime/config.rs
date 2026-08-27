@@ -148,6 +148,28 @@ impl SubstrateConfig {
                 allowed: (1, interweave_transport_api::MAX_PAYLOAD_BYTES),
             });
         }
+        // THE HEARTBEAT IS A DURATION, which is why it was not in the
+        // table above and why it went unchecked: every entry there is a
+        // `usize`. `tokio::time::interval` panics on a zero period, so a
+        // `retry_tick` of `Duration::ZERO` aborted the daemon from a
+        // public configuration field — the same abort the channel depths
+        // are checked to prevent, one type away from the loop that
+        // prevents it.
+        //
+        // Measured in whole milliseconds, so a sub-millisecond tick is
+        // refused rather than truncated to the zero this rejects. That is
+        // also the right policy on its own terms: the field is documented
+        // as a heartbeat slow enough that backoff determines the delay,
+        // and a scheduler walking the retry table every few microseconds
+        // is the burst the tick exists to spread out.
+        let tick_ms = usize::try_from(self.retry_tick.as_millis()).unwrap_or(usize::MAX);
+        if tick_ms == 0 || tick_ms > MAX_CONFIGURED_CAPACITY {
+            return Err(SubstrateError::InvalidConfig {
+                field: "retry_tick_ms",
+                got: tick_ms,
+                allowed: (1, MAX_CONFIGURED_CAPACITY),
+            });
+        }
         Ok(())
     }
 }

@@ -565,6 +565,40 @@ async fn a_zero_capacity_configuration_is_an_error_not_a_panic() {
         runtime.shutdown().await.expect("stops");
     }
 
+    // A ZERO HEARTBEAT IS THE SAME ABORT, one type away from the loop
+    // that catches the others. `tokio::time::interval` panics on a zero
+    // period, and `retry_tick` is a `Duration`, so it was not in the
+    // `usize` table every other depth is checked by.
+    for (label, tick) in [
+        ("zero", Duration::ZERO),
+        // Sub-millisecond truncates to the zero above, so it is refused
+        // rather than silently becoming it.
+        ("sub-millisecond", Duration::from_micros(500)),
+    ] {
+        let config = SubstrateConfig {
+            retry_tick: tick,
+            ..SubstrateConfig::default()
+        };
+        match SwarmRuntime::start(&identity, config, trusting(&[])) {
+            Err(SubstrateError::InvalidConfig { field, .. }) => {
+                assert_eq!(field, "retry_tick_ms", "{label}");
+            }
+            other => panic!("{label}: expected InvalidConfig, got {other:?}"),
+        }
+    }
+
+    // And a heartbeat that is merely slow still starts — the guard is
+    // against the abort, not an opinion about tuning.
+    let slow = SubstrateConfig {
+        retry_tick: Duration::from_secs(30),
+        ..SubstrateConfig::default()
+    };
+    SwarmRuntime::start(&identity, slow, trusting(&[]))
+        .expect("a slow heartbeat is a policy, not an abort")
+        .shutdown()
+        .await
+        .expect("stops");
+
     // And an absurd request is refused rather than allocated: a ceiling
     // is what stops "tuning" from being the denial of service.
     let huge = SubstrateConfig {
