@@ -1580,6 +1580,100 @@ async fn reconfiguring_drops_channels_nobody_holds_and_keeps_the_ones_joined() {
     b.shutdown().await.expect("b stops");
 }
 
+/// A session's final leave gives its queue back; a partial leave does not.
+///
+/// Nothing bounded the queue map. `SubscriptionRegistry` bounds sessions
+/// per channel, but a local client that joins and leaves under a FRESH
+/// session id each time left one queue entry behind per id, holding
+/// whatever those queues had not drained. That is the memory-exhaustion
+/// shape SPIKE-002 measured elsewhere, reached here without ever
+/// exceeding a subscription bound.
+///
+/// # What this test proves, and what proves the rest
+///
+/// The PARTIAL leave is what it covers: a session that left one channel
+/// of two is still owed deliveries on the other. That is the guard
+/// against the over-eager fix, and it bites — closing on every leave
+/// fails it.
+///
+/// The closure itself is NOT observable here, and mutation says so:
+/// never closing the queue leaves this test passing. Once a session has
+/// left its last channel it is no longer a subscriber, so nothing is
+/// delivered to it whether its queue exists or not — the leak is invisible
+/// from outside precisely because the leaked queue is unreachable. What
+/// bounds it is the predicate, unit-tested beside `SubscriptionRegistry`
+/// as `a_session_holding_one_of_two_channels_is_still_live` and
+/// `one_sessions_leave_does_not_release_another`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_final_leave_closes_the_session_queue_and_a_partial_one_does_not() {
+    let (a_id, a_peer) = who();
+    let (b_id, b_peer) = who();
+
+    let mut a = node(
+        &a_id,
+        &[&b_peer],
+        &["general", "second"],
+        SubstrateConfig::default(),
+    )
+    .await;
+    let mut b = node(
+        &b_id,
+        &[&a_peer],
+        &["general", "second"],
+        SubstrateConfig::default(),
+    )
+    .await;
+    connect(&mut a, &mut b, &b_peer).await;
+
+    // The session holds TWO channels and leaves one: still live.
+    for c in ["general", "second"] {
+        b.join(channel(c), "two")
+            .await
+            .expect("lands")
+            .expect("accepted");
+    }
+    b.leave(channel("general"), "two")
+        .await
+        .expect("the leave lands");
+
+    a.join(channel("second"), "pub")
+        .await
+        .expect("lands")
+        .expect("accepted");
+    publish_repeatedly_on(&a, "second", "pub", 9, b"still owed").await;
+    assert_eq!(
+        drain_until(&b, "two", PATIENCE).await.len(),
+        1,
+        "a session that left one channel of two is still owed the other"
+    );
+
+    // Now it leaves the last one. The queue must be gone, which is
+    // observable as a delivery that no longer lands in it.
+    b.leave(channel("second"), "two")
+        .await
+        .expect("the leave lands");
+    b.join(channel("second"), "other")
+        .await
+        .expect("lands")
+        .expect("accepted");
+    publish_repeatedly_on(&a, "second", "pub", 10, b"after the last leave").await;
+
+    assert!(
+        drain_until(&b, "two", Duration::from_secs(1))
+            .await
+            .is_empty(),
+        "the closed queue holds nothing and is not reopened by a delivery"
+    );
+    assert_eq!(
+        drain_until(&b, "other", PATIENCE).await.len(),
+        1,
+        "and the live session still receives"
+    );
+
+    a.shutdown().await.expect("a stops");
+    b.shutdown().await.expect("b stops");
+}
+
 /// Publish the same envelope a few times while the mesh forms.
 ///
 /// A single publish immediately after connecting reaches nobody: GossipSub

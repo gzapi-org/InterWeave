@@ -190,6 +190,21 @@ pub(super) fn handle_command(
             reply,
         } => {
             broadcast_state.subs.leave(&channel, &session);
+
+            // A SESSION THAT HOLDS NOTHING GETS ITS QUEUE BACK. Without
+            // this the map keeps an entry per session id ever seen, and a
+            // local client that joins and leaves under a fresh id each
+            // time grows it without bound -- along with whatever those
+            // queues still hold. `SubscriptionRegistry` bounds sessions
+            // per channel; nothing bounded the queue map itself.
+            //
+            // Asked AFTER the leave and about ALL channels, because a
+            // session that left one of several is still live and still
+            // owed the deliveries on the others.
+            if !broadcast_state.subs.holds_any(&session) {
+                broadcast_state.queues.close(&session);
+            }
+
             // UNSUBSCRIBE ONLY WHEN NOBODY HOLDS IT, joined or desired.
             // A profile that desires the channel keeps the mesh warm with
             // no local consumer, which is the whole point of `desired`.
