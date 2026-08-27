@@ -539,7 +539,8 @@ Under `tests/direct-v2` and `tests/endpoint-routing`:
 - omitted destination -> configured default;
 - offline/unknown/policy-denied -> coarse `no_route`;
 - Accepted only after exact endpoint queue admission;
-- concurrent same-key retransmission -> one enqueue;
+- concurrent same-key retransmission -> one enqueue, **at the layer that
+  can observe it** (see the amendment below);
 - same ID/different body -> conflict;
 - retry after default endpoint change returns original accepted route;
 - 48 KiB payload boundary;
@@ -549,7 +550,86 @@ Under `tests/direct-v2` and `tests/endpoint-routing`:
 
 Direct v2 is correct end-to-end between real Rust peers before IPC or UI integration exists.
 
-Flip to `active`: `contracts/schemas/common`, `contracts/schemas/direct`, and the direct-routing shapes of `contracts/schemas/endpoints` (ADR-0049).
+Flip to `active` (ADR-0049): `contracts/schemas/direct`, and the
+direct-routing shapes of `contracts/schemas/endpoints` —
+`direct-destination`, `endpoint-id`, `message-received`. From
+`contracts/schemas/common`, `message-id` and `peer-id` only.
+
+`common/channel-id` stays `approved`. ADR-0049 defines `active` as
+describing the **current wire**, and ChannelId addresses broadcast
+topics, which no wire carries until Stage 7. The original wording named
+the whole of `common`; flipping a schema for a wire that does not exist
+would make the status field mean "we intend to" — which is precisely
+what `approved` already means.
+
+`endpoints/directory-response` and `endpoints/endpoint-config` likewise
+stay `approved`: the directory exchange is Stage 8, and the config shape
+is not a wire at all.
+
+**Met.** Every clause of the implement list is exercised over loopback
+TCP between two real peers, and the frozen framing is byte-compared
+rather than re-derived.
+
+- **Routing.** `an_explicit_destination_reaches_exactly_that_endpoint`
+  and `an_omitted_destination_reaches_the_configured_default` cover the
+  two selectors; `stage6_model_b_over_the_wire.rs` proves ADR-0030
+  Model B as an invariant — each endpoint receives only what was
+  addressed to it, and an endpoint name this stage never heard of routes
+  like any other.
+- **Coarse refusal.** `an_unknown_endpoint_is_indistinguishable_no_route`,
+  `a_destination_endpoints_inbound_policy_is_coarse_no_route` and
+  `every_resolve_failure_is_no_route_on_the_wire` hold unknown, disabled,
+  unleased, missing-default and policy-denied to one wire code.
+- **The acceptance point.**
+  `a_full_endpoint_queue_is_overloaded_and_never_falsely_accepted` proves
+  `AcceptedV2` follows queue admission rather than preceding it.
+- **Dedup and retry.** `the_same_id_with_a_different_body_is_refused`
+  and `a_matching_retry_replays_the_stored_route_after_the_default_moves`
+  cover conflict and cached-route replay.
+- **Payload boundary.** `a_payload_at_the_ceiling_survives_the_wire`,
+  `an_over_ceiling_payload_is_answered_too_large` and
+  `a_declared_payload_past_the_ceiling_is_too_large` cover 48 KiB from
+  both sides, including a declared length that never arrives.
+- **Ingress limits.** `stage6_ingress_rate_limits.rs` proves the burst is
+  spent, that inventing source endpoints mints no allowance, and that a
+  flooding peer does not spend a quiet peer's.
+
+Verified by breaking the code and watching the specific test fail, not by
+reading the tests and agreeing with them.
+
+#### Amendment 2026-08-27: the concurrent-retransmission clause
+
+The required-test list asked for concurrent same-key retransmission over
+the wire. **That test cannot exist against this design, and the clause is
+what is wrong, not the code.**
+
+`handle_direct` is a synchronous `fn` holding `&mut DirectState`, and
+`admit_structured` acquires the reservation, resolves the route, enqueues
+and releases inside that one call without yielding —
+`every_decided_path_returns_its_reservation` asserts the map is empty
+afterwards. Two admissions therefore cannot overlap in the swarm event
+loop, so a second arrival is always a dedup **cache** hit and never a
+reservation **waiter**.
+
+What is proven, and where:
+
+- over the wire, `one_id_from_one_source_delivers_once` — the cache path,
+  which is the path a real retransmission actually takes;
+- in process, `a_concurrent_matching_copy_attaches_instead_of_enqueuing`
+  — the waiter path, driven directly because the wire cannot reach it.
+
+A wire test was written for the waiter path and then deleted: it passed,
+and mutating `Reservation::Waiter` to enqueue for itself did not break
+it, which proved it never reached the branch it claimed to cover.
+
+**Carried forward as an open question, not closed here:** if the waiter
+path is unreachable, the reservation map's waiter accounting is currently
+dead weight. SPIKE-002 found the bounded reservation map necessary under
+real request-response scheduling, so the mechanism may become live when
+something later yields inside admission — the IPC boundary in Stage 13 is
+the first candidate. Whether to keep it inert until then or remove it is
+an ADR question and is deliberately left open rather than settled by a
+test.
 
 ## 10. Stage 7 — GossipSub broadcast
 
