@@ -656,14 +656,26 @@ waiters with zero refusals, and charging waiters against the same budgets
 as owners is the fix. The bound is correct; what is missing is the
 channel retention above it.
 
-**Required before Stage 6 closes**, one of:
+**Settled by the ADR-0019 amendment of 2026-08-27**, which scopes when the
+rule binds rather than weakening it: waiter retention takes effect at the
+first stage whose admission yields while holding a reservation — the
+local-client IPC boundary — and until then the branch may be treated as
+unreachable. The bound on waiters is untouched and mandatory in every
+stage.
 
-- implement the waiter contract — retain the `ResponseChannel` until the
-  owner's admission resolves, answer every waiter with the owner's
-  outcome — and test it at the layer that can drive it; or
-- amend `ENDPOINTS.md` and `DIRECT.md` with an explicit decision that
-  waiters are refused rather than held until admission yields, which is a
-  wire-visible behaviour change and therefore an ADR question.
+Retention was not implemented now on purpose. It would be a parking
+mechanism for a path that cannot execute for several stages,
+unexercisable end to end, and that is the shape — implemented,
+unit-tested, called by nothing — that produced two P1s on PR #38 and
+motivated `tools/checks/check_domain_fns_are_called.sh`.
+
+**One code obligation remains before this clause is met.** The amendment
+says an implementation that cannot reach the branch must say so rather
+than answer it, and answering an attached waiter `overloaded` reports
+exhaustion for a request that was admitted. `handle_direct` still does
+exactly that. Making the unreachability explicit is a change to admission
+handling and belongs in its own commit, not folded into a documentation
+one.
 
 ## 10. Stage 7 — GossipSub broadcast
 
