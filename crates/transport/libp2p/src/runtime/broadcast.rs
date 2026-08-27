@@ -331,7 +331,26 @@ pub(super) fn handle_broadcast(
         )
     };
 
-    if let BroadcastAdmission::Delivered { sessions, .. } = admission {
+    if let BroadcastAdmission::Delivered { sessions, dropped } = admission {
+        // THE DROPS ARE ANNOUNCED, once, with a count. `admit_broadcast`
+        // returns them precisely so they need not be silent, and a
+        // discarded `dropped` made an allowed overload loss look exactly
+        // like a message that never arrived.
+        //
+        // Before the deliveries, because it is the one event that reports
+        // a loss: if the outbox has room for a single event here, the
+        // fact that something was dropped is worth more than one more
+        // wake-up for a session that already has its message.
+        if !dropped.is_empty()
+            && crate::runtime::may_buffer_delivery(outbox.len(), tick.event_capacity)
+        {
+            outbox.push_back(SwarmEvent::BroadcastDropped {
+                channel: channel.clone(),
+                source_peer: source.clone(),
+                sessions: dropped.len(),
+            });
+        }
+
         for session in sessions {
             // THE NOTIFICATION MAY BE DROPPED; the event itself is
             // already in the session's queue. Direct's non-delivery

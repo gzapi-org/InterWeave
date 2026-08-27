@@ -1753,6 +1753,54 @@ async fn a_broadcast_to_many_sessions_cannot_overrun_the_outbox() {
     b.shutdown().await.expect("b stops");
 }
 
+/// An overload drop is announced, not silent.
+///
+/// Broadcast is allowed to drop for a session whose consumer is behind —
+/// that is the design, and the alternative is one slow client stalling
+/// the mesh for everyone. What it must not do is drop INVISIBLY: a gap
+/// the consumer cannot distinguish from a message that was never sent is
+/// the difference between a slow client and a broken network, and only
+/// the node knows which.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_queue_overflow_is_announced() {
+    let (a_id, a_peer) = who();
+    let (b_id, b_peer) = who();
+
+    let mut a = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
+    // Room for exactly one delivery, so the second is refused.
+    let mut b = node_with_queue(
+        &b_id,
+        &[&a_peer],
+        &["general"],
+        SubstrateConfig::default(),
+        1,
+    )
+    .await;
+    connect(&mut a, &mut b, &b_peer).await;
+
+    for r in [&a, &b] {
+        r.join(channel("general"), "sub")
+            .await
+            .expect("lands")
+            .expect("accepted");
+    }
+
+    publish_repeatedly(&a, "sub", 1, b"first").await;
+    publish_repeatedly(&a, "sub", 2, b"second").await;
+
+    wait_for(&mut b, "the drop announcement", |e| {
+        matches!(
+            e,
+            SwarmEvent::BroadcastDropped { channel: c, source_peer, sessions }
+                if *c == channel("general") && *source_peer == a_peer && *sessions == 1
+        )
+    })
+    .await;
+
+    a.shutdown().await.expect("a stops");
+    b.shutdown().await.expect("b stops");
+}
+
 /// Publish the same envelope a few times while the mesh forms.
 ///
 /// A single publish immediately after connecting reaches nobody: GossipSub

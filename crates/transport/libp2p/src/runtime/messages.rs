@@ -286,6 +286,27 @@ pub enum SwarmEvent {
         /// The local session whose queue took it.
         session: String,
     },
+    /// A broadcast was refused by one or more sessions' queues.
+    ///
+    /// The overload drop broadcast is allowed to take — a session whose
+    /// consumer is behind loses the message rather than stalling the
+    /// mesh for everyone. Allowed is not the same as invisible: without
+    /// this the consumer's gap is indistinguishable from a message that
+    /// was never sent, which is the difference between a slow client and
+    /// a broken network.
+    ///
+    /// ONE event per message, carrying a count, not one per dropped
+    /// session. A message that every session refuses would otherwise
+    /// notify once per session — the same amplification that let a
+    /// fan-out run past the outbox bound.
+    BroadcastDropped {
+        /// The channel it arrived on.
+        channel: interweave_transport_api::ChannelId,
+        /// The publisher, as authenticated by the mesh.
+        source_peer: TransportIdentity,
+        /// How many sessions refused it.
+        sessions: usize,
+    },
     /// A connected peer subscribed to a channel this node holds.
     ///
     /// The one honest signal of BACKEND subscription state: it is
