@@ -184,20 +184,32 @@ impl DiscoveryProvider for PeerCacheDiscovery {
         }
         match hint {
             PeerHint::ObservedReachable {
-                peer_id, address, ..
-            } => match self.cache.record_success(&peer_id, &address, now_ms) {
-                Ok(()) => HintDisposition::Accepted,
+                peer_id,
+                address,
+                observed_at,
+            } => {
+                // WHEN REACHABILITY WAS ESTABLISHED, not when the hint
+                // arrived. The cache's TTL and its eviction ordering are
+                // both keyed on this timestamp, so crediting `now_ms`
+                // would let delivery delay buy a peer freshness it did not
+                // earn — a queued hint would outrank a peer contacted more
+                // recently. A hint dated in the future is clamped: a
+                // caller cannot mint freshness beyond the present.
+                let observed_at = observed_at.min(now_ms);
+                match self.cache.record_success(&peer_id, &address, observed_at) {
+                    Ok(()) => HintDisposition::Accepted,
                 // A bound refused it. The cache is unchanged and the
                 // provider is fine — this is the hint being too big, not
                 // the provider failing.
-                Err(_) => HintDisposition::Rejected(
-                    interweave_discovery_api::DiscoveryError::InvalidLength {
-                        field: "address",
-                        got: address.len(),
-                        max: crate::limits::MAX_ADDRESS_BYTES,
-                    },
-                ),
-            },
+                    Err(_) => HintDisposition::Rejected(
+                        interweave_discovery_api::DiscoveryError::InvalidLength {
+                            field: "address",
+                            got: address.len(),
+                            max: crate::limits::MAX_ADDRESS_BYTES,
+                        },
+                    ),
+                }
+            }
             // NOT ACCEPTED, and the reason is a deferral rather than a
             // policy: the cache's capability record carries a protocol
             // FAMILY, wire major, network hash and role, and a
@@ -550,4 +562,58 @@ mod tests {
             "and it continues, empty, rather than serving garbage"
         );
     }
+    #[test]
+    fn a_delayed_hint_is_credited_to_when_reachability_was_observed() {
+        // The hint is delivered a full day after the peer answered. If the
+        // provider credits delivery time, the record's freshness — which
+        // drives both TTL and eviction ordering — is inflated by the delay.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut p = provider(&dir);
+        p.start(0).expect("start");
+
+        const OBSERVED: u64 = 1_000;
+        const DELIVERED: u64 = OBSERVED + 86_400_000;
+        assert_eq!(
+            p.add_hint(
+                PeerHint::ObservedReachable {
+                    peer_id: peer(P1),
+                    address: "/ip4/127.0.0.1/tcp/1".to_owned(),
+                    observed_at: OBSERVED,
+                },
+                DELIVERED,
+            ),
+            HintDisposition::Accepted
+        );
+
+        // Read the record back through the cache's own view at the instant
+        // the peer should lapse. Credited to OBSERVED it is gone; credited
+        // to DELIVERED it is still live, which is the bug.
+        let lapse = OBSERVED + crate::limits::DEFAULT_TTL_MS;
+        assert!(
+            p.cache_mut().candidates(lapse).is_empty(),
+            "a hint observed at {OBSERVED} must lapse at {lapse}; crediting \
+             delivery time would keep it alive for another day"
+        );
+    }
+
+    #[test]
+    fn a_hint_dated_in_the_future_cannot_mint_freshness() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut p = provider(&dir);
+        p.start(0).expect("start");
+        p.add_hint(
+            PeerHint::ObservedReachable {
+                peer_id: peer(P1),
+                address: "/ip4/127.0.0.1/tcp/1".to_owned(),
+                observed_at: u64::MAX,
+            },
+            1_000,
+        );
+        let lapse = 1_000 + crate::limits::DEFAULT_TTL_MS;
+        assert!(
+            p.cache_mut().candidates(lapse).is_empty(),
+            "a future-dated hint is clamped to now, so it lapses on schedule"
+        );
+    }
+
 }
