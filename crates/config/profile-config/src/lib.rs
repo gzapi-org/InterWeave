@@ -218,6 +218,65 @@ pub struct DiscoveryProviderSettings {
     pub record_mode: Option<String>,
 }
 
+impl DiscoveryProviderSettings {
+    /// The first kademlia-only key this block carries, if any.
+    ///
+    /// Named rather than boolean so the error can point an operator at
+    /// something they can search their profile for. The list is every
+    /// kademlia key in `config.schema.yaml`; a key added to the struct
+    /// without being added here is a key that goes back to being
+    /// silently accepted anywhere, which is what
+    /// `kademlia_settings_are_refused_on_every_other_provider` pins.
+    #[must_use]
+    pub fn first_kademlia_field(&self) -> Option<&'static str> {
+        let checks: [(&'static str, bool); 21] = [
+            ("config_version", self.config_version.is_some()),
+            ("network_id", self.network_id.is_some()),
+            ("mode", self.mode.is_some()),
+            ("routing_peer_policy", self.routing_peer_policy.is_some()),
+            ("seed_sources", !self.seed_sources.is_empty()),
+            ("candidate_ttl", self.candidate_ttl.is_some()),
+            ("kbucket_size", self.kbucket_size.is_some()),
+            ("max_routing_peers", self.max_routing_peers.is_some()),
+            ("query_timeout", self.query_timeout.is_some()),
+            ("parallelism", self.parallelism.is_some()),
+            ("disjoint_query_paths", self.disjoint_query_paths.is_some()),
+            (
+                "max_concurrent_queries",
+                self.max_concurrent_queries.is_some(),
+            ),
+            (
+                "max_queries_per_minute",
+                self.max_queries_per_minute.is_some(),
+            ),
+            ("exploration_interval", self.exploration_interval.is_some()),
+            (
+                "exploration_jitter_percent",
+                self.exploration_jitter_percent.is_some(),
+            ),
+            (
+                "max_results_per_query",
+                self.max_results_per_query.is_some(),
+            ),
+            ("target_routing_peers", self.target_routing_peers.is_some()),
+            (
+                "targeted_lookup_cooldown",
+                self.targeted_lookup_cooldown.is_some(),
+            ),
+            (
+                "bootstrap_min_interval",
+                self.bootstrap_min_interval.is_some(),
+            ),
+            (
+                "bootstrap_refresh_interval",
+                self.bootstrap_refresh_interval.is_some(),
+            ),
+            ("record_mode", self.record_mode.is_some()),
+        ];
+        checks.iter().find(|(_, set)| *set).map(|(name, _)| *name)
+    }
+}
+
 /// One configured discovery provider.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1294,6 +1353,14 @@ pub enum ConfigError {
         /// Which type carried them.
         provider: &'static str,
     },
+    /// Kademlia settings were set on a provider that has no such fields.
+    KademliaSettingsOnWrongProvider {
+        /// Which type carried them.
+        provider: &'static str,
+        /// The first misplaced key, so the message names something the
+        /// operator can search their profile for.
+        field: &'static str,
+    },
     /// An endpoint lists more client kinds than the contract allows.
     TooManyClientKinds {
         /// Which endpoint.
@@ -1432,6 +1499,10 @@ impl core::fmt::Display for ConfigError {
             Self::CacheSettingsOnWrongProvider { provider } => write!(
                 f,
                 "provider '{provider}' carries `ttl`/`max_entries`, which only peer-cache accepts"
+            ),
+            Self::KademliaSettingsOnWrongProvider { provider, field } => write!(
+                f,
+                "provider '{provider}' carries `{field}`, which only kademlia accepts"
             ),
             Self::TooManyClientKinds { endpoint, got } => write!(
                 f,
@@ -1650,6 +1721,20 @@ impl ProfileConfig {
             {
                 errors.push(ConfigError::CacheSettingsOnWrongProvider {
                     provider: entry.provider_type.as_str(),
+                });
+            }
+            // A SHARED SETTINGS STRUCT MAKES EVERY KEY LEGAL EVERYWHERE,
+            // which is why each type's keys are checked back to it. Without
+            // this, `peer-cache` with `config: { network_id: "typo" }`
+            // deserialized, validated, and was silently ignored — the
+            // failure mode `deny_unknown_fields` exists to prevent,
+            // reintroduced one level down by the struct being shared.
+            if entry.provider_type != DiscoveryProviderType::Kademlia
+                && let Some(field) = entry.config.first_kademlia_field()
+            {
+                errors.push(ConfigError::KademliaSettingsOnWrongProvider {
+                    provider: entry.provider_type.as_str(),
+                    field,
                 });
             }
         }
@@ -2895,5 +2980,87 @@ mod tests {
         let parsed: DiscoveryConfig =
             serde_json::from_value(json).expect("all three documented names are legal");
         assert_eq!(parsed.providers[0].config.seed_sources.len(), 3);
+    }
+
+    #[test]
+    fn kademlia_settings_are_refused_on_every_other_provider() {
+        // Every kademlia key, checked against every non-kademlia type.
+        // Enumerated rather than sampled because the failure mode is a
+        // key that was added to the struct and not to the check — a
+        // sample of three would keep passing while the eighteenth went
+        // back to being silently accepted.
+        let keys: Vec<(&str, serde_json::Value)> = vec![
+            ("config_version", serde_json::json!(1)),
+            ("network_id", serde_json::json!("n")),
+            ("mode", serde_json::json!("client")),
+            (
+                "routing_peer_policy",
+                serde_json::json!("data-plane-trusted"),
+            ),
+            ("seed_sources", serde_json::json!(["peer-cache"])),
+            ("candidate_ttl", serde_json::json!("30m")),
+            ("kbucket_size", serde_json::json!(20)),
+            ("max_routing_peers", serde_json::json!(256)),
+            ("query_timeout", serde_json::json!("30s")),
+            ("parallelism", serde_json::json!(3)),
+            ("disjoint_query_paths", serde_json::json!(true)),
+            ("max_concurrent_queries", serde_json::json!(2)),
+            ("max_queries_per_minute", serde_json::json!(6)),
+            ("exploration_interval", serde_json::json!("60s")),
+            ("exploration_jitter_percent", serde_json::json!(20)),
+            ("max_results_per_query", serde_json::json!(20)),
+            ("target_routing_peers", serde_json::json!(64)),
+            ("targeted_lookup_cooldown", serde_json::json!("5m")),
+            ("bootstrap_min_interval", serde_json::json!("5m")),
+            ("bootstrap_refresh_interval", serde_json::json!("15m")),
+            ("record_mode", serde_json::json!("disabled")),
+        ];
+
+        for provider in ["peer-cache", "mdns", "static-bootstrap"] {
+            for (key, value) in &keys {
+                let json = serde_json::json!({
+                    "providers": [{
+                        "type": provider,
+                        "enabled": false,
+                        "config": { (*key): value }
+                    }]
+                });
+                let parsed: DiscoveryConfig =
+                    serde_json::from_value(json).expect("the shared struct parses it");
+                let mut profile = config(vec![endpoint("chat")]);
+                profile.discovery = parsed;
+
+                assert!(
+                    profile.validate().iter().any(|e| matches!(
+                        e,
+                        ConfigError::KademliaSettingsOnWrongProvider { field, .. }
+                            if field == key
+                    )),
+                    "'{key}' on '{provider}' must be refused and named"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn kademlia_settings_are_accepted_on_kademlia() {
+        // The control: the check must not refuse the keys where they
+        // belong.
+        let json = serde_json::json!({
+            "providers": [{
+                "type": "kademlia",
+                "enabled": false,
+                "config": { "network_id": "n", "record_mode": "disabled" }
+            }]
+        });
+        let mut profile = config(vec![endpoint("chat")]);
+        profile.discovery = serde_json::from_value(json).expect("parses");
+        assert!(
+            !profile
+                .validate()
+                .iter()
+                .any(|e| matches!(e, ConfigError::KademliaSettingsOnWrongProvider { .. })),
+            "kademlia keys belong on kademlia"
+        );
     }
 }
