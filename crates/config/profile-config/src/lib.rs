@@ -465,6 +465,62 @@ pub enum RegistrationPolicy {
     ConfiguredOnly,
 }
 
+/// Bounds on `directory.cache_ttl`, in milliseconds — 10s..5m per
+/// `config.schema.yaml`.
+const MIN_CACHE_TTL_MS: u32 = 10_000;
+const MAX_CACHE_TTL_MS: u32 = 300_000;
+
+const fn default_cache_ttl_ms() -> u32 {
+    60_000
+}
+
+/// Parse a duration string (`"60s"`, `"5m"`, `"500ms"`) into milliseconds.
+///
+/// The config documents durations as `<integer><unit>`; this is the only
+/// duration a profile carries. A bare integer is also accepted and read as
+/// milliseconds, so a JSON producer that emits a number round-trips.
+fn parse_duration_ms(text: &str) -> Result<u32, String> {
+    let text = text.trim();
+    let (digits, unit): (&str, u64) = if let Some(n) = text.strip_suffix("ms") {
+        (n, 1)
+    } else if let Some(n) = text.strip_suffix('s') {
+        (n, 1_000)
+    } else if let Some(n) = text.strip_suffix('m') {
+        (n, 60_000)
+    } else {
+        (text, 1)
+    };
+    let value: u64 = digits
+        .trim()
+        .parse()
+        .map_err(|_| format!("'{text}' is not a duration like 60s, 5m, or 500ms"))?;
+    u32::try_from(value.saturating_mul(unit))
+        .map_err(|_| format!("duration '{text}' overflows the millisecond range"))
+}
+
+fn de_cache_ttl<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Wire {
+        Text(String),
+        Ms(u64),
+    }
+    match Wire::deserialize(d)? {
+        Wire::Text(t) => parse_duration_ms(&t).map_err(serde::de::Error::custom),
+        Wire::Ms(ms) => {
+            u32::try_from(ms).map_err(|_| serde::de::Error::custom("cache_ttl overflows"))
+        }
+    }
+}
+
+fn ser_cache_ttl<S: serde::Serializer>(ms: &u32, s: S) -> Result<S::Ok, S::Error> {
+    if ms % 1_000 == 0 {
+        s.serialize_str(&format!("{}s", ms / 1_000))
+    } else {
+        s.serialize_str(&format!("{ms}ms"))
+    }
+}
+
 /// The endpoint-directory block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -472,6 +528,18 @@ pub struct DirectoryConfig {
     /// Whether the directory answers remote queries.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// How long this node caches a remote directory result, in ms.
+    ///
+    /// The requester-side cache term, documented as `cache_ttl` in
+    /// `config.schema.yaml` (a `10s..5m` duration; a bare integer is read
+    /// as milliseconds).
+    #[serde(
+        rename = "cache_ttl",
+        default = "default_cache_ttl_ms",
+        deserialize_with = "de_cache_ttl",
+        serialize_with = "ser_cache_ttl"
+    )]
+    pub cache_ttl_ms: u32,
     /// How many endpoints may be advertised.
     #[serde(default = "default_max_advertised")]
     pub max_advertised: u32,
@@ -500,6 +568,7 @@ impl Default for DirectoryConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            cache_ttl_ms: default_cache_ttl_ms(),
             max_advertised: DEFAULT_MAX_ADVERTISED,
             max_queries_per_minute_per_peer: default_queries_per_minute(),
             max_inflight_queries: default_inflight_queries(),
@@ -682,6 +751,11 @@ pub enum ConfigError {
         /// The configured value.
         got: u32,
     },
+    /// `directory.cache_ttl` is outside the 10s..5m range.
+    DirectoryCacheTtlOutOfRange {
+        /// The configured value, in milliseconds.
+        got_ms: u32,
+    },
     /// An endpoint lists more client kinds than the contract allows.
     TooManyClientKinds {
         /// Which endpoint.
@@ -784,6 +858,10 @@ impl core::fmt::Display for ConfigError {
                 f,
                 "directory.max_inflight_queries is {got}; the range is 1..={}",
                 interweave_transport_api::MAX_INFLIGHT_QUERIES
+            ),
+            Self::DirectoryCacheTtlOutOfRange { got_ms } => write!(
+                f,
+                "directory.cache_ttl is {got_ms}ms; the range is {MIN_CACHE_TTL_MS}..={MAX_CACHE_TTL_MS}ms (10s..5m)"
             ),
             Self::TooManyClientKinds { endpoint, got } => write!(
                 f,
@@ -932,6 +1010,10 @@ impl ProfileConfig {
         let inflight = self.endpoints.directory.max_inflight_queries;
         if inflight == 0 || inflight > interweave_transport_api::MAX_INFLIGHT_QUERIES as u32 {
             errors.push(ConfigError::DirectoryInflightOutOfRange { got: inflight });
+        }
+        let cache_ttl = self.endpoints.directory.cache_ttl_ms;
+        if !(MIN_CACHE_TTL_MS..=MAX_CACHE_TTL_MS).contains(&cache_ttl) {
+            errors.push(ConfigError::DirectoryCacheTtlOutOfRange { got_ms: cache_ttl });
         }
         let advertised = entries.iter().filter(|e| e.advertise && e.enabled).count();
         if advertised > max_advertised as usize {
@@ -1359,6 +1441,47 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, ConfigError::DirectoryQueryRateOutOfRange { .. }))
         );
+    }
+
+    #[test]
+    fn cache_ttl_parses_the_documented_forms_and_round_trips() {
+        // A profile using the schema's `cache_ttl: 60s` form parses.
+        let json = r#"{"enabled":true,"cache_ttl":"60s","max_advertised":16}"#;
+        let d: DirectoryConfig = serde_json::from_str(json).expect("60s parses");
+        assert_eq!(d.cache_ttl_ms, 60_000);
+        // Minutes, milliseconds, and a bare integer of ms.
+        assert_eq!(parse_duration_ms("5m").expect("5m"), 300_000);
+        assert_eq!(parse_duration_ms("10s").expect("10s"), 10_000);
+        assert_eq!(parse_duration_ms("500ms").expect("500ms"), 500);
+        assert_eq!(parse_duration_ms("45000").expect("bare ms"), 45_000);
+        assert!(parse_duration_ms("soon").is_err());
+        // Round-trips through a whole-second string.
+        let back = serde_json::to_string(&d).expect("serializes");
+        assert!(back.contains("\"cache_ttl\":\"60s\""), "got {back}");
+    }
+
+    #[test]
+    fn the_directory_cache_ttl_range_is_enforced() {
+        for bad in [MIN_CACHE_TTL_MS - 1, MAX_CACHE_TTL_MS + 1] {
+            let mut c = config(vec![endpoint("human")]);
+            c.endpoints.directory.cache_ttl_ms = bad;
+            assert!(
+                c.validate()
+                    .iter()
+                    .any(|e| matches!(e, ConfigError::DirectoryCacheTtlOutOfRange { got_ms } if *got_ms == bad)),
+                "{bad}ms should be rejected"
+            );
+        }
+        // Both bounds are inclusive and accepted.
+        for ok in [MIN_CACHE_TTL_MS, MAX_CACHE_TTL_MS] {
+            let mut c = config(vec![endpoint("human")]);
+            c.endpoints.directory.cache_ttl_ms = ok;
+            assert!(
+                !c.validate()
+                    .iter()
+                    .any(|e| matches!(e, ConfigError::DirectoryCacheTtlOutOfRange { .. }))
+            );
+        }
     }
 
     #[test]
