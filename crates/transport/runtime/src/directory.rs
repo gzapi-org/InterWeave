@@ -34,6 +34,8 @@ use interweave_transport_api::{
     EndpointDirectoryV1, EndpointId, MAX_DIRECTORY_ENTRIES, MAX_DIRECTORY_TTL_MS, TransportIdentity,
 };
 
+use crate::ingress::{IngressDenial, IngressLimiter};
+
 /// Default local cache TTL, in milliseconds (`contracts/ENDPOINTS.md`).
 pub const DEFAULT_CACHE_TTL_MS: u32 = 60_000;
 /// Default bound on cached peers.
@@ -42,6 +44,141 @@ pub const DEFAULT_CACHE_TTL_MS: u32 = 60_000;
 /// TTL and the entry count, and this is the third dimension a map needs
 /// to stay a map. One entry per remote peer, evicting the oldest receipt.
 pub const DEFAULT_CACHE_PEERS: usize = 64;
+
+/// Default directory queries per minute per remote PeerId.
+pub const DEFAULT_QUERIES_PER_PEER_PER_MINUTE: u32 = 12;
+/// Ceiling on `queries_per_peer_per_minute`.
+pub const MAX_QUERIES_PER_PEER_PER_MINUTE: u32 = 60;
+/// Default concurrent directory exchanges per profile.
+pub const DEFAULT_MAX_INFLIGHT: usize = 16;
+/// Ceiling on `max_inflight`.
+pub const MAX_INFLIGHT_CEILING: usize = 64;
+
+/// Why the budget refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetDenial {
+    /// This peer has asked too often this minute.
+    PeerExhausted,
+    /// Too many exchanges are in flight for the whole profile.
+    InFlightExhausted,
+}
+
+/// Why a budget could not be configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetConfigError {
+    /// Above [`MAX_QUERIES_PER_PEER_PER_MINUTE`], or zero.
+    QueriesPerPeer(u32),
+    /// Above [`MAX_INFLIGHT_CEILING`], or zero.
+    MaxInflight(usize),
+}
+
+/// The directory's own bounded budget (ADR-0031), separate from direct
+/// ingress so a directory flood cannot spend a message's allowance and a
+/// message flood cannot spend the directory's.
+///
+/// Two bounds, two shapes: queries are rate-limited PER PEER, and
+/// exchanges are counted IN FLIGHT per profile. There is deliberately no
+/// global per-minute bucket — `IngressLimiter::per_peer_only` — because
+/// the contract names none and a second aggregate would be an invented
+/// limit. `the_thirteenth_query_in_a_minute_is_refused`,
+/// `the_seventeenth_exchange_in_flight_is_refused`, and
+/// `ending_an_exchange_admits_the_next` hold the three halves.
+#[derive(Debug)]
+pub struct DirectoryBudget {
+    per_peer: IngressLimiter,
+    inflight: usize,
+    max_inflight: usize,
+}
+
+impl DirectoryBudget {
+    /// Build with the contract defaults.
+    #[must_use]
+    pub fn with_defaults(now_ms: u64) -> Self {
+        Self {
+            per_peer: IngressLimiter::per_peer_only(
+                DEFAULT_QUERIES_PER_PEER_PER_MINUTE,
+                DEFAULT_QUERIES_PER_PEER_PER_MINUTE,
+                now_ms,
+            ),
+            inflight: 0,
+            max_inflight: DEFAULT_MAX_INFLIGHT,
+        }
+    }
+
+    /// Build with explicit bounds.
+    ///
+    /// # Errors
+    /// Returns [`BudgetConfigError`] for a zero or above-ceiling value;
+    /// zero is refused because a budget that admits nothing is a disabled
+    /// directory wearing the wrong error.
+    pub fn new(
+        queries_per_peer_per_minute: u32,
+        max_inflight: usize,
+        now_ms: u64,
+    ) -> Result<Self, BudgetConfigError> {
+        if queries_per_peer_per_minute == 0
+            || queries_per_peer_per_minute > MAX_QUERIES_PER_PEER_PER_MINUTE
+        {
+            return Err(BudgetConfigError::QueriesPerPeer(
+                queries_per_peer_per_minute,
+            ));
+        }
+        if max_inflight == 0 || max_inflight > MAX_INFLIGHT_CEILING {
+            return Err(BudgetConfigError::MaxInflight(max_inflight));
+        }
+        Ok(Self {
+            per_peer: IngressLimiter::per_peer_only(
+                queries_per_peer_per_minute,
+                queries_per_peer_per_minute,
+                now_ms,
+            ),
+            inflight: 0,
+            max_inflight,
+        })
+    }
+
+    /// Charge one query from `peer` and reserve one in-flight slot.
+    ///
+    /// The peer's rate is charged FIRST, so a peer over its own limit does
+    /// not hold an in-flight slot on the way to being refused —
+    /// `a_peer_over_its_rate_does_not_hold_a_slot`. On success the caller
+    /// owes an [`end_exchange`](Self::end_exchange).
+    ///
+    /// # Errors
+    /// Returns [`BudgetDenial`]; both are coarse `overloaded` on the wire.
+    pub fn begin_exchange(
+        &mut self,
+        peer: &TransportIdentity,
+        now_ms: u64,
+    ) -> Result<(), BudgetDenial> {
+        match self.per_peer.admit(peer, now_ms) {
+            Ok(()) => {}
+            Err(IngressDenial::PerPeerExhausted | IngressDenial::GlobalExhausted) => {
+                return Err(BudgetDenial::PeerExhausted);
+            }
+        }
+        if self.inflight >= self.max_inflight {
+            return Err(BudgetDenial::InFlightExhausted);
+        }
+        self.inflight += 1;
+        Ok(())
+    }
+
+    /// Release one in-flight slot.
+    ///
+    /// Saturating rather than panicking: an unmatched release is a caller
+    /// bug, but a runtime task that dies on it is a worse one —
+    /// `an_unmatched_end_does_not_underflow`.
+    pub fn end_exchange(&mut self) {
+        self.inflight = self.inflight.saturating_sub(1);
+    }
+
+    /// Exchanges currently in flight.
+    #[must_use]
+    pub const fn inflight(&self) -> usize {
+        self.inflight
+    }
+}
 
 /// Why a directory response was refused as a protocol violation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -373,5 +510,94 @@ mod tests {
         let mut cache = DirectoryCache::new(0, 60_000);
         cache.insert(peer(P1), validate_response(&raw(&["a"])).expect("valid"), 0);
         assert_eq!(cache.len(), 1);
+    }
+
+    // --- the budget --------------------------------------------------------
+
+    #[test]
+    fn the_thirteenth_query_in_a_minute_is_refused() {
+        let mut b = DirectoryBudget::with_defaults(0);
+        for _ in 0..12 {
+            b.begin_exchange(&peer(P1), 0).expect("within budget");
+            b.end_exchange();
+        }
+        assert_eq!(
+            b.begin_exchange(&peer(P1), 0),
+            Err(BudgetDenial::PeerExhausted)
+        );
+        // Another peer is unaffected: the bound is per PeerId.
+        assert!(b.begin_exchange(&peer(P2), 0).is_ok());
+        b.end_exchange();
+        // And a minute later the first peer is admitted again.
+        assert!(b.begin_exchange(&peer(P1), 60_000).is_ok());
+    }
+
+    #[test]
+    fn the_seventeenth_exchange_in_flight_is_refused() {
+        // One peer with rate to spare holds sixteen exchanges open; the
+        // in-flight bound, not the rate, refuses the seventeenth.
+        let mut b = DirectoryBudget::new(60, 16, 0).expect("valid");
+        for _ in 0..16 {
+            b.begin_exchange(&peer(P1), 0)
+                .expect("within the in-flight bound");
+        }
+        assert_eq!(b.inflight(), 16);
+        assert_eq!(
+            b.begin_exchange(&peer(P2), 0),
+            Err(BudgetDenial::InFlightExhausted),
+            "the bound is per PROFILE: a different peer is refused too"
+        );
+    }
+
+    #[test]
+    fn ending_an_exchange_admits_the_next() {
+        let mut b = DirectoryBudget::new(60, 1, 0).expect("valid");
+        b.begin_exchange(&peer(P1), 0).expect("first");
+        assert_eq!(
+            b.begin_exchange(&peer(P2), 0),
+            Err(BudgetDenial::InFlightExhausted)
+        );
+        b.end_exchange();
+        assert!(b.begin_exchange(&peer(P2), 0).is_ok());
+    }
+
+    #[test]
+    fn a_peer_over_its_rate_does_not_hold_a_slot() {
+        let mut b = DirectoryBudget::new(1, 1, 0).expect("valid");
+        b.begin_exchange(&peer(P1), 0).expect("first");
+        b.end_exchange();
+        assert_eq!(
+            b.begin_exchange(&peer(P1), 0),
+            Err(BudgetDenial::PeerExhausted)
+        );
+        assert_eq!(b.inflight(), 0, "a refused query reserves nothing");
+    }
+
+    #[test]
+    fn the_budget_refuses_zero_and_above_ceiling_bounds() {
+        assert_eq!(
+            DirectoryBudget::new(0, 16, 0).err(),
+            Some(BudgetConfigError::QueriesPerPeer(0))
+        );
+        assert_eq!(
+            DirectoryBudget::new(61, 16, 0).err(),
+            Some(BudgetConfigError::QueriesPerPeer(61))
+        );
+        assert_eq!(
+            DirectoryBudget::new(12, 0, 0).err(),
+            Some(BudgetConfigError::MaxInflight(0))
+        );
+        assert_eq!(
+            DirectoryBudget::new(12, 65, 0).err(),
+            Some(BudgetConfigError::MaxInflight(65))
+        );
+        assert!(DirectoryBudget::new(60, 64, 0).is_ok());
+    }
+
+    #[test]
+    fn an_unmatched_end_does_not_underflow() {
+        let mut b = DirectoryBudget::with_defaults(0);
+        b.end_exchange();
+        assert_eq!(b.inflight(), 0);
     }
 }

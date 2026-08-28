@@ -49,8 +49,8 @@ pub use broadcast_inbound::{
     BroadcastAdmission, ProtocolVerdict, admit_broadcast, classify_broadcast,
 };
 pub use directory::{
-    CacheEntry, DirectoryCache, DirectoryViolation, ValidatedDirectory, clamp_ttl,
-    validate_response,
+    BudgetConfigError, BudgetDenial, CacheEntry, DirectoryBudget, DirectoryCache,
+    DirectoryViolation, ValidatedDirectory, clamp_ttl, validate_response,
 };
 pub use endpoint_queue::{DirectEvent, EndpointQueues, QueueRefusal};
 pub use endpoint_registry::{

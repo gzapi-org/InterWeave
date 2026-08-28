@@ -108,6 +108,19 @@ Refusal::to_wire                                 call  refusal.to_wire(
 
 # --- stage-8 -----------------------------------------------------
 EndpointRegistry::advertised_for                 stage-8   the directory responder in transport-libp2p snapshots it
+DirectoryBudget::begin_exchange                  stage-8   the directory exchange in transport-libp2p drives it
+DirectoryBudget::end_exchange                    stage-8   the directory exchange in transport-libp2p drives it
+DirectoryBudget::inflight                        stage-8   the directory exchange in transport-libp2p drives it
+DirectoryBudget::new                             stage-8   the directory exchange in transport-libp2p drives it
+DirectoryBudget::with_defaults                   stage-8   the directory exchange in transport-libp2p drives it
+DirectoryCache::expire                           stage-8   the directory exchange in transport-libp2p drives it
+DirectoryCache::forget                           stage-8   the directory exchange in transport-libp2p drives it
+DirectoryCache::get                              stage-8   the directory exchange in transport-libp2p drives it
+DirectoryCache::insert                           stage-8   the directory exchange in transport-libp2p drives it
+DirectoryCache::is_empty                         stage-8   the directory exchange in transport-libp2p drives it
+DirectoryCache::len                              stage-8   the directory exchange in transport-libp2p drives it
+DirectoryCache::new                              stage-8   the directory exchange in transport-libp2p drives it
+DirectoryCache::with_defaults                    stage-8   the directory exchange in transport-libp2p drives it
 DirectDestination::to_default                    stage-8   identifier projections used by the endpoint directory
 DirectDestination::to_endpoint                   stage-8   identifier projections used by the endpoint directory
 EndpointQueues::is_open                          stage-8   needs a session on the other side of the lease boundary
