@@ -222,10 +222,19 @@ impl MdnsDiscovery {
         if !self.started || self.stopped {
             return;
         }
+        // ONLY THE LATEST UNDRAINED HEALTH STATE. Alternating multicast
+        // availability appended a transition per flap, so a backpressured
+        // consumer accumulated a history nobody wants — health is a
+        // CURRENT VALUE, and an older reading is not evidence a newer one
+        // lacks. Coalescing here also keeps this path inside
+        // `MAX_PENDING_EVENTS` rather than beside it.
+        self.pending
+            .retain(|event| !matches!(event, DiscoveryEvent::HealthChanged { .. }));
         self.pending.push(DiscoveryEvent::HealthChanged {
             source: SOURCE.to_owned(),
             health: self.health(),
         });
+        self.enforce_pending_bound();
     }
 
     /// Queue an observation, replacing any pending one for the same peer.
@@ -1052,6 +1061,39 @@ mod tests {
         assert_eq!(
             observations, MAX_PEERS,
             "every peer a full `seen` can hold is still reported"
+        );
+    }
+    #[test]
+    fn flapping_multicast_queues_one_health_state_not_a_history() {
+        // Health is a CURRENT VALUE. Appending a transition per flap let
+        // a backpressured consumer accumulate a history nobody reads, and
+        // did it outside the total bound the other paths respect.
+        let mut p = started();
+        let _ = p.drain_events(0, 64);
+
+        for i in 0..1_000u64 {
+            p.report_backend_down(i * 10);
+            p.report_backend_up(i * 10 + 5);
+        }
+
+        let queued = p.drain_events(20_000, usize::MAX);
+        let health: Vec<_> = queued
+            .iter()
+            .filter(|e| matches!(e, DiscoveryEvent::HealthChanged { .. }))
+            .collect();
+        assert_eq!(
+            health.len(),
+            1,
+            "one pending health event, whatever the flap count: {}",
+            health.len()
+        );
+        assert!(
+            matches!(
+                health[0],
+                DiscoveryEvent::HealthChanged { health, .. } if *health == ProviderHealth::Healthy
+            ),
+            "and it is the LATEST state, not the first: {:?}",
+            health[0]
         );
     }
 }
