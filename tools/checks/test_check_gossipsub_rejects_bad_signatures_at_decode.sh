@@ -76,17 +76,13 @@ RS
 RS
   # Pin the guard's expectation to THIS fixture, so every case below
   # exercises the real comparison rather than a copy of it.
-  export INTERWEAVE_REVIEWED_INVALID_SHA256="$(
-    sed 's;//.*$;;' "$work/src/behaviour.rs" \
-      | awk '/fn handle_invalid_message/{f=1} f{print} f&&/^    \}$/{exit}' \
-      | sed 's/[[:space:]]\+/ /g;s/^ //;s/ $//' | grep -v '^$' \
-      | sha256sum | cut -d' ' -f1
-  )"
-  export INTERWEAVE_REVIEWED_DECODE_SHA256="$(
+  export INTERWEAVE_REVIEWED_PROTOCOL_SHA256="$(
     sed 's;//.*$;;' "$work/src/protocol.rs" \
-      | awk '/fn decode\(/{f=1} f{print} f&&/^    \}$/{exit}' \
-      | sed 's/[[:space:]]\+/ /g;s/^ //;s/ $//' | grep -v '^$' \
-      | sha256sum | cut -d' ' -f1
+      | sed 's/[[:space:]]\+/ /g;s/^ //;s/ $//' | grep -v '^$' | sha256sum | cut -d' ' -f1
+  )"
+  export INTERWEAVE_REVIEWED_BEHAVIOUR_SHA256="$(
+    sed 's;//.*$;;' "$work/src/behaviour.rs" \
+      | sed 's/[[:space:]]\+/ /g;s/^ //;s/ $//' | grep -v '^$' | sha256sum | cut -d' ' -f1
   )"
 }
 
@@ -171,12 +167,27 @@ else
   ok "caught it"
 fi
 
+echo "gossipsub signature guard: a new dispatcher caches invalid messages"
+write_good
+python3 - "$work/src/behaviour.rs" <<'PY'
+import io,sys
+p = sys.argv[1]
+s = io.open(p).read()
+s = "    fn dispatch_invalid_messages(&mut self, msgs: Vec<RawMessage>) {\n        for m in msgs { self.duplicate_cache.insert(m.id.clone()); }\n    }\n\n" + s
+io.open(p, "w").write(s)
+PY
+if run_guard; then
+  bad "a new invalid-message dispatcher reached the cache unnoticed"
+else
+  ok "caught it"
+fi
+
 echo "gossipsub signature guard: the cache disappears from the behaviour"
 write_good
 sed -i 's/duplicate_cache.insert/some_other_cache.insert/' "$work/src/behaviour.rs"
 if run_guard; then bad "did not notice the cache it reasons about is gone"; else ok "caught it"; fi
 
-unset INTERWEAVE_REVIEWED_DECODE_SHA256 INTERWEAVE_REVIEWED_INVALID_SHA256
+unset INTERWEAVE_REVIEWED_PROTOCOL_SHA256 INTERWEAVE_REVIEWED_BEHAVIOUR_SHA256
 echo "gossipsub signature guard: it runs against the real crate"
 if bash "$GUARD" >/dev/null 2>&1; then
   ok "passes on the pinned dependency"

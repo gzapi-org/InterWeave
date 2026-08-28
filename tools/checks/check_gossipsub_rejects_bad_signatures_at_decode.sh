@@ -63,11 +63,8 @@ REVIEWED_GOSSIPSUB_VERSION="0.49.5"
 # Overridable ONLY so the self-test can pin its own fixtures, for the same
 # reason INTERWEAVE_GOSSIPSUB_SRC exists: a self-test that reimplements
 # the comparison cannot fail when the real one is weakened.
-REVIEWED_DECODE_SHA256="${INTERWEAVE_REVIEWED_DECODE_SHA256:-c623f65f904b165021fc3b80ef8bbd460cd78065096faae6328c69a64fb3c5f6}"
-# What the behaviour does with a message the decoder refused. Pinned for
-# the same reason: the separation only holds if invalid messages stay out
-# of the cache, and that is decided here rather than by the decoder.
-REVIEWED_INVALID_SHA256="${INTERWEAVE_REVIEWED_INVALID_SHA256:-60bfa396d99b7e8fa6c1a602b5ecf924371c52d5a45859dc7b0ab7628b9298d2}"
+REVIEWED_PROTOCOL_SHA256="${INTERWEAVE_REVIEWED_PROTOCOL_SHA256:-5a2fe62c6b1d89a51299c9f78024cb196080cb84f820d47d02f102493b9790f2}"
+REVIEWED_BEHAVIOUR_SHA256="${INTERWEAVE_REVIEWED_BEHAVIOUR_SHA256:-32b106d723342d35612168b63359a600c24f0838f22ef62fcfe5ce2ad37464fb}"
 
 problems=0
 report() {
@@ -148,38 +145,30 @@ fi
 if ! grep -qE 'if +verify_signature +&& +!.*verify_signature\(&message\)' "$protocol"; then
   report "protocol.rs no longer tests the signature during decode"
 else
-  # THE DECODE PATH IS FINGERPRINTED, NOT DESCRIBED.
+  # THE FILES ARE FINGERPRINTED, NOT DESCRIBED.
   #
-  # Five rounds of review found five ways to satisfy a description of
-  # this branch while defeating it: an assertion that matched a token
-  # rather than a meaning, one that hid another's removal, one fooled by
-  # a comment, and a `return <expr>` read as a refusal. Each fix was
-  # right and left the next hole open, because a regex cannot decide
-  # what code MEANS -- the last finding, that a `continue` must
-  # DOMINATE the branch rather than merely appear in it, is not
-  # answerable by grep at all.
+  # Nine rounds of review found nine ways to satisfy a description of
+  # this guarantee while defeating it. Five were regexes matching a token
+  # rather than a meaning. The last four were all the same shape: whatever
+  # scope was pinned, the bypass went just outside it -- the branch, then
+  # the path to the branch, then the invalid-message handler, then the
+  # code that dispatches to that handler. Each widening was correct and
+  # left a boundary for the next one.
   #
-  # So this stops trying. `Decoder::decode` is normalised -- comments
-  # gone, whitespace collapsed -- and compared against the digest of the
-  # version that was read by a person. It claims exactly one thing, and
-  # can verify it completely: THIS CODE HAS NOT CHANGED.
+  # There is no natural boundary, so the file is the boundary. Both files
+  # the guarantee depends on are normalised -- comments stripped,
+  # whitespace collapsed -- and hashed. The check claims exactly one
+  # thing and verifies it completely: THIS CODE HAS NOT CHANGED.
   #
-  # The WHOLE function, because the branch alone was not enough: a
-  # revision could keep the reviewed rejection byte-for-byte and add a
-  # path above it that delivers a message before verification runs. What
-  # the stage rests on is that every decoded message REACHES the
-  # rejection, and reachability is a property of the path.
-  #
-  # Any edit fails, including harmless ones. That is the intended cost:
-  # the guarantee Stage 7 rests on is re-established by reading the new
-  # code, which is what the failure message asks for. Updating the digest
-  # is the act of saying someone did.
-  actual="$(awk '/fn decode\(/{f=1} f{print} f&&/^    \}$/{exit}' "$protocol" \
-    | sed 's/[[:space:]]\+/ /g;s/^ //;s/ $//' | grep -v '^$' \
-    | sha256sum | cut -d' ' -f1)"
-  if [[ "$actual" != "$REVIEWED_DECODE_SHA256" ]]; then
-    report "Decoder::decode has changed (sha256 $actual, reviewed $REVIEWED_DECODE_SHA256)"
+  # Brittle by construction, and it costs nothing: the version is pinned,
+  # so these files do not change between deliberate bumps. When one
+  # happens, the check fails and the guarantee is re-established by
+  # reading -- which is what it was always asking for.
+  actual_protocol="$(sed 's/[[:space:]]\+/ /g;s/^ //;s/ $//' "$protocol" | grep -v '^$' | sha256sum | cut -d' ' -f1)"
+  if [[ "$actual_protocol" != "$REVIEWED_PROTOCOL_SHA256" ]]; then
+    report "protocol.rs has changed (sha256 $actual_protocol, reviewed $REVIEWED_PROTOCOL_SHA256)"
   fi
+
 fi
 
 # 3. The duplicate cache still lives in the behaviour, downstream of that.
@@ -190,18 +179,14 @@ if grep -q 'duplicate_cache' "$protocol"; then
   report "the duplicate cache is now reachable from the decoder — the separation this check exists for is gone"
 fi
 
-# 4. And what the behaviour DOES with an invalid message is pinned, for
-#    the same reason the decode path is. Requiring only that the text
-#    `duplicate_cache.insert` appear somewhere says nothing about which
-#    paths reach it: a revision routing `invalid_messages` through a
-#    cache insertion satisfies that grep completely while destroying the
-#    separation the whole check exists to assert.
-actual_invalid="$(awk '/fn handle_invalid_message/{f=1} f{print} f&&/^    \}$/{exit}' "$behaviour" \
-  | sed 's/[[:space:]]\+/ /g;s/^ //;s/ $//' | grep -v '^$' \
-  | sha256sum | cut -d' ' -f1)"
-if [[ "$actual_invalid" != "$REVIEWED_INVALID_SHA256" ]]; then
-  report "handle_invalid_message has changed (sha256 $actual_invalid, reviewed $REVIEWED_INVALID_SHA256)"
+# 4. And the whole of behaviour.rs, for the same reason: pinning the
+#    invalid-message HANDLER said nothing about the code that dispatches
+#    to it, which was the ninth finding and the third of that shape.
+actual_behaviour="$(sed 's/[[:space:]]\+/ /g;s/^ //;s/ $//' "$behaviour" | grep -v '^$' | sha256sum | cut -d' ' -f1)"
+if [[ "$actual_behaviour" != "$REVIEWED_BEHAVIOUR_SHA256" ]]; then
+  report "behaviour.rs has changed (sha256 $actual_behaviour, reviewed $REVIEWED_BEHAVIOUR_SHA256)"
 fi
+
 
 if [[ $problems -gt 0 ]]; then
   echo "" >&2
