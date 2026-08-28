@@ -455,7 +455,34 @@ impl CandidateSet {
             if let Some(existing) = records.iter_mut().find(|r| r.source == candidate.source) {
                 existing.observed_at = candidate.observed_at;
                 existing.expires_at = expires_at;
-            } else if records.len() < MAX_PROVENANCE_PER_ADDRESS {
+            } else {
+                // THE SAME ASYMMETRY AS THE ADDRESS SLOTS, one level
+                // down. At the cap a ninth source was dropped by arrival
+                // order — so a configured non-expiring provider reporting
+                // an address eight others already claim lost its record,
+                // and when those eight expired the address went with them
+                // even though it is still configured. Static will not
+                // re-emit it without a reload.
+                if records.len() >= MAX_PROVENANCE_PER_ADDRESS {
+                    if !provider_pinned {
+                        continue;
+                    }
+                    // Displace an unpinned record, oldest first. If every
+                    // record is pinned the cap stands: configuration does
+                    // not grow a bound.
+                    let victim = records
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, r)| !r.pinned)
+                        .min_by_key(|(_, r)| r.observed_at)
+                        .map(|(i, _)| i);
+                    match victim {
+                        Some(i) => {
+                            records.remove(i);
+                        }
+                        None => continue,
+                    }
+                }
                 records.push(Provenance {
                     source: candidate.source.clone(),
                     observed_at: candidate.observed_at,
@@ -2036,4 +2063,66 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_pinned_source_is_recorded_even_when_the_provenance_cap_is_full() {
+        // Eight sources already claim the address; the configured one
+        // arrives ninth. Dropped by arrival order, its record is lost —
+        // and when the eight expire the address goes with them, though it
+        // is still configured and static will not re-emit it.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(21);
+        let address = "/ip4/10.0.0.1/tcp/4001";
+
+        for i in 0..MAX_PROVENANCE_PER_ADDRESS {
+            let mut c = for_id(&subject, "unpinned", address, i as u64, Some(1_000));
+            c.source = format!("unpinned-{i}");
+            set.observe(&c, i as u64, &trust, true, false);
+        }
+
+        let mut pinned = for_id(&subject, "static-bootstrap", address, 500, None);
+        pinned.source = "static-bootstrap".to_owned();
+        set.observe(&pinned, 500, &trust, false, true);
+
+        // Past every unpinned lifetime: only a recorded pinned source can
+        // keep the address alive.
+        let candidates = set.candidates(5_000, &|_| None);
+        let found = candidates
+            .iter()
+            .find(|c| c.peer_id == subject)
+            .expect("the configured source still supports this peer");
+        assert!(
+            found.address_list().contains(&address),
+            "the address outlives the expiring sources: {:?}",
+            found.address_list()
+        );
+    }
+
+    #[test]
+    fn an_unpinned_source_past_the_provenance_cap_is_still_refused() {
+        // The control: only a pinned record displaces, or the cap is not
+        // a cap at all.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(22);
+        let address = "/ip4/10.0.0.1/tcp/4001";
+
+        for i in 0..MAX_PROVENANCE_PER_ADDRESS {
+            let mut c = for_id(&subject, "unpinned", address, i as u64, Some(1_000));
+            c.source = format!("unpinned-{i}");
+            set.observe(&c, i as u64, &trust, true, false);
+        }
+        let mut late = for_id(&subject, "late", address, 900, Some(u64::MAX));
+        late.source = "late".to_owned();
+        set.observe(&late, 900, &trust, true, false);
+
+        // Past every recorded lifetime. If `late` had displaced one, the
+        // address would survive on it.
+        assert!(
+            !set.candidates(5_000, &|_| None)
+                .iter()
+                .any(|c| c.peer_id == subject),
+            "an unpinned ninth source is refused, so nothing outlives the cap"
+        );
+    }
 }
