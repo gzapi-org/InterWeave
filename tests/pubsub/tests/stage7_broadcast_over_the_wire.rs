@@ -1994,6 +1994,82 @@ async fn repeated_unreachable_publishes_cannot_grow_the_outbox() {
     a.shutdown().await.expect("a stops");
 }
 
+/// A reloaded queue bound applies to sessions already joined.
+///
+/// The bound used to be captured when a queue was opened, so one
+/// configured value meant two different things depending on join order:
+/// raising it left live sessions dropping at the old limit, lowering it
+/// let them buffer past the new one.
+///
+/// Both directions are exercised. Contents survive a shrink deliberately
+/// — messages already queued were admitted under the bound in force at
+/// the time, and discarding them would make a configuration reload lose
+/// data for a consumer that did nothing wrong.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reloaded_queue_bound_applies_to_sessions_already_joined() {
+    let (a_id, _) = who();
+    let a = node_with_queue(&a_id, &[], &["general"], SubstrateConfig::default(), 1).await;
+    for s in ["human", "claude"] {
+        a.join(channel("general"), s)
+            .await
+            .expect("lands")
+            .expect("accepted");
+    }
+
+    // At a bound of one, the second publish is dropped for "claude".
+    for id in [20u8, 21] {
+        a.publish(channel("general"), "human", envelope(id, b"before"))
+            .await
+            .expect("lands")
+            .expect("accepted");
+    }
+    assert_eq!(
+        drain_until(&a, "claude", PATIENCE).await.len(),
+        1,
+        "the original bound held"
+    );
+
+    // RAISE it. The already-open session must honour the new bound.
+    a.configure_broadcast(
+        BroadcastChannels::from_profile(&profile(&["general"]), 4).expect("a valid profile"),
+    )
+    .await
+    .expect("the reload is accepted");
+
+    for id in [22u8, 23, 24] {
+        a.publish(channel("general"), "human", envelope(id, b"after"))
+            .await
+            .expect("lands")
+            .expect("accepted");
+    }
+    assert_eq!(
+        drain_until(&a, "claude", PATIENCE).await.len(),
+        3,
+        "a session joined before the reload takes the raised bound"
+    );
+
+    // LOWER it, and the same session drops at the new limit.
+    a.configure_broadcast(
+        BroadcastChannels::from_profile(&profile(&["general"]), 1).expect("a valid profile"),
+    )
+    .await
+    .expect("the reload is accepted");
+
+    for id in [25u8, 26] {
+        a.publish(channel("general"), "human", envelope(id, b"lowered"))
+            .await
+            .expect("lands")
+            .expect("accepted");
+    }
+    assert_eq!(
+        drain_until(&a, "claude", PATIENCE).await.len(),
+        1,
+        "and the lowered bound too"
+    );
+
+    a.shutdown().await.expect("a stops");
+}
+
 /// Publish the same envelope a few times while the mesh forms.
 ///
 /// A single publish immediately after connecting reaches nobody: GossipSub

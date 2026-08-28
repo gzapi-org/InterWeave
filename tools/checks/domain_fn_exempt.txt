@@ -48,6 +48,7 @@ PreAuthLimits::handshake_timeout_ms   call  preauth.handshake_timeout_ms(
 SubscriptionRegistry::subscribers     call  subs.subscribers(
 SubscriptionRegistry::set_desired     call  broadcast_state.subs.set_desired(
 SubscriptionRegistry::holds_any       call  broadcast_state.subs.holds_any(
+SessionQueues::set_bound              call  broadcast_state.queues.set_bound(
 FrameError::to_wire                              call  error.to_wire(
 Refusal::to_wire                                 call  refusal.to_wire(
 

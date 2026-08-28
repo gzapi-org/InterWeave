@@ -126,6 +126,11 @@ pub(super) fn handle_command(
                     // failed while every later session silently opened at
                     // the bound from the rejected request.
                     broadcast_state.queue_bound = config.queue_bound;
+                    // AND FOR THE SESSIONS ALREADY OPEN. Setting it for
+                    // future queues alone left live sessions on whatever
+                    // was configured when they joined, so one bound meant
+                    // two things depending on join order.
+                    broadcast_state.queues.set_bound(config.queue_bound);
                     // SUBSCRIBE AFTER the registry accepted the set, so a
                     // refused configuration leaves the mesh untouched
                     // rather than half-applied.

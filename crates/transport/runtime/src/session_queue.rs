@@ -147,6 +147,26 @@ impl SessionQueues {
             .map_or(0, |queue| queue.events.len())
     }
 
+    /// Apply a new bound to every open queue.
+    ///
+    /// A reconfiguration that changed only the bound for FUTURE queues
+    /// left live sessions on the bound they were opened with: lowering it
+    /// let them go on buffering past the new limit, raising it left them
+    /// dropping at the old one. The configured bound has to mean the same
+    /// thing for every session, whenever it joined.
+    ///
+    /// CONTENTS SURVIVE A SHRINK. Messages already in a queue were
+    /// admitted under the bound in force at the time, and discarding them
+    /// would turn a configuration reload into data loss for a consumer
+    /// that did nothing wrong. A queue over its new bound simply refuses
+    /// pushes until it drains under it, which is what `push` already does
+    /// and needs no special case.
+    pub fn set_bound(&mut self, bound: usize) {
+        for queue in self.queues.values_mut() {
+            queue.bound = bound;
+        }
+    }
+
     /// Whether a queue is open for `session`.
     #[must_use]
     pub fn is_open(&self, session: &str) -> bool {
