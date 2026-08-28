@@ -43,7 +43,6 @@
 # co-occurrence rule stopped seeing calls that were there all along.
 EndpointRegistry::authorize_outbound  call  registry.authorize_outbound(
 TrustSources::classify                call  self.trust.classify(
-EndpointRegistry::lease               call  .lease(&frame.source_endpoint)
 PreAuthLimits::handshake_timeout_ms   call  preauth.handshake_timeout_ms(
 SubscriptionRegistry::subscribers     call  subs.subscribers(
 SubscriptionRegistry::set_desired     call  broadcast_state.subs.set_desired(
@@ -108,7 +107,6 @@ Refusal::to_wire                                 call  refusal.to_wire(
 
 # --- stage-8 -----------------------------------------------------
 EndpointRegistry::advertised_for                 stage-8   the directory responder in transport-libp2p snapshots it
-EndpointRegistry::lease_of                       stage-8   send_direct in transport-libp2p derives the source from it
 DirectoryBudget::begin_exchange                  stage-8   the directory exchange in transport-libp2p drives it
 DirectoryBudget::end_exchange                    stage-8   the directory exchange in transport-libp2p drives it
 DirectoryBudget::inflight                        stage-8   the directory exchange in transport-libp2p drives it
@@ -126,9 +124,9 @@ DirectDestination::to_default                    stage-8   identifier projection
 DirectDestination::to_endpoint                   stage-8   identifier projections used by the endpoint directory
 EndpointQueues::is_open                          stage-8   needs a session on the other side of the lease boundary
 EndpointRegistry::default_endpoint               stage-8   needs a session on the other side of the lease boundary
-EndpointRegistry::release_session                stage-8   needs a session on the other side of the lease boundary
 EndpointRegistry::set_default                    stage-8   needs a session on the other side of the lease boundary
 EndpointRegistry::set_enabled                    stage-8   needs a session on the other side of the lease boundary
+EndpointRegistry::lease                          stage-13  the source is derived through lease_of now; admin.endpoints reads a lease by endpoint
 LocalAdminPort                                   stage-8   plan L588: the lease boundary is wired to transport here
 LocalDataSession                                 stage-8   plan L588: the lease boundary is wired to transport here
 MessageId::parse_hex                             stage-8   identifier projections used by the endpoint directory

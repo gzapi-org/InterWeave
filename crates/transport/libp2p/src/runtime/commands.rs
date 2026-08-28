@@ -18,6 +18,7 @@ use libp2p::swarm::SwarmEvent as Libp2pSwarmEvent;
 
 use interweave_transport_api::TransportError as DirectError;
 use interweave_transport_api::TransportIdentity;
+use interweave_transport_runtime::endpoint_registry::LocalSessionId;
 use interweave_transport_runtime::{ConnectionClass, ConnectionManager, DialOrigin, DialTicket};
 
 use crate::behaviour::SubstrateBehaviourEvent;
@@ -431,34 +432,30 @@ pub(super) fn handle_command(
             refuse.extend(closing);
             let _ = reply.send(closed);
         }
-        SwarmCommand::SendDirect { peer, frame, reply } => {
-            // THE SOURCE ENDPOINT MUST BE ONE THIS NODE HOLDS A LEASE
-            // FOR. It used to be taken from the frame and sent as given,
-            // which made it arbitrary caller input: a handle holder could
-            // name any endpoint at all, and the receiver would key its
-            // dedup entry on that label and surface it on the delivered
-            // event. CLAUDE.md §5 is the other way round — source
-            // EndpointId is derived from the local lease, never trusted
-            // from the caller.
+        SwarmCommand::SendDirect {
+            session,
+            peer,
+            mut frame,
+            reply,
+        } => {
+            // THE SOURCE ENDPOINT IS THE CALLER'S LEASE, and the frame's
+            // own field is REPLACED rather than checked. CLAUDE.md §5:
+            // source EndpointId is derived from the local lease, never
+            // trusted from the caller — and a comparison would still
+            // make the field caller-meaningful, since the caller would
+            // learn which values pass. So the session is the only input.
             //
-            // The registry is the whole check. `configure_direct` claims
-            // a lease per configured endpoint, so holding one means this
-            // runtime really serves that endpoint; a name it never
-            // configured, or one whose lease was revoked, has none.
-            //
-            // Stage 8 tightens this rather than replacing it: an IPC
-            // session gets ONE exclusive lease and may name only that
-            // one, where this layer accepts any lease the node holds.
-            // Which lease belongs to which caller is a question this
-            // stage has no sessions to ask.
-            if direct_state
-                .registry
-                .lease(&frame.source_endpoint)
-                .is_none()
-            {
+            // Stage 6 accepted any lease this node held, because the
+            // handle holder was the only caller and owned every endpoint.
+            // That gap was carried here by explicit decision (PR #38),
+            // and closes with sessions: a session holds ONE lease and
+            // sends as that endpoint or not at all —
+            // `a_session_sends_only_as_its_own_endpoint`.
+            let Some(source) = direct_state.source_of(&LocalSessionId(session)) else {
                 let _ = reply.send(Err(DirectError::EndpointNotRegistered));
                 return;
-            }
+            };
+            frame.source_endpoint = source;
             // TRUST IS RE-READ HERE, not inherited from the connection.
             // `set_trust` revokes a peer and closes its connections, but
             // the close is asynchronous: until the event arrives the
@@ -629,6 +626,18 @@ pub(super) fn handle_command(
         }
         SwarmCommand::ConfigureDirect { config, reply } => {
             let _ = reply.send(direct_state.configure(*config));
+        }
+        SwarmCommand::ClaimEndpoint {
+            session,
+            endpoint,
+            client_kind,
+            reply,
+        } => {
+            let _ =
+                reply.send(direct_state.claim(LocalSessionId(session), &endpoint, &client_kind));
+        }
+        SwarmCommand::ReleaseSession { session, reply } => {
+            let _ = reply.send(direct_state.release(&LocalSessionId(session)));
         }
         SwarmCommand::RevokeEndpoint { endpoint, reply } => {
             let _ = reply.send(direct_state.revoke(&endpoint));

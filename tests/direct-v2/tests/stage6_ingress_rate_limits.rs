@@ -30,7 +30,7 @@ use interweave_transport_api::{
 use interweave_transport_libp2p::runtime::{
     DirectEndpoints, SubstrateConfig, SwarmEvent, SwarmRuntime,
 };
-use interweave_transport_runtime::{Generation, TrustSources};
+use interweave_transport_runtime::TrustSources;
 use interweave_trust_api::EndpointTrustPolicy;
 use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 
@@ -66,6 +66,21 @@ fn trusting(peers: &[&TransportIdentity]) -> TrustSources {
 
 fn endpoint(name: &str) -> EndpointId {
     EndpointId::parse(name).expect("valid endpoint id")
+}
+
+/// Claim each named endpoint for a session of the same name.
+///
+/// What Stage 6 did implicitly at `configure_direct`, done explicitly:
+/// a session sends AS the endpoint it holds, so these tests name sessions
+/// after endpoints and the lease is the only thing that binds the two.
+async fn claim_all(runtime: &SwarmRuntime, names: &[&str]) {
+    for name in names {
+        runtime
+            .claim_endpoint(*name, endpoint(name), "in-process")
+            .await
+            .expect("the claim reaches the task")
+            .expect("the endpoint is configured and free");
+    }
 }
 
 /// A profile carrying these endpoints, which is now the ONLY way to
@@ -105,7 +120,6 @@ fn endpoints() -> DirectEndpoints {
     DirectEndpoints::from_profile(
         &profile_with(vec![entry("human"), entry("claude")], Some("human")),
         QUEUE_BOUND,
-        Generation::parse("ingress_________").expect("valid generation"),
     )
     .expect("a valid profile")
 }
@@ -124,12 +138,8 @@ fn sender_endpoints() -> DirectEndpoints {
     for id in 0..INVENTED_SOURCES {
         entries.push(entry(&format!("source-{id}")));
     }
-    DirectEndpoints::from_profile(
-        &profile_with(entries, Some("human")),
-        QUEUE_BOUND,
-        Generation::parse("ingress_________").expect("valid generation"),
-    )
-    .expect("a valid profile")
+    DirectEndpoints::from_profile(&profile_with(entries, Some("human")), QUEUE_BOUND)
+        .expect("a valid profile")
 }
 
 /// Distinct `id` per call, because a repeated message id is a DUPLICATE
@@ -167,6 +177,7 @@ async fn fan_in(senders: usize) -> (Vec<SwarmRuntime>, SwarmRuntime, TransportId
         .configure_direct(endpoints())
         .await
         .expect("endpoints install");
+    claim_all(&receiver, &["human", "claude"]).await;
     let address = receiver
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
         .await
@@ -179,6 +190,12 @@ async fn fan_in(senders: usize) -> (Vec<SwarmRuntime>, SwarmRuntime, TransportId
             .configure_direct(sender_endpoints())
             .await
             .expect("the sender's own endpoints install");
+        // Sixty-four leases means sixty-four sessions, each named for the
+        // endpoint it holds: a session sends AS its lease and nothing else.
+        let mut names = vec!["human".to_owned(), "claude".to_owned()];
+        names.extend((0..INVENTED_SOURCES).map(|id| format!("source-{id}")));
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        claim_all(&sender, &names).await;
         sender
             .dial(receiver_peer.clone(), address.clone())
             .await
@@ -219,7 +236,7 @@ async fn flood(
     for id in 0..count {
         answers.push(
             sender
-                .send_direct(peer.clone(), frame(&source(id), id))
+                .send_direct(source(id), peer.clone(), frame(&source(id), id))
                 .await
                 .expect("the command reaches the task"),
         );

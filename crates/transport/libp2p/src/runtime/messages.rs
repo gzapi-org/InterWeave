@@ -140,17 +140,20 @@ pub enum SwarmCommand {
         /// Answered with the number of connections closed by the change.
         reply: oneshot::Sender<usize>,
     },
-    /// Send one directed message to a peer.
+    /// Send one directed message to a peer, AS the session's own endpoint.
     ///
-    /// The frame's `source_endpoint` is supplied by the CALLER's runtime
-    /// from its own lease, never by an application: ADR-0030 makes the
-    /// source a routing selector derived locally, so a command that let
-    /// an application choose it would be the spoofing path the contract
-    /// forbids.
+    /// The frame's `source_endpoint` is OVERWRITTEN from `session`'s
+    /// lease before anything else happens: ADR-0030 makes the source a
+    /// routing selector derived locally, and a command that consulted
+    /// the frame's field — even to compare — would make it something a
+    /// caller chooses. A session holding no lease is refused
+    /// `EndpointNotRegistered`.
     SendDirect {
+        /// The local session sending. Its lease is the source.
+        session: String,
         /// The peer to send to.
         peer: TransportIdentity,
-        /// The frame, already validated by its own types.
+        /// The frame. Its `source_endpoint` is replaced, not read.
         frame: Box<DirectMessageV2>,
         /// Answered when the exchange settles.
         reply: oneshot::Sender<Result<EndpointId, DirectError>>,
@@ -166,11 +169,34 @@ pub enum SwarmCommand {
         /// Answered once installed, or with why it was not.
         reply: oneshot::Sender<Result<(), SubstrateError>>,
     },
+    /// Grant a session an exclusive lease on one configured endpoint.
+    ///
+    /// The epoch is minted by the runtime, fresh per grant. This is the
+    /// claim an IPC session will make at Stage 13; until then the handle
+    /// holder is the session.
+    ClaimEndpoint {
+        /// The session claiming. One lease per session, ever.
+        session: String,
+        /// The endpoint it wants.
+        endpoint: EndpointId,
+        /// What kind of client it says it is — hygiene, never authority.
+        client_kind: String,
+        /// Answered with the lease, or the contract's refusal.
+        reply: oneshot::Sender<Result<interweave_local_client_api::EndpointLease, DirectError>>,
+    },
+    /// End every lease a session holds, closing each queue with it.
+    ReleaseSession {
+        /// The session going away.
+        session: String,
+        /// Answered with the endpoints released.
+        reply: oneshot::Sender<Vec<EndpointId>>,
+    },
     /// End one endpoint's lease, closing its queue with it.
     ///
     /// `testing.md` scenario 15: an endpoint lease disconnect removes the
-    /// route immediately. Stage 8 calls this when an IPC session goes;
-    /// until then it is how a test reaches the same state.
+    /// route immediately. `ReleaseSession` is what a session's own end
+    /// does; this is the operator's revoke of one endpoint regardless of
+    /// who holds it.
     RevokeEndpoint {
         /// Whose lease ends.
         endpoint: EndpointId,
@@ -179,7 +205,8 @@ pub enum SwarmCommand {
     },
     /// Take everything waiting on one endpoint's queue.
     ///
-    /// The in-process stand-in for what Stage 8's IPC session does.
+    /// What an IPC session's event stream will do at Stage 13, pulled
+    /// rather than pushed.
     DrainEndpoint {
         /// Whose queue.
         endpoint: EndpointId,

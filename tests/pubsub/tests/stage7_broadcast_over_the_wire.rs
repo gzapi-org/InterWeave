@@ -24,7 +24,7 @@ use interweave_transport_api::{
 use interweave_transport_libp2p::runtime::{
     BroadcastChannels, DirectEndpoints, SubstrateConfig, SwarmEvent, SwarmRuntime,
 };
-use interweave_transport_runtime::{Generation, TrustSources};
+use interweave_transport_runtime::TrustSources;
 use interweave_trust_api::{EndpointTrustPolicy, InfrastructureSet, PeerTrustPolicy};
 
 /// Generous, because a mesh forms over several heartbeats rather than in
@@ -57,6 +57,21 @@ fn channel(name: &str) -> ChannelId {
 
 fn endpoint(name: &str) -> EndpointId {
     EndpointId::parse(name).expect("valid endpoint id")
+}
+
+/// Claim each named endpoint for a session of the same name.
+///
+/// What Stage 6 did implicitly at `configure_direct`, done explicitly:
+/// a session sends AS the endpoint it holds, so these tests name sessions
+/// after endpoints and the lease is the only thing that binds the two.
+async fn claim_all(runtime: &SwarmRuntime, names: &[&str]) {
+    for name in names {
+        runtime
+            .claim_endpoint(*name, endpoint(name), "in-process")
+            .await
+            .expect("the claim reaches the task")
+            .expect("the endpoint is configured and free");
+    }
 }
 
 fn entry(name: &str) -> EndpointConfig {
@@ -122,15 +137,11 @@ async fn node_with_queue(
     let runtime = SwarmRuntime::start(identity, config, trusting(peers)).expect("the node starts");
     runtime
         .configure_direct(
-            DirectEndpoints::from_profile(
-                &profile(desired),
-                64,
-                Generation::parse("stage7__________").expect("valid generation"),
-            )
-            .expect("a valid profile"),
+            DirectEndpoints::from_profile(&profile(desired), 64).expect("a valid profile"),
         )
         .await
         .expect("direct endpoints install");
+    claim_all(&runtime, &["human"]).await;
     runtime
         .configure_broadcast(
             BroadcastChannels::from_profile(&profile(desired), queue_bound)
@@ -236,7 +247,7 @@ async fn broadcast_and_direct_are_independently_functional() {
         destination_endpoint: None,
         payload: Payload::at_ceiling(None, b"directly".to_vec()).expect("within the ceiling"),
     };
-    a.send_direct(b_peer.clone(), frame)
+    a.send_direct("human", b_peer.clone(), frame)
         .await
         .expect("the command lands")
         .expect("the send is accepted");
@@ -559,7 +570,7 @@ async fn a_broadcast_flood_does_not_wedge_the_direct_path() {
         payload: Payload::at_ceiling(None, b"through the flood".to_vec())
             .expect("within the ceiling"),
     };
-    let answered = tokio::time::timeout(PATIENCE, a.send_direct(b_peer.clone(), frame))
+    let answered = tokio::time::timeout(PATIENCE, a.send_direct("human", b_peer.clone(), frame))
         .await
         .expect("the exchange settled rather than hanging behind a broadcast flood")
         .expect("the command lands");
@@ -1727,10 +1738,13 @@ async fn a_broadcast_to_many_sessions_cannot_overrun_the_outbox() {
         )
         .expect("within the ceiling"),
     };
-    let answered = tokio::time::timeout(PATIENCE, a.send_direct(b_peer.clone(), endpoint_frame))
-        .await
-        .expect("the exchange settled rather than hanging behind a fan-out")
-        .expect("the command lands");
+    let answered = tokio::time::timeout(
+        PATIENCE,
+        a.send_direct("human", b_peer.clone(), endpoint_frame),
+    )
+    .await
+    .expect("the exchange settled rather than hanging behind a fan-out")
+    .expect("the command lands");
     assert!(
         answered.is_ok(),
         "a fan-out must not push the outbox past its bound: {answered:?}"

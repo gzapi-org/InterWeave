@@ -43,6 +43,7 @@ interweave-trust-api = { path = "../../api/trust-api" }
 futures = { workspace = true }
 async-trait = { workspace = true }
 libp2p = { workspace = true }
+rand = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]

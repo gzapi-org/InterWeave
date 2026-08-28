@@ -14,7 +14,7 @@
 name = "interweave-endpoint-routing-tests"
 version = "0.0.0"
 publish = false
-description = "Stage 6 endpoint-routing exit-gate tests for InterWeave."
+description = "Stage 6 and Stage 8 endpoint-routing exit-gate tests for InterWeave: Model-B routing, the lease boundary, and the endpoint directory."
 license.workspace = true
 edition.workspace = true
 rust-version.workspace = true

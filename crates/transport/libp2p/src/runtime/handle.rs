@@ -169,8 +169,8 @@ impl SwarmRuntime {
 
     /// Take everything waiting on one session's broadcast queue.
     ///
-    /// The in-process stand-in for what Stage 8's IPC session does, the
-    /// same way `drain_endpoint` is for direct.
+    /// What an IPC session's event stream will do at Stage 13, the same
+    /// way `drain_endpoint` is for direct.
     ///
     /// # Errors
     /// [`SubstrateError::Stopped`] if the task is gone.
@@ -231,12 +231,14 @@ impl SwarmRuntime {
     /// exchange's own outcome.
     pub async fn send_direct(
         &self,
+        session: impl Into<String>,
         peer: TransportIdentity,
         frame: DirectMessageV2,
     ) -> Result<Result<EndpointId, DirectError>, SubstrateError> {
         let (reply, answer) = oneshot::channel();
         self.commands
             .send(SwarmCommand::SendDirect {
+                session: session.into(),
                 peer,
                 frame: Box::new(frame),
                 reply,
@@ -289,9 +291,61 @@ impl SwarmRuntime {
         answer.await.map_err(|_| SubstrateError::Stopped)
     }
 
+    /// Grant `session` an exclusive lease on `endpoint`, opening its queue.
+    ///
+    /// The source endpoint every later `send_direct` from this session
+    /// carries. One lease per session; a second claim is refused, and so
+    /// is a claim on an endpoint another session holds.
+    ///
+    /// # Errors
+    /// [`SubstrateError::Stopped`] if the task is gone; the inner error is
+    /// the contract's refusal.
+    pub async fn claim_endpoint(
+        &self,
+        session: impl Into<String>,
+        endpoint: EndpointId,
+        client_kind: impl Into<String>,
+    ) -> Result<Result<interweave_local_client_api::EndpointLease, DirectError>, SubstrateError>
+    {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(SwarmCommand::ClaimEndpoint {
+                session: session.into(),
+                endpoint,
+                client_kind: client_kind.into(),
+                reply,
+            })
+            .await
+            .map_err(|_| SubstrateError::Stopped)?;
+        answer.await.map_err(|_| SubstrateError::Stopped)
+    }
+
+    /// End every lease `session` holds, closing each queue with it.
+    ///
+    /// Returns the endpoints released. What an IPC disconnect will do at
+    /// Stage 13.
+    ///
+    /// # Errors
+    /// [`SubstrateError::Stopped`] if the task is gone.
+    pub async fn release_session(
+        &self,
+        session: impl Into<String>,
+    ) -> Result<Vec<EndpointId>, SubstrateError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(SwarmCommand::ReleaseSession {
+                session: session.into(),
+                reply,
+            })
+            .await
+            .map_err(|_| SubstrateError::Stopped)?;
+        answer.await.map_err(|_| SubstrateError::Stopped)
+    }
+
     /// Take everything waiting on one endpoint's queue, oldest first.
     ///
-    /// The in-process stand-in for what Stage 8's IPC session does.
+    /// What an IPC session's event stream will do at Stage 13, pulled
+    /// rather than pushed.
     ///
     /// # Errors
     /// [`SubstrateError::Stopped`] if the task is gone.

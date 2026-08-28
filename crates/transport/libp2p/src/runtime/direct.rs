@@ -15,6 +15,7 @@ use std::collections::HashMap;
 
 use libp2p::swarm::SwarmEvent as Libp2pSwarmEvent;
 
+use interweave_local_client_api::{EndpointLease, Generation};
 use interweave_transport_api::TransportError as DirectError;
 use interweave_transport_api::{
     DirectMessageV2, DirectRejectReason, EndpointId, TransportIdentity,
@@ -25,7 +26,9 @@ use interweave_transport_runtime::direct_inbound::{
     AdmissionContext, Outcome as AdmissionOutcome, PrefixContext, admit_prefix, admit_structured,
 };
 use interweave_transport_runtime::endpoint_queue::EndpointQueues;
-use interweave_transport_runtime::endpoint_registry::{EndpointRegistry, RegisteredEndpoint};
+use interweave_transport_runtime::endpoint_registry::{
+    EndpointRegistry, LocalSessionId, RegisteredEndpoint,
+};
 
 use crate::behaviour::SubstrateBehaviourEvent;
 use crate::gated_swarm::GatedSwarm;
@@ -52,6 +55,9 @@ pub struct DirectState {
     pub(super) registry: EndpointRegistry,
     /// Open delivery queues.
     pub(super) queues: EndpointQueues,
+    /// The bound every queue opened by a claim gets. Installed by
+    /// `configure`; until then no endpoint is configured to claim.
+    pub(super) queue_bound: usize,
     /// Inbound requests whose answer is queued but not yet written.
     ///
     /// `pending_direct` counts OUTBOUND exchanges only, so a shutdown
@@ -76,37 +82,18 @@ pub struct DirectState {
     pub(super) answering: std::collections::BTreeSet<libp2p::request_response::InboundRequestId>,
 }
 
-/// One synthetic in-process session's lease epoch, distinct per endpoint.
+/// A fresh lease epoch.
 ///
 /// `LOCAL-CLIENT.md` requires a "fresh 128-bit lease epoch for every
-/// grant". Stage 8 satisfies that directly: every real session mints its
-/// own at establishment. Until then `configure_direct` stands in for N
-/// sessions while being handed ONE value, and passing that value to every
-/// lease is not a harmless simplification — the epoch is how `revoke`
-/// tells a client WHICH routes to discard, so a shared epoch names routes
-/// that are still live on the endpoints that were not revoked.
-///
-/// The derivation keeps the supplied value as a prefix and appends the
-/// endpoint's index. The endpoint NAME is not used: `EndpointId` admits
-/// `.`, which is outside `Generation`'s `[A-Za-z0-9_-]`, so splicing a
-/// name in would make the epoch unparseable for a legal configuration.
-///
-/// Slicing by byte is safe because that same grammar is ASCII-only.
-fn derived_epoch(
-    base: &interweave_transport_runtime::Generation,
-    index: usize,
-) -> Result<interweave_transport_runtime::Generation, SubstrateError> {
-    use interweave_transport_runtime::Generation;
-
-    let suffix = format!("-{index}");
-    let room = Generation::MAX_BYTES.saturating_sub(suffix.len());
-    let base = base.as_str();
-    let keep = base.len().min(room);
-    Generation::parse(format!("{}{suffix}", &base[..keep])).map_err(|_| {
-        SubstrateError::InvalidProfile(vec![format!(
-            "endpoint {index} could not be given a distinct lease epoch"
-        )])
-    })
+/// grant", unpredictable across daemon restarts — so a CSPRNG and not a
+/// counter. Hex is inside `Generation`'s `[A-Za-z0-9_-]` grammar and 32
+/// characters is inside its 64-byte bound, so the parse cannot fail for
+/// any value the RNG produces; the error arm exists because the type
+/// says so, not because it is reachable.
+fn mint_epoch() -> Result<Generation, DirectError> {
+    let bytes: [u8; 16] = rand::random();
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    Generation::parse(hex).map_err(|_| DirectError::BackendUnavailable)
 }
 
 impl DirectState {
@@ -121,79 +108,77 @@ impl DirectState {
         self.trust = trust.peers.clone();
     }
 
-    /// Install endpoint configuration and open a queue for each lease.
+    /// Install endpoint configuration.
+    ///
+    /// NO LEASES ARE GRANTED HERE. Configuration says which endpoints
+    /// exist; a session claims one through [`claim`](Self::claim), and
+    /// until it does the endpoint is `no_route` inbound and unusable as a
+    /// source — `an_enabled_unleased_endpoint_is_no_route_until_claimed`.
+    /// Reconfiguring rebuilds the registry and so DROPS every lease and
+    /// every open queue: whether a live session survives a reload is a
+    /// Stage 13 question, and answering it here would be answering it
+    /// for the IPC server.
     pub(super) fn configure(&mut self, config: DirectEndpoints) -> Result<(), SubstrateError> {
-        use interweave_transport_runtime::endpoint_registry::LocalSessionId;
-
         let mut endpoints = std::collections::BTreeMap::new();
         for (name, configured) in &config.endpoints {
             endpoints.insert(name.clone(), configured.clone());
         }
-        let mut registry = EndpointRegistry::new(endpoints, config.default.clone());
-
-        // A LEASE PER ENDPOINT, in-process. Stage 6 routes to an
-        // in-process `LocalDataSession`; Stage 8 replaces this with a
-        // real IPC claim, and the registry cannot tell the difference —
-        // which is the point of it holding leases rather than sessions.
-        let mut queues = EndpointQueues::new();
-        for (index, (name, configured)) in config.endpoints.iter().enumerate() {
-            // A DISABLED ENDPOINT IS NOT A FAILURE. It is configured and
-            // deliberately closed, so it holds no lease and opens no
-            // queue, and inbound routing answers `no_route` for it
-            // through `resolve_inbound` rather than through an absence
-            // here.
-            if !configured.enabled {
-                continue;
-            }
-            // THE SYNTHETIC KIND MUST BE ONE THE ENDPOINT PERMITS.
-            // `allowed_client_kinds` used to arrive empty, because the
-            // configuration was rebuilt from `RegisteredEndpoint::
-            // default()`; now that the real profile reaches here, a
-            // hard-coded `in-process` is refused outright by any
-            // endpoint restricted to `human-client` or `claude-channel`
-            // — which the example profiles are.
-            //
-            // Stage 8 replaces this with the claim a real session makes,
-            // and this stand-in exists only until there is one.
-            let kind = configured
-                .allowed_client_kinds
-                .first()
-                .map_or("in-process", String::as_str);
-            // AND THE RESULT IS NOT DISCARDED. It used to be `.is_ok()`,
-            // so an endpoint that failed to claim got no lease and no
-            // queue while `configure_direct` still reported success —
-            // every send from it then `EndpointNotRegistered` and every
-            // message to it `no_route`, for a configuration the caller
-            // was told had installed.
-            //
-            // NO TEST REACHES THIS ARM, and that is stated rather than
-            // implied: with a permitted kind chosen above, a disabled
-            // endpoint skipped, names unique per session and duplicates
-            // refused by `ProfileConfig::validate`, none of the four
-            // `ClaimFailure` variants is currently reachable here. The
-            // propagation is what makes a FUTURE change fail loudly
-            // instead of producing a silently dead endpoint, which is
-            // what the discarded result did.
-            registry
-                .claim(
-                    name,
-                    LocalSessionId(format!("in-process-{}", name.as_str())),
-                    kind,
-                    // A DISTINCT EPOCH PER LEASE, not one shared value.
-                    // See `derived_epoch`.
-                    derived_epoch(&config.epoch, index)?,
-                )
-                .map_err(|failure| {
-                    SubstrateError::InvalidProfile(vec![format!(
-                        "endpoint {} could not be leased: {failure:?}",
-                        name.as_str()
-                    )])
-                })?;
-            queues.open(name.clone(), config.queue_bound);
-        }
-        self.registry = registry;
-        self.queues = queues;
+        self.registry = EndpointRegistry::new(endpoints, config.default.clone());
+        self.queues = EndpointQueues::new();
+        self.queue_bound = config.queue_bound;
         Ok(())
+    }
+
+    /// Grant `session` an exclusive lease on `endpoint` and open its queue.
+    ///
+    /// The epoch is minted here, fresh per grant. The registry decides
+    /// everything else — unknown, disabled, wrong client kind, already
+    /// held, or this session already holding one — and its refusal maps
+    /// onto the contract's error vocabulary through `From<ClaimFailure>`.
+    ///
+    /// # Errors
+    /// The [`DirectError`] the contract names for each refusal.
+    pub(super) fn claim(
+        &mut self,
+        session: LocalSessionId,
+        endpoint: &EndpointId,
+        client_kind: &str,
+    ) -> Result<EndpointLease, DirectError> {
+        let epoch = mint_epoch()?;
+        let granted = self
+            .registry
+            .claim(endpoint, session, client_kind, epoch)
+            .map_err(DirectError::from)?
+            .epoch
+            .clone();
+        self.queues.open(endpoint.clone(), self.queue_bound);
+        Ok(EndpointLease {
+            endpoint: endpoint.clone(),
+            epoch: granted,
+        })
+    }
+
+    /// End every lease `session` holds, closing each queue with it.
+    ///
+    /// The same one-fact rule as `revoke`: a lease that ends leaves no
+    /// queue behind. Returns the endpoints released.
+    pub(super) fn release(&mut self, session: &LocalSessionId) -> Vec<EndpointId> {
+        let released = self.registry.release_session(session);
+        for endpoint in &released {
+            self.queues.close(endpoint);
+        }
+        released
+    }
+
+    /// The endpoint `session` may send AS — its lease, or nothing.
+    ///
+    /// This is the whole of source-endpoint derivation (ADR-0030,
+    /// CLAUDE.md §5): the session is the input, and a frame's own
+    /// `source_endpoint` is never consulted.
+    pub(super) fn source_of(&self, session: &LocalSessionId) -> Option<EndpointId> {
+        self.registry
+            .lease_of(session)
+            .map(|(endpoint, _)| endpoint.clone())
     }
 
     /// Whether an admitted request's answer is still queued.
@@ -256,13 +241,11 @@ impl DirectState {
             ),
             registry: EndpointRegistry::new(std::collections::BTreeMap::new(), None),
             queues: EndpointQueues::new(),
+            queue_bound: interweave_local_client_api::DEFAULT_EVENT_QUEUE,
         }
     }
 }
 
-/// Endpoint configuration for this profile's direct routing.
-///
-/// Stage 6 shape: every configured endpoint is leased in-process. Stage 8
 /// The direct runtime's endpoint state, DERIVED from a validated
 /// profile configuration.
 ///
@@ -293,10 +276,9 @@ pub struct DirectEndpoints {
     /// is a configuration, not a failure: a profile may require every
     /// sender to name where it is going.
     default: Option<EndpointId>,
-    /// Bound on each endpoint's delivery queue.
+    /// Bound on each endpoint's delivery queue, applied as leases are
+    /// claimed.
     queue_bound: usize,
-    /// The lease epoch to grant.
-    epoch: interweave_transport_runtime::Generation,
 }
 
 impl DirectEndpoints {
@@ -314,7 +296,6 @@ impl DirectEndpoints {
     pub fn from_profile(
         profile: &interweave_profile_config::ProfileConfig,
         queue_bound: usize,
-        epoch: interweave_transport_runtime::Generation,
     ) -> Result<Self, SubstrateError> {
         let errors = profile.validate();
         if !errors.is_empty() {
@@ -354,7 +335,6 @@ impl DirectEndpoints {
             endpoints,
             default: profile.endpoints.default_direct_endpoint.clone(),
             queue_bound,
-            epoch,
         })
     }
 }
@@ -1019,43 +999,6 @@ mod waiter_tests {
                 | DirectResponse::Rejected { message_id, .. },
             ) => assert_eq!(message_id, req.message_id),
             None => panic!("a settled owner must produce an answer"),
-        }
-    }
-}
-
-#[cfg(test)]
-mod derived_epoch_tests {
-    use super::derived_epoch;
-    use interweave_transport_runtime::Generation;
-
-    fn base(seed: &str) -> Generation {
-        Generation::parse(format!("{seed:_<16}")).expect("valid generation")
-    }
-
-    #[test]
-    fn every_endpoint_index_gets_a_different_epoch() {
-        // The whole point. One shared epoch across N leases makes
-        // `revoke`'s answer name routes that are still live.
-        let b = base("cfg");
-        let a = derived_epoch(&b, 0).expect("index 0");
-        let c = derived_epoch(&b, 1).expect("index 1");
-        assert_ne!(a, c);
-        assert_ne!(a.as_str(), b.as_str(), "and none of them is the base");
-    }
-
-    #[test]
-    fn a_maximum_length_base_still_yields_a_legal_epoch() {
-        // `Generation` is 16..=64 bytes. Appending without making room
-        // would push a 64-byte base over the ceiling and fail to parse,
-        // turning a legal profile into a configuration error.
-        let long = Generation::parse("x".repeat(Generation::MAX_BYTES)).expect("64 bytes is legal");
-        for index in [0_usize, 9, 10, 99] {
-            let derived = derived_epoch(&long, index).expect("still parses");
-            assert!(
-                (Generation::MIN_BYTES..=Generation::MAX_BYTES).contains(&derived.as_str().len()),
-                "index {index} produced {} bytes",
-                derived.as_str().len()
-            );
         }
     }
 }
