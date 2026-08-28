@@ -60,19 +60,19 @@ SessionQueues::close                  call  broadcast_state.queues.close(
 SessionQueues::is_open                call  broadcast_state.queues.is_open(
 SessionQueues::drain                  call  broadcast_state.queues.drain(
 TopicKey::wire_string                 call  topic_key_v1(channel).wire_string(
+
+# --- stage 8 wired these; a directory budget/cache reached through a
+# --- field, and MessageId hex reached through Display/Serialize.
+DirectoryBudget::charge_rate          call  .budget.charge_rate(
+DirectoryBudget::reserve              call  .budget.reserve(
+DirectoryBudget::end_exchange         call  .budget.end_exchange(
+DirectoryBudget::with_defaults        call  DirectoryBudget::with_defaults(
+DirectoryCache::get                   call  .cache.get(
+DirectoryCache::insert                call  .cache.insert(
+DirectoryCache::new                   call  DirectoryCache::new(
+MessageId::parse_hex                  call  Self::parse_hex(
+MessageId::to_hex                     call  self.to_hex(
 MeshMessageId::as_bytes               call  MessageId::new(id.as_bytes(
-# TopicKey::as_bytes has NO production caller and may never gain one:
-# production reads `wire_string`, and the raw accessor exists so the
-# frozen vector is compared byte-for-byte instead of through the hex
-# formatter, which would otherwise be free to agree with itself.
-#
-# Dated to the OPEN stage, deliberately, so the very next transition
-# forces the question. It travelled to stage-13 with the IPC group for one
-# commit, which would have deferred the promised re-examination by five
-# stages -- and the note below is the whole reason it is dated at all.
-# When Stage 9 opens, the answer is to delete the accessor or to justify
-# its public existence in writing; it is not to re-date it again.
-TopicKey::as_bytes                     stage-8   no production caller planned — see the note above
 
 # --- stage 13 — the daemon and desktop IPC v2, which is where a client
 # --- session first exists to disconnect and an admin surface first
@@ -104,29 +104,6 @@ ReplyTokenTable::is_empty              stage-16  reply routes arrive with the br
 FrameError::to_wire                              call  error.to_wire(
 Refusal::to_wire                                 call  refusal.to_wire(
 
-
-# --- stage-8 -----------------------------------------------------
-DirectoryBudget::charge_rate                     call  .budget.charge_rate(
-DirectoryBudget::reserve                         call  .budget.reserve(
-DirectoryBudget::end_exchange                    call  .budget.end_exchange(
-DirectoryBudget::inflight                        stage-13  in-flight count surfaced by admin.* directory diagnostics
-DirectoryBudget::with_defaults                   call  DirectoryBudget::with_defaults(
-DirectoryCache::expire                           stage-13  cache sweep driven by the daemon's idle maintenance
-DirectoryCache::forget                           stage-13  an admin command drops one peer's cached directory
-DirectoryCache::get                              call  .cache.get(
-DirectoryCache::insert                           call  .cache.insert(
-DirectoryCache::is_empty                         stage-13  cache introspection surfaced by admin.* diagnostics
-DirectoryCache::new                              call  DirectoryCache::new(
-DirectDestination::to_default                    stage-8   identifier projections used by the endpoint directory
-DirectDestination::to_endpoint                   stage-8   identifier projections used by the endpoint directory
-EndpointQueues::is_open                          stage-8   needs a session on the other side of the lease boundary
-EndpointRegistry::default_endpoint               stage-8   needs a session on the other side of the lease boundary
-EndpointRegistry::set_default                    stage-8   needs a session on the other side of the lease boundary
-EndpointRegistry::set_enabled                    stage-8   needs a session on the other side of the lease boundary
-LocalAdminPort                                   stage-8   plan L588: the lease boundary is wired to transport here
-LocalDataSession                                 stage-8   plan L588: the lease boundary is wired to transport here
-MessageId::parse_hex                             stage-8   identifier projections used by the endpoint directory
-MessageId::to_hex                                stage-8   identifier projections used by the endpoint directory
 
 # --- stage-9 -----------------------------------------------------
 CandidatePeer::validate                          stage-9   provider descriptors validated when a provider exists to supply them
@@ -169,6 +146,18 @@ TransportCapabilities::clamped                   stage-12  capability clamping h
 
 
 # --- stage-13 ----------------------------------------------------
+DirectoryBudget::inflight                        stage-13  in-flight count surfaced by admin.* directory diagnostics
+DirectoryCache::expire                           stage-13  cache sweep driven by the daemon's idle maintenance
+DirectoryCache::forget                           stage-13  an admin command drops one peer's cached directory
+DirectoryCache::is_empty                         stage-13  cache introspection surfaced by admin.* diagnostics
+DirectDestination::to_default                    stage-13  a local client addresses a direct send at the IPC boundary
+DirectDestination::to_endpoint                   stage-13  a local client addresses a direct send at the IPC boundary
+EndpointQueues::is_open                          stage-13  a session on the other side of the lease boundary reads it
+EndpointRegistry::default_endpoint               stage-13  admin.endpoints reads the configured default
+EndpointRegistry::set_default                    stage-13  admin.endpoints sets the default endpoint
+EndpointRegistry::set_enabled                    stage-13  admin.endpoints enables or disables an endpoint
+LocalAdminPort                                   stage-13  the admin IPC session is the local-client boundary wired at desktop IPC v2
+LocalDataSession                                 stage-13  the data IPC session is the local-client boundary wired at desktop IPC v2 (Stage 8 wired the lease via EndpointLease, not this)
 ContentFingerprint::as_bytes                     stage-13  fingerprint rendering, surfaced by diagnostics
 ContentFingerprint::to_hex                       stage-13  fingerprint rendering, surfaced by diagnostics
 HandshakeSlot::source                            stage-13  pre-auth admission counters, surfaced by `admin.*` status

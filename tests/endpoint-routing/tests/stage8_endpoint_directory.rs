@@ -396,6 +396,112 @@ async fn a_revoked_peers_directory_is_not_surfaced_to_an_in_flight_query() {
     );
 }
 
+/// A hostile directory response is a local ProtocolViolation, not surfaced
+/// and not cached. A raw responder that this node trusts answers with a
+/// DUPLICATE entry — valid grammar, so the codec admits it, and
+/// validate_response catches it — and the querier is told
+/// ProtocolViolation. (An over-32 or bad-grammar frame is refused a layer
+/// earlier, by the codec; this drives the runtime's own validation.)
+///
+/// Proves ENDPOINTS.md ">32 entries, invalid EndpointId grammar, or
+/// duplicates are ProtocolViolation".
+#[tokio::test]
+async fn a_hostile_directory_response_is_a_protocol_violation() {
+    use interweave_transport_api::EndpointDirectoryV1;
+    use interweave_transport_libp2p::endpoints_codec::{
+        DirectoryResponse, ENDPOINTS_PROTOCOL, EndpointsCodec,
+    };
+    use interweave_transport_libp2p::runtime::{SubstrateConfig, SwarmRuntime};
+    use libp2p::futures::StreamExt;
+    use libp2p::request_response;
+    use libp2p::swarm::SwarmEvent as RawEvent;
+    use std::time::Duration;
+
+    let responder_keys = libp2p::identity::Keypair::generate_ed25519();
+    let responder_peer = interweave_transport_api::TransportIdentity::parse(
+        responder_keys.public().to_peer_id().to_string(),
+    )
+    .expect("a valid peer id");
+
+    let mut responder = libp2p::SwarmBuilder::with_existing_identity(responder_keys)
+        .with_tokio()
+        .with_tcp(
+            libp2p::tcp::Config::default(),
+            libp2p::noise::Config::new,
+            libp2p::yamux::Config::default,
+        )
+        .expect("the same transport stack")
+        .with_behaviour(|_| {
+            request_response::Behaviour::<EndpointsCodec>::new(
+                [(ENDPOINTS_PROTOCOL, request_response::ProtocolSupport::Full)],
+                request_response::Config::default(),
+            )
+        })
+        .expect("behaviour")
+        .build();
+    responder
+        .listen_on("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
+        .expect("listens");
+    let address = loop {
+        if let RawEvent::NewListenAddr { address, .. } = responder.select_next_some().await {
+            break address;
+        }
+    };
+
+    // Answer every request with a duplicate-entry directory.
+    tokio::spawn(async move {
+        loop {
+            if let RawEvent::Behaviour(request_response::Event::Message {
+                message: request_response::Message::Request { channel, .. },
+                ..
+            }) = responder.select_next_some().await
+            {
+                let _ = responder.behaviour_mut().send_response(
+                    channel,
+                    DirectoryResponse::Directory(EndpointDirectoryV1 {
+                        generated_at_ms: 1,
+                        ttl_ms: 60_000,
+                        endpoints: vec![endpoint("human"), endpoint("human")],
+                    }),
+                );
+            }
+        }
+    });
+
+    let (querier_id, _querier_peer) = who();
+    let mut querier = SwarmRuntime::start(
+        &querier_id,
+        SubstrateConfig::default(),
+        support::trusting(&[&responder_peer]),
+    )
+    .expect("the querier starts");
+    querier
+        .dial(responder_peer.clone(), address)
+        .await
+        .expect("command")
+        .expect("admitted");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no connection within 20s"
+        );
+        match tokio::time::timeout(Duration::from_secs(20), querier.next_event()).await {
+            Ok(Some(interweave_transport_libp2p::runtime::SwarmEvent::Connected { .. })) => break,
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("the querier stopped before connecting"),
+            Err(_) => panic!("no connection within 20s"),
+        }
+    }
+
+    let error = querier
+        .query_endpoints(responder_peer)
+        .await
+        .expect("the command reaches the task")
+        .expect_err("a duplicate entry is a protocol violation");
+    assert_eq!(error, TransportError::ProtocolViolation);
+}
+
 /// The largest legal directory crosses the wire: 32 advertised, leased,
 /// admissible endpoints at the 64-byte label ceiling. The codec's frozen
 /// bytes are unit-tested; this proves the whole path carries them.

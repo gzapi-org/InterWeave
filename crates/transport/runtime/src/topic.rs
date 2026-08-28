@@ -44,12 +44,6 @@ pub const DOMAIN: &[u8] = b"interweave/topic/v1\x00";
 pub struct TopicKey([u8; 32]);
 
 impl TopicKey {
-    /// The raw digest.
-    #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-
     /// The form that goes on the wire as the GossipSub topic string.
     ///
     /// PUBSUB.md leaves the encoding to the implementation; this picks
@@ -116,12 +110,9 @@ mod tests {
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
             "lower-case hex only: {wire}"
         );
-        // And it is the digest, not a truncation or a re-hash.
-        let mut expected = String::new();
-        for b in key.as_bytes() {
-            expected.push_str(&format!("{b:02x}"));
-        }
-        assert_eq!(wire, expected);
+        // That it is the digest, not a truncation or a re-hash, is proved
+        // by `frozen_derivation_vectors`: `wire_string` there is compared
+        // to the fixture's independently computed sha256 hex.
     }
 
     #[test]

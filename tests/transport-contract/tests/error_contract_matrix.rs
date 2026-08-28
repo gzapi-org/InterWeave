@@ -103,31 +103,31 @@ const MATRIX: &[Clause] = &[
         doc: ENDPOINTS,
         text: "configured endpoint absent -> local `EndpointUnknown`",
         error: "EndpointUnknown",
-        proof: Proof::Stage(8, "lease acquisition needs a session to refuse"),
+        proof: Proof::Test("claim_failures_match_the_contract_mapping"),
     },
     Clause {
         doc: ENDPOINTS,
         text: "configured endpoint disabled -> local `EndpointDisabled`",
         error: "EndpointDisabled",
-        proof: Proof::Stage(8, "lease acquisition needs a session to refuse"),
+        proof: Proof::Test("claim_failures_match_the_contract_mapping"),
     },
     Clause {
         doc: ENDPOINTS,
         text: "configured `allowed_client_kinds` mismatch -> local `EndpointClientKindDenied`",
         error: "EndpointClientKindDenied",
-        proof: Proof::Stage(8, "no client kind exists to mismatch before IPC sessions"),
+        proof: Proof::Test("claim_failures_match_the_contract_mapping"),
     },
     Clause {
         doc: ENDPOINTS,
         text: "ungranted capability/connection authorization -> local `CapabilityDenied`",
         error: "CapabilityDenied",
-        proof: Proof::Stage(8, "capabilities are granted to sessions, which arrive in Stage 8"),
+        proof: Proof::Stage(13, "capabilities are granted to IPC sessions at desktop IPC v2"),
     },
     Clause {
         doc: ENDPOINTS,
         text: "duplicate claim -> `EndpointInUse`",
         error: "EndpointInUse",
-        proof: Proof::Stage(8, "one caller cannot collide with itself"),
+        proof: Proof::Test("a_lease_is_exclusive_and_a_duplicate_claim_is_refused"),
     },
 
     // --- outbound routing order (ENDPOINTS.md steps 1-8) -------------
@@ -175,7 +175,7 @@ const MATRIX: &[Clause] = &[
         doc: ENDPOINTS,
         text: ">32 entries, invalid EndpointId grammar, or duplicates are `ProtocolViolation`",
         error: "ProtocolViolation",
-        proof: Proof::Stage(8, "no directory exchange exists before the endpoint directory"),
+        proof: Proof::Test("a_hostile_directory_response_is_a_protocol_violation"),
     },
     Clause {
         doc: ENDPOINTS,
