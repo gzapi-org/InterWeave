@@ -132,6 +132,62 @@ pub struct DiscoveryProviderSettings {
     /// `peer-cache`: how many peers to retain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_entries: Option<u32>,
+
+    // `kademlia`: the documented namespace, PARSED THOUGH THE PROVIDER IS
+    // NOT BUILT.
+    //
+    // This struct is `deny_unknown_fields`, so omitting these did not
+    // leave them unread — it made the canonical profile in
+    // `architecture/config/examples/kademlia-enabled.yaml` fail to
+    // deserialize, with a serde error about an unknown key. That error
+    // arrives BEFORE `validate`, so the refusal an operator was meant to
+    // read ("this build does not include KademliaDiscovery; Stage 10 adds
+    // it") could never be reached, and a DISABLED kademlia entry — which
+    // is legal and is how an operator stages a profile ahead of the
+    // build — was rejected outright.
+    //
+    // So the schema is modelled now and consumed at Stage 10. Nothing
+    // here interprets a value; `validate` still refuses the provider when
+    // it is enabled.
+    /// `kademlia`: config schema version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_version: Option<u32>,
+    /// `kademlia`: the non-secret DHT namespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_id: Option<String>,
+    /// `kademlia`: `client` or `server`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// `kademlia`: which trust the DHT routers are held to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_peer_policy: Option<String>,
+    /// `kademlia`: providers seeding the routing table.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seed_sources: Vec<String>,
+    /// `kademlia`: how long a routing candidate stays usable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_ttl: Option<String>,
+    /// `kademlia`: k-bucket width.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kbucket_size: Option<u32>,
+    /// `kademlia`: routing-table ceiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_routing_peers: Option<u32>,
+    /// `kademlia`: per-query timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_timeout: Option<String>,
+    /// `kademlia`: query parallelism.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallelism: Option<u32>,
+    /// `kademlia`: whether query paths must be disjoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disjoint_query_paths: Option<bool>,
+    /// `kademlia`: concurrent query ceiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_queries: Option<u32>,
+    /// `kademlia`: query rate ceiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_queries_per_minute: Option<u32>,
 }
 
 /// One configured discovery provider.
@@ -2525,5 +2581,67 @@ mod tests {
             .expect("within the ceiling");
         assert_eq!(got, "/ip4/10.0.0.1/tcp/1");
         assert_eq!(asked.get(), "str");
+    }
+    #[test]
+    fn a_disabled_kademlia_entry_carrying_its_documented_config_parses() {
+        // Staging a profile ahead of the build is legal and is how an
+        // operator prepares for Stage 10. `deny_unknown_fields` made it a
+        // parse error, which fires BEFORE validate — so the entry could
+        // not even be present, let alone disabled.
+        let json = serde_json::json!({
+            "providers": [{
+                "type": "kademlia",
+                "enabled": false,
+                "priority": 40,
+                "config": {
+                    "config_version": 1,
+                    "network_id": "example-private-network",
+                    "mode": "client",
+                    "routing_peer_policy": "data-plane-trusted",
+                    "seed_sources": ["peer-cache", "static-bootstrap"],
+                    "candidate_ttl": "30m",
+                    "kbucket_size": 20,
+                    "max_routing_peers": 256,
+                    "query_timeout": "30s",
+                    "parallelism": 3,
+                    "disjoint_query_paths": true,
+                    "max_concurrent_queries": 2,
+                    "max_queries_per_minute": 6
+                }
+            }]
+        });
+
+        let parsed: DiscoveryConfig =
+            serde_json::from_value(json).expect("the documented namespace is representable");
+        assert_eq!(
+            parsed.providers[0].config.network_id.as_deref(),
+            Some("example-private-network")
+        );
+        assert_eq!(parsed.providers[0].config.seed_sources.len(), 2);
+    }
+
+    #[test]
+    fn an_enabled_kademlia_entry_reaches_the_refusal_it_was_meant_to_get() {
+        // The point of modelling the block: the operator reads the
+        // reasoned refusal, not a serde error about an unknown key.
+        let json = serde_json::json!({
+            "providers": [{
+                "type": "kademlia",
+                "enabled": true,
+                "config": { "network_id": "n", "mode": "client" }
+            }]
+        });
+        let parsed: DiscoveryConfig =
+            serde_json::from_value(json).expect("parses, so validation can speak");
+
+        let mut profile = config(vec![endpoint("chat")]);
+        profile.discovery = parsed;
+        let errors = profile.validate();
+        assert!(
+            errors
+                .iter()
+                .any(|e| format!("{e}").to_lowercase().contains("kademlia")),
+            "the refusal names the provider: {errors:?}"
+        );
     }
 }
