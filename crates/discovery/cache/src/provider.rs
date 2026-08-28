@@ -116,7 +116,34 @@ impl PeerCacheDiscovery {
                 expires_at: candidate.expires_at,
                 addresses: candidate.addresses.iter().cloned().collect(),
             };
-            let changed = self.emitted.get(&candidate.peer_id) != Some(&record);
+            let previously = self.emitted.get(&candidate.peer_id);
+            let changed = previously != Some(&record);
+
+            // AN ADDRESS THE CACHE DROPPED MUST BE RETRACTED, not merely
+            // omitted. `record_success` truncates the least-recently-used
+            // address once a peer is at its per-peer cap, and the
+            // manager's `observe` is ADDITIVE — a fresh snapshot refreshes
+            // what it names and says nothing about what it does not. The
+            // dropped address would stay dialable there until the peer's
+            // whole entry aged out, and under churn a peer's 16 manager
+            // slots fill with addresses this cache no longer holds,
+            // crowding out the ones it does.
+            //
+            // Emitted BEFORE the observation so the consumer never sees a
+            // window with neither, and named selectively so a peer keeps
+            // the addresses that survived.
+            if let Some(prev) = previously {
+                let dropped: BTreeSet<String> =
+                    prev.addresses.difference(&record.addresses).cloned().collect();
+                if !dropped.is_empty() {
+                    self.pending.push(DiscoveryEvent::CandidateExpired {
+                        peer_id: candidate.peer_id.clone(),
+                        source: SOURCE.to_owned(),
+                        addresses: dropped,
+                    });
+                }
+            }
+
             live.insert(candidate.peer_id.clone(), record);
             if changed {
                 self.pending.push(DiscoveryEvent::CandidateObserved {
@@ -679,4 +706,79 @@ mod tests {
             other => panic!("expected an observation, got {other:?}"),
         }
     }
+    #[test]
+    fn an_address_the_cache_truncated_is_retracted_not_merely_omitted() {
+        // At the per-peer cap, `record_success` drops the
+        // least-recently-used address. The manager's view is additive, so
+        // a snapshot that simply omits the dropped address leaves it
+        // dialable there — this provider has to say it went.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut p = provider(&dir);
+        p.start(0).expect("start");
+
+        let cap = crate::limits::MAX_ADDRESSES_PER_PEER;
+        for i in 0..cap {
+            p.cache_mut()
+                .record_success(&peer(P1), &format!("/ip4/10.0.0.1/tcp/{i}"), i as u64)
+                .expect("within bounds");
+        }
+        let _ = p.drain_events(cap as u64, 64);
+
+        // One more pushes the oldest ("/tcp/0") out of the record.
+        let evicted = "/ip4/10.0.0.1/tcp/0";
+        p.cache_mut()
+            .record_success(&peer(P1), "/ip4/10.0.0.1/tcp/999", 1_000)
+            .expect("within bounds");
+
+        let events = p.drain_events(1_000, 64);
+        let retracted = events.iter().any(|e| {
+            matches!(
+                e,
+                DiscoveryEvent::CandidateExpired { addresses, .. }
+                    if addresses.contains(evicted)
+            )
+        });
+        assert!(
+            retracted,
+            "the truncated address is retracted by name: {events:?}"
+        );
+
+        // And the peer itself is still present — a selective retraction,
+        // not a removal.
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                DiscoveryEvent::CandidateObserved { candidate }
+                    if candidate.addresses.contains("/ip4/10.0.0.1/tcp/999")
+            )),
+            "the surviving addresses are still observed: {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_that_drops_nothing_retracts_nothing() {
+        // The positive control: adding an address below the cap must not
+        // manufacture a retraction.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut p = provider(&dir);
+        p.start(0).expect("start");
+
+        p.cache_mut()
+            .record_success(&peer(P1), "/ip4/10.0.0.1/tcp/1", 0)
+            .expect("within bounds");
+        let _ = p.drain_events(0, 64);
+
+        p.cache_mut()
+            .record_success(&peer(P1), "/ip4/10.0.0.2/tcp/2", 10)
+            .expect("within bounds");
+        let events = p.drain_events(10, 64);
+
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, DiscoveryEvent::CandidateExpired { .. })),
+            "nothing was dropped, so nothing is retracted: {events:?}"
+        );
+    }
+
 }
