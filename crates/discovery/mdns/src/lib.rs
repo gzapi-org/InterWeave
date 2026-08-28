@@ -189,13 +189,7 @@ impl MdnsDiscovery {
             self.seen.remove(&peer_id);
             self.last_emitted.remove(&peer_id);
         }
-        self.pending.push(DiscoveryEvent::CandidateExpired {
-            peer_id,
-            source: SOURCE.to_owned(),
-            // Names the address, so a peer announcing several loses only
-            // the one that went.
-            addresses: [address.to_owned()].into_iter().collect(),
-        });
+        self.queue_expiry(&peer_id, address);
         true
     }
 
@@ -234,6 +228,46 @@ impl MdnsDiscovery {
     /// a peer is strictly superseded by a newer one — same peer, same or
     /// wider address set, later expiry — so replacing it loses nothing and
     /// bounds the queue by the peer count.
+    /// Queue that `address` is gone for `peer_id`, coalescing into any
+    /// expiry already pending for that peer.
+    ///
+    /// BOUNDED BY `seen`, which is the point. Appending a fresh event per
+    /// goodbye let a LAN-driven discover/goodbye cycle grow `pending`
+    /// without limit while a consumer was stalled — the observation half
+    /// coalesced and the expiry half did not, which is unauthenticated
+    /// input choosing how much memory this holds. At most one expiry per
+    /// peer is queued, and its address set is bounded by
+    /// `MAX_ADDRESSES_PER_PEER` because that is what `seen` admits.
+    ///
+    /// Merging loses nothing: two expiries for one peer say exactly what
+    /// one expiry naming both addresses says.
+    fn queue_expiry(&mut self, peer_id: &TransportIdentity, address: &str) {
+        // A goodbye contradicts a pending observation of the same address.
+        let mut merged: BTreeSet<String> = [address.to_owned()].into_iter().collect();
+        self.pending.retain_mut(|event| match event {
+            DiscoveryEvent::CandidateObserved { candidate } if candidate.peer_id == *peer_id => {
+                candidate.addresses.remove(address);
+                !candidate.addresses.is_empty()
+            }
+            DiscoveryEvent::CandidateExpired {
+                peer_id: expired_peer,
+                addresses,
+                ..
+            } if expired_peer == peer_id => {
+                merged.append(addresses);
+                false
+            }
+            _ => true,
+        });
+        self.pending.push(DiscoveryEvent::CandidateExpired {
+            peer_id: peer_id.clone(),
+            source: SOURCE.to_owned(),
+            // Names the addresses, so a peer announcing several loses only
+            // the ones that went.
+            addresses: merged,
+        });
+    }
+
     fn queue_observation(&mut self, peer_id: &TransportIdentity, now_ms: u64) {
         let Some(addresses) = self.seen.get(peer_id) else {
             return;
@@ -248,12 +282,22 @@ impl MdnsDiscovery {
         }
         let expires_at = addresses.values().copied().max();
         self.last_emitted.insert(peer_id.clone(), now_ms);
-        // Drop any pending observation this one supersedes.
-        self.pending.retain(|event| {
-            !matches!(
-                event,
-                DiscoveryEvent::CandidateObserved { candidate } if candidate.peer_id == *peer_id
-            )
+        // Drop any pending observation this one supersedes, and withdraw
+        // from any pending expiry the addresses this observation
+        // re-announces — a discover after a goodbye for the same address
+        // means the goodbye is stale, and forwarding both would tell the
+        // consumer the address is gone right after saying it is back.
+        self.pending.retain_mut(|event| match event {
+            DiscoveryEvent::CandidateObserved { candidate } => candidate.peer_id != *peer_id,
+            DiscoveryEvent::CandidateExpired {
+                peer_id: expired_peer,
+                addresses,
+                ..
+            } if expired_peer == peer_id => {
+                addresses.retain(|a| !live.contains(a));
+                !addresses.is_empty()
+            }
+            _ => true,
         });
         self.pending.push(DiscoveryEvent::CandidateObserved {
             candidate: Box::new(CandidatePeer {
@@ -708,4 +752,110 @@ mod tests {
         }
         s
     }
+    #[test]
+    fn a_discover_goodbye_cycle_cannot_grow_the_pending_queue() {
+        // The finding's exact shape: a stalled consumer while the LAN
+        // repeatedly announces and withdraws the same (peer, address).
+        // The observation half coalesced already; the expiry half
+        // appended, so unauthenticated multicast traffic chose how much
+        // memory this provider held.
+        let mut p = started();
+        let _ = p.drain_events(0, 64); // clear the start-time health event
+
+        let addr = "/ip4/10.0.0.1/tcp/4001";
+        let mut now = 0u64;
+        for _ in 0..500 {
+            p.push_discovered(P1, addr, now);
+            p.push_expired(P1, addr, now + 1);
+            now += 1_000;
+        }
+
+        // Draining with a generous bound yields everything queued, which
+        // is how the rest of this module measures the queue.
+        let queued = p.drain_events(now, usize::MAX);
+        assert!(
+            queued.len() <= 2,
+            "a peer holds at most one pending observation and one pending \
+             expiry, got {} after 500 discover/goodbye cycles",
+            queued.len()
+        );
+    }
+
+    #[test]
+    fn expiries_for_one_peer_merge_into_a_single_event() {
+        let mut p = started();
+        for port in 1..=4 {
+            p.push_discovered(P1, &format!("/ip4/10.0.0.1/tcp/{port}"), 0);
+        }
+        let _ = p.drain_events(0, 64);
+
+        for port in 1..=3 {
+            p.push_expired(P1, &format!("/ip4/10.0.0.1/tcp/{port}"), 10);
+        }
+        let events = p.drain_events(10, 64);
+        let expiries: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, DiscoveryEvent::CandidateExpired { .. }))
+            .collect();
+
+        assert_eq!(expiries.len(), 1, "three goodbyes, one coalesced expiry");
+        match expiries[0] {
+            DiscoveryEvent::CandidateExpired { addresses, .. } => assert_eq!(
+                addresses.len(),
+                3,
+                "and it names every address that went — merging loses nothing"
+            ),
+            other => panic!("expected an expiry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_rediscovery_withdraws_the_pending_goodbye_for_that_address() {
+        // Order matters, not just count: forwarding a stale goodbye after
+        // the address came back tells the consumer it is gone when it is
+        // present.
+        let mut p = started();
+        let addr = "/ip4/10.0.0.1/tcp/4001";
+        p.push_discovered(P1, addr, 0);
+        let _ = p.drain_events(0, 64);
+
+        p.push_expired(P1, addr, 10);
+        p.push_discovered(P1, addr, 20);
+
+        let events = p.drain_events(20, 64);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, DiscoveryEvent::CandidateExpired { .. })),
+            "the goodbye was superseded by the rediscovery, so it is not \
+             forwarded: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, DiscoveryEvent::CandidateObserved { .. })),
+            "and the peer is observed as present"
+        );
+    }
+
+    #[test]
+    fn a_goodbye_that_is_not_contradicted_still_reaches_the_consumer() {
+        // The positive control: coalescing must not swallow a real expiry.
+        let mut p = started();
+        p.push_discovered(P1, "/ip4/10.0.0.1/tcp/1", 0);
+        p.push_discovered(P1, "/ip4/10.0.0.2/tcp/2", 0);
+        let _ = p.drain_events(0, 64);
+
+        p.push_expired(P1, "/ip4/10.0.0.1/tcp/1", 10);
+        let events = p.drain_events(10, 64);
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                DiscoveryEvent::CandidateExpired { addresses, .. }
+                    if addresses.contains("/ip4/10.0.0.1/tcp/1")
+            )),
+            "the address that actually went is reported: {events:?}"
+        );
+    }
+
 }
