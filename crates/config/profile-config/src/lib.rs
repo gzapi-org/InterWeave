@@ -188,6 +188,30 @@ pub struct DiscoveryProviderSettings {
     /// `kademlia`: query rate ceiling.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_queries_per_minute: Option<u32>,
+    /// `kademlia`: how often routing exploration runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exploration_interval: Option<String>,
+    /// `kademlia`: jitter applied to that interval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exploration_jitter_percent: Option<u32>,
+    /// `kademlia`: results accepted from one query.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_results_per_query: Option<u32>,
+    /// `kademlia`: routing-table target size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_routing_peers: Option<u32>,
+    /// `kademlia`: minimum spacing between targeted lookups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub targeted_lookup_cooldown: Option<String>,
+    /// `kademlia`: floor on bootstrap frequency.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_min_interval: Option<String>,
+    /// `kademlia`: routine bootstrap refresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_refresh_interval: Option<String>,
+    /// `kademlia`: peer routing only — records are not used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_mode: Option<String>,
 }
 
 /// One configured discovery provider.
@@ -2710,5 +2734,52 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "providers": providers }))
                 .expect("exactly at the limit is legal");
         assert_eq!(parsed.providers.len(), MAX_DISCOVERY_PROVIDERS);
+    }
+    #[test]
+    fn the_canonical_kademlia_profile_deserializes_in_full() {
+        // Built from every key in the `kademlia` block of
+        // `architecture/config/config.schema.yaml`. The previous round
+        // modelled the block from a TRUNCATED read of the schema and
+        // stopped at `max_queries_per_minute`, so the canonical profile
+        // still failed on the first field past that point. Listing them
+        // all here is what makes the next omission fail a test rather
+        // than a profile.
+        let json = serde_json::json!({
+            "providers": [{
+                "type": "kademlia",
+                "enabled": false,
+                "priority": 40,
+                "config": {
+                    "config_version": 1,
+                    "network_id": "example-private-network",
+                    "mode": "client",
+                    "routing_peer_policy": "data-plane-trusted",
+                    "seed_sources": ["peer-cache", "static-bootstrap"],
+                    "candidate_ttl": "30m",
+                    "kbucket_size": 20,
+                    "max_routing_peers": 256,
+                    "query_timeout": "30s",
+                    "parallelism": 3,
+                    "disjoint_query_paths": true,
+                    "max_concurrent_queries": 2,
+                    "max_queries_per_minute": 6,
+                    "exploration_interval": "60s",
+                    "exploration_jitter_percent": 20,
+                    "max_results_per_query": 20,
+                    "target_routing_peers": 64,
+                    "targeted_lookup_cooldown": "5m",
+                    "bootstrap_min_interval": "5m",
+                    "bootstrap_refresh_interval": "15m",
+                    "record_mode": "disabled"
+                }
+            }]
+        });
+
+        let parsed: DiscoveryConfig =
+            serde_json::from_value(json).expect("the whole documented namespace parses");
+        let config = &parsed.providers[0].config;
+        assert_eq!(config.record_mode.as_deref(), Some("disabled"));
+        assert_eq!(config.target_routing_peers, Some(64));
+        assert_eq!(config.bootstrap_refresh_interval.as_deref(), Some("15m"));
     }
 }
