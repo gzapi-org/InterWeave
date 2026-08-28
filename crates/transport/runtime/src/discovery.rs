@@ -317,6 +317,21 @@ impl CandidateSet {
             None => u64::MAX,
         };
 
+        // AN ADDRESSLESS OBSERVATION BUYS NOTHING, so it may not spend a
+        // slot. `CandidatePeer::validate` permits an empty address set,
+        // and protocol observations are explicitly not allowed to keep a
+        // peer alive (COMPOSITION.md) — so such an entry never appears in
+        // `candidates()`. Admitting one under pressure evicted a live
+        // untrusted candidate and replaced its reachability with nothing,
+        // which is a way to clear the set using events that are
+        // individually valid.
+        //
+        // A peer ALREADY known still takes the event: its observations
+        // merge, and it is holding its slot on addresses it already has.
+        if candidate.addresses.is_empty() && !self.peers.contains_key(&candidate.peer_id) {
+            return;
+        }
+
         if !self.peers.contains_key(&candidate.peer_id) && self.peers.len() >= MAX_CANDIDATES {
             self.evict_one(now_ms, trust);
             if self.peers.len() >= MAX_CANDIDATES {
@@ -1702,5 +1717,82 @@ mod tests {
             "an unpinned late arrival is still refused at the bound"
         );
         assert_eq!(found.addresses.len(), MAX_ADDRESSES_PER_PEER);
+    }
+    #[test]
+    fn an_addressless_candidate_does_not_evict_a_live_peer() {
+        // `validate` accepts an empty address set and observations never
+        // keep a peer alive, so the entry would be invisible in
+        // `candidates()` — while having cost a live candidate its slot.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+
+        for i in 0..MAX_CANDIDATES {
+            set.observe(
+                &for_id(
+                    &identity(i),
+                    "mdns",
+                    "/ip4/10.1.0.1/tcp/1",
+                    1_000 + i as u64,
+                    Some(u64::MAX),
+                ),
+                1_000 + i as u64,
+                &trust,
+                true,
+                false,
+            );
+        }
+        let before = set.candidates(2_000, &|_| None).len();
+        assert_eq!(before, MAX_CANDIDATES, "the set is full of live peers");
+
+        let ghost = identity(999_999);
+        let mut empty = for_id(&ghost, "mdns", "/ip4/10.0.0.1/tcp/1", 5_000, Some(u64::MAX));
+        empty.addresses.clear();
+        assert!(empty.validate().is_ok(), "an empty address set is valid");
+        set.observe(&empty, 5_000, &trust, true, false);
+
+        assert_eq!(
+            set.candidates(5_000, &|_| None).len(),
+            before,
+            "nothing was displaced for an entry that cannot be dialled"
+        );
+        assert!(
+            !set.candidates(5_000, &|_| None)
+                .iter()
+                .any(|c| c.peer_id == ghost),
+            "and the addressless peer did not take a slot"
+        );
+    }
+
+    #[test]
+    fn an_addressless_observation_still_reaches_a_peer_already_known() {
+        // The control: ignoring the event entirely would drop protocol
+        // observations for a peer that IS holding a slot on real
+        // addresses.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let known = identity(3);
+        set.observe(
+            &for_id(&known, "mdns", "/ip4/10.0.0.1/tcp/1", 0, Some(u64::MAX)),
+            0,
+            &trust,
+            true,
+            false,
+        );
+
+        let mut empty = for_id(&known, "mdns", "/ip4/10.0.0.1/tcp/1", 100, Some(u64::MAX));
+        empty.addresses.clear();
+        set.observe(&empty, 100, &trust, true, false);
+
+        let candidates = set.candidates(200, &|_| None);
+        let found = candidates
+            .iter()
+            .find(|c| c.peer_id == known)
+            .expect("the known peer keeps its addresses and its slot");
+        assert_eq!(
+            found.last_observed_ms, 100,
+            "and the event is APPLIED, not merely survived: refusing it \
+             outright would leave this at 0 and discard the protocol \
+             observations such an event carries"
+        );
     }
 }
