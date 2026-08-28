@@ -12,6 +12,17 @@
 //! [`MdnsDiscovery::push_discovered`], and validated bounded candidates
 //! come out.
 //!
+//! **That backend does not exist yet, and the reason is a dependency
+//! advisory rather than an oversight.** Enabling libp2p's `mdns` feature
+//! pulls `libp2p-mdns 0.48`, which pins `hickory-proto 0.25.x` and its
+//! RUSTSEC-2026-0118 (a DNSSEC validation loop with no safe upgrade) and
+//! RUSTSEC-2026-0119. `check_dependencies.sh` refuses that, and
+//! `CLAUDE.md` §8 makes it a gate rather than a warning. This crate is
+//! therefore complete and untested against real multicast: every rule
+//! below is driven through `push_discovered`/`push_expired`, which is how
+//! it was always going to be tested, and the socket arrives when the
+//! upstream crate moves to `hickory-proto` 0.26.
+//!
 //! # The input is unauthenticated by construction
 //!
 //! Any host on the multicast domain can advertise anything, so mDNS
