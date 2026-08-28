@@ -258,22 +258,27 @@ fn build_answer(
     now_ms: u64,
     wall_ms: u64,
 ) -> DirectoryResponse {
-    // DISABLED OR DRAINING FIRST: neither reveals anything about any
-    // endpoint, and both are true before trust is even consulted.
-    if !direct_state.directory_enabled() || manager.is_draining() {
-        return DirectoryResponse::Refused(DirectoryRefusal::Unavailable);
-    }
-    // DATA-PLANE TRUST is the admission. An infrastructure-only peer is
-    // not data-plane trusted, so ADR-0036's "no endpoint directory" falls
-    // out of the same check rather than needing its own.
+    // DATA-PLANE TRUST FIRST. An infrastructure-only peer is not
+    // data-plane trusted, so ADR-0036's "no endpoint directory" falls out
+    // of the same check. This runs before the rate charge because an
+    // untrusted peer's queries must not grow a per-peer bucket for it —
+    // and an untrusted peer cannot hold a connection to reach here anyway.
     if manager.classify(querier) != ConnectionClass::DataPlaneTrusted {
         return DirectoryResponse::Refused(DirectoryRefusal::Unauthorized);
     }
-    // THE PER-PEER RATE, charged only for a served directory. A refusal
-    // does not charge it, so an unauthorized or disabled query cannot
-    // spend a peer's own budget.
+    // THE PER-PEER RATE, charged for EVERY trust-admitted query — a
+    // disabled-directory refusal as much as a served list. Charging only
+    // the served path let a trusted peer hammer a disabled directory
+    // without limit, each refusal costing an answer and its bandwidth;
+    // the in-flight bound caps concurrency but not frequency. So the rate
+    // is charged before the disabled check, not after it.
     if directory.budget.charge_rate(querier, now_ms).is_err() {
         return DirectoryResponse::Refused(DirectoryRefusal::Overloaded);
+    }
+    // DISABLED OR DRAINING: neither reveals anything about any endpoint,
+    // and a trusted peer has already paid its rate for asking.
+    if !direct_state.directory_enabled() || manager.is_draining() {
+        return DirectoryResponse::Refused(DirectoryRefusal::Unavailable);
     }
     let endpoints = direct_state.advertised_for(querier);
     DirectoryResponse::Directory(EndpointDirectoryV1 {

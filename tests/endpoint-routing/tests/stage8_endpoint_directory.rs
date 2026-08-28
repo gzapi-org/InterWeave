@@ -512,6 +512,50 @@ async fn generated_at_ms_is_wall_clock_not_monotonic() {
     );
 }
 
+/// A disabled directory still charges a trusted peer's rate: refusals are
+/// not free. The 13th query in a minute is refused Overloaded (the rate),
+/// not Unavailable (the disabled state), proving every trust-admitted
+/// query — refusal included — consumed the 12/minute budget.
+///
+/// Deterministic: refusals are not cached, so each query crosses the wire
+/// and the responder charges the rate each time.
+///
+/// Mutation: charge the rate only for a served directory (the old order)
+/// and every disabled query returns Unavailable, so the 13th never
+/// becomes Overloaded.
+#[tokio::test]
+async fn a_disabled_directory_still_charges_the_query_rate() {
+    let profile = profile_directory(vec![advertised("human")], Some("human"), false);
+    let (querier, _responder, peer) = connected_for_directory(profile, &[("s", "human")]).await;
+
+    // The default per-peer budget is 12/minute. The first twelve queries
+    // to the disabled directory are Unavailable; each still pays the rate.
+    for i in 0..12 {
+        let error = querier
+            .query_endpoints(peer.clone())
+            .await
+            .expect("command")
+            .expect_err("the directory is disabled");
+        assert_eq!(
+            error,
+            TransportError::RemoteEndpointUnavailable,
+            "query {i} is unavailable but charged"
+        );
+    }
+    // The thirteenth is over the rate: Overloaded, not Unavailable. Had a
+    // disabled refusal skipped the charge, this would still be Unavailable.
+    let error = querier
+        .query_endpoints(peer)
+        .await
+        .expect("command")
+        .expect_err("the rate is spent");
+    assert_eq!(
+        error,
+        TransportError::Overloaded,
+        "the 13th query is refused by the rate the disabled ones charged"
+    );
+}
+
 /// The exit gate: route discovery works without entering broadcast,
 /// peer discovery, or Kademlia state. The querier configures no channels
 /// and adds no addresses beyond the dial, and the query still succeeds.
