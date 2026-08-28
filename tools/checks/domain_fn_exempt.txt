@@ -108,6 +108,7 @@ Refusal::to_wire                                 call  refusal.to_wire(
 
 # --- stage-8 -----------------------------------------------------
 EndpointRegistry::advertised_for                 stage-8   the directory responder in transport-libp2p snapshots it
+EndpointRegistry::lease_of                       stage-8   send_direct in transport-libp2p derives the source from it
 DirectoryBudget::begin_exchange                  stage-8   the directory exchange in transport-libp2p drives it
 DirectoryBudget::end_exchange                    stage-8   the directory exchange in transport-libp2p drives it
 DirectoryBudget::inflight                        stage-8   the directory exchange in transport-libp2p drives it

@@ -308,6 +308,19 @@ impl EndpointRegistry {
         self.leases.get(endpoint)
     }
 
+    /// The lease a session holds, if any: the endpoint and the lease.
+    ///
+    /// This is where a sender's `source_endpoint` comes from (ADR-0030):
+    /// the SESSION is the input and the endpoint is the answer, so there
+    /// is no shape in which a caller supplies the endpoint and has it
+    /// believed — `a_sessions_lease_is_found_by_session_not_by_claim`.
+    /// One lease per session is enforced by `claim`, so at most one
+    /// answer exists.
+    #[must_use]
+    pub fn lease_of(&self, session: &LocalSessionId) -> Option<(&EndpointId, &ActiveLease)> {
+        self.leases.iter().find(|(_, l)| &l.owner == session)
+    }
+
     /// Resolve an inbound directed message to exactly one local endpoint.
     ///
     /// Takes `&self`: resolution is the only thing an inbound message
@@ -583,6 +596,29 @@ mod tests {
             r.claim(&ep("claude"), session("a"), "k", epoch("e3"))
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn a_sessions_lease_is_found_by_session_not_by_claim() {
+        let mut r = registry();
+        r.claim(&ep("human"), session("a"), "human-client", epoch("e1"))
+            .expect("claims");
+        r.claim(&ep("claude"), session("b"), "claude-channel", epoch("e2"))
+            .expect("claims");
+        assert_eq!(
+            r.lease_of(&session("a")).map(|(e, _)| e),
+            Some(&ep("human"))
+        );
+        assert_eq!(
+            r.lease_of(&session("b")).map(|(e, _)| e),
+            Some(&ep("claude"))
+        );
+        // A session that holds nothing gets nothing — not a default, not
+        // the first lease in the map.
+        assert_eq!(r.lease_of(&session("c")), None);
+        // And after release the answer changes with the fact.
+        r.release_session(&session("a"));
+        assert_eq!(r.lease_of(&session("a")), None);
     }
 
     #[test]
