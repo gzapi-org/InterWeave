@@ -728,6 +728,128 @@ pub enum DiscoveryEvent {
     },
 }
 
+/// A reachability or capability fact handed DOWN to a provider.
+///
+/// The hint path is `ConnectionManager -> TransportRuntime -> provider`
+/// (ADR-0027): the runtime learns something from an authenticated
+/// connection and offers it to whichever provider persists such things. A
+/// hint is evidence, never authority — accepting one grants no trust and
+/// creates no obligation to dial.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerHint {
+    /// This peer answered at this address.
+    ObservedReachable {
+        /// Who answered.
+        peer_id: TransportIdentity,
+        /// Where, opaque like every other address here.
+        address: String,
+        /// When, in local milliseconds.
+        observed_at: u64,
+    },
+    /// This peer was seen supporting (or not supporting) a protocol.
+    ObservedProtocol {
+        /// About whom.
+        peer_id: TransportIdentity,
+        /// Which protocol.
+        protocol_id: ProtocolId,
+        /// Whether it was supported.
+        supported: bool,
+        /// When, in local milliseconds.
+        observed_at: u64,
+    },
+    /// A whole candidate observed elsewhere.
+    CandidateHint(Box<CandidatePeer>),
+}
+
+/// What a provider did with a hint.
+///
+/// `Unsupported` is a REQUIRED answer, not a courtesy: `DISCOVERY.md` says
+/// a provider must reject a hint class it does not handle explicitly
+/// rather than silently taking ownership of it, because a provider that
+/// quietly accepts is a provider drifting into owning connection policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HintDisposition {
+    /// Taken, and it may influence later events.
+    Accepted,
+    /// This provider does not handle this hint class. Not an error.
+    Unsupported,
+    /// Handled in principle, but this one was malformed.
+    Rejected(DiscoveryError),
+}
+
+/// Why a provider refused a lifecycle call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderError {
+    /// `start` was called twice.
+    AlreadyStarted,
+    /// The call needs a started provider.
+    NotStarted,
+    /// The provider's own mechanism failed.
+    ///
+    /// Carries a short static reason rather than a formatted string: a
+    /// provider's failure text ends up in health diagnostics, and an
+    /// unbounded message from a remote-influenced code path is a log
+    /// injection waiting to be written.
+    Failed(&'static str),
+}
+
+/// A source of candidate peers.
+///
+/// `DISCOVERY.md` sketches this as an async trait returning a stream and
+/// says so non-normatively — "the behavioral contract below is
+/// normative". This is the pull-shaped equivalent, and the shape is
+/// deliberate: this crate must stay free of any runtime, so the async
+/// character belongs to whoever owns the provider's I/O, and
+/// [`drain_events`](Self::drain_events) is the bounded batch that
+/// contract requires. Every normative rule survives the translation:
+///
+/// - **no events before `start`** — `drain_events` returns empty until
+///   then (`provider_starts_cleanly`);
+/// - **bounded batches** — the caller states `max` and the provider must
+///   respect it (`provider_respects_state_bounds`);
+/// - **deterministic termination** — after `shutdown` the drain is empty
+///   forever (`provider_event_stream_closes_after_shutdown`);
+/// - **cooperative, idempotent shutdown**
+///   (`provider_shutdown_is_idempotent_and_bounded`);
+/// - **explicit hint refusal** — [`HintDisposition::Unsupported`];
+/// - **failures become health, not panics** — every method is total
+///   except the two lifecycle calls, which return [`ProviderError`].
+///
+/// A provider never dials, never consults or mutates trust, never touches
+/// a Swarm, and never sends application traffic. Those absences are
+/// structural here: nothing in this crate can reach any of them.
+pub trait DiscoveryProvider {
+    /// What this provider is, including whether it expresses expiry and
+    /// accepts hints. The `name` is also the `source` on every candidate
+    /// it emits, which is what makes provenance checkable.
+    fn descriptor(&self) -> ProviderDescriptor;
+
+    /// Begin. Called once; a second call is [`ProviderError::AlreadyStarted`].
+    ///
+    /// # Errors
+    /// [`ProviderError`] when the provider cannot begin, which the caller
+    /// records as health rather than propagating as a fault.
+    fn start(&mut self, now_ms: u64) -> Result<(), ProviderError>;
+
+    /// Take at most `max` pending events, oldest first.
+    ///
+    /// Empty before `start` and after `shutdown`. Total by construction:
+    /// a provider reports trouble through [`Self::health`], never by
+    /// panicking on a caller's schedule.
+    fn drain_events(&mut self, now_ms: u64, max: usize) -> Vec<DiscoveryEvent>;
+
+    /// Offer a hint. A class this provider does not handle must come back
+    /// [`HintDisposition::Unsupported`].
+    fn add_hint(&mut self, hint: PeerHint, now_ms: u64) -> HintDisposition;
+
+    /// Current health. `Unavailable` before `start` and after `shutdown`.
+    fn health(&self) -> ProviderHealth;
+
+    /// Stop. Idempotent and bounded: a second call is a no-op, and the
+    /// event stream is empty from here on.
+    fn shutdown(&mut self, now_ms: u64);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1293,5 +1415,169 @@ mod tests {
         let error =
             serde_json::from_str::<CandidatePeer>(&json).expect_err("duplicates are refused");
         assert!(error.to_string().contains("unique"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod provider_contract_tests {
+    use super::*;
+
+    const P1: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+
+    fn peer() -> TransportIdentity {
+        TransportIdentity::parse(P1).expect("valid test identity")
+    }
+
+    /// A minimal conforming provider: it emits one candidate on start and
+    /// obeys every lifecycle rule. Its purpose is to show the trait CAN be
+    /// satisfied — the conformance suite proves that a provider breaking
+    /// these rules is caught.
+    struct Conforming {
+        started: bool,
+        stopped: bool,
+        pending: Vec<DiscoveryEvent>,
+    }
+
+    impl Conforming {
+        fn new() -> Self {
+            Self {
+                started: false,
+                stopped: false,
+                pending: Vec::new(),
+            }
+        }
+    }
+
+    impl DiscoveryProvider for Conforming {
+        fn descriptor(&self) -> ProviderDescriptor {
+            ProviderDescriptor {
+                name: "conforming".to_owned(),
+                interface_version: "1.0".to_owned(),
+                config_version: None,
+                scope: ProviderScope::Configured,
+                mode: ProviderMode::Passive,
+                supports_expiry: false,
+                supports_hints: false,
+            }
+        }
+
+        fn start(&mut self, now_ms: u64) -> Result<(), ProviderError> {
+            if self.started {
+                return Err(ProviderError::AlreadyStarted);
+            }
+            self.started = true;
+            self.pending.push(DiscoveryEvent::CandidateObserved {
+                candidate: Box::new(CandidatePeer {
+                    peer_id: peer(),
+                    addresses: ["/ip4/127.0.0.1/tcp/1".to_owned()].into_iter().collect(),
+                    source: "conforming".to_owned(),
+                    observed_at: now_ms,
+                    expires_at: None,
+                    protocol_observations: BTreeSet::new(),
+                }),
+            });
+            Ok(())
+        }
+
+        fn drain_events(&mut self, _now_ms: u64, max: usize) -> Vec<DiscoveryEvent> {
+            if !self.started || self.stopped {
+                return Vec::new();
+            }
+            let take = max.min(self.pending.len());
+            self.pending.drain(..take).collect()
+        }
+
+        fn add_hint(&mut self, _hint: PeerHint, _now_ms: u64) -> HintDisposition {
+            // `supports_hints: false`, so this MUST be explicit.
+            HintDisposition::Unsupported
+        }
+
+        fn health(&self) -> ProviderHealth {
+            if self.started && !self.stopped {
+                ProviderHealth::Healthy
+            } else {
+                ProviderHealth::Unavailable
+            }
+        }
+
+        fn shutdown(&mut self, _now_ms: u64) {
+            self.stopped = true;
+            self.pending.clear();
+        }
+    }
+
+    #[test]
+    fn no_events_exist_before_start() {
+        let mut p = Conforming::new();
+        assert!(p.drain_events(0, 8).is_empty());
+        assert_eq!(p.health(), ProviderHealth::Unavailable);
+        p.start(1).expect("starts");
+        assert_eq!(p.drain_events(1, 8).len(), 1);
+        assert_eq!(p.health(), ProviderHealth::Healthy);
+    }
+
+    #[test]
+    fn a_second_start_is_refused() {
+        let mut p = Conforming::new();
+        p.start(1).expect("starts");
+        assert_eq!(p.start(2), Err(ProviderError::AlreadyStarted));
+    }
+
+    #[test]
+    fn the_drain_respects_the_callers_bound() {
+        let mut p = Conforming::new();
+        p.start(1).expect("starts");
+        // One event pending, but a zero bound takes nothing — the caller
+        // states the batch size, not the provider.
+        assert!(p.drain_events(1, 0).is_empty());
+        assert_eq!(p.drain_events(1, 1).len(), 1);
+    }
+
+    #[test]
+    fn shutdown_is_idempotent_and_closes_the_stream() {
+        let mut p = Conforming::new();
+        p.start(1).expect("starts");
+        p.shutdown(2);
+        p.shutdown(3); // no panic, no change
+        assert!(
+            p.drain_events(4, 8).is_empty(),
+            "the stream is empty from shutdown onward"
+        );
+        assert_eq!(p.health(), ProviderHealth::Unavailable);
+    }
+
+    #[test]
+    fn an_unsupported_hint_is_refused_explicitly() {
+        let mut p = Conforming::new();
+        p.start(1).expect("starts");
+        // The descriptor says supports_hints: false, and the answer says
+        // so too — silence would be the provider taking ownership.
+        assert!(!p.descriptor().supports_hints);
+        assert_eq!(
+            p.add_hint(
+                PeerHint::ObservedReachable {
+                    peer_id: peer(),
+                    address: "/ip4/127.0.0.1/tcp/1".to_owned(),
+                    observed_at: 1,
+                },
+                1
+            ),
+            HintDisposition::Unsupported
+        );
+    }
+
+    #[test]
+    fn a_providers_name_is_the_source_it_stamps() {
+        // Provenance is checkable only because these are the same string:
+        // the manager refuses an event whose source is not the registered
+        // provider's name.
+        let mut p = Conforming::new();
+        p.start(1).expect("starts");
+        let name = p.descriptor().name;
+        let events = p.drain_events(1, 8);
+        let DiscoveryEvent::CandidateObserved { candidate } = &events[0] else {
+            panic!("expected an observation");
+        };
+        assert_eq!(candidate.source, name);
     }
 }
