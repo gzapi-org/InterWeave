@@ -233,6 +233,75 @@ fn a_long_running_node_keeps_its_configured_and_announcing_candidates() {
 }
 
 #[test]
+fn starting_a_provider_makes_discovery_healthy_at_the_manager() {
+    // The manager registers a provider as Unavailable and learns health
+    // only from a HealthChanged event. A provider that becomes healthy
+    // internally and says nothing leaves aggregate discovery health
+    // permanently Unavailable — a node doing real discovery while
+    // reporting it does none.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut manager = DiscoveryManager::new();
+    let cache = PeerCache::load(&dir.path().join("peers.json"), CacheLimits::default())
+        .expect("empty cache");
+    let mut cache_provider = PeerCacheDiscovery::new(cache);
+    let mut static_provider = StaticBootstrapDiscovery::new(Vec::new()).expect("empty is valid");
+
+    manager
+        .register(cache_provider.descriptor(), 10)
+        .expect("registers");
+    manager
+        .register(static_provider.descriptor(), 30)
+        .expect("registers");
+    assert_eq!(
+        manager.aggregate_health(),
+        ProviderHealth::Unavailable,
+        "registered but unstarted"
+    );
+
+    cache_provider.start(0).expect("starts");
+    static_provider.start(0).expect("starts");
+    pump(&mut manager, &mut cache_provider, 0, &nobody());
+    pump(&mut manager, &mut static_provider, 0, &nobody());
+
+    assert_eq!(
+        manager.provider_health("peer-cache"),
+        Some(ProviderHealth::Healthy),
+        "a started provider reports itself healthy"
+    );
+    assert_eq!(
+        manager.provider_health("static-bootstrap"),
+        Some(ProviderHealth::Healthy),
+        "each provider reports its own start, so one silent provider is caught"
+    );
+    assert_eq!(
+        manager.aggregate_health(),
+        ProviderHealth::Healthy,
+        "and discovery as a whole is working"
+    );
+}
+
+#[test]
+fn a_quarantined_cache_reports_degraded_at_start() {
+    // The initial transition carries the REAL answer, which is the state
+    // a consumer most needs to hear at start rather than never.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("peers.json");
+    std::fs::write(&path, b"{ not json").expect("writes");
+    let cache = PeerCache::load(&path, CacheLimits::default()).expect("quarantines");
+    let mut provider = PeerCacheDiscovery::new(cache);
+    let mut manager = DiscoveryManager::new();
+    manager
+        .register(provider.descriptor(), 10)
+        .expect("registers");
+    provider.start(0).expect("starts");
+    pump(&mut manager, &mut provider, 0, &nobody());
+    assert_eq!(
+        manager.provider_health("peer-cache"),
+        Some(ProviderHealth::Degraded)
+    );
+}
+
+#[test]
 fn aggregate_health_survives_one_degraded_provider() {
     let mut manager = DiscoveryManager::new();
     let mut mdns_provider = MdnsDiscovery::new();
@@ -382,9 +451,8 @@ async fn a_discovered_candidate_cannot_bypass_trust_or_the_connection_manager() 
         .find(|c| c.peer_id == listener_peer)
         .expect("discovery produced the candidate");
     let discovered: libp2p::Multiaddr = candidate
-        .addresses
-        .iter()
-        .next()
+        .address_list()
+        .first()
         .expect("an address")
         .parse()
         .expect("the address round-trips");
@@ -449,9 +517,8 @@ async fn a_discovered_candidate_cannot_bypass_trust_or_the_connection_manager() 
         .find(|c| c.peer_id == listener2_peer)
         .expect("discovery produced it");
     let discovered2: libp2p::Multiaddr = candidate2
-        .addresses
-        .iter()
-        .next()
+        .address_list()
+        .first()
         .expect("an address")
         .parse()
         .expect("parses");

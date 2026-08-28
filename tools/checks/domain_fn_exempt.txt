@@ -106,8 +106,8 @@ Refusal::to_wire                                 call  refusal.to_wire(
 
 
 # --- stage-9 -----------------------------------------------------
+AggregatedCandidate::address_list                 stage-12  a consumer reads the ordered addresses at runtime composition
 ProtocolId::parse                                stage-9   the conformance suite drives ObservedProtocol hints through providers
-ProtocolId::as_str                               stage-9   the conformance suite drives ObservedProtocol hints through providers
 DiscoveryManager::new                            stage-9   the conformance suite composes the manager over real providers
 DiscoveryManager::register                       stage-9   the conformance suite composes the manager over real providers
 DiscoveryManager::on_event                       stage-9   the conformance suite composes the manager over real providers

@@ -110,18 +110,48 @@ struct Entry {
     last_observed_ms: u64,
 }
 
-/// A candidate as a consumer sees it: the merged address set and the
-/// sources that vouch for it.
+/// One address, and which providers currently vouch for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddressProvenance {
+    /// The opaque address.
+    pub address: String,
+    /// Every source with a live observation of it, best priority first.
+    ///
+    /// PER ADDRESS, not per candidate: ADR-0007 makes priority guidance
+    /// for choosing among a peer's addresses, and a consumer cannot apply
+    /// it without knowing which provider supports which address. A single
+    /// merged source set could not answer that.
+    pub sources: Vec<String>,
+    /// The best (lowest) configured priority among those sources.
+    pub best_priority: i32,
+    /// The most recent observation of this address.
+    pub observed_at_ms: u64,
+}
+
+/// A candidate as a consumer sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AggregatedCandidate {
     /// Which peer.
     pub peer_id: TransportIdentity,
-    /// Every address at least one live source still supports.
-    pub addresses: BTreeSet<String>,
+    /// Every address at least one live source still supports, ordered by
+    /// the best provider priority supporting each.
+    ///
+    /// An ORDER, never an authorization: a lower priority means "try this
+    /// one first", and every address here still passes dial admission
+    /// exactly as any other would (ADR-0007, ADR-0011).
+    pub addresses: Vec<AddressProvenance>,
     /// Every source currently supporting at least one of those addresses.
     pub sources: BTreeSet<String>,
     /// The most recent observation across sources.
     pub last_observed_ms: u64,
+}
+
+impl AggregatedCandidate {
+    /// Just the addresses, in priority order.
+    #[must_use]
+    pub fn address_list(&self) -> Vec<&str> {
+        self.addresses.iter().map(|a| a.address.as_str()).collect()
+    }
 }
 
 /// The merged candidate set.
@@ -143,18 +173,50 @@ impl CandidateSet {
     }
 
     /// Candidates currently supported by at least one live source.
+    ///
+    /// `priority_of` supplies each source's configured priority so the
+    /// addresses come back ordered; a source the caller does not know is
+    /// treated as the lowest preference rather than dropped, because a
+    /// candidate is still a candidate when its provider has been
+    /// deregistered mid-flight.
     #[must_use]
-    pub fn candidates(&self, now_ms: u64) -> Vec<AggregatedCandidate> {
+    pub fn candidates(
+        &self,
+        now_ms: u64,
+        priority_of: &dyn Fn(&str) -> Option<i32>,
+    ) -> Vec<AggregatedCandidate> {
         self.peers
             .iter()
             .filter_map(|(peer_id, entry)| {
-                let mut addresses = BTreeSet::new();
+                let mut addresses: Vec<AddressProvenance> = Vec::new();
                 let mut sources = BTreeSet::new();
                 for (address, records) in &entry.addresses {
-                    for record in records.iter().filter(|r| now_ms < r.expires_at) {
-                        addresses.insert(address.clone());
+                    let live: Vec<&Provenance> =
+                        records.iter().filter(|r| now_ms < r.expires_at).collect();
+                    if live.is_empty() {
+                        continue;
+                    }
+                    let mut per_address: Vec<(i32, &Provenance)> = live
+                        .iter()
+                        .map(|r| (priority_of(&r.source).unwrap_or(i32::MAX), *r))
+                        .collect();
+                    per_address.sort_by_key(|(priority, r)| (*priority, r.source.clone()));
+                    for (_, record) in &per_address {
                         sources.insert(record.source.clone());
                     }
+                    addresses.push(AddressProvenance {
+                        address: address.clone(),
+                        best_priority: per_address.first().map_or(i32::MAX, |(p, _)| *p),
+                        observed_at_ms: per_address
+                            .iter()
+                            .map(|(_, r)| r.observed_at)
+                            .max()
+                            .unwrap_or(0),
+                        sources: per_address
+                            .into_iter()
+                            .map(|(_, r)| r.source.clone())
+                            .collect(),
+                    });
                 }
                 // A PEER WITH NO LIVE ADDRESS IS NOT A CANDIDATE. Protocol
                 // observations are deliberately not consulted here: they
@@ -162,6 +224,13 @@ impl CandidateSet {
                 if addresses.is_empty() {
                     return None;
                 }
+                // Best priority first; ties broken by the address itself
+                // so the order is deterministic rather than map-dependent.
+                addresses.sort_by(|a, b| {
+                    a.best_priority
+                        .cmp(&b.best_priority)
+                        .then_with(|| a.address.cmp(&b.address))
+                });
                 Some(AggregatedCandidate {
                     peer_id: peer_id.clone(),
                     addresses,
@@ -515,7 +584,9 @@ impl DiscoveryManager {
     /// reachable; a consumer still passes every dial through admission.
     #[must_use]
     pub fn candidates(&self, now_ms: u64) -> Vec<AggregatedCandidate> {
-        self.candidates.candidates(now_ms)
+        self.candidates.candidates(now_ms, &|source| {
+            self.providers.get(source).map(|p| p.priority)
+        })
     }
 
     /// Peers held in the merged set, live or not.
@@ -751,11 +822,7 @@ mod tests {
 
         let c = m.candidates(1);
         assert_eq!(c.len(), 1);
-        assert_eq!(
-            c[0].addresses,
-            ["/two".to_owned()].into_iter().collect(),
-            "only the named address went"
-        );
+        assert_eq!(c[0].address_list(), ["/two"], "only the named address went");
     }
 
     #[test]
@@ -789,7 +856,7 @@ mod tests {
 
         let c = m.candidates(1);
         assert_eq!(c[0].sources, ["b".to_owned()].into_iter().collect());
-        assert_eq!(c[0].addresses, ["/two".to_owned()].into_iter().collect());
+        assert_eq!(c[0].address_list(), ["/two"]);
     }
 
     #[test]
@@ -1116,6 +1183,70 @@ mod tests {
         );
         assert_eq!(m.provider_health("a"), Some(ProviderHealth::Degraded));
         assert_eq!(m.provider_health("missing"), None);
+    }
+
+    #[test]
+    fn addresses_are_ordered_by_the_priority_of_the_source_supporting_each() {
+        // ADR-0007 makes priority guidance for choosing among a peer's
+        // ADDRESSES. A consumer can only apply it if the candidate says
+        // which provider supports which address — one merged source set
+        // cannot answer that.
+        let mut m = DiscoveryManager::new();
+        m.register(descriptor("cheap"), 10).expect("registers");
+        m.register(descriptor("costly"), 90).expect("registers");
+        // THE ADDRESS NAMES SORT THE OTHER WAY. `/aaa` precedes `/zzz`
+        // alphabetically, so if the order came from the address rather
+        // than the priority this assertion would still pass — which the
+        // first version of this test did, and the mutation caught.
+        m.on_event(
+            "costly",
+            observed(candidate(P1, "costly", &["/aaa"], 0, None)),
+            0,
+            &nobody(),
+        )
+        .expect("accepted");
+        m.on_event(
+            "cheap",
+            observed(candidate(P1, "cheap", &["/zzz"], 0, None)),
+            0,
+            &nobody(),
+        )
+        .expect("accepted");
+
+        let c = &m.candidates(0)[0];
+        assert_eq!(
+            c.address_list(),
+            ["/zzz", "/aaa"],
+            "the cheaper provider's address is offered first, against alphabetical order"
+        );
+        assert_eq!(c.addresses[0].sources, vec!["cheap".to_owned()]);
+        assert_eq!(c.addresses[0].best_priority, 10);
+        assert_eq!(c.addresses[1].sources, vec!["costly".to_owned()]);
+        assert_eq!(c.addresses[1].best_priority, 90);
+    }
+
+    #[test]
+    fn one_address_from_two_providers_keeps_both_and_takes_the_better() {
+        let mut m = DiscoveryManager::new();
+        m.register(descriptor("cheap"), 10).expect("registers");
+        m.register(descriptor("costly"), 90).expect("registers");
+        for source in ["costly", "cheap"] {
+            m.on_event(
+                source,
+                observed(candidate(P1, source, &["/shared"], 0, None)),
+                0,
+                &nobody(),
+            )
+            .expect("accepted");
+        }
+        let c = &m.candidates(0)[0];
+        assert_eq!(c.addresses.len(), 1);
+        assert_eq!(
+            c.addresses[0].sources,
+            vec!["cheap".to_owned(), "costly".to_owned()],
+            "both vouch, best priority first"
+        );
+        assert_eq!(c.addresses[0].best_priority, 10);
     }
 
     #[test]
