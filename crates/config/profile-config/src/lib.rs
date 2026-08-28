@@ -87,6 +87,37 @@ impl DiscoveryProviderType {
     }
 }
 
+/// The provider-specific `config` namespace.
+///
+/// The schema gives every provider type its own block under `config`,
+/// and the canonical examples are written that way. Modelled as one
+/// struct whose fields are all optional rather than as an enum keyed on
+/// the type: `serde` resolves the tag and the body separately, and a
+/// per-type enum would have to be internally tagged on the SAME `type`
+/// field the parent already consumed. Which fields belong to which
+/// provider is enforced in validation, where the error can name both.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryProviderSettings {
+    /// `static-bootstrap`: the configured entries, each a multiaddr
+    /// ending in `/p2p/<PeerId>`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peers: Vec<String>,
+    /// `peer-cache`: how long a record stays usable.
+    ///
+    /// Parsed but not yet consumed: `PeerCache` carries its own frozen
+    /// TTL, and narrowing it from configuration is Stage 12's composition
+    /// (which is what builds the cache). Accepting the documented field
+    /// and ignoring it silently would be worse than either — so it is
+    /// parsed, and the runtime that grows a use for it is where it starts
+    /// mattering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<String>,
+    /// `peer-cache`: how many peers to retain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_entries: Option<u32>,
+}
+
 /// One configured discovery provider.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -101,13 +132,9 @@ pub struct DiscoveryProviderConfig {
     /// (ADR-0007). Lower sorts first.
     #[serde(default)]
     pub priority: i32,
-    /// Static bootstrap entries, for `type: static-bootstrap`.
-    ///
-    /// Held here rather than in a per-type `config` object because it is
-    /// the only per-type field this stage consumes; the Kademlia block
-    /// arrives with the provider that reads it.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub peers: Vec<String>,
+    /// The provider-specific block.
+    #[serde(default)]
+    pub config: DiscoveryProviderSettings,
 }
 
 /// The `discovery` block.
@@ -127,7 +154,7 @@ fn default_providers() -> Vec<DiscoveryProviderConfig> {
         provider_type: DiscoveryProviderType::PeerCache,
         enabled: true,
         priority: 10,
-        peers: Vec::new(),
+        config: DiscoveryProviderSettings::default(),
     }]
 }
 
@@ -238,6 +265,31 @@ pub const MAX_ENDPOINTS: usize = 64;
 pub const MAX_DISCOVERY_PROVIDERS: usize = 16;
 /// Maximum static bootstrap entries.
 pub const MAX_STATIC_BOOTSTRAP_PEERS: usize = 64;
+
+/// Split a `multiaddr-with-peer-id` into its address and PeerId halves.
+///
+/// The address stays OPAQUE: this checks that the entry ends in a
+/// `/p2p/<PeerId>` component and that the identity parses, which is
+/// exactly what `StaticBootstrapDiscovery` needs to build an entry. It
+/// does not parse the rest, because the multiaddr grammar is a backend
+/// concept and this crate has no business knowing it.
+///
+/// # Errors
+/// A short static reason naming what is missing.
+pub fn split_peer_multiaddr(entry: &str) -> Result<(&str, TransportIdentity), &'static str> {
+    let (address, peer) = entry
+        .rsplit_once("/p2p/")
+        .ok_or("no trailing /p2p/<PeerId> component")?;
+    if address.is_empty() {
+        return Err("no address before /p2p/");
+    }
+    if peer.is_empty() || peer.contains('/') {
+        return Err("the /p2p/ component is not a single PeerId");
+    }
+    let identity = TransportIdentity::parse(peer.to_owned())
+        .map_err(|_| "the PeerId is not a valid identity")?;
+    Ok((address, identity))
+}
 /// Longest single static bootstrap entry, in bytes.
 ///
 /// The same ceiling `discovery-api` puts on an opaque address, because
@@ -911,6 +963,18 @@ pub enum ConfigError {
         /// Which type carried them.
         provider: &'static str,
     },
+    /// A static bootstrap entry is not a peer-qualified multiaddr.
+    StaticPeerNotPeerQualified {
+        /// The entry as written.
+        entry: String,
+        /// What is wrong with it.
+        reason: &'static str,
+    },
+    /// Cache settings were set on a provider that has no such fields.
+    CacheSettingsOnWrongProvider {
+        /// Which type carried them.
+        provider: &'static str,
+    },
     /// An endpoint lists more client kinds than the contract allows.
     TooManyClientKinds {
         /// Which endpoint.
@@ -1041,6 +1105,14 @@ impl core::fmt::Display for ConfigError {
             Self::StaticPeersOnWrongProvider { provider } => write!(
                 f,
                 "provider '{provider}' carries `peers`, which only static-bootstrap accepts"
+            ),
+            Self::StaticPeerNotPeerQualified { entry, reason } => write!(
+                f,
+                "static-bootstrap entry '{entry}' is not a multiaddr with a peer id: {reason}"
+            ),
+            Self::CacheSettingsOnWrongProvider { provider } => write!(
+                f,
+                "provider '{provider}' carries `ttl`/`max_entries`, which only peer-cache accepts"
             ),
             Self::TooManyClientKinds { endpoint, got } => write!(
                 f,
@@ -1221,21 +1293,43 @@ impl ProfileConfig {
                 });
             }
             if entry.provider_type == DiscoveryProviderType::StaticBootstrap {
-                if entry.peers.len() > MAX_STATIC_BOOTSTRAP_PEERS {
+                if entry.config.peers.len() > MAX_STATIC_BOOTSTRAP_PEERS {
                     errors.push(ConfigError::TooManyStaticPeers {
-                        got: entry.peers.len(),
+                        got: entry.config.peers.len(),
                     });
                 }
-                for peer in &entry.peers {
+                for peer in &entry.config.peers {
                     if peer.is_empty() || peer.len() > MAX_STATIC_PEER_BYTES {
                         errors.push(ConfigError::InvalidStaticPeer { got: peer.len() });
+                        continue;
+                    }
+                    // PEER-QUALIFIED, and validated HERE rather than at
+                    // startup. The schema says `multiaddr-with-peer-id`,
+                    // and StaticBootstrapDiscovery needs a separate
+                    // TransportIdentity to build an entry at all — so a
+                    // bare `/ip4/.../tcp/4001` is a profile that cannot
+                    // become a usable entry, and deferring the complaint
+                    // to wiring turns a configuration error into a
+                    // startup failure with no line number in it.
+                    if let Err(reason) = split_peer_multiaddr(peer) {
+                        errors.push(ConfigError::StaticPeerNotPeerQualified {
+                            entry: peer.clone(),
+                            reason,
+                        });
                     }
                 }
-            } else if !entry.peers.is_empty() {
+            } else if !entry.config.peers.is_empty() {
                 // A `peers` list on mdns or the cache is a configuration
                 // that would do nothing, which is worth saying rather
                 // than ignoring.
                 errors.push(ConfigError::StaticPeersOnWrongProvider {
+                    provider: entry.provider_type.as_str(),
+                });
+            }
+            if entry.provider_type != DiscoveryProviderType::PeerCache
+                && (entry.config.ttl.is_some() || entry.config.max_entries.is_some())
+            {
+                errors.push(ConfigError::CacheSettingsOnWrongProvider {
                     provider: entry.provider_type.as_str(),
                 });
             }
@@ -1711,7 +1805,7 @@ mod tests {
             provider_type: DiscoveryProviderType::Kademlia,
             enabled: true,
             priority: 40,
-            peers: Vec::new(),
+            config: DiscoveryProviderSettings::default(),
         });
         assert!(
             c.validate().iter().any(|e| matches!(
@@ -1732,7 +1826,7 @@ mod tests {
             provider_type: DiscoveryProviderType::Kademlia,
             enabled: false,
             priority: 40,
-            peers: Vec::new(),
+            config: DiscoveryProviderSettings::default(),
         });
         assert!(
             !c.validate()
@@ -1748,7 +1842,7 @@ mod tests {
             provider_type: DiscoveryProviderType::PeerCache,
             enabled: true,
             priority: 20,
-            peers: Vec::new(),
+            config: DiscoveryProviderSettings::default(),
         });
         assert!(c.validate().iter().any(|e| matches!(
             e,
@@ -1768,7 +1862,7 @@ mod tests {
                 provider_type: DiscoveryProviderType::Mdns,
                 enabled: true,
                 priority: 0,
-                peers: Vec::new(),
+                config: DiscoveryProviderSettings::default(),
             })
             .collect();
         assert!(c.validate().iter().any(|e| matches!(
@@ -1784,9 +1878,12 @@ mod tests {
             provider_type: DiscoveryProviderType::StaticBootstrap,
             enabled: true,
             priority: 30,
-            peers: (0..MAX_STATIC_BOOTSTRAP_PEERS + 1)
-                .map(|i| format!("/ip4/10.0.0.1/tcp/{i}"))
-                .collect(),
+            config: DiscoveryProviderSettings {
+                peers: (0..MAX_STATIC_BOOTSTRAP_PEERS + 1)
+                    .map(|i| format!("/ip4/10.0.0.1/tcp/{i}/p2p/{P1}"))
+                    .collect(),
+                ..DiscoveryProviderSettings::default()
+            },
         });
         assert!(c.validate().iter().any(|e| matches!(
             e,
@@ -1798,7 +1895,10 @@ mod tests {
             provider_type: DiscoveryProviderType::StaticBootstrap,
             enabled: true,
             priority: 30,
-            peers: vec![String::new()],
+            config: DiscoveryProviderSettings {
+                peers: vec![String::new()],
+                ..DiscoveryProviderSettings::default()
+            },
         });
         assert!(
             c.validate()
@@ -1816,7 +1916,10 @@ mod tests {
             provider_type: DiscoveryProviderType::Mdns,
             enabled: true,
             priority: 20,
-            peers: vec!["/ip4/10.0.0.1/tcp/4001".to_owned()],
+            config: DiscoveryProviderSettings {
+                peers: vec![format!("/ip4/10.0.0.1/tcp/4001/p2p/{P1}")],
+                ..DiscoveryProviderSettings::default()
+            },
         });
         assert!(c.validate().iter().any(|e| matches!(
             e,
@@ -1825,21 +1928,101 @@ mod tests {
     }
 
     #[test]
+    fn a_static_peer_must_be_peer_qualified() {
+        // config.schema.yaml says `multiaddr-with-peer-id`, and
+        // StaticBootstrapDiscovery needs a separate identity to build an
+        // entry — so a bare address is a profile that cannot become a
+        // usable entry, and saying so here beats failing at startup.
+        let mut c = config(vec![endpoint("human")]);
+        c.discovery.providers.push(DiscoveryProviderConfig {
+            provider_type: DiscoveryProviderType::StaticBootstrap,
+            enabled: true,
+            priority: 30,
+            config: DiscoveryProviderSettings {
+                peers: vec!["/ip4/10.0.0.1/tcp/4001".to_owned()],
+                ..DiscoveryProviderSettings::default()
+            },
+        });
+        assert!(
+            c.validate()
+                .iter()
+                .any(|e| matches!(e, ConfigError::StaticPeerNotPeerQualified { .. })),
+            "an address with no peer id is refused"
+        );
+
+        // With the identity appended it is accepted.
+        let mut good = config(vec![endpoint("human")]);
+        good.discovery.providers.push(DiscoveryProviderConfig {
+            provider_type: DiscoveryProviderType::StaticBootstrap,
+            enabled: true,
+            priority: 30,
+            config: DiscoveryProviderSettings {
+                peers: vec![format!("/ip4/10.0.0.1/tcp/4001/p2p/{P1}")],
+                ..DiscoveryProviderSettings::default()
+            },
+        });
+        assert!(
+            !good
+                .validate()
+                .iter()
+                .any(|e| matches!(e, ConfigError::StaticPeerNotPeerQualified { .. }))
+        );
+    }
+
+    #[test]
+    fn split_peer_multiaddr_names_what_is_missing() {
+        let entry = format!("/dns4/host.example/tcp/4001/p2p/{P1}");
+        let (address, id) = split_peer_multiaddr(&entry).expect("a peer-qualified entry");
+        assert_eq!(address, "/dns4/host.example/tcp/4001");
+        assert_eq!(id, peer(P1));
+
+        assert!(split_peer_multiaddr("/ip4/10.0.0.1/tcp/4001").is_err());
+        assert!(split_peer_multiaddr(&format!("/p2p/{P1}")).is_err());
+        assert!(split_peer_multiaddr("/ip4/10.0.0.1/tcp/1/p2p/not-an-identity").is_err());
+        assert!(split_peer_multiaddr(&format!("/ip4/10.0.0.1/tcp/1/p2p/{P1}/extra")).is_err());
+    }
+
+    #[test]
+    fn cache_settings_on_another_provider_are_refused() {
+        let mut c = config(vec![endpoint("human")]);
+        c.discovery.providers.push(DiscoveryProviderConfig {
+            provider_type: DiscoveryProviderType::Mdns,
+            enabled: true,
+            priority: 20,
+            config: DiscoveryProviderSettings {
+                ttl: Some("7d".to_owned()),
+                ..DiscoveryProviderSettings::default()
+            },
+        });
+        assert!(c.validate().iter().any(|e| matches!(
+            e,
+            ConfigError::CacheSettingsOnWrongProvider { provider: "mdns" }
+        )));
+    }
+
+    #[test]
     fn a_composite_discovery_document_parses() {
         // The shape `architecture/config/examples/composite-discovery.yaml`
         // uses, minus the Kademlia entry this build cannot run.
-        let json = r#"{
+        // The shape the canonical examples use: provider settings nest
+        // under `config`, per config.schema.yaml.
+        let json = format!(
+            r#"{{
             "providers": [
-                { "type": "peer-cache", "enabled": true, "priority": 10 },
-                { "type": "mdns", "enabled": true, "priority": 20 },
-                { "type": "static-bootstrap", "enabled": true, "priority": 30,
-                  "peers": ["/dns4/bootstrap.example.net/tcp/4001"] }
+                {{ "type": "peer-cache", "enabled": true, "priority": 10,
+                   "config": {{ "ttl": "7d", "max_entries": 1024 }} }},
+                {{ "type": "mdns", "enabled": true, "priority": 20, "config": {{}} }},
+                {{ "type": "static-bootstrap", "enabled": true, "priority": 30,
+                   "config": {{ "peers": ["/dns4/bootstrap.example.net/tcp/4001/p2p/{P1}"] }} }}
             ]
-        }"#;
-        let d: DiscoveryConfig = serde_json::from_str(json).expect("the documented shape parses");
+        }}"#
+        );
+        let d: DiscoveryConfig = serde_json::from_str(&json).expect("the documented shape parses");
         assert_eq!(d.providers.len(), 3);
-        assert_eq!(d.providers[2].peers.len(), 1);
+        assert_eq!(d.providers[2].config.peers.len(), 1);
         assert_eq!(d.providers[1].provider_type.as_str(), "mdns");
+        assert_eq!(d.providers[0].config.ttl.as_deref(), Some("7d"));
+        assert_eq!(d.providers[0].config.max_entries, Some(1024));
     }
 
     #[test]
