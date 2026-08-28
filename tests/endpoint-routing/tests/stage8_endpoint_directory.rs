@@ -254,6 +254,35 @@ async fn a_refusal_carries_no_endpoint_list() {
     assert_eq!(error, TransportError::RemoteEndpointUnavailable);
 }
 
+/// A draining node refuses a new directory query, the same as a direct
+/// send. `ShuttingDown` is local; nothing crosses the wire, and even a
+/// cached entry is not served — the node has said it is going away.
+///
+/// Mutation: drop the is_draining check in begin_query and the drained
+/// node answers the query, serving cache or dialing after shutdown began.
+#[tokio::test]
+async fn a_draining_node_refuses_a_new_directory_query() {
+    let profile = profile_directory(vec![advertised("human")], Some("human"), true);
+    let (querier, _responder, peer) = connected_for_directory(profile, &[("s", "human")]).await;
+
+    // Warm the cache with one good query, so the refusal below cannot be
+    // mistaken for a cache miss.
+    querier
+        .query_endpoints(peer.clone())
+        .await
+        .expect("command")
+        .expect("the first query succeeds");
+
+    querier.drain().await.expect("the drain reaches the task");
+
+    let error = querier
+        .query_endpoints(peer)
+        .await
+        .expect("the command reaches the task")
+        .expect_err("a draining node starts no new work and serves no cache");
+    assert_eq!(error, TransportError::ShuttingDown);
+}
+
 /// The exit gate: route discovery works without entering broadcast,
 /// peer discovery, or Kademlia state. The querier configures no channels
 /// and adds no addresses beyond the dial, and the query still succeeds.

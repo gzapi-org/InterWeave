@@ -299,7 +299,16 @@ pub(super) fn begin_query<'a>(
     now_ms: u64,
     reply: oneshot::Sender<Result<DirectoryResult, DirectError>>,
 ) -> Option<(OutboundRequestId, PendingQuery)> {
-    // CACHE FIRST. A fresh entry needs no exchange, and answering from it
+    // DRAINING REFUSES NEW WORK, before the cache is even consulted. A
+    // node that has said it is going out of service must not start a new
+    // network exchange — the same rule `send_direct` follows — and must
+    // not serve an advisory cache read as if it were still in service.
+    // `ShuttingDown` is the local error; nothing crossed the wire.
+    if manager.is_draining() {
+        let _ = reply.send(Err(DirectError::ShuttingDown));
+        return None;
+    }
+    // CACHE next. A fresh entry needs no exchange, and answering from it
     // is what makes the directory advisory rather than a round trip per
     // read.
     if let Some(entry) = directory.cache.get(peer, now_ms) {
