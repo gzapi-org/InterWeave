@@ -563,18 +563,25 @@ direct wire carries the frozen binary frames instead. Marking it `active`
 would tell a consumer that an unimplemented Stage 13 shape is current
 behaviour.
 
-`common/channel-id` became `active` when Stage 7 closed, and the reason
-it was `approved` until then is the reason it is `active` now. ADR-0049
-defines `active` as describing the **current wire**; ChannelId addresses
-broadcast topics, and until Stage 7 no wire carried one, so flipping it
-earlier would have made the status field mean "we intend to" — precisely
-what `approved` already means. Stage 7 derives the GossipSub topic from a
-ChannelId and binds it in the Join, Leave and Publish commands, so the
-wire now exists and the schema describes it.
+`common/channel-id` stays `approved`, and Stage 7 closing did **not**
+change that. ADR-0049 defines `active` as describing the **current
+wire**, and no wire carries a ChannelId string. Stage 7 derives a topic
+from one — `sha256("interweave/topic/v1\0" ‖ channel)`, transmitted as
+the hex of that hash — and the `BroadcastMessageV1` envelope carries no
+ChannelId at all, deliberately, so that a publisher cannot assert a
+channel that disagrees with the topic it published on. Join, Leave and
+Publish are in-process commands, not wire documents.
+
+Flipping it would tell a consumer enumerating active schemas that raw
+ChannelId strings are an implemented interoperable shape. They are not:
+what crosses the wire is a hash, and the string exists only either side
+of it. This is the same reasoning that keeps `endpoints/message-received`
+approved above, for the same reason — the difference between a shape the
+project intends and a shape something transmits.
 
 The original wording named the whole of `common`, which was the mistake
 worth recording: a family-wide flip would have carried schemas whose wire
-still does not exist.
+does not exist.
 
 `endpoints/directory-response` and `endpoints/endpoint-config` likewise
 stay `approved`: the directory exchange is Stage 8, and the config shape
