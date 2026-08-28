@@ -2070,6 +2070,52 @@ async fn a_reloaded_queue_bound_applies_to_sessions_already_joined() {
     a.shutdown().await.expect("a stops");
 }
 
+/// The zero-mesh diagnostic is not starved by local delivery wake-ups.
+///
+/// Both are bounded by the same outbox, and the deliveries are
+/// per-session: with the smallest capacity and a sibling joined, emitting
+/// them first took the only slot every time, so the reachability signal
+/// PUBSUB.md requires was never emitted at all — not dropped under load,
+/// but systematically absent.
+///
+/// Same precedence as the drop report: a message saying something is
+/// WRONG outranks a wake-up for a message the session already holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_zero_mesh_diagnostic_outranks_local_delivery_wakeups() {
+    let (a_id, _) = who();
+    let cramped = SubstrateConfig {
+        event_capacity: 1,
+        ..SubstrateConfig::default()
+    };
+    let mut a = node(&a_id, &[], &["general"], cramped).await;
+    for s in ["human", "claude"] {
+        a.join(channel("general"), s)
+            .await
+            .expect("lands")
+            .expect("accepted");
+    }
+
+    a.publish(channel("general"), "human", envelope(30, b"no peers"))
+        .await
+        .expect("lands")
+        .expect("accepted");
+
+    wait_for(&mut a, "the degraded-reachability report", |e| {
+        matches!(e, SwarmEvent::BroadcastUnreachable { channel: c } if *c == channel("general"))
+    })
+    .await;
+
+    // The message is still queued for the sibling: what a full outbox
+    // costs is the wake-up, never the payload.
+    assert_eq!(
+        drain_until(&a, "claude", PATIENCE).await.len(),
+        1,
+        "the delivery itself is unaffected by which event won the slot"
+    );
+
+    a.shutdown().await.expect("a stops");
+}
+
 /// Publish the same envelope a few times while the mesh forms.
 ///
 /// A single publish immediately after connecting reaches nobody: GossipSub

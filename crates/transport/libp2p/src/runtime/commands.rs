@@ -262,6 +262,30 @@ pub(super) fn handle_command(
                     super::broadcast::publish_error(&error).map_or(Ok(()), Err)
                 }
             };
+            // DEGRADED REACHABILITY IS STILL SUCCESS, and still worth
+            // saying. PUBSUB.md requires `mesh_peer_count=0` to surface as
+            // degraded rather than as delivery, and the caller's `Ok` is
+            // the wrong place for it -- broadcast promises the caller
+            // nothing about reach. The operator gets the other half.
+            //
+            // BOUNDED like every other informational event: a stalled
+            // consumer plus a client publishing into an empty channel is
+            // an unbounded outbox otherwise, and this one is emitted per
+            // COMMAND rather than per received message, so it is the
+            // easiest of them to drive.
+            //
+            // AND FIRST, before the local deliveries. They are per-session
+            // and can take every slot, which starved this one
+            // systematically -- at a capacity of one with a sibling
+            // joined, the required signal was never emitted at all. Same
+            // precedence as the drop report inside `deliver_locally`: a
+            // report that something is WRONG outranks a wake-up for a
+            // message the session already has.
+            if unreachable && super::may_buffer_delivery(outbox.len(), event_capacity) {
+                outbox.push_back(SwarmEvent::BroadcastUnreachable {
+                    channel: channel.clone(),
+                });
+            }
             if answer.is_ok() {
                 deliver_locally(
                     broadcast_state,
@@ -276,22 +300,6 @@ pub(super) fn handle_command(
                         event_capacity,
                     },
                 );
-            }
-            // DEGRADED REACHABILITY IS STILL SUCCESS, and still worth
-            // saying. PUBSUB.md requires `mesh_peer_count=0` to surface as
-            // degraded rather than as delivery, and the caller's `Ok` is
-            // the wrong place for it -- broadcast promises the caller
-            // nothing about reach. The operator gets the other half.
-            //
-            // BOUNDED like every other informational event: a stalled
-            // consumer plus a client publishing into an empty channel is
-            // an unbounded outbox otherwise, and this one is emitted per
-            // COMMAND rather than per received message, so it is the
-            // easiest of them to drive.
-            if unreachable && super::may_buffer_delivery(outbox.len(), event_capacity) {
-                outbox.push_back(SwarmEvent::BroadcastUnreachable {
-                    channel: channel.clone(),
-                });
             }
             let _ = reply.send(answer);
         }
