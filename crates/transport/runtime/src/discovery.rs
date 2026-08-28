@@ -335,7 +335,39 @@ impl CandidateSet {
             if !entry.addresses.contains_key(address)
                 && entry.addresses.len() >= MAX_ADDRESSES_PER_PEER
             {
-                continue;
+                // INSERTION ORDER IS NOT A QUALITY RANKING. Dropping the
+                // incoming address because the slots happen to be full
+                // silently loses an operator's deterministic route when
+                // LAN or cache observations reached the peer first — and
+                // static bootstrap will not offer it again without a
+                // reload, so "later" became "never".
+                //
+                // A pinned address therefore displaces an unpinned one,
+                // oldest first. Nothing else displaces anything: between
+                // two addresses of the same standing the earlier one has
+                // at least been seen, so the bound holds as before.
+                if !provider_pinned {
+                    continue;
+                }
+                let victim = entry
+                    .addresses
+                    .iter()
+                    .filter(|(_, rs)| !rs.iter().any(|r| r.pinned))
+                    .min_by_key(|(addr, rs)| {
+                        (
+                            rs.iter().map(|r| r.observed_at).max().unwrap_or(0),
+                            (*addr).clone(),
+                        )
+                    })
+                    .map(|(addr, _)| addr.clone());
+                match victim {
+                    Some(addr) => {
+                        entry.addresses.remove(&addr);
+                    }
+                    // Every slot is already pinned: the bound is the
+                    // bound, and configuration cannot grow it.
+                    None => continue,
+                }
             }
             let records = entry.addresses.entry(address.clone()).or_default();
             // ONE RECORD PER SOURCE. Re-observing refreshes that source's
@@ -1571,5 +1603,104 @@ mod tests {
             "the static entry outranks cache records, which age out and are \
              re-emitted from disk however recent they are"
         );
+    }
+    #[test]
+    fn a_configured_route_is_not_lost_because_the_lan_filled_the_slots() {
+        // The operator's deterministic route arrives after mDNS and the
+        // cache have already filled the peer's 16 address slots. Dropping
+        // it by insertion order loses it for good: static bootstrap does
+        // not re-emit without a reload.
+        let mut m = DiscoveryManager::new();
+        m.register(descriptor("mdns"), 0).expect("registers");
+        m.register(descriptor_without_expiry("static-bootstrap"), 0)
+            .expect("registers");
+        let trust = nobody();
+        let subject = identity(7);
+
+        for i in 0..MAX_ADDRESSES_PER_PEER {
+            m.on_event(
+                "mdns",
+                observed(for_id(
+                    &subject,
+                    "mdns",
+                    &format!("/ip4/192.168.1.{i}/tcp/4001"),
+                    100 + i as u64,
+                    Some(u64::MAX),
+                )),
+                100 + i as u64,
+                &trust,
+            )
+            .expect("accepted");
+        }
+
+        let configured = "/dns4/bootstrap.example.net/tcp/4001";
+        m.on_event(
+            "static-bootstrap",
+            observed(for_id(&subject, "static-bootstrap", configured, 200, None)),
+            200,
+            &trust,
+        )
+        .expect("accepted");
+
+        let candidates = m.candidates(1_000);
+        let found = candidates
+            .iter()
+            .find(|c| c.peer_id == subject)
+            .expect("the peer is known");
+        assert!(
+            found.address_list().contains(&configured),
+            "the configured route displaced an unpinned one: {:?}",
+            found.address_list()
+        );
+        assert!(
+            found.addresses.len() <= MAX_ADDRESSES_PER_PEER,
+            "and the per-peer bound still holds: {}",
+            found.addresses.len()
+        );
+    }
+
+    #[test]
+    fn an_unpinned_address_does_not_displace_anything() {
+        // The control: only a pinned address displaces. Otherwise this
+        // becomes a way for LAN traffic to churn a peer's address list.
+        let mut m = DiscoveryManager::new();
+        m.register(descriptor("mdns"), 0).expect("registers");
+        let trust = nobody();
+        let subject = identity(9);
+
+        for i in 0..MAX_ADDRESSES_PER_PEER {
+            m.on_event(
+                "mdns",
+                observed(for_id(
+                    &subject,
+                    "mdns",
+                    &format!("/ip4/192.168.1.{i}/tcp/4001"),
+                    100 + i as u64,
+                    Some(u64::MAX),
+                )),
+                100 + i as u64,
+                &trust,
+            )
+            .expect("accepted");
+        }
+        let late = "/ip4/10.9.9.9/tcp/4001";
+        m.on_event(
+            "mdns",
+            observed(for_id(&subject, "mdns", late, 900, Some(u64::MAX))),
+            900,
+            &trust,
+        )
+        .expect("accepted");
+
+        let candidates = m.candidates(1_000);
+        let found = candidates
+            .iter()
+            .find(|c| c.peer_id == subject)
+            .expect("the peer is known");
+        assert!(
+            !found.address_list().contains(&late),
+            "an unpinned late arrival is still refused at the bound"
+        );
+        assert_eq!(found.addresses.len(), MAX_ADDRESSES_PER_PEER);
     }
 }
