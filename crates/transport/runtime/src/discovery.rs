@@ -379,7 +379,19 @@ impl CandidateSet {
         //
         // A peer ALREADY known still takes the event: its observations
         // merge, and it is holding its slot on addresses it already has.
-        if candidate.addresses.is_empty() && !self.peers.contains_key(&candidate.peer_id) {
+        // NOTHING LIVE BUYS NOTHING, so it may not spend a slot. Two
+        // shapes reach this with the same effect: no addresses at all,
+        // and addresses whose stated lifetime has already passed. A cache
+        // event can legitimately sit in a queue past its own TTL, so the
+        // second is ordinary rather than hostile — and either way the
+        // entry is invisible in `candidates()` while having cost a live
+        // candidate its slot.
+        //
+        // A peer ALREADY known still takes the event: its observations
+        // merge, its `last_observed_ms` advances, and it is holding its
+        // slot on addresses it already has.
+        let contributes_nothing = candidate.addresses.is_empty() || expires_at <= now_ms;
+        if contributes_nothing && !self.peers.contains_key(&candidate.peer_id) {
             return;
         }
 
@@ -1957,4 +1969,71 @@ mod tests {
             found.protocol_observations
         );
     }
+    #[test]
+    fn an_already_expired_candidate_does_not_evict_a_live_peer() {
+        // A cache event can sit queued past its own TTL, so this arrives
+        // in ordinary operation. It contributes no live reachability, and
+        // admitting it under pressure trades a usable candidate for an
+        // entry `candidates()` will never show.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+
+        for i in 0..MAX_CANDIDATES {
+            set.observe(
+                &for_id(
+                    &identity(i),
+                    "mdns",
+                    "/ip4/10.1.0.1/tcp/1",
+                    1_000 + i as u64,
+                    Some(u64::MAX),
+                ),
+                1_000 + i as u64,
+                &trust,
+                true,
+                false,
+            );
+        }
+        let before = set.candidates(2_000, &|_| None).len();
+        assert_eq!(before, MAX_CANDIDATES, "the set is full of live peers");
+
+        let stale = identity(888_888);
+        let candidate = for_id(&stale, "peer-cache", "/ip4/10.0.0.1/tcp/1", 10, Some(50));
+        assert!(candidate.validate().is_ok(), "a lapsed candidate is valid");
+        set.observe(&candidate, 5_000, &trust, true, false);
+
+        assert_eq!(
+            set.candidates(5_000, &|_| None).len(),
+            before,
+            "nothing was displaced for an entry already past its lifetime"
+        );
+        assert!(
+            !set.candidates(5_000, &|_| None)
+                .iter()
+                .any(|c| c.peer_id == stale),
+            "and it did not take a slot"
+        );
+    }
+
+    #[test]
+    fn a_candidate_expiring_in_the_future_is_still_admitted() {
+        // The control: the guard must test "already past", not "has an
+        // expiry at all" — every mDNS and cache candidate carries one.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let fresh = identity(4);
+        set.observe(
+            &for_id(&fresh, "peer-cache", "/ip4/10.0.0.1/tcp/1", 0, Some(10_000)),
+            100,
+            &trust,
+            true,
+            false,
+        );
+        assert!(
+            set.candidates(200, &|_| None)
+                .iter()
+                .any(|c| c.peer_id == fresh),
+            "a candidate with time left is admitted normally"
+        );
+    }
+
 }
