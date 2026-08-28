@@ -859,6 +859,77 @@ Remote route discovery works without entering peer discovery, GossipSub, or Kade
 
 Flip to `active`: the directory-response shape in `contracts/schemas/endpoints` (ADR-0049).
 
+**Met.** Both halves shipped over loopback TCP between real peers under
+`tests/endpoint-routing`, and the directory frame is byte-compared against
+`fixtures/endpoints/endpoint-directory-v1-frame.json` rather than
+re-derived.
+
+- **The inherited obligation, closed as an unforgeable capability.**
+  `send_direct` takes the `EndpointLease` that `claim_endpoint` returned,
+  and `EndpointRegistry::holds_lease` verifies its 128-bit epoch against
+  the live lease, so a caller sends only as an endpoint it actually
+  claimed — `ENDPOINTS.md`'s "callers cannot spoof another local
+  endpoint". `configure_direct` no longer auto-leases; a session claims
+  one exclusively. `a_send_is_as_the_leases_endpoint_never_the_frames`,
+  `a_lease_with_the_wrong_epoch_cannot_send`,
+  `an_enabled_unleased_endpoint_is_no_route_until_claimed`, and
+  `release_frees_the_endpoint_and_invalidates_its_lease` cover it, each
+  with its mutation.
+- **Trusted peer only, active advertised admissible routes only.**
+  `advertised_for` lists an endpoint only when enabled, `advertise:
+  true`, actively leased, and admissible for the querier under its inbound
+  narrowing —
+  `a_trusted_peer_learns_only_active_advertised_admissible_routes`, one
+  test per conjunct. The query is refused locally for an untrusted peer
+  (`querying_a_peer_you_do_not_trust_is_refused_locally`) and the rate is
+  charged for every trust-admitted query
+  (`a_disabled_directory_still_charges_the_query_rate`).
+- **At most 32, grammar-validated, sorted, TTL-clamped from local
+  receipt.** The codec refuses a bad grammar or an over-count frame
+  (`endpoints_codec` unit tests); `validate_response` refuses more than 32
+  or a duplicate and sorts an unsorted unique list; `clamp_ttl` is
+  `min(remote, local, 300000)` from receipt, `generated_at_ms` never an
+  input. `the_largest_legal_directory_crosses_the_wire`,
+  `a_hostile_response_is_a_violation_and_an_unsorted_one_is_sorted`,
+  `generated_at_ms_is_wall_clock_not_monotonic`.
+- **Bounded, and configurable.** The requester bounds outbound queries
+  (64 total, 4 per peer); the responder bounds concurrent responses at the
+  configured in-flight ceiling, reserving a slot for every queued response
+  including a refusal. The profile's `max_queries_per_minute_per_peer`,
+  `max_inflight_queries` and `cache_ttl` are parsed, validated and
+  applied, and a reload updates the budget and re-clamps cached entries in
+  place. `the_configured_query_rate_is_honoured`,
+  `the_profile_cache_ttl_reaches_the_requester_cache`.
+- **Exit gate.** `route_discovery_touches_no_broadcast_or_discovery_state`
+  and `the_directory_never_originates_a_dial`.
+
+**Two limits, stated because a `Met.` block that omits them is worse than
+no block.**
+
+- **The responder's coarse `Unauthorized` arm is not reachable end to
+  end.** An untrusted or infrastructure-only peer cannot hold an inbound
+  connection at this stage, so the socket closes before a query — the
+  connection layer performs the directory's exclusion for it (ADR-0036).
+  Disclosure is prevented regardless by `advertised_for`'s own trust
+  filter, which IS unit-tested
+  (`an_untrusted_querier_is_shown_nothing`). The infrastructure-peer path
+  that would exercise the responder's rate charge needs the relay stack
+  (Stage 11).
+- **The per-peer query rate is verified only through a served or disabled
+  directory.** The 12/minute bound is unit-tested in `transport-runtime`;
+  end to end the requester cache answers repeat queries to one responder,
+  so a burst reaches the responder only when it does not cache — which is
+  what `a_disabled_directory_still_charges_the_query_rate` and
+  `the_configured_query_rate_is_honoured` use.
+
+**Deferred, with the stage that owns each.** The IPC session and admin
+surfaces — `LocalDataSession`, `LocalAdminPort`, `EndpointRegistry`'s
+`default_endpoint`/`set_default`/`set_enabled`, and the directory cache's
+admin introspection — go to **Stage 13**, the daemon and desktop IPC v2,
+where a client session and an `admin.*` surface first exist. Stage 8
+wired the lease boundary through the neutral `EndpointLease` capability,
+not through `LocalDataSession`, which is why that type is still unwired.
+
 ## 12. Stage 9 — discovery framework excluding Kademlia
 
 ### Activate

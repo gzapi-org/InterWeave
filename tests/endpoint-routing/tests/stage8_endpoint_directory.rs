@@ -396,6 +396,227 @@ async fn a_revoked_peers_directory_is_not_surfaced_to_an_in_flight_query() {
     );
 }
 
+/// A hostile directory response is a local ProtocolViolation across all
+/// three forms the clause names — a duplicate entry (caught by
+/// `validate_response`), an over-32 count and an invalid-grammar label
+/// (both caught in the codec's decoder, which fails as
+/// `Io(InvalidData)` -> `outbound_error` -> ProtocolViolation). Driving
+/// only the duplicate would leave a regression on the codec path — one
+/// mapping those decode failures to PeerUnreachable — undetected.
+///
+/// The responder writes RAW BYTES rather than encoding through
+/// `EndpointsCodec`, whose encoder cannot produce an over-32 count or an
+/// out-of-grammar label; the querier decodes with the real codec and is
+/// what refuses them.
+///
+/// Proves ENDPOINTS.md ">32 entries, invalid EndpointId grammar, or
+/// duplicates are ProtocolViolation".
+#[tokio::test]
+async fn a_hostile_directory_response_is_a_protocol_violation() {
+    use interweave_transport_libp2p::endpoints_codec::ENDPOINTS_PROTOCOL;
+    use interweave_transport_libp2p::runtime::{SubstrateConfig, SwarmRuntime};
+    use libp2p::futures::StreamExt;
+    use libp2p::request_response;
+    use libp2p::swarm::SwarmEvent as RawEvent;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    // A responder codec that writes whatever raw bytes the test queues.
+    #[derive(Clone)]
+    struct RawResponder {
+        outbox: Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>,
+    }
+    #[async_trait::async_trait]
+    impl request_response::Codec for RawResponder {
+        type Protocol = libp2p::StreamProtocol;
+        type Request = ();
+        type Response = ();
+        async fn read_request<T>(
+            &mut self,
+            _: &libp2p::StreamProtocol,
+            io: &mut T,
+        ) -> std::io::Result<()>
+        where
+            T: libp2p::futures::AsyncRead + Unpin + Send,
+        {
+            use libp2p::futures::AsyncReadExt as _;
+            let mut buf = Vec::new();
+            io.take(8).read_to_end(&mut buf).await?;
+            Ok(())
+        }
+        async fn read_response<T>(
+            &mut self,
+            _: &libp2p::StreamProtocol,
+            _: &mut T,
+        ) -> std::io::Result<()>
+        where
+            T: libp2p::futures::AsyncRead + Unpin + Send,
+        {
+            Ok(())
+        }
+        async fn write_request<T>(
+            &mut self,
+            _: &libp2p::StreamProtocol,
+            _: &mut T,
+            _: (),
+        ) -> std::io::Result<()>
+        where
+            T: libp2p::futures::AsyncWrite + Unpin + Send,
+        {
+            Ok(())
+        }
+        async fn write_response<T>(
+            &mut self,
+            _: &libp2p::StreamProtocol,
+            io: &mut T,
+            (): (),
+        ) -> std::io::Result<()>
+        where
+            T: libp2p::futures::AsyncWrite + Unpin + Send,
+        {
+            use libp2p::futures::AsyncWriteExt as _;
+            let bytes = self
+                .outbox
+                .lock()
+                .expect("lock")
+                .pop_front()
+                .unwrap_or_default();
+            io.write_all(&bytes).await?;
+            io.close().await
+        }
+    }
+
+    // The three hostile frames, hand-encoded (tag 0x01 directory).
+    fn directory_header() -> Vec<u8> {
+        let mut v = vec![0x01u8];
+        v.extend_from_slice(&1u64.to_be_bytes()); // generated_at_ms
+        v.extend_from_slice(&60_000u32.to_be_bytes()); // ttl_ms
+        v
+    }
+    let duplicate = {
+        let mut v = directory_header();
+        v.push(2); // count
+        for _ in 0..2 {
+            v.push(5);
+            v.extend_from_slice(b"human");
+        }
+        v
+    };
+    let over_32 = {
+        let mut v = directory_header();
+        v.push(33); // count over the wire bound
+        for _ in 0..33 {
+            v.push(1);
+            v.push(b'a');
+        }
+        v
+    };
+    let bad_grammar = {
+        let mut v = directory_header();
+        v.push(1);
+        v.push(5);
+        v.extend_from_slice(b"Human"); // uppercase: outside the grammar
+        v
+    };
+    let outbox = Arc::new(Mutex::new(std::collections::VecDeque::from([
+        duplicate,
+        over_32,
+        bad_grammar,
+    ])));
+
+    let responder_keys = libp2p::identity::Keypair::generate_ed25519();
+    let responder_peer = interweave_transport_api::TransportIdentity::parse(
+        responder_keys.public().to_peer_id().to_string(),
+    )
+    .expect("a valid peer id");
+    let codec = RawResponder {
+        outbox: outbox.clone(),
+    };
+    let mut responder = libp2p::SwarmBuilder::with_existing_identity(responder_keys)
+        .with_tokio()
+        .with_tcp(
+            libp2p::tcp::Config::default(),
+            libp2p::noise::Config::new,
+            libp2p::yamux::Config::default,
+        )
+        .expect("the same transport stack")
+        .with_behaviour(|_| {
+            request_response::Behaviour::with_codec(
+                codec,
+                [(ENDPOINTS_PROTOCOL, request_response::ProtocolSupport::Full)],
+                request_response::Config::default(),
+            )
+        })
+        .expect("behaviour")
+        .build();
+    responder
+        .listen_on("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
+        .expect("listens");
+    let address = loop {
+        if let RawEvent::NewListenAddr { address, .. } = responder.select_next_some().await {
+            break address;
+        }
+    };
+    // Extract the ResponseChannel and send `()`, which triggers
+    // `write_response` to pop and transmit the next queued frame. Dropping
+    // the event (as an earlier version did) would send an EMPTY response
+    // and the hostile bytes would never leave — a vacuous pass, since an
+    // empty body also decodes as ProtocolViolation.
+    tokio::spawn(async move {
+        loop {
+            if let RawEvent::Behaviour(request_response::Event::Message {
+                message: request_response::Message::Request { channel, .. },
+                ..
+            }) = responder.select_next_some().await
+            {
+                let _ = responder.behaviour_mut().send_response(channel, ());
+            }
+        }
+    });
+
+    let (querier_id, _querier_peer) = who();
+    let mut querier = SwarmRuntime::start(
+        &querier_id,
+        SubstrateConfig::default(),
+        support::trusting(&[&responder_peer]),
+    )
+    .expect("the querier starts");
+    querier
+        .dial(responder_peer.clone(), address)
+        .await
+        .expect("command")
+        .expect("admitted");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no connection within 20s"
+        );
+        match tokio::time::timeout(Duration::from_secs(20), querier.next_event()).await {
+            Ok(Some(interweave_transport_libp2p::runtime::SwarmEvent::Connected { .. })) => break,
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("the querier stopped before connecting"),
+            Err(_) => panic!("no connection within 20s"),
+        }
+    }
+
+    // Each hostile form is a ProtocolViolation; errors are not cached, so
+    // each query crosses the wire and pulls the next frame.
+    for form in ["duplicate", "over-32", "invalid-grammar"] {
+        let error = querier
+            .query_endpoints(responder_peer.clone())
+            .await
+            .expect("the command reaches the task")
+            .expect_err("a hostile directory response is refused");
+        assert_eq!(
+            error,
+            TransportError::ProtocolViolation,
+            "the {form} response must be ProtocolViolation"
+        );
+    }
+}
+
+/// The largest legal directory crosses the wire: 32 advertised, leased,
 /// The largest legal directory crosses the wire: 32 advertised, leased,
 /// admissible endpoints at the 64-byte label ceiling. The codec's frozen
 /// bytes are unit-tested; this proves the whole path carries them.

@@ -39,11 +39,15 @@ fn every_frozen_topic_key_vector_reproduces() {
         let name = v["name"].as_str().expect("name");
         let channel = ChannelId::parse(v["channel_id"].as_str().expect("channel_id"))
             .unwrap_or_else(|e| panic!("vector `{name}` channel id does not parse: {e:?}"));
-        let expected = hex::decode(v["sha256"].as_str().expect("sha256")).expect("valid hex");
+        let expected = v["sha256"].as_str().expect("sha256");
 
+        // Compared as HEX against the fixture's independently computed
+        // digest: `wire_string` is the Rust derivation, `sha256` is the
+        // Python verifier's, so agreement is a real cross-check rather
+        // than one formatter agreeing with itself.
         assert_eq!(
-            topic_key_v1(&channel).as_bytes().as_slice(),
-            expected.as_slice(),
+            topic_key_v1(&channel).wire_string(),
+            expected,
             "vector `{name}` did not reproduce"
         );
     }
