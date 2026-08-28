@@ -38,6 +38,15 @@ use crate::ingress::{IngressDenial, IngressLimiter};
 
 /// Default local cache TTL, in milliseconds (`contracts/ENDPOINTS.md`).
 pub const DEFAULT_CACHE_TTL_MS: u32 = 60_000;
+/// Default TTL a RESPONDER advertises on its own directory, in ms.
+///
+/// A different concept from [`DEFAULT_CACHE_TTL_MS`], which is how long
+/// this node caches OTHERS' results: this is how long a peer may cache
+/// THIS node's result. They share a default value but not a meaning, so a
+/// node tuning its own cache to zero must not thereby force every peer to
+/// stop caching its directory. The receiver clamps whatever is advertised
+/// to `min(remote, local, 300000)` regardless.
+pub const DEFAULT_ADVERTISED_TTL_MS: u32 = DEFAULT_CACHE_TTL_MS;
 /// Default bound on cached peers.
 ///
 /// A runtime bound rather than a contract number: the contract bounds the

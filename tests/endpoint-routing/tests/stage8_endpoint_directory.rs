@@ -505,10 +505,13 @@ async fn generated_at_ms_is_wall_clock_not_monotonic() {
         "generated_at_ms {} is not a wall-clock timestamp",
         result.generated_at_ms
     );
-    // And it is NOT used for freshness: fresh_until is from local receipt.
+    // Freshness is a DURATION, not that wall-clock timestamp: a fresh
+    // result advertised at 60s and clamped is good for at most the
+    // five-minute ceiling, nowhere near an epoch value.
     assert!(
-        result.fresh_until_ms < YEAR_2020_MS,
-        "freshness is monotonic-framed"
+        result.fresh_for_ms > 0 && result.fresh_for_ms <= 300_000,
+        "fresh_for_ms {} is a remaining duration, not a timestamp",
+        result.fresh_for_ms
     );
 }
 
@@ -553,6 +556,76 @@ async fn a_disabled_directory_still_charges_the_query_rate() {
         error,
         TransportError::Overloaded,
         "the 13th query is refused by the rate the disabled ones charged"
+    );
+}
+
+/// A responder that disables its OWN cache still advertises a cacheable
+/// directory: the advertised TTL is a separate concept from the local
+/// cache setting, so tuning one does not silently zero the other.
+///
+/// Mutation: advertise `local_cache_ttl_ms` instead of the dedicated
+/// advertised TTL, and a responder whose cache is 0 hands the querier a
+/// zero-freshness result.
+#[tokio::test]
+async fn the_advertised_ttl_is_independent_of_the_local_cache_setting() {
+    use interweave_transport_libp2p::runtime::{SubstrateConfig, SwarmRuntime};
+
+    // The responder caches nothing of its own (cache TTL 0) but must still
+    // advertise the protocol default so peers may cache its directory.
+    let (querier_id, querier_peer) = who();
+    let (responder_id, _) = who();
+    let responder_config = SubstrateConfig {
+        directory_cache_ttl_ms: 0,
+        ..SubstrateConfig::default()
+    };
+    let mut responder = SwarmRuntime::start(
+        &responder_id,
+        responder_config,
+        support::trusting(&[&querier_peer]),
+    )
+    .expect("responder starts");
+    let responder_peer = responder.local_peer().clone();
+    let responder_peer_for_query = responder_peer.clone();
+    let querier = SwarmRuntime::start(
+        &querier_id,
+        SubstrateConfig::default(),
+        support::trusting(&[&responder_peer]),
+    )
+    .expect("querier starts");
+
+    let profile = profile_directory(vec![advertised("human")], Some("human"), true);
+    responder
+        .configure_direct(
+            interweave_transport_libp2p::runtime::DirectEndpoints::from_profile(&profile, 8)
+                .expect("valid"),
+        )
+        .await
+        .expect("installs");
+    responder
+        .claim_endpoint("s", endpoint("human"), "in-process")
+        .await
+        .expect("command")
+        .expect("free");
+    let address = responder
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
+        .await
+        .expect("listens");
+    querier
+        .dial(responder_peer, address)
+        .await
+        .expect("command")
+        .expect("admitted");
+    support::wait_connected(&mut responder).await;
+
+    let result = querier
+        .query_endpoints(responder_peer_for_query)
+        .await
+        .expect("command")
+        .expect("directory");
+    assert_eq!(names(&result), ["human"]);
+    assert!(
+        result.fresh_for_ms > 0,
+        "the responder's zero cache setting must not zero what it advertises"
     );
 }
 

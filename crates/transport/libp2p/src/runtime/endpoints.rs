@@ -74,9 +74,13 @@ fn admit_query_dispatch<'a>(
 pub struct DirectoryResult {
     /// The advertised endpoints, validated and sorted.
     pub endpoints: Vec<EndpointId>,
-    /// Freshness deadline in this node's monotonic-ms frame; the entry is
-    /// good until then.
-    pub fresh_until_ms: u64,
+    /// How much longer this result stays fresh, in milliseconds from now.
+    ///
+    /// A DURATION, not a deadline in some private clock: a caller adds it
+    /// to whatever clock it has. Zero means the remote asked not to be
+    /// cached (or the entry is already stale). The cache keeps its own
+    /// monotonic deadline internally; this is what a consumer can use.
+    pub fresh_for_ms: u64,
     /// The remote's own build timestamp, wall-clock epoch-ms. Diagnostic
     /// ONLY — never freshness, which starts at local receipt.
     pub generated_at_ms: u64,
@@ -100,8 +104,11 @@ pub(super) struct DirectoryState {
     pub(super) cache: DirectoryCache,
     /// The responder's per-peer / in-flight budget.
     pub(super) budget: DirectoryBudget,
-    /// The local cache TTL term of the clamp, in ms.
-    pub(super) local_cache_ttl_ms: u32,
+    /// The TTL this node ADVERTISES on its own directory, in ms — how long
+    /// a peer may cache THIS node's result. Distinct from the requester
+    /// cache TTL (which the cache holds internally), so tuning one does
+    /// not move the other.
+    pub(super) advertised_ttl_ms: u32,
     /// Inbound queries whose answer is queued but not yet written, and the
     /// in-flight slot each one holds.
     ///
@@ -125,7 +132,7 @@ impl DirectoryState {
         Self {
             cache: DirectoryCache::new(cache_peers, local_cache_ttl_ms),
             budget: DirectoryBudget::with_defaults(now_ms),
-            local_cache_ttl_ms,
+            advertised_ttl_ms: interweave_transport_runtime::directory::DEFAULT_ADVERTISED_TTL_MS,
             answering: std::collections::BTreeSet::new(),
         }
     }
@@ -288,7 +295,9 @@ fn build_answer(
         // THIS runtime started — near zero after a restart. Budget and
         // cache freshness stay on `now_ms`; only this field is wall time.
         generated_at_ms: wall_ms,
-        ttl_ms: directory.local_cache_ttl_ms,
+        // The ADVERTISED TTL, not this node's own cache preference: how
+        // long a peer may cache this result, clamped again on receipt.
+        ttl_ms: directory.advertised_ttl_ms,
         endpoints,
     })
 }
@@ -318,7 +327,7 @@ fn receive(
                 let entry = directory.cache.insert(peer.clone(), validated, now_ms);
                 Ok(DirectoryResult {
                     endpoints: entry.endpoints.clone(),
-                    fresh_until_ms: entry.fresh_until_ms,
+                    fresh_for_ms: entry.fresh_until_ms.saturating_sub(now_ms),
                     generated_at_ms: entry.generated_at_ms,
                     cached: false,
                     noncanonical,
@@ -369,7 +378,7 @@ pub(super) fn begin_query<'a>(
     if let Some(entry) = directory.cache.get(peer, now_ms) {
         let _ = reply.send(Ok(DirectoryResult {
             endpoints: entry.endpoints.clone(),
-            fresh_until_ms: entry.fresh_until_ms,
+            fresh_for_ms: entry.fresh_until_ms.saturating_sub(now_ms),
             generated_at_ms: entry.generated_at_ms,
             cached: true,
             noncanonical: entry.noncanonical,
