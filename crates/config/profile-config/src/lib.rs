@@ -133,7 +133,11 @@ impl core::error::Error for PersistError {
 /// Maximum configured endpoints in one profile.
 pub const MAX_ENDPOINTS: usize = 64;
 /// Maximum advertised endpoints the directory may hold.
-pub const MAX_ADVERTISED_CEILING: u32 = 32;
+///
+/// The wire's own bound (ADR-0031), read from the contract crate rather
+/// than restated: a response cannot carry more than this, so a profile
+/// must not be allowed to advertise more.
+pub const MAX_ADVERTISED_CEILING: u32 = interweave_transport_api::MAX_DIRECTORY_ENTRIES as u32;
 /// Default `directory.max_advertised`.
 pub const DEFAULT_MAX_ADVERTISED: u32 = 16;
 /// Maximum channels a profile may desire.
