@@ -14,6 +14,9 @@ members = [
     "crates/api/transport-api",
     "crates/config/profile-config",
     "crates/discovery/cache",
+    # Stage 9: configured bootstrap entries as candidates. Configuration
+    # is not trust (ADR-0010).
+    "crates/discovery/static",
     "crates/identity/profile-identity",
     "crates/transport/libp2p",
     "crates/human/chat-protocol",

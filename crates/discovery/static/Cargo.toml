@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# Configured bootstrap entries as discovery candidates. Configuration is
+# not trust: a configured PeerId still needs an explicit trust rule before
+# ConnectionManager will hold an ordinary data-plane connection to it
+# (ADR-0010), and nothing in this crate can reach a trust decision.
+#
+# Addresses are validated and emitted WITHOUT resolution. A `/dns4/` entry
+# stays a name here; resolving it is the dial path's job, which is what
+# keeps a DNS outage a dial diagnostic rather than a discovery-provider
+# health failure.
+[package]
+name = "interweave-discovery-static"
+version = "0.0.0"
+publish = false
+description = "Configured bootstrap discovery provider for InterWeave."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+interweave-discovery-api = { path = "../../api/discovery-api" }
+interweave-transport-api = { path = "../../api/transport-api" }
