@@ -10,7 +10,9 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
 - `apps/`, `crates/`, `tests/`, `fixtures/`, `test-data/`, `spikes/`, `packaging/`, and `xtask/` are tracked landing zones created by ADR-0045.
 - `tools/` is repository tooling — PR/review scripts and tree checks — not an implementation landing zone. It is live now and not gated by stage discipline. Each script has a self-test beside it (`test_*.sh`) that must stay green.
 - `.claude/` is committed shared agent configuration: `settings.json` and `statusline.sh` (§9), plus `skills/` — task-scoped procedures loaded on demand, see §10. Only `settings.local.json` and `CLAUDE.local.md` are per-developer and gitignored.
-- Stages 0-7 are **complete** and **Stage 8 is open**. Read `[workspace].members` for the current list rather than trusting a roster written here, and `[workspace.metadata.interweave].status` for the open stage. The Stage-1 contract crates under `crates/api/` remain types and validation only — no I/O, no runtime, no backend — and the Stage-2 crates remain pure state machines. Stage 3 landed the first file I/O and the Ed25519 identity; Stage 4 landed the libp2p substrate — TCP, Noise, Yamux, Identify — with every other behaviour left out of the feature list rather than merely unused. Stage 5 built the root connection and dial-admission funnel: it is the gate that §3's hard sequencing rule requires before Kademlia, AutoNAT, Relay or DCUtR exist at all. Stage 6 carried `/interweave/direct/2.0.0` end to end between real Rust peers — frozen framing, endpoint routing, dedup and in-flight reservations, per-peer and global ingress limits — routed to an in-process `LocalDataSession`, with no IPC and no UI. Read its **Met.** block in the canonical plan before extending it. Three things there are not derivable from the code. Concurrent same-key retransmission is proven IN PROCESS, not over the wire, and the clause is met **by scope**: the ADR-0019 amendment of 2026-08-27 binds waiter retention from the first stage whose admission yields while holding a reservation, and `handle_direct` does not yield — the wire test becomes owed the moment it can. The reservation map's waiter ACCOUNTING is inert today and must NOT be removed as dead weight, because SPIKE-002/A11 measured the unbounded version as a memory-exhaustion vector — 40 copies attaching 39 waiters with zero refusals — and it binds in every stage regardless of the retention above. And one Stage 6 P1 — binding the source endpoint to the caller's lease rather than to any lease the node holds — was carried to Stage 8 by an explicit decision recorded on PR #38, not by oversight; the plan's Stage 8 section opens with it. Stage 7 carried signed GossipSub broadcast end to end under `tests/pubsub`: strict validation, the frozen `GossipSubMessageIdV1` keyed on authenticated publisher PeerId plus wire sequence — never the application envelope ID — ChannelId→topic derivation, and the ADR-0029 Accept/Ignore/Reject mapping. Broadcast and direct are independently functional and neither substitutes for the other. Three things in its **Met.** block are not derivable from the code and are stated there rather than implied: the trust-demotion layer is not isolable end to end, because `set_trust` closes the connection, blacklists the peer and updates the broadcast trust copy, and removing the third leaves the test passing; a literal `(source, sequence)` mesh-cache collision is not constructible from outside, because the backend assigns the sequence; and only the ACCEPT arm of the ADR-0029 validation report is verified by a test, since suppressing the report on Reject or Ignore has no end-to-end signal. Stage 8 is open and activates **no new package** — `/interweave/endpoints/1.0.0` lands in `crates/transport/libp2p` with tests under the existing `tests/endpoint-routing`, so the absence of a new member is the plan and not an oversight. It opens with the obligation carried from Stage 6 by an explicit decision recorded on PR #38: a frame's source endpoint must be derived from the CALLER's lease, not from any lease the node holds. That gap is unreachable while the runtime handle is the only caller and becomes real the moment IPC sessions exist. No further package joins until the stage that needs it opens (§3).
+- Stages 0-7 are **complete** and **Stage 8 is open**. Read `[workspace].members` for the current roster and `[workspace.metadata.interweave].status` for the open stage rather than trusting either written here. **What each completed stage proved is in its `Met.` block in the canonical plan** — including, for Stages 6 and 7, the clauses met by scope and the limits their tests cannot reach. Read the block before extending that stage; it is the record, and this file does not mirror it.
+- Three facts about the built code are **not** derivable from it, and are recorded here because nothing else would say them at the moment they matter. **The reservation map's waiter ACCOUNTING is inert today and must NOT be removed as dead weight** — SPIKE-002/A11 measured the unbounded version as a memory-exhaustion vector, 40 copies attaching 39 waiters with zero refusals, and it binds in every stage. **The Stage 6 P1 about binding the source endpoint to the caller's lease was carried to Stage 8 by an explicit decision on PR #38, not by oversight** — the plan's Stage 8 section opens with it. And **broadcast and direct must remain independently functional and must never substitute for each other**, which is a standing constraint rather than a stage's exit gate.
+- Stage 8 is open and activates **no new package**: `/interweave/endpoints/1.0.0` lands in `crates/transport/libp2p` with tests under the existing `tests/endpoint-routing`, so the absence of a new member is the plan and not an oversight. The Stage-1 contract crates under `crates/api/` remain types and validation only — no I/O, no runtime, no backend — and the Stage-2 crates remain pure state machines. No further package joins until the stage that needs it opens (§3).
 - The toolchain is pinned in `rust-toolchain.toml`; edition, MSRV, lints, shared dependency versions, and the release profile are declared once in the root `Cargo.toml` and inherited.
 - Production Rust exists and grows one stage at a time; `apps/` and `packaging/` are still empty, so there is no binary, installer, or service unit yet.
 - Display name is **InterWeave**. Machine/wire namespace is lowercase `interweave` per ADR-0047.
@@ -35,7 +37,7 @@ Use this order:
 4. architecture explanatory documents/reviews;
 5. examples and research notes.
 
-**Start at the digest.** `architecture/adr/ADR-DIGEST.md` carries one current-state entry per ADR plus a keyword → ADR lookup table, and is the cheapest correct way to find which decisions govern a change. Every ADR has an entry — a check enforces it — so "not in the digest" means "no such decision", not "someone forgot". It is a navigation aid, not an authority: it sits below everything in the list above, and on any discrepancy the ADR wins and the digest is what gets fixed. Never read a normative constant from it; limits, wire formats, and vectors come from the contracts and `fixtures/`.
+**Start at the digest.** `architecture/adr/ADR-DIGEST.md` is the cheapest correct way to find which decisions govern a change, and the `adr-lookup` skill is the procedure for using it. What belongs HERE is only its standing: the digest is a navigation aid, not an authority. It sits below everything in the list above, on any discrepancy the ADR wins and the digest is what gets fixed, and no normative constant is ever read from it — limits, wire formats and vectors come from the contracts and `fixtures/`.
 
 If two accepted documents appear to conflict, **do not silently choose one in code**. Identify the conflict and amend/clarify the architecture first.
 
@@ -221,7 +223,7 @@ When changing an accepted contract:
 
 When changing an ADR, propagate in the same commit series: the row in `architecture/adr/README.md`, the entry in `ADR-DIGEST.md` (placed in a cluster, plus a keyword-table row if it introduces a topic someone would search for), and any specification whose text inherits the changed rule. `tools/checks/validate_adr_index.sh` enforces the mechanical part.
 
-Amending an ADR is a three-part record (ADR-0048): the in-place body edit — folded into the section it qualifies, because bodies read **current** — a dated note in `architecture/adr/history/NNNN-amendments.md`, and a row in that ADR's `## Amendments` table carrying the same date and title. A change of substance is not an amendment: it is a new superseding ADR. The test is whether a reader who followed the old text would now be wrong.
+Amending an ADR is a three-part record (ADR-0048), and the `adr-authoring` skill carries the mechanics. The part that is a judgement rather than a procedure stays here: **a change of substance is not an amendment, it is a new superseding ADR, and the test is whether a reader who followed the old text would now be wrong.**
 
 New ADRs follow `architecture/adr/ADR-TEMPLATE.md`. Procedures for both reading and authoring live in the `adr-lookup` and `adr-authoring` skills (§10) rather than being restated here.
 
@@ -258,17 +260,33 @@ The same file forbids git dependencies and any registry other than crates.io. A 
 
 #### The advisory check sees RustSec, and GitHub sees more
 
-`cargo-deny` resolves advisories against the RustSec database. A vulnerability published only as a GHSA has no RUSTSEC id, so the check cannot see it and reports clean — accurately, for the question it asks. Treat Dependabot as a second, non-overlapping source rather than a duplicate of the dependency check.
+`cargo-deny` resolves advisories against the RustSec database. A
+vulnerability published only as a GHSA has no RUSTSEC id, so the check
+cannot see it and reports clean — accurately, for the question it asks.
+Treat Dependabot as a second, non-overlapping source rather than a
+duplicate of the dependency check.
 
-The live example is **`yamux`**, which has no RustSec advisory at all. `libp2p-yamux` depends on BOTH 0.12.1 and the patched 0.13.10; `Config::default()` selects 0.13.10, which is what `crates/transport/libp2p` uses. But every tuning setter — `set_max_num_streams`, `set_receive_window_size`, `set_max_buffer_size`, `set_window_update_mode` — routes through `Config::set`, which replaces the config with `Config012::default()` and silently moves the muxer onto 0.12.1 and its remote-panic DoS (GHSA-vxx9-2994-q338). Bounding stream counts is exactly what §6 pushes toward, so the natural next change reintroduces the vulnerability without touching a version number and with every check green.
-
-`tools/checks/check_yamux_muxer.sh` is the guard for that, because `cargo-deny` structurally cannot be. Banning the version would not work either: 0.12.1 is in the graph unconditionally as libp2p-yamux's alternate, so a ban fails every run whether or not anything selected it. What is dangerous is first-party code choosing it, which is what the guard looks for.
+That gap is live: **`yamux`** has no RustSec advisory, and every `Config`
+tuning setter silently moves the muxer onto a version with a remote-panic
+DoS. Bounding stream counts is exactly what §6 pushes toward, so the
+natural next change reintroduces it with every check green.
+`tools/checks/check_yamux_muxer.sh` is the guard, because `cargo-deny`
+structurally cannot be; its `--help` carries the mechanism, the advisory
+id, and why banning the version would not work.
 
 ### Licence headers are checked
 
-Every first-party source file carries an `SPDX-License-Identifier: Apache-2.0` header in its opening lines. `tools/checks/check_license_headers.sh` enforces that, and also fails on foreign licence terms — an SPDX tag naming another licence, or rights-reserved / confidential boilerplate — anywhere in the tracked or about-to-be-committed tree. It scans untracked-but-not-ignored files too, because the file about to be committed is exactly the one worth catching.
+Every first-party source file carries an `SPDX-License-Identifier:
+Apache-2.0` header in its opening lines, and
+`tools/checks/check_license_headers.sh` enforces that plus the absence of
+foreign licence terms anywhere in the tracked or about-to-be-committed
+tree.
 
-Code copied in from a differently-licensed source keeps its own terms until the copyright holder relicenses it, and a public Apache-2.0 tree is where that goes unnoticed. Genuinely third-party material is therefore an **exemption with recorded provenance** in `tools/checks/license_exempt.txt`, never a silent relabel.
+The decision behind it: code copied in from a differently-licensed source
+keeps its own terms until the copyright holder relicenses it, and a public
+Apache-2.0 tree is where that goes unnoticed. Genuinely third-party
+material is therefore an **exemption with recorded provenance** in
+`tools/checks/license_exempt.txt`, never a silent relabel.
 
 ## 9. Git/change discipline
 
@@ -311,6 +329,7 @@ Commit messages are project files for the purposes of §7 — do not cite unrela
 - Branch name `<hostname -s>/<clone-dir-basename>/<type>/<short-desc>`, e.g. `develop-qzapp/InterWeave/docs/dial-admission-gate`, so every branch traces to its session by host and clone.
 - **Check where you are BEFORE the first commit of a new task**, not after a push is rejected. The default state at the start of a task is standing on the *previous* task's branch, which by then is pushed, queued, or merged — and every one of those failure modes is silent.
 - Scan for the work before doing the work: `git fetch` and read `origin/main` for the same change already landed or in flight. Adopt or coordinate instead of racing.
+- **Check what EVERY open PR touches before choosing this task — other sessions' as well as your own.** `tools/gh/pr-sessions.sh /all /OPEN` lists them; `gh pr view <n> --json files` says what each one holds. Steps 2 and 3 below do not answer this: step 2 asks only about the branch you are standing on, and step 3 sees `origin/main`, where work sitting in an unmerged PR by definition is not. Partition by FILE SET, not by intent: two open PRs touching the same file will conflict, and the second to land pays for it with an unplanned rebase and a re-review of a tree neither review saw. A refactor of a file is a hard exclusion — nothing else may touch that file until it lands. And a task that depends on another being **merged** waits for the merge, not for it to be written; building on an unmerged branch means duplicating its commits or standing on a base nobody reviewed. Whose PR it is changes the RESPONSE, never the check: around your own you re-plan freely, around another session's you partition or coordinate — never push to its branch, rebase it, or answer its reviews. These are start-of-task decisions, which is why they are here and not in the lifecycle skill.
 
 ```
 1. git rev-parse --abbrev-ref HEAD            # where am I?
@@ -322,23 +341,47 @@ Commit messages are project files for the purposes of §7 — do not cite unrela
 
 Steps 4–5 are **unconditional**: the step-2 lookup only speaks when a PR already exists.
 
+**Step 4 destroys uncommitted work, so the rule that guards it is here and
+not in a skill.** Your starting directory is yours exclusively: assume sole
+ownership, and `git add -A`, builds and tests are all trustworthy. If you
+observe changes you did not make — a dirty tree at start, foreign edits, or
+files you did not create — that is a launcher misconfiguration, two
+sessions sharing one checkout. **Stop and report it. Do not reset, do not
+stage selectively, do not commit to `main` to get clear of it.** A
+`reset --hard` in that state erases another session's uncommitted work, and
+nothing afterwards can tell you it happened.
+
 ### Nothing prompts before code lands — the discipline below is all there is
 
-`.claude/settings.json` carries an empty `"ask"`. `git push`, `gh pr merge`, and the GraphQL mutations that do the same job (`enablePullRequestAutoMerge`, `enqueuePullRequest`) all run without a confirmation prompt. **This is deliberate**, and it was chosen knowing the cost: a session idling through review rounds for a human who had already approved the work spends most of its time waiting.
+`.claude/settings.json` carries an empty `"ask"`. `git push`, `gh pr merge`,
+and the GraphQL mutations that do the same job all run without a
+confirmation prompt. **This is deliberate**, and it was chosen knowing the
+cost: a session idling through review rounds for a human who had already
+approved the work spends most of its time waiting.
 
-So read the rest of this section as the whole of the protection, not as a reminder attached to one.
+So read the rest of this section as the whole of the protection, not as a
+reminder attached to one.
 
-The chain that lands code is `gh pr merge --auto` → checks → merge queue → `main`. **Arming is standing consent**: it lands the PR at the first moment every required check goes green, whether or not anyone is still looking, and whether or not a review ever arrived. Nothing asks first, nothing blocks it, and no red check appears afterwards to say it was premature.
+The chain that lands code is `gh pr merge --auto` → checks → merge queue →
+`main`. **Arming is standing consent**: it lands the PR at the first moment
+every required check goes green, whether or not anyone is still looking,
+and whether or not a review ever arrived. Nothing asks first, nothing
+blocks it, and no red check appears afterwards to say it was premature.
 
-What that leaves load-bearing, each stated in full below:
+What that leaves load-bearing is stated in full below: arm only when the
+branch is finished, wait for a security-boundary change's review on the
+current head, and carry zero unresolved P1/P2 findings into a stage
+closure.
 
-- **Arm only when the branch is finished.** Arming while more commits are coming lands a tree that predates them.
-- **A security-boundary change waits for its automated review on the CURRENT head.** Green checks are not a review. This one has caught real defects repeatedly, including in fixes written for earlier findings in the same PR — it is the rule with the most evidence behind it and the least mechanism.
-- **Zero unresolved P1/P2 findings before a stage is called complete.** A PR merges with findings outstanding and nothing announces it.
+`git push` never landed anything even when it did prompt: `main` is
+protected, a pull request is required, and an unarmed PR sits indefinitely.
+Push early and often — a review reads what is on the remote and nothing
+else.
 
-`git push` never landed anything even when it did prompt: `main` is protected, a pull request is required, and an unarmed PR sits indefinitely. Push early and often — a review reads what is on the remote and nothing else.
-
-A session cannot see its own permission prompts, so do not try to infer any of this from the transcript: an approved action and an auto-allowed one produce an identical tool result. The only way to know what is gated is to read `.claude/settings.json`.
+A session cannot see its own permission prompts, so do not try to infer any
+of this from the transcript: an approved action and an auto-allowed one
+produce an identical tool result. The only way to know what is gated is to
+read `.claude/settings.json`.
 
 ### Merge / PR discipline
 
@@ -352,152 +395,71 @@ A session cannot see its own permission prompts, so do not try to infer any of t
 
 **Commit shape and PR shape are different questions.** The multi-fix and multi-package rules below govern COMMITS — one per root cause, one per package. Bisectability, revertability, and reviewability all live at the commit level and are unaffected by batching several commits into one PR.
 
-#### The canonical lifecycle
+#### The rest of the lifecycle is a skill
 
-**Phase 1 — starting a task**: the five steps above.
+Phases 2–6 — working, integration, opening, landing, and the follow-up
+that nothing reminds you to do — plus the `tools/gh/` tooling, the rules
+for opening a second PR alongside an open one, concurrent-session
+isolation and subagent dispatch, all live in the **`pr-lifecycle` skill**
+(§10). Load it when you are about to commit, push, open a PR, arm a merge,
+answer findings, **or dispatch a subagent** — dispatch is a trigger because
+`worktree.baseRef` is `head`, so an agent reads your last COMMIT and never
+your working tree, and the rule that follows from that is in the skill.
 
-**Phase 2 — working**
-
-```
-6.  implement ONE fix / ONE package
-7.  add its tests
-8.  run the impacted tests
-9.  commit (one per root cause, per package)
-10. git push
-```
-
-Commits are cheap and local, and pushing is now ungated — so push whenever the branch is worth showing, and always before asking for a review, because a review reads what is on the remote and nothing else.
-
-**Phase 3 — integration**
-
-```
-11. git fetch
-12. git merge --no-ff origin/main
-13. build + test the MERGED tree               ← the step people skip
-14. bash tools/checks/scan_semantic_collisions.sh
-15. bash tools/checks/check_license_headers.sh
-16. git push
-```
-
-Step 13 matters because required checks are **not strict**: a branch can be green against a base it was never built on. Step 14 catches what a textually-clean merge hides — two sessions minting the same ADR number in different files, or the same amendment heading. Step 15 catches licence terms that rode in with copied material.
-
-**Phase 4 — opening**
-
-```
-17. gh pr create --base main --head "$BRANCH"
-18. gh pr merge <n> --auto                     # ONLY when done — nothing asks
-19. tools/gh/wait-merged.sh <n> &              # background; its exit is the callback
-19b. tools/gh/pr-review-status.sh <n> --wait 30m --automated-only &
-```
-
-Drop `--delete-branch`: the queue owns branch cleanup and `gh` rejects the flag.
-
-**Phase 5 — landing**: the queue builds the head on current `main`, merges, and pushes. Return to `main` deliberately, on the notification — never let a background watcher move your tree.
-
-**Phase 6 — after**
-
-```
-20. tools/gh/pr-sessions.sh /unresolved        # what still owes a reply
-21. tools/gh/pr-review-status.sh <n>           # was it REALLY reviewed, and against which head
-22. tools/gh/pr-reply.sh … <<'EOF'             # reply + resolve one thread; body on STDIN
-```
-
-Phase 6 is not optional and nothing reminds you: no red check, no blocked merge. A PR can and does merge with findings outstanding.
-
-**Answering findings is a TASK, so it starts at Phase 1 like any other** — fetch, check where you are, cut a fresh branch. The findings arrived on a branch that is already merged and deleted, so whatever you are standing on is by definition the wrong place. Any code fix lands on a new branch; only the replies go to the old PR.
-
-Never post a reply body through `gh api -f body="…"`: replies quote code, and a double-quoted body has its backticks command-substituted and its `$vars` expanded before `gh` sees them. `pr-reply.sh` takes the body on STDIN for exactly this reason — the same hazard as the heredoc rule for commit messages.
-
-#### The tooling
-
-`tools/gh/` scripts are the supported way to observe a PR; each carries its own `--help`, and each has a self-test beside it (`test_*.sh`) that must stay green.
-
-| script | what it answers |
-|---|---|
-| `wait-merged.sh <n>` | blocks until the PR reaches a terminal state; run it in the **background**, its exit IS the callback |
-| `pr-review-status.sh <n>` | was this PR *actually* reviewed, by whom, and against which head |
-| `pr-sessions.sh` | which session owns which PR; `/unresolved` lists PRs still owing a reply |
-| `pr-reply.sh` | reply to and resolve one review thread, body on STDIN |
-| `actions-health.sh` | is Actions healthy enough to be worth spending a run on |
-
-`wait-merged.sh` exit codes, because they arrive with no time to go reading:
-
-| exit | verdict |
-|---|---|
-| 0 | MERGED — safe to return to `main` |
-| 3 | CLOSED without merging — do NOT return to `main` |
-| 5 | BLOCKED — a required check already failed, or the base conflicts |
-| 6 | STALLED outside the PR — Actions degraded, or a REQUIRED check has no run to report it (lost webhook, or a filter excluding it) |
-| 4 | watch expired, state genuinely unknown |
-| 2 | usage error, or the PR could not be read repeatedly |
-
-`BLOCKED` while checks are merely pending is the normal waiting state, not a verdict. `pr-review-status.sh` exit 5 means no review is coming at all — the head advanced past the last review and none was requested; it returns immediately rather than sitting out the timeout, so a fast `--wait` is an answer, not a failure.
-
-`actions-health.sh` reports remaining allowance only when `INTERWEAVE_ACTIONS_INCLUDED_MINUTES` is set in `.claude/settings.json`. It is deliberately unset: this repository is public, so Actions minutes are not metered. Set it only if that changes, and never hardcode a plan size anywhere else.
-
-#### When to open a NEW PR
-
-**A PR waiting on review does not block the next task.** Review rounds take minutes to hours and a session that idles through them wastes most of its time, so start the next piece of work on its own branch rather than waiting. Come back to the open PR when its review lands.
-
-What makes that safe is that each task is a separate branch off fresh `origin/main`, so concurrent work shares nothing but the base. Two rules keep it that way:
-
-- **Partition by file set, not by intent.** Two open PRs touching the same file will conflict, and the second to land pays for it — with a rebase you did not plan and a re-review of a tree neither review saw. Before starting alongside an open PR, check what it touches. A refactor of a file is a hard exclusion: nothing else may touch that file until it lands.
-- **A PR that depends on another being MERGED still waits.** Not merely written — merged. Building on an unmerged branch means either duplicating its commits or a base nobody reviewed.
-
-Within one branch, the old rule stands: if the work belongs to the task the branch is for, it is another commit on it, not a second PR. "Different concerns", "different packages" and "different root causes" are commit boundaries, satisfied by committing separately. A batch past ~6–8 commits is a reason to stop adding and land, not to open a second PR alongside.
-
-**Track what is outstanding.** With several PRs open, `tools/gh/pr-sessions.sh /unresolved` is the list of what still owes a reply, and Phase 6 applies to every one of them. Nothing else reminds you: a PR merges with findings outstanding and no red check ever appears.
+What stays here is what a session needs *before* it knows that skill
+applies: where a branch comes from (above), that nothing prompts before
+code lands (above), and the review gate below.
 
 #### Never race your own CI
 
-**Arm `--auto` only when the branch is finished.** Arming is standing consent: it lands the PR at the FIRST moment every required check is green, not when you decide you are done. Arm while more commits are coming and the PR can merge before your next commit exists. Arming late costs nothing, so there is no trade to make.
+**Arm `--auto` only when the branch is finished.** Arming is standing
+consent: it lands the PR at the FIRST moment every required check is green,
+not when you decide you are done. Arm while more commits are coming and the
+PR can merge before your next commit exists. Arming late costs nothing, so
+there is no trade to make.
 
 #### A security-boundary change waits for its review
 
-**Do not arm `--auto` on a change to a security boundary until the automated review has reported on the current head.** Green checks are not a review: §9 already says the merge is not evidence that anything was reviewed, and the queue lands a PR the moment the last check passes.
+**Do not arm `--auto` on a change to a security boundary until the
+automated review has reported on the current head.** Green checks are not a
+review: §9 already says the merge is not evidence that anything was
+reviewed, and the queue lands a PR the moment the last check passes.
 
-The gap is not theoretical and it is measured in seconds. PR #28 merged at 06:56:03 UTC and the review that found a P1 in it arrived at 06:56:15 — twelve seconds later, against a branch that no longer existed. The finding then cost a fresh branch, a second PR, and a reply on a merged thread, all to land a two-line fix that would have been one more commit had anyone waited.
+The gap is not theoretical and it is measured in seconds. PR #28 merged at
+06:56:03 UTC and the review that found a P1 in it arrived at 06:56:15 —
+twelve seconds later, against a branch that no longer existed. The finding
+then cost a fresh branch, a second PR, and a reply on a merged thread, all
+to land a two-line fix that would have been one more commit had anyone
+waited.
 
-A **security boundary** here means identity and key handling, trust policy, wire or configuration parsing, persistence, admission and resource accounting, and anything cryptographic. Documentation and mechanical changes are not on that list and should not wait.
+A **security boundary** here means identity and key handling, trust policy,
+wire or configuration parsing, persistence, admission and resource
+accounting, and anything cryptographic. Documentation and mechanical
+changes are not on that list and should not wait.
 
-The mechanics, and the step that is easy to miss: **a push does not re-trigger automated review, so waiting for one you never asked for is waiting forever.** Open the PR, request a review explicitly, and only then run `tools/gh/pr-review-status.sh <n> --wait --automated-only` in the background, arming once it reports a review of the current head.
+The mechanics, and the step that is easy to miss: **a push does not
+re-trigger automated review, so waiting for one you never asked for is
+waiting forever.** Open the PR, request a review explicitly, and only then
+run `tools/gh/pr-review-status.sh <n> --wait --automated-only` in the
+background, arming once it reports a review of the current head.
 
-**`--automated-only` is part of the instruction, not a refinement of it — the bare command does not satisfy this gate.** Without the flag, coverage is any review by anyone who is not the PR author, and this repository is public: any GitHub user can submit a review object on an open PR. One drive-by review carrying the current head exits 0 and arms the merge this rule exists to hold open. The flag restricts coverage to the recognised reviewer, and narrows the pending-request and prior-review terms to the same set so a human reviewer being slow cannot mask a bot review that is not coming. Run without the flag when the question is the *other* one — was this looked at by anyone — and the report will name any coverage that rests only on an unrecognised account.
+**`--automated-only` is part of the instruction, not a refinement of it —
+the bare command does not satisfy this gate.** Without the flag, coverage
+is any review by anyone who is not the PR author, and this repository is
+public: any GitHub user can submit a review object on an open PR. One
+drive-by review carrying the current head exits 0 and arms the merge this
+rule exists to hold open. The flag restricts coverage to the recognised
+reviewer. The script's `--help` explains the rest.
 
-`pr-review-status.sh` tells you which of those two states you are in. Exit 5 — `NO REVIEW COMING` — means the head advanced past the last review and none was requested; it returns immediately rather than sitting out the timeout, so a fast `--wait` there is the answer and not a failure. Ask for the review, then wait again. An `@codex review` comment is not a GitHub review *request* — `reviewRequests` stays empty — so exit 5 used to fire seconds after the ask, about the very sequence this paragraph prescribes. The tool now reads the ask out of the comment stream and reports `@codex review asked … (in flight)` instead, comparing it against the head's own commit date so that an ask predating the current head still lets exit 5 fire. The ask is deliberately not restricted to a reviewer account: it can only turn 5 into 1, never mark a head reviewed, and there is no correct list to check it against — so the report names who asked rather than filtering on it.
+**A clean review leaves no review object.** When the reviewer finds nothing
+it posts an ordinary issue comment naming what it looked at, and creates no
+review; `pr-review-status.sh` reads those as coverage. A review that
+arrives while you are still committing is a review of the wrong tree, which
+is a reason to arm late rather than a reason not to wait.
 
-**A clean review leaves no review object.** When the reviewer finds nothing it posts an ordinary issue comment naming what it looked at — `**Reviewed commit:** <sha>` — and creates no review. `pr-review-status.sh` reads those as coverage and reports them as `verdict comments`, so a passing review satisfies this rule the same way a review with findings does. Only comments from a recognised reviewer account count: this repository is public, anyone may leave a comment, and "not the PR author" would let a stranger mark a head reviewed by typing the phrase. The same is true of review **objects**, which is why `--automated-only` exists — a public repository lets any user submit one, so the negation admits a stranger on that path too. A review that arrives while you are still committing is a review of the wrong tree, which is a reason to arm late rather than a reason not to wait. If a finding lands on a PR that is already queued, `gh api graphql -f query='mutation{dequeuePullRequest(input:{id:"<pr node id>"}){mergeQueueEntry{state}}}'` takes it out of the queue so the fix goes on the same head — `gh pr merge --disable-auto` clears the standing consent but does NOT dequeue.
-
-Zero unresolved P1 or P2 findings is also a precondition for declaring a stage complete. Nothing enforces that; it is the same class of obligation as Phase 6, which no red check announces either.
-
-### Concurrent sessions, worktrees, and subagent dispatch
-
-Multiple sessions may work this repository in parallel, possibly on different hosts. **Isolation is required**, and the model is **one full `git clone` per session**. Sessions coordinate **only** through `origin`.
-
-- **Your starting directory is yours exclusively.** Assume sole ownership: `git add -A` is safe, builds and tests are trustworthy. If you observe changes you did not make — a dirty tree at start, foreign edits or files — that is a launcher misconfiguration (two sessions sharing a checkout). **Stop and report it**; do not work around it by staging selectively or committing to `main`.
-- **Never push to, rebase, or delete a branch another session created.** The `<host>/<clone>/…` prefix tells you whose it is. Same for their PRs: do not retarget, re-title, or merge them. Only answer review comments on PRs you opened.
-- **Never resolve a review thread you have not actually addressed.** Resolving signals "this was handled"; a false resolve buries the finding with nothing left to catch it.
-
-#### Subagent dispatch
-
-**Dispatching agents is OPT-IN: fan out only when the user asks for it.** A task that merely looks parallelisable is not an invitation. The isolation contract governs **how** to dispatch, never **whether**.
-
-When you do dispatch, **`isolation: "worktree"` and `model` are both required on EVERY call.** The `PreToolUse` hook in `.claude/settings.json` denies a dispatch missing either, and denies ahead of the premium-model prompt so an `ask` cannot wave a missing worktree through. **Forks (`subagent_type: "fork"`) are the only carve-out** — a fork continues this session rather than being a separate agent.
-
-- **Both apply inside a `Workflow` script too, and NOTHING ENFORCES THEM THERE.** The hook matches the tool name `Agent`, so a workflow's `agent(prompt, opts)` calls never reach it, and both fields default the wrong way: omitting `model` makes the agent inherit the **session** model, omitting `isolation` leaves it working in the **session's clone**. Write both out on every call: `agent(prompt, { model: 'haiku', isolation: 'worktree' })`.
-- **`opus` and `fable` are FORBIDDEN as subagent models** unless the user's prompt explicitly asks for that tier for that dispatch. "The task looks hard" is not authorisation; neither is "the session is already running that model". Choose the cheapest tier that can do the job: `haiku` for mechanical, well-specified work; `sonnet` for judgement work. Fan-out multiplies cost by the agent count — a large wave is a reason to drop a tier, not to keep the session's.
-- **The agent's side of the contract**: it receives a worktree path, stays inside it, and **runs no git at all** — it does not create, enter, exit, or remove a worktree, and it never commits.
-- **Only the session commits.** Collecting an agent's work is a **copy**, not a merge: read what it produced, apply it in the clone yourself, and commit there. The `worktree-agent-<id>` branch is a by-product of isolation, not a delivery mechanism; merging it would put commits in the history the session did not author.
-- **`worktree.baseRef` is pinned to `"head"`** in `.claude/settings.json`. The default (`fresh`) branches agent worktrees from `origin/<default-branch>`, so the agent sees **none** of the unmerged task branch — exactly when fan-out is worth doing. Do not revert it, and check it before diagnosing a "blind" agent.
-- **`head` is the committed HEAD, not your working tree — so COMMIT BEFORE YOU FAN OUT.** Uncommitted edits and untracked files are invisible to every agent, and an agent asked to extend work you have not committed silently reads the *previous* version and reports success against it.
-- **Partition WRITES by file set, and name that set in each prompt.** Isolation made concurrent mutation safe; it did not make it collectable. Two agents that both rewrite the same file hand the session two divergent versions and no merge. Overlapping reads are free.
-- **The harness opens the worktree; the session closes it whenever the agent did work.** The harness auto-removes only worktrees left unchanged, so every productive dispatch leaves one behind:
-  ```
-  git worktree list
-  git worktree remove --force <path> && git branch -D worktree-agent-<id>
-  git worktree prune
-  ```
-  `.claude/worktrees/` is gitignored because it sits inside the repository and each entry holds a `.git` file — without the ignore, `git add -A` stages it as an embedded repository and commits a broken gitlink.
+Zero unresolved P1 or P2 findings is also a precondition for declaring a
+stage complete. Nothing enforces that; it is the same class of obligation
+as the follow-up phase, which no red check announces either.
 
 ### Always
 
@@ -545,24 +507,29 @@ Clean up before committing: diagnostic instrumentation added during the chase, t
 
 ### Repository-wide change verification
 
-For repository-wide changes, verify at minimum:
+**`cargo xtask checks` runs every tree check; `cargo xtask ci` adds fmt,
+clippy, the workspace tests and every self-test.** Nothing short-circuits,
+so one invocation reports everything that is wrong. Run it before
+committing a repository-wide change, and read each script's `--help` for
+what it actually asserts — they are not restated here, because a list of
+one-line summaries goes stale while the scripts do not.
 
-- `git status` is understood;
-- `tools/checks/check_docs_integrity.py` is clean — every relative Markdown link and heading anchor resolves, and every YAML file and `yaml` block parses;
-- `tools/checks/check_guards_are_wired.sh` is clean — every guard is invoked by a workflow and has a self-test beside it, because one that runs nowhere passes silently-green;
-- `tools/checks/validate_adr_index.sh` is clean — every ADR is template-conformant, indexed, and digested, and its amendment record is consistent;
-- `tools/checks/scan_semantic_collisions.sh` is clean — no two branches minted the same ADR number or amendment heading;
-- `tools/checks/check_license_headers.sh` is clean — no missing Apache-2.0 header on first-party source, no foreign licence terms;
-- `tools/checks/validate_contracts.py` is clean — every wire schema is meta-valid, manifested both ways, and traceable to an ADR and a prose specification;
-- `tools/checks/verify_fixture_vectors.py` is clean — every frozen vector recomputes from its declared algorithm;
-- `tools/checks/check_stage_status.sh` is clean — every human-facing statement of the open stage agrees with `workspace.metadata.interweave.status`;
-- `tools/checks/check_component_status.sh` is clean — no component README calls itself an unimplemented placeholder while its own directory holds a manifest and source;
-- `tools/checks/check_required_contexts.sh` is clean — the workflow's job names and §9's list of required contexts are the same set;
-- `tools/checks/check_dependencies.sh` is clean — the graph satisfies `deny.toml`: no **RustSec-advisory** or yanked version, every licence on the allow-list, no wildcard requirement or shipped executable, and crates.io as the only source. RustSec is the qualifier, not decoration: `cargo-deny` reads that database and nothing else, so a GitHub-only advisory is invisible to it and the check passes truthfully while Dependabot reports a high. That gap is real today — see the `yamux` note below;
-- no forbidden production artifacts were introduced outside the active stage;
-- `git fsck --full` passes before archive handoff when a full repository ZIP is requested.
+CI still invokes the scripts by name rather than through `xtask`. That is
+deliberate: it is what makes each one visible to
+`tools/checks/check_guards_are_wired.sh`, which fails on a guard that runs
+nowhere.
 
-`cargo xtask checks` runs every tree check above in one pass, and `cargo xtask ci` adds fmt, clippy, the workspace tests, and every self-test. Nothing short-circuits, so one invocation reports everything that is wrong. CI still invokes the scripts by name — that is what makes them visible to `check_guards_are_wired.sh`.
+Two things `xtask` cannot tell you:
+
+- **`cargo-deny` reads RustSec and nothing else**, so a GitHub-only
+  advisory is invisible to it and `check_dependencies.sh` passes
+  truthfully while Dependabot reports a high. That gap is real today — see
+  the `yamux` note in §8.
+- **`git fsck --full`** before archive handoff, when a full repository ZIP
+  is requested.
+
+And the one thing no check covers: **no forbidden production artifacts
+outside the active stage** (§3).
 
 ## 10. Context loading map
 
@@ -571,7 +538,8 @@ Task-scoped context loads on demand. Do not paste it back into this file.
 - **Reading or navigating ADRs** → the `adr-lookup` skill. Digest first: `architecture/adr/ADR-DIGEST.md` keyword table, then the matching entries, then the full ADR only when your change touches its substance.
 - **Writing a new ADR, amending one, or propagating an ADR change** → the `adr-authoring` skill, with `architecture/adr/ADR-TEMPLATE.md` as the structure and ADR-0048 as the model.
 - **Why an ADR changed** → `architecture/adr/history/`. Research only; the body already says what the decision is today.
-- **Why a branch, PR, or merge step exists** → §9, plus `tools/gh/<script>.sh --help`; each script documents its own exit codes.
+- **Committing, pushing, opening a PR, arming a merge, answering findings, or dispatching a subagent** → the `pr-lifecycle` skill. §9 keeps only what you need before that skill applies: where a branch comes from, that nothing prompts before code lands, and the security-boundary review gate.
+- **What a `tools/gh/` script does, its flags and exit codes** → `tools/gh/<script>.sh --help`. Each ships its own, and a table written elsewhere goes stale while the script does not.
 - **The construction order and what may be built next** → `architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md` and ADR-0046 (§1, §3).
 
 ## 11. Working principle
