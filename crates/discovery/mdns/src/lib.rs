@@ -64,6 +64,17 @@ pub const MAX_PEERS: usize = 256;
 /// Addresses held per peer.
 pub const MAX_ADDRESSES_PER_PEER: usize = 8;
 
+/// How often a re-announcement is forwarded to the consumer.
+///
+/// mDNS re-announces constantly and the manager learns lifetimes ONLY
+/// from an observation event, so a refresh that stays inside this
+/// provider lets the manager expire a peer that is still announcing.
+/// Forwarding every announcement would be a flood; forwarding none was a
+/// liveness bug. This is the middle: a refresh is re-emitted at most once
+/// per window, which is well inside `OBSERVATION_TTL_MS` so the manager's
+/// provenance never lapses while announcements continue.
+pub const REFRESH_INTERVAL_MS: u64 = 30_000;
+
 /// How long an observation stays live without being seen again.
 ///
 /// mDNS records carry their own TTL and the backend reports expiry
@@ -77,6 +88,9 @@ pub const OBSERVATION_TTL_MS: u64 = 120_000;
 pub struct MdnsDiscovery {
     /// peer -> address -> when the observation lapses.
     seen: BTreeMap<TransportIdentity, BTreeMap<String, u64>>,
+    /// peer -> when this provider last emitted an observation for it, so
+    /// a refresh reaches the manager without every announcement doing so.
+    last_emitted: BTreeMap<TransportIdentity, u64>,
     started: bool,
     stopped: bool,
     /// Whether the backend currently has working multicast.
@@ -90,6 +104,7 @@ impl MdnsDiscovery {
     pub fn new() -> Self {
         Self {
             seen: BTreeMap::new(),
+            last_emitted: BTreeMap::new(),
             started: false,
             stopped: false,
             backend_up: true,
@@ -134,10 +149,20 @@ impl MdnsDiscovery {
         let expires_at = now_ms.saturating_add(OBSERVATION_TTL_MS);
         let refreshed = addresses.insert(address.to_owned(), expires_at).is_some();
 
-        // A REFRESH IS NOT A NEW OBSERVATION. Re-announcing the same
-        // address every few seconds is exactly what mDNS does, and
-        // emitting each one would make a quiet LAN look like a busy one.
-        if !refreshed {
+        // A NEW ADDRESS IS ALWAYS FORWARDED; a re-announcement is
+        // forwarded at most once per REFRESH_INTERVAL_MS.
+        //
+        // Emitting every announcement would make a quiet LAN look busy.
+        // Emitting NONE was worse and is the bug this shape fixes: the
+        // manager learns a lifetime only from an observation event, so a
+        // refresh that stopped here let it expire a peer that was still
+        // announcing — and this provider, still holding the record, would
+        // emit neither an expiry nor a later observation to restore it.
+        let due = self
+            .last_emitted
+            .get(&peer_id)
+            .is_none_or(|last| now_ms.saturating_sub(*last) >= REFRESH_INTERVAL_MS);
+        if !refreshed || due {
             self.queue_observation(&peer_id, now_ms);
         }
         true
@@ -162,6 +187,7 @@ impl MdnsDiscovery {
         let emptied = addresses.is_empty();
         if emptied {
             self.seen.remove(&peer_id);
+            self.last_emitted.remove(&peer_id);
         }
         self.pending.push(DiscoveryEvent::CandidateExpired {
             peer_id,
@@ -212,6 +238,7 @@ impl MdnsDiscovery {
             return;
         }
         let expires_at = addresses.values().copied().max();
+        self.last_emitted.insert(peer_id.clone(), now_ms);
         self.pending.push(DiscoveryEvent::CandidateObserved {
             candidate: Box::new(CandidatePeer {
                 peer_id: peer_id.clone(),
@@ -240,6 +267,7 @@ impl MdnsDiscovery {
             }
         }
         self.seen.retain(|_, addresses| !addresses.is_empty());
+        self.last_emitted.retain(|p, _| self.seen.contains_key(p));
         for (peer_id, addresses) in lapsed {
             self.pending.push(DiscoveryEvent::CandidateExpired {
                 peer_id,
@@ -307,6 +335,7 @@ impl DiscoveryProvider for MdnsDiscovery {
         self.stopped = true;
         self.pending.clear();
         self.seen.clear();
+        self.last_emitted.clear();
     }
 }
 
@@ -369,19 +398,57 @@ mod tests {
     }
 
     #[test]
-    fn a_re_announcement_is_not_a_new_observation() {
-        // mDNS re-announces constantly; emitting each one would make a
-        // quiet LAN look busy and would flood the manager.
+    fn re_announcements_are_coalesced_but_not_swallowed() {
+        // Both halves matter. Emitting every announcement floods the
+        // manager; emitting none lets the manager expire a peer that is
+        // still announcing, because a lifetime reaches it ONLY through an
+        // observation event.
         let mut p = started();
         p.push_discovered(P1, "/ip4/192.168.1.5/tcp/4001", 0);
         assert_eq!(observations(&p.drain_events(0, 8)).len(), 1);
+
+        // Inside the window: coalesced.
         for t in 1..10 {
             p.push_discovered(P1, "/ip4/192.168.1.5/tcp/4001", t);
         }
         assert!(
             p.drain_events(10, 8).is_empty(),
-            "a refresh extends the lifetime without re-announcing upward"
+            "a burst of re-announcements is not a burst of events"
         );
+
+        // Past the window: forwarded, so the manager's lifetime is
+        // refreshed while the peer keeps announcing.
+        p.push_discovered(P1, "/ip4/192.168.1.5/tcp/4001", REFRESH_INTERVAL_MS);
+        let seen = observations(&p.drain_events(REFRESH_INTERVAL_MS, 8));
+        assert_eq!(seen.len(), 1, "the refresh reaches the consumer");
+        assert_eq!(seen[0].0, peer(P1));
+    }
+
+    #[test]
+    fn a_peer_that_keeps_announcing_never_lapses_at_the_consumer() {
+        // The liveness property the coalescing must not break: announce
+        // every 10s for well past OBSERVATION_TTL_MS and the consumer is
+        // told often enough that its own lifetime never runs out.
+        let mut p = started();
+        let mut last_seen_at = 0u64;
+        let mut t = 0u64;
+        while t <= OBSERVATION_TTL_MS * 2 {
+            p.push_discovered(P1, "/ip4/192.168.1.5/tcp/4001", t);
+            for event in p.drain_events(t, 8) {
+                if let DiscoveryEvent::CandidateObserved { .. } = event {
+                    last_seen_at = t;
+                }
+                if let DiscoveryEvent::CandidateExpired { .. } = event {
+                    panic!("a peer that never stopped announcing was expired at {t}");
+                }
+            }
+            assert!(
+                t - last_seen_at < OBSERVATION_TTL_MS,
+                "gap of {}ms at t={t} would outlive a consumer's lifetime",
+                t - last_seen_at
+            );
+            t += 10_000;
+        }
     }
 
     #[test]
