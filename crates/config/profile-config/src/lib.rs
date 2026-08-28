@@ -74,15 +74,27 @@ impl DiscoveryProviderType {
         }
     }
 
-    /// Whether this build carries an implementation.
+    /// Whether this build can actually RUN this provider.
     ///
     /// Not a preference: it is a fact about the binary, and a profile
-    /// enabling a provider that is absent must fail loudly.
+    /// enabling a provider that cannot run must fail loudly rather than
+    /// starting a node that silently discovers nothing
+    /// (`PROVIDER-CONTRACT.md`).
+    ///
+    /// `Mdns` is false for a reason worth stating, because the crate
+    /// exists and its tests pass: `interweave-discovery-mdns` is the
+    /// NORMALIZATION half, and its multicast backend is deferred while
+    /// `libp2p-mdns` pins a `hickory-proto` carrying RUSTSEC-2026-0118
+    /// and -0119 (see the workspace manifest). Without that backend the
+    /// provider receives nothing, so an operator enabling `mdns` would
+    /// get a healthy-looking provider performing no LAN discovery — the
+    /// same silent omission the Kademlia rule exists to prevent. It flips
+    /// to true in the change that wires the backend.
     #[must_use]
     pub const fn is_implemented(self) -> bool {
         match self {
-            Self::PeerCache | Self::Mdns | Self::StaticBootstrap => true,
-            Self::Kademlia => false,
+            Self::PeerCache | Self::StaticBootstrap => true,
+            Self::Mdns | Self::Kademlia => false,
         }
     }
 }
@@ -268,7 +280,9 @@ pub const MAX_STATIC_BOOTSTRAP_PEERS: usize = 64;
 
 /// Split a `multiaddr-with-peer-id` into its address and PeerId halves.
 ///
-/// The address stays OPAQUE: this checks that the entry ends in a
+/// The address half is checked STRUCTURALLY and not against the multiaddr
+/// grammar — see the comment in the body for why, and for what that does
+/// and does not catch. This checks that the entry ends in a
 /// `/p2p/<PeerId>` component and that the identity parses, which is
 /// exactly what `StaticBootstrapDiscovery` needs to build an entry. It
 /// does not parse the rest, because the multiaddr grammar is a backend
@@ -282,6 +296,22 @@ pub fn split_peer_multiaddr(entry: &str) -> Result<(&str, TransportIdentity), &'
         .ok_or("no trailing /p2p/<PeerId> component")?;
     if address.is_empty() {
         return Err("no address before /p2p/");
+    }
+    // STRUCTURAL, not the multiaddr grammar itself: the protocol table is
+    // a backend concept, and a configuration crate importing libp2p to
+    // spell it would invert the layering `crates/api` exists to hold.
+    // This rejects `garbage/p2p/<id>` and `/ip4//tcp/1/p2p/<id>` — the
+    // shapes an operator actually typos — while `/nonsense/1/p2p/<id>`
+    // reaches the dial path, which owns that vocabulary.
+    if !address.starts_with('/') {
+        return Err("the address does not start with '/'");
+    }
+    if address
+        .split('/')
+        .skip(1)
+        .any(|component| component.is_empty())
+    {
+        return Err("the address has an empty component");
     }
     if peer.is_empty() || peer.contains('/') {
         return Err("the /p2p/ component is not a single PeerId");
@@ -1819,6 +1849,29 @@ mod tests {
     }
 
     #[test]
+    fn enabling_mdns_is_refused_while_its_backend_is_deferred() {
+        // The crate exists and its tests pass, but it is the
+        // NORMALIZATION half: without the multicast backend it receives
+        // nothing, so an operator enabling it would get a healthy-looking
+        // provider doing no LAN discovery. That is the same silent
+        // omission the Kademlia rule prevents, so it fails the same way.
+        let mut c = config(vec![endpoint("human")]);
+        c.discovery.providers.push(DiscoveryProviderConfig {
+            provider_type: DiscoveryProviderType::Mdns,
+            enabled: true,
+            priority: 20,
+            config: DiscoveryProviderSettings::default(),
+        });
+        assert!(
+            c.validate().iter().any(|e| matches!(
+                e,
+                ConfigError::DiscoveryProviderNotImplemented { provider: "mdns" }
+            )),
+            "an enabled provider with no backend must fail loudly"
+        );
+    }
+
+    #[test]
     fn a_disabled_unimplemented_provider_is_allowed() {
         // A disabled entry records an intent and starts nothing.
         let mut c = config(vec![endpoint("human")]);
@@ -1980,6 +2033,10 @@ mod tests {
         assert!(split_peer_multiaddr(&format!("/p2p/{P1}")).is_err());
         assert!(split_peer_multiaddr("/ip4/10.0.0.1/tcp/1/p2p/not-an-identity").is_err());
         assert!(split_peer_multiaddr(&format!("/ip4/10.0.0.1/tcp/1/p2p/{P1}/extra")).is_err());
+        // A valid PeerId does not launder a nonsense prefix.
+        assert!(split_peer_multiaddr(&format!("garbage/p2p/{P1}")).is_err());
+        assert!(split_peer_multiaddr(&format!("//p2p/{P1}")).is_err());
+        assert!(split_peer_multiaddr(&format!("/ip4//tcp/1/p2p/{P1}")).is_err());
     }
 
     #[test]
@@ -2011,7 +2068,7 @@ mod tests {
             "providers": [
                 {{ "type": "peer-cache", "enabled": true, "priority": 10,
                    "config": {{ "ttl": "7d", "max_entries": 1024 }} }},
-                {{ "type": "mdns", "enabled": true, "priority": 20, "config": {{}} }},
+                {{ "type": "mdns", "enabled": false, "priority": 20, "config": {{}} }},
                 {{ "type": "static-bootstrap", "enabled": true, "priority": 30,
                    "config": {{ "peers": ["/dns4/bootstrap.example.net/tcp/4001/p2p/{P1}"] }} }}
             ]
