@@ -210,8 +210,7 @@ async fn a_stale_cache_entry_then_release_yields_no_route() {
 #[tokio::test]
 async fn revoking_trust_removes_cached_directory_access_at_once() {
     let profile = profile_directory(vec![advertised("human")], Some("human"), true);
-    let (querier, _responder, peer) =
-        connected_for_directory(profile, &[("s", "human")]).await;
+    let (querier, _responder, peer) = connected_for_directory(profile, &[("s", "human")]).await;
 
     // Warm the cache: this entry stays fresh for the default 60s.
     let warm = querier
