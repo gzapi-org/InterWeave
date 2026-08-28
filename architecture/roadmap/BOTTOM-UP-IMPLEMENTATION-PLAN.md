@@ -802,13 +802,14 @@ than no block.**
   backend cache and blocks nothing.
 
 **Deferred, with the stage that owns each.** The broadcast
-`message-received` local delivery shape and `broadcast_reachability` go to
-Stage 8, where an IPC surface first carries them. `testing.md`'s
-reply-after-leave case goes to Stage 16 with the bridge: `ReplyRoute::Broadcast`
-needs a session field before that question can be asked. Session-disconnect
-cleanup — `SubscriptionRegistry::release_session` — is Stage 8 for the same
-reason as the delivery shape: a disconnect first becomes observable at the
-IPC boundary.
+`message-received` local delivery shape, `broadcast_reachability`, and
+session-disconnect cleanup — `SubscriptionRegistry::release_session` —
+all go to **Stage 13**, the daemon and desktop IPC v2. That is where a
+client session first exists to disconnect and an admin surface first
+exists to read a counter; Stage 8 is the endpoint-directory protocol and
+has neither. `testing.md`'s reply-after-leave case goes to Stage 16 with
+the bridge: `ReplyRoute::Broadcast` needs a session field before that
+question can be asked.
 
 ## 11. Stage 8 — endpoint directory
 

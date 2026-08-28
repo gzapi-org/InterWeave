@@ -66,18 +66,20 @@ MeshMessageId::as_bytes               call  MessageId::new(id.as_bytes(
 # production reads `wire_string`, and the raw accessor exists so the
 # frozen vector is compared byte-for-byte instead of through the hex
 # formatter, which would otherwise be free to agree with itself. Dated so
-# the claim is re-examined rather than left standing; if Stage 8 closes
-# with nothing calling it, the question is whether to delete it, not
-# whether to re-date it.
-TopicKey::as_bytes                     stage-8   no production caller planned — see the note above
+# the claim is re-examined rather than left standing; when that stage
+# closes with nothing calling it, the question is whether to delete it,
+# not whether to re-date it again.
+TopicKey::as_bytes                     stage-13  no production caller planned — see the note above
 
-# --- stage 8 — all three first become observable at the IPC surface: a
-# --- client disconnect is what releases a session, and the limiter's
-# --- diagnostics are what an admin surface reads.
-SubscriptionRegistry::release_session  stage-8   a client disconnect releases its joins, once IPC reports one
-SubscriptionRegistry::subscriptions    stage-8   the admin surface reads the count it bounds
-IngressLimiter::prune_idle             stage-8   the periodic sweep runs from the IPC-driven admin tick
-IngressLimiter::tracked_peers          stage-8   the admin surface reads it
+# --- stage 13 — the daemon and desktop IPC v2, which is where a client
+# --- session first exists to disconnect and an admin surface first
+# --- exists to read a counter. Stage 8 is the endpoint-directory
+# --- protocol and has neither, so dating these to it would have expired
+# --- them five stages before anything could call them.
+SubscriptionRegistry::release_session  stage-13  a client disconnect releases its joins, once IPC reports one
+SubscriptionRegistry::subscriptions    stage-13  the admin surface reads the count it bounds
+IngressLimiter::prune_idle             stage-13  the periodic sweep runs from the IPC-driven admin tick
+IngressLimiter::tracked_peers          stage-13  the admin surface reads it
 
 # --- stage 16 — the Claude bridge, where a reply route first has a
 # --- channel to resolve against (plan section 19).
