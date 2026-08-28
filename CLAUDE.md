@@ -402,7 +402,9 @@ that nothing reminds you to do — plus the `tools/gh/` tooling, the rules
 for opening a second PR alongside an open one, concurrent-session
 isolation and subagent dispatch, all live in the **`pr-lifecycle` skill**
 (§10). Load it when you are about to commit, push, open a PR, arm a merge,
-or answer findings.
+answer findings, **or dispatch a subagent** — dispatch is a trigger because
+`worktree.baseRef` is `head`, so an agent reads your last COMMIT and never
+your working tree, and the rule that follows from that is in the skill.
 
 What stays here is what a session needs *before* it knows that skill
 applies: where a branch comes from (above), that nothing prompts before
@@ -536,7 +538,7 @@ Task-scoped context loads on demand. Do not paste it back into this file.
 - **Reading or navigating ADRs** → the `adr-lookup` skill. Digest first: `architecture/adr/ADR-DIGEST.md` keyword table, then the matching entries, then the full ADR only when your change touches its substance.
 - **Writing a new ADR, amending one, or propagating an ADR change** → the `adr-authoring` skill, with `architecture/adr/ADR-TEMPLATE.md` as the structure and ADR-0048 as the model.
 - **Why an ADR changed** → `architecture/adr/history/`. Research only; the body already says what the decision is today.
-- **Committing, pushing, opening a PR, arming a merge, answering findings** → the `pr-lifecycle` skill. §9 keeps only what you need before that skill applies: where a branch comes from, that nothing prompts before code lands, and the security-boundary review gate.
+- **Committing, pushing, opening a PR, arming a merge, answering findings, or dispatching a subagent** → the `pr-lifecycle` skill. §9 keeps only what you need before that skill applies: where a branch comes from, that nothing prompts before code lands, and the security-boundary review gate.
 - **What a `tools/gh/` script does, its flags and exit codes** → `tools/gh/<script>.sh --help`. Each ships its own, and a table written elsewhere goes stale while the script does not.
 - **The construction order and what may be built next** → `architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md` and ADR-0046 (§1, §3).
 
