@@ -25,6 +25,15 @@ use crate::cache::{CacheHealth, PeerCache, SOURCE};
 /// The provider-interface version this implements.
 const INTERFACE_VERSION: &str = "1.0";
 
+/// The ceiling on events waiting to be drained.
+///
+/// Two per peer the cache can hold — one observation, one retraction —
+/// which is what a consumer draining normally ever sees at once.
+/// Per-peer coalescing bounds what one identity queues; this bounds the
+/// queue, which is the part that survives peers ageing out and being
+/// replaced by different ones.
+pub const MAX_PENDING_EVENTS: usize = 2 * crate::limits::MAX_PEERS;
+
 /// What a consumer was last told about one peer.
 ///
 /// Compared as a whole to decide re-emission: any field that a
@@ -80,6 +89,20 @@ impl PeerCacheDiscovery {
     /// Mutable access, for the flush the owner schedules.
     pub const fn cache_mut(&mut self) -> &mut PeerCache {
         &mut self.cache
+    }
+
+    /// Hold `pending` to [`MAX_PENDING_EVENTS`], oldest first.
+    ///
+    /// Oldest because a consumer this far behind has already missed more
+    /// recent news, and because refusing NEW events instead would let the
+    /// provider's view freeze at whatever filled the queue. A dropped
+    /// event costs a refresh the next drain recomputes from the cache,
+    /// which is the whole reason this provider can afford to drop one.
+    fn enforce_pending_bound(&mut self) {
+        if self.pending.len() > MAX_PENDING_EVENTS {
+            let excess = self.pending.len() - MAX_PENDING_EVENTS;
+            self.pending.drain(..excess);
+        }
     }
 
     /// Re-read the cache and queue the difference since the last look.
@@ -149,6 +172,20 @@ impl PeerCacheDiscovery {
 
             live.insert(candidate.peer_id.clone(), record);
             if changed {
+                // SUPERSEDE THE PENDING OBSERVATION FOR THIS PEER. Every
+                // reachability hint moves the record's expiry, so a
+                // stalled consumer collected one event per hint for the
+                // same peer — the cache is bounded and the queue was not.
+                // The newest snapshot strictly supersedes an undrained
+                // older one, so replacing loses nothing.
+                let peer_id = candidate.peer_id.clone();
+                self.pending.retain(|event| {
+                    !matches!(
+                        event,
+                        DiscoveryEvent::CandidateObserved { candidate }
+                            if candidate.peer_id == peer_id
+                    )
+                });
                 self.pending.push(DiscoveryEvent::CandidateObserved {
                     candidate: Box::new(candidate),
                 });
@@ -174,6 +211,7 @@ impl PeerCacheDiscovery {
             });
         }
         self.emitted = live;
+        self.enforce_pending_bound();
     }
 }
 
@@ -307,6 +345,29 @@ mod tests {
 
     const P1: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
     const P2: &str = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
+
+    /// A synthetic well-formed identity, for tests needing more peers
+    /// than there are named constants. The PeerId grammar checked here is
+    /// a prefix, an alphabet and a length with no checksum, so a
+    /// generated id is as valid to this provider as a captured one.
+    fn synthetic(cycle: u64, n: usize) -> TransportIdentity {
+        const B58: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+        let mut tail = [b'1'; 44];
+        let (mut v, mut i) = (cycle as usize * 100_000 + n, 43usize);
+        loop {
+            tail[i] = B58[v % B58.len()];
+            v /= B58.len();
+            if v == 0 || i == 0 {
+                break;
+            }
+            i -= 1;
+        }
+        TransportIdentity::parse(format!(
+            "12D3KooW{}",
+            core::str::from_utf8(&tail).expect("ascii")
+        ))
+        .expect("matches the grammar")
+    }
 
     fn peer(s: &str) -> TransportIdentity {
         TransportIdentity::parse(s).expect("valid identity")
@@ -781,6 +842,100 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, DiscoveryEvent::CandidateExpired { .. })),
             "nothing was dropped, so nothing is retracted: {events:?}"
+        );
+    }
+    #[test]
+    fn repeated_hints_for_one_peer_do_not_grow_the_queue() {
+        // Every reachability hint moves the record's expiry, so each one
+        // was a change and each change appended an event. The cache is
+        // bounded; the queue was not.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut p = provider(&dir);
+        p.start(0).expect("start");
+        let _ = p.drain_events(0, 64);
+
+        for i in 1..=2_000u64 {
+            p.add_hint(
+                PeerHint::ObservedReachable {
+                    peer_id: peer(P1),
+                    address: "/ip4/10.0.0.1/tcp/1".to_owned(),
+                    observed_at: i,
+                },
+                i,
+            );
+            // Drain nothing: the stalled consumer.
+            let _ = p.drain_events(i, 0);
+        }
+
+        let queued = p.drain_events(2_000, usize::MAX);
+        let observations = queued
+            .iter()
+            .filter(|e| matches!(e, DiscoveryEvent::CandidateObserved { .. }))
+            .count();
+        assert_eq!(
+            observations, 1,
+            "one peer holds one pending observation however many hints \
+             arrived, got {observations}"
+        );
+    }
+
+    #[test]
+    fn the_pending_queue_has_a_total_bound_across_peers() {
+        // Per-peer coalescing bounds what one identity queues. Peers age
+        // out and are replaced by different ones, which is what the total
+        // bound is for.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut p = provider(&dir);
+        p.start(0).expect("start");
+        let _ = p.drain_events(0, 64);
+
+        let mut now = 1u64;
+        for cycle in 0..8u64 {
+            for i in 0..crate::limits::MAX_PEERS {
+                p.cache_mut()
+                    .record_success(&synthetic(cycle, i), "/ip4/10.0.0.1/tcp/1", now)
+                    .expect("within the cache's own bounds");
+            }
+            // Observe them WHILE THEY ARE FRESH — draining after the TTL
+            // had already passed made an earlier version of this test
+            // vacuous: every peer aged out before `refresh` looked, so it
+            // asserted a bound on an empty queue and passed with the
+            // bound removed.
+            let _ = p.drain_events(now, 0);
+            now += crate::limits::DEFAULT_TTL_MS + 1;
+        }
+
+        let queued = p.drain_events(now, usize::MAX);
+        assert!(
+            !queued.is_empty(),
+            "the scenario must actually queue events, or the bound below \
+             is asserted against nothing"
+        );
+        assert!(
+            queued.len() <= MAX_PENDING_EVENTS,
+            "the queue stays within its total bound, got {}",
+            queued.len()
+        );
+    }
+
+    #[test]
+    fn a_consumer_that_drains_normally_still_sees_every_peer() {
+        // The control: the cap must not be reachable in ordinary use.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut p = provider(&dir);
+        p.start(0).expect("start");
+        let _ = p.drain_events(0, 64);
+
+        for i in 0..64 {
+            p.cache_mut()
+                .record_success(&synthetic(0, i), "/ip4/10.0.0.1/tcp/1", 10)
+                .ok();
+        }
+        let drained = p.drain_events(10, usize::MAX);
+        assert_eq!(
+            candidate_events(&drained).len(),
+            64,
+            "every peer recorded is still reported"
         );
     }
 }
