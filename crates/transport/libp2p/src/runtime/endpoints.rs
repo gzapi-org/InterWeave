@@ -77,6 +77,9 @@ pub struct DirectoryResult {
     /// Freshness deadline in this node's monotonic-ms frame; the entry is
     /// good until then.
     pub fresh_until_ms: u64,
+    /// The remote's own build timestamp, wall-clock epoch-ms. Diagnostic
+    /// ONLY — never freshness, which starts at local receipt.
+    pub generated_at_ms: u64,
     /// Whether the answer came from cache rather than the wire.
     pub cached: bool,
     /// Whether the remote sent an unsorted list that was sorted locally.
@@ -146,6 +149,15 @@ enum Answer {
     Refused(DirectoryRefusal),
 }
 
+/// The two clocks a directory event reads: monotonic for budgets and
+/// cache freshness, wall for the diagnostic `generated_at_ms`. Grouped so
+/// the handler's signature stays within bounds, the same shape `DirectTick`
+/// uses.
+pub(super) struct EndpointsTick {
+    pub(super) now_ms: u64,
+    pub(super) wall_ms: u64,
+}
+
 /// One directory-protocol event, or the event handed back untouched.
 pub(super) fn handle_endpoints(
     event: Libp2pSwarmEvent<SubstrateBehaviourEvent>,
@@ -154,8 +166,9 @@ pub(super) fn handle_endpoints(
     directory: &mut DirectoryState,
     manager: &interweave_transport_runtime::ConnectionManager,
     pending: &mut HashMap<OutboundRequestId, PendingQuery>,
-    now_ms: u64,
+    tick: EndpointsTick,
 ) -> Handled {
+    let EndpointsTick { now_ms, wall_ms } = tick;
     let Libp2pSwarmEvent::Behaviour(SubstrateBehaviourEvent::Endpoints(event)) = event else {
         return Handled::Passed(Box::new(event));
     };
@@ -174,7 +187,7 @@ pub(super) fn handle_endpoints(
             let Ok(querier) = to_transport_identity(&peer) else {
                 return Handled::Consumed;
             };
-            let answer = build_answer(&querier, direct_state, directory, manager, now_ms);
+            let answer = build_answer(&querier, direct_state, directory, manager, now_ms, wall_ms);
             let response = match answer {
                 Answer::Directory(directory) => DirectoryResponse::Directory(directory),
                 Answer::Refused(reason) => DirectoryResponse::Refused(reason),
@@ -259,6 +272,7 @@ fn build_answer(
     directory: &mut DirectoryState,
     manager: &interweave_transport_runtime::ConnectionManager,
     now_ms: u64,
+    wall_ms: u64,
 ) -> Answer {
     // DISABLED OR DRAINING FIRST: neither reveals anything about any
     // endpoint, and both are true before trust is even consulted.
@@ -278,7 +292,11 @@ fn build_answer(
     }
     let endpoints = direct_state.advertised_for(querier);
     Answer::Directory(EndpointDirectoryV1 {
-        generated_at_ms: now_ms,
+        // WALL CLOCK, not monotonic: this is a diagnostic epoch-ms
+        // timestamp a remote reads, and `now_ms` here is elapsed since
+        // THIS runtime started — near zero after a restart. Budget and
+        // cache freshness stay on `now_ms`; only this field is wall time.
+        generated_at_ms: wall_ms,
         ttl_ms: directory.local_cache_ttl_ms,
         endpoints,
     })
@@ -310,6 +328,7 @@ fn receive(
                 Ok(DirectoryResult {
                     endpoints: entry.endpoints.clone(),
                     fresh_until_ms: entry.fresh_until_ms,
+                    generated_at_ms: entry.generated_at_ms,
                     cached: false,
                     noncanonical,
                 })
@@ -360,6 +379,7 @@ pub(super) fn begin_query<'a>(
         let _ = reply.send(Ok(DirectoryResult {
             endpoints: entry.endpoints.clone(),
             fresh_until_ms: entry.fresh_until_ms,
+            generated_at_ms: entry.generated_at_ms,
             cached: true,
             noncanonical: entry.noncanonical,
         }));

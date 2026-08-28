@@ -904,7 +904,10 @@ impl SwarmRuntime {
                             &mut directory_state,
                             &manager,
                             &mut pending_endpoints,
-                            now_ms(started),
+                            endpoints::EndpointsTick {
+                                now_ms: now_ms(started),
+                                wall_ms: wall_ms(),
+                            },
                         ) {
                             endpoints::Handled::Consumed => continue,
                             endpoints::Handled::Passed(event) => *event,

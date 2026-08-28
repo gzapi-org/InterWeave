@@ -479,6 +479,39 @@ async fn a_draining_node_refuses_a_new_directory_query() {
     assert_eq!(error, TransportError::ShuttingDown);
 }
 
+/// generated_at_ms is a wall-clock epoch-ms timestamp, not monotonic
+/// elapsed since the responder started — otherwise a consumer rendering
+/// it would show a 1970 date after every restart.
+///
+/// Mutation: set generated_at_ms from now_ms (monotonic) and the value
+/// falls below the epoch threshold, since a freshly started runtime's
+/// elapsed time is a few milliseconds.
+#[tokio::test]
+async fn generated_at_ms_is_wall_clock_not_monotonic() {
+    let profile = profile_directory(vec![advertised("human")], Some("human"), true);
+    let (querier, _responder, peer) = connected_for_directory(profile, &[("s", "human")]).await;
+
+    let result = querier
+        .query_endpoints(peer)
+        .await
+        .expect("command")
+        .expect("directory");
+
+    // 2020-01-01 in epoch-ms. A wall clock is well past it; monotonic
+    // elapsed since a runtime that started moments ago is a handful of ms.
+    const YEAR_2020_MS: u64 = 1_577_836_800_000;
+    assert!(
+        result.generated_at_ms > YEAR_2020_MS,
+        "generated_at_ms {} is not a wall-clock timestamp",
+        result.generated_at_ms
+    );
+    // And it is NOT used for freshness: fresh_until is from local receipt.
+    assert!(
+        result.fresh_until_ms < YEAR_2020_MS,
+        "freshness is monotonic-framed"
+    );
+}
+
 /// The exit gate: route discovery works without entering broadcast,
 /// peer discovery, or Kademlia state. The querier configures no channels
 /// and adds no addresses beyond the dial, and the query still succeeds.
