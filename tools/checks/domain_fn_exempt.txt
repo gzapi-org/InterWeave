@@ -106,7 +106,8 @@ Refusal::to_wire                                 call  refusal.to_wire(
 
 
 # --- stage-8 -----------------------------------------------------
-DirectoryBudget::begin_exchange                  call  .budget.begin_exchange(
+DirectoryBudget::charge_rate                     call  .budget.charge_rate(
+DirectoryBudget::reserve                         call  .budget.reserve(
 DirectoryBudget::end_exchange                    call  .budget.end_exchange(
 DirectoryBudget::inflight                        stage-13  in-flight count surfaced by admin.* directory diagnostics
 DirectoryBudget::with_defaults                   call  DirectoryBudget::with_defaults(

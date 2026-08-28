@@ -137,31 +137,48 @@ impl DirectoryBudget {
         })
     }
 
-    /// Charge one query from `peer` and reserve one in-flight slot.
+    /// Reserve one in-flight slot for a queued response — ANY response.
     ///
-    /// The peer's rate is charged FIRST, so a peer over its own limit does
-    /// not hold an in-flight slot on the way to being refused —
-    /// `a_peer_over_its_rate_does_not_hold_a_slot`. On success the caller
-    /// owes an [`end_exchange`](Self::end_exchange).
+    /// The in-flight bound counts every response this node has queued but
+    /// not yet written, a refusal as much as a directory, because each one
+    /// widens `polling_room`'s slack until it is written. A refusal that
+    /// skipped this could grow that slack past the ceiling — which is why
+    /// the responder reserves BEFORE deciding the response, and drops the
+    /// query (answers nothing) when no slot remains rather than queueing a
+    /// refusal that would not fit. On success the caller owes an
+    /// [`end_exchange`](Self::end_exchange).
     ///
     /// # Errors
-    /// Returns [`BudgetDenial`]; both are coarse `overloaded` on the wire.
-    pub fn begin_exchange(
-        &mut self,
-        peer: &TransportIdentity,
-        now_ms: u64,
-    ) -> Result<(), BudgetDenial> {
-        match self.per_peer.admit(peer, now_ms) {
-            Ok(()) => {}
-            Err(IngressDenial::PerPeerExhausted | IngressDenial::GlobalExhausted) => {
-                return Err(BudgetDenial::PeerExhausted);
-            }
-        }
+    /// [`BudgetDenial::InFlightExhausted`] when the ceiling is reached.
+    pub fn reserve(&mut self) -> Result<(), BudgetDenial> {
         if self.inflight >= self.max_inflight {
             return Err(BudgetDenial::InFlightExhausted);
         }
         self.inflight += 1;
         Ok(())
+    }
+
+    /// Charge one query against `peer`'s rate — only for a real directory.
+    ///
+    /// Separate from [`reserve`](Self::reserve): the in-flight bound counts
+    /// every queued response, but the per-peer RATE limits how often a peer
+    /// earns an actual endpoint list. A refusal does not charge the rate,
+    /// so an unauthorized or disabled query cannot exhaust a peer's own
+    /// budget — only a served directory does.
+    ///
+    /// # Errors
+    /// [`BudgetDenial::PeerExhausted`] when the peer is over its rate.
+    pub fn charge_rate(
+        &mut self,
+        peer: &TransportIdentity,
+        now_ms: u64,
+    ) -> Result<(), BudgetDenial> {
+        match self.per_peer.admit(peer, now_ms) {
+            Ok(()) => Ok(()),
+            Err(IngressDenial::PerPeerExhausted | IngressDenial::GlobalExhausted) => {
+                Err(BudgetDenial::PeerExhausted)
+            }
+        }
     }
 
     /// Release one in-flight slot.
@@ -509,62 +526,65 @@ mod tests {
     // --- the budget --------------------------------------------------------
 
     #[test]
-    fn the_thirteenth_query_in_a_minute_is_refused() {
+    fn the_thirteenth_rate_charge_in_a_minute_is_refused() {
+        // charge_rate limits how often a peer earns a real directory.
         let mut b = DirectoryBudget::with_defaults(0);
         for _ in 0..12 {
-            b.begin_exchange(&peer(P1), 0).expect("within budget");
-            b.end_exchange();
+            b.charge_rate(&peer(P1), 0).expect("within budget");
         }
         assert_eq!(
-            b.begin_exchange(&peer(P1), 0),
+            b.charge_rate(&peer(P1), 0),
             Err(BudgetDenial::PeerExhausted)
         );
-        // Another peer is unaffected: the bound is per PeerId.
-        assert!(b.begin_exchange(&peer(P2), 0).is_ok());
-        b.end_exchange();
+        // Another peer is unaffected: the rate is per PeerId.
+        assert!(b.charge_rate(&peer(P2), 0).is_ok());
         // And a minute later the first peer is admitted again.
-        assert!(b.begin_exchange(&peer(P1), 60_000).is_ok());
+        assert!(b.charge_rate(&peer(P1), 60_000).is_ok());
     }
 
     #[test]
-    fn the_seventeenth_exchange_in_flight_is_refused() {
-        // One peer with rate to spare holds sixteen exchanges open; the
-        // in-flight bound, not the rate, refuses the seventeenth.
+    fn the_seventeenth_reserved_response_is_refused() {
+        // reserve() bounds concurrent queued responses, refusals included;
+        // the in-flight ceiling, not any peer's rate, refuses the 17th.
         let mut b = DirectoryBudget::new(60, 16, 0).expect("valid");
         for _ in 0..16 {
-            b.begin_exchange(&peer(P1), 0)
-                .expect("within the in-flight bound");
+            b.reserve().expect("within the in-flight bound");
         }
         assert_eq!(b.inflight(), 16);
         assert_eq!(
-            b.begin_exchange(&peer(P2), 0),
+            b.reserve(),
             Err(BudgetDenial::InFlightExhausted),
-            "the bound is per PROFILE: a different peer is refused too"
+            "the in-flight bound is per PROFILE, not per peer"
         );
     }
 
     #[test]
-    fn ending_an_exchange_admits_the_next() {
+    fn ending_a_response_admits_the_next() {
         let mut b = DirectoryBudget::new(60, 1, 0).expect("valid");
-        b.begin_exchange(&peer(P1), 0).expect("first");
-        assert_eq!(
-            b.begin_exchange(&peer(P2), 0),
-            Err(BudgetDenial::InFlightExhausted)
-        );
+        b.reserve().expect("first");
+        assert_eq!(b.reserve(), Err(BudgetDenial::InFlightExhausted));
         b.end_exchange();
-        assert!(b.begin_exchange(&peer(P2), 0).is_ok());
+        assert!(b.reserve().is_ok());
     }
 
     #[test]
-    fn a_peer_over_its_rate_does_not_hold_a_slot() {
-        let mut b = DirectoryBudget::new(1, 1, 0).expect("valid");
-        b.begin_exchange(&peer(P1), 0).expect("first");
-        b.end_exchange();
+    fn a_refusal_reserves_a_slot_but_charges_no_rate() {
+        // A peer over its rate still holds an in-flight slot for the
+        // refusal it is about to be sent — that response is queued work,
+        // and the slot is released when it settles. What it does NOT do is
+        // charge the rate a second time.
+        let mut b = DirectoryBudget::new(1, 4, 0).expect("valid");
+        b.charge_rate(&peer(P1), 0).expect("first real directory");
         assert_eq!(
-            b.begin_exchange(&peer(P1), 0),
+            b.charge_rate(&peer(P1), 0),
             Err(BudgetDenial::PeerExhausted)
         );
-        assert_eq!(b.inflight(), 0, "a refused query reserves nothing");
+        // The refusal for that over-rate query still reserves a slot.
+        b.reserve()
+            .expect("a refusal is queued work and holds a slot");
+        assert_eq!(b.inflight(), 1);
+        b.end_exchange();
+        assert_eq!(b.inflight(), 0);
     }
 
     #[test]

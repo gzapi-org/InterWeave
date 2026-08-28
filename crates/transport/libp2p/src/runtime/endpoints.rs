@@ -102,25 +102,20 @@ pub(super) struct DirectoryState {
     pub(super) budget: DirectoryBudget,
     /// The local cache TTL term of the clamp, in ms.
     pub(super) local_cache_ttl_ms: u32,
-    /// Inbound queries whose answer is queued but not yet written —
-    /// EVERY answer, a refusal as much as a directory.
+    /// Inbound queries whose answer is queued but not yet written, and the
+    /// in-flight slot each one holds.
     ///
-    /// Read by `shutdown_settled` so an accepted control response is not
-    /// dropped by an early exit. A refusal is a queued response too, so it
-    /// earns the same grace; tracking only directories here (which was the
-    /// bug) let a shutdown racing a refusal drop it.
+    /// Every id here reserved a budget slot before its response was
+    /// decided — a refusal as much as a directory — and releases it when
+    /// the response settles, so the in-flight ceiling bounds queued
+    /// responses of every kind. It is also what `shutdown_settled` and
+    /// `polling_room` read: the slot-holder set and the queued-answer set
+    /// are the same set.
     ///
     /// A set, not a count, for the same reason `DirectState::answering`
     /// is: an `InboundFailure` for a query never queued must release
     /// nothing that belongs to another.
     pub(super) answering: std::collections::BTreeSet<libp2p::request_response::InboundRequestId>,
-    /// The subset of `answering` that also holds an in-flight BUDGET slot.
-    ///
-    /// Only an admitted directory reserved one, so only those ids release
-    /// one when they settle — separating "needs shutdown grace" (every
-    /// queued response) from "holds a budget slot" (admitted directories
-    /// only), which the single set used to conflate.
-    pub(super) budgeted: std::collections::BTreeSet<libp2p::request_response::InboundRequestId>,
 }
 
 impl DirectoryState {
@@ -132,7 +127,6 @@ impl DirectoryState {
             budget: DirectoryBudget::with_defaults(now_ms),
             local_cache_ttl_ms,
             answering: std::collections::BTreeSet::new(),
-            budgeted: std::collections::BTreeSet::new(),
         }
     }
 
@@ -141,12 +135,6 @@ impl DirectoryState {
     pub(super) fn answering(&self) -> usize {
         self.answering.len()
     }
-}
-
-/// The outcome of trying to build a directory for a querying peer.
-enum Answer {
-    Directory(EndpointDirectoryV1),
-    Refused(DirectoryRefusal),
 }
 
 /// The two clocks a directory event reads: monotonic for budgets and
@@ -187,26 +175,23 @@ pub(super) fn handle_endpoints(
             let Ok(querier) = to_transport_identity(&peer) else {
                 return Handled::Consumed;
             };
-            let answer = build_answer(&querier, direct_state, directory, manager, now_ms, wall_ms);
-            let response = match answer {
-                Answer::Directory(directory) => DirectoryResponse::Directory(directory),
-                Answer::Refused(reason) => DirectoryResponse::Refused(reason),
-            };
-            // A DIRECTORY HOLDS A BUDGET SLOT; a refusal does not, but
-            // BOTH are queued responses that earn the shutdown grace. Only
-            // `build_answer` reserving a slot returns a Directory, so that
-            // is what `budgeted` tracks; `answering` tracks every response
-            // that was actually queued, so a shutdown racing a refusal
-            // does not drop it.
-            let admitted = matches!(response, DirectoryResponse::Directory(_));
+            // RESERVE A SLOT BEFORE DECIDING THE RESPONSE. Every queued
+            // response — a refusal as much as a directory — holds one
+            // in-flight slot, because each widens `polling_room`'s slack
+            // until written. No slot left: drop the query and answer
+            // nothing, a valid coarse outcome under overload that, unlike
+            // queueing a refusal that does not fit, adds no slack.
+            if directory.budget.reserve().is_err() {
+                return Handled::Consumed;
+            }
+            let response =
+                build_answer(&querier, direct_state, directory, manager, now_ms, wall_ms);
             if swarm.answer_endpoints(channel, response).is_ok() {
+                // The reserved slot is now held by this queued response and
+                // released when it settles.
                 directory.answering.insert(request_id);
-                if admitted {
-                    directory.budgeted.insert(request_id);
-                }
-            } else if admitted {
-                // The answer never left; give the slot straight back. It
-                // was never in `answering`, so there is nothing to grace.
+            } else {
+                // The answer never left; give the slot straight back.
                 directory.budget.end_exchange();
             }
             Handled::Consumed
@@ -251,12 +236,10 @@ pub(super) fn handle_endpoints(
 
         RrEvent::InboundFailure { request_id, .. } | RrEvent::ResponseSent { request_id, .. } => {
             // The answer is written or its stream died; either way it is no
-            // longer queued, so it leaves `answering` and stops holding the
-            // grace. A budget slot is released only if this response held
-            // one — a refusal did not — and keyed by the id so a query this
-            // side never queued releases nothing that belongs to another.
-            directory.answering.remove(&request_id);
-            if directory.budgeted.remove(&request_id) {
+            // longer queued, so it leaves `answering` and releases the slot
+            // it held. Keyed by the id, so a query this side never queued
+            // releases nothing that belongs to another exchange.
+            if directory.answering.remove(&request_id) {
                 directory.budget.end_exchange();
             }
             Handled::Consumed
@@ -264,8 +247,9 @@ pub(super) fn handle_endpoints(
     }
 }
 
-/// Decide what to answer a querying peer — and reserve an in-flight slot
-/// exactly when the answer is a directory.
+/// Decide what to answer a querying peer. The caller has already reserved
+/// an in-flight slot; this only charges the per-peer RATE, and only when
+/// it is about to serve a real directory.
 fn build_answer(
     querier: &TransportIdentity,
     direct_state: &DirectState,
@@ -273,25 +257,26 @@ fn build_answer(
     manager: &interweave_transport_runtime::ConnectionManager,
     now_ms: u64,
     wall_ms: u64,
-) -> Answer {
+) -> DirectoryResponse {
     // DISABLED OR DRAINING FIRST: neither reveals anything about any
     // endpoint, and both are true before trust is even consulted.
     if !direct_state.directory_enabled() || manager.is_draining() {
-        return Answer::Refused(DirectoryRefusal::Unavailable);
+        return DirectoryResponse::Refused(DirectoryRefusal::Unavailable);
     }
     // DATA-PLANE TRUST is the admission. An infrastructure-only peer is
     // not data-plane trusted, so ADR-0036's "no endpoint directory" falls
     // out of the same check rather than needing its own.
     if manager.classify(querier) != ConnectionClass::DataPlaneTrusted {
-        return Answer::Refused(DirectoryRefusal::Unauthorized);
+        return DirectoryResponse::Refused(DirectoryRefusal::Unauthorized);
     }
-    // THE BUDGET, which reserves an in-flight slot on success. A refusal
-    // holds nothing.
-    if directory.budget.begin_exchange(querier, now_ms).is_err() {
-        return Answer::Refused(DirectoryRefusal::Overloaded);
+    // THE PER-PEER RATE, charged only for a served directory. A refusal
+    // does not charge it, so an unauthorized or disabled query cannot
+    // spend a peer's own budget.
+    if directory.budget.charge_rate(querier, now_ms).is_err() {
+        return DirectoryResponse::Refused(DirectoryRefusal::Overloaded);
     }
     let endpoints = direct_state.advertised_for(querier);
-    Answer::Directory(EndpointDirectoryV1 {
+    DirectoryResponse::Directory(EndpointDirectoryV1 {
         // WALL CLOCK, not monotonic: this is a diagnostic epoch-ms
         // timestamp a remote reads, and `now_ms` here is elapsed since
         // THIS runtime started — near zero after a restart. Budget and
