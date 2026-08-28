@@ -340,6 +340,16 @@ Commit messages are project files for the purposes of §7 — do not cite unrela
 
 Steps 4–5 are **unconditional**: the step-2 lookup only speaks when a PR already exists.
 
+**Step 4 destroys uncommitted work, so the rule that guards it is here and
+not in a skill.** Your starting directory is yours exclusively: assume sole
+ownership, and `git add -A`, builds and tests are all trustworthy. If you
+observe changes you did not make — a dirty tree at start, foreign edits, or
+files you did not create — that is a launcher misconfiguration, two
+sessions sharing one checkout. **Stop and report it. Do not reset, do not
+stage selectively, do not commit to `main` to get clear of it.** A
+`reset --hard` in that state erases another session's uncommitted work, and
+nothing afterwards can tell you it happened.
+
 ### Nothing prompts before code lands — the discipline below is all there is
 
 `.claude/settings.json` carries an empty `"ask"`. `git push`, `gh pr merge`,

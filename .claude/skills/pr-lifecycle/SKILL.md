@@ -157,12 +157,10 @@ Multiple sessions may work this repository in parallel, possibly on
 different hosts. **Isolation is required**, and the model is **one full
 `git clone` per session**. Sessions coordinate **only** through `origin`.
 
-- **Your starting directory is yours exclusively.** Assume sole ownership:
-  `git add -A` is safe, builds and tests are trustworthy. If you observe
-  changes you did not make — a dirty tree at start, foreign edits or files
-  — that is a launcher misconfiguration (two sessions sharing a checkout).
-  **Stop and report it**; do not work around it by staging selectively or
-  committing to `main`.
+- **Your starting directory is yours exclusively**, and the rule for what
+  to do when it is not — stop and report, never reset — lives in
+  `CLAUDE.md` §9 beside the `reset --hard` it guards, because that step
+  runs at task start and this skill loads later.
 - **Never push to, rebase, or delete a branch another session created.**
   The `<host>/<clone>/…` prefix tells you whose it is. Same for their PRs:
   do not retarget, re-title, or merge them. Only answer review comments on
