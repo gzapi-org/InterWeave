@@ -205,6 +205,51 @@ impl DirectoryBudget {
         self.inflight = self.inflight.saturating_sub(1);
     }
 
+    /// Update the rate and concurrency limits WITHOUT discarding the live
+    /// in-flight count.
+    ///
+    /// A profile reload changes the limits but must not forget the
+    /// responses already queued: rebuilding the whole budget would reset
+    /// `inflight` to zero while the responder still holds those slots, so
+    /// a reload could admit another full batch over the ceiling and later
+    /// completions would decrement a count that never included them. This
+    /// preserves `inflight`, so a tightened `max_inflight` simply admits
+    /// nothing new until enough of the live exchanges settle —
+    /// `set_limits_preserves_the_live_in_flight_count`.
+    ///
+    /// The per-peer rate buckets DO reset, which is acceptable: a
+    /// reconfigure is an operator action, and a fresh rate window is not
+    /// the accounting hazard the in-flight count is.
+    ///
+    /// # Errors
+    /// [`BudgetConfigError`] for a zero or above-ceiling value, the same
+    /// as [`new`](Self::new).
+    pub fn set_limits(
+        &mut self,
+        queries_per_peer_per_minute: u32,
+        max_inflight: usize,
+        now_ms: u64,
+    ) -> Result<(), BudgetConfigError> {
+        if queries_per_peer_per_minute == 0
+            || queries_per_peer_per_minute > MAX_QUERIES_PER_PEER_PER_MINUTE
+        {
+            return Err(BudgetConfigError::QueriesPerPeer(
+                queries_per_peer_per_minute,
+            ));
+        }
+        if max_inflight == 0 || max_inflight > MAX_INFLIGHT_CEILING {
+            return Err(BudgetConfigError::MaxInflight(max_inflight));
+        }
+        self.per_peer = IngressLimiter::per_peer_only(
+            queries_per_peer_per_minute,
+            queries_per_peer_per_minute,
+            now_ms,
+        );
+        self.max_inflight = max_inflight;
+        // `inflight` is deliberately untouched.
+        Ok(())
+    }
+
     /// Exchanges currently in flight.
     #[must_use]
     pub const fn inflight(&self) -> usize {
@@ -621,6 +666,45 @@ mod tests {
             Some(BudgetConfigError::MaxInflight(65))
         );
         assert!(DirectoryBudget::new(60, 64, 0).is_ok());
+    }
+
+    #[test]
+    fn set_limits_preserves_the_live_in_flight_count() {
+        let mut b = DirectoryBudget::new(12, 16, 0).expect("valid");
+        // Two exchanges in flight.
+        b.reserve().expect("first");
+        b.reserve().expect("second");
+        assert_eq!(b.inflight(), 2);
+
+        // Reload to a TIGHTER concurrency of one. The live count is kept,
+        // so nothing new is admitted until enough settle.
+        b.set_limits(12, 1, 60_000).expect("valid limits");
+        assert_eq!(b.inflight(), 2, "the live count survives the reload");
+        assert_eq!(
+            b.reserve(),
+            Err(BudgetDenial::InFlightExhausted),
+            "already over the tightened ceiling"
+        );
+        // Two completions bring it under the new ceiling.
+        b.end_exchange();
+        b.end_exchange();
+        assert_eq!(b.inflight(), 0);
+        assert!(b.reserve().is_ok());
+    }
+
+    #[test]
+    fn set_limits_rejects_out_of_range() {
+        let mut b = DirectoryBudget::new(12, 16, 0).expect("valid");
+        assert_eq!(
+            b.set_limits(0, 16, 0).err(),
+            Some(BudgetConfigError::QueriesPerPeer(0))
+        );
+        assert_eq!(
+            b.set_limits(12, 0, 0).err(),
+            Some(BudgetConfigError::MaxInflight(0))
+        );
+        // A rejected reload leaves the budget as it was.
+        assert_eq!(b.inflight(), 0);
     }
 
     #[test]
