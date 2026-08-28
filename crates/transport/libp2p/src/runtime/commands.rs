@@ -633,9 +633,15 @@ pub(super) fn handle_command(
             // The cache may answer without a packet; otherwise this
             // dispatches one exchange and records it, and the response
             // arm in `endpoints` replies to the caller when it settles.
-            if let Some((request_id, pending)) =
-                super::endpoints::begin_query(swarm, directory_state, manager, &peer, now_ms, reply)
-            {
+            if let Some((request_id, pending)) = super::endpoints::begin_query(
+                swarm,
+                directory_state,
+                manager,
+                pending_endpoints.values().map(|q| &q.peer),
+                &peer,
+                now_ms,
+                reply,
+            ) {
                 pending_endpoints.insert(request_id, pending);
             }
         }

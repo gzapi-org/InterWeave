@@ -32,6 +32,43 @@ use crate::gated_swarm::GatedSwarm;
 use super::direct::DirectState;
 use super::to_transport_identity;
 
+/// Outbound directory queries allowed in flight at once, in total.
+///
+/// The requester's mirror of `admit_outbound` for direct sends: the
+/// command channel is drained continuously, so without a cap here a
+/// caller can queue more uncached queries than either the peer or the
+/// outbox can absorb — and each pending query also widens `polling_room`,
+/// weakening the outbox bound it is supposed to respect. Set at the
+/// responder's in-flight ceiling, since a profile that answers 64 at once
+/// has no reason to originate more.
+const MAX_OUTBOUND_DIRECTORY: usize = 64;
+
+/// Outbound directory queries allowed in flight to any one peer.
+///
+/// Small on purpose: concurrent queries to the SAME peer all return that
+/// peer's one directory, so more than a few in flight is pure waste. A
+/// cap rather than coalescing, matching the direct path.
+const MAX_OUTBOUND_DIRECTORY_PER_PEER: usize = 4;
+
+/// Whether one more outbound query to `peer` fits both bounds.
+fn admit_query_dispatch<'a>(
+    in_flight: impl Iterator<Item = &'a TransportIdentity>,
+    peer: &TransportIdentity,
+) -> Result<(), DirectError> {
+    let mut total: usize = 0;
+    let mut for_peer: usize = 0;
+    for held in in_flight {
+        total = total.saturating_add(1);
+        if held == peer {
+            for_peer = for_peer.saturating_add(1);
+        }
+    }
+    if total >= MAX_OUTBOUND_DIRECTORY || for_peer >= MAX_OUTBOUND_DIRECTORY_PER_PEER {
+        return Err(DirectError::Overloaded);
+    }
+    Ok(())
+}
+
 /// What a caller learns from a directory query.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectoryResult {
@@ -253,10 +290,11 @@ fn receive(
 /// has already been replied to; `Ok(Some(id))` when an exchange was
 /// dispatched and its answer will arrive as a `Response` event; `Err`
 /// when nothing could be sent.
-pub(super) fn begin_query(
+pub(super) fn begin_query<'a>(
     swarm: &mut GatedSwarm,
     directory: &mut DirectoryState,
     manager: &interweave_transport_runtime::ConnectionManager,
+    in_flight: impl Iterator<Item = &'a TransportIdentity>,
     peer: &TransportIdentity,
     now_ms: u64,
     reply: oneshot::Sender<Result<DirectoryResult, DirectError>>,
@@ -277,6 +315,14 @@ pub(super) fn begin_query(
     // locally without a packet, the same class the responder checks.
     if manager.classify(peer) != ConnectionClass::DataPlaneTrusted {
         let _ = reply.send(Err(DirectError::UnauthorizedPeer));
+        return None;
+    }
+    // BOUNDED BEFORE DISPATCH, like a direct send. A cache miss to a
+    // connected peer would otherwise queue an unbounded number of
+    // outbound exchanges, each holding a `pending_endpoints` entry and a
+    // `polling_room` slot until it settles.
+    if let Err(refused) = admit_query_dispatch(in_flight, peer) {
+        let _ = reply.send(Err(refused));
         return None;
     }
     let Ok(peer_id) = super::to_peer_id(peer) else {
@@ -323,4 +369,53 @@ fn outbound_error(error: &libp2p::request_response::OutboundFailure) -> DirectEr
 pub(super) enum Handled {
     Consumed,
     Passed(Box<Libp2pSwarmEvent<SubstrateBehaviourEvent>>),
+}
+
+#[cfg(test)]
+mod bound_tests {
+    use super::{MAX_OUTBOUND_DIRECTORY, MAX_OUTBOUND_DIRECTORY_PER_PEER, admit_query_dispatch};
+    use interweave_transport_api::{TransportError as DirectError, TransportIdentity};
+
+    const P1: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+    const P2: &str = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
+
+    fn identity(s: &str) -> TransportIdentity {
+        TransportIdentity::parse(s).expect("valid identity")
+    }
+
+    #[test]
+    fn nothing_in_flight_is_admitted() {
+        assert!(admit_query_dispatch(std::iter::empty(), &identity(P1)).is_ok());
+    }
+
+    #[test]
+    fn the_per_peer_cap_refuses_the_next_to_that_peer() {
+        let held: Vec<TransportIdentity> = std::iter::repeat_with(|| identity(P1))
+            .take(MAX_OUTBOUND_DIRECTORY_PER_PEER)
+            .collect();
+        assert_eq!(
+            admit_query_dispatch(held.iter(), &identity(P1)),
+            Err(DirectError::Overloaded),
+            "a fifth concurrent query to one peer is refused"
+        );
+        // A DIFFERENT peer, under both caps, is unaffected.
+        assert!(
+            admit_query_dispatch(held.iter(), &identity(P2)).is_ok(),
+            "the per-peer cap is per peer"
+        );
+    }
+
+    #[test]
+    fn the_total_cap_refuses_even_a_fresh_peer() {
+        // The ceiling reached entirely by OTHER peers, so the querier's
+        // own per-peer count is zero and only the total bound can refuse.
+        let held: Vec<TransportIdentity> = std::iter::repeat_with(|| identity(P2))
+            .take(MAX_OUTBOUND_DIRECTORY)
+            .collect();
+        assert_eq!(
+            admit_query_dispatch(held.iter(), &identity(P1)),
+            Err(DirectError::Overloaded),
+            "at the total ceiling, even a peer with nothing in flight waits"
+        );
+    }
 }
