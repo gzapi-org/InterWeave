@@ -1,0 +1,1059 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Andrea Benetton
+//! Candidate aggregation across discovery providers (ADR-0006, ADR-0007).
+//!
+//! `DiscoveryManager` is the only consumer of a `DiscoveryProvider`
+//! (`PROVIDER-CONTRACT.md`), and this is its state: providers report
+//! observations, this merges them, and what comes out is a bounded set of
+//! candidate peers a CONSUMER may consider dialling.
+//!
+//! # What this deliberately cannot do
+//!
+//! It does not dial, does not own a Swarm, and **never mutates trust**
+//! (ADR-0011, ADR-0012). A [`PeerTrustPolicy`] appears in exactly one
+//! place — eviction ORDER — because `architecture/discovery/DESIGN.md`
+//! says overflow evicts "least-recently-observed untrusted candidates",
+//! and answering "is this one untrusted" is a read. Nothing here writes
+//! it, and no method returns a trust decision to a caller.
+//!
+//! # Merge model (`COMPOSITION.md`)
+//!
+//! Candidates are keyed by PeerId. Each address carries one provenance
+//! record PER SOURCE, so two providers reporting the same address are two
+//! records with independent lifetimes: an address disappears only when no
+//! live source still supports it, and a peer disappears when no addresses
+//! remain. Protocol observations are merged separately by `(peer,
+//! protocol, source)` and **never keep an otherwise expired peer alive** —
+//! they are facts about a peer, not evidence it is still there.
+//!
+//! # Time is a parameter
+//!
+//! Every method that can expire something takes `now_ms`. No clock is read
+//! here, so expiry is tested by enumeration rather than by sleeping — the
+//! same shape as `dedup.rs` and `directory.rs`.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use interweave_discovery_api::{
+    CandidatePeer, DiscoveryEvent, ProtocolId, ProviderDescriptor, ProviderHealth,
+};
+use interweave_transport_api::TransportIdentity;
+use interweave_trust_api::PeerTrustPolicy;
+
+/// Aggregate candidate PeerIds (`DESIGN.md`).
+pub const MAX_CANDIDATES: usize = 4096;
+/// Addresses retained per candidate peer.
+pub const MAX_ADDRESSES_PER_PEER: usize = 16;
+/// Provenance records retained per address — one per source.
+pub const MAX_PROVENANCE_PER_ADDRESS: usize = 8;
+/// Protocol observations retained per peer.
+pub const MAX_OBSERVATIONS_PER_PEER: usize = 16;
+
+/// Registered providers, which also bounds how many can be composed.
+pub const MAX_PROVIDERS: usize = 16;
+
+/// The default lifetime applied to an observation whose provider does not
+/// express expiry.
+///
+/// `CandidatePeer::expires_at` of `None` means "this provider does not
+/// model expiry", NOT "this is permanent" — the type's own documentation
+/// says so, and the manager is where the bound it promises gets applied.
+/// Ten minutes: long enough that a static entry refreshed on reload
+/// survives, short enough that a stale LAN address does not outlive the
+/// laptop that left.
+pub const DEFAULT_OBSERVATION_TTL_MS: u64 = 600_000;
+
+/// Why an event was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RejectedEvent {
+    /// The event's `source` is not the registered name of the provider
+    /// that emitted it.
+    ///
+    /// Provenance is the twelfth conformance guarantee, and it is only
+    /// checkable because a provider's descriptor name is the source it
+    /// stamps. A provider claiming another's name would launder a
+    /// candidate's origin, so the manager refuses rather than rewrites.
+    SourceMismatch {
+        /// The provider that emitted it.
+        expected: String,
+        /// The name the event carried.
+        got: String,
+    },
+    /// The candidate failed its own contract validation.
+    InvalidCandidate,
+    /// No provider is registered under that name.
+    UnknownProvider,
+}
+
+/// One source's support for one address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Provenance {
+    source: String,
+    observed_at: u64,
+    expires_at: u64,
+}
+
+/// One peer's aggregated reachability.
+#[derive(Debug, Clone, Default)]
+struct Entry {
+    /// address -> the sources supporting it, each with its own lifetime.
+    addresses: BTreeMap<String, Vec<Provenance>>,
+    /// `(protocol, source)` -> (supported, observed_at, expires_at).
+    observations: BTreeMap<(ProtocolId, String), (bool, u64, u64)>,
+    /// The most recent observation of this peer from any source, for the
+    /// least-recently-observed half of the eviction rule.
+    last_observed_ms: u64,
+}
+
+/// A candidate as a consumer sees it: the merged address set and the
+/// sources that vouch for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggregatedCandidate {
+    /// Which peer.
+    pub peer_id: TransportIdentity,
+    /// Every address at least one live source still supports.
+    pub addresses: BTreeSet<String>,
+    /// Every source currently supporting at least one of those addresses.
+    pub sources: BTreeSet<String>,
+    /// The most recent observation across sources.
+    pub last_observed_ms: u64,
+}
+
+/// The merged candidate set.
+///
+/// Bounded in three dimensions, because a set fed by a LAN multicast any
+/// host can send to is a map an unauthorized party grows.
+#[derive(Debug, Clone, Default)]
+pub struct CandidateSet {
+    peers: BTreeMap<TransportIdentity, Entry>,
+}
+
+impl CandidateSet {
+    /// An empty set.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            peers: BTreeMap::new(),
+        }
+    }
+
+    /// Candidates currently supported by at least one live source.
+    #[must_use]
+    pub fn candidates(&self, now_ms: u64) -> Vec<AggregatedCandidate> {
+        self.peers
+            .iter()
+            .filter_map(|(peer_id, entry)| {
+                let mut addresses = BTreeSet::new();
+                let mut sources = BTreeSet::new();
+                for (address, records) in &entry.addresses {
+                    for record in records.iter().filter(|r| now_ms < r.expires_at) {
+                        addresses.insert(address.clone());
+                        sources.insert(record.source.clone());
+                    }
+                }
+                // A PEER WITH NO LIVE ADDRESS IS NOT A CANDIDATE. Protocol
+                // observations are deliberately not consulted here: they
+                // never keep a peer alive (`COMPOSITION.md`).
+                if addresses.is_empty() {
+                    return None;
+                }
+                Some(AggregatedCandidate {
+                    peer_id: peer_id.clone(),
+                    addresses,
+                    sources,
+                    last_observed_ms: entry.last_observed_ms,
+                })
+            })
+            .collect()
+    }
+
+    /// Peers held, live or not.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.peers.len()
+    }
+
+    /// Whether nothing is held.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.peers.is_empty()
+    }
+
+    /// Drop every provenance record and observation that has expired, and
+    /// every peer left with no addresses.
+    pub fn sweep(&mut self, now_ms: u64) {
+        for entry in self.peers.values_mut() {
+            for records in entry.addresses.values_mut() {
+                records.retain(|r| now_ms < r.expires_at);
+            }
+            entry.addresses.retain(|_, records| !records.is_empty());
+            entry.observations.retain(|_, (_, _, exp)| now_ms < *exp);
+        }
+        self.peers.retain(|_, e| !e.addresses.is_empty());
+    }
+
+    /// Record an observation from `source`.
+    ///
+    /// The observation's lifetime is its own `expires_at` when the
+    /// provider expresses one, else `now_ms + DEFAULT_OBSERVATION_TTL_MS`.
+    fn observe(&mut self, candidate: &CandidatePeer, now_ms: u64, trust: &PeerTrustPolicy) {
+        let expires_at = candidate
+            .expires_at
+            .unwrap_or_else(|| now_ms.saturating_add(DEFAULT_OBSERVATION_TTL_MS));
+
+        if !self.peers.contains_key(&candidate.peer_id) && self.peers.len() >= MAX_CANDIDATES {
+            self.evict_one(now_ms, trust);
+            if self.peers.len() >= MAX_CANDIDATES {
+                // Nothing could be evicted — every slot is a live trusted
+                // candidate. Refusing the new one is correct: the bound is
+                // the bound, and dropping a trusted peer for an unknown
+                // one is what an attacker would want.
+                return;
+            }
+        }
+
+        let entry = self.peers.entry(candidate.peer_id.clone()).or_default();
+        entry.last_observed_ms = entry.last_observed_ms.max(candidate.observed_at);
+
+        for address in &candidate.addresses {
+            if !entry.addresses.contains_key(address)
+                && entry.addresses.len() >= MAX_ADDRESSES_PER_PEER
+            {
+                continue;
+            }
+            let records = entry.addresses.entry(address.clone()).or_default();
+            // ONE RECORD PER SOURCE. Re-observing refreshes that source's
+            // lifetime and leaves every other source's alone, which is
+            // what makes "the address dies when no source supports it"
+            // mean something.
+            if let Some(existing) = records.iter_mut().find(|r| r.source == candidate.source) {
+                existing.observed_at = candidate.observed_at;
+                existing.expires_at = expires_at;
+            } else if records.len() < MAX_PROVENANCE_PER_ADDRESS {
+                records.push(Provenance {
+                    source: candidate.source.clone(),
+                    observed_at: candidate.observed_at,
+                    expires_at,
+                });
+            }
+        }
+
+        for observation in &candidate.protocol_observations {
+            let key = (observation.protocol_id.clone(), candidate.source.clone());
+            if !entry.observations.contains_key(&key)
+                && entry.observations.len() >= MAX_OBSERVATIONS_PER_PEER
+            {
+                continue;
+            }
+            entry.observations.insert(
+                key,
+                (observation.supported, observation.observed_at, expires_at),
+            );
+        }
+    }
+
+    /// Retract `source`'s support: the named addresses, or all of them.
+    fn retract(&mut self, peer_id: &TransportIdentity, source: &str, addresses: &BTreeSet<String>) {
+        let Some(entry) = self.peers.get_mut(peer_id) else {
+            return;
+        };
+        for (address, records) in &mut entry.addresses {
+            if addresses.is_empty() || addresses.contains(address) {
+                records.retain(|r| r.source != source);
+            }
+        }
+        entry.addresses.retain(|_, records| !records.is_empty());
+        if addresses.is_empty() {
+            entry.observations.retain(|(_, s), _| s != source);
+        }
+        if entry.addresses.is_empty() {
+            self.peers.remove(peer_id);
+        }
+    }
+
+    /// Make room: an expired peer first, then the least recently observed
+    /// UNTRUSTED one.
+    ///
+    /// Trust is read for ORDER and nothing else (ADR-0012). A trusted peer
+    /// is preferred over an untrusted one under pressure — it is not
+    /// granted anything, and an untrusted candidate that survives is not
+    /// thereby endorsed.
+    fn evict_one(&mut self, now_ms: u64, trust: &PeerTrustPolicy) {
+        let expired: Option<TransportIdentity> = self
+            .peers
+            .iter()
+            .find(|(_, e)| {
+                e.addresses
+                    .values()
+                    .all(|rs| rs.iter().all(|r| now_ms >= r.expires_at))
+            })
+            .map(|(p, _)| p.clone());
+        if let Some(peer) = expired {
+            self.peers.remove(&peer);
+            return;
+        }
+        let victim = self
+            .peers
+            .iter()
+            .filter(|(peer, _)| !trust.decide(peer).is_allowed())
+            .min_by_key(|(_, e)| e.last_observed_ms)
+            .map(|(p, _)| p.clone());
+        if let Some(peer) = victim {
+            self.peers.remove(&peer);
+        }
+    }
+}
+
+/// One registered provider's identity and composition settings.
+#[derive(Debug, Clone)]
+struct Registered {
+    descriptor: ProviderDescriptor,
+    /// Guidance for address selection, never trust (ADR-0007).
+    priority: i32,
+    health: ProviderHealth,
+}
+
+/// Composes providers and owns the merged candidate set.
+///
+/// The manager never holds the providers themselves: it is a pure state
+/// machine, and whoever owns the provider objects drains them and hands
+/// the events here. That keeps every I/O-shaped concern — tasks, sockets,
+/// files — outside a module whose rules are worth testing by enumeration.
+#[derive(Debug, Default)]
+pub struct DiscoveryManager {
+    providers: BTreeMap<String, Registered>,
+    candidates: CandidateSet,
+}
+
+impl DiscoveryManager {
+    /// An empty manager.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            providers: BTreeMap::new(),
+            candidates: CandidateSet::new(),
+        }
+    }
+
+    /// Register a provider under its descriptor's name.
+    ///
+    /// The descriptor is validated here: a provider whose name breaks the
+    /// contract's bounds cannot be composed, and the name is what every
+    /// later provenance check compares against.
+    ///
+    /// # Errors
+    /// The descriptor's own validation error, or `None` when the registry
+    /// is full — `MAX_PROVIDERS` mirrors the config schema's
+    /// `providers: list[ProviderConfig, max=16]`.
+    pub fn register(
+        &mut self,
+        descriptor: ProviderDescriptor,
+        priority: i32,
+    ) -> Result<(), interweave_discovery_api::DiscoveryError> {
+        descriptor.validate()?;
+        if !self.providers.contains_key(&descriptor.name) && self.providers.len() >= MAX_PROVIDERS {
+            return Err(interweave_discovery_api::DiscoveryError::TooManyItems {
+                field: "providers",
+                got: self.providers.len() + 1,
+                max: MAX_PROVIDERS,
+            });
+        }
+        self.providers.insert(
+            descriptor.name.clone(),
+            Registered {
+                descriptor,
+                priority,
+                // A registered provider has not started yet, and
+                // `DISCOVERY.md` gives a provider no events before start.
+                health: ProviderHealth::Unavailable,
+            },
+        );
+        Ok(())
+    }
+
+    /// Providers registered.
+    #[must_use]
+    pub fn provider_count(&self) -> usize {
+        self.providers.len()
+    }
+
+    /// One provider's last reported health, if it is registered.
+    #[must_use]
+    pub fn provider_health(&self, name: &str) -> Option<ProviderHealth> {
+        self.providers.get(name).map(|p| p.health)
+    }
+
+    /// A provider's composition priority, if it is registered.
+    #[must_use]
+    pub fn provider_priority(&self, name: &str) -> Option<i32> {
+        self.providers.get(name).map(|p| p.priority)
+    }
+
+    /// Aggregate discovery health (`DISCOVERY.md`).
+    ///
+    /// Healthy when any provider is healthy — the transport can be fine
+    /// with one provider degraded, and reporting the worst would make a
+    /// disabled-multicast laptop look broken. Unavailable only when every
+    /// provider is, which is the state that actually means "no discovery".
+    #[must_use]
+    pub fn aggregate_health(&self) -> ProviderHealth {
+        if self.providers.is_empty() {
+            return ProviderHealth::Unavailable;
+        }
+        if self
+            .providers
+            .values()
+            .any(|p| p.health == ProviderHealth::Healthy)
+        {
+            ProviderHealth::Healthy
+        } else if self
+            .providers
+            .values()
+            .any(|p| p.health == ProviderHealth::Degraded)
+        {
+            ProviderHealth::Degraded
+        } else {
+            ProviderHealth::Unavailable
+        }
+    }
+
+    /// Take one event from `source`.
+    ///
+    /// # Errors
+    /// [`RejectedEvent`] when the provider is unknown, the event's own
+    /// source does not match it, or a candidate fails validation. A
+    /// refusal changes nothing: a malformed event from one provider must
+    /// not disturb another's state (conformance: failure isolation).
+    pub fn on_event(
+        &mut self,
+        source: &str,
+        event: DiscoveryEvent,
+        now_ms: u64,
+        trust: &PeerTrustPolicy,
+    ) -> Result<(), RejectedEvent> {
+        if !self.providers.contains_key(source) {
+            return Err(RejectedEvent::UnknownProvider);
+        }
+        match event {
+            DiscoveryEvent::CandidateObserved { candidate } => {
+                if candidate.source != source {
+                    return Err(RejectedEvent::SourceMismatch {
+                        expected: source.to_owned(),
+                        got: candidate.source.clone(),
+                    });
+                }
+                candidate
+                    .validate()
+                    .map_err(|_| RejectedEvent::InvalidCandidate)?;
+                self.candidates.observe(&candidate, now_ms, trust);
+                Ok(())
+            }
+            DiscoveryEvent::CandidateExpired {
+                peer_id,
+                source: event_source,
+                addresses,
+            } => {
+                if event_source != source {
+                    return Err(RejectedEvent::SourceMismatch {
+                        expected: source.to_owned(),
+                        got: event_source,
+                    });
+                }
+                self.candidates.retract(&peer_id, source, &addresses);
+                Ok(())
+            }
+            DiscoveryEvent::HealthChanged {
+                source: event_source,
+                health,
+            } => {
+                if event_source != source {
+                    return Err(RejectedEvent::SourceMismatch {
+                        expected: source.to_owned(),
+                        got: event_source,
+                    });
+                }
+                if let Some(registered) = self.providers.get_mut(source) {
+                    registered.health = health;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Drop everything that has expired at `now_ms`.
+    pub fn sweep(&mut self, now_ms: u64) {
+        self.candidates.sweep(now_ms);
+    }
+
+    /// The merged candidates a consumer may consider.
+    ///
+    /// ADVISORY. Nothing here has been dialled, trusted, or promised to be
+    /// reachable; a consumer still passes every dial through admission.
+    #[must_use]
+    pub fn candidates(&self, now_ms: u64) -> Vec<AggregatedCandidate> {
+        self.candidates.candidates(now_ms)
+    }
+
+    /// Peers held in the merged set, live or not.
+    #[must_use]
+    pub fn candidate_count(&self) -> usize {
+        self.candidates.len()
+    }
+
+    /// The descriptor a provider registered with.
+    #[must_use]
+    pub fn descriptor(&self, name: &str) -> Option<&ProviderDescriptor> {
+        self.providers.get(name).map(|p| &p.descriptor)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use interweave_discovery_api::{ProtocolObservation, ProviderMode, ProviderScope};
+
+    const P1: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+    const P2: &str = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
+    const P3: &str = "12D3KooWQYV9dGMFoRzNStwpXztXaBUjtPqi6aU76ZgUriHhKust";
+
+    fn peer(s: &str) -> TransportIdentity {
+        TransportIdentity::parse(s).expect("valid identity")
+    }
+    fn trusting(peers: &[&str]) -> PeerTrustPolicy {
+        PeerTrustPolicy::new(peers.iter().map(|p| peer(p)).collect::<Vec<_>>()).expect("policy")
+    }
+    fn nobody() -> PeerTrustPolicy {
+        PeerTrustPolicy::new(Vec::new()).expect("policy")
+    }
+    fn descriptor(name: &str) -> ProviderDescriptor {
+        ProviderDescriptor {
+            name: name.to_owned(),
+            interface_version: "1.0".to_owned(),
+            config_version: None,
+            scope: ProviderScope::Configured,
+            mode: ProviderMode::Passive,
+            supports_expiry: true,
+            supports_hints: false,
+        }
+    }
+    fn candidate(
+        p: &str,
+        source: &str,
+        addrs: &[&str],
+        at: u64,
+        exp: Option<u64>,
+    ) -> CandidatePeer {
+        CandidatePeer {
+            peer_id: peer(p),
+            addresses: addrs.iter().map(|a| (*a).to_owned()).collect(),
+            source: source.to_owned(),
+            observed_at: at,
+            expires_at: exp,
+            protocol_observations: BTreeSet::new(),
+        }
+    }
+    fn observed(c: CandidatePeer) -> DiscoveryEvent {
+        DiscoveryEvent::CandidateObserved {
+            candidate: Box::new(c),
+        }
+    }
+    fn manager_with(names: &[&str]) -> DiscoveryManager {
+        let mut m = DiscoveryManager::new();
+        for n in names {
+            m.register(descriptor(n), 0).expect("registers");
+        }
+        m
+    }
+
+    #[test]
+    fn two_providers_reporting_one_peer_merge_into_one_candidate() {
+        let mut m = manager_with(&["a", "b"]);
+        m.on_event(
+            "a",
+            observed(candidate(P1, "a", &["/addr/1"], 0, None)),
+            0,
+            &nobody(),
+        )
+        .expect("accepted");
+        m.on_event(
+            "b",
+            observed(candidate(P1, "b", &["/addr/2"], 0, None)),
+            0,
+            &nobody(),
+        )
+        .expect("accepted");
+
+        let c = m.candidates(0);
+        assert_eq!(c.len(), 1, "one peer, not one per provider");
+        assert_eq!(c[0].addresses.len(), 2, "address sets merge");
+        assert_eq!(
+            c[0].sources,
+            ["a".to_owned(), "b".to_owned()].into_iter().collect(),
+            "both sources vouch for it"
+        );
+    }
+
+    #[test]
+    fn an_address_survives_until_no_live_source_supports_it() {
+        // The rule COMPOSITION.md states, and the reason provenance is
+        // per source rather than a single lifetime per address: `a`
+        // expires at 100, `b` at 200, so the shared address lives to 200.
+        let mut m = manager_with(&["a", "b"]);
+        m.on_event(
+            "a",
+            observed(candidate(P1, "a", &["/shared"], 0, Some(100))),
+            0,
+            &nobody(),
+        )
+        .expect("accepted");
+        m.on_event(
+            "b",
+            observed(candidate(P1, "b", &["/shared"], 0, Some(200))),
+            0,
+            &nobody(),
+        )
+        .expect("accepted");
+
+        assert_eq!(m.candidates(150).len(), 1, "b still supports it at 150");
+        assert_eq!(
+            m.candidates(150)[0].sources,
+            ["b".to_owned()].into_iter().collect(),
+            "and only b does"
+        );
+        assert!(m.candidates(200).is_empty(), "no live source at 200");
+    }
+
+    #[test]
+    fn a_peer_disappears_when_its_last_address_does() {
+        let mut m = manager_with(&["a"]);
+        m.on_event(
+            "a",
+            observed(candidate(P1, "a", &["/one"], 0, Some(50))),
+            0,
+            &nobody(),
+        )
+        .expect("accepted");
+        assert_eq!(m.candidates(0).len(), 1);
+        assert!(m.candidates(50).is_empty());
+        m.sweep(50);
+        assert_eq!(m.candidate_count(), 0, "swept, not merely hidden");
+    }
+
+    #[test]
+    fn protocol_observations_never_keep_a_peer_alive() {
+        // COMPOSITION.md: observations are facts about a peer, not
+        // evidence it is still reachable. A peer whose addresses all
+        // expired is gone even with a live observation attached.
+        let mut m = manager_with(&["a"]);
+        let mut c = candidate(P1, "a", &["/one"], 0, Some(50));
+        c.protocol_observations.insert(ProtocolObservation {
+            protocol_id: ProtocolId::parse("/interweave/direct/2.0.0").expect("valid"),
+            supported: true,
+            observed_at: 0,
+        });
+        m.on_event("a", observed(c), 0, &nobody())
+            .expect("accepted");
+        assert!(
+            m.candidates(50).is_empty(),
+            "the observation must not resurrect the peer"
+        );
+    }
+
+    #[test]
+    fn re_observing_refreshes_only_that_sources_lifetime() {
+        let mut m = manager_with(&["a", "b"]);
+        m.on_event(
+            "a",
+            observed(candidate(P1, "a", &["/shared"], 0, Some(100))),
+            0,
+            &nobody(),
+        )
+        .expect("accepted");
+        m.on_event(
+            "b",
+            observed(candidate(P1, "b", &["/shared"], 0, Some(100))),
+            0,
+            &nobody(),
+        )
+        .expect("accepted");
+        // `a` re-observes at 90 with a longer life; `b` is untouched.
+        m.on_event(
+            "a",
+            observed(candidate(P1, "a", &["/shared"], 90, Some(500))),
+            90,
+            &nobody(),
+        )
+        .expect("accepted");
+
+        let at_200 = m.candidates(200);
+        assert_eq!(at_200.len(), 1);
+        assert_eq!(
+            at_200[0].sources,
+            ["a".to_owned()].into_iter().collect(),
+            "b's record expired on its own schedule"
+        );
+    }
+
+    #[test]
+    fn a_selective_retraction_drops_only_the_named_address() {
+        let mut m = manager_with(&["a"]);
+        m.on_event(
+            "a",
+            observed(candidate(P1, "a", &["/one", "/two"], 0, None)),
+            0,
+            &nobody(),
+        )
+        .expect("accepted");
+        m.on_event(
+            "a",
+            DiscoveryEvent::CandidateExpired {
+                peer_id: peer(P1),
+                source: "a".to_owned(),
+                addresses: ["/one".to_owned()].into_iter().collect(),
+            },
+            1,
+            &nobody(),
+        )
+        .expect("accepted");
+
+        let c = m.candidates(1);
+        assert_eq!(c.len(), 1);
+        assert_eq!(
+            c[0].addresses,
+            ["/two".to_owned()].into_iter().collect(),
+            "only the named address went"
+        );
+    }
+
+    #[test]
+    fn an_empty_retraction_drops_the_whole_source() {
+        let mut m = manager_with(&["a", "b"]);
+        m.on_event(
+            "a",
+            observed(candidate(P1, "a", &["/one"], 0, None)),
+            0,
+            &nobody(),
+        )
+        .expect("accepted");
+        m.on_event(
+            "b",
+            observed(candidate(P1, "b", &["/two"], 0, None)),
+            0,
+            &nobody(),
+        )
+        .expect("accepted");
+        m.on_event(
+            "a",
+            DiscoveryEvent::CandidateExpired {
+                peer_id: peer(P1),
+                source: "a".to_owned(),
+                addresses: BTreeSet::new(),
+            },
+            1,
+            &nobody(),
+        )
+        .expect("accepted");
+
+        let c = m.candidates(1);
+        assert_eq!(c[0].sources, ["b".to_owned()].into_iter().collect());
+        assert_eq!(c[0].addresses, ["/two".to_owned()].into_iter().collect());
+    }
+
+    #[test]
+    fn an_event_naming_another_providers_source_is_refused() {
+        // Provenance (conformance #12): a provider cannot launder a
+        // candidate's origin by stamping someone else's name.
+        let mut m = manager_with(&["a", "b"]);
+        let err = m
+            .on_event(
+                "a",
+                observed(candidate(P1, "b", &["/x"], 0, None)),
+                0,
+                &nobody(),
+            )
+            .expect_err("a cannot speak as b");
+        assert_eq!(
+            err,
+            RejectedEvent::SourceMismatch {
+                expected: "a".to_owned(),
+                got: "b".to_owned()
+            }
+        );
+        assert!(m.candidates(0).is_empty(), "and nothing was recorded");
+    }
+
+    #[test]
+    fn an_unregistered_provider_is_refused() {
+        let mut m = manager_with(&["a"]);
+        assert_eq!(
+            m.on_event(
+                "ghost",
+                observed(candidate(P1, "ghost", &["/x"], 0, None)),
+                0,
+                &nobody()
+            ),
+            Err(RejectedEvent::UnknownProvider)
+        );
+    }
+
+    #[test]
+    fn an_invalid_candidate_is_refused_and_changes_nothing() {
+        let mut m = manager_with(&["a"]);
+        m.on_event(
+            "a",
+            observed(candidate(P1, "a", &["/good"], 0, None)),
+            0,
+            &nobody(),
+        )
+        .expect("accepted");
+        // expires_at before observed_at: the candidate's own validation
+        // refuses it, and the good one is untouched.
+        let bad = candidate(P2, "a", &["/bad"], 100, Some(50));
+        assert_eq!(
+            m.on_event("a", observed(bad), 100, &nobody()),
+            Err(RejectedEvent::InvalidCandidate)
+        );
+        let c = m.candidates(0);
+        assert_eq!(c.len(), 1, "the earlier candidate survives");
+        assert_eq!(c[0].peer_id, peer(P1));
+    }
+
+    #[test]
+    fn a_provider_without_expiry_still_gets_a_bounded_lifetime() {
+        // `expires_at: None` means "this provider does not model expiry",
+        // not "permanent" — the manager applies the bound the type's own
+        // documentation promises.
+        let mut m = manager_with(&["a"]);
+        m.on_event(
+            "a",
+            observed(candidate(P1, "a", &["/one"], 0, None)),
+            0,
+            &nobody(),
+        )
+        .expect("accepted");
+        assert_eq!(m.candidates(DEFAULT_OBSERVATION_TTL_MS - 1).len(), 1);
+        assert!(
+            m.candidates(DEFAULT_OBSERVATION_TTL_MS).is_empty(),
+            "an unexpiring provider does not produce an eternal candidate"
+        );
+    }
+
+    #[test]
+    fn addresses_per_peer_are_bounded() {
+        let mut m = manager_with(&["a"]);
+        let many: Vec<String> = (0..MAX_ADDRESSES_PER_PEER + 8)
+            .map(|i| format!("/addr/{i}"))
+            .collect();
+        let refs: Vec<&str> = many.iter().map(String::as_str).collect();
+        m.on_event(
+            "a",
+            observed(candidate(P1, "a", &refs, 0, None)),
+            0,
+            &nobody(),
+        )
+        .expect("accepted");
+        assert_eq!(m.candidates(0)[0].addresses.len(), MAX_ADDRESSES_PER_PEER);
+    }
+
+    #[test]
+    fn provenance_per_address_is_bounded() {
+        let names: Vec<String> = (0..MAX_PROVENANCE_PER_ADDRESS + 4)
+            .map(|i| format!("p{i}"))
+            .collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut m = manager_with(&refs);
+        for n in &refs {
+            m.on_event(
+                n,
+                observed(candidate(P1, n, &["/shared"], 0, None)),
+                0,
+                &nobody(),
+            )
+            .expect("accepted");
+        }
+        // Every source vouches for the same address, but only the first
+        // eight records are kept.
+        assert_eq!(
+            m.candidates(0)[0].sources.len(),
+            MAX_PROVENANCE_PER_ADDRESS,
+            "the provenance list is capped"
+        );
+    }
+
+    #[test]
+    fn eviction_takes_an_expired_peer_before_a_live_one() {
+        let mut m = manager_with(&["a"]);
+        // Fill to the cap: one expired, the rest live.
+        m.on_event(
+            "a",
+            observed(candidate(P1, "a", &["/x"], 0, Some(10))),
+            0,
+            &nobody(),
+        )
+        .expect("accepted");
+        for i in 0..MAX_CANDIDATES - 1 {
+            let id = synthetic(i);
+            m.on_event(
+                "a",
+                observed(candidate(&id, "a", &["/y"], 0, Some(1_000))),
+                0,
+                &nobody(),
+            )
+            .expect("accepted");
+        }
+        assert_eq!(m.candidate_count(), MAX_CANDIDATES);
+        // One more, at a time when P1 has expired: P1 is the victim.
+        m.on_event(
+            "a",
+            observed(candidate(P2, "a", &["/z"], 20, Some(1_000))),
+            20,
+            &nobody(),
+        )
+        .expect("accepted");
+        assert_eq!(m.candidate_count(), MAX_CANDIDATES);
+        assert!(
+            m.candidates(20).iter().any(|c| c.peer_id == peer(P2)),
+            "the new candidate was admitted"
+        );
+        assert!(
+            !m.candidates(20).iter().any(|c| c.peer_id == peer(P1)),
+            "the expired one made room"
+        );
+    }
+
+    #[test]
+    fn eviction_prefers_an_untrusted_peer_over_a_trusted_one() {
+        // Trust is read for ORDER only (ADR-0012). P1 is trusted and the
+        // OLDEST, so a rule that ignored trust would evict it; the rule
+        // that reads trust takes the untrusted P2 instead.
+        let trust = trusting(&[P1]);
+        let mut m = manager_with(&["a"]);
+        m.on_event(
+            "a",
+            observed(candidate(P1, "a", &["/x"], 1, Some(9_000))),
+            1,
+            &trust,
+        )
+        .expect("accepted");
+        m.on_event(
+            "a",
+            observed(candidate(P2, "a", &["/y"], 2, Some(9_000))),
+            2,
+            &trust,
+        )
+        .expect("accepted");
+        for i in 0..MAX_CANDIDATES - 2 {
+            let id = synthetic(i);
+            m.on_event(
+                "a",
+                observed(candidate(&id, "a", &["/z"], 5, Some(9_000))),
+                5,
+                &trust,
+            )
+            .expect("accepted");
+        }
+        assert_eq!(m.candidate_count(), MAX_CANDIDATES);
+
+        m.on_event(
+            "a",
+            observed(candidate(P3, "a", &["/w"], 6, Some(9_000))),
+            6,
+            &trust,
+        )
+        .expect("accepted");
+        let live: Vec<TransportIdentity> = m.candidates(6).into_iter().map(|c| c.peer_id).collect();
+        assert!(live.contains(&peer(P1)), "the trusted peer was kept");
+        assert!(!live.contains(&peer(P2)), "the untrusted one was evicted");
+    }
+
+    /// A distinct valid PeerId per index, for the bound tests.
+    fn synthetic(i: usize) -> String {
+        // Ed25519 identity PeerIds are `12D3KooW` + 44 base58 chars. Vary
+        // the tail deterministically over the base58 alphabet.
+        const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+        let mut s = String::from("12D3KooW");
+        let mut n = i;
+        for _ in 0..44 {
+            s.push(char::from(ALPHABET[n % ALPHABET.len()]));
+            n /= ALPHABET.len();
+        }
+        s
+    }
+
+    #[test]
+    fn registration_validates_the_descriptor_and_is_bounded() {
+        let mut m = DiscoveryManager::new();
+        let mut bad = descriptor("x");
+        bad.name = String::new(); // empty: the descriptor's own rule
+        assert!(m.register(bad, 0).is_err());
+
+        for i in 0..MAX_PROVIDERS {
+            m.register(descriptor(&format!("p{i}")), 0)
+                .expect("registers");
+        }
+        assert!(
+            m.register(descriptor("one-too-many"), 0).is_err(),
+            "the registry mirrors the config schema's max of 16"
+        );
+        assert_eq!(m.provider_count(), MAX_PROVIDERS);
+    }
+
+    #[test]
+    fn aggregate_health_follows_the_best_provider() {
+        let mut m = manager_with(&["a", "b"]);
+        // Registered but unstarted: no events yet, so unavailable.
+        assert_eq!(m.aggregate_health(), ProviderHealth::Unavailable);
+
+        m.on_event(
+            "a",
+            DiscoveryEvent::HealthChanged {
+                source: "a".to_owned(),
+                health: ProviderHealth::Degraded,
+            },
+            0,
+            &nobody(),
+        )
+        .expect("accepted");
+        assert_eq!(m.aggregate_health(), ProviderHealth::Degraded);
+
+        m.on_event(
+            "b",
+            DiscoveryEvent::HealthChanged {
+                source: "b".to_owned(),
+                health: ProviderHealth::Healthy,
+            },
+            0,
+            &nobody(),
+        )
+        .expect("accepted");
+        assert_eq!(
+            m.aggregate_health(),
+            ProviderHealth::Healthy,
+            "one healthy provider is working discovery, however degraded another is"
+        );
+        assert_eq!(m.provider_health("a"), Some(ProviderHealth::Degraded));
+        assert_eq!(m.provider_health("missing"), None);
+    }
+
+    #[test]
+    fn priority_is_recorded_and_is_not_trust() {
+        // ADR-0007: priority is guidance for address selection. It is
+        // stored, and it changes nothing about what is admitted.
+        let mut m = DiscoveryManager::new();
+        m.register(descriptor("low"), 30).expect("registers");
+        m.register(descriptor("high"), 10).expect("registers");
+        assert_eq!(m.provider_priority("high"), Some(10));
+        m.on_event(
+            "low",
+            observed(candidate(P1, "low", &["/x"], 0, None)),
+            0,
+            &nobody(),
+        )
+        .expect("accepted");
+        assert_eq!(
+            m.candidates(0).len(),
+            1,
+            "a low-priority provider's candidate is still a candidate"
+        );
+    }
+}

@@ -20,6 +20,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+interweave-discovery-api = { path = "../../api/discovery-api" }
 interweave-local-client-api = { path = "../../api/local-client-api" }
 interweave-transport-api = { path = "../../api/transport-api" }
 interweave-trust-api = { path = "../../api/trust-api" }

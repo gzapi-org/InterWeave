@@ -1771,6 +1771,7 @@ dependencies = [
 name = "interweave-transport-runtime"
 version = "0.0.0"
 dependencies = [
+ "interweave-discovery-api",
  "interweave-local-client-api",
  "interweave-transport-api",
  "interweave-trust-api",
