@@ -158,6 +158,81 @@ fn a_candidate_survives_one_providers_retraction_when_another_still_vouches() {
 }
 
 #[test]
+fn a_long_running_node_keeps_its_configured_and_announcing_candidates() {
+    // The liveness property across all three providers, composed: a node
+    // that runs for hours must still hold the peers it was configured
+    // with, the ones its cache keeps succeeding against, and the ones the
+    // LAN keeps announcing. Each provider refreshes the manager
+    // differently, and every one of them got this wrong first time.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut manager = DiscoveryManager::new();
+
+    let cache = PeerCache::load(&dir.path().join("peers.json"), CacheLimits::default())
+        .expect("empty cache");
+    let mut cache_provider = PeerCacheDiscovery::new(cache);
+    let mut static_provider = StaticBootstrapDiscovery::new(vec![
+        StaticEntry::new(peer(P1), "/dns4/bootstrap.example/tcp/4001").expect("within bounds"),
+    ])
+    .expect("within bounds");
+    let mut mdns_provider = MdnsDiscovery::new();
+
+    for d in [
+        cache_provider.descriptor(),
+        static_provider.descriptor(),
+        mdns_provider.descriptor(),
+    ] {
+        manager.register(d, 10).expect("registers");
+    }
+    cache_provider.start(0).expect("starts");
+    static_provider.start(0).expect("starts");
+    mdns_provider.start(0).expect("starts");
+
+    // TEN DAYS, in ten-minute steps. The window has to outlast the
+    // LONGEST lifetime in play or it cannot see the bug it is for: the
+    // cache's own TTL is seven days, so a four-hour run proved the static
+    // and mDNS halves and silently skipped the cache one. Ten-minute
+    // steps keep it fast while staying well inside every refresh window.
+    let step = 10 * 60 * 1_000;
+    let ten_days = 10 * 24 * 60 * 60 * 1_000;
+    let mut t = 0u64;
+    while t <= ten_days {
+        cache_provider.add_hint(
+            interweave_discovery_api::PeerHint::ObservedReachable {
+                peer_id: peer(P2),
+                address: "/ip4/10.0.0.2/tcp/4001".to_owned(),
+                observed_at: t,
+            },
+            t,
+        );
+        mdns_provider.push_discovered(
+            "12D3KooWQYV9dGMFoRzNStwpXztXaBUjtPqi6aU76ZgUriHhKust",
+            "/ip4/192.168.1.5/tcp/4001",
+            t,
+        );
+        pump(&mut manager, &mut cache_provider, t, &nobody());
+        pump(&mut manager, &mut static_provider, t, &nobody());
+        pump(&mut manager, &mut mdns_provider, t, &nobody());
+        manager.sweep(t);
+
+        let held: Vec<TransportIdentity> = manager
+            .candidates(t)
+            .into_iter()
+            .map(|c| c.peer_id)
+            .collect();
+        assert!(
+            held.contains(&peer(P1)),
+            "the configured bootstrap peer vanished at t={t}"
+        );
+        assert!(
+            held.contains(&peer(P2)),
+            "the cache peer that keeps succeeding vanished at t={t}"
+        );
+        assert_eq!(held.len(), 3, "and the announcing LAN peer too, at t={t}");
+        t += step;
+    }
+}
+
+#[test]
 fn aggregate_health_survives_one_degraded_provider() {
     let mut manager = DiscoveryManager::new();
     let mut mdns_provider = MdnsDiscovery::new();
