@@ -56,8 +56,16 @@ report() {
   problems=$((problems + 1))
 }
 
-manifest="$(cargo metadata --format-version 1 --locked 2>/dev/null \
-  | python3 -c '
+# The source root, overridable ONLY so the self-test can run this exact
+# script against mutated stand-ins. Without it the self-test would have to
+# reimplement these assertions, and a reimplementation cannot fail when the
+# real ones are weakened -- which is the failure mode this whole guard
+# exists to prevent, one level up.
+if [[ -n "${INTERWEAVE_GOSSIPSUB_SRC:-}" ]]; then
+  src="$INTERWEAVE_GOSSIPSUB_SRC"
+else
+  manifest="$(cargo metadata --format-version 1 --locked 2>/dev/null \
+    | python3 -c '
 import json,sys
 meta = json.load(sys.stdin)
 for pkg in meta["packages"]:
@@ -66,13 +74,15 @@ for pkg in meta["packages"]:
         break
 ' || true)"
 
-if [[ -z "$manifest" ]]; then
-  report "libp2p-gossipsub is not in the dependency graph — if broadcast was removed, remove this check with it"
-  exit 1
+  if [[ -z "$manifest" ]]; then
+    report "libp2p-gossipsub is not in the dependency graph — if broadcast was removed, remove this check with it"
+    exit 1
+  fi
+  src="$(dirname "$manifest")/src"
 fi
 
-protocol="$(dirname "$manifest")/src/protocol.rs"
-behaviour="$(dirname "$manifest")/src/behaviour.rs"
+protocol="$src/protocol.rs"
+behaviour="$src/behaviour.rs"
 
 for f in "$protocol" "$behaviour"; do
   [[ -r "$f" ]] || report "cannot read $f"
@@ -87,9 +97,24 @@ elif ! awk '/ValidationMode::Strict *=>/,/ValidationMode::Permissive/' "$protoco
   report "ValidationMode::Strict no longer sets verify_signature — a forged message may now reach the behaviour"
 fi
 
-# 2. The decoder still refuses a message whose signature does not verify.
+# 2. The decoder still refuses a message whose signature does not verify —
+#    and the REJECTION ITSELF, not merely the condition. A refactor that
+#    keeps the test for logging and drops the early exit would leave a
+#    condition-only assertion green while invalid messages walked on to
+#    the behaviour.
 if ! grep -qE 'if +verify_signature +&& +!.*verify_signature\(&message\)' "$protocol"; then
-  report "protocol.rs no longer rejects on a failed verify_signature during decode"
+  report "protocol.rs no longer tests the signature during decode"
+else
+  body="$(awk '/if +verify_signature +&& +!.*verify_signature\(&message\)/{f=1} f{print} f&&/^ *\}$/{exit}' "$protocol")"
+  if ! grep -qE 'ValidationError::InvalidSignature' <<<"$body"; then
+    report "the failed-signature branch no longer records an InvalidSignature validation error"
+  fi
+  if ! grep -qE '^\s*(continue|return)\b' <<<"$body"; then
+    report "the failed-signature branch no longer terminates decoding of that message — it may now fall through to the behaviour"
+  fi
+  if ! grep -qE 'source: *None' <<<"$body" || ! grep -qE 'sequence_number: *None' <<<"$body"; then
+    report "the failed-signature branch no longer blanks source/sequence_number — a forgery could carry an id into the cache"
+  fi
 fi
 
 # 3. The duplicate cache still lives in the behaviour, downstream of that.
