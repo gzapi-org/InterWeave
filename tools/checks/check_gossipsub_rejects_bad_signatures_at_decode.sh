@@ -64,6 +64,10 @@ REVIEWED_GOSSIPSUB_VERSION="0.49.5"
 # reason INTERWEAVE_GOSSIPSUB_SRC exists: a self-test that reimplements
 # the comparison cannot fail when the real one is weakened.
 REVIEWED_DECODE_SHA256="${INTERWEAVE_REVIEWED_DECODE_SHA256:-c623f65f904b165021fc3b80ef8bbd460cd78065096faae6328c69a64fb3c5f6}"
+# What the behaviour does with a message the decoder refused. Pinned for
+# the same reason: the separation only holds if invalid messages stay out
+# of the cache, and that is decided here rather than by the decoder.
+REVIEWED_INVALID_SHA256="${INTERWEAVE_REVIEWED_INVALID_SHA256:-60bfa396d99b7e8fa6c1a602b5ecf924371c52d5a45859dc7b0ab7628b9298d2}"
 
 problems=0
 report() {
@@ -184,6 +188,19 @@ if ! grep -q 'duplicate_cache.insert' "$behaviour"; then
 fi
 if grep -q 'duplicate_cache' "$protocol"; then
   report "the duplicate cache is now reachable from the decoder — the separation this check exists for is gone"
+fi
+
+# 4. And what the behaviour DOES with an invalid message is pinned, for
+#    the same reason the decode path is. Requiring only that the text
+#    `duplicate_cache.insert` appear somewhere says nothing about which
+#    paths reach it: a revision routing `invalid_messages` through a
+#    cache insertion satisfies that grep completely while destroying the
+#    separation the whole check exists to assert.
+actual_invalid="$(awk '/fn handle_invalid_message/{f=1} f{print} f&&/^    \}$/{exit}' "$behaviour" \
+  | sed 's/[[:space:]]\+/ /g;s/^ //;s/ $//' | grep -v '^$' \
+  | sha256sum | cut -d' ' -f1)"
+if [[ "$actual_invalid" != "$REVIEWED_INVALID_SHA256" ]]; then
+  report "handle_invalid_message has changed (sha256 $actual_invalid, reviewed $REVIEWED_INVALID_SHA256)"
 fi
 
 if [[ $problems -gt 0 ]]; then

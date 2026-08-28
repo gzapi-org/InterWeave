@@ -62,9 +62,26 @@ write_good() {
 RS
   cat > "$work/src/behaviour.rs" <<'RS'
         if !self.duplicate_cache.insert(msg_id.clone()) { return; }
+
+    fn handle_invalid_message(
+        &mut self,
+        propagation_source: &PeerId,
+        topic: &TopicHash,
+        reject_reason: RejectReason,
+    ) {
+        if let PeerScoreState::Active(peer_score) = &mut self.peer_score {
+            peer_score.reject_message(propagation_source, topic, reject_reason);
+        }
+    }
 RS
   # Pin the guard's expectation to THIS fixture, so every case below
   # exercises the real comparison rather than a copy of it.
+  export INTERWEAVE_REVIEWED_INVALID_SHA256="$(
+    sed 's;//.*$;;' "$work/src/behaviour.rs" \
+      | awk '/fn handle_invalid_message/{f=1} f{print} f&&/^    \}$/{exit}' \
+      | sed 's/[[:space:]]\+/ /g;s/^ //;s/ $//' | grep -v '^$' \
+      | sha256sum | cut -d' ' -f1
+  )"
   export INTERWEAVE_REVIEWED_DECODE_SHA256="$(
     sed 's;//.*$;;' "$work/src/protocol.rs" \
       | awk '/fn decode\(/{f=1} f{print} f&&/^    \}$/{exit}' \
@@ -138,12 +155,28 @@ write_good
 echo 'self.duplicate_cache.insert(id);' >> "$work/src/protocol.rs"
 if run_guard; then bad "did not notice the cache became reachable before validation"; else ok "caught it"; fi
 
+echo "gossipsub signature guard: invalid messages start reaching the cache"
+write_good
+python3 - "$work/src/behaviour.rs" <<'PY'
+import io,sys
+p = sys.argv[1]
+s = io.open(p).read()
+s = s.replace("            peer_score.reject_message(propagation_source, topic, reject_reason);",
+              "            peer_score.reject_message(propagation_source, topic, reject_reason);\n        }\n        if true {\n            self.duplicate_cache.insert(msg_id.clone());", 1)
+io.open(p, "w").write(s)
+PY
+if run_guard; then
+  bad "an invalid-message cache path was added and the separation check stayed green"
+else
+  ok "caught it"
+fi
+
 echo "gossipsub signature guard: the cache disappears from the behaviour"
 write_good
 sed -i 's/duplicate_cache.insert/some_other_cache.insert/' "$work/src/behaviour.rs"
 if run_guard; then bad "did not notice the cache it reasons about is gone"; else ok "caught it"; fi
 
-unset INTERWEAVE_REVIEWED_DECODE_SHA256
+unset INTERWEAVE_REVIEWED_DECODE_SHA256 INTERWEAVE_REVIEWED_INVALID_SHA256
 echo "gossipsub signature guard: it runs against the real crate"
 if bash "$GUARD" >/dev/null 2>&1; then
   ok "passes on the pinned dependency"

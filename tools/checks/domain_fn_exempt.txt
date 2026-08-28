@@ -65,11 +65,15 @@ MeshMessageId::as_bytes               call  MessageId::new(id.as_bytes(
 # TopicKey::as_bytes has NO production caller and may never gain one:
 # production reads `wire_string`, and the raw accessor exists so the
 # frozen vector is compared byte-for-byte instead of through the hex
-# formatter, which would otherwise be free to agree with itself. Dated so
-# the claim is re-examined rather than left standing; when that stage
-# closes with nothing calling it, the question is whether to delete it,
-# not whether to re-date it again.
-TopicKey::as_bytes                     stage-13  no production caller planned — see the note above
+# formatter, which would otherwise be free to agree with itself.
+#
+# Dated to the OPEN stage, deliberately, so the very next transition
+# forces the question. It travelled to stage-13 with the IPC group for one
+# commit, which would have deferred the promised re-examination by five
+# stages -- and the note below is the whole reason it is dated at all.
+# When Stage 9 opens, the answer is to delete the accessor or to justify
+# its public existence in writing; it is not to re-date it again.
+TopicKey::as_bytes                     stage-8   no production caller planned — see the note above
 
 # --- stage 13 — the daemon and desktop IPC v2, which is where a client
 # --- session first exists to disconnect and an admin surface first
