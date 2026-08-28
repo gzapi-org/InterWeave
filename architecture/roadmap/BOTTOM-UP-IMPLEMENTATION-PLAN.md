@@ -584,9 +584,10 @@ The original wording named the whole of `common`, which was the mistake
 worth recording: a family-wide flip would have carried schemas whose wire
 does not exist.
 
-`endpoints/directory-response` and `endpoints/endpoint-config` likewise
-stay `approved`: the directory exchange is Stage 8, and the config shape
-is not a wire at all.
+`endpoints/endpoint-config` stays `approved`: the config shape is not a
+wire at all. (`endpoints/directory-response` was `approved` here at Stage
+6 because the directory exchange was still Stage 8 work; Stage 8
+implemented `/interweave/endpoints/1.0.0` and flipped it to `active`.)
 
 **Met.** Every clause of the implement list is exercised over loopback
 TCP between two real peers, and the frozen framing is byte-compared
