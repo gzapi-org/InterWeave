@@ -38,6 +38,9 @@ members = [
     # Stage 7: signed GossipSub broadcast, which must stay independently
     # functional from direct and must not substitute for it.
     "tests/pubsub",
+    # Stage 9: DiscoveryProvider conformance and the composition proof
+    # that discovery cannot bypass trust or ConnectionManager.
+    "tests/discovery-conformance",
     "xtask",
 ]
 
