@@ -83,6 +83,15 @@ else
   ok "caught it"
 fi
 
+echo "gossipsub signature guard: the branch returns a value instead of abandoning"
+write_good
+sed -i 's/^                continue;$/                return message;/' "$work/src/protocol.rs"
+if run_guard; then
+  bad "read `return message;` as a rejection — a yielded message reaches the behaviour"
+else
+  ok "caught it"
+fi
+
 echo "gossipsub signature guard: the branch stops recording an invalid signature"
 write_good
 sed -i 's/ValidationError::InvalidSignature/ValidationError::SomethingElse/' "$work/src/protocol.rs"

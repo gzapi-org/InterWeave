@@ -109,8 +109,13 @@ else
   if ! grep -qE 'ValidationError::InvalidSignature' <<<"$body"; then
     report "the failed-signature branch no longer records an InvalidSignature validation error"
   fi
-  if ! grep -qE '^\s*(continue|return)\b' <<<"$body"; then
-    report "the failed-signature branch no longer terminates decoding of that message — it may now fall through to the behaviour"
+  # A BARE `continue;` or `return;` ONLY. `return <expr>;` yields a value
+  # -- a decoded message, an Ok -- which is delivery, not rejection, and
+  # a regex that accepted any `return` read `return message;` as a
+  # refusal. The rejection here abandons the message; anything that hands
+  # one back has to be read by a person, not matched by this.
+  if ! grep -qE '^[[:space:]]*(continue|return)[[:space:]]*;' <<<"$body"; then
+    report "the failed-signature branch no longer abandons the message — a bare continue/return is gone, so it may now yield one to the behaviour"
   fi
   # SEPARATELY, because the mesh id is a PAIR. One assertion covering
   # both fields can lose half of itself and still fire on a fixture that
