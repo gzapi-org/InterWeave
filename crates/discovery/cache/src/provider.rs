@@ -133,8 +133,11 @@ impl PeerCacheDiscovery {
             // window with neither, and named selectively so a peer keeps
             // the addresses that survived.
             if let Some(prev) = previously {
-                let dropped: BTreeSet<String> =
-                    prev.addresses.difference(&record.addresses).cloned().collect();
+                let dropped: BTreeSet<String> = prev
+                    .addresses
+                    .difference(&record.addresses)
+                    .cloned()
+                    .collect();
                 if !dropped.is_empty() {
                     self.pending.push(DiscoveryEvent::CandidateExpired {
                         peer_id: candidate.peer_id.clone(),
@@ -780,5 +783,4 @@ mod tests {
             "nothing was dropped, so nothing is retracted: {events:?}"
         );
     }
-
 }

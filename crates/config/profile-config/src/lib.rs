@@ -610,6 +610,52 @@ where
 ///
 /// Length is checked per entry as it arrives for the same reason: a
 /// bounded count of unbounded strings is not a bound.
+/// One static-bootstrap entry, refused at its byte ceiling before it is
+/// copied into an owned `String`.
+///
+/// A `DeserializeSeed` rather than a plain visitor because the bound has
+/// to reach the ELEMENT: a sequence visitor can only bound the count, and
+/// a bounded count of unbounded strings is not a bound. This mirrors
+/// `bounded_string` in `discovery-api`, which the candidate-address
+/// fields already use.
+struct BoundedStr;
+
+impl<'de> serde::de::DeserializeSeed<'de> for BoundedStr {
+    type Value = String;
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<String, D::Error> {
+        d.deserialize_str(self)
+    }
+}
+
+impl serde::de::Visitor<'_> for BoundedStr {
+    type Value = String;
+
+    fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "a static-bootstrap peer entry of at most {MAX_STATIC_PEER_BYTES} bytes"
+        )
+    }
+
+    fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<String, E> {
+        if value.len() > MAX_STATIC_PEER_BYTES {
+            return Err(serde::de::Error::custom(format!(
+                "a static-bootstrap peer entry is at most {MAX_STATIC_PEER_BYTES} bytes, got {}",
+                value.len()
+            )));
+        }
+        Ok(value.to_owned())
+    }
+
+    /// A deserializer that already owns the buffer hands it over here.
+    /// Checking before taking it means the owned value is dropped rather
+    /// than kept.
+    fn visit_string<E: serde::de::Error>(self, value: String) -> Result<String, E> {
+        self.visit_str(&value)
+    }
+}
+
 fn wire_static_peers<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -631,17 +677,17 @@ where
             mut seq: A,
         ) -> Result<Self::Value, A::Error> {
             let mut out: Vec<String> = Vec::new();
-            while let Some(entry) = seq.next_element::<String>()? {
+            // EACH ELEMENT THROUGH A BOUNDED VISITOR, not through
+            // `next_element::<String>()`. That builds the owned `String`
+            // first and hands it over complete, so checking its length
+            // afterwards bounds what is KEPT and not what is paid for —
+            // one oversized token is still allocated in full. `BoundedStr`
+            // refuses inside `visit_str`, where a self-describing format
+            // can hand over a borrowed slice of its own buffer.
+            while let Some(entry) = seq.next_element_seed(BoundedStr)? {
                 if out.len() >= MAX_STATIC_BOOTSTRAP_PEERS {
                     return Err(serde::de::Error::custom(format!(
                         "at most {MAX_STATIC_BOOTSTRAP_PEERS} static bootstrap peers, got more"
-                    )));
-                }
-                if entry.len() > MAX_STATIC_PEER_BYTES {
-                    return Err(serde::de::Error::custom(format!(
-                        "a static-bootstrap peer entry is at most \
-                         {MAX_STATIC_PEER_BYTES} bytes, got {}",
-                        entry.len()
                     )));
                 }
                 out.push(entry);
@@ -2397,5 +2443,87 @@ mod tests {
             parsed.providers[0].config.peers.len(),
             MAX_STATIC_BOOTSTRAP_PEERS
         );
+    }
+    /// A deserializer that records which string method the seed asked
+    /// for, so the "refused before it is owned" claim is checked rather
+    /// than asserted in a comment.
+    ///
+    /// `deserialize_str` is the borrowed path — the visitor sees a slice
+    /// of the parser's buffer. `deserialize_string` is the owned one,
+    /// which is what `next_element::<String>()` takes and what makes an
+    /// oversized entry cost its full length before anything rejects it.
+    struct Probe<'a> {
+        asked: &'a std::cell::Cell<&'static str>,
+        value: &'a str,
+    }
+
+    impl<'de> serde::Deserializer<'de> for Probe<'_> {
+        type Error = serde::de::value::Error;
+
+        fn deserialize_str<V: serde::de::Visitor<'de>>(
+            self,
+            v: V,
+        ) -> Result<V::Value, Self::Error> {
+            self.asked.set("str");
+            v.visit_str(self.value)
+        }
+
+        fn deserialize_string<V: serde::de::Visitor<'de>>(
+            self,
+            v: V,
+        ) -> Result<V::Value, Self::Error> {
+            self.asked.set("string");
+            v.visit_string(self.value.to_owned())
+        }
+
+        fn deserialize_any<V: serde::de::Visitor<'de>>(
+            self,
+            _v: V,
+        ) -> Result<V::Value, Self::Error> {
+            Err(serde::de::Error::custom("the probe only answers strings"))
+        }
+
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 char bytes byte_buf
+            option unit unit_struct newtype_struct seq tuple tuple_struct
+            map struct enum identifier ignored_any
+        }
+    }
+
+    #[test]
+    fn a_static_peer_entry_is_refused_before_it_is_owned() {
+        use serde::de::DeserializeSeed;
+
+        let asked = std::cell::Cell::new("");
+        let oversized = "x".repeat(MAX_STATIC_PEER_BYTES + 1);
+        let err = BoundedStr
+            .deserialize(Probe {
+                asked: &asked,
+                value: &oversized,
+            })
+            .expect_err("over the ceiling");
+
+        assert_eq!(
+            asked.get(),
+            "str",
+            "the entry is read through the BORROWED path; asking for a \
+             `String` is what allocates the oversized value in full"
+        );
+        assert!(err.to_string().contains("bytes"), "got: {err}");
+    }
+
+    #[test]
+    fn a_legal_static_peer_entry_still_comes_through_the_probe() {
+        use serde::de::DeserializeSeed;
+
+        let asked = std::cell::Cell::new("");
+        let got = BoundedStr
+            .deserialize(Probe {
+                asked: &asked,
+                value: "/ip4/10.0.0.1/tcp/1",
+            })
+            .expect("within the ceiling");
+        assert_eq!(got, "/ip4/10.0.0.1/tcp/1");
+        assert_eq!(asked.get(), "str");
     }
 }
