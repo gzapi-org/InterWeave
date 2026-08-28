@@ -78,14 +78,18 @@ const fn reason_code(reason: DirectoryRefusal) -> u8 {
     }
 }
 
-/// The inverse. An unknown code reads as `Unavailable`: the peer refused,
-/// for a reason this build cannot name, and "not available to me" is the
-/// honest local reading of that.
-const fn reason_from_code(code: u8) -> DirectoryRefusal {
+/// The inverse, strict: only the three assigned codes decode. An
+/// unassigned value (0, 4, 200…) is malformed protocol metadata, not a
+/// fourth refusal, so it is a decode error rather than being coerced to
+/// `Unavailable` — the same stance the direct-v2 decoder takes on an
+/// unassigned reason code, and the reason a masked interoperability fault
+/// does not read to the caller as an ordinary refusal.
+const fn reason_from_code(code: u8) -> Result<DirectoryRefusal, &'static str> {
     match code {
-        1 => DirectoryRefusal::Overloaded,
-        2 => DirectoryRefusal::Unauthorized,
-        _ => DirectoryRefusal::Unavailable,
+        1 => Ok(DirectoryRefusal::Overloaded),
+        2 => Ok(DirectoryRefusal::Unauthorized),
+        3 => Ok(DirectoryRefusal::Unavailable),
+        _ => Err("unassigned directory refusal code"),
     }
 }
 
@@ -147,7 +151,7 @@ pub fn decode_response(bytes: &[u8]) -> Result<DirectoryResponse, &'static str> 
     let (&tag, rest) = bytes.split_first().ok_or("empty response")?;
     match tag {
         TAG_REFUSED => match rest {
-            [code] => Ok(DirectoryResponse::Refused(reason_from_code(*code))),
+            [code] => reason_from_code(*code).map(DirectoryResponse::Refused),
             _ => Err("a refusal is a tag and one reason byte"),
         },
         TAG_DIRECTORY => {
@@ -377,10 +381,18 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_refusal_code_reads_as_unavailable() {
+    fn an_unassigned_refusal_code_does_not_decode() {
+        // 3 is Unavailable; 0, 4, 200 are unassigned and rejected rather
+        // than coerced to a valid reason.
         assert_eq!(
-            decode_response(&[TAG_REFUSED, 200]),
+            decode_response(&[TAG_REFUSED, 3]),
             Ok(DirectoryResponse::Refused(DirectoryRefusal::Unavailable))
         );
+        for bad in [0u8, 4, 200] {
+            assert_eq!(
+                decode_response(&[TAG_REFUSED, bad]),
+                Err("unassigned directory refusal code")
+            );
+        }
     }
 }
