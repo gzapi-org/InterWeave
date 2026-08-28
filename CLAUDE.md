@@ -329,6 +329,7 @@ Commit messages are project files for the purposes of §7 — do not cite unrela
 - Branch name `<hostname -s>/<clone-dir-basename>/<type>/<short-desc>`, e.g. `develop-qzapp/InterWeave/docs/dial-admission-gate`, so every branch traces to its session by host and clone.
 - **Check where you are BEFORE the first commit of a new task**, not after a push is rejected. The default state at the start of a task is standing on the *previous* task's branch, which by then is pushed, queued, or merged — and every one of those failure modes is silent.
 - Scan for the work before doing the work: `git fetch` and read `origin/main` for the same change already landed or in flight. Adopt or coordinate instead of racing.
+- **If any of your PRs is still open, check what it touches before choosing this task.** Partition by FILE SET, not by intent: two open PRs touching the same file will conflict, and the second to land pays for it with an unplanned rebase and a re-review of a tree neither review saw. A refactor of a file is a hard exclusion — nothing else may touch that file until it lands. And a task that depends on another being **merged** waits for the merge, not for it to be written; building on an unmerged branch means duplicating its commits or standing on a base nobody reviewed. These are start-of-task decisions, which is why they are here and not in the lifecycle skill.
 
 ```
 1. git rev-parse --abbrev-ref HEAD            # where am I?

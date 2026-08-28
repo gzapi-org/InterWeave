@@ -117,18 +117,11 @@ time, so start the next piece of work on its own branch rather than
 waiting. Come back to the open PR when its review lands.
 
 What makes that safe is that each task is a separate branch off fresh
-`origin/main`, so concurrent work shares nothing but the base. Two rules
-keep it that way:
-
-- **Partition by file set, not by intent.** Two open PRs touching the same
-  file will conflict, and the second to land pays for it — with a rebase
-  you did not plan and a re-review of a tree neither review saw. Before
-  starting alongside an open PR, check what it touches. A refactor of a
-  file is a hard exclusion: nothing else may touch that file until it
-  lands.
-- **A PR that depends on another being MERGED still waits.** Not merely
-  written — merged. Building on an unmerged branch means either
-  duplicating its commits or a base nobody reviewed.
+`origin/main`, so concurrent work shares nothing but the base. The two
+rules that keep it that way — partition by FILE SET rather than intent, and
+a task depending on another waits for it to be MERGED — are start-of-task
+decisions, so they live in `CLAUDE.md` §9 where they are loaded before you
+choose the work.
 
 Within one branch, the old rule stands: if the work belongs to the task the
 branch is for, it is another commit on it, not a second PR. "Different
@@ -177,8 +170,20 @@ task that merely looks parallelisable is not an invitation. The isolation
 contract governs **how** to dispatch, never **whether**.
 
 The `PreToolUse` hook in `.claude/settings.json` denies a dispatch missing
-`model` or `isolation`, and states why at the moment of the call — so the
-rules it enforces are not restated here. What the hook does **not** cover:
+`model` or `isolation` and states why at the moment of the call, so those
+two requirements are not restated here.
+
+**The hook only speaks when it DENIES.** A compliant dispatch sees nothing
+from it, so everything the agent itself must be told has to come from the
+prompt you write:
+
+- **The agent stays inside the worktree path it is given, runs no git at
+  all, and never commits.** It does not create, enter, exit, or remove a
+  worktree. An agent that commits or moves its worktree can make its own
+  output uncollectable, or destroy the only copy of it when the session
+  performs the force-removal below.
+
+What the hook does not cover either:
 
 - **Both apply inside a `Workflow` script too, and NOTHING ENFORCES THEM
   THERE.** The hook matches the tool name `Agent`, so a workflow's
