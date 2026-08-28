@@ -475,6 +475,12 @@ pub struct DirectoryConfig {
     /// How many endpoints may be advertised.
     #[serde(default = "default_max_advertised")]
     pub max_advertised: u32,
+    /// Directory queries admitted per minute from one remote PeerId.
+    #[serde(default = "default_queries_per_minute")]
+    pub max_queries_per_minute_per_peer: u32,
+    /// Concurrent directory exchanges this profile answers at once.
+    #[serde(default = "default_inflight_queries")]
+    pub max_inflight_queries: u32,
 }
 
 const fn default_true() -> bool {
@@ -483,12 +489,20 @@ const fn default_true() -> bool {
 const fn default_max_advertised() -> u32 {
     DEFAULT_MAX_ADVERTISED
 }
+const fn default_queries_per_minute() -> u32 {
+    interweave_transport_api::DEFAULT_QUERIES_PER_PEER_PER_MINUTE
+}
+const fn default_inflight_queries() -> u32 {
+    interweave_transport_api::DEFAULT_INFLIGHT_QUERIES as u32
+}
 
 impl Default for DirectoryConfig {
     fn default() -> Self {
         Self {
             enabled: true,
             max_advertised: DEFAULT_MAX_ADVERTISED,
+            max_queries_per_minute_per_peer: default_queries_per_minute(),
+            max_inflight_queries: default_inflight_queries(),
         }
     }
 }
@@ -657,6 +671,17 @@ pub enum ConfigError {
         /// The configured value.
         got: u32,
     },
+    /// `directory.max_queries_per_minute_per_peer` is zero or over the
+    /// ceiling.
+    DirectoryQueryRateOutOfRange {
+        /// The configured value.
+        got: u32,
+    },
+    /// `directory.max_inflight_queries` is zero or over the ceiling.
+    DirectoryInflightOutOfRange {
+        /// The configured value.
+        got: u32,
+    },
     /// An endpoint lists more client kinds than the contract allows.
     TooManyClientKinds {
         /// Which endpoint.
@@ -749,6 +774,16 @@ impl core::fmt::Display for ConfigError {
             Self::MaxAdvertisedAboveCeiling { got } => write!(
                 f,
                 "directory.max_advertised is {got}; the ceiling is {MAX_ADVERTISED_CEILING}"
+            ),
+            Self::DirectoryQueryRateOutOfRange { got } => write!(
+                f,
+                "directory.max_queries_per_minute_per_peer is {got}; the range is 1..={}",
+                interweave_transport_api::MAX_QUERIES_PER_PEER_PER_MINUTE
+            ),
+            Self::DirectoryInflightOutOfRange { got } => write!(
+                f,
+                "directory.max_inflight_queries is {got}; the range is 1..={}",
+                interweave_transport_api::MAX_INFLIGHT_QUERIES
             ),
             Self::TooManyClientKinds { endpoint, got } => write!(
                 f,
@@ -885,6 +920,18 @@ impl ProfileConfig {
             errors.push(ConfigError::MaxAdvertisedAboveCeiling {
                 got: max_advertised,
             });
+        }
+        // The query rate and concurrency bounds are 1..=ceiling: zero
+        // would be a directory that admits nothing wearing the wrong
+        // error, and above the ceiling is the resource bound the design
+        // stops being bounded below.
+        let rate = self.endpoints.directory.max_queries_per_minute_per_peer;
+        if rate == 0 || rate > interweave_transport_api::MAX_QUERIES_PER_PEER_PER_MINUTE {
+            errors.push(ConfigError::DirectoryQueryRateOutOfRange { got: rate });
+        }
+        let inflight = self.endpoints.directory.max_inflight_queries;
+        if inflight == 0 || inflight > interweave_transport_api::MAX_INFLIGHT_QUERIES as u32 {
+            errors.push(ConfigError::DirectoryInflightOutOfRange { got: inflight });
         }
         let advertised = entries.iter().filter(|e| e.advertise && e.enabled).count();
         if advertised > max_advertised as usize {
@@ -1282,6 +1329,54 @@ mod tests {
             c.validate()
                 .iter()
                 .any(|e| matches!(e, ConfigError::MaxAdvertisedAboveCeiling { got: 33 }))
+        );
+    }
+
+    #[test]
+    fn the_directory_query_rate_range_is_enforced() {
+        for (rate, catch) in [
+            (0u32, 0u32),
+            (
+                interweave_transport_api::MAX_QUERIES_PER_PEER_PER_MINUTE + 1,
+                61,
+            ),
+        ] {
+            let mut c = config(vec![endpoint("human")]);
+            c.endpoints.directory.max_queries_per_minute_per_peer = rate;
+            assert!(
+                c.validate().iter().any(
+                    |e| matches!(e, ConfigError::DirectoryQueryRateOutOfRange { got } if *got == catch)
+                ),
+                "rate {rate} should be rejected"
+            );
+        }
+        // The ceiling itself is accepted.
+        let mut c = config(vec![endpoint("human")]);
+        c.endpoints.directory.max_queries_per_minute_per_peer =
+            interweave_transport_api::MAX_QUERIES_PER_PEER_PER_MINUTE;
+        assert!(
+            !c.validate()
+                .iter()
+                .any(|e| matches!(e, ConfigError::DirectoryQueryRateOutOfRange { .. }))
+        );
+    }
+
+    #[test]
+    fn the_directory_inflight_range_is_enforced() {
+        let mut c = config(vec![endpoint("human")]);
+        c.endpoints.directory.max_inflight_queries = 0;
+        assert!(
+            c.validate()
+                .iter()
+                .any(|e| matches!(e, ConfigError::DirectoryInflightOutOfRange { got: 0 }))
+        );
+        let mut c = config(vec![endpoint("human")]);
+        c.endpoints.directory.max_inflight_queries =
+            interweave_transport_api::MAX_INFLIGHT_QUERIES as u32 + 1;
+        assert!(
+            c.validate()
+                .iter()
+                .any(|e| matches!(e, ConfigError::DirectoryInflightOutOfRange { got: 65 }))
         );
     }
 
