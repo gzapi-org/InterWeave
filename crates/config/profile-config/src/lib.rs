@@ -214,7 +214,7 @@ pub struct DiscoveryProviderConfig {
 #[serde(deny_unknown_fields)]
 pub struct DiscoveryConfig {
     /// The composed providers.
-    #[serde(default = "default_providers")]
+    #[serde(default = "default_providers", deserialize_with = "wire_providers")]
     pub providers: Vec<DiscoveryProviderConfig>,
 }
 
@@ -646,6 +646,45 @@ where
                     )));
                 }
                 out.push(channel);
+            }
+            Ok(out)
+        }
+    }
+
+    deserializer.deserialize_seq(Bounded)
+}
+
+/// The provider array, bounded WHILE it is read.
+///
+/// Same reason as `wire_static_peers`: `validate` enforces the same
+/// ceiling, but on a value already built, and each element here is a
+/// whole `DiscoveryProviderConfig` carrying its own nested lists. One
+/// element past the limit is enough to know.
+fn wire_providers<'de, D>(deserializer: D) -> Result<Vec<DiscoveryProviderConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Bounded;
+
+    impl<'de> serde::de::Visitor<'de> for Bounded {
+        type Value = Vec<DiscoveryProviderConfig>;
+
+        fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(f, "at most {MAX_DISCOVERY_PROVIDERS} discovery providers")
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut out = Vec::new();
+            while let Some(entry) = seq.next_element::<DiscoveryProviderConfig>()? {
+                if out.len() >= MAX_DISCOVERY_PROVIDERS {
+                    return Err(serde::de::Error::custom(format!(
+                        "at most {MAX_DISCOVERY_PROVIDERS} discovery providers, got more"
+                    )));
+                }
+                out.push(entry);
             }
             Ok(out)
         }
@@ -2643,5 +2682,33 @@ mod tests {
                 .any(|e| format!("{e}").to_lowercase().contains("kademlia")),
             "the refusal names the provider: {errors:?}"
         );
+    }
+    #[test]
+    fn an_oversized_provider_array_is_refused_while_reading() {
+        // Each element is a whole provider config carrying its own nested
+        // lists, so materializing the array before `validate` sees it is
+        // the expensive version of the same mistake as the peer list.
+        let providers: Vec<_> = (0..MAX_DISCOVERY_PROVIDERS + 1)
+            .map(|_| serde_json::json!({ "type": "mdns", "enabled": false }))
+            .collect();
+        let err = serde_json::from_value::<DiscoveryConfig>(
+            serde_json::json!({ "providers": providers }),
+        )
+        .expect_err("refused as it is read");
+        assert!(
+            err.to_string().contains("discovery providers"),
+            "the error names the limit: {err}"
+        );
+    }
+
+    #[test]
+    fn a_provider_array_at_the_limit_still_parses() {
+        let providers: Vec<_> = (0..MAX_DISCOVERY_PROVIDERS)
+            .map(|_| serde_json::json!({ "type": "mdns", "enabled": false }))
+            .collect();
+        let parsed: DiscoveryConfig =
+            serde_json::from_value(serde_json::json!({ "providers": providers }))
+                .expect("exactly at the limit is legal");
+        assert_eq!(parsed.providers.len(), MAX_DISCOVERY_PROVIDERS);
     }
 }

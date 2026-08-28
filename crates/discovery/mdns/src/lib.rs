@@ -965,5 +965,4 @@ mod tests {
             queued.len()
         );
     }
-
 }
