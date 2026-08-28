@@ -39,6 +39,106 @@ pub use persist::{
     require_private_dir, write_atomic, write_private_atomic,
 };
 
+/// Which provider a `discovery.providers` entry configures.
+///
+/// A tagged union, per `config.schema.yaml`. `kademlia` is a KNOWN type
+/// this build does not implement: it parses, and enabling it is a
+/// validation error rather than a silent omission —
+/// `PROVIDER-CONTRACT.md` is explicit that "the runtime must never
+/// silently start while omitting a provider that configuration enables",
+/// and ADR-0034 makes a reduced build reject a defaulted-on entry as a
+/// hard startup error. Stage 10 implements it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DiscoveryProviderType {
+    /// Bounded advisory persistence of what this node observed.
+    PeerCache,
+    /// LAN multicast.
+    Mdns,
+    /// Operator-configured entries.
+    StaticBootstrap,
+    /// Peer routing over a DHT. Not implemented until Stage 10.
+    Kademlia,
+}
+
+impl DiscoveryProviderType {
+    /// The provider name this type is known by, matching the `source` its
+    /// implementation stamps on every candidate.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PeerCache => "peer-cache",
+            Self::Mdns => "mdns",
+            Self::StaticBootstrap => "static-bootstrap",
+            Self::Kademlia => "kademlia",
+        }
+    }
+
+    /// Whether this build carries an implementation.
+    ///
+    /// Not a preference: it is a fact about the binary, and a profile
+    /// enabling a provider that is absent must fail loudly.
+    #[must_use]
+    pub const fn is_implemented(self) -> bool {
+        match self {
+            Self::PeerCache | Self::Mdns | Self::StaticBootstrap => true,
+            Self::Kademlia => false,
+        }
+    }
+}
+
+/// One configured discovery provider.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryProviderConfig {
+    /// Which provider.
+    #[serde(rename = "type")]
+    pub provider_type: DiscoveryProviderType,
+    /// Whether it runs.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Composition guidance for address selection, never trust
+    /// (ADR-0007). Lower sorts first.
+    #[serde(default)]
+    pub priority: i32,
+    /// Static bootstrap entries, for `type: static-bootstrap`.
+    ///
+    /// Held here rather than in a per-type `config` object because it is
+    /// the only per-type field this stage consumes; the Kademlia block
+    /// arrives with the provider that reads it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peers: Vec<String>,
+}
+
+/// The `discovery` block.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryConfig {
+    /// The composed providers.
+    #[serde(default = "default_providers")]
+    pub providers: Vec<DiscoveryProviderConfig>,
+}
+
+fn default_providers() -> Vec<DiscoveryProviderConfig> {
+    // The cache alone: it costs nothing on a node that has never
+    // connected, and mDNS stays OFF by default because LAN discovery
+    // reveals that a P2P service exists (`providers/mdns.md`).
+    vec![DiscoveryProviderConfig {
+        provider_type: DiscoveryProviderType::PeerCache,
+        enabled: true,
+        priority: 10,
+        peers: Vec::new(),
+    }]
+}
+
+impl Default for DiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            providers: default_providers(),
+        }
+    }
+}
+
 /// What can go wrong resolving paths or writing to disk.
 ///
 /// SEPARATE from [`ConfigError`], which is the vocabulary of
@@ -132,6 +232,17 @@ impl core::error::Error for PersistError {
 
 /// Maximum configured endpoints in one profile.
 pub const MAX_ENDPOINTS: usize = 64;
+/// Maximum discovery providers one profile may compose.
+///
+/// `config.schema.yaml`: `providers: list[ProviderConfig, max=16]`.
+pub const MAX_DISCOVERY_PROVIDERS: usize = 16;
+/// Maximum static bootstrap entries.
+pub const MAX_STATIC_BOOTSTRAP_PEERS: usize = 64;
+/// Longest single static bootstrap entry, in bytes.
+///
+/// The same ceiling `discovery-api` puts on an opaque address, because
+/// that is what the entry becomes.
+pub const MAX_STATIC_PEER_BYTES: usize = 256;
 /// Maximum advertised endpoints the directory may hold.
 ///
 /// The wire's own bound (ADR-0031), read from the contract crate rather
@@ -654,6 +765,13 @@ pub struct ProfileConfig {
     pub trust: TrustConfig,
     /// Endpoints.
     pub endpoints: EndpointsConfig,
+    /// Discovery providers.
+    ///
+    /// Defaulted like `channels`: a profile that says nothing gets the
+    /// peer cache and nothing else, which is the posture a node with no
+    /// opinion should have.
+    #[serde(default)]
+    pub discovery: DiscoveryConfig,
     /// Broadcast channels.
     ///
     /// Defaulted, unlike `trust` and `endpoints`, and the difference is
@@ -755,6 +873,43 @@ pub enum ConfigError {
     DirectoryCacheTtlOutOfRange {
         /// The configured value, in milliseconds.
         got_ms: u32,
+    },
+    /// More discovery providers than the schema allows.
+    TooManyDiscoveryProviders {
+        /// How many were configured.
+        got: usize,
+    },
+    /// The same provider type is configured twice.
+    ///
+    /// Composition is by TYPE (`PROVIDER-CONTRACT.md` dispatches on it),
+    /// so two entries naming one type are two answers to the same
+    /// question and there is no rule for choosing between them.
+    DuplicateDiscoveryProvider {
+        /// Which type.
+        provider: &'static str,
+    },
+    /// A provider is enabled that this build does not implement.
+    ///
+    /// Never a silent omission: the runtime must not start while leaving
+    /// out a provider the operator turned on.
+    DiscoveryProviderNotImplemented {
+        /// Which type.
+        provider: &'static str,
+    },
+    /// More static bootstrap entries than the provider accepts.
+    TooManyStaticPeers {
+        /// How many were configured.
+        got: usize,
+    },
+    /// A static bootstrap entry was empty or too long.
+    InvalidStaticPeer {
+        /// Its length in bytes.
+        got: usize,
+    },
+    /// `peers` was set on a provider that has no such field.
+    StaticPeersOnWrongProvider {
+        /// Which type carried them.
+        provider: &'static str,
     },
     /// An endpoint lists more client kinds than the contract allows.
     TooManyClientKinds {
@@ -862,6 +1017,30 @@ impl core::fmt::Display for ConfigError {
             Self::DirectoryCacheTtlOutOfRange { got_ms } => write!(
                 f,
                 "directory.cache_ttl is {got_ms}ms; the range is {MIN_CACHE_TTL_MS}..={MAX_CACHE_TTL_MS}ms (10s..5m)"
+            ),
+            Self::TooManyDiscoveryProviders { got } => write!(
+                f,
+                "discovery.providers lists {got} entries; the maximum is {MAX_DISCOVERY_PROVIDERS}"
+            ),
+            Self::DuplicateDiscoveryProvider { provider } => write!(
+                f,
+                "discovery.providers configures '{provider}' twice; composition dispatches on type, so one entry decides it"
+            ),
+            Self::DiscoveryProviderNotImplemented { provider } => write!(
+                f,
+                "discovery provider '{provider}' is enabled but this build does not implement it; disable it or use a build that does"
+            ),
+            Self::TooManyStaticPeers { got } => write!(
+                f,
+                "static-bootstrap lists {got} peers; the maximum is {MAX_STATIC_BOOTSTRAP_PEERS}"
+            ),
+            Self::InvalidStaticPeer { got } => write!(
+                f,
+                "a static-bootstrap peer entry is {got} bytes; it must be 1..={MAX_STATIC_PEER_BYTES}"
+            ),
+            Self::StaticPeersOnWrongProvider { provider } => write!(
+                f,
+                "provider '{provider}' carries `peers`, which only static-bootstrap accepts"
             ),
             Self::TooManyClientKinds { endpoint, got } => write!(
                 f,
@@ -1014,6 +1193,52 @@ impl ProfileConfig {
         let cache_ttl = self.endpoints.directory.cache_ttl_ms;
         if !(MIN_CACHE_TTL_MS..=MAX_CACHE_TTL_MS).contains(&cache_ttl) {
             errors.push(ConfigError::DirectoryCacheTtlOutOfRange { got_ms: cache_ttl });
+        }
+
+        // Rule 7 — discovery composition. Each of these is a
+        // configuration the runtime must refuse to start on rather than
+        // silently correct.
+        let providers = &self.discovery.providers;
+        if providers.len() > MAX_DISCOVERY_PROVIDERS {
+            errors.push(ConfigError::TooManyDiscoveryProviders {
+                got: providers.len(),
+            });
+        }
+        let mut seen: BTreeSet<DiscoveryProviderType> = BTreeSet::new();
+        for entry in providers {
+            if !seen.insert(entry.provider_type) {
+                errors.push(ConfigError::DuplicateDiscoveryProvider {
+                    provider: entry.provider_type.as_str(),
+                });
+            }
+            // ENABLED AND ABSENT IS A HARD ERROR. A disabled entry for an
+            // unimplemented provider is fine — it records an intent — but
+            // starting while omitting one the operator turned on is what
+            // PROVIDER-CONTRACT.md forbids.
+            if entry.enabled && !entry.provider_type.is_implemented() {
+                errors.push(ConfigError::DiscoveryProviderNotImplemented {
+                    provider: entry.provider_type.as_str(),
+                });
+            }
+            if entry.provider_type == DiscoveryProviderType::StaticBootstrap {
+                if entry.peers.len() > MAX_STATIC_BOOTSTRAP_PEERS {
+                    errors.push(ConfigError::TooManyStaticPeers {
+                        got: entry.peers.len(),
+                    });
+                }
+                for peer in &entry.peers {
+                    if peer.is_empty() || peer.len() > MAX_STATIC_PEER_BYTES {
+                        errors.push(ConfigError::InvalidStaticPeer { got: peer.len() });
+                    }
+                }
+            } else if !entry.peers.is_empty() {
+                // A `peers` list on mdns or the cache is a configuration
+                // that would do nothing, which is worth saying rather
+                // than ignoring.
+                errors.push(ConfigError::StaticPeersOnWrongProvider {
+                    provider: entry.provider_type.as_str(),
+                });
+            }
         }
         let advertised = entries.iter().filter(|e| e.advertise && e.enabled).count();
         if advertised > max_advertised as usize {
@@ -1266,6 +1491,7 @@ mod tests {
                 directory: DirectoryConfig::default(),
                 entries,
             },
+            discovery: DiscoveryConfig::default(),
             channels: ChannelsConfig::default(),
         }
     }
@@ -1458,6 +1684,162 @@ mod tests {
         // Round-trips through a whole-second string.
         let back = serde_json::to_string(&d).expect("serializes");
         assert!(back.contains("\"cache_ttl\":\"60s\""), "got {back}");
+    }
+
+    #[test]
+    fn a_profile_that_says_nothing_gets_the_cache_and_nothing_else() {
+        // mDNS stays OFF by default: LAN discovery reveals that a P2P
+        // service exists, so it is opt-in (`providers/mdns.md`).
+        let c = config(vec![endpoint("human")]);
+        let enabled: Vec<&str> = c
+            .discovery
+            .providers
+            .iter()
+            .filter(|p| p.enabled)
+            .map(|p| p.provider_type.as_str())
+            .collect();
+        assert_eq!(enabled, vec!["peer-cache"]);
+        assert!(c.validate().is_empty(), "the default composes cleanly");
+    }
+
+    #[test]
+    fn an_enabled_unimplemented_provider_is_refused() {
+        // PROVIDER-CONTRACT.md: the runtime must never silently start
+        // while omitting a provider that configuration enables.
+        let mut c = config(vec![endpoint("human")]);
+        c.discovery.providers.push(DiscoveryProviderConfig {
+            provider_type: DiscoveryProviderType::Kademlia,
+            enabled: true,
+            priority: 40,
+            peers: Vec::new(),
+        });
+        assert!(
+            c.validate().iter().any(|e| matches!(
+                e,
+                ConfigError::DiscoveryProviderNotImplemented {
+                    provider: "kademlia"
+                }
+            )),
+            "Stage 10 implements it; enabling it now must fail loudly"
+        );
+    }
+
+    #[test]
+    fn a_disabled_unimplemented_provider_is_allowed() {
+        // A disabled entry records an intent and starts nothing.
+        let mut c = config(vec![endpoint("human")]);
+        c.discovery.providers.push(DiscoveryProviderConfig {
+            provider_type: DiscoveryProviderType::Kademlia,
+            enabled: false,
+            priority: 40,
+            peers: Vec::new(),
+        });
+        assert!(
+            !c.validate()
+                .iter()
+                .any(|e| matches!(e, ConfigError::DiscoveryProviderNotImplemented { .. }))
+        );
+    }
+
+    #[test]
+    fn a_duplicate_provider_type_is_refused() {
+        let mut c = config(vec![endpoint("human")]);
+        c.discovery.providers.push(DiscoveryProviderConfig {
+            provider_type: DiscoveryProviderType::PeerCache,
+            enabled: true,
+            priority: 20,
+            peers: Vec::new(),
+        });
+        assert!(c.validate().iter().any(|e| matches!(
+            e,
+            ConfigError::DuplicateDiscoveryProvider {
+                provider: "peer-cache"
+            }
+        )));
+    }
+
+    #[test]
+    fn the_provider_count_is_bounded() {
+        let mut c = config(vec![endpoint("human")]);
+        // Distinct types run out, so repeat one: the count rule fires
+        // regardless of the duplicate rule also firing.
+        c.discovery.providers = (0..MAX_DISCOVERY_PROVIDERS + 1)
+            .map(|_| DiscoveryProviderConfig {
+                provider_type: DiscoveryProviderType::Mdns,
+                enabled: true,
+                priority: 0,
+                peers: Vec::new(),
+            })
+            .collect();
+        assert!(c.validate().iter().any(|e| matches!(
+            e,
+            ConfigError::TooManyDiscoveryProviders { got } if *got == MAX_DISCOVERY_PROVIDERS + 1
+        )));
+    }
+
+    #[test]
+    fn static_bootstrap_entries_are_bounded_and_validated() {
+        let mut c = config(vec![endpoint("human")]);
+        c.discovery.providers.push(DiscoveryProviderConfig {
+            provider_type: DiscoveryProviderType::StaticBootstrap,
+            enabled: true,
+            priority: 30,
+            peers: (0..MAX_STATIC_BOOTSTRAP_PEERS + 1)
+                .map(|i| format!("/ip4/10.0.0.1/tcp/{i}"))
+                .collect(),
+        });
+        assert!(c.validate().iter().any(|e| matches!(
+            e,
+            ConfigError::TooManyStaticPeers { got } if *got == MAX_STATIC_BOOTSTRAP_PEERS + 1
+        )));
+
+        let mut c = config(vec![endpoint("human")]);
+        c.discovery.providers.push(DiscoveryProviderConfig {
+            provider_type: DiscoveryProviderType::StaticBootstrap,
+            enabled: true,
+            priority: 30,
+            peers: vec![String::new()],
+        });
+        assert!(
+            c.validate()
+                .iter()
+                .any(|e| matches!(e, ConfigError::InvalidStaticPeer { got: 0 }))
+        );
+    }
+
+    #[test]
+    fn peers_on_a_provider_that_has_no_such_field_is_refused() {
+        // Silently ignoring it would leave an operator believing the
+        // entries were composed.
+        let mut c = config(vec![endpoint("human")]);
+        c.discovery.providers.push(DiscoveryProviderConfig {
+            provider_type: DiscoveryProviderType::Mdns,
+            enabled: true,
+            priority: 20,
+            peers: vec!["/ip4/10.0.0.1/tcp/4001".to_owned()],
+        });
+        assert!(c.validate().iter().any(|e| matches!(
+            e,
+            ConfigError::StaticPeersOnWrongProvider { provider: "mdns" }
+        )));
+    }
+
+    #[test]
+    fn a_composite_discovery_document_parses() {
+        // The shape `architecture/config/examples/composite-discovery.yaml`
+        // uses, minus the Kademlia entry this build cannot run.
+        let json = r#"{
+            "providers": [
+                { "type": "peer-cache", "enabled": true, "priority": 10 },
+                { "type": "mdns", "enabled": true, "priority": 20 },
+                { "type": "static-bootstrap", "enabled": true, "priority": 30,
+                  "peers": ["/dns4/bootstrap.example.net/tcp/4001"] }
+            ]
+        }"#;
+        let d: DiscoveryConfig = serde_json::from_str(json).expect("the documented shape parses");
+        assert_eq!(d.providers.len(), 3);
+        assert_eq!(d.providers[2].peers.len(), 1);
+        assert_eq!(d.providers[1].provider_type.as_str(), "mdns");
     }
 
     #[test]
