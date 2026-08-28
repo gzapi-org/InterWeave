@@ -68,6 +68,9 @@ pub struct DirectState {
     pub(super) directory_queries_per_min: u32,
     /// See above.
     pub(super) directory_max_inflight: usize,
+    /// The profile's requester cache TTL, in ms, carried so the directory
+    /// cache honours it rather than the startup default.
+    pub(super) directory_cache_ttl_ms: u32,
     /// Inbound requests whose answer is queued but not yet written.
     ///
     /// `pending_direct` counts OUTBOUND exchanges only, so a shutdown
@@ -140,6 +143,7 @@ impl DirectState {
         self.max_advertised = config.max_advertised;
         self.directory_queries_per_min = config.directory_queries_per_min;
         self.directory_max_inflight = config.directory_max_inflight;
+        self.directory_cache_ttl_ms = config.directory_cache_ttl_ms;
         Ok(())
     }
 
@@ -193,6 +197,11 @@ impl DirectState {
     /// the responder budget when a profile is installed.
     pub(super) const fn directory_budget_limits(&self) -> (u32, usize) {
         (self.directory_queries_per_min, self.directory_max_inflight)
+    }
+
+    /// The configured requester cache TTL, in ms.
+    pub(super) const fn directory_cache_ttl_ms(&self) -> u32 {
+        self.directory_cache_ttl_ms
     }
 
     /// The endpoints advertised to `peer` — enabled, advertised, leased,
@@ -286,6 +295,7 @@ impl DirectState {
             directory_queries_per_min:
                 interweave_transport_runtime::directory::DEFAULT_QUERIES_PER_PEER_PER_MINUTE,
             directory_max_inflight: interweave_transport_runtime::directory::DEFAULT_MAX_INFLIGHT,
+            directory_cache_ttl_ms: interweave_transport_runtime::directory::DEFAULT_CACHE_TTL_MS,
         }
     }
 }
@@ -332,6 +342,8 @@ pub struct DirectEndpoints {
     pub(super) directory_queries_per_min: u32,
     /// Concurrent directory exchanges this profile answers at once.
     pub(super) directory_max_inflight: usize,
+    /// How long this node caches a remote directory result, in ms.
+    pub(super) directory_cache_ttl_ms: u32,
 }
 
 impl DirectEndpoints {
@@ -396,6 +408,7 @@ impl DirectEndpoints {
                 profile.endpoints.directory.max_inflight_queries,
             )
             .unwrap_or(usize::MAX),
+            directory_cache_ttl_ms: profile.endpoints.directory.cache_ttl_ms,
         })
     }
 }

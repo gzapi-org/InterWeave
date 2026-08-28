@@ -396,6 +396,15 @@ impl DirectoryCache {
         self.entries.entry(peer).insert_entry(entry).into_mut()
     }
 
+    /// Change the local cache TTL term, in ms.
+    ///
+    /// Applies to entries inserted AFTER the change; entries already held
+    /// keep the freshness they were computed with. Used when a profile
+    /// reload carries a new `directory.cache_ttl`.
+    pub fn set_local_ttl(&mut self, local_ttl_ms: u32) {
+        self.local_ttl_ms = local_ttl_ms;
+    }
+
     /// The fresh entry for `peer` at `now_ms`, if any.
     #[must_use]
     pub fn get(&self, peer: &TransportIdentity, now_ms: u64) -> Option<&CacheEntry> {
@@ -574,6 +583,23 @@ mod tests {
             names(&cache.get(&peer(P1), 5).expect("fresh").endpoints),
             ["b"]
         );
+    }
+
+    #[test]
+    fn set_local_ttl_changes_the_clamp_for_new_entries() {
+        // Local term 10s: a remote advertising 60s is clamped to 10s.
+        let mut cache = DirectoryCache::new(8, 10_000);
+        cache.insert(peer(P1), validate_response(&raw(&["a"])).expect("valid"), 0);
+        assert!(cache.get(&peer(P1), 9_999).is_some());
+        assert!(
+            cache.get(&peer(P1), 10_000).is_none(),
+            "clamped to the 10s local term"
+        );
+        // Raise the local term to 60s; a NEW entry now caches for 60s.
+        cache.set_local_ttl(60_000);
+        cache.insert(peer(P2), validate_response(&raw(&["b"])).expect("valid"), 0);
+        assert!(cache.get(&peer(P2), 59_999).is_some());
+        assert!(cache.get(&peer(P2), 60_000).is_none());
     }
 
     #[test]

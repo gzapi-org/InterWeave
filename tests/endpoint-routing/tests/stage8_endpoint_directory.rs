@@ -705,6 +705,78 @@ async fn the_configured_query_rate_is_honoured() {
     assert_eq!(error, TransportError::Overloaded);
 }
 
+/// A profile's directory.cache_ttl reaches the requester cache: a querier
+/// whose profile sets a 10s cache clamps a result to 10s, where the 60s
+/// default would leave it at 60s.
+///
+/// Mutation: skip set_cache_ttl at configure, and the querier caches for
+/// the default 60s regardless of its profile.
+#[tokio::test]
+async fn the_profile_cache_ttl_reaches_the_requester_cache() {
+    use interweave_profile_config::DirectoryConfig;
+    use interweave_transport_libp2p::runtime::{DirectEndpoints, SubstrateConfig, SwarmRuntime};
+
+    let (querier_id, querier_peer) = who();
+    let (responder_id, _) = who();
+    let mut responder = SwarmRuntime::start(
+        &responder_id,
+        SubstrateConfig::default(),
+        support::trusting(&[&querier_peer]),
+    )
+    .expect("responder starts");
+    let responder_peer = responder.local_peer().clone();
+    let querier = SwarmRuntime::start(
+        &querier_id,
+        SubstrateConfig::default(),
+        support::trusting(&[&responder_peer]),
+    )
+    .expect("querier starts");
+
+    // The querier's own profile caches directory results for 10 seconds.
+    let mut querier_profile = profile_directory(vec![advertised("human")], Some("human"), true);
+    querier_profile.endpoints.directory = DirectoryConfig {
+        cache_ttl_ms: 10_000,
+        ..querier_profile.endpoints.directory
+    };
+    querier
+        .configure_direct(DirectEndpoints::from_profile(&querier_profile, 8).expect("valid"))
+        .await
+        .expect("querier installs");
+
+    // The responder advertises the 60s default.
+    let responder_profile = profile_directory(vec![advertised("human")], Some("human"), true);
+    responder
+        .configure_direct(DirectEndpoints::from_profile(&responder_profile, 8).expect("valid"))
+        .await
+        .expect("responder installs");
+    responder
+        .claim_endpoint("s", endpoint("human"), "in-process")
+        .await
+        .expect("command")
+        .expect("free");
+    let address = responder
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
+        .await
+        .expect("listens");
+    querier
+        .dial(responder_peer.clone(), address)
+        .await
+        .expect("command")
+        .expect("admitted");
+    support::wait_connected(&mut responder).await;
+
+    let result = querier
+        .query_endpoints(responder_peer)
+        .await
+        .expect("command")
+        .expect("directory");
+    assert!(
+        result.fresh_for_ms > 0 && result.fresh_for_ms <= 10_000,
+        "the profile's 10s cache_ttl clamps the result, got {}ms",
+        result.fresh_for_ms
+    );
+}
+
 /// The exit gate: route discovery works without entering broadcast,
 /// peer discovery, or Kademlia state. The querier configures no channels
 /// and adds no addresses beyond the dial, and the query still succeeds.

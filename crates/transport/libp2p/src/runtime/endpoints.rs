@@ -158,6 +158,12 @@ impl DirectoryState {
             .set_limits(queries_per_min, max_inflight, now_ms);
     }
 
+    /// Apply a profile's requester cache TTL. New cache entries use it;
+    /// entries already held keep the freshness they were computed with.
+    pub(super) fn set_cache_ttl(&mut self, local_ttl_ms: u32) {
+        self.cache.set_local_ttl(local_ttl_ms);
+    }
+
     /// Queries whose answer is queued but not yet written — read by
     /// `polling_room` so an answer cannot be starved out of its slot.
     pub(super) fn answering(&self) -> usize {

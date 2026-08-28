@@ -514,7 +514,7 @@ fn de_cache_ttl<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, D::Error>
 }
 
 fn ser_cache_ttl<S: serde::Serializer>(ms: &u32, s: S) -> Result<S::Ok, S::Error> {
-    if ms % 1_000 == 0 {
+    if ms.is_multiple_of(1_000) {
         s.serialize_str(&format!("{}s", ms / 1_000))
     } else {
         s.serialize_str(&format!("{ms}ms"))

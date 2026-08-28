@@ -657,6 +657,7 @@ pub(super) fn handle_command(
             if outcome.is_ok() {
                 let (queries, inflight) = direct_state.directory_budget_limits();
                 directory_state.set_budget_limits(queries, inflight, now_ms);
+                directory_state.set_cache_ttl(direct_state.directory_cache_ttl_ms());
             }
             let _ = reply.send(outcome);
         }
