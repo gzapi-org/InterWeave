@@ -210,6 +210,19 @@ pub(super) fn handle_endpoints(
             let Some(PendingQuery { peer, reply }) = pending.remove(&request_id) else {
                 return Handled::Consumed;
             };
+            // TRUST IS RE-READ ON ARRIVAL, defence in depth. Revoking a
+            // peer closes its connection, so an in-flight exchange usually
+            // fails before a response arrives — but the Response event and
+            // the ConnectionClosed event race, and a directory response is
+            // CACHED, so accepting one from a revoked peer would surface
+            // its routes and keep them readable until the entry expired.
+            // The pre-dispatch check cannot see a revocation that lands
+            // after it; this closes the window the connection close does
+            // not, the same way `send_direct` re-reads the class.
+            if manager.classify(&peer) != ConnectionClass::DataPlaneTrusted {
+                let _ = reply.send(Err(DirectError::UnauthorizedPeer));
+                return Handled::Consumed;
+            }
             let _ = reply.send(receive(response, &peer, directory, now_ms));
             Handled::Consumed
         }

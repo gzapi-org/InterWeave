@@ -235,6 +235,167 @@ async fn revoking_trust_removes_cached_directory_access_at_once() {
     assert_eq!(error, TransportError::UnauthorizedPeer);
 }
 
+/// A peer revoked while a query is in flight never has its directory
+/// surfaced to the caller. Two layers enforce this and either is enough:
+/// revoking trust closes the connection, so the exchange usually fails
+/// before a response arrives; and if a response DID arrive first — the
+/// narrow window this test cannot force deterministically — the response
+/// arm re-reads the class and refuses it before caching.
+///
+/// The deterministic, meaningful assertion is the property itself: after
+/// revocation the in-flight query resolves to an error, never an Ok
+/// carrying the revoked peer's endpoints. The responder holds its answer
+/// until the test has revoked trust (awaiting the command's reply), so
+/// the answer can only reach the querier after the revocation.
+#[tokio::test]
+async fn a_revoked_peers_directory_is_not_surfaced_to_an_in_flight_query() {
+    use interweave_transport_api::EndpointDirectoryV1;
+    use interweave_transport_libp2p::endpoints_codec::{
+        DirectoryResponse, ENDPOINTS_PROTOCOL, EndpointsCodec,
+    };
+    use interweave_transport_libp2p::runtime::{SubstrateConfig, SwarmRuntime};
+    use libp2p::futures::StreamExt;
+    use libp2p::request_response;
+    use libp2p::swarm::SwarmEvent as RawEvent;
+    use std::time::Duration;
+
+    let responder_keys = libp2p::identity::Keypair::generate_ed25519();
+    let responder_peer = interweave_transport_api::TransportIdentity::parse(
+        responder_keys.public().to_peer_id().to_string(),
+    )
+    .expect("a valid peer id");
+
+    let mut responder = libp2p::SwarmBuilder::with_existing_identity(responder_keys)
+        .with_tokio()
+        .with_tcp(
+            libp2p::tcp::Config::default(),
+            libp2p::noise::Config::new,
+            libp2p::yamux::Config::default,
+        )
+        .expect("the same transport stack")
+        .with_behaviour(|_| {
+            request_response::Behaviour::<EndpointsCodec>::new(
+                [(ENDPOINTS_PROTOCOL, request_response::ProtocolSupport::Full)],
+                request_response::Config::default(),
+            )
+        })
+        .expect("behaviour")
+        .build();
+    responder
+        .listen_on("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
+        .expect("listens");
+    let address = loop {
+        if let RawEvent::NewListenAddr { address, .. } = responder.select_next_some().await {
+            break address;
+        }
+    };
+
+    // Responder task: on the request, tell the test and hold the channel;
+    // on the trigger, answer with a one-entry directory.
+    let (got_request_tx, got_request_rx) = tokio::sync::oneshot::channel();
+    let (answer_now_tx, mut answer_now_rx) = tokio::sync::mpsc::channel::<()>(1);
+    tokio::spawn(async move {
+        let mut held = None;
+        let mut told = Some(got_request_tx);
+        loop {
+            tokio::select! {
+                event = responder.select_next_some() => {
+                    if let RawEvent::Behaviour(request_response::Event::Message {
+                        message: request_response::Message::Request { channel, .. },
+                        ..
+                    }) = event
+                    {
+                        held = Some(channel);
+                        if let Some(tx) = told.take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                }
+                _ = answer_now_rx.recv() => {
+                    if let Some(channel) = held.take() {
+                        let _ = responder.behaviour_mut().send_response(
+                            channel,
+                            DirectoryResponse::Directory(EndpointDirectoryV1 {
+                                generated_at_ms: 1,
+                                ttl_ms: 60_000,
+                                endpoints: vec![endpoint("human")],
+                            }),
+                        );
+                    }
+                }
+            }
+        }
+    });
+
+    let (querier_id, _querier_peer) = who();
+    let mut querier = SwarmRuntime::start(
+        &querier_id,
+        SubstrateConfig::default(),
+        support::trusting(&[&responder_peer]),
+    )
+    .expect("the querier starts");
+    querier
+        .dial(responder_peer.clone(), address)
+        .await
+        .expect("command")
+        .expect("admitted");
+
+    // The connection must be up before the query, or begin_query refuses
+    // it as unreachable and the responder never sees a request.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no connection within 20s"
+        );
+        match tokio::time::timeout(Duration::from_secs(20), querier.next_event()).await {
+            Ok(Some(interweave_transport_libp2p::runtime::SwarmEvent::Connected { .. })) => break,
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("the querier stopped before connecting"),
+            Err(_) => panic!("no connection within 20s"),
+        }
+    }
+    let querier = querier;
+
+    // Dispatch the query in a task; it blocks on the reply.
+    let q = {
+        let querier = &querier;
+        let peer = responder_peer.clone();
+        async move { querier.query_endpoints(peer).await }
+    };
+    let peer_for_revoke = responder_peer.clone();
+    let ((), result) = tokio::join!(
+        async {
+            // The request reached the responder; now revoke and let it answer.
+            tokio::time::timeout(Duration::from_secs(20), got_request_rx)
+                .await
+                .expect("the responder received the query within 20s")
+                .expect("the responder task is alive");
+            let _ = peer_for_revoke;
+            querier
+                .set_trust(support::trusting(&[]))
+                .await
+                .expect("the revocation is processed");
+            answer_now_tx.send(()).await.expect("trigger the answer");
+        },
+        tokio::time::timeout(Duration::from_secs(20), q),
+    );
+
+    let outcome = result
+        .expect("the query settled rather than hanging")
+        .expect("the command reaches the task");
+    // Never Ok: whichever layer wins — the connection close or the
+    // response-arm recheck — the revoked peer's endpoints are not
+    // delivered. Both refusals are correct.
+    assert!(
+        matches!(
+            outcome,
+            Err(TransportError::UnauthorizedPeer | TransportError::PeerUnreachable)
+        ),
+        "a revoked peer's directory must not be surfaced, got {outcome:?}"
+    );
+}
+
 /// The largest legal directory crosses the wire: 32 advertised, leased,
 /// admissible endpoints at the 64-byte label ceiling. The codec's frozen
 /// bytes are unit-tested; this proves the whole path carries them.
