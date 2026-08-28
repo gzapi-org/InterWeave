@@ -557,9 +557,20 @@ async fn a_hostile_directory_response_is_a_protocol_violation() {
             break address;
         }
     };
+    // Extract the ResponseChannel and send `()`, which triggers
+    // `write_response` to pop and transmit the next queued frame. Dropping
+    // the event (as an earlier version did) would send an EMPTY response
+    // and the hostile bytes would never leave — a vacuous pass, since an
+    // empty body also decodes as ProtocolViolation.
     tokio::spawn(async move {
         loop {
-            let _ = responder.select_next_some().await;
+            if let RawEvent::Behaviour(request_response::Event::Message {
+                message: request_response::Message::Request { channel, .. },
+                ..
+            }) = responder.select_next_some().await
+            {
+                let _ = responder.behaviour_mut().send_response(channel, ());
+            }
         }
     });
 
