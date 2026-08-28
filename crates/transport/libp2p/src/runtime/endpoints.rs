@@ -99,13 +99,25 @@ pub(super) struct DirectoryState {
     pub(super) budget: DirectoryBudget,
     /// The local cache TTL term of the clamp, in ms.
     pub(super) local_cache_ttl_ms: u32,
-    /// Inbound queries whose answer this node is still writing.
+    /// Inbound queries whose answer is queued but not yet written —
+    /// EVERY answer, a refusal as much as a directory.
+    ///
+    /// Read by `shutdown_settled` so an accepted control response is not
+    /// dropped by an early exit. A refusal is a queued response too, so it
+    /// earns the same grace; tracking only directories here (which was the
+    /// bug) let a shutdown racing a refusal drop it.
     ///
     /// A set, not a count, for the same reason `DirectState::answering`
-    /// is: an `InboundFailure` for a query never admitted must release
-    /// nothing that belongs to another. The budget's in-flight slot is
-    /// released when the id leaves this set.
+    /// is: an `InboundFailure` for a query never queued must release
+    /// nothing that belongs to another.
     pub(super) answering: std::collections::BTreeSet<libp2p::request_response::InboundRequestId>,
+    /// The subset of `answering` that also holds an in-flight BUDGET slot.
+    ///
+    /// Only an admitted directory reserved one, so only those ids release
+    /// one when they settle — separating "needs shutdown grace" (every
+    /// queued response) from "holds a budget slot" (admitted directories
+    /// only), which the single set used to conflate.
+    pub(super) budgeted: std::collections::BTreeSet<libp2p::request_response::InboundRequestId>,
 }
 
 impl DirectoryState {
@@ -117,6 +129,7 @@ impl DirectoryState {
             budget: DirectoryBudget::with_defaults(now_ms),
             local_cache_ttl_ms,
             answering: std::collections::BTreeSet::new(),
+            budgeted: std::collections::BTreeSet::new(),
         }
     }
 
@@ -166,16 +179,21 @@ pub(super) fn handle_endpoints(
                 Answer::Directory(directory) => DirectoryResponse::Directory(directory),
                 Answer::Refused(reason) => DirectoryResponse::Refused(reason),
             };
-            // ONLY AN ADMITTED QUERY HOLDS A SLOT. `build_answer` reserved
-            // one exactly when it returned a Directory, so the release on
-            // failure below matches it.
+            // A DIRECTORY HOLDS A BUDGET SLOT; a refusal does not, but
+            // BOTH are queued responses that earn the shutdown grace. Only
+            // `build_answer` reserving a slot returns a Directory, so that
+            // is what `budgeted` tracks; `answering` tracks every response
+            // that was actually queued, so a shutdown racing a refusal
+            // does not drop it.
             let admitted = matches!(response, DirectoryResponse::Directory(_));
             if swarm.answer_endpoints(channel, response).is_ok() {
+                directory.answering.insert(request_id);
                 if admitted {
-                    directory.answering.insert(request_id);
+                    directory.budgeted.insert(request_id);
                 }
             } else if admitted {
-                // The answer never left; give the slot straight back.
+                // The answer never left; give the slot straight back. It
+                // was never in `answering`, so there is nothing to grace.
                 directory.budget.end_exchange();
             }
             Handled::Consumed
@@ -206,10 +224,13 @@ pub(super) fn handle_endpoints(
         }
 
         RrEvent::InboundFailure { request_id, .. } | RrEvent::ResponseSent { request_id, .. } => {
-            // The answer is written or its stream died; either way the
-            // in-flight slot it held is freed, once, keyed by the id so a
-            // query this side never admitted releases nothing.
-            if directory.answering.remove(&request_id) {
+            // The answer is written or its stream died; either way it is no
+            // longer queued, so it leaves `answering` and stops holding the
+            // grace. A budget slot is released only if this response held
+            // one — a refusal did not — and keyed by the id so a query this
+            // side never queued releases nothing that belongs to another.
+            directory.answering.remove(&request_id);
+            if directory.budgeted.remove(&request_id) {
                 directory.budget.end_exchange();
             }
             Handled::Consumed
