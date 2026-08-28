@@ -16,7 +16,7 @@ use interweave_discovery_api::{
     DiscoveryEvent, DiscoveryProvider, HintDisposition, PeerHint, ProviderDescriptor,
     ProviderError, ProviderHealth, ProviderMode, ProviderScope,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use interweave_transport_api::TransportIdentity;
 
@@ -26,6 +26,17 @@ use crate::cache::{CacheHealth, PeerCache, SOURCE};
 const INTERFACE_VERSION: &str = "1.0";
 
 /// The cache, presented as a discovery provider.
+/// What a consumer was last told about one peer.
+///
+/// Compared as a whole to decide re-emission: any field that a
+/// `CandidateObserved` carries belongs here, or a change to it is
+/// invisible and the consumer keeps stale content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EmittedRecord {
+    expires_at: Option<u64>,
+    addresses: BTreeSet<String>,
+}
+
 #[derive(Debug)]
 pub struct PeerCacheDiscovery {
     cache: PeerCache,
@@ -37,13 +48,14 @@ pub struct PeerCacheDiscovery {
     /// each, so ageing out is an expiry rather than silence AND a record
     /// whose life was extended is re-emitted rather than stranded.
     ///
-    /// The value is the record's own `expires_at` at the time it was
-    /// emitted. Tracking only the peer id was a liveness bug: a peer that
+    /// The value is what the consumer was last told — the record's
+    /// `expires_at` AND its address set, which is the whole of what a
+    /// `CandidateObserved` carries. Tracking only the peer id was a liveness bug: a peer that
     /// kept succeeding had its cache expiry extended while the consumer
     /// still held the FIRST one, and the manager — which learns lifetimes
     /// only from an observation event — expired a peer the cache
     /// considered fresh.
-    emitted: BTreeMap<TransportIdentity, Option<u64>>,
+    emitted: BTreeMap<TransportIdentity, EmittedRecord>,
 }
 
 impl PeerCacheDiscovery {
@@ -82,7 +94,7 @@ impl PeerCacheDiscovery {
             return;
         }
         let fresh = self.cache.candidates(now_ms);
-        let mut live: BTreeMap<TransportIdentity, Option<u64>> = BTreeMap::new();
+        let mut live: BTreeMap<TransportIdentity, EmittedRecord> = BTreeMap::new();
 
         // WHAT CHANGED, where a longer life counts as a change. Re-emitting
         // the whole cache on every drain would be duplicate-tolerant (the
@@ -92,9 +104,20 @@ impl PeerCacheDiscovery {
         // learn from an observation event, so a peer that kept succeeding
         // lapsed there while staying fresh here.
         for candidate in fresh {
-            let previously = self.emitted.get(&candidate.peer_id).copied();
-            let changed = previously != Some(candidate.expires_at);
-            live.insert(candidate.peer_id.clone(), candidate.expires_at);
+            // WHAT THE CONSUMER WAS LAST TOLD, in full. Comparing expiry
+            // alone missed a change the expiry cannot express: two
+            // addresses recorded for one peer inside the same millisecond
+            // share a record expiry, so the second address was suppressed
+            // and never reached the manager until some later success
+            // moved the timestamp. Address set and expiry together are the
+            // whole of what a `CandidateObserved` carries, so comparing
+            // both is comparing the message rather than a proxy for it.
+            let record = EmittedRecord {
+                expires_at: candidate.expires_at,
+                addresses: candidate.addresses.iter().cloned().collect(),
+            };
+            let changed = self.emitted.get(&candidate.peer_id) != Some(&record);
+            live.insert(candidate.peer_id.clone(), record);
             if changed {
                 self.pending.push(DiscoveryEvent::CandidateObserved {
                     candidate: Box::new(candidate),
@@ -117,7 +140,7 @@ impl PeerCacheDiscovery {
                 source: SOURCE.to_owned(),
                 // Empty: this provider's lifetime is per PEER (the record
                 // ages as a whole), not per address.
-                addresses: std::collections::BTreeSet::new(),
+                addresses: BTreeSet::new(),
             });
         }
         self.emitted = live;
@@ -614,6 +637,47 @@ mod tests {
             p.cache_mut().candidates(lapse).is_empty(),
             "a future-dated hint is clamped to now, so it lapses on schedule"
         );
+    }
+
+    #[test]
+    fn a_second_address_in_the_same_millisecond_still_reaches_the_consumer() {
+        // Both successes land at the same instant, so the record's expiry
+        // is identical across them. A change detector keyed on expiry
+        // alone calls that "unchanged" and strands the second address at
+        // the provider — the consumer holds one address for a peer the
+        // cache knows at two.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut p = provider(&dir);
+        p.start(0).expect("start");
+
+        const T: u64 = 5_000;
+        p.cache_mut()
+            .record_success(&peer(P1), "/ip4/10.0.0.1/tcp/1", T)
+            .expect("recorded");
+        let first = p.drain_events(T, 16);
+        let first = candidate_events(&first);
+        assert_eq!(first.len(), 1, "the peer is observed once");
+
+        p.cache_mut()
+            .record_success(&peer(P1), "/ip4/10.0.0.2/tcp/2", T)
+            .expect("recorded");
+        let second = p.drain_events(T, 16);
+        let second = candidate_events(&second);
+
+        assert_eq!(
+            second.len(),
+            1,
+            "the peer is re-observed because its address set grew, even \
+             though its expiry did not move"
+        );
+        match second[0] {
+            DiscoveryEvent::CandidateObserved { candidate } => assert_eq!(
+                candidate.addresses.len(),
+                2,
+                "and it carries BOTH addresses"
+            ),
+            other => panic!("expected an observation, got {other:?}"),
+        }
     }
 
 }
