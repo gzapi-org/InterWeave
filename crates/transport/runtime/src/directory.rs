@@ -55,13 +55,19 @@ pub const DEFAULT_ADVERTISED_TTL_MS: u32 = DEFAULT_CACHE_TTL_MS;
 pub const DEFAULT_CACHE_PEERS: usize = 64;
 
 /// Default directory queries per minute per remote PeerId.
-pub const DEFAULT_QUERIES_PER_PEER_PER_MINUTE: u32 = 12;
+///
+/// Read from the contract crate, not restated: profile-config validates a
+/// profile's setting against the same ceiling, so both must read one
+/// source (the pattern `MAX_ADVERTISED_CEILING` already follows).
+pub const DEFAULT_QUERIES_PER_PEER_PER_MINUTE: u32 =
+    interweave_transport_api::DEFAULT_QUERIES_PER_PEER_PER_MINUTE;
 /// Ceiling on `queries_per_peer_per_minute`.
-pub const MAX_QUERIES_PER_PEER_PER_MINUTE: u32 = 60;
+pub const MAX_QUERIES_PER_PEER_PER_MINUTE: u32 =
+    interweave_transport_api::MAX_QUERIES_PER_PEER_PER_MINUTE;
 /// Default concurrent directory exchanges per profile.
-pub const DEFAULT_MAX_INFLIGHT: usize = 16;
+pub const DEFAULT_MAX_INFLIGHT: usize = interweave_transport_api::DEFAULT_INFLIGHT_QUERIES;
 /// Ceiling on `max_inflight`.
-pub const MAX_INFLIGHT_CEILING: usize = 64;
+pub const MAX_INFLIGHT_CEILING: usize = interweave_transport_api::MAX_INFLIGHT_QUERIES;
 
 /// Why the budget refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
