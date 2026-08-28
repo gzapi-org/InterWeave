@@ -173,6 +173,22 @@ The `PreToolUse` hook in `.claude/settings.json` denies a dispatch missing
 `model` or `isolation` and states why at the moment of the call, so those
 two requirements are not restated here.
 
+**Which model, though, is a decision the hook cannot make for you.** It
+denies a *missing* `model`; on `opus` or `fable` it only **asks**, and an
+ask is answered by the user, not by the rule. So:
+
+- **`opus` and `fable` are FORBIDDEN as subagent models** unless the user's
+  prompt explicitly asks for that tier for that dispatch. "The task looks
+  hard" is not authorisation; neither is "the session is already running
+  that model" — the hook's own text says the inheritance is the failure
+  mode, not the default.
+- **Choose the cheapest tier that can do the job**: `haiku` for mechanical,
+  well-specified work (extraction, pattern-following edits, structured
+  search); `sonnet` for judgement work (multi-file reasoning, reviews,
+  convention-holding prose).
+- **Fan-out multiplies cost by the agent count**, so a large wave is a
+  reason to drop a tier, not to keep the session's.
+
 **The hook only speaks when it DENIES.** A compliant dispatch sees nothing
 from it, so everything the agent itself must be told has to come from the
 prompt you write:
@@ -190,6 +206,10 @@ What the hook does not cover either:
   `agent(prompt, opts)` calls never reach it, and both fields default the
   wrong way. Write both out on every call:
   `agent(prompt, { model: 'haiku', isolation: 'worktree' })`.
+  **The premium-tier rule above is unenforced there in a way it is not for
+  a direct `Agent` call**: no ask arrives, so `model: 'opus'` across a wave
+  of agents costs what it costs in silence. The rule is the only thing
+  standing between a workflow and that bill.
 - **`worktree.baseRef` is pinned to `"head"`** in `.claude/settings.json`.
   The default (`fresh`) branches agent worktrees from
   `origin/<default-branch>`, so the agent sees **none** of the unmerged
