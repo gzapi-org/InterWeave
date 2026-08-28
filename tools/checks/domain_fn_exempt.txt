@@ -77,9 +77,16 @@ TopicKey::as_bytes                     stage-13  no production caller planned â€
 # --- protocol and has neither, so dating these to it would have expired
 # --- them five stages before anything could call them.
 SubscriptionRegistry::release_session  stage-13  a client disconnect releases its joins, once IPC reports one
-SubscriptionRegistry::subscriptions    stage-13  the admin surface reads the count it bounds
-IngressLimiter::prune_idle             stage-13  the periodic sweep runs from the IPC-driven admin tick
 IngressLimiter::tracked_peers          stage-13  the admin surface reads it
+
+# --- These two are NOT waiting for anything: each is called from its own
+# --- file, which the heuristic does not count as a reference. Dating them
+# --- said the enforcement was future work and would have let its REMOVAL
+# --- pass unnoticed until stage 13 -- `subscriptions()` is what applies
+# --- the MAX_SUBSCRIPTIONS ceiling inside `join`, and `prune_idle` is
+# --- what bounds the limiter's peer map inside `admit`.
+SubscriptionRegistry::subscriptions    call  self.subscriptions()
+IngressLimiter::prune_idle             call  self.prune_idle(now_ms)
 
 # --- stage 16 â€” the Claude bridge, where a reply route first has a
 # --- channel to resolve against (plan section 19).
