@@ -200,6 +200,42 @@ async fn a_stale_cache_entry_then_release_yields_no_route() {
     assert_eq!(error, TransportError::RemoteEndpointUnavailable);
 }
 
+/// testing.md 26: trust revocation removes directory access at once, not
+/// when a cached entry happens to expire. The querier warms its cache,
+/// then drops the responder from trust; the next query is refused before
+/// the still-fresh cache is consulted.
+///
+/// Mutation: serve the cache before the trust check (the previous order)
+/// and the revoked peer keeps reading its cached routes.
+#[tokio::test]
+async fn revoking_trust_removes_cached_directory_access_at_once() {
+    let profile = profile_directory(vec![advertised("human")], Some("human"), true);
+    let (querier, _responder, peer) =
+        connected_for_directory(profile, &[("s", "human")]).await;
+
+    // Warm the cache: this entry stays fresh for the default 60s.
+    let warm = querier
+        .query_endpoints(peer.clone())
+        .await
+        .expect("command")
+        .expect("the first query succeeds and caches");
+    assert_eq!(names(&warm), ["human"]);
+
+    // Drop the responder from trust. The connection close is asynchronous,
+    // but the local class check does not wait for it.
+    querier
+        .set_trust(support::trusting(&[]))
+        .await
+        .expect("the trust update reaches the task");
+
+    let error = querier
+        .query_endpoints(peer)
+        .await
+        .expect("the command reaches the task")
+        .expect_err("a revoked peer cannot read its cached directory");
+    assert_eq!(error, TransportError::UnauthorizedPeer);
+}
+
 /// The largest legal directory crosses the wire: 32 advertised, leased,
 /// admissible endpoints at the 64-byte label ceiling. The codec's frozen
 /// bytes are unit-tested; this proves the whole path carries them.

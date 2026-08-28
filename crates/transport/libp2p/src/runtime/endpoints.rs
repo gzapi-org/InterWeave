@@ -299,13 +299,24 @@ pub(super) fn begin_query<'a>(
     now_ms: u64,
     reply: oneshot::Sender<Result<DirectoryResult, DirectError>>,
 ) -> Option<(OutboundRequestId, PendingQuery)> {
-    // DRAINING REFUSES NEW WORK, before the cache is even consulted. A
-    // node that has said it is going out of service must not start a new
-    // network exchange — the same rule `send_direct` follows — and must
-    // not serve an advisory cache read as if it were still in service.
-    // `ShuttingDown` is the local error; nothing crossed the wire.
+    // DRAINING REFUSES NEW WORK, before anything else. A node that has
+    // said it is going out of service must not start a new exchange — the
+    // same rule `send_direct` follows — and must not serve an advisory
+    // cache read as if it were still in service. `ShuttingDown` is local;
+    // nothing crossed the wire.
     if manager.is_draining() {
         let _ = reply.send(Err(DirectError::ShuttingDown));
+        return None;
+    }
+    // TRUST BEFORE CACHE. A query is a data-plane operation, and a peer
+    // dropped from trust loses directory access at once — not when a
+    // cached entry happens to expire. Serving the cache first would keep
+    // a revoked peer's routes readable for up to the TTL (five minutes),
+    // which `testing.md` 26 forbids: revocation removes query access.
+    // Refused locally, without a packet, the same class the responder
+    // checks.
+    if manager.classify(peer) != ConnectionClass::DataPlaneTrusted {
+        let _ = reply.send(Err(DirectError::UnauthorizedPeer));
         return None;
     }
     // CACHE next. A fresh entry needs no exchange, and answering from it
@@ -318,12 +329,6 @@ pub(super) fn begin_query<'a>(
             cached: true,
             noncanonical: entry.noncanonical,
         }));
-        return None;
-    }
-    // A QUERY IS A DATA-PLANE OPERATION: an untrusted peer is refused
-    // locally without a packet, the same class the responder checks.
-    if manager.classify(peer) != ConnectionClass::DataPlaneTrusted {
-        let _ = reply.send(Err(DirectError::UnauthorizedPeer));
         return None;
     }
     // BOUNDED BEFORE DISPATCH, like a direct send. A cache miss to a
