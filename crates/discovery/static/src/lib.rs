@@ -39,6 +39,12 @@ const INTERFACE_VERSION: &str = "1.0";
 /// Configured entries permitted (`providers/static-bootstrap.md`).
 pub const MAX_ENTRIES: usize = 64;
 
+/// The ceiling on events waiting to be drained.
+///
+/// Two per configured entry — one observation, one retraction — which is
+/// the most a single reload can produce for one peer.
+pub const MAX_PENDING_EVENTS: usize = 2 * MAX_ENTRIES;
+
 /// One configured entry: a peer and one address at which to reach it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaticEntry {
@@ -163,12 +169,63 @@ impl StaticBootstrapDiscovery {
             }
             for (peer_id, addresses) in &replacement {
                 if self.entries.get(peer_id) != Some(addresses) {
-                    self.pending.push(observed(peer_id, addresses, now_ms));
+                    self.queue_observation(peer_id, addresses, now_ms);
                 }
             }
+            self.enforce_pending_bound();
         }
         self.entries = replacement;
         Ok(())
+    }
+
+    /// Queue an observation for `peer_id`, superseding an undrained one.
+    ///
+    /// Repeated reloads against a stalled consumer appended a full set of
+    /// events per reload, so `pending` grew without limit while `entries`
+    /// stayed at its 64-entry cap — the bound was on the configuration
+    /// and not on the queue.
+    ///
+    /// A pending EXPIRY is not dropped wholesale, only the addresses this
+    /// observation re-announces. The manager's `observe` is additive: a
+    /// fresh snapshot refreshes what it names and says nothing about what
+    /// it omits, so discarding the retraction would strand an address the
+    /// operator removed. That is the same mistake the cache made, found
+    /// one review round earlier.
+    fn queue_observation(
+        &mut self,
+        peer_id: &TransportIdentity,
+        addresses: &BTreeSet<String>,
+        now_ms: u64,
+    ) {
+        self.pending.retain_mut(|event| match event {
+            DiscoveryEvent::CandidateObserved { candidate } => candidate.peer_id != *peer_id,
+            DiscoveryEvent::CandidateExpired {
+                peer_id: expired_peer,
+                addresses: gone,
+                ..
+            } if expired_peer == peer_id => {
+                // An empty set retracts the whole peer, and this
+                // observation says it is configured again.
+                if gone.is_empty() {
+                    return false;
+                }
+                gone.retain(|a| !addresses.contains(a));
+                !gone.is_empty()
+            }
+            _ => true,
+        });
+        self.pending.push(observed(peer_id, addresses, now_ms));
+    }
+
+    /// Hold `pending` to [`MAX_PENDING_EVENTS`], oldest first.
+    ///
+    /// A dropped event costs what the next reload re-emits, since this
+    /// provider's whole state is the configuration it holds.
+    fn enforce_pending_bound(&mut self) {
+        if self.pending.len() > MAX_PENDING_EVENTS {
+            let excess = self.pending.len() - MAX_PENDING_EVENTS;
+            self.pending.drain(..excess);
+        }
     }
 }
 
@@ -505,5 +562,65 @@ mod tests {
         assert_eq!(p.drain_events(0, 1).len(), 1, "the caller sizes the batch");
         assert_eq!(p.drain_events(0, 8).len(), 2, "the rest stays queued");
         assert!(p.drain_events(0, 8).is_empty(), "and then it is empty");
+    }
+    #[test]
+    fn repeated_reloads_do_not_grow_the_queue() {
+        // `entries` is capped at 64; `pending` was not, so a stalled
+        // consumer plus repeated reloads grew it without limit.
+        let mut p = StaticBootstrapDiscovery::new(vec![entry(P1, "/ip4/10.0.0.1/tcp/4001")])
+            .expect("legal entries");
+        p.start(0).expect("starts");
+        let _ = p.drain_events(0, 64);
+
+        for round in 0..500u64 {
+            let addr = format!("/ip4/10.0.0.{}/tcp/4001", round % 200 + 1);
+            p.set_entries(vec![entry(P1, &addr)], round)
+                .expect("a legal reload");
+            let _ = p.drain_events(round, 0);
+        }
+
+        let queued = p.drain_events(500, usize::MAX);
+        assert!(
+            !queued.is_empty(),
+            "the scenario must queue something, or the bound is asserted \
+             against nothing"
+        );
+        assert!(
+            queued.len() <= MAX_PENDING_EVENTS,
+            "the queue stays within its bound, got {}",
+            queued.len()
+        );
+    }
+
+    #[test]
+    fn a_removed_address_stays_retracted_across_a_later_reload() {
+        // The manager is ADDITIVE, so a retraction that gets coalesced
+        // away strands the address there. Only the addresses an
+        // observation re-announces may be withdrawn from a pending
+        // expiry.
+        let mut p = StaticBootstrapDiscovery::new(vec![
+            entry(P1, "/ip4/10.0.0.1/tcp/1"),
+            entry(P1, "/ip4/10.0.0.2/tcp/2"),
+        ])
+        .expect("legal entries");
+        p.start(0).expect("starts");
+        let _ = p.drain_events(0, 64);
+
+        p.set_entries(vec![entry(P1, "/ip4/10.0.0.1/tcp/1")], 10)
+            .expect("reload");
+        // A second reload with the same content still queues nothing new
+        // for the dropped address, and must not erase the retraction.
+        p.set_entries(vec![entry(P1, "/ip4/10.0.0.1/tcp/1")], 20)
+            .expect("reload");
+
+        let events = p.drain_events(20, usize::MAX);
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                DiscoveryEvent::CandidateExpired { addresses, .. }
+                    if addresses.contains("/ip4/10.0.0.2/tcp/2")
+            )),
+            "the removed address is still retracted: {events:?}"
+        );
     }
 }
