@@ -83,6 +83,15 @@ pub const REFRESH_INTERVAL_MS: u64 = 30_000;
 /// or a backend that lost multicast without noticing.
 pub const OBSERVATION_TTL_MS: u64 = 120_000;
 
+/// The ceiling on events waiting to be drained.
+///
+/// Two per peer `seen` can hold — one observation, one expiry — which is
+/// what a well-behaved LAN produces. It is a TOTAL bound rather than a
+/// per-peer one because the identity space is not bounded: peers that
+/// have lapsed out of `seen` are exactly the ones whose queued events
+/// were unbounded before.
+pub const MAX_PENDING_EVENTS: usize = 2 * MAX_PEERS;
+
 /// LAN observations, normalized into candidates.
 #[derive(Debug, Default)]
 pub struct MdnsDiscovery {
@@ -286,6 +295,29 @@ impl MdnsDiscovery {
             // the ones that went.
             addresses: merged,
         });
+        self.enforce_pending_bound();
+    }
+
+    /// Hold `pending` to `MAX_PENDING_EVENTS`, oldest first.
+    ///
+    /// Per-peer coalescing is not a bound, and that took three rounds to
+    /// see: it caps what one IDENTITY can queue, while the identity space
+    /// is free. A LAN sender announces 256 peers, lets them lapse — which
+    /// empties `seen` — and repeats with fresh ones, so every bound keyed
+    /// on `seen` holds while `pending` grows a batch per cycle.
+    ///
+    /// So the queue is bounded by the queue. Oldest first, because a
+    /// consumer this far behind has already missed more recent news, and
+    /// because the alternative — refusing new events — would let an
+    /// attacker freeze the provider's view by filling it once.
+    ///
+    /// A dropped event costs a retraction the manager will make itself on
+    /// its own TTL, or an observation the next announcement repeats.
+    fn enforce_pending_bound(&mut self) {
+        if self.pending.len() > MAX_PENDING_EVENTS {
+            let excess = self.pending.len() - MAX_PENDING_EVENTS;
+            self.pending.drain(..excess);
+        }
     }
 
     fn queue_observation(&mut self, peer_id: &TransportIdentity, now_ms: u64) {
@@ -329,6 +361,7 @@ impl MdnsDiscovery {
                 protocol_observations: BTreeSet::new(),
             }),
         });
+        self.enforce_pending_bound();
     }
 
     /// Drop observations whose backstop TTL has passed, queueing an
@@ -960,9 +993,65 @@ mod tests {
 
         let queued = p.drain_events(now, usize::MAX);
         assert!(
-            queued.len() <= 2 * MAX_PEERS,
-            "the queue stays bounded by what `seen` can hold, got {}",
+            queued.len() <= MAX_PENDING_EVENTS,
+            "the queue stays within its total bound, got {}",
             queued.len()
+        );
+    }
+
+    #[test]
+    fn rotating_identities_forever_cannot_grow_the_queue() {
+        // The earlier version of this test used 320 identities and
+        // allowed 512 events, so it passed WITHOUT any total bound —
+        // per-peer coalescing was enough at that size. The rotation has
+        // to exceed the bound by enough that only a real cap can hold it.
+        let mut p = started();
+        let _ = p.drain_events(0, 64);
+
+        let mut now = 0u64;
+        let mut minted = 0u64;
+        for _ in 0..50 {
+            for _ in 0..MAX_PEERS {
+                p.push_discovered(&synthetic_peer(minted), "/ip4/10.0.0.1/tcp/4001", now);
+                minted += 1;
+            }
+            // The whole batch lapses, so `seen` empties and every bound
+            // keyed on it is satisfied while the queue keeps growing.
+            now += OBSERVATION_TTL_MS + 1;
+            p.sweep(now);
+        }
+        assert!(
+            minted > MAX_PENDING_EVENTS as u64 * 4,
+            "the rotation must outrun the bound by a wide margin, minted {minted}"
+        );
+
+        let queued = p.drain_events(now, usize::MAX);
+        assert!(
+            queued.len() <= MAX_PENDING_EVENTS,
+            "{minted} distinct identities over 50 cycles left {} events queued; \
+             the cap is {MAX_PENDING_EVENTS}",
+            queued.len()
+        );
+    }
+
+    #[test]
+    fn a_consumer_that_drains_normally_loses_nothing() {
+        // The control: the cap must not be reachable in ordinary use, or
+        // it is silently dropping events a well-behaved consumer needed.
+        let mut p = started();
+        let _ = p.drain_events(0, 64);
+
+        for i in 0..MAX_PEERS as u64 {
+            p.push_discovered(&synthetic_peer(i), "/ip4/10.0.0.1/tcp/4001", 0);
+        }
+        let drained = p.drain_events(0, usize::MAX);
+        let observations = drained
+            .iter()
+            .filter(|e| matches!(e, DiscoveryEvent::CandidateObserved { .. }))
+            .count();
+        assert_eq!(
+            observations, MAX_PEERS,
+            "every peer a full `seen` can hold is still reported"
         );
     }
 }
