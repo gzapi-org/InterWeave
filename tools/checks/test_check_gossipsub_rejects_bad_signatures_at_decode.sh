@@ -39,6 +39,7 @@ mkdir -p "$work/src"
 # digest of it. Each negative case mutates one thing and must fail.
 write_good() {
   cat > "$work/src/protocol.rs" <<'RS'
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
             match self.validation_mode {
                 ValidationMode::Strict => {
                     verify_signature = true;
@@ -56,15 +57,18 @@ write_good() {
                 invalid_messages.push((message, ValidationError::InvalidSignature));
                 continue;
             }
+            Ok(Some(rpc))
+    }
 RS
   cat > "$work/src/behaviour.rs" <<'RS'
         if !self.duplicate_cache.insert(msg_id.clone()) { return; }
 RS
   # Pin the guard's expectation to THIS fixture, so every case below
   # exercises the real comparison rather than a copy of it.
-  export INTERWEAVE_REVIEWED_BRANCH_SHA256="$(
-    awk '/if verify_signature && !GossipsubCodec::verify_signature\(&message\)/{f=1} f{print} f&&/^ *\}$/{exit}' "$work/src/protocol.rs" \
-      | sed 's;//.*$;;' | sed 's/[[:space:]]\+/ /g;s/^ //;s/ $//' | grep -v '^$' \
+  export INTERWEAVE_REVIEWED_DECODE_SHA256="$(
+    sed 's;//.*$;;' "$work/src/protocol.rs" \
+      | awk '/fn decode\(/{f=1} f{print} f&&/^    \}$/{exit}' \
+      | sed 's/[[:space:]]\+/ /g;s/^ //;s/ $//' | grep -v '^$' \
       | sha256sum | cut -d' ' -f1
   )"
 }
@@ -120,6 +124,10 @@ echo "gossipsub signature guard: the branch survives only inside a block comment
 mutate "matched a branch that a block comment had disabled" \
   's = s.replace("            if verify_signature && !GossipsubCodec::verify_signature(&message) {", "            /* if verify_signature && !GossipsubCodec::verify_signature(&message) { */\n            if false {", 1)'
 
+echo "gossipsub signature guard: a bypass inserted above the reviewed branch"
+mutate "left a pre-verification delivery path invisible" \
+  's = s.replace("            if verify_signature", "            if bypass { decoded.push(message.clone()); continue; }\n            if verify_signature", 1)'
+
 echo "gossipsub signature guard: a comment-only edit is tolerated"
 write_good
 sed -i 's|tracing::warn!("Invalid signature for received message");|// reworded\n                tracing::warn!("Invalid signature for received message");|' "$work/src/protocol.rs"
@@ -135,7 +143,7 @@ write_good
 sed -i 's/duplicate_cache.insert/some_other_cache.insert/' "$work/src/behaviour.rs"
 if run_guard; then bad "did not notice the cache it reasons about is gone"; else ok "caught it"; fi
 
-unset INTERWEAVE_REVIEWED_BRANCH_SHA256
+unset INTERWEAVE_REVIEWED_DECODE_SHA256
 echo "gossipsub signature guard: it runs against the real crate"
 if bash "$GUARD" >/dev/null 2>&1; then
   ok "passes on the pinned dependency"

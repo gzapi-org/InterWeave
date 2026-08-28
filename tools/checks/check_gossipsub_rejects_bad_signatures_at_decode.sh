@@ -50,14 +50,20 @@ fi
 
 cd "$(dirname "$0")/../.."
 
-# The normalised failed-signature branch of the version below, as read by
-# a person. Recomputed by the failure message's own instructions; changing
-# it without reading the new branch defeats the entire check.
+# The normalised `Decoder::decode` of the version below, as read by a
+# person. The WHOLE function, not just the failed-signature branch:
+# fingerprinting the branch alone said nothing about the path to it, so a
+# bypass inserted above it left the digest matching. What the stage rests
+# on is that EVERY decoded message reaches the rejection, which is a
+# property of the path, so the path is what is pinned.
+#
+# Recomputed by the failure message's own instructions; changing it
+# without reading the new function defeats the entire check.
 REVIEWED_GOSSIPSUB_VERSION="0.49.5"
 # Overridable ONLY so the self-test can pin its own fixtures, for the same
 # reason INTERWEAVE_GOSSIPSUB_SRC exists: a self-test that reimplements
 # the comparison cannot fail when the real one is weakened.
-REVIEWED_BRANCH_SHA256="${INTERWEAVE_REVIEWED_BRANCH_SHA256:-c6a420a3f2f4cb3a8799beff54954080c5bc5238efdbd7b0037fc465b2f40fda}"
+REVIEWED_DECODE_SHA256="${INTERWEAVE_REVIEWED_DECODE_SHA256:-c623f65f904b165021fc3b80ef8bbd460cd78065096faae6328c69a64fb3c5f6}"
 
 problems=0
 report() {
@@ -138,7 +144,7 @@ fi
 if ! grep -qE 'if +verify_signature +&& +!.*verify_signature\(&message\)' "$protocol"; then
   report "protocol.rs no longer tests the signature during decode"
 else
-  # THE BRANCH IS FINGERPRINTED, NOT DESCRIBED.
+  # THE DECODE PATH IS FINGERPRINTED, NOT DESCRIBED.
   #
   # Five rounds of review found five ways to satisfy a description of
   # this branch while defeating it: an assertion that matched a token
@@ -149,20 +155,26 @@ else
   # DOMINATE the branch rather than merely appear in it, is not
   # answerable by grep at all.
   #
-  # So this stops trying. The branch is normalised -- comments gone,
-  # whitespace collapsed -- and compared against the digest of the
+  # So this stops trying. `Decoder::decode` is normalised -- comments
+  # gone, whitespace collapsed -- and compared against the digest of the
   # version that was read by a person. It claims exactly one thing, and
   # can verify it completely: THIS CODE HAS NOT CHANGED.
+  #
+  # The WHOLE function, because the branch alone was not enough: a
+  # revision could keep the reviewed rejection byte-for-byte and add a
+  # path above it that delivers a message before verification runs. What
+  # the stage rests on is that every decoded message REACHES the
+  # rejection, and reachability is a property of the path.
   #
   # Any edit fails, including harmless ones. That is the intended cost:
   # the guarantee Stage 7 rests on is re-established by reading the new
   # code, which is what the failure message asks for. Updating the digest
   # is the act of saying someone did.
-  body="$(awk '/if verify_signature && !GossipsubCodec::verify_signature\(&message\)/{f=1} f{print} f&&/^ *\}$/{exit}' "$protocol" \
-    | sed 's/[[:space:]]\+/ /g;s/^ //;s/ $//' | grep -v '^$')"
-  actual="$(printf '%s\n' "$body" | sha256sum | cut -d' ' -f1)"
-  if [[ "$actual" != "$REVIEWED_BRANCH_SHA256" ]]; then
-    report "the failed-signature branch has changed (sha256 $actual, reviewed $REVIEWED_BRANCH_SHA256)"
+  actual="$(awk '/fn decode\(/{f=1} f{print} f&&/^    \}$/{exit}' "$protocol" \
+    | sed 's/[[:space:]]\+/ /g;s/^ //;s/ $//' | grep -v '^$' \
+    | sha256sum | cut -d' ' -f1)"
+  if [[ "$actual" != "$REVIEWED_DECODE_SHA256" ]]; then
+    report "Decoder::decode has changed (sha256 $actual, reviewed $REVIEWED_DECODE_SHA256)"
   fi
 fi
 
