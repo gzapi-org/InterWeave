@@ -188,6 +188,13 @@ sed -i 's/duplicate_cache.insert/some_other_cache.insert/' "$work/src/behaviour.
 if run_guard; then bad "did not notice the cache it reasons about is gone"; else ok "caught it"; fi
 
 unset INTERWEAVE_REVIEWED_PROTOCOL_SHA256 INTERWEAVE_REVIEWED_BEHAVIOUR_SHA256
+echo "gossipsub signature guard: the dependency is not the reviewed version"
+if INTERWEAVE_REVIEWED_GOSSIPSUB_VERSION="0.0.0-not-a-release" bash "$GUARD" >/dev/null 2>&1; then
+  bad "hashed a version it had not reviewed"
+else
+  ok "refuses a version it has not reviewed"
+fi
+
 echo "gossipsub signature guard: it runs against the real crate"
 if bash "$GUARD" >/dev/null 2>&1; then
   ok "passes on the pinned dependency"

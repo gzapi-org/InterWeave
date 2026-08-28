@@ -59,7 +59,7 @@ cd "$(dirname "$0")/../.."
 #
 # Recomputed by the failure message's own instructions; changing it
 # without reading the new function defeats the entire check.
-REVIEWED_GOSSIPSUB_VERSION="0.49.5"
+REVIEWED_GOSSIPSUB_VERSION="${INTERWEAVE_REVIEWED_GOSSIPSUB_VERSION:-0.49.5}"
 # Overridable ONLY so the self-test can pin its own fixtures, for the same
 # reason INTERWEAVE_GOSSIPSUB_SRC exists: a self-test that reimplements
 # the comparison cannot fail when the real one is weakened.
@@ -80,18 +80,37 @@ report() {
 if [[ -n "${INTERWEAVE_GOSSIPSUB_SRC:-}" ]]; then
   src="$INTERWEAVE_GOSSIPSUB_SRC"
 else
-  manifest="$(cargo metadata --format-version 1 --locked 2>/dev/null \
+  # EXACTLY ONE, AND THE REVIEWED VERSION. Taking the first match and
+  # never checking its version -- which is what this did, with
+  # REVIEWED_GOSSIPSUB_VERSION declared and unused -- means a graph
+  # holding both the reviewed release and a newer one could hash the
+  # DORMANT copy and report on code nothing runs. Ambiguity here is not
+  # something to resolve cleverly; it is something to refuse.
+  selected="$(cargo metadata --format-version 1 --locked 2>/dev/null \
     | python3 -c '
 import json,sys
 meta = json.load(sys.stdin)
-for pkg in meta["packages"]:
-    if pkg["name"] == "libp2p-gossipsub":
-        print(pkg["manifest_path"])
-        break
+found = [p for p in meta["packages"] if p["name"] == "libp2p-gossipsub"]
+for p in found:
+    print(p["version"], p["manifest_path"])
 ' || true)"
 
-  if [[ -z "$manifest" ]]; then
+  count="$(printf '%s' "$selected" | grep -c . || true)"
+  if [[ "$count" -eq 0 ]]; then
     report "libp2p-gossipsub is not in the dependency graph — if broadcast was removed, remove this check with it"
+    exit 1
+  fi
+  if [[ "$count" -gt 1 ]]; then
+    report "the graph holds $count libp2p-gossipsub versions:"
+    printf '%s\n' "$selected" | sed 's/^/    /' >&2
+    report "which one serves the transport is not a question this check can answer — resolve the duplicate, or pin the guard to the one that does"
+    exit 1
+  fi
+
+  found_version="$(printf '%s' "$selected" | cut -d' ' -f1)"
+  manifest="$(printf '%s' "$selected" | cut -d' ' -f2-)"
+  if [[ "$found_version" != "$REVIEWED_GOSSIPSUB_VERSION" ]]; then
+    report "libp2p-gossipsub is $found_version, reviewed $REVIEWED_GOSSIPSUB_VERSION — read the new source and re-establish the guarantee before moving the pins"
     exit 1
   fi
   src="$(dirname "$manifest")/src"
