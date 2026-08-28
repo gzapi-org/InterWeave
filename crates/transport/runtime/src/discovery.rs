@@ -52,15 +52,20 @@ pub const MAX_OBSERVATIONS_PER_PEER: usize = 16;
 /// Registered providers, which also bounds how many can be composed.
 pub const MAX_PROVIDERS: usize = 16;
 
-/// The default lifetime applied to an observation whose provider does not
-/// express expiry.
+/// The default lifetime applied to an observation from a provider that
+/// CAN express expiry but did not for this candidate.
 ///
-/// `CandidatePeer::expires_at` of `None` means "this provider does not
-/// model expiry", NOT "this is permanent" — the type's own documentation
-/// says so, and the manager is where the bound it promises gets applied.
-/// Ten minutes: long enough that a static entry refreshed on reload
-/// survives, short enough that a stale LAN address does not outlive the
+/// `CandidatePeer::expires_at` of `None` means "no stated expiry", not
+/// "permanent", and the manager is where the bound gets applied. Ten
+/// minutes: short enough that a stale LAN address does not outlive the
 /// laptop that left.
+///
+/// It does NOT apply to a provider whose descriptor says
+/// `supports_expiry: false` — see [`DiscoveryManager::on_event`]. Such a
+/// provider is not declining to state a lifetime for one candidate; it is
+/// saying its observations do not lapse on their own, and ageing them out
+/// on a timer deletes configured bootstrap entries from a long-running
+/// node that is still configured with them.
 pub const DEFAULT_OBSERVATION_TTL_MS: u64 = 600_000;
 
 /// Why an event was refused.
@@ -196,10 +201,24 @@ impl CandidateSet {
     ///
     /// The observation's lifetime is its own `expires_at` when the
     /// provider expresses one, else `now_ms + DEFAULT_OBSERVATION_TTL_MS`.
-    fn observe(&mut self, candidate: &CandidatePeer, now_ms: u64, trust: &PeerTrustPolicy) {
-        let expires_at = candidate
-            .expires_at
-            .unwrap_or_else(|| now_ms.saturating_add(DEFAULT_OBSERVATION_TTL_MS));
+    fn observe(
+        &mut self,
+        candidate: &CandidatePeer,
+        now_ms: u64,
+        trust: &PeerTrustPolicy,
+        provider_expires: bool,
+    ) {
+        // A PROVIDER THAT DECLARES NO EXPIRY IS RETRACTED, NEVER AGED OUT.
+        // Static bootstrap emits its entries once, at start and on
+        // reload; a default TTL here would delete them from a node that
+        // is still configured with them and would never re-learn, because
+        // nothing changed and so nothing is re-emitted. Such a provider
+        // says what it means with `CandidateExpired`.
+        let expires_at = match candidate.expires_at {
+            Some(stated) => stated,
+            None if provider_expires => now_ms.saturating_add(DEFAULT_OBSERVATION_TTL_MS),
+            None => u64::MAX,
+        };
 
         if !self.peers.contains_key(&candidate.peer_id) && self.peers.len() >= MAX_CANDIDATES {
             self.evict_one(now_ms, trust);
@@ -445,7 +464,12 @@ impl DiscoveryManager {
                 candidate
                     .validate()
                     .map_err(|_| RejectedEvent::InvalidCandidate)?;
-                self.candidates.observe(&candidate, now_ms, trust);
+                let provider_expires = self
+                    .providers
+                    .get(source)
+                    .is_some_and(|p| p.descriptor.supports_expiry);
+                self.candidates
+                    .observe(&candidate, now_ms, trust, provider_expires);
                 Ok(())
             }
             DiscoveryEvent::CandidateExpired {
@@ -525,6 +549,15 @@ mod tests {
     fn nobody() -> PeerTrustPolicy {
         PeerTrustPolicy::new(Vec::new()).expect("policy")
     }
+    /// A descriptor for a provider that does NOT model expiry, like
+    /// static bootstrap.
+    fn descriptor_without_expiry(name: &str) -> ProviderDescriptor {
+        ProviderDescriptor {
+            supports_expiry: false,
+            ..descriptor(name)
+        }
+    }
+
     fn descriptor(name: &str) -> ProviderDescriptor {
         ProviderDescriptor {
             name: name.to_owned(),
@@ -819,10 +852,11 @@ mod tests {
     }
 
     #[test]
-    fn a_provider_without_expiry_still_gets_a_bounded_lifetime() {
-        // `expires_at: None` means "this provider does not model expiry",
-        // not "permanent" — the manager applies the bound the type's own
-        // documentation promises.
+    fn an_expiring_provider_that_states_no_lifetime_still_gets_a_bounded_one() {
+        // A provider that CAN express expiry but did not for this
+        // candidate gets the manager's bound — `None` is "no stated
+        // expiry", not "permanent". The provider that declares
+        // `supports_expiry: false` is the other case, covered above.
         let mut m = manager_with(&["a"]);
         m.on_event(
             "a",
@@ -835,6 +869,55 @@ mod tests {
         assert!(
             m.candidates(DEFAULT_OBSERVATION_TTL_MS).is_empty(),
             "an unexpiring provider does not produce an eternal candidate"
+        );
+    }
+
+    #[test]
+    fn a_provider_that_declares_no_expiry_is_retracted_not_aged_out() {
+        // Static bootstrap emits its entries at start and on reload only.
+        // Ageing them out on a timer would delete a configured bootstrap
+        // peer from a long-running node that is still configured with it,
+        // and nothing would re-emit it because nothing changed.
+        let mut m = DiscoveryManager::new();
+        m.register(descriptor_without_expiry("static-bootstrap"), 30)
+            .expect("registers");
+        m.on_event(
+            "static-bootstrap",
+            observed(candidate(
+                P1,
+                "static-bootstrap",
+                &["/dns4/host.example/tcp/1"],
+                0,
+                None,
+            )),
+            0,
+            &nobody(),
+        )
+        .expect("accepted");
+
+        // Far past any default TTL — a week.
+        let a_week = 7 * 24 * 60 * 60 * 1_000;
+        assert_eq!(
+            m.candidates(a_week).len(),
+            1,
+            "a configured entry is still configured a week later"
+        );
+
+        // It goes when the provider says so, and only then.
+        m.on_event(
+            "static-bootstrap",
+            DiscoveryEvent::CandidateExpired {
+                peer_id: peer(P1),
+                source: "static-bootstrap".to_owned(),
+                addresses: BTreeSet::new(),
+            },
+            a_week,
+            &nobody(),
+        )
+        .expect("accepted");
+        assert!(
+            m.candidates(a_week).is_empty(),
+            "the retraction is what ends it"
         );
     }
 
