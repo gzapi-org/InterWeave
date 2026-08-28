@@ -107,6 +107,7 @@ Refusal::to_wire                                 call  refusal.to_wire(
 
 
 # --- stage-8 -----------------------------------------------------
+EndpointRegistry::advertised_for                 stage-8   the directory responder in transport-libp2p snapshots it
 DirectDestination::to_default                    stage-8   identifier projections used by the endpoint directory
 DirectDestination::to_endpoint                   stage-8   identifier projections used by the endpoint directory
 EndpointQueues::is_open                          stage-8   needs a session on the other side of the lease boundary
@@ -157,7 +158,6 @@ DedupCache::expire                               stage-12  expiry and introspect
 PeerTrustPolicy::with_local_peer                 stage-12  bound at runtime composition
 ReservationMap::outstanding                      stage-12  expiry and introspection driven at runtime composition
 TransportCapabilities::clamped                   stage-12  capability clamping happens at runtime composition
-TrustDecision::is_allowed                        stage-12  bound at runtime composition
 
 
 # --- stage-13 ----------------------------------------------------
