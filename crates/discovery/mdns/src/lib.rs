@@ -273,7 +273,9 @@ impl MdnsDiscovery {
         // retraction is a bounded loss (the manager ages the address out
         // on its own TTL) where dropping the bound is not.
         while merged.len() > MAX_ADDRESSES_PER_PEER {
-            let oldest = merged.iter().next().cloned().expect("non-empty");
+            let Some(oldest) = merged.iter().next().cloned() else {
+                break;
+            };
             merged.remove(&oldest);
         }
 
@@ -904,5 +906,4 @@ mod tests {
             }
         }
     }
-
 }
