@@ -162,7 +162,11 @@ pub struct DiscoveryProviderSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_peer_policy: Option<String>,
     /// `kademlia`: providers seeding the routing table.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "wire_seed_sources"
+    )]
     pub seed_sources: Vec<String>,
     /// `kademlia`: how long a routing candidate stays usable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -359,6 +363,12 @@ pub const MAX_ENDPOINTS: usize = 64;
 ///
 /// `config.schema.yaml`: `providers: list[ProviderConfig, max=16]`.
 pub const MAX_DISCOVERY_PROVIDERS: usize = 16;
+
+/// `config.schema.yaml`: `seed_sources: list[enum[...], max=3]`.
+pub const MAX_KADEMLIA_SEED_SOURCES: usize = 3;
+
+/// The closed set `seed_sources` draws from.
+pub const KADEMLIA_SEED_SOURCES: [&str; 3] = ["peer-cache", "mdns", "static-bootstrap"];
 /// Maximum static bootstrap entries.
 pub const MAX_STATIC_BOOTSTRAP_PEERS: usize = 64;
 
@@ -670,6 +680,61 @@ where
                     )));
                 }
                 out.push(channel);
+            }
+            Ok(out)
+        }
+    }
+
+    deserializer.deserialize_seq(Bounded)
+}
+
+/// `seed_sources`, bounded and checked against its documented enum
+/// while it is read.
+///
+/// A DISABLED kademlia entry is legal on this build, and `validate` does
+/// not look inside a provider it is not going to run. So without this
+/// the schema's `list[enum[...], max=3]` was neither a resource bound
+/// nor a semantic one: an arbitrarily long list of arbitrary names
+/// parsed, allocated in full, and passed validation.
+///
+/// The names are checked here rather than in `validate` because they are
+/// a closed set fixed by the schema, not a cross-field rule — an
+/// unknown one is malformed input, and the parse is where malformed
+/// input stops.
+fn wire_seed_sources<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Bounded;
+
+    impl<'de> serde::de::Visitor<'de> for Bounded {
+        type Value = Vec<String>;
+
+        fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(
+                f,
+                "at most {MAX_KADEMLIA_SEED_SOURCES} of {KADEMLIA_SEED_SOURCES:?}"
+            )
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut out: Vec<String> = Vec::new();
+            while let Some(entry) = seq.next_element_seed(BoundedStr)? {
+                if out.len() >= MAX_KADEMLIA_SEED_SOURCES {
+                    return Err(serde::de::Error::custom(format!(
+                        "at most {MAX_KADEMLIA_SEED_SOURCES} kademlia seed sources, got more"
+                    )));
+                }
+                if !KADEMLIA_SEED_SOURCES.contains(&entry.as_str()) {
+                    return Err(serde::de::Error::custom(format!(
+                        "unknown kademlia seed source '{entry}'; expected one of \
+                         {KADEMLIA_SEED_SOURCES:?}"
+                    )));
+                }
+                out.push(entry);
             }
             Ok(out)
         }
@@ -2781,5 +2846,54 @@ mod tests {
         assert_eq!(config.record_mode.as_deref(), Some("disabled"));
         assert_eq!(config.target_routing_peers, Some(64));
         assert_eq!(config.bootstrap_refresh_interval.as_deref(), Some("15m"));
+    }
+    #[test]
+    fn an_oversized_seed_source_list_is_refused_while_reading() {
+        let json = serde_json::json!({
+            "providers": [{
+                "type": "kademlia",
+                "enabled": false,
+                "config": { "seed_sources":
+                    ["peer-cache", "mdns", "static-bootstrap", "peer-cache"] }
+            }]
+        });
+        let err = serde_json::from_value::<DiscoveryConfig>(json)
+            .expect_err("four is past the documented maximum of three");
+        assert!(err.to_string().contains("seed sources"), "got: {err}");
+    }
+
+    #[test]
+    fn an_unknown_seed_source_name_is_refused() {
+        // A disabled entry is legal on this build and `validate` does not
+        // look inside a provider it will not run, so without a check at
+        // the parse an arbitrary name simply passed.
+        let json = serde_json::json!({
+            "providers": [{
+                "type": "kademlia",
+                "enabled": false,
+                "config": { "seed_sources": ["peer-cache", "not-a-provider"] }
+            }]
+        });
+        let err = serde_json::from_value::<DiscoveryConfig>(json).expect_err("the enum is closed");
+        assert!(
+            err.to_string().contains("not-a-provider"),
+            "the error names the offending value: {err}"
+        );
+    }
+
+    #[test]
+    fn the_documented_seed_sources_are_accepted() {
+        // The control: every legal value parses, so the check cannot be
+        // passing by refusing everything.
+        let json = serde_json::json!({
+            "providers": [{
+                "type": "kademlia",
+                "enabled": false,
+                "config": { "seed_sources": ["peer-cache", "mdns", "static-bootstrap"] }
+            }]
+        });
+        let parsed: DiscoveryConfig =
+            serde_json::from_value(json).expect("all three documented names are legal");
+        assert_eq!(parsed.providers[0].config.seed_sources.len(), 3);
     }
 }
