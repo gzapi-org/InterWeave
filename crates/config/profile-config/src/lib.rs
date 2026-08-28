@@ -113,7 +113,11 @@ impl DiscoveryProviderType {
 pub struct DiscoveryProviderSettings {
     /// `static-bootstrap`: the configured entries, each a multiaddr
     /// ending in `/p2p/<PeerId>`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "wire_static_peers"
+    )]
     pub peers: Vec<String>,
     /// `peer-cache`: how long a record stays usable.
     ///
@@ -586,6 +590,61 @@ where
                     )));
                 }
                 out.push(channel);
+            }
+            Ok(out)
+        }
+    }
+
+    deserializer.deserialize_seq(Bounded)
+}
+
+/// The static-bootstrap list, bounded WHILE it is read.
+///
+/// `validate` enforces the same two limits, and that is where an operator
+/// gets a message naming the offending entry — but validation runs on a
+/// value that has already been built, so a profile claiming a million
+/// entries, or one entry of a gigabyte, is paid for in full before
+/// anything rejects it. The ceiling exists to bound the cost of the
+/// input, so it has to apply to the input. One element past the limit is
+/// enough to know.
+///
+/// Length is checked per entry as it arrives for the same reason: a
+/// bounded count of unbounded strings is not a bound.
+fn wire_static_peers<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Bounded;
+
+    impl<'de> serde::de::Visitor<'de> for Bounded {
+        type Value = Vec<String>;
+
+        fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(
+                f,
+                "at most {MAX_STATIC_BOOTSTRAP_PEERS} static bootstrap peers"
+            )
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut out: Vec<String> = Vec::new();
+            while let Some(entry) = seq.next_element::<String>()? {
+                if out.len() >= MAX_STATIC_BOOTSTRAP_PEERS {
+                    return Err(serde::de::Error::custom(format!(
+                        "at most {MAX_STATIC_BOOTSTRAP_PEERS} static bootstrap peers, got more"
+                    )));
+                }
+                if entry.len() > MAX_STATIC_PEER_BYTES {
+                    return Err(serde::de::Error::custom(format!(
+                        "a static-bootstrap peer entry is at most \
+                         {MAX_STATIC_PEER_BYTES} bytes, got {}",
+                        entry.len()
+                    )));
+                }
+                out.push(entry);
             }
             Ok(out)
         }
@@ -2272,6 +2331,71 @@ mod tests {
             with_channels(&refs[..MAX_DESIRED_CHANNELS])
                 .validate()
                 .is_empty()
+        );
+    }
+    #[test]
+    fn an_oversized_static_peer_list_is_refused_while_reading() {
+        // The bound has to apply to the INPUT. `validate` catches this
+        // too, but only after every entry has been materialized, which is
+        // the cost the ceiling exists to prevent.
+        let peers: Vec<String> = (0..MAX_STATIC_BOOTSTRAP_PEERS + 1)
+            .map(|i| format!("/ip4/10.0.0.1/tcp/{i}/p2p/{P1}"))
+            .collect();
+        let json = serde_json::json!({
+            "providers": [{
+                "type": "static-bootstrap",
+                "enabled": true,
+                "config": { "peers": peers }
+            }]
+        });
+
+        let err = serde_json::from_value::<DiscoveryConfig>(json)
+            .expect_err("the list is refused as it is read");
+        assert!(
+            err.to_string().contains("static bootstrap peers"),
+            "the error names the limit that refused it, got: {err}"
+        );
+    }
+
+    #[test]
+    fn an_oversized_static_peer_entry_is_refused_while_reading() {
+        // A bounded count of unbounded strings is not a bound.
+        let json = serde_json::json!({
+            "providers": [{
+                "type": "static-bootstrap",
+                "enabled": true,
+                "config": { "peers": ["/ip4/10.0.0.1/".to_owned()
+                    + &"x".repeat(MAX_STATIC_PEER_BYTES)] }
+            }]
+        });
+
+        let err = serde_json::from_value::<DiscoveryConfig>(json)
+            .expect_err("the entry is refused as it is read");
+        assert!(
+            err.to_string().contains("bytes"),
+            "the error names the byte ceiling, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_static_peer_list_within_both_bounds_still_parses() {
+        // The positive control: the visitor must not refuse legal input.
+        let peers: Vec<String> = (0..MAX_STATIC_BOOTSTRAP_PEERS)
+            .map(|i| format!("/ip4/10.0.0.1/tcp/{i}/p2p/{P1}"))
+            .collect();
+        let json = serde_json::json!({
+            "providers": [{
+                "type": "static-bootstrap",
+                "enabled": true,
+                "config": { "peers": peers }
+            }]
+        });
+
+        let parsed: DiscoveryConfig =
+            serde_json::from_value(json).expect("exactly at the limit is legal");
+        assert_eq!(
+            parsed.providers[0].config.peers.len(),
+            MAX_STATIC_BOOTSTRAP_PEERS
         );
     }
 }

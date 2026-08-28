@@ -25,7 +25,6 @@ use crate::cache::{CacheHealth, PeerCache, SOURCE};
 /// The provider-interface version this implements.
 const INTERFACE_VERSION: &str = "1.0";
 
-/// The cache, presented as a discovery provider.
 /// What a consumer was last told about one peer.
 ///
 /// Compared as a whole to decide re-emission: any field that a
@@ -37,6 +36,7 @@ struct EmittedRecord {
     addresses: BTreeSet<String>,
 }
 
+/// The cache, presented as a discovery provider.
 #[derive(Debug)]
 pub struct PeerCacheDiscovery {
     cache: PeerCache,
@@ -221,9 +221,9 @@ impl DiscoveryProvider for PeerCacheDiscovery {
                 let observed_at = observed_at.min(now_ms);
                 match self.cache.record_success(&peer_id, &address, observed_at) {
                     Ok(()) => HintDisposition::Accepted,
-                // A bound refused it. The cache is unchanged and the
-                // provider is fine — this is the hint being too big, not
-                // the provider failing.
+                    // A bound refused it. The cache is unchanged and the
+                    // provider is fine — this is the hint being too big, not
+                    // the provider failing.
                     Err(_) => HintDisposition::Rejected(
                         interweave_discovery_api::DiscoveryError::InvalidLength {
                             field: "address",
@@ -679,5 +679,4 @@ mod tests {
             other => panic!("expected an observation, got {other:?}"),
         }
     }
-
 }
