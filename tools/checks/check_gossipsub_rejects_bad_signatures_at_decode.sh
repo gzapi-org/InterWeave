@@ -112,8 +112,15 @@ else
   if ! grep -qE '^\s*(continue|return)\b' <<<"$body"; then
     report "the failed-signature branch no longer terminates decoding of that message — it may now fall through to the behaviour"
   fi
-  if ! grep -qE 'source: *None' <<<"$body" || ! grep -qE 'sequence_number: *None' <<<"$body"; then
-    report "the failed-signature branch no longer blanks source/sequence_number — a forgery could carry an id into the cache"
+  # SEPARATELY, because the mesh id is a PAIR. One assertion covering
+  # both fields can lose half of itself and still fire on a fixture that
+  # mutates the other half — which is exactly how the first version of
+  # this hid the loss of the sequence-number protection.
+  if ! grep -qE 'source: *None' <<<"$body"; then
+    report "the failed-signature branch no longer blanks source — a forgery could carry a publisher identity into the cache"
+  fi
+  if ! grep -qE 'sequence_number: *None' <<<"$body"; then
+    report "the failed-signature branch no longer blanks sequence_number — a forgery could carry the other half of a mesh id into the cache"
   fi
 fi
 

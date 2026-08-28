@@ -88,11 +88,23 @@ write_good
 sed -i 's/ValidationError::InvalidSignature/ValidationError::SomethingElse/' "$work/src/protocol.rs"
 if run_guard; then bad "did not notice the validation error changed"; else ok "caught it"; fi
 
-echo "gossipsub signature guard: the rejected message keeps its source and sequence"
+# TWO CASES, one per field. A single fixture mutating both would report
+# "caught it" while only one of the guard's two assertions still existed,
+# which is how the sequence-number half was lost unnoticed once already.
+echo "gossipsub signature guard: the rejected message keeps its source"
 write_good
 sed -i 's/                    source: None,/                    source: Some(peer),/' "$work/src/protocol.rs"
 if run_guard; then
-  bad "did not notice a forgery may now carry an id past the decoder"
+  bad "did not notice a forgery may now carry a publisher identity past the decoder"
+else
+  ok "caught it"
+fi
+
+echo "gossipsub signature guard: the rejected message keeps its sequence number"
+write_good
+sed -i 's/                    sequence_number: None,/                    sequence_number: Some(seq),/' "$work/src/protocol.rs"
+if run_guard; then
+  bad "did not notice a forgery may now carry the other half of a mesh id past the decoder"
 else
   ok "caught it"
 fi
