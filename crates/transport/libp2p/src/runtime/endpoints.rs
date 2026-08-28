@@ -258,25 +258,26 @@ fn build_answer(
     now_ms: u64,
     wall_ms: u64,
 ) -> DirectoryResponse {
-    // DATA-PLANE TRUST FIRST. An infrastructure-only peer is not
-    // data-plane trusted, so ADR-0036's "no endpoint directory" falls out
-    // of the same check. This runs before the rate charge because an
-    // untrusted peer's queries must not grow a per-peer bucket for it —
-    // and an untrusted peer cannot hold a connection to reach here anyway.
-    if manager.classify(querier) != ConnectionClass::DataPlaneTrusted {
-        return DirectoryResponse::Refused(DirectoryRefusal::Unauthorized);
-    }
-    // THE PER-PEER RATE, charged for EVERY trust-admitted query — a
-    // disabled-directory refusal as much as a served list. Charging only
-    // the served path let a trusted peer hammer a disabled directory
-    // without limit, each refusal costing an answer and its bandwidth;
-    // the in-flight bound caps concurrency but not frequency. So the rate
-    // is charged before the disabled check, not after it.
+    // THE PER-PEER RATE, charged for EVERY query that reaches the handler
+    // — before trust, before the disabled check, for any connected
+    // requester. An infrastructure-only peer holds a retained relay /
+    // AutoNAT control connection (`ConnectionManager::authorizes_for`) and
+    // can open a directory substream on it, so it reaches here too; a
+    // refusal it receives must not be free. The in-flight bound caps
+    // concurrency, not frequency, so without this a peer issuing refusals
+    // as fast as they settle spends unbounded processing and bandwidth.
+    // A refused query charges exactly as a served one does.
     if directory.budget.charge_rate(querier, now_ms).is_err() {
         return DirectoryResponse::Refused(DirectoryRefusal::Overloaded);
     }
+    // DATA-PLANE TRUST. An infrastructure-only peer is not data-plane
+    // trusted, so ADR-0036's "no endpoint directory" falls out of the same
+    // check — and it has now paid its rate for asking.
+    if manager.classify(querier) != ConnectionClass::DataPlaneTrusted {
+        return DirectoryResponse::Refused(DirectoryRefusal::Unauthorized);
+    }
     // DISABLED OR DRAINING: neither reveals anything about any endpoint,
-    // and a trusted peer has already paid its rate for asking.
+    // and the requester has already paid its rate.
     if !direct_state.directory_enabled() || manager.is_draining() {
         return DirectoryResponse::Refused(DirectoryRefusal::Unavailable);
     }
