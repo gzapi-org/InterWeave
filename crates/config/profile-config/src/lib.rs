@@ -278,14 +278,21 @@ impl DiscoveryProviderSettings {
 }
 
 /// One configured discovery provider.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DiscoveryProviderConfig {
     /// Which provider.
     #[serde(rename = "type")]
     pub provider_type: DiscoveryProviderType,
     /// Whether it runs.
-    #[serde(default = "default_true")]
+    ///
+    /// No `serde` default: the schema gives one only to `kademlia`
+    /// (`enabled: bool = true`) and requires the field on the other
+    /// three. A blanket default silently turned an incomplete profile
+    /// ON — `{ "type": "static-bootstrap", ... }` with no `enabled`
+    /// started dialling configured peers because a field was forgotten,
+    /// which is a runtime behaviour change from an omission rather than
+    /// a decision. Applied per type in `DiscoveryProviderConfig`'s own
+    /// `Deserialize`, since a field default cannot see the tag.
     pub enabled: bool,
     /// Composition guidance for address selection, never trust
     /// (ADR-0007). Lower sorts first.
@@ -294,6 +301,50 @@ pub struct DiscoveryProviderConfig {
     /// The provider-specific block.
     #[serde(default)]
     pub config: DiscoveryProviderSettings,
+}
+
+impl<'de> Deserialize<'de> for DiscoveryProviderConfig {
+    /// `enabled` defaults only where the schema says it does.
+    ///
+    /// A `#[serde(default)]` on the field cannot express this: the
+    /// default has to know the provider type, and the type is a sibling
+    /// field on the same map. So the map is read first and the default
+    /// applied after the tag is known — which is also why
+    /// `deny_unknown_fields` is spelled out by hand here rather than
+    /// derived.
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            #[serde(rename = "type")]
+            provider_type: DiscoveryProviderType,
+            #[serde(default)]
+            enabled: Option<bool>,
+            #[serde(default)]
+            priority: i32,
+            #[serde(default)]
+            config: DiscoveryProviderSettings,
+        }
+
+        let wire = Wire::deserialize(d)?;
+        let enabled = match wire.enabled {
+            Some(value) => value,
+            // Only kademlia carries a documented default.
+            None if wire.provider_type == DiscoveryProviderType::Kademlia => true,
+            None => {
+                return Err(serde::de::Error::custom(format!(
+                    "provider '{}' requires `enabled`; only kademlia defaults it",
+                    wire.provider_type.as_str()
+                )));
+            }
+        };
+        Ok(Self {
+            provider_type: wire.provider_type,
+            enabled,
+            priority: wire.priority,
+            config: wire.config,
+        })
+    }
 }
 
 /// The `discovery` block.
@@ -3061,6 +3112,65 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, ConfigError::KademliaSettingsOnWrongProvider { .. })),
             "kademlia keys belong on kademlia"
+        );
+    }
+    #[test]
+    fn omitting_enabled_is_refused_for_the_providers_the_schema_requires_it_on() {
+        // A blanket `default = true` turned a forgotten field into a
+        // runtime behaviour change: a static-bootstrap entry with no
+        // `enabled` started dialling the configured peers.
+        for provider in ["peer-cache", "mdns", "static-bootstrap"] {
+            let json = serde_json::json!({
+                "providers": [{ "type": provider, "priority": 10 }]
+            });
+            let err = serde_json::from_value::<DiscoveryConfig>(json).unwrap_err();
+            assert!(
+                err.to_string().contains("requires `enabled`"),
+                "'{provider}' must require the field: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn kademlia_alone_defaults_enabled_because_the_schema_gives_it_one() {
+        let parsed: DiscoveryConfig = serde_json::from_value(serde_json::json!({
+            "providers": [{ "type": "kademlia", "priority": 40 }]
+        }))
+        .expect("kademlia carries `enabled: bool = true`");
+        assert!(
+            parsed.providers[0].enabled,
+            "and the documented default is true"
+        );
+    }
+
+    #[test]
+    fn an_explicit_enabled_is_honoured_on_every_provider() {
+        // The control: requiring the field must not stop it being read.
+        for (provider, value) in [
+            ("peer-cache", true),
+            ("mdns", false),
+            ("static-bootstrap", true),
+            ("kademlia", false),
+        ] {
+            let parsed: DiscoveryConfig = serde_json::from_value(serde_json::json!({
+                "providers": [{ "type": provider, "enabled": value }]
+            }))
+            .expect("an explicit value parses");
+            assert_eq!(parsed.providers[0].enabled, value, "for '{provider}'");
+        }
+    }
+
+    #[test]
+    fn an_unknown_provider_field_is_still_refused() {
+        // Hand-written `Deserialize` means `deny_unknown_fields` is now
+        // spelled out rather than derived, so it owes its own test.
+        let err = serde_json::from_value::<DiscoveryConfig>(serde_json::json!({
+            "providers": [{ "type": "mdns", "enabled": true, "prioriti": 3 }]
+        }))
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("prioriti"),
+            "a misspelled key is named, not ignored: {err}"
         );
     }
 }
