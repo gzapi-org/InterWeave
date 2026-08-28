@@ -17,6 +17,9 @@ members = [
     # Stage 9: configured bootstrap entries as candidates. Configuration
     # is not trust (ADR-0010).
     "crates/discovery/static",
+    # Stage 9: LAN candidate normalization. The multicast mechanism
+    # lives in transport/libp2p; this crate owns no socket.
+    "crates/discovery/mdns",
     "crates/identity/profile-identity",
     "crates/transport/libp2p",
     "crates/human/chat-protocol",

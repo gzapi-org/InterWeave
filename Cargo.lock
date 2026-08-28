@@ -1578,6 +1578,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "interweave-discovery-mdns"
+version = "0.0.0"
+dependencies = [
+ "interweave-discovery-api",
+ "interweave-transport-api",
+]
+
+[[package]]
 name = "interweave-discovery-static"
 version = "0.0.0"
 dependencies = [

@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# LAN candidate discovery, normalization half. NO SOCKETS: this crate
+# takes raw observations a backend pushes in and turns them into bounded,
+# validated candidates. The multicast mechanism lives in
+# `crates/transport/libp2p`, which is the only place allowed to own a
+# Swarm — a provider that opened its own socket would be a provider
+# owning transport.
+#
+# Any host on the multicast domain can advertise, so mDNS grants ZERO
+# trust (providers/mdns.md). Bounds are applied before anything is
+# emitted, because the input is unauthenticated by construction.
+[package]
+name = "interweave-discovery-mdns"
+version = "0.0.0"
+publish = false
+description = "LAN mDNS candidate normalization for InterWeave discovery."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+interweave-discovery-api = { path = "../../api/discovery-api" }
+interweave-transport-api = { path = "../../api/transport-api" }
