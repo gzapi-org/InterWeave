@@ -338,6 +338,7 @@ impl DirectEndpoints {
                     entry.id.clone(),
                     RegisteredEndpoint {
                         enabled: entry.enabled,
+                        advertise: entry.advertise,
                         allowed_client_kinds: entry
                             .allowed_client_kinds
                             .iter()
