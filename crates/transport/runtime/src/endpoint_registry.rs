@@ -308,17 +308,19 @@ impl EndpointRegistry {
         self.leases.get(endpoint)
     }
 
-    /// The lease a session holds, if any: the endpoint and the lease.
+    /// Whether a live lease on `endpoint` carries exactly `epoch`.
     ///
-    /// This is where a sender's `source_endpoint` comes from (ADR-0030):
-    /// the SESSION is the input and the endpoint is the answer, so there
-    /// is no shape in which a caller supplies the endpoint and has it
-    /// believed — `a_sessions_lease_is_found_by_session_not_by_claim`.
-    /// One lease per session is enforced by `claim`, so at most one
-    /// answer exists.
+    /// The unforgeable half of source derivation (ADR-0030,
+    /// `ENDPOINTS.md`: "callers cannot spoof another local endpoint"). A
+    /// sender proves it may send AS `endpoint` by presenting the 128-bit
+    /// epoch its own claim returned; a caller that names an endpoint it
+    /// did not claim does not hold the matching epoch, so this is `false`
+    /// and the send is refused. One lease per session and a distinct epoch
+    /// per lease are enforced by `claim`, so the (endpoint, epoch) pair
+    /// identifies exactly one live lease.
     #[must_use]
-    pub fn lease_of(&self, session: &LocalSessionId) -> Option<(&EndpointId, &ActiveLease)> {
-        self.leases.iter().find(|(_, l)| &l.owner == session)
+    pub fn holds_lease(&self, endpoint: &EndpointId, epoch: &Generation) -> bool {
+        self.leases.get(endpoint).is_some_and(|l| &l.epoch == epoch)
     }
 
     /// Resolve an inbound directed message to exactly one local endpoint.
@@ -599,26 +601,20 @@ mod tests {
     }
 
     #[test]
-    fn a_sessions_lease_is_found_by_session_not_by_claim() {
+    fn holds_lease_matches_only_the_exact_epoch() {
         let mut r = registry();
         r.claim(&ep("human"), session("a"), "human-client", epoch("e1"))
             .expect("claims");
-        r.claim(&ep("claude"), session("b"), "claude-channel", epoch("e2"))
-            .expect("claims");
-        assert_eq!(
-            r.lease_of(&session("a")).map(|(e, _)| e),
-            Some(&ep("human"))
-        );
-        assert_eq!(
-            r.lease_of(&session("b")).map(|(e, _)| e),
-            Some(&ep("claude"))
-        );
-        // A session that holds nothing gets nothing — not a default, not
-        // the first lease in the map.
-        assert_eq!(r.lease_of(&session("c")), None);
-        // And after release the answer changes with the fact.
+        assert!(r.holds_lease(&ep("human"), &epoch("e1")));
+        // The right endpoint with the WRONG epoch is not a match: a caller
+        // that did not claim `human` does not hold e1.
+        assert!(!r.holds_lease(&ep("human"), &epoch("e2")));
+        // The right epoch against an endpoint that does not carry it is
+        // not a match either.
+        assert!(!r.holds_lease(&ep("claude"), &epoch("e1")));
+        // And after release the lease is gone, epoch or not.
         r.release_session(&session("a"));
-        assert_eq!(r.lease_of(&session("a")), None);
+        assert!(!r.holds_lease(&ep("human"), &epoch("e1")));
     }
 
     #[test]

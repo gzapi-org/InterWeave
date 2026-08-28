@@ -29,6 +29,7 @@ workspace = true
 interweave-test-support = { path = "../support" }
 interweave-transport-api = { path = "../../crates/api/transport-api" }
 interweave-transport-runtime = { path = "../../crates/transport/runtime" }
+interweave-local-client-api = { path = "../../crates/api/local-client-api" }
 libp2p = { workspace = true }
 futures = { workspace = true }
 interweave-profile-config = { path = "../../crates/config/profile-config" }

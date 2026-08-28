@@ -140,17 +140,21 @@ pub enum SwarmCommand {
         /// Answered with the number of connections closed by the change.
         reply: oneshot::Sender<usize>,
     },
-    /// Send one directed message to a peer, AS the session's own endpoint.
+    /// Send one directed message to a peer, AS the lease's own endpoint.
     ///
-    /// The frame's `source_endpoint` is OVERWRITTEN from `session`'s
-    /// lease before anything else happens: ADR-0030 makes the source a
-    /// routing selector derived locally, and a command that consulted
-    /// the frame's field — even to compare — would make it something a
-    /// caller chooses. A session holding no lease is refused
+    /// The frame's `source_endpoint` is OVERWRITTEN from the lease before
+    /// anything else happens: ADR-0030 makes the source a routing selector
+    /// derived locally, and a command that consulted the frame's field —
+    /// even to compare — would make it something a caller chooses. The
+    /// lease is the unforgeable capability, not a name: its epoch is
+    /// verified against the live lease, so a caller cannot send as an
+    /// endpoint it did not claim (`ENDPOINTS.md`: "callers cannot spoof
+    /// another local endpoint"). A stale or unheld lease is refused
     /// `EndpointNotRegistered`.
     SendDirect {
-        /// The local session sending. Its lease is the source.
-        session: String,
+        /// The lease authorising the send. Its endpoint is the source, its
+        /// epoch the proof.
+        lease: interweave_local_client_api::EndpointLease,
         /// The peer to send to.
         peer: TransportIdentity,
         /// The frame. Its `source_endpoint` is replaced, not read.

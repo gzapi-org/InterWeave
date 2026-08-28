@@ -231,14 +231,14 @@ impl SwarmRuntime {
     /// exchange's own outcome.
     pub async fn send_direct(
         &self,
-        session: impl Into<String>,
+        lease: &interweave_local_client_api::EndpointLease,
         peer: TransportIdentity,
         frame: DirectMessageV2,
     ) -> Result<Result<EndpointId, DirectError>, SubstrateError> {
         let (reply, answer) = oneshot::channel();
         self.commands
             .send(SwarmCommand::SendDirect {
-                session: session.into(),
+                lease: lease.clone(),
                 peer,
                 frame: Box::new(frame),
                 reply,

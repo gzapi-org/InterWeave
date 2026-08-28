@@ -47,14 +47,19 @@ pub(crate) fn endpoint(name: &str) -> EndpointId {
 /// What Stage 6 did implicitly at `configure_direct`, done explicitly:
 /// a session sends AS the endpoint it holds, so these tests name sessions
 /// after endpoints and the lease is the only thing that binds the two.
-pub(crate) async fn claim_all(runtime: &SwarmRuntime, names: &[&str]) {
+type Leases = std::collections::BTreeMap<String, interweave_local_client_api::EndpointLease>;
+
+pub(crate) async fn claim_all(runtime: &SwarmRuntime, names: &[&str]) -> Leases {
+    let mut leases = Leases::new();
     for name in names {
-        runtime
+        let lease = runtime
             .claim_endpoint(*name, endpoint(name), "in-process")
             .await
             .expect("the claim reaches the task")
             .expect("the endpoint is configured and free");
+        leases.insert((*name).to_owned(), lease);
     }
+    leases
 }
 
 /// A profile carrying these endpoints, which is now the ONLY way to
@@ -119,7 +124,7 @@ pub(crate) fn frame(from: &str, to: Option<&str>, body: &[u8], id: u8) -> Direct
     }
 }
 
-pub(crate) async fn connected_pair() -> (SwarmRuntime, SwarmRuntime, TransportIdentity) {
+pub(crate) async fn connected_pair() -> (SwarmRuntime, SwarmRuntime, TransportIdentity, Leases) {
     connected_pair_claiming(&["human", "claude", "gpt-5"], &["human", "claude", "gpt-5"]).await
 }
 
@@ -128,7 +133,7 @@ pub(crate) async fn connected_pair() -> (SwarmRuntime, SwarmRuntime, TransportId
 pub(crate) async fn connected_pair_claiming(
     sender_claims: &[&str],
     receiver_claims: &[&str],
-) -> (SwarmRuntime, SwarmRuntime, TransportIdentity) {
+) -> (SwarmRuntime, SwarmRuntime, TransportIdentity, Leases) {
     let (sender_id, sender_peer) = who();
     let (receiver_id, receiver_peer) = who();
 
@@ -151,7 +156,7 @@ pub(crate) async fn connected_pair_claiming(
         .configure_direct(endpoints())
         .await
         .expect("the sender's own endpoints install");
-    claim_all(&sender, sender_claims).await;
+    let leases = claim_all(&sender, sender_claims).await;
 
     receiver
         .configure_direct(endpoints())
@@ -169,7 +174,7 @@ pub(crate) async fn connected_pair_claiming(
         .expect("admitted");
     wait_connected(&mut receiver).await;
 
-    (sender, receiver, receiver_peer)
+    (sender, receiver, receiver_peer, leases)
 }
 
 /// An advertised endpoint: `advertise: true`, otherwise default.

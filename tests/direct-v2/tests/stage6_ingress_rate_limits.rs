@@ -73,14 +73,19 @@ fn endpoint(name: &str) -> EndpointId {
 /// What Stage 6 did implicitly at `configure_direct`, done explicitly:
 /// a session sends AS the endpoint it holds, so these tests name sessions
 /// after endpoints and the lease is the only thing that binds the two.
-async fn claim_all(runtime: &SwarmRuntime, names: &[&str]) {
+type Leases = std::collections::BTreeMap<String, interweave_local_client_api::EndpointLease>;
+
+async fn claim_all(runtime: &SwarmRuntime, names: &[&str]) -> Leases {
+    let mut leases = Leases::new();
     for name in names {
-        runtime
+        let lease = runtime
             .claim_endpoint(*name, endpoint(name), "in-process")
             .await
             .expect("the claim reaches the task")
             .expect("the endpoint is configured and free");
+        leases.insert((*name).to_owned(), lease);
     }
+    leases
 }
 
 /// A profile carrying these endpoints, which is now the ONLY way to
@@ -164,7 +169,14 @@ async fn start(id: &ProfileIdentity, trust: TrustSources) -> SwarmRuntime {
 }
 
 /// A receiver plus `senders` peers already connected to it.
-async fn fan_in(senders: usize) -> (Vec<SwarmRuntime>, SwarmRuntime, TransportIdentity) {
+async fn fan_in(
+    senders: usize,
+) -> (
+    Vec<SwarmRuntime>,
+    Vec<Leases>,
+    SwarmRuntime,
+    TransportIdentity,
+) {
     let sending: Vec<(ProfileIdentity, TransportIdentity)> = (0..senders).map(|_| who()).collect();
     let (receiver_id, receiver_peer) = who();
 
@@ -184,6 +196,7 @@ async fn fan_in(senders: usize) -> (Vec<SwarmRuntime>, SwarmRuntime, TransportId
         .expect("listens");
 
     let mut runtimes = Vec::with_capacity(senders);
+    let mut lease_sets = Vec::with_capacity(senders);
     for (id, _) in &sending {
         let sender = start(id, trusting(&[&receiver_peer])).await;
         sender
@@ -195,7 +208,7 @@ async fn fan_in(senders: usize) -> (Vec<SwarmRuntime>, SwarmRuntime, TransportId
         let mut names = vec!["human".to_owned(), "claude".to_owned()];
         names.extend((0..INVENTED_SOURCES).map(|id| format!("source-{id}")));
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
-        claim_all(&sender, &names).await;
+        let leases = claim_all(&sender, &names).await;
         sender
             .dial(receiver_peer.clone(), address.clone())
             .await
@@ -203,9 +216,10 @@ async fn fan_in(senders: usize) -> (Vec<SwarmRuntime>, SwarmRuntime, TransportId
             .expect("admitted");
         wait_connected(&mut receiver).await;
         runtimes.push(sender);
+        lease_sets.push(leases);
     }
 
-    (runtimes, receiver, receiver_peer)
+    (runtimes, lease_sets, receiver, receiver_peer)
 }
 
 /// Bounded: a connection that never arrives is a RESULT, and a test that
@@ -228,15 +242,17 @@ async fn wait_connected(runtime: &mut SwarmRuntime) {
 /// answer in order. `source` names the source endpoint per index.
 async fn flood(
     sender: &SwarmRuntime,
+    leases: &Leases,
     peer: &TransportIdentity,
     count: u8,
     source: impl Fn(u8) -> String,
 ) -> Vec<Result<EndpointId, TransportError>> {
     let mut answers = Vec::with_capacity(usize::from(count));
     for id in 0..count {
+        let name = source(id);
         answers.push(
             sender
-                .send_direct(source(id), peer.clone(), frame(&source(id), id))
+                .send_direct(&leases[&name], peer.clone(), frame(&name, id))
                 .await
                 .expect("the command reaches the task"),
         );
@@ -269,8 +285,15 @@ fn assert_only_overloaded(answers: &[Result<EndpointId, TransportError>]) {
 /// sixteen seconds, and these sends complete in milliseconds.
 #[tokio::test]
 async fn a_trusted_peer_is_refused_once_its_burst_is_spent() {
-    let (senders, receiver, peer) = fan_in(1).await;
-    let answers = flood(&senders[0], &peer, PER_PEER_BURST * 2, |_| "human".into()).await;
+    let (senders, lease_sets, receiver, peer) = fan_in(1).await;
+    let answers = flood(
+        &senders[0],
+        &lease_sets[0],
+        &peer,
+        PER_PEER_BURST * 2,
+        |_| "human".into(),
+    )
+    .await;
 
     let allowed = accepted(&answers);
     assert!(
@@ -308,10 +331,14 @@ async fn a_trusted_peer_is_refused_once_its_burst_is_spent() {
 /// frame here carries a source endpoint no other frame used.
 #[tokio::test]
 async fn a_peer_cannot_mint_allowance_by_inventing_source_endpoints() {
-    let (senders, receiver, peer) = fan_in(1).await;
-    let answers = flood(&senders[0], &peer, PER_PEER_BURST * 2, |id| {
-        format!("source-{}", id % INVENTED_SOURCES)
-    })
+    let (senders, lease_sets, receiver, peer) = fan_in(1).await;
+    let answers = flood(
+        &senders[0],
+        &lease_sets[0],
+        &peer,
+        PER_PEER_BURST * 2,
+        |id| format!("source-{}", id % INVENTED_SOURCES),
+    )
     .await;
 
     let allowed = accepted(&answers);
@@ -340,16 +367,26 @@ async fn a_peer_cannot_mint_allowance_by_inventing_source_endpoints() {
 /// if the quiet peer is refused, the keying is wrong.
 #[tokio::test]
 async fn a_flooding_peer_does_not_spend_a_quiet_peers_allowance() {
-    let (senders, receiver, peer) = fan_in(2).await;
+    let (senders, lease_sets, receiver, peer) = fan_in(2).await;
 
-    let flooded = flood(&senders[0], &peer, PER_PEER_BURST * 2, |_| "human".into()).await;
+    let flooded = flood(
+        &senders[0],
+        &lease_sets[0],
+        &peer,
+        PER_PEER_BURST * 2,
+        |_| "human".into(),
+    )
+    .await;
     assert!(
         accepted(&flooded) < flooded.len(),
         "the loud peer was refused"
     );
 
     // The quiet peer has spent nothing and is owed its own full burst.
-    let quiet = flood(&senders[1], &peer, PER_PEER_BURST, |_| "human".into()).await;
+    let quiet = flood(&senders[1], &lease_sets[1], &peer, PER_PEER_BURST, |_| {
+        "human".into()
+    })
+    .await;
     assert_eq!(
         accepted(&quiet),
         usize::from(PER_PEER_BURST),
@@ -388,12 +425,12 @@ async fn a_flooding_peer_does_not_spend_a_quiet_peers_allowance() {
 #[tokio::test]
 async fn the_global_bucket_bounds_peers_that_are_each_within_their_own() {
     const SENDERS: usize = 16;
-    let (senders, receiver, peer) = fan_in(SENDERS).await;
+    let (senders, lease_sets, receiver, peer) = fan_in(SENDERS).await;
 
     let mut accepted_total = 0usize;
     let mut refusals = 0usize;
-    for sender in &senders {
-        let answers = flood(sender, &peer, PER_PEER_BURST, |_| "human".into()).await;
+    for (sender, leases) in senders.iter().zip(&lease_sets) {
+        let answers = flood(sender, leases, &peer, PER_PEER_BURST, |_| "human".into()).await;
         // EVERY refusal must be the limiter, as the sibling tests
         // require. Counting bare `Err` would let a transport fault or a
         // queue-capacity regression supply the refusals this test reads

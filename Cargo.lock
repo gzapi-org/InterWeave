@@ -1701,6 +1701,7 @@ name = "interweave-pubsub-tests"
 version = "0.0.0"
 dependencies = [
  "futures",
+ "interweave-local-client-api",
  "interweave-profile-config",
  "interweave-profile-identity",
  "interweave-test-support",

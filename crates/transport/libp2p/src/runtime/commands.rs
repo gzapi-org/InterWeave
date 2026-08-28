@@ -438,25 +438,28 @@ pub(super) fn handle_command(
             let _ = reply.send(closed);
         }
         SwarmCommand::SendDirect {
-            session,
+            lease,
             peer,
             mut frame,
             reply,
         } => {
-            // THE SOURCE ENDPOINT IS THE CALLER'S LEASE, and the frame's
-            // own field is REPLACED rather than checked. CLAUDE.md §5:
-            // source EndpointId is derived from the local lease, never
-            // trusted from the caller — and a comparison would still
-            // make the field caller-meaningful, since the caller would
-            // learn which values pass. So the session is the only input.
+            // THE SOURCE ENDPOINT IS THE LEASE'S, and the frame's own field
+            // is REPLACED rather than checked. CLAUDE.md §5: source
+            // EndpointId is derived from the local lease, never trusted
+            // from the caller — and a comparison would still make the field
+            // caller-meaningful, since the caller would learn which values
+            // pass. So the lease is the only input.
             //
-            // Stage 6 accepted any lease this node held, because the
-            // handle holder was the only caller and owned every endpoint.
-            // That gap was carried here by explicit decision (PR #38),
-            // and closes with sessions: a session holds ONE lease and
-            // sends as that endpoint or not at all —
-            // `a_session_sends_only_as_its_own_endpoint`.
-            let Some(source) = direct_state.source_of(&LocalSessionId(session)) else {
+            // The lease is the CAPABILITY, not a name. `ENDPOINTS.md`
+            // requires that "callers cannot spoof another local endpoint",
+            // and a session STRING could not deliver that — any handle
+            // holder could name another session and send as its endpoint.
+            // The lease carries the 128-bit epoch `claim_endpoint` minted,
+            // so sending as an endpoint requires having claimed it; a
+            // caller that names one it did not claim does not hold the
+            // matching epoch and is refused —
+            // `a_lease_with_the_wrong_epoch_cannot_send`.
+            let Some(source) = direct_state.source_for_lease(&lease) else {
                 let _ = reply.send(Err(DirectError::EndpointNotRegistered));
                 return;
             };

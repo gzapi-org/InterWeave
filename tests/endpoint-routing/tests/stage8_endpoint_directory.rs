@@ -135,14 +135,14 @@ async fn a_disabled_directory_does_not_break_explicit_send() {
     // The querier holds no lease here, so it cannot send; but the
     // responder still ROUTES to `human`, proving the directory being off
     // did not disable endpoint delivery. Claim on the querier and send.
-    querier
+    let me = querier
         .claim_endpoint("me", endpoint("human"), "in-process")
         .await
         .expect("command")
         .expect("free");
     let resolved = querier
         .send_direct(
-            "me",
+            &me,
             peer,
             support::frame("human", Some("human"), b"still routes", 1),
         )
@@ -183,14 +183,14 @@ async fn a_stale_cache_entry_then_release_yields_no_route() {
 
     // But an explicit send is the ordinary no_route: the querier claims a
     // source and sends to the now-unleased endpoint.
-    querier
+    let me = querier
         .claim_endpoint("me", endpoint("human"), "in-process")
         .await
         .expect("command")
         .expect("free on the querier");
     let error = querier
         .send_direct(
-            "me",
+            &me,
             peer,
             support::frame("human", Some("human"), b"gone", 2),
         )

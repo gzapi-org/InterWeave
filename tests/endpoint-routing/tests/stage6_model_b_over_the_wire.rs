@@ -21,11 +21,11 @@ use support::{connected_pair, endpoint, frame};
 /// `claude` reaches only Claude — on ONE PeerId.
 #[tokio::test]
 async fn each_endpoint_receives_only_what_was_addressed_to_it() {
-    let (sender, receiver, peer) = connected_pair().await;
+    let (sender, receiver, peer, leases) = connected_pair().await;
 
     sender
         .send_direct(
-            "human",
+            &leases["human"],
             peer.clone(),
             frame("human", Some("human"), b"for the human", 1),
         )
@@ -34,7 +34,7 @@ async fn each_endpoint_receives_only_what_was_addressed_to_it() {
         .expect("accepted");
     sender
         .send_direct(
-            "human",
+            &leases["human"],
             peer.clone(),
             frame("human", Some("claude"), b"for claude", 2),
         )
@@ -43,7 +43,7 @@ async fn each_endpoint_receives_only_what_was_addressed_to_it() {
         .expect("accepted");
     sender
         .send_direct(
-            "human",
+            &leases["human"],
             peer,
             frame("human", Some("gpt-5"), b"for gpt-5", 3),
         )
@@ -75,10 +75,14 @@ async fn each_endpoint_receives_only_what_was_addressed_to_it() {
 /// routes exactly as `human` and `claude` do — no code knows the names.
 #[tokio::test]
 async fn an_endpoint_this_stage_never_heard_of_routes_like_any_other() {
-    let (sender, receiver, peer) = connected_pair().await;
+    let (sender, receiver, peer, leases) = connected_pair().await;
 
     let resolved = sender
-        .send_direct("human", peer, frame("human", Some("gpt-5"), b"hello", 4))
+        .send_direct(
+            &leases["human"],
+            peer,
+            frame("human", Some("gpt-5"), b"hello", 4),
+        )
         .await
         .expect("command")
         .expect("a configured endpoint is a configured endpoint");
@@ -113,11 +117,11 @@ async fn an_endpoint_this_stage_never_heard_of_routes_like_any_other() {
 /// second arrival a duplicate of the first and drop it.
 #[tokio::test]
 async fn one_id_from_two_source_endpoints_delivers_twice() {
-    let (sender, receiver, peer) = connected_pair().await;
+    let (sender, receiver, peer, leases) = connected_pair().await;
 
     sender
         .send_direct(
-            "human",
+            &leases["human"],
             peer.clone(),
             frame("human", Some("claude"), b"from human", 5),
         )
@@ -126,7 +130,7 @@ async fn one_id_from_two_source_endpoints_delivers_twice() {
         .expect("accepted");
     sender
         .send_direct(
-            "gpt-5",
+            &leases["gpt-5"],
             peer,
             frame("gpt-5", Some("claude"), b"from gpt-5", 5),
         )
@@ -157,16 +161,16 @@ async fn one_id_from_two_source_endpoints_delivers_twice() {
 /// mean dedup is not working at all.
 #[tokio::test]
 async fn one_id_from_one_source_delivers_once() {
-    let (sender, receiver, peer) = connected_pair().await;
+    let (sender, receiver, peer, leases) = connected_pair().await;
     let repeated = frame("human", Some("claude"), b"same body", 6);
 
     sender
-        .send_direct("human", peer.clone(), repeated.clone())
+        .send_direct(&leases["human"], peer.clone(), repeated.clone())
         .await
         .expect("command")
         .expect("accepted");
     sender
-        .send_direct("human", peer, repeated)
+        .send_direct(&leases["human"], peer, repeated)
         .await
         .expect("command")
         .expect("the retry is accepted from cache");

@@ -189,15 +189,19 @@ impl DirectState {
             .advertised_for(peer, &self.trust, self.max_advertised)
     }
 
-    /// The endpoint `session` may send AS — its lease, or nothing.
+    /// The endpoint a lease-holder may send AS — the lease's endpoint, or
+    /// nothing when the lease is not live.
     ///
-    /// This is the whole of source-endpoint derivation (ADR-0030,
-    /// CLAUDE.md §5): the session is the input, and a frame's own
-    /// `source_endpoint` is never consulted.
-    pub(super) fn source_of(&self, session: &LocalSessionId) -> Option<EndpointId> {
+    /// The whole of source-endpoint derivation (ADR-0030, CLAUDE.md §5):
+    /// the LEASE is the input, verified by its epoch, and a frame's own
+    /// `source_endpoint` is never consulted. A caller cannot send as an
+    /// endpoint it did not claim, because it does not hold the matching
+    /// epoch — `ENDPOINTS.md`: "callers cannot spoof another local
+    /// endpoint".
+    pub(super) fn source_for_lease(&self, lease: &EndpointLease) -> Option<EndpointId> {
         self.registry
-            .lease_of(session)
-            .map(|(endpoint, _)| endpoint.clone())
+            .holds_lease(&lease.endpoint, &lease.epoch)
+            .then(|| lease.endpoint.clone())
     }
 
     /// Whether an admitted request's answer is still queued.

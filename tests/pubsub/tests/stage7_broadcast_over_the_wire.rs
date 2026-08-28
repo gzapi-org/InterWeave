@@ -64,14 +64,19 @@ fn endpoint(name: &str) -> EndpointId {
 /// What Stage 6 did implicitly at `configure_direct`, done explicitly:
 /// a session sends AS the endpoint it holds, so these tests name sessions
 /// after endpoints and the lease is the only thing that binds the two.
-async fn claim_all(runtime: &SwarmRuntime, names: &[&str]) {
+type Leases = std::collections::BTreeMap<String, interweave_local_client_api::EndpointLease>;
+
+async fn claim_all(runtime: &SwarmRuntime, names: &[&str]) -> Leases {
+    let mut leases = Leases::new();
     for name in names {
-        runtime
+        let lease = runtime
             .claim_endpoint(*name, endpoint(name), "in-process")
             .await
             .expect("the claim reaches the task")
             .expect("the endpoint is configured and free");
+        leases.insert((*name).to_owned(), lease);
     }
+    leases
 }
 
 fn entry(name: &str) -> EndpointConfig {
@@ -122,7 +127,7 @@ async fn node(
     peers: &[&TransportIdentity],
     desired: &[&str],
     config: SubstrateConfig,
-) -> SwarmRuntime {
+) -> (SwarmRuntime, Leases) {
     node_with_queue(identity, peers, desired, config, 64).await
 }
 
@@ -133,7 +138,7 @@ async fn node_with_queue(
     desired: &[&str],
     config: SubstrateConfig,
     queue_bound: usize,
-) -> SwarmRuntime {
+) -> (SwarmRuntime, Leases) {
     let runtime = SwarmRuntime::start(identity, config, trusting(peers)).expect("the node starts");
     runtime
         .configure_direct(
@@ -141,7 +146,7 @@ async fn node_with_queue(
         )
         .await
         .expect("direct endpoints install");
-    claim_all(&runtime, &["human"]).await;
+    let leases = claim_all(&runtime, &["human"]).await;
     runtime
         .configure_broadcast(
             BroadcastChannels::from_profile(&profile(desired), queue_bound)
@@ -149,7 +154,7 @@ async fn node_with_queue(
         )
         .await
         .expect("broadcast channels install");
-    runtime
+    (runtime, leases)
 }
 
 /// Connect `dialer` to `listener` and wait for both to see it.
@@ -217,8 +222,8 @@ async fn broadcast_and_direct_are_independently_functional() {
     let (a_id, a_peer) = who();
     let (b_id, b_peer) = who();
 
-    let mut a = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
-    let mut b = node(&b_id, &[&a_peer], &["general"], SubstrateConfig::default()).await;
+    let (mut a, a_leases) = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
+    let (mut b, _) = node(&b_id, &[&a_peer], &["general"], SubstrateConfig::default()).await;
     connect(&mut a, &mut b, &b_peer).await;
 
     a.join(channel("general"), "pub")
@@ -247,7 +252,7 @@ async fn broadcast_and_direct_are_independently_functional() {
         destination_endpoint: None,
         payload: Payload::at_ceiling(None, b"directly".to_vec()).expect("within the ceiling"),
     };
-    a.send_direct("human", b_peer.clone(), frame)
+    a.send_direct(&a_leases["human"], b_peer.clone(), frame)
         .await
         .expect("the command lands")
         .expect("the send is accepted");
@@ -276,8 +281,8 @@ async fn publishing_without_a_join_is_refused_and_nothing_reaches_the_wire() {
     let (a_id, a_peer) = who();
     let (b_id, b_peer) = who();
 
-    let mut a = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
-    let mut b = node(&b_id, &[&a_peer], &["general"], SubstrateConfig::default()).await;
+    let (mut a, _) = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
+    let (mut b, _) = node(&b_id, &[&a_peer], &["general"], SubstrateConfig::default()).await;
     connect(&mut a, &mut b, &b_peer).await;
 
     // B joins and would receive; A never joins.
@@ -313,8 +318,8 @@ async fn a_desired_channel_with_no_join_delivers_nothing_and_replays_nothing() {
     let (a_id, a_peer) = who();
     let (b_id, b_peer) = who();
 
-    let mut a = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
-    let mut b = node(&b_id, &[&a_peer], &["general"], SubstrateConfig::default()).await;
+    let (mut a, _) = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
+    let (mut b, _) = node(&b_id, &[&a_peer], &["general"], SubstrateConfig::default()).await;
     connect(&mut a, &mut b, &b_peer).await;
 
     a.join(channel("general"), "pub")
@@ -349,8 +354,8 @@ async fn only_the_joined_session_of_two_is_delivered_to() {
     let (a_id, a_peer) = who();
     let (b_id, b_peer) = who();
 
-    let mut a = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
-    let mut b = node(&b_id, &[&a_peer], &["general"], SubstrateConfig::default()).await;
+    let (mut a, _) = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
+    let (mut b, _) = node(&b_id, &[&a_peer], &["general"], SubstrateConfig::default()).await;
     connect(&mut a, &mut b, &b_peer).await;
 
     a.join(channel("general"), "pub")
@@ -383,8 +388,8 @@ async fn leaving_stops_delivery_for_that_session_alone() {
     let (a_id, a_peer) = who();
     let (b_id, b_peer) = who();
 
-    let mut a = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
-    let mut b = node(&b_id, &[&a_peer], &["general"], SubstrateConfig::default()).await;
+    let (mut a, _) = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
+    let (mut b, _) = node(&b_id, &[&a_peer], &["general"], SubstrateConfig::default()).await;
     connect(&mut a, &mut b, &b_peer).await;
 
     a.join(channel("general"), "pub")
@@ -448,8 +453,8 @@ async fn revoking_trust_stops_broadcast_delivery() {
     let (a_id, a_peer) = who();
     let (b_id, b_peer) = who();
 
-    let mut a = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
-    let mut b = node(&b_id, &[&a_peer], &["general"], SubstrateConfig::default()).await;
+    let (mut a, _) = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
+    let (mut b, _) = node(&b_id, &[&a_peer], &["general"], SubstrateConfig::default()).await;
     connect(&mut a, &mut b, &b_peer).await;
 
     a.join(channel("general"), "pub")
@@ -527,8 +532,8 @@ async fn a_broadcast_flood_does_not_wedge_the_direct_path() {
         event_capacity: 8,
         ..SubstrateConfig::default()
     };
-    let mut a = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
-    let mut b = node(&b_id, &[&a_peer], &["general"], cramped).await;
+    let (mut a, a_leases) = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
+    let (mut b, _) = node(&b_id, &[&a_peer], &["general"], cramped).await;
     connect(&mut a, &mut b, &b_peer).await;
 
     a.join(channel("general"), "pub")
@@ -570,10 +575,13 @@ async fn a_broadcast_flood_does_not_wedge_the_direct_path() {
         payload: Payload::at_ceiling(None, b"through the flood".to_vec())
             .expect("within the ceiling"),
     };
-    let answered = tokio::time::timeout(PATIENCE, a.send_direct("human", b_peer.clone(), frame))
-        .await
-        .expect("the exchange settled rather than hanging behind a broadcast flood")
-        .expect("the command lands");
+    let answered = tokio::time::timeout(
+        PATIENCE,
+        a.send_direct(&a_leases["human"], b_peer.clone(), frame),
+    )
+    .await
+    .expect("the exchange settled rather than hanging behind a broadcast flood")
+    .expect("the command lands");
     assert!(
         answered.is_ok(),
         "a broadcast flood must not stop the receiver answering direct: {answered:?}"
@@ -627,7 +635,7 @@ async fn an_infrastructure_only_peer_cannot_join_the_mesh() {
 
     // The infra peer, for its part, treats the node as data-plane and
     // tries to broadcast to it.
-    let infra = node(
+    let (infra, _) = node(
         &infra_id,
         &[&node_peer],
         &["general"],
@@ -712,8 +720,8 @@ async fn an_unauthorized_publisher_is_ignored_not_delivered_and_not_relayed_furt
     let (c_id, c_peer) = who();
     let (d_id, d_peer) = who();
 
-    let mut a = node(&a_id, &[&r_peer], &["general"], SubstrateConfig::default()).await;
-    let mut r = node(
+    let (mut a, _) = node(&a_id, &[&r_peer], &["general"], SubstrateConfig::default()).await;
+    let (mut r, _) = node(
         &r_id,
         &[&a_peer, &c_peer],
         &["general"],
@@ -721,7 +729,7 @@ async fn an_unauthorized_publisher_is_ignored_not_delivered_and_not_relayed_furt
     )
     .await;
     // C does NOT trust A.
-    let mut c = node(
+    let (mut c, _) = node(
         &c_id,
         &[&r_peer, &d_peer],
         &["general"],
@@ -730,7 +738,7 @@ async fn an_unauthorized_publisher_is_ignored_not_delivered_and_not_relayed_furt
     .await;
     // D trusts A so that a forwarded message WOULD be delivered — D's
     // silence is then C not forwarding, not D ignoring.
-    let mut d = node(
+    let (mut d, _) = node(
         &d_id,
         &[&c_peer, &r_peer, &a_peer],
         &["general"],
@@ -831,14 +839,14 @@ async fn invalid_signature_traffic_cannot_poison_the_cache_for_authentic_traffic
 
     // The victim trusts BOTH: the forger is a trusted peer abusing its
     // connection, which is the only party that can reach the mesh at all.
-    let mut victim = node(
+    let (mut victim, _) = node(
         &v_id,
         &[&a_peer, &forger_peer],
         &["general"],
         SubstrateConfig::default(),
     )
     .await;
-    let mut a = node(&a_id, &[&v_peer], &["general"], SubstrateConfig::default()).await;
+    let (mut a, _) = node(&a_id, &[&v_peer], &["general"], SubstrateConfig::default()).await;
     victim
         .join(channel("general"), "sub")
         .await
@@ -955,8 +963,8 @@ async fn the_last_leave_on_an_undesired_channel_drops_the_backend_subscription()
     let (b_id, b_peer) = who();
 
     // B desires NOTHING, so a join is the only thing holding the topic.
-    let mut a = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
-    let mut b = node(&b_id, &[&a_peer], &[], SubstrateConfig::default()).await;
+    let (mut a, _) = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
+    let (mut b, _) = node(&b_id, &[&a_peer], &[], SubstrateConfig::default()).await;
     connect(&mut a, &mut b, &b_peer).await;
 
     b.join(channel("general"), "only")
@@ -992,8 +1000,8 @@ async fn leaving_a_desired_channel_keeps_the_mesh_warm() {
     let (b_id, b_peer) = who();
 
     // B DESIRES the channel.
-    let mut a = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
-    let mut b = node(&b_id, &[&a_peer], &["general"], SubstrateConfig::default()).await;
+    let (mut a, _) = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
+    let (mut b, _) = node(&b_id, &[&a_peer], &["general"], SubstrateConfig::default()).await;
     connect(&mut a, &mut b, &b_peer).await;
 
     b.join(channel("general"), "only")
@@ -1060,8 +1068,8 @@ async fn shutdown_unsubscribes_before_dropping_the_swarm() {
     let (a_id, a_peer) = who();
     let (b_id, b_peer) = who();
 
-    let mut a = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
-    let mut b = node(&b_id, &[&a_peer], &["general"], SubstrateConfig::default()).await;
+    let (mut a, _) = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
+    let (mut b, _) = node(&b_id, &[&a_peer], &["general"], SubstrateConfig::default()).await;
     connect(&mut a, &mut b, &b_peer).await;
 
     wait_for(
@@ -1108,7 +1116,7 @@ async fn shutdown_unsubscribes_before_dropping_the_swarm() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publishing_into_an_empty_mesh_is_local_success() {
     let (a_id, _) = who();
-    let a = node(&a_id, &[], &["general"], SubstrateConfig::default()).await;
+    let (a, _) = node(&a_id, &[], &["general"], SubstrateConfig::default()).await;
     a.join(channel("general"), "only")
         .await
         .expect("lands")
@@ -1143,9 +1151,9 @@ async fn a_full_session_queue_drops_for_that_session_and_the_mesh_still_forwards
     let (b_id, b_peer) = who();
     let (c_id, c_peer) = who();
 
-    let mut a = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
+    let (mut a, _) = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
     // B keeps room for exactly ONE delivery per session.
-    let mut b = node_with_queue(
+    let (mut b, _) = node_with_queue(
         &b_id,
         &[&a_peer, &c_peer],
         &["general"],
@@ -1157,7 +1165,7 @@ async fn a_full_session_queue_drops_for_that_session_and_the_mesh_still_forwards
     // author, not the relay that carried the message. C trusting only B
     // would make C ignore everything A sends and this test would read a
     // forwarding failure that was not one.
-    let mut c = node(
+    let (mut c, _) = node(
         &c_id,
         &[&b_peer, &a_peer],
         &["general"],
@@ -1223,7 +1231,7 @@ async fn a_signed_but_malformed_envelope_is_reject_and_does_not_wedge_later_vali
     )
     .expect("a canonical peer id");
 
-    let mut victim = node(
+    let (mut victim, _) = node(
         &v_id,
         &[&forger_peer],
         &["general"],
@@ -1323,8 +1331,8 @@ async fn gossipsub_never_originates_a_dial() {
     let (a_id, a_peer) = who();
     let (b_id, b_peer) = who();
 
-    let mut a = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
-    let b = node(&b_id, &[&a_peer], &["general"], SubstrateConfig::default()).await;
+    let (mut a, _) = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
+    let (b, _) = node(&b_id, &[&a_peer], &["general"], SubstrateConfig::default()).await;
     let address = b
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("a loopback address"))
         .await
@@ -1376,8 +1384,8 @@ async fn the_largest_legal_broadcast_crosses_the_wire() {
     let (a_id, a_peer) = who();
     let (b_id, b_peer) = who();
 
-    let mut a = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
-    let mut b = node(&b_id, &[&a_peer], &["general"], SubstrateConfig::default()).await;
+    let (mut a, _) = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
+    let (mut b, _) = node(&b_id, &[&a_peer], &["general"], SubstrateConfig::default()).await;
     connect(&mut a, &mut b, &b_peer).await;
     for r in [&a, &b] {
         r.join(channel("general"), "sub")
@@ -1443,9 +1451,9 @@ async fn a_refused_reconfiguration_leaves_the_queue_bound_alone() {
     let (a_id, a_peer) = who();
     let (b_id, b_peer) = who();
 
-    let mut a = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
+    let (mut a, _) = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
     // B starts bounded at ONE.
-    let mut b = node_with_queue(
+    let (mut b, _) = node_with_queue(
         &b_id,
         &[&a_peer],
         &["general"],
@@ -1525,14 +1533,14 @@ async fn reconfiguring_drops_channels_nobody_holds_and_keeps_the_ones_joined() {
     let (a_id, a_peer) = who();
     let (b_id, b_peer) = who();
 
-    let mut a = node(
+    let (mut a, _) = node(
         &a_id,
         &[&b_peer],
         &["dropped", "kept"],
         SubstrateConfig::default(),
     )
     .await;
-    let mut b = node(
+    let (mut b, _) = node(
         &b_id,
         &[&a_peer],
         &["dropped", "kept"],
@@ -1620,14 +1628,14 @@ async fn a_final_leave_closes_the_session_queue_and_a_partial_one_does_not() {
     let (a_id, a_peer) = who();
     let (b_id, b_peer) = who();
 
-    let mut a = node(
+    let (mut a, _) = node(
         &a_id,
         &[&b_peer],
         &["general", "second"],
         SubstrateConfig::default(),
     )
     .await;
-    let mut b = node(
+    let (mut b, _) = node(
         &b_id,
         &[&a_peer],
         &["general", "second"],
@@ -1707,8 +1715,8 @@ async fn a_broadcast_to_many_sessions_cannot_overrun_the_outbox() {
         event_capacity: 4,
         ..SubstrateConfig::default()
     };
-    let mut a = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
-    let mut b = node(&b_id, &[&a_peer], &["general"], cramped).await;
+    let (mut a, a_leases) = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
+    let (mut b, _) = node(&b_id, &[&a_peer], &["general"], cramped).await;
     connect(&mut a, &mut b, &b_peer).await;
 
     // FAR more joined sessions than the outbox can hold notifications for.
@@ -1740,7 +1748,7 @@ async fn a_broadcast_to_many_sessions_cannot_overrun_the_outbox() {
     };
     let answered = tokio::time::timeout(
         PATIENCE,
-        a.send_direct("human", b_peer.clone(), endpoint_frame),
+        a.send_direct(&a_leases["human"], b_peer.clone(), endpoint_frame),
     )
     .await
     .expect("the exchange settled rather than hanging behind a fan-out")
@@ -1780,9 +1788,9 @@ async fn a_session_queue_overflow_is_announced() {
     let (a_id, a_peer) = who();
     let (b_id, b_peer) = who();
 
-    let mut a = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
+    let (mut a, _) = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
     // Room for exactly one delivery, so the second is refused.
-    let mut b = node_with_queue(
+    let (mut b, _) = node_with_queue(
         &b_id,
         &[&a_peer],
         &["general"],
@@ -1829,7 +1837,7 @@ async fn a_session_queue_overflow_is_announced() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_local_sessions_on_one_profile_receive_each_others_broadcasts() {
     let (a_id, _) = who();
-    let a = node(&a_id, &[], &["general"], SubstrateConfig::default()).await;
+    let (a, _) = node(&a_id, &[], &["general"], SubstrateConfig::default()).await;
 
     for s in ["human", "claude"] {
         a.join(channel("general"), s)
@@ -1877,7 +1885,7 @@ async fn two_local_sessions_on_one_profile_receive_each_others_broadcasts() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_publish_with_no_mesh_peers_is_accepted_and_reported_degraded() {
     let (a_id, _) = who();
-    let mut a = node(&a_id, &[], &["general"], SubstrateConfig::default()).await;
+    let (mut a, _) = node(&a_id, &[], &["general"], SubstrateConfig::default()).await;
     a.join(channel("general"), "only")
         .await
         .expect("lands")
@@ -1907,7 +1915,7 @@ async fn a_publish_with_no_mesh_peers_is_accepted_and_reported_degraded() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_republished_envelope_reaches_a_local_sibling_once() {
     let (a_id, _) = who();
-    let a = node(&a_id, &[], &["general"], SubstrateConfig::default()).await;
+    let (a, _) = node(&a_id, &[], &["general"], SubstrateConfig::default()).await;
     for s in ["human", "claude"] {
         a.join(channel("general"), s)
             .await
@@ -1935,7 +1943,7 @@ async fn a_republished_envelope_reaches_a_local_sibling_once() {
 async fn a_local_publish_announces_delivery_and_overflow() {
     let (a_id, _) = who();
     // Room for one delivery per session, so the second publish overflows.
-    let mut a = node_with_queue(&a_id, &[], &["general"], SubstrateConfig::default(), 1).await;
+    let (mut a, _) = node_with_queue(&a_id, &[], &["general"], SubstrateConfig::default(), 1).await;
     for s in ["human", "claude"] {
         a.join(channel("general"), s)
             .await
@@ -1981,7 +1989,7 @@ async fn repeated_unreachable_publishes_cannot_grow_the_outbox() {
         event_capacity: 4,
         ..SubstrateConfig::default()
     };
-    let a = node(&a_id, &[], &["general"], cramped).await;
+    let (a, _) = node(&a_id, &[], &["general"], cramped).await;
     a.join(channel("general"), "only")
         .await
         .expect("lands")
@@ -2022,7 +2030,7 @@ async fn repeated_unreachable_publishes_cannot_grow_the_outbox() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reloaded_queue_bound_applies_to_sessions_already_joined() {
     let (a_id, _) = who();
-    let a = node_with_queue(&a_id, &[], &["general"], SubstrateConfig::default(), 1).await;
+    let (a, _) = node_with_queue(&a_id, &[], &["general"], SubstrateConfig::default(), 1).await;
     for s in ["human", "claude"] {
         a.join(channel("general"), s)
             .await
@@ -2101,7 +2109,7 @@ async fn the_zero_mesh_diagnostic_outranks_local_delivery_wakeups() {
         event_capacity: 1,
         ..SubstrateConfig::default()
     };
-    let mut a = node(&a_id, &[], &["general"], cramped).await;
+    let (mut a, _) = node(&a_id, &[], &["general"], cramped).await;
     for s in ["human", "claude"] {
         a.join(channel("general"), s)
             .await
@@ -2149,7 +2157,7 @@ async fn an_actual_loss_outranks_the_zero_mesh_report() {
         event_capacity: 1,
         ..SubstrateConfig::default()
     };
-    let mut a = node_with_queue(&a_id, &[], &["general"], cramped, 1).await;
+    let (mut a, _) = node_with_queue(&a_id, &[], &["general"], cramped, 1).await;
     for s in ["human", "claude"] {
         a.join(channel("general"), s)
             .await
