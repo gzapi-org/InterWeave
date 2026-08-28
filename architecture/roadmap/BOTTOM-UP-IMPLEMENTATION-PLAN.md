@@ -563,12 +563,18 @@ direct wire carries the frozen binary frames instead. Marking it `active`
 would tell a consumer that an unimplemented Stage 13 shape is current
 behaviour.
 
-`common/channel-id` stays `approved`. ADR-0049 defines `active` as
-describing the **current wire**, and ChannelId addresses broadcast
-topics, which no wire carries until Stage 7. The original wording named
-the whole of `common`; flipping a schema for a wire that does not exist
-would make the status field mean "we intend to" — which is precisely
-what `approved` already means.
+`common/channel-id` became `active` when Stage 7 closed, and the reason
+it was `approved` until then is the reason it is `active` now. ADR-0049
+defines `active` as describing the **current wire**; ChannelId addresses
+broadcast topics, and until Stage 7 no wire carried one, so flipping it
+earlier would have made the status field mean "we intend to" — precisely
+what `approved` already means. Stage 7 derives the GossipSub topic from a
+ChannelId and binds it in the Join, Leave and Publish commands, so the
+wire now exists and the schema describes it.
+
+The original wording named the whole of `common`, which was the mistake
+worth recording: a family-wide flip would have carried schemas whose wire
+still does not exist.
 
 `endpoints/directory-response` and `endpoints/endpoint-config` likewise
 stay `approved`: the directory exchange is Stage 8, and the config shape

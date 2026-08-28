@@ -10,7 +10,7 @@
   "examples": ["general", "team.eu:builds/nightly-1", "Announcements"],
   "x-contract": {
     "name": "common.channel-id",
-    "status": "approved",
+    "status": "active",
     "version": "1.0.0",
     "adr": ["0025", "0026"],
     "specification": "architecture/contracts/TRANSPORT.md"

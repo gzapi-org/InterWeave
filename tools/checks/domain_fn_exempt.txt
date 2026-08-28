@@ -49,33 +49,49 @@ SubscriptionRegistry::subscribers     call  subs.subscribers(
 SubscriptionRegistry::set_desired     call  broadcast_state.subs.set_desired(
 SubscriptionRegistry::holds_any       call  broadcast_state.subs.holds_any(
 SessionQueues::set_bound              call  broadcast_state.queues.set_bound(
+
+# --- stage 7 wired these; the ledger cannot attribute a call through a
+# --- field, so each names the expression that reaches it.
+SubscriptionRegistry::join            call  broadcast_state.subs.join(
+SubscriptionRegistry::leave           call  broadcast_state.subs.leave(
+SubscriptionRegistry::may_publish     call  broadcast_state.subs.may_publish(
+SubscriptionRegistry::backend_should_subscribe  call  broadcast_state.subs.backend_should_subscribe(
+SessionQueues::open                   call  .open(session, broadcast_state.queue_bound
+SessionQueues::close                  call  broadcast_state.queues.close(
+SessionQueues::is_open                call  broadcast_state.queues.is_open(
+SessionQueues::drain                  call  broadcast_state.queues.drain(
+TopicKey::wire_string                 call  topic_key_v1(channel).wire_string(
+MeshMessageId::as_bytes               call  MessageId::new(id.as_bytes(
+# TopicKey::as_bytes has NO production caller and may never gain one:
+# production reads `wire_string`, and the raw accessor exists so the
+# frozen vector is compared byte-for-byte instead of through the hex
+# formatter, which would otherwise be free to agree with itself. Dated so
+# the claim is re-examined rather than left standing; if Stage 8 closes
+# with nothing calling it, the question is whether to delete it, not
+# whether to re-date it.
+TopicKey::as_bytes                     stage-8   no production caller planned — see the note above
+
+# --- stage 8 — all three first become observable at the IPC surface: a
+# --- client disconnect is what releases a session, and the limiter's
+# --- diagnostics are what an admin surface reads.
+SubscriptionRegistry::release_session  stage-8   a client disconnect releases its joins, once IPC reports one
+SubscriptionRegistry::subscriptions    stage-8   the admin surface reads the count it bounds
+IngressLimiter::prune_idle             stage-8   the periodic sweep runs from the IPC-driven admin tick
+IngressLimiter::tracked_peers          stage-8   the admin surface reads it
+
+# --- stage 16 — the Claude bridge, where a reply route first has a
+# --- channel to resolve against (plan section 19).
+ReplyResolution::as_error              stage-16  reply routes arrive with the bridge
+ReplyTokenTable::new                   stage-16  reply routes arrive with the bridge
+ReplyTokenTable::mint                  stage-16  reply routes arrive with the bridge
+ReplyTokenTable::resolve               stage-16  reply routes arrive with the bridge
+ReplyTokenTable::expire                stage-16  reply routes arrive with the bridge
+ReplyTokenTable::clear                 stage-16  reply routes arrive with the bridge
+ReplyTokenTable::len                   stage-16  reply routes arrive with the bridge
+ReplyTokenTable::is_empty              stage-16  reply routes arrive with the bridge
 FrameError::to_wire                              call  error.to_wire(
 Refusal::to_wire                                 call  refusal.to_wire(
 
-# --- stage-7 -----------------------------------------------------
-SessionQueues::close                             stage-7   a leave or a session ending closes its queue, once commands exist
-SessionQueues::drain                             stage-7   the session drain command hands these to a local consumer
-SessionQueues::is_open                           stage-7   join opens a queue only when the session has none
-SessionQueues::open                              stage-7   join opens the queue, once the command exists
-MeshMessageId::as_bytes                          stage-7   the message_id_fn hands these bytes to gossipsub's MessageId
-TopicKey::as_bytes                               stage-7   read beside wire_string when the behaviour subscribes and publishes
-TopicKey::wire_string                            stage-7   becomes the gossipsub topic string when the behaviour is composed
-IngressLimiter::prune_idle                       stage-7   broadcast subscription surface, no mesh before GossipSub
-IngressLimiter::tracked_peers                    stage-7   broadcast subscription surface, no mesh before GossipSub
-ReplyResolution::as_error                        stage-7   reply routes arrive with channels
-ReplyTokenTable::clear                           stage-7   reply routes arrive with channels
-ReplyTokenTable::expire                          stage-7   reply routes arrive with channels
-ReplyTokenTable::is_empty                        stage-7   reply routes arrive with channels
-ReplyTokenTable::len                             stage-7   reply routes arrive with channels
-ReplyTokenTable::mint                            stage-7   reply routes arrive with channels
-ReplyTokenTable::new                             stage-7   reply routes arrive with channels
-ReplyTokenTable::resolve                         stage-7   reply routes arrive with channels
-SubscriptionRegistry::backend_should_subscribe   stage-7   broadcast subscription surface, no mesh before GossipSub
-SubscriptionRegistry::join                       stage-7   broadcast subscription surface, no mesh before GossipSub
-SubscriptionRegistry::leave                      stage-7   broadcast subscription surface, no mesh before GossipSub
-SubscriptionRegistry::may_publish                stage-7   broadcast subscription surface, no mesh before GossipSub
-SubscriptionRegistry::release_session            stage-7   broadcast subscription surface, no mesh before GossipSub
-SubscriptionRegistry::subscriptions              stage-7   broadcast subscription surface, no mesh before GossipSub
 
 # --- stage-8 -----------------------------------------------------
 DirectDestination::to_default                    stage-8   identifier projections used by the endpoint directory

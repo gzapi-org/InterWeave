@@ -36,7 +36,7 @@ enum IdRule {
     /// The first version of this experiment hashed nothing: it returned
     /// raw `source || u64be(sequence)`. That separates two publishers,
     /// which made B1 pass, but it is not the frozen function -- so the
-    /// pass said nothing about the calculation Stage 7 will ship.
+    /// pass said nothing about the calculation Stage 7 went on to ship.
     SourceAndSequence,
     /// PAYLOAD-DERIVED, and only for B2. See the note there: the public
     /// API does not let a caller choose a sequence number, so a
