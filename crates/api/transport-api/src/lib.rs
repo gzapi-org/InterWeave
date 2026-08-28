@@ -38,7 +38,9 @@ pub use base64url::Base64Error;
 pub use broadcast_v1::{BroadcastFrameError, BroadcastMessageV1};
 pub use direct_v2::{AcceptedV2, DirectMessageV2, FrameError, RejectedV2};
 pub use endpoint_directory::{
-    DirectoryRefusal, EndpointDirectoryV1, MAX_DIRECTORY_ENTRIES, MAX_DIRECTORY_TTL_MS,
+    DEFAULT_INFLIGHT_QUERIES, DEFAULT_QUERIES_PER_PEER_PER_MINUTE, DirectoryRefusal,
+    EndpointDirectoryV1, MAX_DIRECTORY_ENTRIES, MAX_DIRECTORY_TTL_MS, MAX_INFLIGHT_QUERIES,
+    MAX_QUERIES_PER_PEER_PER_MINUTE,
 };
 pub use ids::{ChannelId, DirectDestination, EndpointId, IdError, MessageId, TransportIdentity};
 pub use payload::{MAX_MEDIA_TYPE_BYTES, MAX_PAYLOAD_BYTES, MediaType, Payload, PayloadError};

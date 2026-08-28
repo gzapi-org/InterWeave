@@ -22,6 +22,15 @@ pub const MAX_DIRECTORY_ENTRIES: usize = 32;
 /// `min(remote, local, MAX_DIRECTORY_TTL_MS)`. Five minutes.
 pub const MAX_DIRECTORY_TTL_MS: u32 = 300_000;
 
+/// Default directory queries per minute per remote PeerId (ADR-0031).
+pub const DEFAULT_QUERIES_PER_PEER_PER_MINUTE: u32 = 12;
+/// Hard ceiling on directory queries per minute per remote PeerId.
+pub const MAX_QUERIES_PER_PEER_PER_MINUTE: u32 = 60;
+/// Default concurrent directory exchanges per profile (ADR-0031).
+pub const DEFAULT_INFLIGHT_QUERIES: usize = 16;
+/// Hard ceiling on concurrent directory exchanges per profile.
+pub const MAX_INFLIGHT_QUERIES: usize = 64;
+
 /// A directory as it crosses the wire, before validation.
 ///
 /// Peer-asserted throughout: this is what the authenticated remote PeerId
