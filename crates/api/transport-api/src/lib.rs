@@ -29,6 +29,7 @@
 pub mod base64url;
 pub mod broadcast_v1;
 pub mod direct_v2;
+pub mod endpoint_directory;
 pub mod ids;
 pub mod payload;
 pub mod status;
@@ -36,6 +37,9 @@ pub mod status;
 pub use base64url::Base64Error;
 pub use broadcast_v1::{BroadcastFrameError, BroadcastMessageV1};
 pub use direct_v2::{AcceptedV2, DirectMessageV2, FrameError, RejectedV2};
+pub use endpoint_directory::{
+    DirectoryRefusal, EndpointDirectoryV1, MAX_DIRECTORY_ENTRIES, MAX_DIRECTORY_TTL_MS,
+};
 pub use ids::{ChannelId, DirectDestination, EndpointId, IdError, MessageId, TransportIdentity};
 pub use payload::{MAX_MEDIA_TYPE_BYTES, MAX_PAYLOAD_BYTES, MediaType, Payload, PayloadError};
 pub use status::{
