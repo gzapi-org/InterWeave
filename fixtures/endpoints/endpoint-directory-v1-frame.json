@@ -1,0 +1,103 @@
+{
+  "fixture": "Endpoint directory v1 framing",
+  "specification": "architecture/transport/libp2p/ENDPOINTS.md",
+  "adr": [
+    "0031"
+  ],
+  "status": "frozen",
+  "algorithm": {
+    "id": "endpoint-directory-v1-frame",
+    "byte_order": "big-endian for every multi-byte integer (network byte order)",
+    "layout": "request: tag:u8=0x01 || directory: tag:u8=0x01 || generated_at_ms:u64be || ttl_ms:u32be || count:u8 || count × (len:u8 || endpoint) || refused: tag:u8=0x02 || reason:u8",
+    "notes": [
+      "The request is exactly one byte; an empty request is a closed stream, not a query.",
+      "count is 0..=32 and len is 1..=64; the receiver treats more entries, a bad grammar, or a duplicate as a protocol violation, never as something to truncate.",
+      "ttl_ms is carried as sent; the RECEIVER clamps it to min(remote, local, 300000) and never refuses a frame for it.",
+      "generated_at_ms is diagnostic: it never extends freshness, which starts at local receipt.",
+      "A refusal carries a reason byte and no list. 1 = overloaded, 2 = unauthorized, 3 = unavailable."
+    ]
+  },
+  "$comment": "Vectors are DERIVED from the layout decided in transport/libp2p/ENDPOINTS.md — ADR-0031 decides that the protocol exists and what it may carry, and publishes no golden frame, so this file is anchored by its `adr` list rather than a per-vector `frozen_by`. There is deliberately NO `contract` URN: the directory-response JSON Schema describes the LOGICAL shape a cache or UI receives after validation, and these bytes are the wire before it.",
+  "vectors": [
+    {
+      "name": "request",
+      "description": "The whole request: one tag byte. Not empty — an empty request is a closed stream, not a query.",
+      "kind": "request",
+      "frame_hex": "01",
+      "frame_len": 1
+    },
+    {
+      "name": "empty-directory",
+      "description": "count = 0. A trusted peer with nothing advertised, nothing leased, or nothing admissible for the querier gets an EMPTY list, not a refusal — a refusal would tell the querier which of those it was.",
+      "kind": "directory",
+      "generated_at_ms": 1786600000000,
+      "ttl_ms": 60000,
+      "endpoints": [],
+      "frame_hex": "010000019ff9a88a000000ea6000",
+      "frame_len": 14
+    },
+    {
+      "name": "one-entry",
+      "description": "A single advertised, leased, admissible endpoint.",
+      "kind": "directory",
+      "generated_at_ms": 1786600000000,
+      "ttl_ms": 60000,
+      "endpoints": [
+        "human"
+      ],
+      "frame_hex": "010000019ff9a88a000000ea60010568756d616e",
+      "frame_len": 20
+    },
+    {
+      "name": "ceiling-32-by-64",
+      "description": "The largest legal response: 32 entries, every EndpointId at the 64-byte ceiling, sorted. 2094 bytes; a codec must read exactly this and refuse one byte more.",
+      "kind": "directory",
+      "generated_at_ms": 1786600000000,
+      "ttl_ms": 300000,
+      "endpoints": [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaad",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaae",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaf",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaag",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaah",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaai",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaj",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaak",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaal",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaam",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaan",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaao",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaap",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaq",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaar",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaas",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaat",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaau",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaav",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaw",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaax",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaay",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaz",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbba",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbc",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbd",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbe",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbf"
+      ],
+      "frame_hex": "010000019ff9a88a00000493e020406161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616140616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161624061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616163406161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616440616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161654061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616166406161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616740616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161684061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616169406161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616a406161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616b406161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616c406161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616d406161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616e406161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616f4061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616170406161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161617140616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161724061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616173406161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161617440616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161754061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616176406161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161617740616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161784061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616179406161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161617a406262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626140626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262624062626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626263406262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626440626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262654062626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626266",
+      "frame_len": 2094
+    },
+    {
+      "name": "refused-overloaded",
+      "description": "A refusal carries a reason and NO list. reason 1 = overloaded; 2 = unauthorized; 3 = unavailable.",
+      "kind": "refused",
+      "reason": 1,
+      "frame_hex": "0201",
+      "frame_len": 2
+    }
+  ]
+}

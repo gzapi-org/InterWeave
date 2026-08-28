@@ -119,6 +119,27 @@ out="$(run "$R")"
 [ "$(run_code "$R")" = "0" ] && ok "repeated verdicts are not treated as collisions" \
     || bad "a verdict set should pass: $out"
 
+# ── the endpoint-directory frame: 33 entries cannot be encoded ───────────
+# The frame carries at most 32; the verifier refuses to compute a 33rd
+# rather than truncating, so a fixture cannot freeze an illegal frame.
+R="$TMP/directory"; mkdir -p "$R/fixtures/endpoints" "$R/architecture/adr"
+touch "$R/architecture/adr/0031-x.md"
+python3 -c "
+import json,sys
+p=sys.argv[1]
+ok={'name':'one','kind':'directory','generated_at_ms':1786600000000,'ttl_ms':60000,'endpoints':['human'],
+    'frame_hex':'010000019ff9a88a000000ea60010568756d616e','frame_len':20}
+too={'name':'too-many','kind':'directory','generated_at_ms':0,'ttl_ms':0,
+     'endpoints':['e%02d'%i for i in range(33)],'frame_hex':'00'}
+json.dump({'algorithm':{'id':'endpoint-directory-v1-frame'},'adr':['0031'],'vectors':[ok,too]}, open(p,'w'))
+" "$R/fixtures/endpoints/d.json"
+out="$(run "$R")"
+[[ "$out" == *"at most 32"* ]] && ok "a 33-entry directory frame is refused, not truncated" || bad "should refuse 33 entries: $out"
+python3 -c "
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d['vectors'].pop(); json.dump(d, open(p,'w'))" "$R/fixtures/endpoints/d.json"
+[ "$(run_code "$R")" = "0" ] && ok "a legal directory frame recomputes" || bad "the one-entry frame should recompute: $(run "$R")"
+
 # ── a file with no ADR anchor ────────────────────────────────────────────
 R="$TMP/unanchored"; make_fixture "$R" "$GOLDEN"
 python3 -c "

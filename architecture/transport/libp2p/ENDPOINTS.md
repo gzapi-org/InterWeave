@@ -84,18 +84,40 @@ It is a separate request-response behavior/control protocol, not a GossipSub top
 Request:
 
 ```text
-ListEndpointsV1 {}
+ListEndpointsV1 {
+  tag: u8 = 0x01,
+}
 ```
+
+The request is exactly one byte. It is not empty: an empty request is indistinguishable from a closed stream, and a codec that accepted it could not tell a query from a peer that opened a stream and went away. Any other length or tag is malformed and is answered with nothing.
 
 Response:
 
 ```text
 EndpointDirectoryV1 {
-  generated_at_ms: u64,
-  ttl_ms: u32,                     // <= 300000
-  endpoints: [EndpointId; <= 32],
+  tag: u8 = 0x01,
+  generated_at_ms: u64,            // diagnostic only
+  ttl_ms: u32,                     // clamped by the receiver, never refused
+  count: u8,                       // 0..=32
+  endpoints: count × {
+    len: u8,                       // 1..=64
+    endpoint: ASCII bytes,
+  },
+}
+
+DirectoryRefusedV1 {
+  tag: u8 = 0x02,
+  reason: u8,
 }
 ```
+
+Multi-byte integers are **big-endian**, matching `DIRECT.md`, the IPC length prefix and `DirectContentFingerprintV1`. Refusal reasons are hand-assigned, not derived from any enum order:
+
+- `1` — `overloaded`: the per-peer query budget or the profile's in-flight bound is exhausted;
+- `2` — `unauthorized`: the querying peer is not data-plane trusted (an infrastructure-only peer receives this, ADR-0036);
+- `3` — `unavailable`: the directory is disabled for this profile, or the node is draining.
+
+A refusal carries no endpoint list. The maximum request is 1 byte; the maximum response is 1 + 8 + 4 + 1 + 32 × 65 = **2094 bytes**, and both codecs bound their reads to those ceilings before allocating. `fixtures/endpoints/endpoint-directory-v1-frame.json` freezes the empty, single-entry and ceiling frames, one refusal, and the request.
 
 The sender sorts the list lexicographically for deterministic fixtures. Only currently leased endpoints configured with `advertise: true` are included. No endpoint metadata beyond `EndpointId` is carried.
 
