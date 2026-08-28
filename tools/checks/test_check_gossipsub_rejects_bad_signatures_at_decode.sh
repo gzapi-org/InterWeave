@@ -123,6 +123,23 @@ write_good
 sed -i 's/^            if verify_signature && !GossipsubCodec::verify_signature(&message) {/            if false {/' "$work/src/protocol.rs"
 if run_guard; then bad "did not notice the decode-time test is gone"; else ok "caught it"; fi
 
+echo "gossipsub signature guard: the condition survives only as a comment"
+write_good
+python3 - "$work/src/protocol.rs" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+live = "            if verify_signature && !GossipsubCodec::verify_signature(&message) {"
+assert s.count(live) == 1
+s = s.replace(live, "            // was: if verify_signature && !GossipsubCodec::verify_signature(&message) {\n            if false {", 1)
+open(p, "w").write(s)
+PY
+if run_guard; then
+  bad "matched a commented-out condition while the live one was disabled"
+else
+  ok "caught it"
+fi
+
 echo "gossipsub signature guard: the duplicate cache moves into the decoder"
 write_good
 echo 'self.duplicate_cache.insert(id);' >> "$work/src/protocol.rs"

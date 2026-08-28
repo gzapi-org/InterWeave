@@ -89,6 +89,20 @@ for f in "$protocol" "$behaviour"; do
 done
 [[ $problems -eq 0 ]] || exit 1
 
+# EVERY ASSERTION READS CODE, NEVER COMMENTS. A revision that replaced
+# the live condition with `if false` while leaving the original in a
+# comment above it satisfied every check below: the greps matched the
+# comment and the body they then examined was the real one, still intact
+# and now unreachable. Line comments are stripped once, here, so no
+# assertion can be fooled by prose that merely looks like the code.
+stripped_protocol="$(mktemp)"
+stripped_behaviour="$(mktemp)"
+trap 'rm -f "$stripped_protocol" "$stripped_behaviour"' EXIT
+sed 's;//.*$;;' "$protocol"  > "$stripped_protocol"
+sed 's;//.*$;;' "$behaviour" > "$stripped_behaviour"
+protocol="$stripped_protocol"
+behaviour="$stripped_behaviour"
+
 # 1. Strict still asks for signature verification.
 if ! grep -qE 'ValidationMode::Strict *=>' "$protocol"; then
   report "protocol.rs no longer matches on ValidationMode::Strict"
