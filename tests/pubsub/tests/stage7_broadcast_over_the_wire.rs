@@ -2116,6 +2116,52 @@ async fn the_zero_mesh_diagnostic_outranks_local_delivery_wakeups() {
     a.shutdown().await.expect("a stops");
 }
 
+/// When both loss reports compete for one slot, the DROP wins.
+///
+/// A publish with no mesh peers whose local fan-out also overflows a
+/// session queue produces both reports in one command turn. At the
+/// smallest capacity they cannot both fit, and there is no room to give
+/// them: `polling_room` stops the Swarm being polled the moment the
+/// outbox passes the base capacity, so a reserve for diagnostics buys one
+/// event and costs the node its ability to answer anything — that was
+/// tried, and an earlier finding's test caught it immediately.
+///
+/// So they are RANKED. Actual data loss outranks degraded reachability,
+/// which outranks a wake-up for a message the session already holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_actual_loss_outranks_the_zero_mesh_report() {
+    let (a_id, _) = who();
+    let cramped = SubstrateConfig {
+        event_capacity: 1,
+        ..SubstrateConfig::default()
+    };
+    let mut a = node_with_queue(&a_id, &[], &["general"], cramped, 1).await;
+    for s in ["human", "claude"] {
+        a.join(channel("general"), s)
+            .await
+            .expect("lands")
+            .expect("accepted");
+    }
+
+    // Fill the sibling's queue, then publish again with no peers: this
+    // turn produces a zero-mesh report AND a local overflow.
+    for id in [40u8, 41] {
+        a.publish(channel("general"), "human", envelope(id, b"both"))
+            .await
+            .expect("lands")
+            .expect("accepted");
+    }
+
+    wait_for(
+        &mut a,
+        "the local overflow report",
+        |e| matches!(e, SwarmEvent::BroadcastDropped { sessions, .. } if *sessions == 1),
+    )
+    .await;
+
+    a.shutdown().await.expect("a stops");
+}
+
 /// Publish the same envelope a few times while the mesh forms.
 ///
 /// A single publish immediately after connecting reaches nobody: GossipSub

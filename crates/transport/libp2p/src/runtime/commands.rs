@@ -262,31 +262,23 @@ pub(super) fn handle_command(
                     super::broadcast::publish_error(&error).map_or(Ok(()), Err)
                 }
             };
-            // DEGRADED REACHABILITY IS STILL SUCCESS, and still worth
-            // saying. PUBSUB.md requires `mesh_peer_count=0` to surface as
+            // ONE PRIORITY ORDER FOR THE TURN: the drop report (emitted
+            // inside `deliver_locally`, because data was actually lost),
+            // then this, then the wake-ups.
+            //
+            // PUBSUB.md requires `mesh_peer_count=0` to surface as
             // degraded rather than as delivery, and the caller's `Ok` is
             // the wrong place for it -- broadcast promises the caller
             // nothing about reach. The operator gets the other half.
             //
-            // BOUNDED like every other informational event: a stalled
-            // consumer plus a client publishing into an empty channel is
-            // an unbounded outbox otherwise, and this one is emitted per
-            // COMMAND rather than per received message, so it is the
-            // easiest of them to drive.
-            //
-            // AND FIRST, before the local deliveries. They are per-session
-            // and can take every slot, which starved this one
-            // systematically -- at a capacity of one with a sibling
-            // joined, the required signal was never emitted at all. Same
-            // precedence as the drop report inside `deliver_locally`: a
-            // report that something is WRONG outranks a wake-up for a
-            // message the session already has.
-            if unreachable && super::may_buffer_delivery(outbox.len(), event_capacity) {
-                outbox.push_back(SwarmEvent::BroadcastUnreachable {
-                    channel: channel.clone(),
-                });
-            }
-            if answer.is_ok() {
+            // It sits BELOW the drop report deliberately: a review round
+            // found each of the two orderings against the wake-ups, and
+            // the resolution is not to give diagnostics extra room --
+            // `polling_room` stops the Swarm the moment the outbox passes
+            // the base capacity -- but to rank them. Actual loss outranks
+            // degraded reachability, which outranks a notification for a
+            // message the session already holds.
+            let outcome = if answer.is_ok() {
                 deliver_locally(
                     broadcast_state,
                     manager,
@@ -299,7 +291,26 @@ pub(super) fn handle_command(
                         wall_ms,
                         event_capacity,
                     },
-                );
+                )
+            } else {
+                None
+            };
+            if unreachable && super::may_buffer_delivery(outbox.len(), event_capacity) {
+                outbox.push_back(SwarmEvent::BroadcastUnreachable {
+                    channel: channel.clone(),
+                });
+            }
+            if let Some(outcome) = outcome {
+                for delivered in outcome.sessions {
+                    if !super::may_buffer_delivery(outbox.len(), event_capacity) {
+                        break;
+                    }
+                    outbox.push_back(SwarmEvent::BroadcastDelivered {
+                        channel: channel.clone(),
+                        source_peer: outcome.source_peer.clone(),
+                        session: delivered,
+                    });
+                }
             }
             let _ = reply.send(answer);
         }
@@ -699,17 +710,13 @@ fn deliver_locally(
     publisher_session: &str,
     frame: &interweave_transport_api::BroadcastMessageV1,
     tick: LocalPublishTick,
-) {
+) -> Option<LocalOutcome> {
     let LocalPublishTick {
         now_ms,
         wall_ms,
         event_capacity,
     } = tick;
-    let Some(source_peer) = manager.local_peer().cloned() else {
-        // Unbound only before the identity is installed, which is before
-        // any session can have joined anything.
-        return;
-    };
+    let source_peer = manager.local_peer().cloned()?;
     let admission = interweave_transport_runtime::broadcast_inbound::admit_local_broadcast(
         frame,
         channel,
@@ -731,13 +738,25 @@ fn deliver_locally(
         dropped,
     } = admission
     else {
-        return;
+        return None;
     };
 
-    // THE SAME EVENTS AS INBOUND, under the same live capacity check.
-    // Every push here re-reads the outbox length: one publish can notify
-    // every joined session, which is exactly how a single free slot turns
-    // into N appended events.
+    // THE SAME EVENTS AS INBOUND, under the same live capacity check, and
+    // in one priority order across the whole command turn:
+    //
+    //   1. the DROP report -- data was actually lost;
+    //   2. the zero-mesh report -- reachability is degraded;
+    //   3. the delivery wake-ups -- a message the session already holds.
+    //
+    // The order is the whole mechanism, because there is no room above
+    // the base capacity to give: `polling_room` stops the Swarm being
+    // polled the moment the outbox passes it, so a "reserve" for
+    // diagnostics buys one more event and costs the node its ability to
+    // answer anything. That was tried, and the test for an earlier
+    // finding caught it.
+    //
+    // Every push re-reads the outbox length: one publish can notify every
+    // joined session, which is how a single free slot becomes N events.
     if !dropped.is_empty() && super::may_buffer_delivery(outbox.len(), event_capacity) {
         outbox.push_back(SwarmEvent::BroadcastDropped {
             channel: channel.clone(),
@@ -745,16 +764,20 @@ fn deliver_locally(
             sessions: dropped.len(),
         });
     }
-    for session in sessions {
-        if !super::may_buffer_delivery(outbox.len(), event_capacity) {
-            break;
-        }
-        outbox.push_back(SwarmEvent::BroadcastDelivered {
-            channel: channel.clone(),
-            source_peer: source_peer.clone(),
-            session,
-        });
-    }
+    Some(LocalOutcome {
+        sessions,
+        source_peer,
+    })
+}
+
+/// What a local publish delivered, for the caller to announce.
+///
+/// Returned rather than emitted inside `deliver_locally` so the command
+/// can put the zero-mesh report BETWEEN the drop report and these: three
+/// event kinds in one turn, one priority order, one capacity.
+struct LocalOutcome {
+    sessions: Vec<String>,
+    source_peer: interweave_transport_api::TransportIdentity,
 }
 
 pub(super) fn forget_address(
