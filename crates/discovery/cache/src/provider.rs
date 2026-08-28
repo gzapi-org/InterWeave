@@ -148,6 +148,19 @@ impl DiscoveryProvider for PeerCacheDiscovery {
             return Err(ProviderError::AlreadyStarted);
         }
         self.started = true;
+        // THE INITIAL TRANSITION IS AN EVENT, and it carries the real
+        // answer: a quarantined cache starts Degraded, which is exactly
+        // the state a consumer needs to hear about at start rather than
+        // never. The manager learns health only from `HealthChanged`.
+        let health = if matches!(self.cache.health(), CacheHealth::Healthy) {
+            ProviderHealth::Healthy
+        } else {
+            ProviderHealth::Degraded
+        };
+        self.pending.push(DiscoveryEvent::HealthChanged {
+            source: SOURCE.to_owned(),
+            health,
+        });
         // The cold-start emission: everything still fresh on disk.
         self.refresh(now_ms);
         Ok(())
@@ -239,6 +252,24 @@ mod tests {
         let cache = PeerCache::load(&dir.path().join("peers.json"), CacheLimits::default())
             .expect("an absent file is an empty cache, not an error");
         PeerCacheDiscovery::new(cache)
+    }
+
+    /// Events other than the initial health transition every provider
+    /// queues at start so the manager learns it.
+    fn candidate_events(events: &[DiscoveryEvent]) -> Vec<&DiscoveryEvent> {
+        events
+            .iter()
+            .filter(|e| !matches!(e, DiscoveryEvent::HealthChanged { .. }))
+            .collect()
+    }
+
+    /// The expiry carried by the first observation in a batch, which is
+    /// not necessarily the first EVENT — a start also queues health.
+    fn first_observed_expiry(events: &[DiscoveryEvent]) -> Option<u64> {
+        events.iter().find_map(|e| match e {
+            DiscoveryEvent::CandidateObserved { candidate } => Some(candidate.expires_at),
+            _ => None,
+        })?
     }
 
     fn observed_peers(events: &[DiscoveryEvent]) -> Vec<TransportIdentity> {
@@ -357,7 +388,7 @@ mod tests {
             "the cache persists what THIS node observed, not third-party claims"
         );
         // And neither was stored.
-        assert!(p.drain_events(1_000, 8).is_empty());
+        assert!(candidate_events(&p.drain_events(1_000, 8)).is_empty());
     }
 
     #[test]
@@ -374,10 +405,7 @@ mod tests {
         p.start(0).expect("starts");
         let first = p.drain_events(0, 8);
         assert_eq!(observed_peers(&first), vec![peer(P1)]);
-        let first_expiry = match &first[0] {
-            DiscoveryEvent::CandidateObserved { candidate } => candidate.expires_at,
-            _ => panic!("an observation"),
-        };
+        let first_expiry = first_observed_expiry(&first);
 
         // Still succeeding an hour later: the record's life moves forward.
         let later = 3_600_000;
@@ -398,10 +426,7 @@ mod tests {
             vec![peer(P1)],
             "the extended life is forwarded, not stranded in the cache"
         );
-        let second_expiry = match &again[0] {
-            DiscoveryEvent::CandidateObserved { candidate } => candidate.expires_at,
-            _ => panic!("an observation"),
-        };
+        let second_expiry = first_observed_expiry(&again);
         assert!(
             second_expiry > first_expiry,
             "and it really is later: {second_expiry:?} vs {first_expiry:?}"
@@ -417,10 +442,11 @@ mod tests {
             .record_success(&peer(P1), "/ip4/10.0.0.1/tcp/4001", 0)
             .expect("within bounds");
         p.start(0).expect("starts");
-        assert_eq!(p.drain_events(0, 8).len(), 1);
+        // Health plus the one observation.
+        assert_eq!(candidate_events(&p.drain_events(0, 8)).len(), 1);
         for t in 1..20 {
             assert!(
-                p.drain_events(t, 8).is_empty(),
+                candidate_events(&p.drain_events(t, 8)).is_empty(),
                 "nothing changed, so nothing is emitted"
             );
         }
@@ -459,6 +485,7 @@ mod tests {
         }
         p.start(0).expect("starts");
         assert_eq!(p.drain_events(0, 1).len(), 1, "the caller sizes the batch");
+        // health + two observations were queued; the rest stay.
     }
 
     #[test]
@@ -507,8 +534,19 @@ mod tests {
         let mut p = PeerCacheDiscovery::new(cache);
         p.start(0).expect("starts");
         assert_eq!(p.health(), ProviderHealth::Degraded);
+        let events = p.drain_events(0, 8);
         assert!(
-            p.drain_events(0, 8).is_empty(),
+            events.iter().any(|e| matches!(
+                e,
+                DiscoveryEvent::HealthChanged {
+                    health: ProviderHealth::Degraded,
+                    ..
+                }
+            )),
+            "the degraded state is reported at start, not merely readable"
+        );
+        assert!(
+            candidate_events(&events).is_empty(),
             "and it continues, empty, rather than serving garbage"
         );
     }

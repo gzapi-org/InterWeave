@@ -225,6 +225,15 @@ impl MdnsDiscovery {
         });
     }
 
+    /// Queue an observation, replacing any pending one for the same peer.
+    ///
+    /// COALESCED, not appended. `seen` is bounded but `pending` was not:
+    /// a consumer that stops draining while 256 peers announce adds a
+    /// batch every refresh window forever, which lets unauthenticated LAN
+    /// traffic grow memory without limit. An older pending observation for
+    /// a peer is strictly superseded by a newer one — same peer, same or
+    /// wider address set, later expiry — so replacing it loses nothing and
+    /// bounds the queue by the peer count.
     fn queue_observation(&mut self, peer_id: &TransportIdentity, now_ms: u64) {
         let Some(addresses) = self.seen.get(peer_id) else {
             return;
@@ -239,6 +248,13 @@ impl MdnsDiscovery {
         }
         let expires_at = addresses.values().copied().max();
         self.last_emitted.insert(peer_id.clone(), now_ms);
+        // Drop any pending observation this one supersedes.
+        self.pending.retain(|event| {
+            !matches!(
+                event,
+                DiscoveryEvent::CandidateObserved { candidate } if candidate.peer_id == *peer_id
+            )
+        });
         self.pending.push(DiscoveryEvent::CandidateObserved {
             candidate: Box::new(CandidatePeer {
                 peer_id: peer_id.clone(),
@@ -298,6 +314,16 @@ impl DiscoveryProvider for MdnsDiscovery {
             return Err(ProviderError::AlreadyStarted);
         }
         self.started = true;
+        // The manager learns health only from an event; see the same
+        // note in the other providers.
+        self.pending.push(DiscoveryEvent::HealthChanged {
+            source: SOURCE.to_owned(),
+            health: if self.backend_up {
+                ProviderHealth::Healthy
+            } else {
+                ProviderHealth::Degraded
+            },
+        });
         Ok(())
     }
 
@@ -354,6 +380,15 @@ mod tests {
         p.start(0).expect("starts");
         p
     }
+    /// Events other than the initial health transition, which every
+    /// provider now queues at start so the manager learns it.
+    fn candidate_events(events: &[DiscoveryEvent]) -> Vec<&DiscoveryEvent> {
+        events
+            .iter()
+            .filter(|e| !matches!(e, DiscoveryEvent::HealthChanged { .. }))
+            .collect()
+    }
+
     fn observations(events: &[DiscoveryEvent]) -> Vec<(TransportIdentity, BTreeSet<String>)> {
         events
             .iter()
@@ -390,7 +425,10 @@ mod tests {
         assert!(!p.push_discovered("", "/ip4/192.168.1.5/tcp/4001", 0));
         assert!(!p.push_discovered(P1, "", 0));
         assert!(!p.push_discovered(P1, &"a".repeat(MAX_ADDRESS_BYTES + 1), 0));
-        assert!(p.drain_events(0, 8).is_empty());
+        assert!(
+            candidate_events(&p.drain_events(0, 8)).is_empty(),
+            "no candidate came of any of it"
+        );
         assert_eq!(p.peer_count(), 0);
         // ...and a good one still works, so the filter discriminates.
         assert!(p.push_discovered(P1, "/ip4/192.168.1.5/tcp/4001", 0));
@@ -422,6 +460,43 @@ mod tests {
         let seen = observations(&p.drain_events(REFRESH_INTERVAL_MS, 8));
         assert_eq!(seen.len(), 1, "the refresh reaches the consumer");
         assert_eq!(seen[0].0, peer(P1));
+    }
+
+    #[test]
+    fn a_stalled_consumer_cannot_grow_the_queue_without_limit() {
+        // `seen` was bounded and `pending` was not: a consumer that stops
+        // draining while the LAN keeps announcing would otherwise let
+        // unauthenticated traffic grow memory forever.
+        let mut p = started();
+        let mut t = 0u64;
+        // Two peers announcing for an hour, drained never.
+        while t <= 60 * 60 * 1_000 {
+            p.push_discovered(P1, "/ip4/192.168.1.5/tcp/4001", t);
+            p.push_discovered(P2, "/ip4/192.168.1.6/tcp/4001", t);
+            t += REFRESH_INTERVAL_MS;
+        }
+        let queued = p.drain_events(t, 4096);
+        let observations_queued = queued
+            .iter()
+            .filter(|e| matches!(e, DiscoveryEvent::CandidateObserved { .. }))
+            .count();
+        assert!(
+            observations_queued <= 2,
+            "one pending observation per peer, not one per announcement: got {observations_queued}"
+        );
+    }
+
+    #[test]
+    fn the_coalesced_observation_is_the_newest_one() {
+        // Replacing an older pending observation must not lose the newer
+        // address set: a peer announcing a second address while the
+        // consumer is stalled must still have both when it drains.
+        let mut p = started();
+        p.push_discovered(P1, "/ip4/192.168.1.5/tcp/4001", 0);
+        p.push_discovered(P1, "/ip6/::1/tcp/4001", 1);
+        let seen = observations(&p.drain_events(1, 8));
+        assert_eq!(seen.len(), 1, "coalesced into one");
+        assert_eq!(seen[0].1.len(), 2, "carrying both addresses");
     }
 
     #[test]
@@ -513,7 +588,7 @@ mod tests {
     fn an_expiry_for_something_unknown_is_ignored() {
         let mut p = started();
         assert!(!p.push_expired(P1, "/ip4/192.168.1.5/tcp/4001", 0));
-        assert!(p.drain_events(0, 8).is_empty());
+        assert!(candidate_events(&p.drain_events(0, 8)).is_empty());
     }
 
     #[test]
@@ -612,10 +687,14 @@ mod tests {
     #[test]
     fn the_drain_respects_the_callers_bound() {
         let mut p = started();
+        // Three events pending: the start health transition and two
+        // observations.
         p.push_discovered(P1, "/ip4/192.168.1.5/tcp/4001", 0);
         p.push_discovered(P2, "/ip4/192.168.1.6/tcp/4001", 0);
+        assert_eq!(p.drain_events(0, 1).len(), 1, "the caller sizes the batch");
         assert_eq!(p.drain_events(0, 1).len(), 1);
         assert_eq!(p.drain_events(0, 8).len(), 1, "the rest stays queued");
+        assert!(p.drain_events(0, 8).is_empty(), "and then it is empty");
     }
 
     /// A distinct valid PeerId per index, for the flood test.

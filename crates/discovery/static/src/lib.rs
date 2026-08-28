@@ -214,6 +214,14 @@ impl DiscoveryProvider for StaticBootstrapDiscovery {
             return Err(ProviderError::AlreadyStarted);
         }
         self.started = true;
+        // THE INITIAL TRANSITION IS AN EVENT. The manager registers a
+        // provider as Unavailable and learns health only from
+        // `HealthChanged`, so a provider that merely becomes healthy
+        // internally leaves aggregate health wrong forever.
+        self.pending.push(DiscoveryEvent::HealthChanged {
+            source: SOURCE.to_owned(),
+            health: ProviderHealth::Healthy,
+        });
         for (peer_id, addresses) in &self.entries {
             self.pending.push(observed(peer_id, addresses, now_ms));
         }
@@ -492,7 +500,10 @@ mod tests {
         ])
         .expect("within bounds");
         p.start(0).expect("starts");
-        assert_eq!(p.drain_events(0, 1).len(), 1);
-        assert_eq!(p.drain_events(0, 8).len(), 1, "the rest stays queued");
+        // Three events queued: the start health transition and two
+        // configured entries.
+        assert_eq!(p.drain_events(0, 1).len(), 1, "the caller sizes the batch");
+        assert_eq!(p.drain_events(0, 8).len(), 2, "the rest stays queued");
+        assert!(p.drain_events(0, 8).is_empty(), "and then it is empty");
     }
 }
