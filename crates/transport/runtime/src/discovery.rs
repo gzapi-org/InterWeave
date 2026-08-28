@@ -171,6 +171,33 @@ pub struct AggregatedCandidate {
     pub sources: BTreeSet<String>,
     /// The most recent observation across sources.
     pub last_observed_ms: u64,
+    /// Protocol facts still live for this peer, merged across sources.
+    ///
+    /// Advisory like everything else here: a protocol observation never
+    /// keeps a peer alive (COMPOSITION.md), so this list can be empty for
+    /// a peer with addresses and is never the reason one is present. It
+    /// is peer-asserted evidence a consumer may weigh, not authorization.
+    ///
+    /// Exposed because the manager MERGES these and nothing could read
+    /// them: bounded, expired on schedule, retracted with their source,
+    /// and unreachable — which is a store rather than a contribution, and
+    /// leaves the Kademlia seed flow that is meant to consume them with
+    /// no way to.
+    pub protocol_observations: Vec<MergedObservation>,
+}
+
+/// One protocol fact about a peer, as merged from the providers
+/// asserting it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergedObservation {
+    /// Which protocol.
+    pub protocol: ProtocolId,
+    /// Whether it is asserted supported.
+    pub supported: bool,
+    /// Which sources currently assert it, in name order.
+    pub sources: Vec<String>,
+    /// The most recent assertion across those sources.
+    pub observed_at_ms: u64,
 }
 
 impl AggregatedCandidate {
@@ -258,11 +285,35 @@ impl CandidateSet {
                         .cmp(&b.best_priority)
                         .then_with(|| a.address.cmp(&b.address))
                 });
+                // Merged by protocol: one entry per (protocol, supported)
+                // claim, naming every source still asserting it. Expired
+                // observations are dropped by the same `now_ms` the
+                // addresses are judged against, so a consumer never reads
+                // a fact this manager would no longer stand behind.
+                let mut merged: BTreeMap<(ProtocolId, bool), MergedObservation> = BTreeMap::new();
+                for ((protocol, source), (supported, at, exp)) in &entry.observations {
+                    if now_ms >= *exp {
+                        continue;
+                    }
+                    let slot = merged
+                        .entry((protocol.clone(), *supported))
+                        .or_insert_with(|| MergedObservation {
+                            protocol: protocol.clone(),
+                            supported: *supported,
+                            sources: Vec::new(),
+                            observed_at_ms: 0,
+                        });
+                    slot.sources.push(source.clone());
+                    slot.observed_at_ms = slot.observed_at_ms.max(*at);
+                }
+                let protocol_observations: Vec<MergedObservation> = merged.into_values().collect();
+
                 Some(AggregatedCandidate {
                     peer_id: peer_id.clone(),
                     addresses,
                     sources,
                     last_observed_ms: entry.last_observed_ms,
+                    protocol_observations,
                 })
             })
             .collect()
@@ -1793,6 +1844,117 @@ mod tests {
             "and the event is APPLIED, not merely survived: refusing it \
              outright would leave this at 0 and discard the protocol \
              observations such an event carries"
+        );
+    }
+    #[test]
+    fn merged_protocol_observations_reach_the_consumer() {
+        // The manager bounded, expired and retracted these and no
+        // consumer could read one — a store rather than a contribution.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(11);
+
+        let mut first = for_id(&subject, "mdns", "/ip4/10.0.0.1/tcp/1", 0, Some(u64::MAX));
+        first.protocol_observations.insert(ProtocolObservation {
+            protocol_id: ProtocolId::parse("/interweave/direct/2.0.0").expect("valid"),
+            supported: true,
+            observed_at: 10,
+        });
+        set.observe(&first, 0, &trust, true, false);
+
+        let candidates = set.candidates(100, &|_| None);
+        let found = candidates
+            .iter()
+            .find(|c| c.peer_id == subject)
+            .expect("known");
+        assert_eq!(found.protocol_observations.len(), 1, "the fact is readable");
+        assert_eq!(
+            found.protocol_observations[0].protocol.as_str(),
+            "/interweave/direct/2.0.0"
+        );
+        assert_eq!(found.protocol_observations[0].sources, vec!["mdns"]);
+    }
+
+    #[test]
+    fn one_protocol_asserted_by_two_sources_merges_naming_both() {
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(12);
+        let protocol = ProtocolId::parse("/interweave/direct/2.0.0").expect("valid");
+
+        for (source, at) in [("mdns", 10u64), ("peer-cache", 40u64)] {
+            let mut c = for_id(&subject, source, "/ip4/10.0.0.1/tcp/1", at, Some(u64::MAX));
+            c.protocol_observations.insert(ProtocolObservation {
+                protocol_id: protocol.clone(),
+                supported: true,
+                observed_at: at,
+            });
+            set.observe(&c, at, &trust, true, false);
+        }
+
+        let candidates = set.candidates(100, &|_| None);
+        let found = candidates
+            .iter()
+            .find(|c| c.peer_id == subject)
+            .expect("known");
+        assert_eq!(
+            found.protocol_observations.len(),
+            1,
+            "one protocol, one entry"
+        );
+        assert_eq!(
+            found.protocol_observations[0].sources,
+            vec!["mdns", "peer-cache"],
+            "naming every source still asserting it"
+        );
+        assert_eq!(
+            found.protocol_observations[0].observed_at_ms, 40,
+            "carrying the most recent assertion"
+        );
+    }
+
+    #[test]
+    fn an_expired_protocol_observation_is_not_exposed() {
+        // Judged against the same `now_ms` as the addresses, so a
+        // consumer never reads a fact the manager would not stand behind.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(13);
+
+        // A short-lived source carries the fact; a long-lived one keeps
+        // the peer present. At `late` the first has lapsed and the second
+        // has not, so the peer must remain with no facts attached.
+        let mut short = for_id(&subject, "mdns", "/ip4/10.0.0.1/tcp/1", 0, Some(50));
+        short.protocol_observations.insert(ProtocolObservation {
+            protocol_id: ProtocolId::parse("/interweave/direct/2.0.0").expect("valid"),
+            supported: true,
+            observed_at: 0,
+        });
+        set.observe(&short, 0, &trust, true, false);
+        set.observe(
+            &for_id(
+                &subject,
+                "peer-cache",
+                "/ip4/10.0.0.2/tcp/2",
+                0,
+                Some(u64::MAX),
+            ),
+            0,
+            &trust,
+            true,
+            false,
+        );
+
+        let late = 100;
+        let candidates = set.candidates(late, &|_| None);
+        let found = candidates
+            .iter()
+            .find(|c| c.peer_id == subject)
+            .expect("still known through the long-lived source");
+        assert!(
+            found.protocol_observations.is_empty(),
+            "the lapsed fact is gone while the peer remains: {:?}",
+            found.protocol_observations
         );
     }
 }
