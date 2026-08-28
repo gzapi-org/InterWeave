@@ -259,6 +259,24 @@ impl MdnsDiscovery {
             }
             _ => true,
         });
+
+        // BOUNDED BY WHAT `seen` CAN HOLD, not by history. Merging alone
+        // was still unbounded across DISTINCT addresses: discover a,
+        // expire a, discover b, expire b — each rediscovery withdraws only
+        // the address that came back, so every address ever expired
+        // accumulated in one event while `seen` never held more than one.
+        // The set is the memory the finding was about, so the set is what
+        // has to be capped.
+        //
+        // The oldest go, because a consumer that has not drained in that
+        // long has already been told less recent news; dropping a
+        // retraction is a bounded loss (the manager ages the address out
+        // on its own TTL) where dropping the bound is not.
+        while merged.len() > MAX_ADDRESSES_PER_PEER {
+            let oldest = merged.iter().next().cloned().expect("non-empty");
+            merged.remove(&oldest);
+        }
+
         self.pending.push(DiscoveryEvent::CandidateExpired {
             peer_id: peer_id.clone(),
             source: SOURCE.to_owned(),
@@ -857,4 +875,34 @@ mod tests {
             "the address that actually went is reported: {events:?}"
         );
     }
+    #[test]
+    fn cycling_through_distinct_addresses_cannot_grow_a_pending_expiry() {
+        // The finding's shape: discover a, expire a, discover b, expire b.
+        // Each rediscovery withdraws only the address that came back, so
+        // merging alone let every address ever expired accumulate in one
+        // event while `seen` never held more than one.
+        let mut p = started();
+        let _ = p.drain_events(0, 64);
+
+        let mut now = 0u64;
+        for i in 0..500 {
+            let addr = format!("/ip4/10.0.0.1/tcp/{i}");
+            p.push_discovered(P1, &addr, now);
+            p.push_expired(P1, &addr, now + 1);
+            now += 1_000;
+        }
+
+        let queued = p.drain_events(now, usize::MAX);
+        for event in &queued {
+            if let DiscoveryEvent::CandidateExpired { addresses, .. } = event {
+                assert!(
+                    addresses.len() <= MAX_ADDRESSES_PER_PEER,
+                    "a pending expiry names at most {MAX_ADDRESSES_PER_PEER} \
+                     addresses, got {}",
+                    addresses.len()
+                );
+            }
+        }
+    }
+
 }
