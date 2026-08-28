@@ -174,11 +174,25 @@ const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 /// `ResponseSent` arrives before any shutdown could race it. The
 /// arithmetic is testable even where the race is not.
 const fn shutdown_settled(
-    pending_outbound: usize,
-    answering_inbound: usize,
+    pending_direct: usize,
+    pending_directory: usize,
+    answering_direct: usize,
+    answering_directory: usize,
     past_deadline: bool,
 ) -> bool {
-    past_deadline || (pending_outbound == 0 && answering_inbound == 0)
+    // FOUR COUNTS, NOT TWO, and the widening is deliberate: directory
+    // exchanges and their queued answers widen `polling_room`'s slack
+    // exactly as direct ones do, so a verdict that omitted them broke the
+    // loop while a directory query or a queued directory answer was still
+    // in flight — dropping the caller, or the control response, and
+    // skipping the grace that already-accepted control work is owed.
+    // Naming all four makes the omission a compile error at every call
+    // site rather than a divergence to be noticed later.
+    past_deadline
+        || (pending_direct == 0
+            && pending_directory == 0
+            && answering_direct == 0
+            && answering_directory == 0)
 }
 
 /// Whether the Swarm may be polled.
@@ -545,7 +559,9 @@ impl SwarmRuntime {
                 if let Some((deadline, _)) = &stopping
                     && shutdown_settled(
                         pending_direct.len(),
+                        pending_endpoints.len(),
                         direct_state.answering(),
+                        directory_state.answering(),
                         tokio::time::Instant::now() >= *deadline,
                     )
                 {
@@ -738,7 +754,9 @@ impl SwarmRuntime {
                                 // and it still stops immediately.
                                 if shutdown_settled(
                                     pending_direct.len(),
+                                    pending_endpoints.len(),
                                     direct_state.answering(),
+                                    directory_state.answering(),
                                     false,
                                 ) || stopping.is_some()
                                 {
@@ -1215,12 +1233,12 @@ mod shutdown_grace_tests {
 
     #[test]
     fn nothing_in_flight_finishes_at_once() {
-        assert!(shutdown_settled(0, 0, false));
+        assert!(shutdown_settled(0, 0, 0, 0, false));
     }
 
     #[test]
-    fn an_outbound_exchange_holds_the_grace() {
-        assert!(!shutdown_settled(1, 0, false));
+    fn an_outbound_direct_exchange_holds_the_grace() {
+        assert!(!shutdown_settled(1, 0, 0, 0, false));
     }
 
     /// THE SECOND DIRECTION. `pending_direct` counts outbound only, so a
@@ -1228,18 +1246,33 @@ mod shutdown_grace_tests {
     /// request's answer is still queued — the response never written and
     /// the sender left to retry into a restarted node.
     #[test]
-    fn an_inbound_answer_holds_it_too() {
+    fn an_inbound_direct_answer_holds_it_too() {
         assert!(
-            !shutdown_settled(0, 1, false),
+            !shutdown_settled(0, 0, 1, 0, false),
             "an answer queued but unwritten is still work in flight"
+        );
+    }
+
+    /// AND THE DIRECTORY, both directions. A pending outbound query and a
+    /// queued directory answer are work in flight exactly as their direct
+    /// counterparts are; a verdict blind to them exits the grace early.
+    #[test]
+    fn a_directory_query_or_answer_holds_it() {
+        assert!(
+            !shutdown_settled(0, 1, 0, 0, false),
+            "an in-flight outbound directory query is work"
+        );
+        assert!(
+            !shutdown_settled(0, 0, 0, 1, false),
+            "a queued directory answer is work"
         );
     }
 
     /// The deadline ends it either way, which is what makes the grace
     /// BOUNDED rather than a second protocol timeout.
     #[test]
-    fn the_deadline_outranks_both() {
-        assert!(shutdown_settled(5, 5, true));
+    fn the_deadline_outranks_them_all() {
+        assert!(shutdown_settled(5, 5, 5, 5, true));
     }
 }
 
