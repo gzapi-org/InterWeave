@@ -16,6 +16,8 @@ use interweave_discovery_api::{
     DiscoveryEvent, DiscoveryProvider, HintDisposition, PeerHint, ProviderDescriptor,
     ProviderError, ProviderHealth, ProviderMode, ProviderScope,
 };
+use std::collections::BTreeMap;
+
 use interweave_transport_api::TransportIdentity;
 
 use crate::cache::{CacheHealth, PeerCache, SOURCE};
@@ -31,9 +33,17 @@ pub struct PeerCacheDiscovery {
     stopped: bool,
     /// Events waiting to be drained, oldest first.
     pending: Vec<DiscoveryEvent>,
-    /// Peers emitted as candidates and not yet retracted, so ageing out
-    /// of the cache can be reported as expiry rather than silence.
-    emitted: Vec<TransportIdentity>,
+    /// Peers emitted as candidates, with the freshness last reported for
+    /// each, so ageing out is an expiry rather than silence AND a record
+    /// whose life was extended is re-emitted rather than stranded.
+    ///
+    /// The value is the record's own `expires_at` at the time it was
+    /// emitted. Tracking only the peer id was a liveness bug: a peer that
+    /// kept succeeding had its cache expiry extended while the consumer
+    /// still held the FIRST one, and the manager — which learns lifetimes
+    /// only from an observation event — expired a peer the cache
+    /// considered fresh.
+    emitted: BTreeMap<TransportIdentity, Option<u64>>,
 }
 
 impl PeerCacheDiscovery {
@@ -45,7 +55,7 @@ impl PeerCacheDiscovery {
             started: false,
             stopped: false,
             pending: Vec::new(),
-            emitted: Vec::new(),
+            emitted: BTreeMap::new(),
         }
     }
 
@@ -72,16 +82,20 @@ impl PeerCacheDiscovery {
             return;
         }
         let fresh = self.cache.candidates(now_ms);
-        let live: Vec<TransportIdentity> = fresh.iter().map(|c| c.peer_id.clone()).collect();
+        let mut live: BTreeMap<TransportIdentity, Option<u64>> = BTreeMap::new();
 
-        // ONLY WHAT CHANGED. Re-emitting the whole cache on every drain
-        // would be duplicate-tolerant (the manager dedups) but unbounded
-        // in traffic: a caller draining in a loop would see the entire
-        // cache each time. A candidate is queued when it is new since the
-        // last look; a refreshed record reaches the manager through the
-        // hint that refreshed it, not by re-reading the file.
+        // WHAT CHANGED, where a longer life counts as a change. Re-emitting
+        // the whole cache on every drain would be duplicate-tolerant (the
+        // manager dedups) but unbounded in traffic. Emitting only on FIRST
+        // sight was the other error: a record whose expiry moved forward
+        // never reached the consumer, which holds a lifetime it can only
+        // learn from an observation event, so a peer that kept succeeding
+        // lapsed there while staying fresh here.
         for candidate in fresh {
-            if !self.emitted.contains(&candidate.peer_id) {
+            let previously = self.emitted.get(&candidate.peer_id).copied();
+            let changed = previously != Some(candidate.expires_at);
+            live.insert(candidate.peer_id.clone(), candidate.expires_at);
+            if changed {
                 self.pending.push(DiscoveryEvent::CandidateObserved {
                     candidate: Box::new(candidate),
                 });
@@ -93,8 +107,8 @@ impl PeerCacheDiscovery {
         // vouches for.
         let expired: Vec<TransportIdentity> = self
             .emitted
-            .iter()
-            .filter(|p| !live.contains(p))
+            .keys()
+            .filter(|p| !live.contains_key(*p))
             .cloned()
             .collect();
         for peer_id in expired {
@@ -344,6 +358,72 @@ mod tests {
         );
         // And neither was stored.
         assert!(p.drain_events(1_000, 8).is_empty());
+    }
+
+    #[test]
+    fn a_refreshed_record_is_re_emitted_so_the_consumer_learns_the_new_life() {
+        // The consumer holds a lifetime it can only learn from an
+        // observation event. A hint that extends the cache record must
+        // therefore produce one, or the peer lapses there while staying
+        // fresh here.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut p = provider(&dir);
+        p.cache_mut()
+            .record_success(&peer(P1), "/ip4/10.0.0.1/tcp/4001", 0)
+            .expect("within bounds");
+        p.start(0).expect("starts");
+        let first = p.drain_events(0, 8);
+        assert_eq!(observed_peers(&first), vec![peer(P1)]);
+        let first_expiry = match &first[0] {
+            DiscoveryEvent::CandidateObserved { candidate } => candidate.expires_at,
+            _ => panic!("an observation"),
+        };
+
+        // Still succeeding an hour later: the record's life moves forward.
+        let later = 3_600_000;
+        assert_eq!(
+            p.add_hint(
+                PeerHint::ObservedReachable {
+                    peer_id: peer(P1),
+                    address: "/ip4/10.0.0.1/tcp/4001".to_owned(),
+                    observed_at: later,
+                },
+                later
+            ),
+            HintDisposition::Accepted
+        );
+        let again = p.drain_events(later, 8);
+        assert_eq!(
+            observed_peers(&again),
+            vec![peer(P1)],
+            "the extended life is forwarded, not stranded in the cache"
+        );
+        let second_expiry = match &again[0] {
+            DiscoveryEvent::CandidateObserved { candidate } => candidate.expires_at,
+            _ => panic!("an observation"),
+        };
+        assert!(
+            second_expiry > first_expiry,
+            "and it really is later: {second_expiry:?} vs {first_expiry:?}"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_record_is_not_re_emitted() {
+        // The other half: draining in a loop must not replay the cache.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut p = provider(&dir);
+        p.cache_mut()
+            .record_success(&peer(P1), "/ip4/10.0.0.1/tcp/4001", 0)
+            .expect("within bounds");
+        p.start(0).expect("starts");
+        assert_eq!(p.drain_events(0, 8).len(), 1);
+        for t in 1..20 {
+            assert!(
+                p.drain_events(t, 8).is_empty(),
+                "nothing changed, so nothing is emitted"
+            );
+        }
     }
 
     #[test]
