@@ -104,11 +104,16 @@ struct Provenance {
     source: String,
     observed_at: u64,
     expires_at: u64,
-    /// The source is a CONFIGURED provider (`ProviderScope::Configured`),
-    /// which is what the retention rule in `evict_one` keys on. Carried
-    /// per record rather than looked up at eviction time because the
-    /// registry can change between the observation and the pressure.
-    configured: bool,
+    /// The source is a configured provider that declares NO EXPIRY, so
+    /// it will not emit this entry again — which is what the retention
+    /// rule in `evict_one` keys on. Carried per record rather than looked
+    /// up at eviction time because the registry can change between the
+    /// observation and the pressure.
+    ///
+    /// Scope alone is not the test: `PeerCacheDiscovery` is also
+    /// `Configured`, and a cache record ages out and is re-emitted from
+    /// disk, so it needs no protection from eviction.
+    pinned: bool,
 }
 
 /// One peer's aggregated reachability.
@@ -124,11 +129,11 @@ struct Entry {
 }
 
 impl Entry {
-    /// Any live provenance from a configured provider.
-    fn is_configured(&self) -> bool {
+    /// Any live provenance from a pinned provider.
+    fn is_pinned(&self) -> bool {
         self.addresses
             .values()
-            .any(|rs| rs.iter().any(|r| r.configured))
+            .any(|rs| rs.iter().any(|r| r.pinned))
     }
 }
 
@@ -298,7 +303,7 @@ impl CandidateSet {
         now_ms: u64,
         trust: &PeerTrustPolicy,
         provider_expires: bool,
-        provider_configured: bool,
+        provider_pinned: bool,
     ) {
         // A PROVIDER THAT DECLARES NO EXPIRY IS RETRACTED, NEVER AGED OUT.
         // Static bootstrap emits its entries once, at start and on
@@ -345,7 +350,7 @@ impl CandidateSet {
                     source: candidate.source.clone(),
                     observed_at: candidate.observed_at,
                     expires_at,
-                    configured: provider_configured,
+                    pinned: provider_pinned,
                 });
             }
         }
@@ -419,7 +424,7 @@ impl CandidateSet {
         let configured: BTreeSet<TransportIdentity> = self
             .peers
             .iter()
-            .filter(|(_, e)| e.is_configured())
+            .filter(|(_, e)| e.is_pinned())
             .map(|(p, _)| p.clone())
             .collect();
         let protect: BTreeSet<&TransportIdentity> = if configured.len() <= MAX_CONFIGURED_RETAINED {
@@ -594,16 +599,29 @@ impl DiscoveryManager {
                     .providers
                     .get(source)
                     .is_some_and(|p| p.descriptor.supports_expiry);
-                let provider_configured = self
-                    .providers
-                    .get(source)
-                    .is_some_and(|p| p.descriptor.scope == ProviderScope::Configured);
+                // PINNED, not merely configured-scope. `PeerCacheDiscovery`
+                // also declares `ProviderScope::Configured`, so scope alone
+                // protected cached observations too — and once more than
+                // MAX_CONFIGURED_RETAINED recent cache peers coexisted with
+                // older static ones, the ranking protected the cache entries
+                // and made the static bootstrap ones evictable, which is the
+                // opposite of the rule.
+                //
+                // The property retention actually rests on is that the
+                // provider will not emit the entry again: `supports_expiry:
+                // false` means it is RETRACTED or it stands, and static
+                // bootstrap emits only at start and on reload. A cache
+                // record ages out and is re-emitted from disk, so losing one
+                // to eviction costs a refresh, not the entry.
+                let provider_pinned = self.providers.get(source).is_some_and(|p| {
+                    p.descriptor.scope == ProviderScope::Configured && !p.descriptor.supports_expiry
+                });
                 self.candidates.observe(
                     &candidate,
                     now_ms,
                     trust,
                     provider_expires,
-                    provider_configured,
+                    provider_pinned,
                 );
                 Ok(())
             }
@@ -1476,6 +1494,82 @@ mod tests {
         assert!(
             after >= MAX_CONFIGURED_RETAINED,
             "and the cap IS protected, not merely an upper bound: got {after}"
+        );
+    }
+    #[test]
+    fn cache_pressure_does_not_displace_a_static_entry() {
+        // `PeerCacheDiscovery` also declares `ProviderScope::Configured`,
+        // so keying retention on scope protected cache records too. Once
+        // more than the cap of RECENT cache peers coexisted with older
+        // static ones, the ranking kept the cache entries and made the
+        // bootstrap entries evictable — the exact inversion of the rule.
+        //
+        // Driven through the MANAGER, because the scope-versus-expiry
+        // decision lives in `on_event`. A `CandidateSet` test passes the
+        // flag in by hand and would agree with either spelling.
+        let mut m = DiscoveryManager::new();
+        m.register(descriptor_without_expiry("static-bootstrap"), 0)
+            .expect("registers");
+        m.register(descriptor("peer-cache"), 0).expect("registers");
+        m.register(descriptor("mdns"), 0).expect("registers");
+        let trust = nobody();
+        let boot = identity(0);
+
+        m.on_event(
+            "static-bootstrap",
+            observed(for_id(
+                &boot,
+                "static-bootstrap",
+                "/ip4/10.0.0.1/tcp/1",
+                0,
+                None,
+            )),
+            0,
+            &trust,
+        )
+        .expect("accepted");
+
+        // Far more than the cap of cache peers, every one observed later
+        // than the static entry.
+        for i in 1..=(MAX_CONFIGURED_RETAINED * 2) {
+            let at = 1_000 + i as u64;
+            m.on_event(
+                "peer-cache",
+                observed(for_id(
+                    &identity(i),
+                    "peer-cache",
+                    "/ip4/10.2.0.1/tcp/1",
+                    at,
+                    Some(u64::MAX),
+                )),
+                at,
+                &trust,
+            )
+            .expect("accepted");
+        }
+
+        // Now enough pressure to force eviction.
+        for i in 10_000..10_000 + MAX_CANDIDATES {
+            let at = 500_000 + i as u64;
+            m.on_event(
+                "mdns",
+                observed(for_id(
+                    &identity(i),
+                    "mdns",
+                    "/ip4/10.1.0.1/tcp/1",
+                    at,
+                    Some(u64::MAX),
+                )),
+                at,
+                &trust,
+            )
+            .expect("accepted");
+        }
+
+        assert!(
+            m.candidates(900_000).iter().any(|c| c.peer_id == boot),
+            "the static entry outranks cache records, which age out and are \
+             re-emitted from disk however recent they are"
         );
     }
 }
