@@ -297,6 +297,28 @@ impl SubscriptionRegistry {
         })
     }
 
+    /// Replace the profile's desired set, keeping every live join.
+    ///
+    /// A reconfigure is an operator action on warm-mesh policy, not a
+    /// client disconnect — so unlike opening an endpoint queue, which
+    /// discards what the previous lease holder held, this leaves client
+    /// joins alone. A session that joined a channel the new profile no
+    /// longer desires still holds it.
+    ///
+    /// # Errors
+    /// [`SubscriptionDenial::TooManySubscriptions`] if the resulting set
+    /// would exceed [`MAX_SUBSCRIPTIONS`]. Counted against the joins
+    /// already held rather than against the new set alone, because both
+    /// cost the same and the ceiling is on what this profile holds.
+    pub fn set_desired(&mut self, desired: BTreeSet<ChannelId>) -> Result<(), SubscriptionDenial> {
+        let joined_elsewhere = self.joins.keys().filter(|c| !desired.contains(*c)).count();
+        if joined_elsewhere.saturating_add(desired.len()) > MAX_SUBSCRIPTIONS {
+            return Err(SubscriptionDenial::TooManySubscriptions);
+        }
+        self.desired = desired;
+        Ok(())
+    }
+
     /// Record that a session joined a channel.
     ///
     /// Idempotent: re-joining a channel this session already holds
@@ -357,6 +379,17 @@ impl SubscriptionRegistry {
         }
     }
 
+    /// Whether `session` still holds any join.
+    ///
+    /// The question a leave must ask before closing the session's queue:
+    /// a session that left one channel of several is still live, and
+    /// closing its queue would drop the deliveries it is owed on the
+    /// others.
+    #[must_use]
+    pub fn holds_any(&self, session: &str) -> bool {
+        self.joins.values().any(|set| set.contains(session))
+    }
+
     /// Drop every join held by a session, as disconnect does.
     pub fn release_session(&mut self, session: &str) {
         self.joins.retain(|_, set| {
@@ -403,6 +436,48 @@ impl SubscriptionRegistry {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_session_holding_one_of_two_channels_is_still_live() {
+        let mut subs = SubscriptionRegistry::new(BTreeSet::new()).expect("an empty profile");
+        let one = ChannelId::parse("one").expect("legal");
+        let two = ChannelId::parse("two").expect("legal");
+        subs.join(one.clone(), String::from("s")).expect("joins");
+        subs.join(two.clone(), String::from("s")).expect("joins");
+
+        subs.leave(&one, "s");
+        assert!(
+            subs.holds_any("s"),
+            "a session that left one channel of two still holds the other"
+        );
+
+        subs.leave(&two, "s");
+        assert!(
+            !subs.holds_any("s"),
+            "and holds nothing once the last one is left"
+        );
+    }
+
+    #[test]
+    fn one_sessions_leave_does_not_release_another() {
+        let mut subs = SubscriptionRegistry::new(BTreeSet::new()).expect("an empty profile");
+        let c = ChannelId::parse("shared").expect("legal");
+        subs.join(c.clone(), String::from("mine")).expect("joins");
+        subs.join(c.clone(), String::from("theirs")).expect("joins");
+
+        subs.leave(&c, "mine");
+        assert!(!subs.holds_any("mine"));
+        assert!(
+            subs.holds_any("theirs"),
+            "a channel is not released for everyone by one session leaving it"
+        );
+    }
+
+    #[test]
+    fn an_unknown_session_holds_nothing() {
+        let subs = SubscriptionRegistry::new(BTreeSet::new()).expect("an empty profile");
+        assert!(!subs.holds_any("never-seen"));
+    }
     use super::*;
 
     const P1: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";

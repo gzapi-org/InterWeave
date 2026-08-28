@@ -49,8 +49,9 @@ use libp2p::{PeerId, noise, tcp, yamux};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::behaviour::SubstrateBehaviour;
-use crate::gated_swarm::GatedSwarm;
+use crate::gated_swarm::{GatedSwarm, mesh_admits};
 
+mod broadcast;
 mod commands;
 mod config;
 mod dialing;
@@ -67,6 +68,7 @@ use dialing::{
 };
 use direct::{DirectHandled, DirectTick, handle_direct};
 
+pub use broadcast::{BroadcastChannels, BroadcastState};
 pub use direct::{DirectEndpoints, DirectState};
 
 pub use messages::{DialRefusal, SwarmCommand, SwarmEvent};
@@ -345,7 +347,16 @@ impl SwarmRuntime {
                 yamux::Config::default,
             )
             .map_err(|e| SubstrateError::Transport(e.to_string()))?
-            .with_behaviour(|key| SubstrateBehaviour::new(key.public(), config.preauth))
+            // The behaviour is now fallible: GossipSub refuses a
+            // configuration whose authenticity and validation mode
+            // disagree, at construction. Boxed because the builder wants
+            // an error that implements `Error`, and a contradiction here
+            // should stop the runtime starting rather than panic inside
+            // the task that would have driven it.
+            .with_behaviour(|key| {
+                SubstrateBehaviour::new(key, config.preauth)
+                    .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
+            })
             .map_err(|e| SubstrateError::Transport(e.to_string()))?
             .with_swarm_config(|c| c.with_idle_connection_timeout(config.idle_timeout))
             // THE HANDSHAKE TIMEOUT, taken from the same limits the
@@ -434,6 +445,10 @@ impl SwarmRuntime {
         // differ, and the one a directed message meets must be the one
         // that admitted its connection.
         direct_state.adopt_trust(&trust);
+        // Broadcast holds its own copy for the same reason, and its own
+        // ingress buckets: ADR-0026's amendment accounts the two modes
+        // apart so neither can spend the other's allowance.
+        let mut broadcast_state = broadcast::BroadcastState::new(&trust);
 
         // A shutdown that is waiting for in-flight exchanges: the
         // deadline it must not pass, and the caller to answer when it
@@ -740,11 +755,15 @@ impl SwarmRuntime {
                                     &mut active,
                                     &mut pending_direct,
                                     &mut direct_state,
+                                    &mut broadcast_state,
                                     &mut in_flight,
                                     config.max_pending_listens,
                                     config.max_active_listeners,
                                     config.max_payload_bytes,
                                     now_ms(started),
+                                    wall_ms(),
+                                    &mut outbox,
+                                    config.event_capacity,
                                     command,
                                 );
                                 // A revocation names connections; this
@@ -789,6 +808,29 @@ impl SwarmRuntime {
                         // belongs to progress alone.
                         let may_buffer =
                             may_buffer_delivery(outbox.len(), config.event_capacity);
+                        // BROADCAST FIRST, and it consumes its own
+                        // events before `translate` sees them — the same
+                        // shape direct uses, for the same reason: a
+                        // shape conversion knows nothing about admission
+                        // and would announce a message this node has not
+                        // decided about.
+                        let event = match broadcast::handle_broadcast(
+                            event,
+                            &mut swarm,
+                            &mut broadcast_state,
+                            &mut outbox,
+                            broadcast::BroadcastTick {
+                                now_ms: now_ms(started),
+                                wall_ms: wall_ms(),
+                                max_payload_bytes: config.max_payload_bytes,
+                                draining: manager.is_draining(),
+                                may_buffer_delivery: may_buffer,
+                                event_capacity: config.event_capacity,
+                            },
+                        ) {
+                            broadcast::BroadcastHandled::Consumed => continue,
+                            broadcast::BroadcastHandled::Passed(event) => *event,
+                        };
                         let event = match handle_direct(
                             event,
                             &mut swarm,
@@ -859,6 +901,20 @@ impl SwarmRuntime {
                         // downstream blocks on them, and the alternative
                         // is an outbox that grows with whatever the
                         // network sends.
+                        // THE MESH LEARNS THE CLASS HERE. GossipSub does
+                        // no connection admission of its own, so a peer
+                        // reaching it has already passed the dial gate --
+                        // but the gate answers once, at connection time,
+                        // and a class can change while a connection stays
+                        // up. Syncing on every announced connection is the
+                        // half that costs nothing; `SetTrust` is the half
+                        // that matters.
+                        if let Some(SwarmEvent::Connected { peer }) = translated.as_ref()
+                            && let Ok(id) = to_peer_id(peer)
+                        {
+                            let trusted = mesh_admits(manager.classify(peer));
+                            swarm.sync_broadcast_admission(&id, trusted);
+                        }
                         if let Some(event) = translated
                             && may_buffer_delivery(outbox.len(), config.event_capacity)
                         {
@@ -884,6 +940,45 @@ impl SwarmRuntime {
                     }
                 }
             }
+            // LEAVE THE MESH BEFORE DROPPING IT. A dropped swarm closes
+            // connections, and a peer that sees a connection close learns
+            // nothing about subscriptions -- it keeps this node in its
+            // topic set until its own timers age the entry out, and goes
+            // on forwarding to a peer that is gone. Unsubscribing first
+            // sends the leave while there is still a connection to send
+            // it on.
+            //
+            // `shutdown_settled`'s arithmetic decided WHEN to get here and
+            // is deliberately untouched: three prior mistakes are recorded
+            // in its comment, and this is not a fourth.
+            let leaving = !broadcast_state.channels.is_empty();
+            for wire in broadcast_state.channels.keys() {
+                swarm.unsubscribe_topic(&libp2p::gossipsub::IdentTopic::new(wire.clone()));
+            }
+
+            // AND THEN POLL, because unsubscribing only queues the RPC
+            // into the behaviour. Dropping the swarm here would discard
+            // it unsent, and the leave would exist in this node's memory
+            // and nowhere else -- a shutdown that looks correct from the
+            // inside and changes nothing on the wire. The first version
+            // of this passed its test in isolation on exactly that
+            // timing luck, and failed under a loaded suite.
+            //
+            // Bounded, because this runs after the caller was answered:
+            // a peer that cannot accept the leave promptly must not hold
+            // shutdown open. What it costs when it expires is the same
+            // stale topic entry that not sending at all would leave.
+            if leaving {
+                let flush = tokio::time::sleep(Duration::from_millis(250));
+                tokio::pin!(flush);
+                loop {
+                    tokio::select! {
+                        () = &mut flush => break,
+                        _ = swarm.select_next_some() => {}
+                    }
+                }
+            }
+
             // `swarm` drops here, closing listeners and connections. The
             // join handle completing is what proves it happened.
         });

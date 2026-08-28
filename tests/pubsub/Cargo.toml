@@ -30,3 +30,9 @@ interweave-test-support = { path = "../support" }
 interweave-transport-api = { path = "../../crates/api/transport-api" }
 interweave-transport-runtime = { path = "../../crates/transport/runtime" }
 libp2p = { workspace = true }
+futures = { workspace = true }
+interweave-profile-config = { path = "../../crates/config/profile-config" }
+interweave-profile-identity = { path = "../../crates/identity/profile-identity" }
+interweave-transport-libp2p = { path = "../../crates/transport/libp2p" }
+interweave-trust-api = { path = "../../crates/api/trust-api" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

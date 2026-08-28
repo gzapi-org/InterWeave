@@ -155,6 +155,17 @@ pub struct BroadcastContext<'a> {
     pub queues: &'a mut SessionQueues,
 }
 
+/// What admission needs once a message is allowed, without the gates
+/// that only remote traffic passes.
+pub struct LocalContext<'a> {
+    /// The duplicate cache, keyed by mode so the two cannot alias.
+    pub dedup: &'a mut DedupCache,
+    /// Local join references, which decide who receives.
+    pub subs: &'a SubscriptionRegistry,
+    /// Bounded per-session delivery queues.
+    pub queues: &'a mut SessionQueues,
+}
+
 /// Everything after the verdict: rate, dedup, fan-out.
 ///
 /// Called only for [`ProtocolVerdict::Accept`], and only after the report
@@ -171,9 +182,14 @@ pub fn admit_broadcast(
     ctx: &mut BroadcastContext<'_>,
 ) -> BroadcastAdmission {
     // 3. THE SHARED GATES, in the one order they are written in. Trust is
-    //    re-answered here and passes trivially, which is the point: there
-    //    is one implementation of these three and no broadcast-shaped
-    //    copy that could drift from it.
+    //    re-answered here, and in correct code it passes because the
+    //    classifier already said Accept. It is NOT redundant: with the
+    //    classifier corrupted to accept an unauthorized publisher, this
+    //    gate still refused local delivery -- the four-peer exit-gate
+    //    test only caught that mutation at the forwarding hop. One
+    //    implementation of the three gates, no broadcast-shaped copy to
+    //    drift from it, and a second answer to the trust question that
+    //    does not share the first one's mistakes.
     //
     //    WHAT THE RATE BUCKET BOUNDS, and what it cannot. Everything
     //    below it: the fingerprint hash over the payload, the dedup
@@ -192,6 +208,45 @@ pub fn admit_broadcast(
         return BroadcastAdmission::Refused(refusal);
     }
 
+    admit_local_broadcast(
+        frame,
+        channel,
+        source,
+        clocks,
+        None,
+        &mut LocalContext {
+            dedup: ctx.dedup,
+            subs: ctx.subs,
+            queues: ctx.queues,
+        },
+    )
+}
+
+/// Everything a broadcast needs once it is ALLOWED: identity, dedup,
+/// fan-out.
+///
+/// Shared by the two ways a message becomes deliverable, because they owe
+/// the same answers. Inbound reaches it after decode, trust and the
+/// prefix gates; a LOCAL publish reaches it directly, having already
+/// passed the checks that apply to a caller -- its own join, the payload
+/// ceiling, and draining -- none of which are the remote gates.
+///
+/// A local publish that skipped this would re-deliver every retry of one
+/// envelope, since the publisher republishes while the mesh forms and
+/// only dedup collapses those; and it would deliver same-key conflicting
+/// bodies that inbound refuses. Both were true of the first version, and
+/// neither is visible in a test that publishes once.
+///
+/// `exclude` is the publishing session, which already has the message.
+/// `None` for inbound, where every subscriber is a recipient.
+pub fn admit_local_broadcast(
+    frame: &BroadcastMessageV1,
+    channel: &ChannelId,
+    source: &TransportIdentity,
+    clocks: Clocks,
+    exclude: Option<&str>,
+    ctx: &mut LocalContext<'_>,
+) -> BroadcastAdmission {
     // 4. CONTENT IDENTITY. The direct fingerprint by name and by
     //    definition: it is computed over media type and payload alone,
     //    never crosses the wire, and the dedup keys already differ by
@@ -239,6 +294,11 @@ pub fn admit_broadcast(
     let mut sessions = Vec::with_capacity(subscribers.len());
     let mut dropped = Vec::new();
     for session in subscribers {
+        // The publisher already has its own message; handing it back
+        // would make every client filter its own traffic.
+        if Some(session.as_str()) == exclude {
+            continue;
+        }
         let event = BroadcastEvent {
             source_peer: source.clone(),
             channel: channel.clone(),

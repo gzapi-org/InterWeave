@@ -21,7 +21,7 @@ use interweave_transport_api::TransportIdentity;
 use interweave_transport_runtime::{ConnectionClass, ConnectionManager, DialOrigin, DialTicket};
 
 use crate::behaviour::SubstrateBehaviourEvent;
-use crate::gated_swarm::{GatedSwarm, NotConnected};
+use crate::gated_swarm::{GatedSwarm, NotConnected, mesh_admits};
 
 use super::dialing::{
     ActiveListeners, OpenConnection, PendingListens, attempt_dial, connections_to_close,
@@ -42,11 +42,15 @@ pub(super) fn handle_command(
     active: &mut ActiveListeners,
     pending_direct: &mut HashMap<libp2p::request_response::OutboundRequestId, PendingDirect>,
     direct_state: &mut DirectState,
+    broadcast_state: &mut super::broadcast::BroadcastState,
     in_flight: &mut HashMap<libp2p::swarm::ConnectionId, DialTicket>,
     max_pending_listens: usize,
     max_active_listeners: usize,
     effective_payload: usize,
     now_ms: u64,
+    wall_ms: u64,
+    outbox: &mut std::collections::VecDeque<SwarmEvent>,
+    event_capacity: usize,
     command: SwarmCommand,
 ) {
     match command {
@@ -109,6 +113,209 @@ pub(super) fn handle_command(
                     let _ = reply.send(false);
                 }
             }
+        }
+        SwarmCommand::ConfigureBroadcast { config, reply } => {
+            // The desired set is replaced; live joins are kept. See the
+            // command's own doc for why this differs from ConfigureDirect.
+            let desired: std::collections::BTreeSet<_> = config.desired.iter().cloned().collect();
+            match broadcast_state.subs.set_desired(desired) {
+                Ok(()) => {
+                    // THE BOUND MOVES ONLY ON SUCCESS. Assigning it above
+                    // the match left a refused configuration partly
+                    // applied: the caller was told the configuration
+                    // failed while every later session silently opened at
+                    // the bound from the rejected request.
+                    broadcast_state.queue_bound = config.queue_bound;
+                    // AND FOR THE SESSIONS ALREADY OPEN. Setting it for
+                    // future queues alone left live sessions on whatever
+                    // was configured when they joined, so one bound meant
+                    // two things depending on join order.
+                    broadcast_state.queues.set_bound(config.queue_bound);
+                    // SUBSCRIBE AFTER the registry accepted the set, so a
+                    // refused configuration leaves the mesh untouched
+                    // rather than half-applied.
+                    for channel in &config.desired {
+                        let topic = broadcast_state.remember(channel);
+                        let _ = swarm.subscribe_topic(&topic);
+                    }
+
+                    // AND DROP WHAT IS NO LONGER HELD. Subscribing to the
+                    // new set is only half of applying it: a channel the
+                    // previous set desired, that no session still joins,
+                    // is held by nobody once the registry has answered --
+                    // and would otherwise stay subscribed, receiving and
+                    // relaying traffic this node no longer wants, with
+                    // each reconfiguration adding another.
+                    //
+                    // Asked of the REGISTRY, not of the old desired set:
+                    // the registry is what knows whether a live join still
+                    // holds the channel, which is the case that must not
+                    // be unsubscribed.
+                    let held: Vec<interweave_transport_api::ChannelId> =
+                        broadcast_state.channels.values().cloned().collect();
+                    for channel in held {
+                        if !broadcast_state.subs.backend_should_subscribe(&channel) {
+                            let topic = broadcast_state.forget(&channel);
+                            let _ = swarm.unsubscribe_topic(&topic);
+                        }
+                    }
+                    let _ = reply.send(Ok(()));
+                }
+                Err(denial) => {
+                    let _ = reply.send(Err(format!("{denial:?}")));
+                }
+            }
+        }
+        SwarmCommand::Join {
+            channel,
+            session,
+            reply,
+        } => {
+            match broadcast_state.subs.join(channel.clone(), session.clone()) {
+                Ok(()) => {
+                    // The queue is opened by the JOIN, which is what
+                    // bounds the key set by local state rather than by
+                    // anything a remote peer names.
+                    if !broadcast_state.queues.is_open(&session) {
+                        broadcast_state
+                            .queues
+                            .open(session, broadcast_state.queue_bound);
+                    }
+                    let topic = broadcast_state.remember(&channel);
+                    let _ = swarm.subscribe_topic(&topic);
+                    let _ = reply.send(Ok(()));
+                }
+                Err(_) => {
+                    // A ceiling, not a policy: the session asked for more
+                    // than the profile may hold.
+                    let _ = reply.send(Err(DirectError::Overloaded));
+                }
+            }
+        }
+        SwarmCommand::Leave {
+            channel,
+            session,
+            reply,
+        } => {
+            broadcast_state.subs.leave(&channel, &session);
+
+            // A SESSION THAT HOLDS NOTHING GETS ITS QUEUE BACK. Without
+            // this the map keeps an entry per session id ever seen, and a
+            // local client that joins and leaves under a fresh id each
+            // time grows it without bound -- along with whatever those
+            // queues still hold. `SubscriptionRegistry` bounds sessions
+            // per channel; nothing bounded the queue map itself.
+            //
+            // Asked AFTER the leave and about ALL channels, because a
+            // session that left one of several is still live and still
+            // owed the deliveries on the others.
+            if !broadcast_state.subs.holds_any(&session) {
+                broadcast_state.queues.close(&session);
+            }
+
+            // UNSUBSCRIBE ONLY WHEN NOBODY HOLDS IT, joined or desired.
+            // A profile that desires the channel keeps the mesh warm with
+            // no local consumer, which is the whole point of `desired`.
+            if !broadcast_state.subs.backend_should_subscribe(&channel) {
+                let topic = broadcast_state.forget(&channel);
+                let _ = swarm.unsubscribe_topic(&topic);
+            }
+            let _ = reply.send(());
+        }
+        SwarmCommand::Publish {
+            channel,
+            session,
+            frame,
+            reply,
+        } => {
+            // 1. THE CALLER'S OWN JOIN. PUBSUB.md: the runtime does not
+            //    implicitly subscribe and does not borrow another local
+            //    client's reference. Checked before any byte reaches the
+            //    backend, so a refusal is invisible on the wire.
+            if !broadcast_state.subs.may_publish(&channel, &session) {
+                let _ = reply.send(Err(DirectError::ChannelNotJoined));
+                return;
+            }
+            if frame.payload.len() > effective_payload {
+                let _ = reply.send(Err(DirectError::PayloadTooLarge));
+                return;
+            }
+            if manager.is_draining() {
+                let _ = reply.send(Err(DirectError::ShuttingDown));
+                return;
+            }
+            let topic = broadcast_state.remember(&channel);
+            // LOCAL ACCEPTANCE, not the backend's Ok. A lone node's
+            // publish comes back `NoPeersSubscribedToTopic`, which
+            // `publish_error` reads as success with degraded reachability
+            // -- and a fan-out hung off the Ok arm alone therefore missed
+            // the one case Model B cares most about: two local clients on
+            // a node with no peers at all.
+            let mut unreachable = false;
+            let answer = match swarm.publish_broadcast(topic.hash(), frame.encode()) {
+                Ok(_) => Ok(()),
+                Err(error) => {
+                    unreachable = matches!(
+                        error,
+                        libp2p::gossipsub::PublishError::NoPeersSubscribedToTopic
+                    );
+                    super::broadcast::publish_error(&error).map_or(Ok(()), Err)
+                }
+            };
+            // ONE PRIORITY ORDER FOR THE TURN: the drop report (emitted
+            // inside `deliver_locally`, because data was actually lost),
+            // then this, then the wake-ups.
+            //
+            // PUBSUB.md requires `mesh_peer_count=0` to surface as
+            // degraded rather than as delivery, and the caller's `Ok` is
+            // the wrong place for it -- broadcast promises the caller
+            // nothing about reach. The operator gets the other half.
+            //
+            // It sits BELOW the drop report deliberately: a review round
+            // found each of the two orderings against the wake-ups, and
+            // the resolution is not to give diagnostics extra room --
+            // `polling_room` stops the Swarm the moment the outbox passes
+            // the base capacity -- but to rank them. Actual loss outranks
+            // degraded reachability, which outranks a notification for a
+            // message the session already holds.
+            let outcome = if answer.is_ok() {
+                deliver_locally(
+                    broadcast_state,
+                    manager,
+                    outbox,
+                    &channel,
+                    &session,
+                    &frame,
+                    LocalPublishTick {
+                        now_ms,
+                        wall_ms,
+                        event_capacity,
+                    },
+                )
+            } else {
+                None
+            };
+            if unreachable && super::may_buffer_delivery(outbox.len(), event_capacity) {
+                outbox.push_back(SwarmEvent::BroadcastUnreachable {
+                    channel: channel.clone(),
+                });
+            }
+            if let Some(outcome) = outcome {
+                for delivered in outcome.sessions {
+                    if !super::may_buffer_delivery(outbox.len(), event_capacity) {
+                        break;
+                    }
+                    outbox.push_back(SwarmEvent::BroadcastDelivered {
+                        channel: channel.clone(),
+                        source_peer: outcome.source_peer.clone(),
+                        session: delivered,
+                    });
+                }
+            }
+            let _ = reply.send(answer);
+        }
+        SwarmCommand::DrainSession { session, reply } => {
+            let _ = reply.send(broadcast_state.queues.drain(&session));
         }
         SwarmCommand::Dial {
             peer,
@@ -186,7 +393,30 @@ pub(super) fn handle_command(
             // admission on the old policy would refuse the peer's
             // connection and accept its message.
             direct_state.adopt_trust(&trust);
+            // AND BROADCAST'S, which is a separate copy and so a separate
+            // way to be stale. Without this a revoked peer's connection
+            // closes while its next broadcast is still admitted by the
+            // policy that trusted it -- the same divergence the direct
+            // line above exists to prevent, in the mode that fans out.
+            broadcast_state.adopt_trust(&trust);
             let revoked = manager.set_trust(*trust, &live);
+
+            // AND THE MESH MOVES WITH IT, for every live peer rather than
+            // only the revoked ones. A peer DEMOTED to infrastructure-only
+            // is not revoked -- ADR-0036 keeps its connection so it can
+            // carry AutoNAT and relay traffic -- so it survives the
+            // closing below and would otherwise keep receiving broadcast
+            // on a connection the data plane no longer authorizes. The
+            // promotion direction matters equally: a peer that becomes
+            // trusted must stop being blacklisted, or a revocation
+            // followed by a restoration would leave it permanently
+            // excluded from the mesh with nothing reporting why.
+            for peer in &live {
+                if let Ok(id) = to_peer_id(peer) {
+                    let trusted = mesh_admits(manager.classify(peer));
+                    swarm.sync_broadcast_admission(&id, trusted);
+                }
+            }
 
             // UNIQUE CONNECTIONS for the closing and the count. Every
             // connection is named at most once however many revoked
@@ -444,6 +674,112 @@ pub(super) fn handle_command(
 /// that handles it cannot be reached from a test. The decision therefore
 /// lives where a test can reach it, the same reason `admit_outbound` was
 /// extracted.
+/// The clocks and the bound one local publish is admitted against.
+///
+/// Named rather than passed as three more positional scalars: two of them
+/// are `u64` milliseconds that mean different things, and a call site that
+/// swapped them would compile.
+struct LocalPublishTick {
+    /// Monotonic milliseconds, for dedup TTLs.
+    now_ms: u64,
+    /// Wall-clock milliseconds, for the receipt stamp.
+    wall_ms: u64,
+    /// The BASE outbox capacity, re-read before every event.
+    event_capacity: usize,
+}
+
+/// Admit a locally published broadcast for the OTHER sessions that joined.
+///
+/// Through the SAME admission as an inbound message, not beside it.
+/// GossipSub does not loop a publish back to its own node, so without
+/// this two local clients on one profile never see each other's messages
+/// — the case `human-client-model-b.md` is built around.
+///
+/// The first version of this pushed straight into the queues, and every
+/// difference from inbound admission was a defect: retries of one
+/// envelope were delivered once remotely and once PER ATTEMPT locally,
+/// because only dedup collapses the republishing a publisher does while
+/// the mesh forms; same-key conflicting bodies that inbound refuses were
+/// delivered; and neither the delivery wake-up nor the overload drop was
+/// reported. Sharing the path is what stops the two drifting again.
+fn deliver_locally(
+    broadcast_state: &mut super::broadcast::BroadcastState,
+    manager: &ConnectionManager,
+    outbox: &mut std::collections::VecDeque<SwarmEvent>,
+    channel: &interweave_transport_api::ChannelId,
+    publisher_session: &str,
+    frame: &interweave_transport_api::BroadcastMessageV1,
+    tick: LocalPublishTick,
+) -> Option<LocalOutcome> {
+    let LocalPublishTick {
+        now_ms,
+        wall_ms,
+        event_capacity,
+    } = tick;
+    let source_peer = manager.local_peer().cloned()?;
+    let admission = interweave_transport_runtime::broadcast_inbound::admit_local_broadcast(
+        frame,
+        channel,
+        &source_peer,
+        interweave_transport_runtime::direct_inbound::Clocks {
+            monotonic_ms: now_ms,
+            wall_ms,
+        },
+        Some(publisher_session),
+        &mut interweave_transport_runtime::broadcast_inbound::LocalContext {
+            dedup: &mut broadcast_state.dedup,
+            subs: &broadcast_state.subs,
+            queues: &mut broadcast_state.queues,
+        },
+    );
+
+    let interweave_transport_runtime::broadcast_inbound::BroadcastAdmission::Delivered {
+        sessions,
+        dropped,
+    } = admission
+    else {
+        return None;
+    };
+
+    // THE SAME EVENTS AS INBOUND, under the same live capacity check, and
+    // in one priority order across the whole command turn:
+    //
+    //   1. the DROP report -- data was actually lost;
+    //   2. the zero-mesh report -- reachability is degraded;
+    //   3. the delivery wake-ups -- a message the session already holds.
+    //
+    // The order is the whole mechanism, because there is no room above
+    // the base capacity to give: `polling_room` stops the Swarm being
+    // polled the moment the outbox passes it, so a "reserve" for
+    // diagnostics buys one more event and costs the node its ability to
+    // answer anything. That was tried, and the test for an earlier
+    // finding caught it.
+    //
+    // Every push re-reads the outbox length: one publish can notify every
+    // joined session, which is how a single free slot becomes N events.
+    if !dropped.is_empty() && super::may_buffer_delivery(outbox.len(), event_capacity) {
+        outbox.push_back(SwarmEvent::BroadcastDropped {
+            channel: channel.clone(),
+            source_peer: source_peer.clone(),
+            sessions: dropped.len(),
+        });
+    }
+    Some(LocalOutcome {
+        sessions,
+        source_peer,
+    })
+}
+
+/// What a local publish delivered, for the caller to announce.
+///
+/// Returned rather than emitted inside `deliver_locally` so the command
+/// can put the zero-mesh report BETWEEN the drop report and these: three
+/// event kinds in one turn, one priority order, one capacity.
+struct LocalOutcome {
+    sessions: Vec<String>,
+    source_peer: interweave_transport_api::TransportIdentity,
+}
+
 pub(super) fn forget_address(
     active: &mut ActiveListeners,
     listener: ListenerId,

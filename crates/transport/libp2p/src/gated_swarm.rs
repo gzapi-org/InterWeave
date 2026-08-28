@@ -34,7 +34,9 @@
 //! [`PolicySnapshot::admit`]: interweave_transport_runtime::PolicySnapshot::admit
 
 use futures::stream::SelectNextSome;
+use interweave_transport_runtime::ConnectionClass;
 use libp2p::core::transport::ListenerId;
+use libp2p::gossipsub;
 use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
 use libp2p::swarm::{ConnectionId, DialError, Swarm, SwarmEvent};
 use libp2p::{Multiaddr, PeerId, TransportError};
@@ -178,6 +180,27 @@ pub struct NotConnected;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Unanswerable;
 
+/// Whether a peer of this class may participate in the broadcast mesh.
+///
+/// Only the data plane. `ConnectivityInfrastructureOnly` is authorized
+/// for reachability control and nothing else — ADR-0036 and DESIGN.md
+/// both say it is excluded from GossipSub, direct v2, the endpoint
+/// directory and Kademlia routing — and `Unauthorized` is authorized for
+/// nothing at all.
+///
+/// Written as an exhaustive match rather than `== DataPlaneTrusted` so
+/// that adding a class forces a decision here instead of silently
+/// defaulting it to "not the data plane", which would be the safe answer
+/// today and is not guaranteed to be the right one for a class that does
+/// not exist yet.
+#[must_use]
+pub const fn mesh_admits(class: ConnectionClass) -> bool {
+    match class {
+        ConnectionClass::DataPlaneTrusted => true,
+        ConnectionClass::ConnectivityInfrastructureOnly | ConnectionClass::Unauthorized => false,
+    }
+}
+
 impl GatedSwarm {
     /// Wrap a built Swarm.
     #[must_use]
@@ -255,6 +278,92 @@ impl GatedSwarm {
             .direct
             .send_response(channel, response)
             .map_err(|_| Unanswerable)
+    }
+
+    /// Publish one encoded envelope to a topic.
+    ///
+    /// Unlike [`Self::send_direct`] this needs no connectivity check:
+    /// GossipSub publishes to whatever mesh peers exist and answers
+    /// `NoPeersSubscribedToTopic` when there are none — which PUBSUB.md
+    /// makes local success with degraded reachability, not a failure, so
+    /// refusing up front here would convert a documented success into an
+    /// error.
+    ///
+    /// # Errors
+    /// The backend's own [`gossipsub::PublishError`]; the caller maps it.
+    pub fn publish_broadcast(
+        &mut self,
+        topic: gossipsub::TopicHash,
+        bytes: Vec<u8>,
+    ) -> Result<gossipsub::MessageId, gossipsub::PublishError> {
+        self.inner.behaviour_mut().broadcast.publish(topic, bytes)
+    }
+
+    /// Subscribe the backend to a topic.
+    ///
+    /// # Errors
+    /// [`gossipsub::SubscriptionError`] from the backend.
+    pub fn subscribe_topic(
+        &mut self,
+        topic: &gossipsub::IdentTopic,
+    ) -> Result<bool, gossipsub::SubscriptionError> {
+        self.inner.behaviour_mut().broadcast.subscribe(topic)
+    }
+
+    /// Unsubscribe the backend from a topic.
+    ///
+    /// Returns whether a subscription was held.
+    pub fn unsubscribe_topic(&mut self, topic: &gossipsub::IdentTopic) -> bool {
+        self.inner.behaviour_mut().broadcast.unsubscribe(topic)
+    }
+
+    /// Report one message's ADR-0029 validation result.
+    ///
+    /// **Every message the application is handed must be reported exactly
+    /// once.** The behaviour is built with `validate_messages()`, which
+    /// hands propagation to this crate; a message never reported stays in
+    /// the backend's cache and its id is never seen as new again, so the
+    /// same publisher re-sending it reaches nobody.
+    ///
+    /// Returns whether the message was still in that cache — `false`
+    /// means it had already been evicted, which is the shape of reporting
+    /// twice or far too late.
+    pub fn report_broadcast_validation(
+        &mut self,
+        id: &gossipsub::MessageId,
+        propagation_source: &libp2p::PeerId,
+        acceptance: gossipsub::MessageAcceptance,
+    ) -> bool {
+        self.inner
+            .behaviour_mut()
+            .broadcast
+            .report_message_validation_result(id, propagation_source, acceptance)
+    }
+
+    /// Keep the mesh's view of a peer in step with its trust class.
+    ///
+    /// GossipSub performs **no connection admission of its own**: it acts
+    /// on whatever the swarm has already established, so an untrusted
+    /// peer never reaches it only because the dial gate refused the
+    /// connection first. That leaves one case the gate cannot cover — a
+    /// peer whose class changes while its connection stays up, which
+    /// ADR-0036 makes ordinary: an infrastructure-only peer keeps
+    /// carrying AutoNAT and relay control traffic and must be excluded
+    /// from the data plane, mesh included (DESIGN.md).
+    ///
+    /// Blacklisting is what expresses that to the backend. It is
+    /// idempotent, so this may be called on every classification without
+    /// tracking what was already applied.
+    pub fn sync_broadcast_admission(&mut self, peer: &libp2p::PeerId, data_plane_trusted: bool) {
+        // The decision itself is `mesh_admits`, kept separate and pure so
+        // it can be enumerated over every class.
+
+        let broadcast = &mut self.inner.behaviour_mut().broadcast;
+        if data_plane_trusted {
+            broadcast.remove_blacklisted_peer(peer);
+        } else {
+            broadcast.blacklist_peer(peer);
+        }
     }
 
     /// Close one connection by id.
@@ -426,5 +535,22 @@ mod tests {
         );
         drop(refused);
         assert_eq!(handle.load().pending_dials(), 0, "and released on drop");
+    }
+}
+
+#[cfg(test)]
+mod broadcast_admission_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_data_plane_class_is_admitted_to_the_mesh() {
+        // Enumerated rather than spot-checked: an infrastructure-only
+        // peer keeps a live connection by design (ADR-0036), so it is the
+        // one that would otherwise stay in the mesh after a demotion.
+        assert!(mesh_admits(ConnectionClass::DataPlaneTrusted));
+        assert!(!mesh_admits(
+            ConnectionClass::ConnectivityInfrastructureOnly
+        ));
+        assert!(!mesh_admits(ConnectionClass::Unauthorized));
     }
 }

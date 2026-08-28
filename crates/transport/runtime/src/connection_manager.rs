@@ -1228,6 +1228,17 @@ impl ConnectionManager {
         self.local_peer.as_ref() == Some(peer)
     }
 
+    /// This node's own PeerId, once bound.
+    ///
+    /// A locally published broadcast has to name a publisher for the
+    /// sessions that receive it, and the honest answer is this node --
+    /// the same identity the mesh would have authenticated had the
+    /// message come from outside.
+    #[must_use]
+    pub fn local_peer(&self) -> Option<&TransportIdentity> {
+        self.local_peer.as_ref()
+    }
+
     /// Begin draining. Admission refuses from the next snapshot on.
     pub fn begin_shutdown(&mut self) {
         self.shutting_down.store(true, Ordering::Release);
