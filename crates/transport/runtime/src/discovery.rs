@@ -35,7 +35,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use interweave_discovery_api::{
-    CandidatePeer, DiscoveryEvent, ProtocolId, ProviderDescriptor, ProviderHealth,
+    CandidatePeer, DiscoveryEvent, ProtocolId, ProviderDescriptor, ProviderHealth, ProviderScope,
 };
 use interweave_transport_api::TransportIdentity;
 use interweave_trust_api::PeerTrustPolicy;
@@ -51,6 +51,14 @@ pub const MAX_OBSERVATIONS_PER_PEER: usize = 16;
 
 /// Registered providers, which also bounds how many can be composed.
 pub const MAX_PROVIDERS: usize = 16;
+
+/// Configured candidates retained against overflow eviction.
+///
+/// `DESIGN.md` says configured static entries are retained "within their
+/// own explicit cap"; this is that cap, and it matches the 64-entry
+/// ceiling `static-bootstrap` itself accepts, so a fully-loaded static
+/// provider is exactly covered and no more.
+pub const MAX_CONFIGURED_RETAINED: usize = 64;
 
 /// The default lifetime applied to an observation from a provider that
 /// CAN express expiry but did not for this candidate.
@@ -96,6 +104,11 @@ struct Provenance {
     source: String,
     observed_at: u64,
     expires_at: u64,
+    /// The source is a CONFIGURED provider (`ProviderScope::Configured`),
+    /// which is what the retention rule in `evict_one` keys on. Carried
+    /// per record rather than looked up at eviction time because the
+    /// registry can change between the observation and the pressure.
+    configured: bool,
 }
 
 /// One peer's aggregated reachability.
@@ -108,6 +121,15 @@ struct Entry {
     /// The most recent observation of this peer from any source, for the
     /// least-recently-observed half of the eviction rule.
     last_observed_ms: u64,
+}
+
+impl Entry {
+    /// Any live provenance from a configured provider.
+    fn is_configured(&self) -> bool {
+        self.addresses
+            .values()
+            .any(|rs| rs.iter().any(|r| r.configured))
+    }
 }
 
 /// One address, and which providers currently vouch for it.
@@ -276,6 +298,7 @@ impl CandidateSet {
         now_ms: u64,
         trust: &PeerTrustPolicy,
         provider_expires: bool,
+        provider_configured: bool,
     ) {
         // A PROVIDER THAT DECLARES NO EXPIRY IS RETRACTED, NEVER AGED OUT.
         // Static bootstrap emits its entries once, at start and on
@@ -322,6 +345,7 @@ impl CandidateSet {
                     source: candidate.source.clone(),
                     observed_at: candidate.observed_at,
                     expires_at,
+                    configured: provider_configured,
                 });
             }
         }
@@ -380,10 +404,43 @@ impl CandidateSet {
             self.peers.remove(&peer);
             return;
         }
+        // CONFIGURED ENTRIES ARE RETAINED WITHIN THEIR OWN CAP
+        // (`architecture/discovery/DESIGN.md`). Static bootstrap is the
+        // case that makes this load-bearing: its provider declares no
+        // expiry and emits only at start and on reload, so an evicted
+        // configured entry is not re-learned — it is gone until something
+        // reloads the provider. Left in the general pool it would also be
+        // evicted FIRST under churn, because a peer observed once at start
+        // is by definition the least recently observed.
+        //
+        // Beyond the cap the protection stops: retention is bounded like
+        // everything else here, so configuration cannot be used to pin the
+        // whole set out of reach of eviction.
+        let configured: BTreeSet<TransportIdentity> = self
+            .peers
+            .iter()
+            .filter(|(_, e)| e.is_configured())
+            .map(|(p, _)| p.clone())
+            .collect();
+        let protect: BTreeSet<&TransportIdentity> = if configured.len() <= MAX_CONFIGURED_RETAINED {
+            configured.iter().collect()
+        } else {
+            // Over the cap: protect the most recently observed within it,
+            // so the excess is evictable in the same order as anything
+            // else.
+            let mut ranked: Vec<&TransportIdentity> = configured.iter().collect();
+            ranked.sort_by_key(|p| {
+                std::cmp::Reverse(self.peers.get(*p).map_or(0, |e| e.last_observed_ms))
+            });
+            ranked.truncate(MAX_CONFIGURED_RETAINED);
+            ranked.into_iter().collect()
+        };
+
         let victim = self
             .peers
             .iter()
             .filter(|(peer, _)| !trust.decide(peer).is_allowed())
+            .filter(|(peer, _)| !protect.contains(peer))
             .min_by_key(|(_, e)| e.last_observed_ms)
             .map(|(p, _)| p.clone());
         if let Some(peer) = victim {
@@ -537,8 +594,17 @@ impl DiscoveryManager {
                     .providers
                     .get(source)
                     .is_some_and(|p| p.descriptor.supports_expiry);
-                self.candidates
-                    .observe(&candidate, now_ms, trust, provider_expires);
+                let provider_configured = self
+                    .providers
+                    .get(source)
+                    .is_some_and(|p| p.descriptor.scope == ProviderScope::Configured);
+                self.candidates.observe(
+                    &candidate,
+                    now_ms,
+                    trust,
+                    provider_expires,
+                    provider_configured,
+                );
                 Ok(())
             }
             DiscoveryEvent::CandidateExpired {
@@ -611,6 +677,31 @@ mod tests {
     const P2: &str = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
     const P3: &str = "12D3KooWQYV9dGMFoRzNStwpXztXaBUjtPqi6aU76ZgUriHhKust";
 
+    /// A synthetic well-formed identity, for tests that need more peers
+    /// than there are named constants.
+    ///
+    /// The PeerId grammar this crate checks is a prefix, an alphabet and a
+    /// length with no checksum (`TransportIdentity::parse`), so a
+    /// generated string is exactly as valid to every layer under test as a
+    /// captured one. Nothing here dials, so a peer that no key backs is
+    /// the right test subject rather than a shortcut.
+    fn identity(n: usize) -> TransportIdentity {
+        const B58: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+        let mut tail = [b'1'; 44];
+        let mut v = n;
+        let mut i = 43;
+        loop {
+            tail[i] = B58[v % B58.len()];
+            v /= B58.len();
+            if v == 0 || i == 0 {
+                break;
+            }
+            i -= 1;
+        }
+        let s = format!("12D3KooW{}", core::str::from_utf8(&tail).expect("ascii"));
+        TransportIdentity::parse(s).expect("the generated id matches the grammar")
+    }
+
     fn peer(s: &str) -> TransportIdentity {
         TransportIdentity::parse(s).expect("valid identity")
     }
@@ -656,6 +747,24 @@ mod tests {
             protocol_observations: BTreeSet::new(),
         }
     }
+    /// `candidate`, for an identity that is already parsed.
+    fn for_id(
+        id: &TransportIdentity,
+        source: &str,
+        addr: &str,
+        at: u64,
+        exp: Option<u64>,
+    ) -> CandidatePeer {
+        CandidatePeer {
+            peer_id: id.clone(),
+            addresses: [addr.to_owned()].into_iter().collect(),
+            source: source.to_owned(),
+            observed_at: at,
+            expires_at: exp,
+            protocol_observations: BTreeSet::new(),
+        }
+    }
+
     fn observed(c: CandidatePeer) -> DiscoveryEvent {
         DiscoveryEvent::CandidateObserved {
             candidate: Box::new(c),
@@ -1268,6 +1377,105 @@ mod tests {
             m.candidates(0).len(),
             1,
             "a low-priority provider's candidate is still a candidate"
+        );
+    }
+    #[test]
+    fn a_configured_entry_survives_overflow_pressure() {
+        // Static bootstrap emits once, at start, and declares no expiry.
+        // Left in the general pool it is evicted FIRST under churn — a
+        // peer observed once at start is by definition the least recently
+        // observed — and nothing re-emits it, so the bootstrap address is
+        // gone until a provider reload. DESIGN.md retains it.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let boot = identity(0);
+
+        set.observe(
+            &for_id(&boot, "static-bootstrap", "/ip4/10.0.0.1/tcp/1", 0, None),
+            0,
+            &trust,
+            false, // supports_expiry: false
+            true,  // scope: Configured
+        );
+
+        // Fill the set from a non-configured provider, all observed later.
+        for i in 1..=MAX_CANDIDATES {
+            set.observe(
+                &for_id(
+                    &identity(i),
+                    "mdns",
+                    "/ip4/10.1.0.1/tcp/1",
+                    1_000 + i as u64,
+                    Some(u64::MAX),
+                ),
+                1_000 + i as u64,
+                &trust,
+                true,
+                false,
+            );
+        }
+
+        assert!(
+            set.candidates(2_000_000, &|_| None)
+                .iter()
+                .any(|c| c.peer_id == boot),
+            "the configured bootstrap entry is retained under pressure"
+        );
+    }
+
+    #[test]
+    fn configured_entries_past_their_cap_are_evictable() {
+        // Retention is bounded like everything else: configuration must
+        // not be a way to pin the whole set out of reach of eviction.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+
+        for i in 0..MAX_CONFIGURED_RETAINED + 8 {
+            set.observe(
+                &for_id(
+                    &identity(i),
+                    "static-bootstrap",
+                    "/ip4/10.0.0.1/tcp/1",
+                    i as u64,
+                    None,
+                ),
+                i as u64,
+                &trust,
+                false,
+                true,
+            );
+        }
+        let before = set.candidates(1_000_000, &|_| None).len();
+
+        // Now apply pressure with a non-configured provider.
+        for i in 1_000..1_000 + MAX_CANDIDATES {
+            set.observe(
+                &for_id(
+                    &identity(i),
+                    "mdns",
+                    "/ip4/10.1.0.1/tcp/1",
+                    100_000 + i as u64,
+                    Some(u64::MAX),
+                ),
+                100_000 + i as u64,
+                &trust,
+                true,
+                false,
+            );
+        }
+
+        let after = set
+            .candidates(1_000_000, &|_| None)
+            .iter()
+            .filter(|c| c.sources.contains("static-bootstrap"))
+            .count();
+        assert!(
+            after <= MAX_CONFIGURED_RETAINED,
+            "at most the cap is protected, got {after} of {before} configured"
+        );
+        assert!(
+            after >= MAX_CONFIGURED_RETAINED,
+            "and the cap IS protected, not merely an upper bound: got {after}"
         );
     }
 }
