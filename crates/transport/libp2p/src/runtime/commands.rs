@@ -649,7 +649,16 @@ pub(super) fn handle_command(
             }
         }
         SwarmCommand::ConfigureDirect { config, reply } => {
-            let _ = reply.send(direct_state.configure(*config));
+            let outcome = direct_state.configure(*config);
+            // On success the profile's directory limits are now in
+            // `direct_state`; rebuild the responder budget from them so a
+            // non-default rate or concurrency setting is honoured rather
+            // than the startup defaults.
+            if outcome.is_ok() {
+                let (queries, inflight) = direct_state.directory_budget_limits();
+                directory_state.set_budget_limits(queries, inflight, now_ms);
+            }
+            let _ = reply.send(outcome);
         }
         SwarmCommand::ClaimEndpoint {
             session,

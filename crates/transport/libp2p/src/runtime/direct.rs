@@ -62,6 +62,12 @@ pub struct DirectState {
     pub(super) directory_enabled: bool,
     /// The profile's advertised-entry cap, at or below the wire's 32.
     pub(super) max_advertised: usize,
+    /// The profile's directory query rate and concurrency, carried from
+    /// configuration so the responder's budget honours them rather than
+    /// the built-in defaults.
+    pub(super) directory_queries_per_min: u32,
+    /// See above.
+    pub(super) directory_max_inflight: usize,
     /// Inbound requests whose answer is queued but not yet written.
     ///
     /// `pending_direct` counts OUTBOUND exchanges only, so a shutdown
@@ -132,6 +138,8 @@ impl DirectState {
         self.queue_bound = config.queue_bound;
         self.directory_enabled = config.directory_enabled;
         self.max_advertised = config.max_advertised;
+        self.directory_queries_per_min = config.directory_queries_per_min;
+        self.directory_max_inflight = config.directory_max_inflight;
         Ok(())
     }
 
@@ -179,6 +187,12 @@ impl DirectState {
     /// Whether this profile answers directory queries.
     pub(super) const fn directory_enabled(&self) -> bool {
         self.directory_enabled
+    }
+
+    /// The configured directory query rate and concurrency, for rebuilding
+    /// the responder budget when a profile is installed.
+    pub(super) const fn directory_budget_limits(&self) -> (u32, usize) {
+        (self.directory_queries_per_min, self.directory_max_inflight)
     }
 
     /// The endpoints advertised to `peer` — enabled, advertised, leased,
@@ -269,6 +283,9 @@ impl DirectState {
             // answers Unavailable until `configure` says otherwise.
             directory_enabled: false,
             max_advertised: 0,
+            directory_queries_per_min:
+                interweave_transport_runtime::directory::DEFAULT_QUERIES_PER_PEER_PER_MINUTE,
+            directory_max_inflight: interweave_transport_runtime::directory::DEFAULT_MAX_INFLIGHT,
         }
     }
 }
@@ -311,6 +328,10 @@ pub struct DirectEndpoints {
     /// The profile's own cap on advertised entries, at or below the
     /// wire's 32.
     pub(super) max_advertised: usize,
+    /// Directory queries admitted per minute from one remote PeerId.
+    pub(super) directory_queries_per_min: u32,
+    /// Concurrent directory exchanges this profile answers at once.
+    pub(super) directory_max_inflight: usize,
 }
 
 impl DirectEndpoints {
@@ -370,6 +391,11 @@ impl DirectEndpoints {
             directory_enabled: profile.endpoints.directory.enabled,
             max_advertised: usize::try_from(profile.endpoints.directory.max_advertised)
                 .unwrap_or(usize::MAX),
+            directory_queries_per_min: profile.endpoints.directory.max_queries_per_minute_per_peer,
+            directory_max_inflight: usize::try_from(
+                profile.endpoints.directory.max_inflight_queries,
+            )
+            .unwrap_or(usize::MAX),
         })
     }
 }

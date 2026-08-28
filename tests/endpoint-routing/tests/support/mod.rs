@@ -219,6 +219,7 @@ pub(crate) fn profile_directory(
     profile.endpoints.directory = DirectoryConfig {
         enabled: directory_enabled,
         max_advertised: interweave_profile_config::MAX_ADVERTISED_CEILING,
+        ..DirectoryConfig::default()
     };
     profile
 }

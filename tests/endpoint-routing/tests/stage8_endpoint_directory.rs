@@ -629,6 +629,82 @@ async fn the_advertised_ttl_is_independent_of_the_local_cache_setting() {
     );
 }
 
+/// A profile's configured query rate is honoured, not the built-in
+/// default. A responder set to 1 query/minute refuses the SECOND query
+/// from one peer — where the default 12 would admit it. The querier
+/// caches nothing (cache TTL 0) so both queries reach the responder.
+///
+/// Mutation: build the responder budget with `with_defaults` regardless
+/// of the profile, and the second query is admitted.
+#[tokio::test]
+async fn the_configured_query_rate_is_honoured() {
+    use interweave_profile_config::DirectoryConfig;
+    use interweave_transport_libp2p::runtime::{DirectEndpoints, SubstrateConfig, SwarmRuntime};
+
+    let (querier_id, querier_peer) = who();
+    let (responder_id, _) = who();
+    let mut responder = SwarmRuntime::start(
+        &responder_id,
+        SubstrateConfig::default(),
+        support::trusting(&[&querier_peer]),
+    )
+    .expect("responder starts");
+    let responder_peer = responder.local_peer().clone();
+    // The querier never caches, so every query crosses the wire.
+    let querier = SwarmRuntime::start(
+        &querier_id,
+        SubstrateConfig {
+            directory_cache_ttl_ms: 0,
+            ..SubstrateConfig::default()
+        },
+        support::trusting(&[&responder_peer]),
+    )
+    .expect("querier starts");
+
+    // A responder that admits ONE directory query per minute per peer.
+    let mut profile = profile_directory(vec![advertised("human")], Some("human"), true);
+    profile.endpoints.directory = DirectoryConfig {
+        max_queries_per_minute_per_peer: 1,
+        ..profile.endpoints.directory
+    };
+    responder
+        .configure_direct(DirectEndpoints::from_profile(&profile, 8).expect("valid"))
+        .await
+        .expect("installs");
+    responder
+        .claim_endpoint("s", endpoint("human"), "in-process")
+        .await
+        .expect("command")
+        .expect("free");
+    let address = responder
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
+        .await
+        .expect("listens");
+    querier
+        .dial(responder_peer.clone(), address)
+        .await
+        .expect("command")
+        .expect("admitted");
+    support::wait_connected(&mut responder).await;
+
+    // First query: admitted.
+    let first = querier
+        .query_endpoints(responder_peer.clone())
+        .await
+        .expect("command")
+        .expect("the first query is within the rate");
+    assert_eq!(names(&first), ["human"]);
+
+    // Second: over the configured rate of one. The default of twelve would
+    // have admitted it.
+    let error = querier
+        .query_endpoints(responder_peer)
+        .await
+        .expect("command")
+        .expect_err("the second query exceeds the configured rate of one");
+    assert_eq!(error, TransportError::Overloaded);
+}
+
 /// The exit gate: route discovery works without entering broadcast,
 /// peer discovery, or Kademlia state. The querier configures no channels
 /// and adds no addresses beyond the dial, and the query still succeeds.

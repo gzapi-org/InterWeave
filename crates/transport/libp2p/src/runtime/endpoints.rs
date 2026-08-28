@@ -137,6 +137,25 @@ impl DirectoryState {
         }
     }
 
+    /// Rebuild the responder budget from a profile's configured limits.
+    ///
+    /// Called when `configure_direct` installs a profile: the budget is
+    /// built with defaults at startup, before any profile exists, so a
+    /// non-default rate or concurrency setting takes effect here. An
+    /// out-of-range pair cannot arrive — `ProfileConfig::validate` already
+    /// bounded it to the same ceilings — so a rejected value falls back to
+    /// the defaults rather than propagating an error the validator has
+    /// made unreachable.
+    pub(super) fn set_budget_limits(
+        &mut self,
+        queries_per_min: u32,
+        max_inflight: usize,
+        now_ms: u64,
+    ) {
+        self.budget = DirectoryBudget::new(queries_per_min, max_inflight, now_ms)
+            .unwrap_or_else(|_| DirectoryBudget::with_defaults(now_ms));
+    }
+
     /// Queries whose answer is queued but not yet written — read by
     /// `polling_room` so an answer cannot be starved out of its slot.
     pub(super) fn answering(&self) -> usize {
