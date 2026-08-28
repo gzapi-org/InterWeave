@@ -13,169 +13,19 @@
 //! socket. A mock delivers wherever the test told it to.
 #![allow(clippy::expect_used, clippy::panic)]
 
-use std::time::Duration;
+mod support;
 
-use interweave_profile_config::{
-    ChannelsConfig, DirectoryConfig, EndpointConfig, EndpointsConfig, ProfileConfig,
-    RegistrationPolicy, TrustConfig, TrustPolicyKind,
-};
-use interweave_profile_identity::ProfileIdentity;
-use interweave_transport_api::{
-    DirectMessageV2, EndpointId, MediaType, MessageId, Payload, TransportIdentity,
-};
-use interweave_transport_libp2p::runtime::{
-    DirectEndpoints, SubstrateConfig, SwarmEvent, SwarmRuntime,
-};
-use interweave_transport_runtime::{Generation, TrustSources};
-use interweave_trust_api::EndpointTrustPolicy;
-use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
-
-fn who() -> (ProfileIdentity, TransportIdentity) {
-    let id = ProfileIdentity::generate();
-    let peer = id.transport_identity().expect("peer id");
-    (id, peer)
-}
-
-fn trusting(peers: &[&TransportIdentity]) -> TrustSources {
-    TrustSources::new(
-        PeerTrustPolicy::new(peers.iter().map(|p| (*p).clone())).expect("a handful"),
-        InfrastructureSet::default(),
-    )
-}
-
-fn endpoint(name: &str) -> EndpointId {
-    EndpointId::parse(name).expect("valid endpoint id")
-}
-
-/// A profile carrying these endpoints, which is now the ONLY way to
-/// reach `DirectEndpoints` — the runtime derives its state from the
-/// canonical validated configuration rather than from a second model
-/// assembled here.
-fn profile_with(entries: Vec<EndpointConfig>, default: Option<&str>) -> ProfileConfig {
-    ProfileConfig {
-        schema_version: 2,
-        trust: TrustConfig {
-            policy: TrustPolicyKind::default(),
-            allowed_peers: std::collections::BTreeSet::new(),
-        },
-        endpoints: EndpointsConfig {
-            registration_policy: RegistrationPolicy::default(),
-            default_direct_endpoint: default.map(endpoint),
-            directory: DirectoryConfig::default(),
-            entries,
-        },
-        channels: ChannelsConfig::default(),
-    }
-}
-
-/// One endpoint entry with default policies.
-fn entry(name: &str) -> EndpointConfig {
-    EndpointConfig {
-        id: endpoint(name),
-        enabled: true,
-        advertise: false,
-        allowed_client_kinds: Vec::new(),
-        inbound: EndpointTrustPolicy::default(),
-        outbound: EndpointTrustPolicy::default(),
-    }
-}
-
-/// ONE PROFILE, SEVERAL ENDPOINTS. `human` is the default; `claude` and
-/// a third name that does not exist yet share the same PeerId, which is
-/// the arrangement Model B describes.
-fn endpoints() -> DirectEndpoints {
-    DirectEndpoints::from_profile(
-        &profile_with(
-            vec![entry("human"), entry("claude"), entry("gpt-5")],
-            Some("human"),
-        ),
-        8,
-        Generation::parse("modelb__________").expect("valid generation"),
-    )
-    .expect("a valid profile")
-}
-
-/// A frame from `from`, to `to`, carrying `body` under `id`.
-fn frame(from: &str, to: Option<&str>, body: &[u8], id: u8) -> DirectMessageV2 {
-    DirectMessageV2 {
-        message_id: MessageId::from_bytes([id; 16]),
-        sent_at_ms: 1,
-        source_endpoint: endpoint(from),
-        destination_endpoint: to.map(endpoint),
-        payload: Payload::at_ceiling(
-            Some(MediaType::parse("text/plain").expect("valid media type")),
-            body.to_vec(),
-        )
-        .expect("within the ceiling"),
-    }
-}
-
-async fn connected_pair() -> (SwarmRuntime, SwarmRuntime, TransportIdentity) {
-    let (sender_id, sender_peer) = who();
-    let (receiver_id, receiver_peer) = who();
-
-    let mut receiver = SwarmRuntime::start(
-        &receiver_id,
-        SubstrateConfig::default(),
-        trusting(&[&sender_peer]),
-    )
-    .expect("the receiver starts");
-    let sender = SwarmRuntime::start(
-        &sender_id,
-        SubstrateConfig::default(),
-        trusting(&[&receiver_peer]),
-    )
-    .expect("the sender starts");
-
-    // The sender holds leases for the endpoints it sends FROM: a source
-    // endpoint must name a lease this node holds, not a label it chose.
-    sender
-        .configure_direct(endpoints())
-        .await
-        .expect("the sender's own endpoints install");
-
-    receiver
-        .configure_direct(endpoints())
-        .await
-        .expect("endpoints install");
-    let address = receiver
-        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
-        .await
-        .expect("listens");
-    sender
-        .dial(receiver_peer.clone(), address)
-        .await
-        .expect("command")
-        .expect("admitted");
-    wait_connected(&mut receiver).await;
-
-    (sender, receiver, receiver_peer)
-}
-
-/// Bounded: a connection that never arrives is a RESULT, and a test that
-/// waits forever reports nothing at all.
-async fn wait_connected(runtime: &mut SwarmRuntime) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        assert!(!remaining.is_zero(), "no connection within 20s");
-        match tokio::time::timeout(remaining, runtime.next_event()).await {
-            Ok(Some(SwarmEvent::Connected { .. })) => return,
-            Ok(Some(_)) => {}
-            Ok(None) => panic!("the runtime stopped before connecting"),
-            Err(_) => panic!("no connection within 20s"),
-        }
-    }
-}
+use support::{connected_pair, endpoint, frame};
 
 /// Scenarios 2 and 3: a send to `human` reaches only human, a send to
 /// `claude` reaches only Claude — on ONE PeerId.
 #[tokio::test]
 async fn each_endpoint_receives_only_what_was_addressed_to_it() {
-    let (sender, receiver, peer) = connected_pair().await;
+    let (sender, receiver, peer, leases) = connected_pair().await;
 
     sender
         .send_direct(
+            &leases["human"],
             peer.clone(),
             frame("human", Some("human"), b"for the human", 1),
         )
@@ -184,6 +34,7 @@ async fn each_endpoint_receives_only_what_was_addressed_to_it() {
         .expect("accepted");
     sender
         .send_direct(
+            &leases["human"],
             peer.clone(),
             frame("human", Some("claude"), b"for claude", 2),
         )
@@ -191,7 +42,11 @@ async fn each_endpoint_receives_only_what_was_addressed_to_it() {
         .expect("command")
         .expect("accepted");
     sender
-        .send_direct(peer, frame("human", Some("gpt-5"), b"for gpt-5", 3))
+        .send_direct(
+            &leases["human"],
+            peer,
+            frame("human", Some("gpt-5"), b"for gpt-5", 3),
+        )
         .await
         .expect("command")
         .expect("accepted");
@@ -220,10 +75,14 @@ async fn each_endpoint_receives_only_what_was_addressed_to_it() {
 /// routes exactly as `human` and `claude` do — no code knows the names.
 #[tokio::test]
 async fn an_endpoint_this_stage_never_heard_of_routes_like_any_other() {
-    let (sender, receiver, peer) = connected_pair().await;
+    let (sender, receiver, peer, leases) = connected_pair().await;
 
     let resolved = sender
-        .send_direct(peer, frame("human", Some("gpt-5"), b"hello", 4))
+        .send_direct(
+            &leases["human"],
+            peer,
+            frame("human", Some("gpt-5"), b"hello", 4),
+        )
         .await
         .expect("command")
         .expect("a configured endpoint is a configured endpoint");
@@ -258,10 +117,11 @@ async fn an_endpoint_this_stage_never_heard_of_routes_like_any_other() {
 /// second arrival a duplicate of the first and drop it.
 #[tokio::test]
 async fn one_id_from_two_source_endpoints_delivers_twice() {
-    let (sender, receiver, peer) = connected_pair().await;
+    let (sender, receiver, peer, leases) = connected_pair().await;
 
     sender
         .send_direct(
+            &leases["human"],
             peer.clone(),
             frame("human", Some("claude"), b"from human", 5),
         )
@@ -269,7 +129,11 @@ async fn one_id_from_two_source_endpoints_delivers_twice() {
         .expect("command")
         .expect("accepted");
     sender
-        .send_direct(peer, frame("gpt-5", Some("claude"), b"from gpt-5", 5))
+        .send_direct(
+            &leases["gpt-5"],
+            peer,
+            frame("gpt-5", Some("claude"), b"from gpt-5", 5),
+        )
         .await
         .expect("command")
         .expect("the same id from a different source is not a duplicate");
@@ -297,16 +161,16 @@ async fn one_id_from_two_source_endpoints_delivers_twice() {
 /// mean dedup is not working at all.
 #[tokio::test]
 async fn one_id_from_one_source_delivers_once() {
-    let (sender, receiver, peer) = connected_pair().await;
+    let (sender, receiver, peer, leases) = connected_pair().await;
     let repeated = frame("human", Some("claude"), b"same body", 6);
 
     sender
-        .send_direct(peer.clone(), repeated.clone())
+        .send_direct(&leases["human"], peer.clone(), repeated.clone())
         .await
         .expect("command")
         .expect("accepted");
     sender
-        .send_direct(peer, repeated)
+        .send_direct(&leases["human"], peer, repeated)
         .await
         .expect("command")
         .expect("the retry is accepted from cache");

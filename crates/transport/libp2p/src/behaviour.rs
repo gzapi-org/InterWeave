@@ -31,6 +31,7 @@ use interweave_transport_runtime::mesh_id::gossipsub_message_id_v1;
 use interweave_transport_runtime::preauth::PreAuthLimits;
 
 use crate::direct_codec::{DIRECT_PROTOCOL, DirectCodec};
+use crate::endpoints_codec::{ENDPOINTS_PROTOCOL, EndpointsCodec};
 use crate::outbound_gate::OutboundAdmission;
 use crate::preauth_gate::PreAuthAdmission;
 
@@ -41,6 +42,12 @@ use crate::preauth_gate::PreAuthAdmission;
 /// time out the attribution is a race, so this bounds how long a caller
 /// waits and nothing more.
 pub const DIRECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long one directory exchange may take.
+///
+/// Shorter than direct: the answer is a snapshot the responder already
+/// holds, and a slow one is a slow peer rather than a slow decision.
+const ENDPOINTS_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The Identify protocol name this profile advertises.
 ///
@@ -152,6 +159,14 @@ pub struct SubstrateBehaviour {
     /// connection admission at all, so an untrusted peer never reaches it
     /// only because the gated swarm refused the connection first.
     pub broadcast: gossipsub::Behaviour,
+    /// The endpoint directory, `/interweave/endpoints/1.0.0` (ADR-0031).
+    ///
+    /// After both gates for the same reason `direct` is: `send_request`
+    /// dials an unconnected peer, so this behaviour sits in a Swarm where
+    /// an unadmitted dial is already refused — and `GatedSwarm::
+    /// query_endpoints` refuses to call it on an unconnected peer at all,
+    /// so the gate is the second line and not the first.
+    pub endpoints: request_response::Behaviour<EndpointsCodec>,
 }
 
 impl SubstrateBehaviour {
@@ -209,6 +224,16 @@ impl SubstrateBehaviour {
                 gossipsub::MessageAuthenticity::Signed(keypair.clone()),
                 broadcast_config,
             )?,
+            endpoints: request_response::Behaviour::with_codec(
+                EndpointsCodec,
+                // FULL: a profile both asks and answers. Whether it
+                // ANSWERS is the runtime's decision per query, not a
+                // protocol it declines to speak — an unauthorized or
+                // disabled directory is a refusal frame, so the asker
+                // learns "no" rather than "no such protocol".
+                [(ENDPOINTS_PROTOCOL, ProtocolSupport::Full)],
+                request_response::Config::default().with_request_timeout(ENDPOINTS_TIMEOUT),
+            ),
         })
     }
 }

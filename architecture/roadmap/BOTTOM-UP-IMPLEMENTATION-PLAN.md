@@ -110,7 +110,7 @@ Nothing. Every exit-gate item below is met; the stage closes when its final chan
 
 ### Required fixtures
 
-All materialized, and recomputed on every CI run by `tools/checks/verify_fixture_vectors.py` — 88 vectors. Each declares its algorithm, is recomputed from the specification rather than from the fixture, and is anchored to its ADRs. ADR-0047 InterWeave identifiers were the inputs throughout; no former working-namespace alias is materialized anywhere.
+All materialized, and recomputed on every CI run by `tools/checks/verify_fixture_vectors.py` — 100 vectors. Each declares its algorithm, is recomputed from the specification rather than from the fixture, and is anchored to its ADRs. ADR-0047 InterWeave identifiers were the inputs throughout; no former working-namespace alias is materialized anywhere.
 
 | Fixture | Derivation source | File |
 |---|---|---|
@@ -122,6 +122,7 @@ All materialized, and recomputed on every CI run by `tools/checks/verify_fixture
 | Kademlia network hash / protocol namespace | `docs/architecture/kademlia-integration.md`; golden in ADR-0047 | `fixtures/kademlia/kad-network-namespace-v1.json` |
 | IPC v2 maximum payload/frame (payload-fit invariant) | `contracts/LOCAL-IPC.md` §Framing | `fixtures/ipc-v2/ipc-v2-payload-fit.json` |
 | EndpointId grammar vectors | `contracts/ENDPOINTS.md` + `contracts/schemas/endpoints/` | `fixtures/endpoints/endpoint-id-grammar-v1.json` |
+| Endpoint directory v1 framing (byte order pinned big-endian in `transport/libp2p/ENDPOINTS.md`) | `transport/libp2p/ENDPOINTS.md` §Endpoint directory protocol | `fixtures/endpoints/endpoint-directory-v1-frame.json` |
 | HumanChatV2 envelope vectors | `clients/human/HUMAN-CHAT.md` + `contracts/schemas/human-chat/` | `fixtures/human-chat-v2/human-chat-v2-envelope.json` |
 | configuration-v2 vectors | `architecture/config/config.schema.yaml` + examples | `fixtures/config/config-v2-cross-field.json` |
 
@@ -583,9 +584,10 @@ The original wording named the whole of `common`, which was the mistake
 worth recording: a family-wide flip would have carried schemas whose wire
 does not exist.
 
-`endpoints/directory-response` and `endpoints/endpoint-config` likewise
-stay `approved`: the directory exchange is Stage 8, and the config shape
-is not a wire at all.
+`endpoints/endpoint-config` stays `approved`: the config shape is not a
+wire at all. (`endpoints/directory-response` was `approved` here at Stage
+6 because the directory exchange was still Stage 8 work; Stage 8
+implemented `/interweave/endpoints/1.0.0` and flipped it to `active`.)
 
 **Met.** Every clause of the implement list is exercised over loopback
 TCP between two real peers, and the frozen framing is byte-compared

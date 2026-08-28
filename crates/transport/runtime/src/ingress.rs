@@ -105,7 +105,9 @@ pub enum IngressDenial {
 #[derive(Debug)]
 pub struct IngressLimiter {
     per_peer: BTreeMap<TransportIdentity, Bucket>,
-    global: Bucket,
+    /// `None` when this limiter bounds peers only and the aggregate is
+    /// someone else's job — the directory's in-flight bound, for one.
+    global: Option<Bucket>,
     per_peer_per_minute: u32,
     per_peer_burst: u32,
     last_prune_ms: u64,
@@ -150,9 +152,26 @@ impl IngressLimiter {
     ) -> Self {
         Self {
             per_peer: BTreeMap::new(),
-            global: Bucket::new(global_per_minute, global_burst, now_ms),
+            global: Some(Bucket::new(global_per_minute, global_burst, now_ms)),
             per_peer_per_minute,
             per_peer_burst,
+            last_prune_ms: now_ms,
+        }
+    }
+
+    /// Build a limiter with per-peer buckets and NO global bucket.
+    ///
+    /// For a budget whose aggregate bound is not a rate — the directory
+    /// bounds in-flight exchanges rather than queries per minute, and a
+    /// global rate bucket here would be a second, unspecified limit.
+    /// `one_peer_exhausting_itself_does_not_touch_an_absent_global`.
+    #[must_use]
+    pub const fn per_peer_only(per_minute: u32, burst: u32, now_ms: u64) -> Self {
+        Self {
+            per_peer: BTreeMap::new(),
+            global: None,
+            per_peer_per_minute: per_minute,
+            per_peer_burst: burst,
             last_prune_ms: now_ms,
         }
     }
@@ -191,7 +210,11 @@ impl IngressLimiter {
         if !bucket.try_consume(now_ms) {
             return Err(IngressDenial::PerPeerExhausted);
         }
-        if !self.global.try_consume(now_ms) {
+        if self
+            .global
+            .as_mut()
+            .is_some_and(|global| !global.try_consume(now_ms))
+        {
             return Err(IngressDenial::GlobalExhausted);
         }
         Ok(())
@@ -670,6 +693,20 @@ mod tests {
             l.admit(&other_peer(b'd'), 0),
             Err(IngressDenial::GlobalExhausted)
         );
+    }
+
+    #[test]
+    fn one_peer_exhausting_itself_does_not_touch_an_absent_global() {
+        // per_peer_only: 2 per minute, burst 2, and nothing global. The
+        // third call is the PEER's refusal, and a second peer has its own
+        // two regardless, because there is no aggregate to have been spent.
+        let mut l = IngressLimiter::per_peer_only(2, 2, 0);
+        assert!(l.admit(&peer(P1), 0).is_ok());
+        assert!(l.admit(&peer(P1), 0).is_ok());
+        assert_eq!(l.admit(&peer(P1), 0), Err(IngressDenial::PerPeerExhausted));
+        assert!(l.admit(&peer(P2), 0).is_ok());
+        assert!(l.admit(&peer(P2), 0).is_ok());
+        assert_eq!(l.admit(&peer(P2), 0), Err(IngressDenial::PerPeerExhausted));
     }
 
     #[test]

@@ -35,7 +35,7 @@
   },
   "x-contract": {
     "name": "endpoints.directory-response",
-    "status": "approved",
+    "status": "active",
     "version": "1.0.0",
     "adr": [
       "0031"

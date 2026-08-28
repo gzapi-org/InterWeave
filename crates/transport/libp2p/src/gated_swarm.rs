@@ -280,6 +280,47 @@ impl GatedSwarm {
             .map_err(|_| Unanswerable)
     }
 
+    /// Ask an ALREADY-CONNECTED peer for its endpoint directory.
+    ///
+    /// The same precondition as [`Self::send_direct`], for the same
+    /// reason: `send_request` dials an unconnected peer and that dial is
+    /// behaviour-originated, so the outbound gate would refuse it.
+    /// `the_directory_never_originates_a_dial` holds this.
+    ///
+    /// # Errors
+    /// [`NotConnected`] when the peer has no live connection.
+    pub fn query_endpoints(
+        &mut self,
+        peer: &libp2p::PeerId,
+    ) -> Result<libp2p::request_response::OutboundRequestId, NotConnected> {
+        if !self.inner.is_connected(peer) {
+            return Err(NotConnected);
+        }
+        Ok(self
+            .inner
+            .behaviour_mut()
+            .endpoints
+            .send_request(peer, crate::endpoints_codec::ListEndpointsV1))
+    }
+
+    /// Answer one inbound directory query.
+    ///
+    /// # Errors
+    /// [`Unanswerable`] when the connection that carried it is gone.
+    pub fn answer_endpoints(
+        &mut self,
+        channel: libp2p::request_response::ResponseChannel<
+            crate::endpoints_codec::DirectoryResponse,
+        >,
+        response: crate::endpoints_codec::DirectoryResponse,
+    ) -> Result<(), Unanswerable> {
+        self.inner
+            .behaviour_mut()
+            .endpoints
+            .send_response(channel, response)
+            .map_err(|_| Unanswerable)
+    }
+
     /// Publish one encoded envelope to a topic.
     ///
     /// Unlike [`Self::send_direct`] this needs no connectivity check:

@@ -45,7 +45,7 @@ Both halves of `$id` must match the file's own directory and name; the validator
 - **`approved`** — an authoritative **implementation target**. Never a claim that anything implements it.
 - **`proposed`** — a review artifact. Must not drive implementation.
 
-**Every contract here is `approved`.** Nothing in this repository is implemented, so no contract describes current behaviour.
+**Most contracts here are `approved`** — an implementation target, not a description of current behaviour. The ones a completed stage has implemented are `active`: the direct-routing shapes `endpoints/endpoint-id` and `endpoints/direct-destination` (Stage 6), and `endpoints/directory-response` (Stage 8). A status flips to `active` in the same change that lands its wire.
 
 ## Adding a contract
 

@@ -43,9 +43,13 @@ interweave-trust-api = { path = "../../api/trust-api" }
 futures = { workspace = true }
 async-trait = { workspace = true }
 libp2p = { workspace = true }
+rand = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+# The codec's frozen-frame test reads the fixture file rather than
+# quoting bytes it could have copied from the encoder.
+serde_json = { workspace = true }
 # Trust sources are constructed by tests, not by this crate: the
 # substrate passes a `TrustSources` through to the manager and never
 # names the two authorities inside it.

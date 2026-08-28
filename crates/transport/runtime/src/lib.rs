@@ -13,6 +13,7 @@ pub mod connection_manager;
 pub mod connection_policy;
 pub mod dedup;
 pub mod direct_inbound;
+pub mod directory;
 pub mod endpoint_queue;
 pub mod endpoint_registry;
 pub mod fingerprint;
@@ -46,6 +47,10 @@ pub use direct_inbound::{
 // not spell it could not build the context.
 pub use broadcast_inbound::{
     BroadcastAdmission, ProtocolVerdict, admit_broadcast, classify_broadcast,
+};
+pub use directory::{
+    BudgetConfigError, BudgetDenial, CacheEntry, DirectoryBudget, DirectoryCache,
+    DirectoryViolation, ValidatedDirectory, clamp_ttl, validate_response,
 };
 pub use endpoint_queue::{DirectEvent, EndpointQueues, QueueRefusal};
 pub use endpoint_registry::{

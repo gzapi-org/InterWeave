@@ -142,6 +142,44 @@ def direct_message_v2_frame(vector: dict) -> str:
     return out.hex()
 
 
+def endpoint_directory_v1_frame(vector: dict) -> str:
+    """Encode one /interweave/endpoints/1.0.0 frame, returning hex.
+
+    From architecture/transport/libp2p/ENDPOINTS.md §Endpoint directory
+    protocol. One algorithm covers the request and both response shapes
+    because they share a wire and a byte order, and `kind` says which.
+    The layout was conceptual — field names and widths, no bytes — until
+    this fixture forced the pin, exactly as the direct frame did.
+    """
+    kind = vector["kind"]
+    if kind == "request":
+        out = b"\x01"
+    elif kind == "refused":
+        reason = int(vector["reason"])
+        if reason not in (1, 2, 3):
+            raise ValueError(f"refusal reason {reason} is not one of 1 overloaded, 2 unauthorized, 3 unavailable")
+        out = b"\x02" + bytes([reason])
+    elif kind == "directory":
+        out = b"\x01" + int(vector["generated_at_ms"]).to_bytes(8, "big")
+        out += int(vector["ttl_ms"]).to_bytes(4, "big")
+        endpoints = vector["endpoints"]
+        if len(endpoints) > 32:
+            raise ValueError(f"{len(endpoints)} entries; the frame carries at most 32")
+        out += bytes([len(endpoints)])
+        for endpoint in endpoints:
+            b = endpoint.encode("ascii")
+            if not 1 <= len(b) <= 64:
+                raise ValueError(f"endpoint {endpoint!r} is {len(b)} bytes; 1..64")
+            out += bytes([len(b)]) + b
+    else:
+        raise ValueError(f"unknown frame kind {kind!r}")
+
+    stated_len = vector.get("frame_len")
+    if stated_len is not None and stated_len != len(out):
+        raise ValueError(f"frame_len disagrees: stored {stated_len}, computed {len(out)}")
+    return out.hex()
+
+
 def broadcast_message_v1_frame(vector: dict) -> str:
     """Encode one BroadcastMessageV1 envelope, returning hex.
 
@@ -573,6 +611,9 @@ ALGORITHMS = {
     ),
     "direct-message-v2-frame": (
         direct_message_v2_frame, "frame_hex", True, ("payload_hex", "payload_utf8"),
+    ),
+    "endpoint-directory-v1-frame": (
+        endpoint_directory_v1_frame, "frame_hex", True, (),
     ),
     "ed25519-bip39-entropy-v1": (
         ed25519_bip39_entropy_v1, "expected_peer_id", True, ("entropy_hex",),

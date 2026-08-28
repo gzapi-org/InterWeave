@@ -16,6 +16,7 @@
 
 use std::time::Duration;
 
+use interweave_local_client_api::Generation;
 use interweave_profile_config::{
     ChannelsConfig, DirectoryConfig, EndpointConfig, EndpointsConfig, ProfileConfig,
     RegistrationPolicy, TrustConfig, TrustPolicyKind,
@@ -27,7 +28,7 @@ use interweave_transport_api::{
 use interweave_transport_libp2p::runtime::{
     DirectEndpoints, SubstrateConfig, SubstrateError, SwarmEvent, SwarmRuntime,
 };
-use interweave_transport_runtime::{Generation, TrustSources};
+use interweave_transport_runtime::TrustSources;
 use interweave_trust_api::EndpointTrustPolicy;
 use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 
@@ -49,6 +50,26 @@ fn trusting(peers: &[&TransportIdentity]) -> TrustSources {
 
 fn endpoint(name: &str) -> EndpointId {
     EndpointId::parse(name).expect("valid endpoint id")
+}
+
+/// Claim each named endpoint for a session of the same name.
+///
+/// What Stage 6 did implicitly at `configure_direct`, done explicitly:
+/// a session sends AS the endpoint it holds, so these tests name sessions
+/// after endpoints and the lease is the only thing that binds the two.
+type Leases = std::collections::BTreeMap<String, interweave_local_client_api::EndpointLease>;
+
+async fn claim_all(runtime: &SwarmRuntime, names: &[&str]) -> Leases {
+    let mut leases = Leases::new();
+    for name in names {
+        let lease = runtime
+            .claim_endpoint(*name, endpoint(name), "in-process")
+            .await
+            .expect("the claim reaches the task")
+            .expect("the endpoint is configured and free");
+        leases.insert((*name).to_owned(), lease);
+    }
+    leases
 }
 
 /// A profile carrying these endpoints, which is now the ONLY way to
@@ -84,16 +105,11 @@ fn entry(name: &str) -> EndpointConfig {
     }
 }
 
-fn generation() -> Generation {
-    Generation::parse("stage6__________").expect("valid generation")
-}
-
 /// `human` and `claude`, with `human` the default.
 fn endpoints(queue_bound: usize) -> DirectEndpoints {
     DirectEndpoints::from_profile(
         &profile_with(vec![entry("human"), entry("claude")], Some("human")),
         queue_bound,
-        generation(),
     )
     .expect("a valid profile")
 }
@@ -123,7 +139,9 @@ fn frame(destination: Option<&str>, body: &[u8], id: u8) -> DirectMessageV2 {
 
 /// Two connected runtimes: a sender and a receiver that accepts direct
 /// messages on `human` and `claude`.
-async fn connected_pair(queue_bound: usize) -> (SwarmRuntime, SwarmRuntime, TransportIdentity) {
+async fn connected_pair(
+    queue_bound: usize,
+) -> (SwarmRuntime, SwarmRuntime, TransportIdentity, Leases) {
     let (sender_id, sender_peer) = who();
     let (receiver_id, receiver_peer) = who();
 
@@ -148,11 +166,13 @@ async fn connected_pair(queue_bound: usize) -> (SwarmRuntime, SwarmRuntime, Tran
         .configure_direct(endpoints(queue_bound))
         .await
         .expect("the sender's own endpoints install");
+    let leases = claim_all(&sender, &["human", "claude"]).await;
 
     receiver
         .configure_direct(endpoints(queue_bound))
         .await
         .expect("endpoints install");
+    claim_all(&receiver, &["human", "claude"]).await;
 
     let address = receiver
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("a loopback address"))
@@ -168,7 +188,7 @@ async fn connected_pair(queue_bound: usize) -> (SwarmRuntime, SwarmRuntime, Tran
     // Both sides must have the connection before a request can ride it.
     wait_connected(&mut receiver).await;
 
-    (sender, receiver, receiver_peer)
+    (sender, receiver, receiver_peer, leases)
 }
 
 /// Drive a runtime until it reports a connection.
@@ -193,10 +213,14 @@ async fn wait_connected(runtime: &mut SwarmRuntime) {
 /// Scenario 1: two trusted peers, an accepted direct v2 exchange.
 #[tokio::test]
 async fn an_explicit_destination_reaches_exactly_that_endpoint() {
-    let (sender, receiver, receiver_peer) = connected_pair(8).await;
+    let (sender, receiver, receiver_peer, leases) = connected_pair(8).await;
 
     let resolved = sender
-        .send_direct(receiver_peer, frame(Some("claude"), b"hello", 1))
+        .send_direct(
+            &leases["human"],
+            receiver_peer,
+            frame(Some("claude"), b"hello", 1),
+        )
         .await
         .expect("the command reaches the task")
         .expect("the exchange is accepted");
@@ -225,10 +249,10 @@ async fn an_explicit_destination_reaches_exactly_that_endpoint() {
 /// and the response reports which endpoint that was.
 #[tokio::test]
 async fn an_omitted_destination_reaches_the_configured_default() {
-    let (sender, receiver, receiver_peer) = connected_pair(8).await;
+    let (sender, receiver, receiver_peer, leases) = connected_pair(8).await;
 
     let resolved = sender
-        .send_direct(receiver_peer, frame(None, b"hello", 2))
+        .send_direct(&leases["human"], receiver_peer, frame(None, b"hello", 2))
         .await
         .expect("the command reaches the task")
         .expect("the exchange is accepted");
@@ -260,10 +284,14 @@ async fn an_omitted_destination_reaches_the_configured_default() {
 /// `RemoteEndpointUnavailable` — the peer disclosed nothing more.
 #[tokio::test]
 async fn an_unknown_endpoint_is_indistinguishable_no_route() {
-    let (sender, _receiver, receiver_peer) = connected_pair(8).await;
+    let (sender, _receiver, receiver_peer, leases) = connected_pair(8).await;
 
     let error = sender
-        .send_direct(receiver_peer, frame(Some("nonexistent"), b"hello", 3))
+        .send_direct(
+            &leases["human"],
+            receiver_peer,
+            frame(Some("nonexistent"), b"hello", 3),
+        )
         .await
         .expect("the command reaches the task")
         .expect_err("an unknown endpoint is refused");
@@ -274,17 +302,25 @@ async fn an_unknown_endpoint_is_indistinguishable_no_route() {
 /// acceptance. The queue bound is 1, so the second message finds it full.
 #[tokio::test]
 async fn a_full_endpoint_queue_is_overloaded_and_never_falsely_accepted() {
-    let (sender, receiver, receiver_peer) = connected_pair(1).await;
+    let (sender, receiver, receiver_peer, leases) = connected_pair(1).await;
 
     let first = sender
-        .send_direct(receiver_peer.clone(), frame(Some("claude"), b"one", 4))
+        .send_direct(
+            &leases["human"],
+            receiver_peer.clone(),
+            frame(Some("claude"), b"one", 4),
+        )
         .await
         .expect("the command reaches the task")
         .expect("the first is accepted");
     assert_eq!(first, endpoint("claude"));
 
     let error = sender
-        .send_direct(receiver_peer, frame(Some("claude"), b"two", 5))
+        .send_direct(
+            &leases["human"],
+            receiver_peer,
+            frame(Some("claude"), b"two", 5),
+        )
         .await
         .expect("the command reaches the task")
         .expect_err("the second finds the queue full");
@@ -304,11 +340,11 @@ async fn a_full_endpoint_queue_is_overloaded_and_never_falsely_accepted() {
 /// remote's default has changed.
 #[tokio::test]
 async fn a_matching_retry_replays_the_stored_route_after_the_default_moves() {
-    let (sender, receiver, receiver_peer) = connected_pair(8).await;
+    let (sender, receiver, receiver_peer, leases) = connected_pair(8).await;
     let retried = frame(None, b"hello", 6);
 
     let first = sender
-        .send_direct(receiver_peer.clone(), retried.clone())
+        .send_direct(&leases["human"], receiver_peer.clone(), retried.clone())
         .await
         .expect("the command reaches the task")
         .expect("accepted");
@@ -326,17 +362,18 @@ async fn a_matching_retry_replays_the_stored_route_after_the_default_moves() {
             DirectEndpoints::from_profile(
                 &profile_with(vec![entry("human"), entry("claude")], Some("claude")),
                 8,
-                generation(),
             )
             .expect("a valid profile"),
         )
         .await
         .expect("reconfigures");
+    // Reconfiguring drops every lease with the registry it rebuilds.
+    claim_all(&receiver, &["human", "claude"]).await;
 
     // Reconfiguring replaced the registry, and with it the dedup cache's
     // relevance — but the cache itself survives, which is the point.
     let again = sender
-        .send_direct(receiver_peer, retried)
+        .send_direct(&leases["human"], receiver_peer, retried)
         .await
         .expect("the command reaches the task")
         .expect("the retry is accepted");
@@ -368,16 +405,24 @@ async fn a_matching_retry_replays_the_stored_route_after_the_default_moves() {
 /// not delivered. One identity cannot mean two messages.
 #[tokio::test]
 async fn the_same_id_with_a_different_body_is_refused() {
-    let (sender, receiver, receiver_peer) = connected_pair(8).await;
+    let (sender, receiver, receiver_peer, leases) = connected_pair(8).await;
 
     sender
-        .send_direct(receiver_peer.clone(), frame(Some("claude"), b"first", 7))
+        .send_direct(
+            &leases["human"],
+            receiver_peer.clone(),
+            frame(Some("claude"), b"first", 7),
+        )
         .await
         .expect("the command reaches the task")
         .expect("accepted");
 
     let error = sender
-        .send_direct(receiver_peer, frame(Some("claude"), b"second", 7))
+        .send_direct(
+            &leases["human"],
+            receiver_peer,
+            frame(Some("claude"), b"second", 7),
+        )
         .await
         .expect("the command reaches the task")
         .expect_err("a conflicting body is refused");
@@ -421,11 +466,13 @@ async fn an_untrusted_peer_is_refused_at_the_data_plane() {
         .configure_direct(endpoints(8))
         .await
         .expect("the sender's own endpoints install");
+    let leases = claim_all(&sender, &["human", "claude"]).await;
 
     receiver
         .configure_direct(endpoints(8))
         .await
         .expect("endpoints install");
+    claim_all(&receiver, &["human", "claude"]).await;
     let address = receiver
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
         .await
@@ -445,7 +492,11 @@ async fn an_untrusted_peer_is_refused_at_the_data_plane() {
         .expect("revokes");
 
     let result = sender
-        .send_direct(receiver_peer, frame(Some("claude"), b"hello", 8))
+        .send_direct(
+            &leases["human"],
+            receiver_peer,
+            frame(Some("claude"), b"hello", 8),
+        )
         .await
         .expect("the command reaches the task");
     // NOT MERELY `is_err()`. Revocation may surface either way — the
@@ -477,7 +528,7 @@ async fn an_untrusted_peer_is_refused_at_the_data_plane() {
 async fn a_payload_at_the_ceiling_survives_the_wire() {
     use interweave_transport_api::MAX_PAYLOAD_BYTES;
 
-    let (sender, receiver, receiver_peer) = connected_pair(8).await;
+    let (sender, receiver, receiver_peer, leases) = connected_pair(8).await;
     let body = vec![0xABu8; MAX_PAYLOAD_BYTES];
     let at_ceiling = DirectMessageV2 {
         message_id: MessageId::from_bytes([9; 16]),
@@ -488,7 +539,7 @@ async fn a_payload_at_the_ceiling_survives_the_wire() {
     };
 
     let resolved = sender
-        .send_direct(receiver_peer, at_ceiling)
+        .send_direct(&leases["human"], receiver_peer, at_ceiling)
         .await
         .expect("the command reaches the task")
         .expect("the ceiling is legal");
@@ -521,11 +572,12 @@ async fn a_payload_at_the_ceiling_survives_the_wire() {
 /// application instead.
 #[tokio::test]
 async fn revoking_a_lease_removes_the_route_and_discards_its_backlog() {
-    let (sender, receiver, receiver_peer) = connected_pair(8).await;
+    let (sender, receiver, receiver_peer, leases) = connected_pair(8).await;
 
     // One message lands and is left undrained.
     sender
         .send_direct(
+            &leases["human"],
             receiver_peer.clone(),
             frame(Some("claude"), b"undelivered", 20),
         )
@@ -542,7 +594,11 @@ async fn revoking_a_lease_removes_the_route_and_discards_its_backlog() {
     // THE ROUTE IS GONE, and indistinguishably so: an unleased endpoint
     // is `no_route` with every other routing failure.
     let error = sender
-        .send_direct(receiver_peer, frame(Some("claude"), b"after", 21))
+        .send_direct(
+            &leases["human"],
+            receiver_peer,
+            frame(Some("claude"), b"after", 21),
+        )
         .await
         .expect("the command reaches the task")
         .expect_err("a revoked endpoint has no route");
@@ -572,12 +628,16 @@ async fn revoking_a_lease_removes_the_route_and_discards_its_backlog() {
 /// `shutting_down` and the queue stays untouched.
 #[tokio::test]
 async fn a_draining_node_refuses_new_work_on_an_open_connection() {
-    let (sender, receiver, receiver_peer) = connected_pair(8).await;
+    let (sender, receiver, receiver_peer, leases) = connected_pair(8).await;
 
     // Before draining, the same send is accepted — so the refusal below
     // is attributable to the drain and to nothing else about this setup.
     sender
-        .send_direct(receiver_peer.clone(), frame(Some("claude"), b"before", 30))
+        .send_direct(
+            &leases["human"],
+            receiver_peer.clone(),
+            frame(Some("claude"), b"before", 30),
+        )
         .await
         .expect("the command reaches the task")
         .expect("accepted while serving");
@@ -585,7 +645,11 @@ async fn a_draining_node_refuses_new_work_on_an_open_connection() {
     receiver.drain().await.expect("the drain reaches the task");
 
     let error = sender
-        .send_direct(receiver_peer, frame(Some("claude"), b"during", 31))
+        .send_direct(
+            &leases["human"],
+            receiver_peer,
+            frame(Some("claude"), b"during", 31),
+        )
         .await
         .expect("the command reaches the task")
         .expect_err("a draining node takes on no new work");
@@ -614,11 +678,15 @@ async fn a_draining_node_refuses_new_work_on_an_open_connection() {
 /// verdict on a local mistake, about a peer that is right here.
 #[tokio::test]
 async fn sending_to_the_local_peer_is_invalid_argument() {
-    let (sender, _receiver, _peer) = connected_pair(8).await;
+    let (sender, _receiver, _peer, leases) = connected_pair(8).await;
     let me = sender.local_peer().clone();
 
     let error = sender
-        .send_direct(me, frame(Some("claude"), b"to myself", 32))
+        .send_direct(
+            &leases["human"],
+            me,
+            frame(Some("claude"), b"to myself", 32),
+        )
         .await
         .expect("the command reaches the task")
         .expect_err("the local peer is not a destination");
@@ -641,16 +709,24 @@ async fn sending_to_the_local_peer_is_invalid_argument() {
 /// socket and no dedup entry is minted anywhere.
 #[tokio::test]
 async fn a_source_endpoint_without_a_lease_is_refused() {
-    let (sender, receiver, receiver_peer) = connected_pair(8).await;
+    let (sender, receiver, receiver_peer, leases) = connected_pair(8).await;
 
+    // A forged lease naming an endpoint this node never configured. Its
+    // epoch matches no live lease, so `holds_lease` is false and the send
+    // is refused before it reaches the swarm.
+    let forged = interweave_local_client_api::EndpointLease {
+        endpoint: endpoint("not-leased"),
+        epoch: Generation::parse("forged__________").expect("a valid generation"),
+    };
     let error = sender
         .send_direct(
+            &forged,
             receiver_peer.clone(),
             frame_from("not-leased", Some("claude"), b"spoofed", 40),
         )
         .await
         .expect("the command reaches the task")
-        .expect_err("a name this node never configured holds no lease");
+        .expect_err("a fabricated lease matches no live lease");
     assert_eq!(error, TransportError::EndpointNotRegistered);
 
     // NOTHING CROSSED THE WIRE. A refusal that still sent the frame
@@ -669,6 +745,7 @@ async fn a_source_endpoint_without_a_lease_is_refused() {
     // discriminates rather than refusing everything.
     sender
         .send_direct(
+            &leases["human"],
             receiver_peer,
             frame_from("human", Some("claude"), b"real", 41),
         )
@@ -694,7 +771,7 @@ async fn a_source_endpoint_without_a_lease_is_refused() {
 /// refusing to receive under it.
 #[tokio::test]
 async fn a_revoked_endpoint_can_no_longer_be_a_source() {
-    let (sender, _receiver, receiver_peer) = connected_pair(8).await;
+    let (sender, _receiver, receiver_peer, leases) = connected_pair(8).await;
 
     sender
         .revoke_endpoint(endpoint("human"))
@@ -703,6 +780,7 @@ async fn a_revoked_endpoint_can_no_longer_be_a_source() {
 
     let error = sender
         .send_direct(
+            &leases["human"],
             receiver_peer,
             frame_from("human", Some("claude"), b"after revoke", 42),
         )
@@ -727,12 +805,16 @@ async fn a_revoked_endpoint_can_no_longer_be_a_source() {
 /// test the wrong thing.
 #[tokio::test]
 async fn revoking_trust_stops_direct_sends_before_the_close_lands() {
-    let (sender, receiver, receiver_peer) = connected_pair(8).await;
+    let (sender, receiver, receiver_peer, leases) = connected_pair(8).await;
 
     // It works while trusted, so the refusal below is the revocation and
     // not some other property of this setup.
     sender
-        .send_direct(receiver_peer.clone(), frame(Some("claude"), b"trusted", 50))
+        .send_direct(
+            &leases["human"],
+            receiver_peer.clone(),
+            frame(Some("claude"), b"trusted", 50),
+        )
         .await
         .expect("the command reaches the task")
         .expect("accepted while trusted");
@@ -747,7 +829,11 @@ async fn revoking_trust_stops_direct_sends_before_the_close_lands() {
         .expect("the trust update reaches the task");
 
     let error = sender
-        .send_direct(receiver_peer, frame(Some("claude"), b"revoked", 51))
+        .send_direct(
+            &leases["human"],
+            receiver_peer,
+            frame(Some("claude"), b"revoked", 51),
+        )
         .await
         .expect("the command reaches the task")
         .expect_err("an untrusted peer is not a direct destination");
@@ -777,7 +863,7 @@ async fn a_configuration_the_validator_refuses_never_becomes_state() {
         .collect();
     assert_eq!(too_many.len(), interweave_profile_config::MAX_ENDPOINTS + 1);
 
-    let error = DirectEndpoints::from_profile(&profile_with(too_many, None), 8, generation())
+    let error = DirectEndpoints::from_profile(&profile_with(too_many, None), 8)
         .expect_err("one past the ceiling is one too many");
     assert!(
         matches!(error, SubstrateError::InvalidProfile(_)),
@@ -789,7 +875,7 @@ async fn a_configuration_the_validator_refuses_never_becomes_state() {
     let exactly: Vec<EndpointConfig> = (0..interweave_profile_config::MAX_ENDPOINTS)
         .map(|i| entry(&format!("endpoint-{i}")))
         .collect();
-    DirectEndpoints::from_profile(&profile_with(exactly, None), 8, generation())
+    DirectEndpoints::from_profile(&profile_with(exactly, None), 8)
         .expect("the ceiling itself is permitted");
 }
 
@@ -804,7 +890,7 @@ async fn the_canonical_rules_are_inherited_rather_than_restated() {
     let duplicated = profile_with(vec![entry("human"), entry("human")], Some("human"));
     assert!(
         matches!(
-            DirectEndpoints::from_profile(&duplicated, 8, generation()),
+            DirectEndpoints::from_profile(&duplicated, 8),
             Err(SubstrateError::InvalidProfile(_))
         ),
         "a duplicate endpoint id is refused"
@@ -813,7 +899,7 @@ async fn the_canonical_rules_are_inherited_rather_than_restated() {
     let absent = profile_with(vec![entry("human")], Some("claude"));
     assert!(
         matches!(
-            DirectEndpoints::from_profile(&absent, 8, generation()),
+            DirectEndpoints::from_profile(&absent, 8),
             Err(SubstrateError::InvalidProfile(_))
         ),
         "a default naming an endpoint that does not exist is refused"
@@ -824,7 +910,7 @@ async fn the_canonical_rules_are_inherited_rather_than_restated() {
     let disabled = profile_with(vec![off], Some("human"));
     assert!(
         matches!(
-            DirectEndpoints::from_profile(&disabled, 8, generation()),
+            DirectEndpoints::from_profile(&disabled, 8),
             Err(SubstrateError::InvalidProfile(_))
         ),
         "a default naming a disabled endpoint is refused"
@@ -846,8 +932,8 @@ async fn a_queue_depth_outside_its_range_is_refused() {
     let profile = profile_with(vec![entry("human")], None);
 
     for bad in [0, interweave_local_client_api::MAX_EVENT_QUEUE + 1] {
-        let error = DirectEndpoints::from_profile(&profile, bad, generation())
-            .expect_err("outside the permitted range");
+        let error =
+            DirectEndpoints::from_profile(&profile, bad).expect_err("outside the permitted range");
         assert!(
             matches!(
                 error,
@@ -862,7 +948,7 @@ async fn a_queue_depth_outside_its_range_is_refused() {
 
     // Both ends of the range itself are permitted.
     for good in [1, interweave_local_client_api::MAX_EVENT_QUEUE] {
-        DirectEndpoints::from_profile(&profile, good, generation()).expect("inside the range");
+        DirectEndpoints::from_profile(&profile, good).expect("inside the range");
     }
 }
 
@@ -903,10 +989,12 @@ async fn a_full_event_channel_does_not_freeze_a_direct_exchange() {
         .configure_direct(endpoints(8))
         .await
         .expect("the sender's own endpoints install");
+    let leases = claim_all(&sender, &["human", "claude"]).await;
     receiver
         .configure_direct(endpoints(8))
         .await
         .expect("endpoints install");
+    claim_all(&receiver, &["human", "claude"]).await;
     let address = receiver
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
         .await
@@ -923,6 +1011,7 @@ async fn a_full_event_channel_does_not_freeze_a_direct_exchange() {
     let answered = tokio::time::timeout(
         Duration::from_secs(20),
         sender.send_direct(
+            &leases["human"],
             receiver_peer,
             frame(Some("claude"), b"through a full outbox", 60),
         ),
@@ -950,10 +1039,14 @@ async fn a_full_event_channel_does_not_freeze_a_direct_exchange() {
 /// as anything the remote said.
 #[tokio::test]
 async fn a_draining_node_starts_no_new_outbound_exchange() {
-    let (sender, receiver, receiver_peer) = connected_pair(8).await;
+    let (sender, receiver, receiver_peer, leases) = connected_pair(8).await;
 
     sender
-        .send_direct(receiver_peer.clone(), frame(Some("claude"), b"before", 70))
+        .send_direct(
+            &leases["human"],
+            receiver_peer.clone(),
+            frame(Some("claude"), b"before", 70),
+        )
         .await
         .expect("the command reaches the task")
         .expect("accepted while serving");
@@ -961,7 +1054,11 @@ async fn a_draining_node_starts_no_new_outbound_exchange() {
     sender.drain().await.expect("the drain reaches the task");
 
     let error = sender
-        .send_direct(receiver_peer, frame(Some("claude"), b"during", 71))
+        .send_direct(
+            &leases["human"],
+            receiver_peer,
+            frame(Some("claude"), b"during", 71),
+        )
         .await
         .expect("the command reaches the task")
         .expect_err("a draining node takes on no new work");
@@ -1011,10 +1108,12 @@ async fn a_profile_payload_limit_binds_below_the_ceiling() {
         .configure_direct(endpoints(8))
         .await
         .expect("the sender's endpoints install");
+    let leases = claim_all(&sender, &["human", "claude"]).await;
     receiver
         .configure_direct(endpoints(8))
         .await
         .expect("endpoints install");
+    claim_all(&receiver, &["human", "claude"]).await;
     let address = receiver
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
         .await
@@ -1036,7 +1135,7 @@ async fn a_profile_payload_limit_binds_below_the_ceiling() {
     };
 
     let error = sender
-        .send_direct(receiver_peer.clone(), oversized)
+        .send_direct(&leases["human"], receiver_peer.clone(), oversized)
         .await
         .expect("the command reaches the task")
         .expect_err("above the receiver's configured limit");
@@ -1053,6 +1152,7 @@ async fn a_profile_payload_limit_binds_below_the_ceiling() {
     // UNDER the limit still works, so this is a limit and not a wall.
     sender
         .send_direct(
+            &leases["human"],
             receiver_peer,
             DirectMessageV2 {
                 message_id: MessageId::from_bytes([81; 16]),
@@ -1102,10 +1202,12 @@ async fn a_narrow_sender_refuses_its_own_oversized_payload() {
         .configure_direct(endpoints(8))
         .await
         .expect("the sender's endpoints install");
+    let leases = claim_all(&sender, &["human", "claude"]).await;
     receiver
         .configure_direct(endpoints(8))
         .await
         .expect("endpoints install");
+    claim_all(&receiver, &["human", "claude"]).await;
     let address = receiver
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
         .await
@@ -1119,6 +1221,7 @@ async fn a_narrow_sender_refuses_its_own_oversized_payload() {
 
     let error = sender
         .send_direct(
+            &leases["human"],
             receiver_peer,
             DirectMessageV2 {
                 message_id: MessageId::from_bytes([82; 16]),
@@ -1192,15 +1295,16 @@ async fn the_source_endpoints_outbound_policy_narrows_a_trusted_peer() {
 
     sender
         .configure_direct(
-            DirectEndpoints::from_profile(&sender_profile, 8, generation())
-                .expect("a valid profile"),
+            DirectEndpoints::from_profile(&sender_profile, 8).expect("a valid profile"),
         )
         .await
         .expect("the sender's endpoints install");
+    let leases = claim_all(&sender, &["human", "claude"]).await;
     receiver
         .configure_direct(endpoints(8))
         .await
         .expect("endpoints install");
+    claim_all(&receiver, &["human", "claude"]).await;
     let address = receiver
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
         .await
@@ -1214,6 +1318,7 @@ async fn the_source_endpoints_outbound_policy_narrows_a_trusted_peer() {
 
     let error = sender
         .send_direct(
+            &leases["human"],
             receiver_peer.clone(),
             frame_from("human", Some("claude"), b"narrowed out", 90),
         )
@@ -1230,6 +1335,7 @@ async fn the_source_endpoints_outbound_policy_narrows_a_trusted_peer() {
     // the refusal was narrowing and not a broken connection.
     sender
         .send_direct(
+            &leases["claude"],
             receiver_peer,
             frame_from("claude", Some("claude"), b"permitted", 91),
         )
@@ -1287,13 +1393,14 @@ async fn a_destination_endpoints_inbound_policy_is_coarse_no_route() {
         .configure_direct(endpoints(8))
         .await
         .expect("the sender's endpoints install");
+    let leases = claim_all(&sender, &["human", "claude"]).await;
     receiver
         .configure_direct(
-            DirectEndpoints::from_profile(&receiver_profile, 8, generation())
-                .expect("a valid profile"),
+            DirectEndpoints::from_profile(&receiver_profile, 8).expect("a valid profile"),
         )
         .await
         .expect("endpoints install");
+    claim_all(&receiver, &["human", "claude"]).await;
     let address = receiver
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
         .await
@@ -1307,6 +1414,7 @@ async fn a_destination_endpoints_inbound_policy_is_coarse_no_route() {
 
     let error = sender
         .send_direct(
+            &leases["human"],
             receiver_peer.clone(),
             frame(Some("claude"), b"excluded", 92),
         )
@@ -1333,7 +1441,11 @@ async fn a_destination_endpoints_inbound_policy_is_coarse_no_route() {
     // INDISTINGUISHABLE FROM ABSENT, which is what makes it coarse: an
     // endpoint that does not exist answers exactly the same way.
     let unknown = sender
-        .send_direct(receiver_peer.clone(), frame(Some("nonexistent"), b"x", 93))
+        .send_direct(
+            &leases["human"],
+            receiver_peer.clone(),
+            frame(Some("nonexistent"), b"x", 93),
+        )
         .await
         .expect("command")
         .expect_err("no such endpoint");
@@ -1342,7 +1454,11 @@ async fn a_destination_endpoints_inbound_policy_is_coarse_no_route() {
     // ...and the endpoint that inherits still accepts, so the receiver
     // is not simply refusing everything.
     sender
-        .send_direct(receiver_peer, frame(Some("human"), b"welcome", 94))
+        .send_direct(
+            &leases["human"],
+            receiver_peer,
+            frame(Some("human"), b"welcome", 94),
+        )
         .await
         .expect("command")
         .expect("an inheriting endpoint admits a profile-trusted peer");
@@ -1356,19 +1472,17 @@ async fn a_destination_endpoints_inbound_policy_is_coarse_no_route() {
     );
 }
 
-/// An endpoint restricted to a real client kind still works.
+/// An endpoint restricted to a client kind is leased by that kind, and
+/// refuses another.
 ///
-/// The synthetic in-process lease used a hard-coded `in-process` kind.
-/// That passed while `DirectEndpoints` rebuilt every endpoint from
-/// `RegisteredEndpoint::default()`, whose kind list is empty and
-/// restricts nothing. Once the real profile reached the registry, any
-/// endpoint restricted to `human-client` or `claude-channel` — which the
-/// example profiles are — refused the claim outright.
-///
-/// The refusal was then SWALLOWED by an `.is_ok()`: no lease, no queue,
-/// and `configure_direct` still reported success. Every send from that
-/// endpoint answered `EndpointNotRegistered` and every message to it
-/// `no_route`, for a configuration the caller was told had installed.
+/// The kind travels with the claim. Under the Stage 6 stand-in the
+/// runtime claimed every endpoint itself with a hard-coded `in-process`
+/// kind, and an endpoint restricted to `human-client` or `claude-channel`
+/// — which the example profiles are — refused it; the refusal was then
+/// swallowed by an `.is_ok()`, so `configure_direct` reported success for
+/// an endpoint that could neither send nor receive. Now the session
+/// claiming says what it is, the registry answers, and the answer is
+/// returned rather than discarded.
 #[tokio::test]
 async fn an_endpoint_restricted_to_a_client_kind_still_leases() {
     let restricted = |name: &str, kind: &str| {
@@ -1400,8 +1514,7 @@ async fn an_endpoint_restricted_to_a_client_kind_still_leases() {
     )
     .expect("starts");
 
-    let installed =
-        DirectEndpoints::from_profile(&profile, 8, generation()).expect("a valid profile");
+    let installed = DirectEndpoints::from_profile(&profile, 8).expect("a valid profile");
     sender
         .configure_direct(installed.clone())
         .await
@@ -1410,6 +1523,33 @@ async fn an_endpoint_restricted_to_a_client_kind_still_leases() {
         .configure_direct(installed)
         .await
         .expect("the receiver's restricted endpoints install");
+
+    // THE WRONG KIND IS REFUSED, with the contract's own error and before
+    // the exclusivity check — the endpoint is free at this point, so the
+    // refusal can only be the kind.
+    let refused = sender
+        .claim_endpoint("stranger", endpoint("human"), "in-process")
+        .await
+        .expect("the claim reaches the task")
+        .expect_err("an endpoint restricted to human-client refuses in-process");
+    assert_eq!(refused, TransportError::EndpointClientKindDenied);
+
+    // THE RIGHT KIND LEASES, on both sides. The sender's leases are kept
+    // so it can prove ownership when it sends below.
+    let mut leases = Leases::new();
+    for (name, kind) in [("human", "human-client"), ("claude", "claude-channel")] {
+        let lease = sender
+            .claim_endpoint(name, endpoint(name), kind)
+            .await
+            .expect("the claim reaches the task")
+            .expect("the permitted kind leases");
+        leases.insert(name.to_owned(), lease);
+        receiver
+            .claim_endpoint(name, endpoint(name), kind)
+            .await
+            .expect("the claim reaches the task")
+            .expect("the permitted kind leases");
+    }
 
     let address = receiver
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
@@ -1426,7 +1566,11 @@ async fn an_endpoint_restricted_to_a_client_kind_still_leases() {
     // needs the sender's lease and the delivery needs the receiver's, so
     // one message proves both.
     let resolved = sender
-        .send_direct(receiver_peer, frame(Some("claude"), b"restricted", 95))
+        .send_direct(
+            &leases["human"],
+            receiver_peer,
+            frame(Some("claude"), b"restricted", 95),
+        )
         .await
         .expect("the command reaches the task")
         .expect("a restricted endpoint is still a leased endpoint");
@@ -1468,6 +1612,7 @@ async fn an_unknown_peer_and_an_unreachable_one_are_told_apart() {
         .configure_direct(endpoints(8))
         .await
         .expect("endpoints install");
+    let leases = claim_all(&sender, &["human", "claude"]).await;
 
     // NEITHER IS CONNECTED. The only difference is whether the manager
     // holds an address for it.
@@ -1480,7 +1625,11 @@ async fn an_unknown_peer_and_an_unreachable_one_are_told_apart() {
         .expect("the command reaches the task");
 
     let unknown = sender
-        .send_direct(never_seen, frame(Some("claude"), b"nowhere", 96))
+        .send_direct(
+            &leases["human"],
+            never_seen,
+            frame(Some("claude"), b"nowhere", 96),
+        )
         .await
         .expect("the command reaches the task")
         .expect_err("no candidate addresses");
@@ -1491,7 +1640,11 @@ async fn an_unknown_peer_and_an_unreachable_one_are_told_apart() {
     );
 
     let unreachable = sender
-        .send_direct(has_an_address, frame(Some("claude"), b"somewhere", 97))
+        .send_direct(
+            &leases["human"],
+            has_an_address,
+            frame(Some("claude"), b"somewhere", 97),
+        )
         .await
         .expect("the command reaches the task")
         .expect_err("an address, but no connection");

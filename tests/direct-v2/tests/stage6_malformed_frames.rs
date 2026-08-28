@@ -33,7 +33,7 @@ use interweave_transport_api::{
 };
 use interweave_transport_libp2p::direct_codec::{DIRECT_PROTOCOL, DirectResponse, decode_response};
 use interweave_transport_libp2p::runtime::{DirectEndpoints, SubstrateConfig, SwarmRuntime};
-use interweave_transport_runtime::{Generation, TrustSources};
+use interweave_transport_runtime::TrustSources;
 use interweave_trust_api::EndpointTrustPolicy;
 use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 
@@ -105,6 +105,26 @@ fn endpoint(name: &str) -> EndpointId {
     EndpointId::parse(name).expect("valid endpoint id")
 }
 
+/// Claim each named endpoint for a session of the same name.
+///
+/// What Stage 6 did implicitly at `configure_direct`, done explicitly:
+/// a session sends AS the endpoint it holds, so these tests name sessions
+/// after endpoints and the lease is the only thing that binds the two.
+type Leases = std::collections::BTreeMap<String, interweave_local_client_api::EndpointLease>;
+
+async fn claim_all(runtime: &SwarmRuntime, names: &[&str]) -> Leases {
+    let mut leases = Leases::new();
+    for name in names {
+        let lease = runtime
+            .claim_endpoint(*name, endpoint(name), "in-process")
+            .await
+            .expect("the claim reaches the task")
+            .expect("the endpoint is configured and free");
+        leases.insert((*name).to_owned(), lease);
+    }
+    leases
+}
+
 /// A profile carrying these endpoints, which is now the ONLY way to
 /// reach `DirectEndpoints` — the runtime derives its state from the
 /// canonical validated configuration rather than from a second model
@@ -142,7 +162,6 @@ fn endpoints() -> DirectEndpoints {
     DirectEndpoints::from_profile(
         &profile_with(vec![entry("human"), entry("claude")], Some("human")),
         8,
-        Generation::parse("malformed_______").expect("valid generation"),
     )
     .expect("a valid profile")
 }
@@ -211,6 +230,7 @@ async fn answers_with_trust(bytes: Vec<u8>, trusted: bool, repeat: usize) -> Vec
         .configure_direct(endpoints())
         .await
         .expect("endpoints install");
+    claim_all(&receiver, &["human", "claude"]).await;
     let address = receiver
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
         .await
@@ -517,6 +537,7 @@ async fn shutdown_grants_an_in_flight_exchange_a_bounded_grace() {
         .configure_direct(endpoints())
         .await
         .expect("endpoints install");
+    let leases = claim_all(&sender, &["human", "claude"]).await;
     sender
         .dial(silent_peer.clone(), address)
         .await
@@ -542,7 +563,7 @@ async fn shutdown_grants_an_in_flight_exchange_a_bounded_grace() {
     // and leaves the exchange in flight.
     let dispatched = tokio::time::timeout(
         Duration::from_millis(500),
-        sender.send_direct(silent_peer, legal_message()),
+        sender.send_direct(&leases["human"], silent_peer, legal_message()),
     )
     .await;
     assert!(dispatched.is_err(), "the silent peer answered nothing");
@@ -659,6 +680,8 @@ async fn inbound_deliveries_cannot_starve_an_outbound_exchange() {
 
     a.configure_direct(endpoints()).await.expect("a endpoints");
     b.configure_direct(endpoints()).await.expect("b endpoints");
+    let a_leases = claim_all(&a, &["human", "claude"]).await;
+    let b_leases = claim_all(&b, &["human", "claude"]).await;
     let a_address = a
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
         .await
@@ -692,7 +715,7 @@ async fn inbound_deliveries_cannot_starve_an_outbound_exchange() {
     let (own, _flood) = tokio::join!(
         tokio::time::timeout(
             Duration::from_secs(25),
-            a.send_direct(silent_peer, legal_message()),
+            a.send_direct(&a_leases["human"], silent_peer, legal_message()),
         ),
         async {
             for id in 40..60u8 {
@@ -704,7 +727,7 @@ async fn inbound_deliveries_cannot_starve_an_outbound_exchange() {
                 // the flood only has to fill `a`'s outbox, not succeed.
                 let _ = tokio::time::timeout(
                     Duration::from_millis(500),
-                    b.send_direct(a_peer.clone(), frame),
+                    b.send_direct(&b_leases["human"], a_peer.clone(), frame),
                 )
                 .await;
             }
@@ -792,6 +815,7 @@ async fn an_unreadable_response_is_a_protocol_violation() {
         .configure_direct(endpoints())
         .await
         .expect("endpoints install");
+    let leases = claim_all(&sender, &["human", "claude"]).await;
     sender
         .dial(rude_peer.clone(), address)
         .await
@@ -815,7 +839,7 @@ async fn an_unreadable_response_is_a_protocol_violation() {
 
     let error = tokio::time::timeout(
         Duration::from_secs(20),
-        sender.send_direct(rude_peer, legal_message()),
+        sender.send_direct(&leases["human"], rude_peer, legal_message()),
     )
     .await
     .expect("the exchange settled")
@@ -951,6 +975,7 @@ async fn a_notification_cannot_starve_an_outbound_exchange() {
     a.configure_direct(endpoints()).await.expect("a endpoints");
     b.configure_direct(endpoints()).await.expect("b endpoints");
     c.configure_direct(endpoints()).await.expect("c endpoints");
+    let leases = claim_all(&a, &["human", "claude"]).await;
     let a_address = a
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
         .await
@@ -978,7 +1003,7 @@ async fn a_notification_cannot_starve_an_outbound_exchange() {
     let (own, _) = tokio::join!(
         tokio::time::timeout(
             Duration::from_secs(25),
-            a.send_direct(silent_peer, legal_message()),
+            a.send_direct(&leases["human"], silent_peer, legal_message()),
         ),
         async {
             let _ = b.dial(a_peer.clone(), a_address.clone()).await;

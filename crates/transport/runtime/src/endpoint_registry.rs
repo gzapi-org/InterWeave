@@ -27,7 +27,9 @@
 use std::collections::BTreeMap;
 
 use interweave_local_client_api::Generation;
-use interweave_transport_api::{DirectRejectReason, EndpointId, TransportError};
+use interweave_transport_api::{
+    DirectRejectReason, EndpointId, MAX_DIRECTORY_ENTRIES, TransportError, TransportIdentity,
+};
 use interweave_trust_api::{EndpointTrustPolicy, PeerTrustPolicy, TrustDecision};
 
 /// Identifies one local data-plane session.
@@ -43,6 +45,12 @@ pub struct LocalSessionId(pub String);
 pub struct RegisteredEndpoint {
     /// Whether the endpoint accepts traffic.
     pub enabled: bool,
+    /// Whether it may appear in the directory (ADR-0031).
+    ///
+    /// Listing only. An unadvertised endpoint still accepts a direct
+    /// message addressed to it, and `false` is the safe default because
+    /// advertisement is the information-disclosure surface.
+    pub advertise: bool,
     /// Client kinds permitted to lease it. Empty means no restriction.
     ///
     /// A misbinding guard, not authentication: `client_kind` is a label a
@@ -58,6 +66,7 @@ impl Default for RegisteredEndpoint {
     fn default() -> Self {
         Self {
             enabled: true,
+            advertise: false,
             allowed_client_kinds: Vec::new(),
             inbound: EndpointTrustPolicy::default(),
             outbound: EndpointTrustPolicy::default(),
@@ -299,6 +308,21 @@ impl EndpointRegistry {
         self.leases.get(endpoint)
     }
 
+    /// Whether a live lease on `endpoint` carries exactly `epoch`.
+    ///
+    /// The unforgeable half of source derivation (ADR-0030,
+    /// `ENDPOINTS.md`: "callers cannot spoof another local endpoint"). A
+    /// sender proves it may send AS `endpoint` by presenting the 128-bit
+    /// epoch its own claim returned; a caller that names an endpoint it
+    /// did not claim does not hold the matching epoch, so this is `false`
+    /// and the send is refused. One lease per session and a distinct epoch
+    /// per lease are enforced by `claim`, so the (endpoint, epoch) pair
+    /// identifies exactly one live lease.
+    #[must_use]
+    pub fn holds_lease(&self, endpoint: &EndpointId, epoch: &Generation) -> bool {
+        self.leases.get(endpoint).is_some_and(|l| &l.epoch == epoch)
+    }
+
     /// Resolve an inbound directed message to exactly one local endpoint.
     ///
     /// Takes `&self`: resolution is the only thing an inbound message
@@ -343,6 +367,46 @@ impl EndpointRegistry {
             return Err(ResolveFailure::EndpointOffline);
         };
         Ok((target, lease))
+    }
+
+    /// The endpoints this node advertises to `peer` (ADR-0031).
+    ///
+    /// An endpoint is listed only when it is simultaneously enabled,
+    /// `advertise: true`, actively leased, and admissible for `peer` under
+    /// its inbound narrowing policy — one test per conjunct in this
+    /// module, each named for the endpoint it must NOT list. The list is
+    /// sorted because the map is, and is cut at `min(cap,
+    /// MAX_DIRECTORY_ENTRIES)`: `more_than_the_cap_is_cut_not_refused`
+    /// and `the_cap_never_exceeds_the_wire_bound`.
+    ///
+    /// Profile trust is applied inside the narrowing decision, so a peer
+    /// the profile does not trust sees an empty list even if a caller
+    /// forgot to gate the query — `an_untrusted_querier_is_shown_nothing`.
+    /// That is defence in depth, not the admission check: the caller
+    /// refuses an untrusted query before this is reached, and a refusal
+    /// is not an empty list.
+    ///
+    /// Takes `&self` for the same reason `resolve_inbound` does: a remote
+    /// query must not be able to change any state.
+    #[must_use]
+    pub fn advertised_for(
+        &self,
+        peer: &TransportIdentity,
+        profile: &PeerTrustPolicy,
+        cap: usize,
+    ) -> Vec<EndpointId> {
+        self.endpoints
+            .iter()
+            .filter(|(_, configured)| configured.enabled && configured.advertise)
+            .filter(|(endpoint, _)| self.leases.contains_key(*endpoint))
+            .filter(|(_, configured)| {
+                profile
+                    .decide_for_endpoint(peer, &configured.inbound)
+                    .is_allowed()
+            })
+            .map(|(endpoint, _)| endpoint.clone())
+            .take(cap.min(MAX_DIRECTORY_ENTRIES))
+            .collect()
     }
 
     /// Decide whether a peer may be addressed from this endpoint.
@@ -537,6 +601,23 @@ mod tests {
     }
 
     #[test]
+    fn holds_lease_matches_only_the_exact_epoch() {
+        let mut r = registry();
+        r.claim(&ep("human"), session("a"), "human-client", epoch("e1"))
+            .expect("claims");
+        assert!(r.holds_lease(&ep("human"), &epoch("e1")));
+        // The right endpoint with the WRONG epoch is not a match: a caller
+        // that did not claim `human` does not hold e1.
+        assert!(!r.holds_lease(&ep("human"), &epoch("e2")));
+        // The right epoch against an endpoint that does not carry it is
+        // not a match either.
+        assert!(!r.holds_lease(&ep("claude"), &epoch("e1")));
+        // And after release the lease is gone, epoch or not.
+        r.release_session(&session("a"));
+        assert!(!r.holds_lease(&ep("human"), &epoch("e1")));
+    }
+
+    #[test]
     fn session_teardown_releases_the_lease_it_held() {
         let mut r = registry();
         r.claim(&ep("human"), session("a"), "k", epoch("e1"))
@@ -657,6 +738,172 @@ mod tests {
         assert!(
             !r.authorize_outbound(&ep("ghost"), &peer(P1), &profile)
                 .is_allowed()
+        );
+    }
+
+    // --- the directory snapshot -------------------------------------------
+
+    fn advertised() -> RegisteredEndpoint {
+        RegisteredEndpoint {
+            advertise: true,
+            ..RegisteredEndpoint::default()
+        }
+    }
+    fn trusting(peers: &[&str]) -> PeerTrustPolicy {
+        PeerTrustPolicy::new(peers.iter().map(|p| peer(p)).collect::<Vec<_>>())
+            .expect("valid policy")
+    }
+    fn names(list: &[EndpointId]) -> Vec<&str> {
+        list.iter().map(EndpointId::as_str).collect()
+    }
+
+    #[test]
+    fn a_leased_advertised_admissible_endpoint_is_listed() {
+        let mut endpoints = BTreeMap::new();
+        endpoints.insert(ep("human"), advertised());
+        let mut r = EndpointRegistry::new(endpoints, None);
+        r.claim(&ep("human"), session("a"), "human-client", epoch("e1"))
+            .expect("claims");
+        assert_eq!(
+            names(&r.advertised_for(&peer(P1), &trusting(&[P1]), 32)),
+            ["human"]
+        );
+    }
+
+    #[test]
+    fn an_unleased_advertised_endpoint_is_not_listed() {
+        // Configured, enabled, advertised — and nobody is holding it. The
+        // directory lists routes that WORK, and an unleased endpoint
+        // answers no_route.
+        let mut endpoints = BTreeMap::new();
+        endpoints.insert(ep("human"), advertised());
+        endpoints.insert(ep("claude"), advertised());
+        let mut r = EndpointRegistry::new(endpoints, None);
+        r.claim(&ep("human"), session("a"), "human-client", epoch("e1"))
+            .expect("claims");
+        assert_eq!(
+            names(&r.advertised_for(&peer(P1), &trusting(&[P1]), 32)),
+            ["human"]
+        );
+        // And releasing it removes it: the snapshot follows the lease.
+        r.release_session(&session("a"));
+        assert!(r.advertised_for(&peer(P1), &trusting(&[P1]), 32).is_empty());
+    }
+
+    #[test]
+    fn a_leased_unadvertised_endpoint_is_not_listed() {
+        let mut endpoints = BTreeMap::new();
+        endpoints.insert(ep("human"), RegisteredEndpoint::default());
+        let mut r = EndpointRegistry::new(endpoints, None);
+        r.claim(&ep("human"), session("a"), "human-client", epoch("e1"))
+            .expect("claims");
+        assert!(r.advertised_for(&peer(P1), &trusting(&[P1]), 32).is_empty());
+    }
+
+    #[test]
+    fn an_endpoint_whose_policy_excludes_the_querier_is_not_listed() {
+        // Both peers are profile-trusted; `claude` narrows to P2 only.
+        // P1 must not be told about a route that would answer it no_route.
+        let mut endpoints = BTreeMap::new();
+        endpoints.insert(ep("human"), advertised());
+        endpoints.insert(
+            ep("claude"),
+            RegisteredEndpoint {
+                inbound: EndpointTrustPolicy::StaticSubset {
+                    allowed_peers: [peer(P2)].into_iter().collect(),
+                },
+                ..advertised()
+            },
+        );
+        let mut r = EndpointRegistry::new(endpoints, None);
+        r.claim(&ep("human"), session("a"), "human-client", epoch("e1"))
+            .expect("claims");
+        r.claim(&ep("claude"), session("b"), "claude-channel", epoch("e2"))
+            .expect("claims");
+        let profile = trusting(&[P1, P2]);
+        assert_eq!(names(&r.advertised_for(&peer(P1), &profile, 32)), ["human"]);
+        assert_eq!(
+            names(&r.advertised_for(&peer(P2), &profile, 32)),
+            ["claude", "human"]
+        );
+    }
+
+    #[test]
+    fn an_untrusted_querier_is_shown_nothing() {
+        // Narrowing never widens: an endpoint's inbound policy inheriting
+        // profile trust admits nobody the profile refused.
+        let mut endpoints = BTreeMap::new();
+        endpoints.insert(ep("human"), advertised());
+        let mut r = EndpointRegistry::new(endpoints, None);
+        r.claim(&ep("human"), session("a"), "human-client", epoch("e1"))
+            .expect("claims");
+        assert!(r.advertised_for(&peer(P2), &trusting(&[P1]), 32).is_empty());
+    }
+
+    #[test]
+    fn the_list_is_sorted_regardless_of_claim_order() {
+        let mut endpoints = BTreeMap::new();
+        for name in ["zeta", "alpha", "mid"] {
+            endpoints.insert(ep(name), advertised());
+        }
+        let mut r = EndpointRegistry::new(endpoints, None);
+        for (i, name) in ["zeta", "mid", "alpha"].iter().enumerate() {
+            r.claim(
+                &ep(name),
+                session(name),
+                "human-client",
+                epoch(&format!("e{i}")),
+            )
+            .expect("claims");
+        }
+        assert_eq!(
+            names(&r.advertised_for(&peer(P1), &trusting(&[P1]), 32)),
+            ["alpha", "mid", "zeta"]
+        );
+    }
+
+    #[test]
+    fn more_than_the_cap_is_cut_not_refused() {
+        let mut endpoints = BTreeMap::new();
+        for i in 0..5 {
+            endpoints.insert(ep(&format!("e{i}")), advertised());
+        }
+        let mut r = EndpointRegistry::new(endpoints, None);
+        for i in 0..5 {
+            r.claim(
+                &ep(&format!("e{i}")),
+                session(&format!("s{i}")),
+                "human-client",
+                epoch(&format!("g{i}")),
+            )
+            .expect("claims");
+        }
+        assert_eq!(
+            names(&r.advertised_for(&peer(P1), &trusting(&[P1]), 3)),
+            ["e0", "e1", "e2"]
+        );
+    }
+
+    #[test]
+    fn the_cap_never_exceeds_the_wire_bound() {
+        let mut endpoints = BTreeMap::new();
+        for i in 0..40 {
+            endpoints.insert(ep(&format!("e{i:02}")), advertised());
+        }
+        let mut r = EndpointRegistry::new(endpoints, None);
+        for i in 0..40 {
+            r.claim(
+                &ep(&format!("e{i:02}")),
+                session(&format!("s{i}")),
+                "human-client",
+                epoch(&format!("g{i}")),
+            )
+            .expect("claims");
+        }
+        // A caller asking for more than the wire carries gets the wire.
+        assert_eq!(
+            r.advertised_for(&peer(P1), &trusting(&[P1]), 1000).len(),
+            MAX_DIRECTORY_ENTRIES
         );
     }
 }
