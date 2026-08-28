@@ -86,6 +86,15 @@ pub struct SubstrateConfig {
     /// any instantaneous queue depth. This is the bound on the table
     /// itself.
     pub max_pending_listens: usize,
+    /// How long a remote directory result stays fresh, in milliseconds.
+    ///
+    /// The LOCAL term of `min(remote, local, 300000)`. Zero is legal and
+    /// means "never cache": every query crosses the wire. `validate`
+    /// refuses anything above the five-minute ceiling rather than
+    /// clamping it, so a caller learns its configuration was wrong.
+    pub directory_cache_ttl_ms: u32,
+    /// Most remote peers whose directory is cached at once.
+    pub directory_cache_peers: usize,
 }
 
 impl Default for SubstrateConfig {
@@ -102,6 +111,8 @@ impl Default for SubstrateConfig {
             max_active_listeners: 64,
             max_retries_per_tick: 4,
             max_pending_listens: 64,
+            directory_cache_ttl_ms: interweave_transport_runtime::directory::DEFAULT_CACHE_TTL_MS,
+            directory_cache_peers: interweave_transport_runtime::directory::DEFAULT_CACHE_PEERS,
         }
     }
 }
@@ -165,6 +176,11 @@ impl SubstrateConfig {
             // is a scheduler that never dials, which is the state this
             // stage exists to leave.
             ("max_retries_per_tick", self.max_retries_per_tick, 1),
+            // A cache of zero peers is a map that cannot hold its first
+            // entry; `DirectoryCache::new` would clamp it to one, and a
+            // configuration silently corrected is the shape this
+            // function exists to refuse.
+            ("directory_cache_peers", self.directory_cache_peers, 1),
         ];
         for (field, got, min) in depths {
             if got < min || got > MAX_CONFIGURED_CAPACITY {
@@ -189,6 +205,16 @@ impl SubstrateConfig {
                 field: "max_payload_bytes",
                 got: self.max_payload_bytes,
                 allowed: (1, interweave_transport_api::MAX_PAYLOAD_BYTES),
+            });
+        }
+        // THE DIRECTORY TTL IS A u32 with its own ceiling. Zero means
+        // "never cache" and is legal; above five minutes is refused, not
+        // clamped, for the reason the payload limit is.
+        if self.directory_cache_ttl_ms > interweave_transport_api::MAX_DIRECTORY_TTL_MS {
+            return Err(SubstrateError::InvalidConfig {
+                field: "directory_cache_ttl_ms",
+                got: self.directory_cache_ttl_ms as usize,
+                allowed: (0, interweave_transport_api::MAX_DIRECTORY_TTL_MS as usize),
             });
         }
         // THE HEARTBEAT IS A DURATION, which is why it was not in the

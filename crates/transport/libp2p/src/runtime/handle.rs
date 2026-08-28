@@ -291,6 +291,29 @@ impl SwarmRuntime {
         answer.await.map_err(|_| SubstrateError::Stopped)
     }
 
+    /// Ask `peer` which endpoints it advertises to this profile.
+    ///
+    /// Cached for the clamped TTL from local receipt; `cached` on the
+    /// result says whether the wire was crossed. Advisory (ADR-0031): an
+    /// entry here is what the peer CLAIMED, a send needs no prior query,
+    /// and a listed endpoint may still answer `no_route` by the time a
+    /// message reaches it.
+    ///
+    /// # Errors
+    /// [`SubstrateError::Stopped`] if the task is gone; the inner error
+    /// is why the query did not produce a directory.
+    pub async fn query_endpoints(
+        &self,
+        peer: TransportIdentity,
+    ) -> Result<Result<super::endpoints::DirectoryResult, DirectError>, SubstrateError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(SwarmCommand::QueryEndpoints { peer, reply })
+            .await
+            .map_err(|_| SubstrateError::Stopped)?;
+        answer.await.map_err(|_| SubstrateError::Stopped)
+    }
+
     /// Grant `session` an exclusive lease on `endpoint`, opening its queue.
     ///
     /// The source endpoint every later `send_direct` from this session

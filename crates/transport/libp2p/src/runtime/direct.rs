@@ -58,6 +58,10 @@ pub struct DirectState {
     /// The bound every queue opened by a claim gets. Installed by
     /// `configure`; until then no endpoint is configured to claim.
     pub(super) queue_bound: usize,
+    /// Whether this profile answers directory queries. From `configure`.
+    pub(super) directory_enabled: bool,
+    /// The profile's advertised-entry cap, at or below the wire's 32.
+    pub(super) max_advertised: usize,
     /// Inbound requests whose answer is queued but not yet written.
     ///
     /// `pending_direct` counts OUTBOUND exchanges only, so a shutdown
@@ -126,6 +130,8 @@ impl DirectState {
         self.registry = EndpointRegistry::new(endpoints, config.default.clone());
         self.queues = EndpointQueues::new();
         self.queue_bound = config.queue_bound;
+        self.directory_enabled = config.directory_enabled;
+        self.max_advertised = config.max_advertised;
         Ok(())
     }
 
@@ -168,6 +174,19 @@ impl DirectState {
             self.queues.close(endpoint);
         }
         released
+    }
+
+    /// Whether this profile answers directory queries.
+    pub(super) const fn directory_enabled(&self) -> bool {
+        self.directory_enabled
+    }
+
+    /// The endpoints advertised to `peer` — enabled, advertised, leased,
+    /// and admissible under each endpoint's inbound policy, capped at the
+    /// profile's `max_advertised` (itself at or below the wire's 32).
+    pub(super) fn advertised_for(&self, peer: &TransportIdentity) -> Vec<EndpointId> {
+        self.registry
+            .advertised_for(peer, &self.trust, self.max_advertised)
     }
 
     /// The endpoint `session` may send AS — its lease, or nothing.
@@ -242,6 +261,10 @@ impl DirectState {
             registry: EndpointRegistry::new(std::collections::BTreeMap::new(), None),
             queues: EndpointQueues::new(),
             queue_bound: interweave_local_client_api::DEFAULT_EVENT_QUEUE,
+            // A daemon with no profile installed advertises nothing and
+            // answers Unavailable until `configure` says otherwise.
+            directory_enabled: false,
+            max_advertised: 0,
         }
     }
 }
@@ -279,6 +302,11 @@ pub struct DirectEndpoints {
     /// Bound on each endpoint's delivery queue, applied as leases are
     /// claimed.
     queue_bound: usize,
+    /// Whether this profile answers directory queries at all.
+    pub(super) directory_enabled: bool,
+    /// The profile's own cap on advertised entries, at or below the
+    /// wire's 32.
+    pub(super) max_advertised: usize,
 }
 
 impl DirectEndpoints {
@@ -335,6 +363,9 @@ impl DirectEndpoints {
             endpoints,
             default: profile.endpoints.default_direct_endpoint.clone(),
             queue_bound,
+            directory_enabled: profile.endpoints.directory.enabled,
+            max_advertised: usize::try_from(profile.endpoints.directory.max_advertised)
+                .unwrap_or(usize::MAX),
         })
     }
 }

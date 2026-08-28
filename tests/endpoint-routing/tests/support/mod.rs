@@ -172,6 +172,121 @@ pub(crate) async fn connected_pair_claiming(
     (sender, receiver, receiver_peer)
 }
 
+/// An advertised endpoint: `advertise: true`, otherwise default.
+pub(crate) fn advertised(name: &str) -> EndpointConfig {
+    EndpointConfig {
+        advertise: true,
+        ..entry(name)
+    }
+}
+
+/// An advertised endpoint whose inbound policy admits only `only`.
+pub(crate) fn advertised_to(name: &str, only: &TransportIdentity) -> EndpointConfig {
+    EndpointConfig {
+        inbound: EndpointTrustPolicy::StaticSubset {
+            allowed_peers: [only.clone()].into_iter().collect(),
+        },
+        ..advertised(name)
+    }
+}
+
+/// A profile that trusts `peers` and configures `entries`, directory on.
+///
+/// The endpoint subsets can only narrow to peers the PROFILE trusts, so a
+/// test that excludes one endpoint from a peer must list that peer here.
+pub(crate) fn profile_trusting(
+    peers: &[&TransportIdentity],
+    entries: Vec<EndpointConfig>,
+    default: Option<&str>,
+) -> ProfileConfig {
+    let mut profile = profile_directory(entries, default, true);
+    profile.trust.allowed_peers = peers.iter().map(|p| (*p).clone()).collect();
+    profile
+}
+
+/// A profile whose directory is enabled or not.
+pub(crate) fn profile_directory(
+    entries: Vec<EndpointConfig>,
+    default: Option<&str>,
+    directory_enabled: bool,
+) -> ProfileConfig {
+    let mut profile = profile_with(entries, default);
+    profile.endpoints.directory = DirectoryConfig {
+        enabled: directory_enabled,
+        max_advertised: interweave_profile_config::MAX_ADVERTISED_CEILING,
+    };
+    profile
+}
+
+/// Two connected runtimes where the RESPONDER (second) is configured from
+/// `responder_profile` and both sides trust each other data-plane.
+/// `responder_sessions` names the endpoints the responder claims.
+///
+/// Both are data-plane trusted because an infrastructure-only peer cannot
+/// hold an inbound connection at this stage — the socket closes before a
+/// request (see `tests/direct-v2` malformed-frames). The responder's own
+/// `Unauthorized` refusal arm is therefore not reachable end to end here,
+/// which the Met. block records as a stated limit; the reachable guard is
+/// the querier-side local refusal, tested directly.
+pub(crate) async fn connected_for_directory(
+    responder_profile: ProfileConfig,
+    responder_sessions: &[(&str, &str)],
+) -> (SwarmRuntime, SwarmRuntime, TransportIdentity) {
+    let (querier_id, querier_peer) = who();
+    let (responder_id, _responder_peer) = who();
+
+    let mut responder = SwarmRuntime::start(
+        &responder_id,
+        SubstrateConfig::default(),
+        trusting(&[&querier_peer]),
+    )
+    .expect("the responder starts");
+    let responder_peer = responder.local_peer().clone();
+    let querier = SwarmRuntime::start(
+        &querier_id,
+        SubstrateConfig::default(),
+        trusting(&[&responder_peer]),
+    )
+    .expect("the querier starts");
+
+    responder
+        .configure_direct(
+            DirectEndpoints::from_profile(&responder_profile, 8).expect("a valid profile"),
+        )
+        .await
+        .expect("the responder's endpoints install");
+    // The querier configures a `human` endpoint of its own, so a test
+    // that wants to send after querying has a source to claim. It leaves
+    // the directory at defaults; only the responder's is under test.
+    querier
+        .configure_direct(
+            DirectEndpoints::from_profile(&profile_with(vec![entry("human")], Some("human")), 8)
+                .expect("a valid querier profile"),
+        )
+        .await
+        .expect("the querier's endpoint installs");
+    for (session, name) in responder_sessions {
+        responder
+            .claim_endpoint(*session, endpoint(name), "in-process")
+            .await
+            .expect("the claim reaches the task")
+            .expect("the endpoint is configured and free");
+    }
+
+    let address = responder
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
+        .await
+        .expect("listens");
+    querier
+        .dial(responder_peer.clone(), address)
+        .await
+        .expect("command")
+        .expect("admitted");
+    wait_connected(&mut responder).await;
+
+    (querier, responder, responder_peer)
+}
+
 /// Bounded: a connection that never arrives is a RESULT, and a test that
 /// waits forever reports nothing at all.
 pub(crate) async fn wait_connected(runtime: &mut SwarmRuntime) {

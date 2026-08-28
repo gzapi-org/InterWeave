@@ -56,6 +56,7 @@ mod commands;
 mod config;
 mod dialing;
 mod direct;
+mod endpoints;
 mod handle;
 mod messages;
 
@@ -70,6 +71,7 @@ use direct::{DirectHandled, DirectTick, handle_direct};
 
 pub use broadcast::{BroadcastChannels, BroadcastState};
 pub use direct::{DirectEndpoints, DirectState};
+pub use endpoints::DirectoryResult;
 
 pub use messages::{DialRefusal, SwarmCommand, SwarmEvent};
 
@@ -215,6 +217,11 @@ const fn polling_room(
             .saturating_add(pending_exchanges)
             .saturating_add(answering_inbound)
 }
+
+// The directory's own pending queries and queued answers are folded into
+// `pending_exchanges` and `answering_inbound` at the call site, so the
+// predicate above needs no directory-specific term: a directory exchange
+// costs a slot exactly as a direct one does.
 
 /// Whether an accepted delivery may be buffered for the consumer.
 ///
@@ -459,6 +466,21 @@ impl SwarmRuntime {
             PendingDirect,
         > = HashMap::new();
 
+        // The directory's task state: the advisory cache, the query
+        // budget, and the answers still being written. Built from the
+        // runtime config, like the direct dedup and reservation limits.
+        let mut directory_state = endpoints::DirectoryState::new(
+            now_ms(started),
+            config.directory_cache_peers,
+            config.directory_cache_ttl_ms,
+        );
+        // Outbound directory exchanges awaiting a response, keyed by the
+        // request id the way `pending_direct` is.
+        let mut pending_endpoints: HashMap<
+            libp2p::request_response::OutboundRequestId,
+            endpoints::PendingQuery,
+        > = HashMap::new();
+
         let (command_tx, mut command_rx) = mpsc::channel(config.command_capacity);
         let (event_tx, event_rx) = mpsc::channel(config.event_capacity);
 
@@ -542,8 +564,8 @@ impl SwarmRuntime {
                     outbox.len(),
                     config.event_capacity,
                     listens.len(),
-                    pending_direct.len(),
-                    direct_state.answering(),
+                    pending_direct.len() + pending_endpoints.len(),
+                    direct_state.answering() + directory_state.answering(),
                 );
 
                 tokio::select! {
@@ -754,7 +776,9 @@ impl SwarmRuntime {
                                     &mut listens,
                                     &mut active,
                                     &mut pending_direct,
+                                    &mut pending_endpoints,
                                     &mut direct_state,
+                                    &mut directory_state,
                                     &mut broadcast_state,
                                     &mut in_flight,
                                     config.max_pending_listens,
@@ -847,6 +871,25 @@ impl SwarmRuntime {
                         ) {
                             DirectHandled::Consumed => continue,
                             DirectHandled::Passed(event) => *event,
+                        };
+
+                        // THE DIRECTORY, consumed before `translate` for
+                        // the same reason direct and broadcast are: an
+                        // inbound query carries a `ResponseChannel` that
+                        // cannot be borrowed out of a shared reference,
+                        // and `translate` is a shape conversion that
+                        // knows nothing about trust or the budget.
+                        let event = match endpoints::handle_endpoints(
+                            event,
+                            &mut swarm,
+                            &mut direct_state,
+                            &mut directory_state,
+                            &manager,
+                            &mut pending_endpoints,
+                            now_ms(started),
+                        ) {
+                            endpoints::Handled::Consumed => continue,
+                            endpoints::Handled::Passed(event) => *event,
                         };
 
                         let mut refuse = Vec::new();

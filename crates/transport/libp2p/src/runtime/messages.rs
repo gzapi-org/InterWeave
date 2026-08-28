@@ -158,6 +158,17 @@ pub enum SwarmCommand {
         /// Answered when the exchange settles.
         reply: oneshot::Sender<Result<EndpointId, DirectError>>,
     },
+    /// Ask a trusted, connected peer which endpoints it advertises.
+    ///
+    /// Answered from the cache when a fresh entry exists, otherwise by one
+    /// exchange over `/interweave/endpoints/1.0.0`. The result is
+    /// advisory: it gates no send and grants no trust (ADR-0031).
+    QueryEndpoints {
+        /// Whose directory.
+        peer: TransportIdentity,
+        /// Answered when the exchange settles or the cache answers.
+        reply: oneshot::Sender<Result<super::endpoints::DirectoryResult, DirectError>>,
+    },
     /// Install endpoint configuration for directed messaging.
     ///
     /// Replaces whatever was there, which DISCARDS every open queue —

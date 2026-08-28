@@ -286,12 +286,6 @@ impl DirectoryCache {
         }
     }
 
-    /// Build with the contract default TTL and the runtime default bound.
-    #[must_use]
-    pub fn with_defaults() -> Self {
-        Self::new(DEFAULT_CACHE_PEERS, DEFAULT_CACHE_TTL_MS)
-    }
-
     /// Record a validated response received at `now_ms`, replacing any
     /// entry for the same peer.
     ///
