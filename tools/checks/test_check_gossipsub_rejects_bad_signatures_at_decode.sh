@@ -35,12 +35,13 @@ trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/src"
 
 # A stand-in with the shape the guard is written against.
+# The stand-in is the REAL branch's shape, since the guard now compares a
+# digest of it. Each negative case mutates one thing and must fail.
 write_good() {
   cat > "$work/src/protocol.rs" <<'RS'
             match self.validation_mode {
                 ValidationMode::Strict => {
                     verify_signature = true;
-                    verify_sequence_no = true;
                 }
                 ValidationMode::Permissive => {}
             }
@@ -57,88 +58,72 @@ write_good() {
             }
 RS
   cat > "$work/src/behaviour.rs" <<'RS'
-        if !self.duplicate_cache.insert(msg_id.clone()) {
-            return;
-        }
+        if !self.duplicate_cache.insert(msg_id.clone()) { return; }
 RS
+  # Pin the guard's expectation to THIS fixture, so every case below
+  # exercises the real comparison rather than a copy of it.
+  export INTERWEAVE_REVIEWED_BRANCH_SHA256="$(
+    awk '/if verify_signature && !GossipsubCodec::verify_signature\(&message\)/{f=1} f{print} f&&/^ *\}$/{exit}' "$work/src/protocol.rs" \
+      | sed 's;//.*$;;' | sed 's/[[:space:]]\+/ /g;s/^ //;s/ $//' | grep -v '^$' \
+      | sha256sum | cut -d' ' -f1
+  )"
 }
 
 run_guard() { INTERWEAVE_GOSSIPSUB_SRC="$work/src" bash "$GUARD" >/dev/null 2>&1; }
 
+mutate() {  # <description> <python-snippet>
+  write_good
+  python3 - "$work/src/protocol.rs" <<PY
+import io,sys
+p = sys.argv[1]
+s = io.open(p).read()
+$2
+io.open(p, "w").write(s)
+PY
+  if run_guard; then bad "$1"; else ok "caught it"; fi
+}
+
 echo "gossipsub signature guard: the shape it is written against"
 write_good
-if run_guard; then ok "accepts the pinned layout"; else bad "rejects the layout it was written against"; fi
+if run_guard; then ok "accepts the reviewed branch"; else bad "rejects the branch it pinned"; fi
 
 echo "gossipsub signature guard: Strict stops verifying signatures"
 write_good
 sed -i 's/                    verify_signature = true;//' "$work/src/protocol.rs"
 if run_guard; then bad "did not notice Strict no longer sets verify_signature"; else ok "caught it"; fi
 
-echo "gossipsub signature guard: the condition survives but the rejection is gone"
-write_good
-sed -i 's/^                continue;$//' "$work/src/protocol.rs"
-if run_guard; then
-  bad "did not notice the branch no longer terminates decoding — the condition-only case"
-else
-  ok "caught it"
-fi
+echo "gossipsub signature guard: the branch abandons via a nested conditional"
+mutate "read a conditional continue as unconditional abandonment" \
+  's = s.replace("                continue;", "                if false { continue; }", 1)'
 
 echo "gossipsub signature guard: the branch returns a value instead of abandoning"
-write_good
-sed -i 's/^                continue;$/                return message;/' "$work/src/protocol.rs"
-if run_guard; then
-  bad "read `return message;` as a rejection — a yielded message reaches the behaviour"
-else
-  ok "caught it"
-fi
+mutate "read a returned message as a rejection" \
+  's = s.replace("                continue;", "                return message;", 1)'
 
-echo "gossipsub signature guard: the branch stops recording an invalid signature"
-write_good
-sed -i 's/ValidationError::InvalidSignature/ValidationError::SomethingElse/' "$work/src/protocol.rs"
-if run_guard; then bad "did not notice the validation error changed"; else ok "caught it"; fi
-
-# TWO CASES, one per field. A single fixture mutating both would report
-# "caught it" while only one of the guard's two assertions still existed,
-# which is how the sequence-number half was lost unnoticed once already.
 echo "gossipsub signature guard: the rejected message keeps its source"
-write_good
-sed -i 's/                    source: None,/                    source: Some(peer),/' "$work/src/protocol.rs"
-if run_guard; then
-  bad "did not notice a forgery may now carry a publisher identity past the decoder"
-else
-  ok "caught it"
-fi
+mutate "did not notice a forgery may carry a publisher identity past the decoder" \
+  's = s.replace("source: None,", "source: Some(peer),", 1)'
 
 echo "gossipsub signature guard: the rejected message keeps its sequence number"
-write_good
-sed -i 's/                    sequence_number: None,/                    sequence_number: Some(seq),/' "$work/src/protocol.rs"
-if run_guard; then
-  bad "did not notice a forgery may now carry the other half of a mesh id past the decoder"
-else
-  ok "caught it"
-fi
+mutate "did not notice a forgery may carry the other half of a mesh id past the decoder" \
+  's = s.replace("sequence_number: None,", "sequence_number: Some(seq),", 1)'
 
-echo "gossipsub signature guard: the decoder stops testing the signature at all"
-write_good
-sed -i 's/^            if verify_signature && !GossipsubCodec::verify_signature(&message) {/            if false {/' "$work/src/protocol.rs"
-if run_guard; then bad "did not notice the decode-time test is gone"; else ok "caught it"; fi
+echo "gossipsub signature guard: the branch stops recording an invalid signature"
+mutate "did not notice the validation error changed" \
+  's = s.replace("ValidationError::InvalidSignature", "ValidationError::SomethingElse", 1)'
 
-echo "gossipsub signature guard: the condition survives only as a comment"
+echo "gossipsub signature guard: the condition survives only as a line comment"
+mutate "matched a commented-out condition while the live one was disabled" \
+  's = s.replace("            if verify_signature", "            // if verify_signature", 1).replace("!GossipsubCodec::verify_signature(&message) {", "!GossipsubCodec::verify_signature(&message) {\n            if false {", 1)'
+
+echo "gossipsub signature guard: the branch survives only inside a block comment"
+mutate "matched a branch that a block comment had disabled" \
+  's = s.replace("            if verify_signature && !GossipsubCodec::verify_signature(&message) {", "            /* if verify_signature && !GossipsubCodec::verify_signature(&message) { */\n            if false {", 1)'
+
+echo "gossipsub signature guard: a comment-only edit is tolerated"
 write_good
-python3 - "$work/src/protocol.rs" <<'PY'
-import sys
-p = sys.argv[1]
-s = open(p).read()
-live = "            if verify_signature && !GossipsubCodec::verify_signature(&message) {"
-assert s.count(live) == 1
-s = s.replace(live, "            // was: if verify_signature && !GossipsubCodec::verify_signature(&message) {\n            if false {", 1)
-open(p, "w").write(s)
-PY
-if run_guard; then
-  bad "matched a commented-out condition while the live one was disabled"
-else
-  ok "caught it"
-fi
+sed -i 's|tracing::warn!("Invalid signature for received message");|// reworded\n                tracing::warn!("Invalid signature for received message");|' "$work/src/protocol.rs"
+if run_guard; then ok "comment churn does not fail the check"; else bad "a comment-only change failed it"; fi
 
 echo "gossipsub signature guard: the duplicate cache moves into the decoder"
 write_good
@@ -150,6 +135,7 @@ write_good
 sed -i 's/duplicate_cache.insert/some_other_cache.insert/' "$work/src/behaviour.rs"
 if run_guard; then bad "did not notice the cache it reasons about is gone"; else ok "caught it"; fi
 
+unset INTERWEAVE_REVIEWED_BRANCH_SHA256
 echo "gossipsub signature guard: it runs against the real crate"
 if bash "$GUARD" >/dev/null 2>&1; then
   ok "passes on the pinned dependency"

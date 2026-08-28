@@ -50,6 +50,15 @@ fi
 
 cd "$(dirname "$0")/../.."
 
+# The normalised failed-signature branch of the version below, as read by
+# a person. Recomputed by the failure message's own instructions; changing
+# it without reading the new branch defeats the entire check.
+REVIEWED_GOSSIPSUB_VERSION="0.49.5"
+# Overridable ONLY so the self-test can pin its own fixtures, for the same
+# reason INTERWEAVE_GOSSIPSUB_SRC exists: a self-test that reimplements
+# the comparison cannot fail when the real one is weakened.
+REVIEWED_BRANCH_SHA256="${INTERWEAVE_REVIEWED_BRANCH_SHA256:-c6a420a3f2f4cb3a8799beff54954080c5bc5238efdbd7b0037fc465b2f40fda}"
+
 problems=0
 report() {
   echo "check_gossipsub_rejects_bad_signatures_at_decode: $*" >&2
@@ -98,8 +107,18 @@ done
 stripped_protocol="$(mktemp)"
 stripped_behaviour="$(mktemp)"
 trap 'rm -f "$stripped_protocol" "$stripped_behaviour"' EXIT
-sed 's;//.*$;;' "$protocol"  > "$stripped_protocol"
-sed 's;//.*$;;' "$behaviour" > "$stripped_behaviour"
+strip_comments() {
+  # Block comments first (they may span lines), then line comments.
+  python3 -c '
+import re,sys
+src = open(sys.argv[1]).read()
+src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+src = re.sub(r"//[^\n]*", "", src)
+sys.stdout.write(src)
+' "$1"
+}
+strip_comments "$protocol"  > "$stripped_protocol"
+strip_comments "$behaviour" > "$stripped_behaviour"
 protocol="$stripped_protocol"
 behaviour="$stripped_behaviour"
 
@@ -119,27 +138,31 @@ fi
 if ! grep -qE 'if +verify_signature +&& +!.*verify_signature\(&message\)' "$protocol"; then
   report "protocol.rs no longer tests the signature during decode"
 else
-  body="$(awk '/if +verify_signature +&& +!.*verify_signature\(&message\)/{f=1} f{print} f&&/^ *\}$/{exit}' "$protocol")"
-  if ! grep -qE 'ValidationError::InvalidSignature' <<<"$body"; then
-    report "the failed-signature branch no longer records an InvalidSignature validation error"
-  fi
-  # A BARE `continue;` or `return;` ONLY. `return <expr>;` yields a value
-  # -- a decoded message, an Ok -- which is delivery, not rejection, and
-  # a regex that accepted any `return` read `return message;` as a
-  # refusal. The rejection here abandons the message; anything that hands
-  # one back has to be read by a person, not matched by this.
-  if ! grep -qE '^[[:space:]]*(continue|return)[[:space:]]*;' <<<"$body"; then
-    report "the failed-signature branch no longer abandons the message — a bare continue/return is gone, so it may now yield one to the behaviour"
-  fi
-  # SEPARATELY, because the mesh id is a PAIR. One assertion covering
-  # both fields can lose half of itself and still fire on a fixture that
-  # mutates the other half — which is exactly how the first version of
-  # this hid the loss of the sequence-number protection.
-  if ! grep -qE 'source: *None' <<<"$body"; then
-    report "the failed-signature branch no longer blanks source — a forgery could carry a publisher identity into the cache"
-  fi
-  if ! grep -qE 'sequence_number: *None' <<<"$body"; then
-    report "the failed-signature branch no longer blanks sequence_number — a forgery could carry the other half of a mesh id into the cache"
+  # THE BRANCH IS FINGERPRINTED, NOT DESCRIBED.
+  #
+  # Five rounds of review found five ways to satisfy a description of
+  # this branch while defeating it: an assertion that matched a token
+  # rather than a meaning, one that hid another's removal, one fooled by
+  # a comment, and a `return <expr>` read as a refusal. Each fix was
+  # right and left the next hole open, because a regex cannot decide
+  # what code MEANS -- the last finding, that a `continue` must
+  # DOMINATE the branch rather than merely appear in it, is not
+  # answerable by grep at all.
+  #
+  # So this stops trying. The branch is normalised -- comments gone,
+  # whitespace collapsed -- and compared against the digest of the
+  # version that was read by a person. It claims exactly one thing, and
+  # can verify it completely: THIS CODE HAS NOT CHANGED.
+  #
+  # Any edit fails, including harmless ones. That is the intended cost:
+  # the guarantee Stage 7 rests on is re-established by reading the new
+  # code, which is what the failure message asks for. Updating the digest
+  # is the act of saying someone did.
+  body="$(awk '/if verify_signature && !GossipsubCodec::verify_signature\(&message\)/{f=1} f{print} f&&/^ *\}$/{exit}' "$protocol" \
+    | sed 's/[[:space:]]\+/ /g;s/^ //;s/ $//' | grep -v '^$')"
+  actual="$(printf '%s\n' "$body" | sha256sum | cut -d' ' -f1)"
+  if [[ "$actual" != "$REVIEWED_BRANCH_SHA256" ]]; then
+    report "the failed-signature branch has changed (sha256 $actual, reviewed $REVIEWED_BRANCH_SHA256)"
   fi
 fi
 
