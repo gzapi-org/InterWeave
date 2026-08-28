@@ -102,6 +102,11 @@ fn tree_checks() -> Vec<Task> {
             &["tools/checks/check_yamux_muxer.sh"],
         ),
         Task::new(
+            "gossipsub still refuses invalid signatures during decode",
+            "bash",
+            &["tools/checks/check_gossipsub_rejects_bad_signatures_at_decode.sh"],
+        ),
+        Task::new(
             "dependency policy — advisories, licences, bans, sources",
             "bash",
             &["tools/checks/check_dependencies.sh"],

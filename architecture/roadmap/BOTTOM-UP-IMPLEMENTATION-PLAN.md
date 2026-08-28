@@ -795,6 +795,17 @@ than no block.**
   be forged from outside. What is observable — and tested — is that
   forged traffic bearing a publisher's identity does not stop that
   publisher's real message being delivered.
+
+  The MECHANISM that makes this hold is upstream of the cache entirely:
+  signature verification runs in the GossipSub codec's decoder, so a
+  message that fails it becomes an invalid-message event with no source
+  and no sequence number, and the behaviour that owns the duplicate cache
+  is never reached. A forgery therefore cannot occupy an entry under ANY
+  id — stronger than an ordering, and the reason the wire test cannot see
+  it. Since that is a property of a dependency's internals, no test of
+  ours can assert it and no version pin describes it:
+  `tools/checks/check_gossipsub_rejects_bad_signatures_at_decode.sh`
+  fails if an upgrade moves it.
 - **Only the Accept arm of the validation report is verified.**
   Suppressing the report on Accept fails the four-peer control, because
   forwarding is what reporting Accept releases; suppressing it on Reject

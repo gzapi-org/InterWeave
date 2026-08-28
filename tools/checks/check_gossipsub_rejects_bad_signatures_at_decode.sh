@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+# tools/checks/check_gossipsub_rejects_bad_signatures_at_decode.sh
+#
+# >>> help
+# Does the pinned GossipSub still reject invalid signatures during DECODE,
+# before a message can reach the duplicate cache?
+#
+# PUBSUB.md requires that invalid-signature traffic cannot poison the
+# duplicate cache against later authentic traffic. Stage 7 proves the
+# observable half over the wire: forged traffic bearing a publisher's
+# identity does not stop that publisher's real message arriving. It cannot
+# prove the mechanism, because the collision that would test it is not
+# constructible from outside — `sequence_number` is assigned inside the
+# backend, so no publisher, honest or otherwise, chooses the `(source,
+# sequence)` pair a forgery would need to match.
+#
+# What makes the property hold is where the check happens. In
+# `libp2p-gossipsub`, signature verification runs in the CODEC's decoder
+# (`protocol.rs`), not in the behaviour:
+#
+#     ValidationMode::Strict => { verify_signature = true; ... }
+#     if verify_signature && !GossipsubCodec::verify_signature(&message) {
+#
+# A message that fails it is turned into an invalid-message event with
+# `source: None` and `sequence_number: None`, and `handle_received_message`
+# — which owns `duplicate_cache` — is never reached. So a forged message
+# cannot occupy a cache entry under ANY id, which is stronger than an
+# ordering within the behaviour and is why the wire test cannot see it.
+#
+# WHY A BESPOKE CHECK. This is a property of a dependency's internals, so
+# no test of ours can assert it and no lockfile pin can describe it: the
+# version could be bumped, the code reorganised, and every check stay
+# green while the guarantee the stage rests on quietly moved. The review
+# that raised this named exactly that risk — a backend upgrade changing
+# validation or cache ordering.
+#
+# It fails on an upgrade that moves or renames these, which is the point:
+# the guarantee must be re-established by reading the new code, not
+# assumed to have survived.
+# <<< help
+
+set -euo pipefail
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  sed -n '/^# >>> help$/,/^# <<< help$/p' "$0" | sed '1d;$d' | sed 's/^# \{0,1\}//'
+  exit 0
+fi
+
+cd "$(dirname "$0")/../.."
+
+problems=0
+report() {
+  echo "check_gossipsub_rejects_bad_signatures_at_decode: $*" >&2
+  problems=$((problems + 1))
+}
+
+manifest="$(cargo metadata --format-version 1 --locked 2>/dev/null \
+  | python3 -c '
+import json,sys
+meta = json.load(sys.stdin)
+for pkg in meta["packages"]:
+    if pkg["name"] == "libp2p-gossipsub":
+        print(pkg["manifest_path"])
+        break
+' || true)"
+
+if [[ -z "$manifest" ]]; then
+  report "libp2p-gossipsub is not in the dependency graph — if broadcast was removed, remove this check with it"
+  exit 1
+fi
+
+protocol="$(dirname "$manifest")/src/protocol.rs"
+behaviour="$(dirname "$manifest")/src/behaviour.rs"
+
+for f in "$protocol" "$behaviour"; do
+  [[ -r "$f" ]] || report "cannot read $f"
+done
+[[ $problems -eq 0 ]] || exit 1
+
+# 1. Strict still asks for signature verification.
+if ! grep -qE 'ValidationMode::Strict *=>' "$protocol"; then
+  report "protocol.rs no longer matches on ValidationMode::Strict"
+elif ! awk '/ValidationMode::Strict *=>/,/ValidationMode::Permissive/' "$protocol" \
+     | grep -qE 'verify_signature *= *true'; then
+  report "ValidationMode::Strict no longer sets verify_signature — a forged message may now reach the behaviour"
+fi
+
+# 2. The decoder still refuses a message whose signature does not verify.
+if ! grep -qE 'if +verify_signature +&& +!.*verify_signature\(&message\)' "$protocol"; then
+  report "protocol.rs no longer rejects on a failed verify_signature during decode"
+fi
+
+# 3. The duplicate cache still lives in the behaviour, downstream of that.
+if ! grep -q 'duplicate_cache.insert' "$behaviour"; then
+  report "behaviour.rs no longer inserts into duplicate_cache — re-read where suppression happens now"
+fi
+if grep -q 'duplicate_cache' "$protocol"; then
+  report "the duplicate cache is now reachable from the decoder — the separation this check exists for is gone"
+fi
+
+if [[ $problems -gt 0 ]]; then
+  echo "" >&2
+  echo "The pinned GossipSub's signature handling moved. Stage 7's cache-poisoning" >&2
+  echo "clause rests on invalid signatures being refused during DECODE, before the" >&2
+  echo "duplicate cache exists to poison. Re-read the new code and re-establish it" >&2
+  echo "deliberately; do not adjust this check to match." >&2
+  exit 1
+fi
+
+echo "check_gossipsub_rejects_bad_signatures_at_decode: OK — invalid signatures are refused in the decoder, upstream of the duplicate cache."
