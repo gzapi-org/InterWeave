@@ -49,33 +49,62 @@ SubscriptionRegistry::subscribers     call  subs.subscribers(
 SubscriptionRegistry::set_desired     call  broadcast_state.subs.set_desired(
 SubscriptionRegistry::holds_any       call  broadcast_state.subs.holds_any(
 SessionQueues::set_bound              call  broadcast_state.queues.set_bound(
+
+# --- stage 7 wired these; the ledger cannot attribute a call through a
+# --- field, so each names the expression that reaches it.
+SubscriptionRegistry::join            call  broadcast_state.subs.join(
+SubscriptionRegistry::leave           call  broadcast_state.subs.leave(
+SubscriptionRegistry::may_publish     call  broadcast_state.subs.may_publish(
+SubscriptionRegistry::backend_should_subscribe  call  broadcast_state.subs.backend_should_subscribe(
+SessionQueues::open                   call  .open(session, broadcast_state.queue_bound
+SessionQueues::close                  call  broadcast_state.queues.close(
+SessionQueues::is_open                call  broadcast_state.queues.is_open(
+SessionQueues::drain                  call  broadcast_state.queues.drain(
+TopicKey::wire_string                 call  topic_key_v1(channel).wire_string(
+MeshMessageId::as_bytes               call  MessageId::new(id.as_bytes(
+# TopicKey::as_bytes has NO production caller and may never gain one:
+# production reads `wire_string`, and the raw accessor exists so the
+# frozen vector is compared byte-for-byte instead of through the hex
+# formatter, which would otherwise be free to agree with itself.
+#
+# Dated to the OPEN stage, deliberately, so the very next transition
+# forces the question. It travelled to stage-13 with the IPC group for one
+# commit, which would have deferred the promised re-examination by five
+# stages -- and the note below is the whole reason it is dated at all.
+# When Stage 9 opens, the answer is to delete the accessor or to justify
+# its public existence in writing; it is not to re-date it again.
+TopicKey::as_bytes                     stage-8   no production caller planned — see the note above
+
+# --- stage 13 — the daemon and desktop IPC v2, which is where a client
+# --- session first exists to disconnect and an admin surface first
+# --- exists to read a counter. Stage 8 is the endpoint-directory
+# --- protocol and has neither, so dating these to it would have expired
+# --- them five stages before anything could call them.
+SubscriptionRegistry::release_session  stage-13  a client disconnect releases its joins, once IPC reports one
+IngressLimiter::tracked_peers          stage-13  the admin surface reads it
+
+# --- These two are NOT waiting for anything: each is called from its own
+# --- file, which the heuristic does not count as a reference. Dating them
+# --- said the enforcement was future work and would have let its REMOVAL
+# --- pass unnoticed until stage 13 -- `subscriptions()` is what applies
+# --- the MAX_SUBSCRIPTIONS ceiling inside `join`, and `prune_idle` is
+# --- what bounds the limiter's peer map inside `admit`.
+SubscriptionRegistry::subscriptions    call  self.subscriptions()
+IngressLimiter::prune_idle             call  self.prune_idle(now_ms)
+
+# --- stage 16 — the Claude bridge, where a reply route first has a
+# --- channel to resolve against (plan section 19).
+ReplyResolution::as_error              stage-16  reply routes arrive with the bridge
+ReplyTokenTable::new                   stage-16  reply routes arrive with the bridge
+ReplyTokenTable::mint                  stage-16  reply routes arrive with the bridge
+ReplyTokenTable::resolve               stage-16  reply routes arrive with the bridge
+ReplyTokenTable::expire                stage-16  reply routes arrive with the bridge
+ReplyTokenTable::clear                 stage-16  reply routes arrive with the bridge
+ReplyTokenTable::len                   stage-16  reply routes arrive with the bridge
+ReplyTokenTable::is_empty              stage-16  reply routes arrive with the bridge
 FrameError::to_wire                              call  error.to_wire(
 Refusal::to_wire                                 call  refusal.to_wire(
 
-# --- stage-7 -----------------------------------------------------
-SessionQueues::close                             stage-7   a leave or a session ending closes its queue, once commands exist
-SessionQueues::drain                             stage-7   the session drain command hands these to a local consumer
-SessionQueues::is_open                           stage-7   join opens a queue only when the session has none
-SessionQueues::open                              stage-7   join opens the queue, once the command exists
-MeshMessageId::as_bytes                          stage-7   the message_id_fn hands these bytes to gossipsub's MessageId
-TopicKey::as_bytes                               stage-7   read beside wire_string when the behaviour subscribes and publishes
-TopicKey::wire_string                            stage-7   becomes the gossipsub topic string when the behaviour is composed
-IngressLimiter::prune_idle                       stage-7   broadcast subscription surface, no mesh before GossipSub
-IngressLimiter::tracked_peers                    stage-7   broadcast subscription surface, no mesh before GossipSub
-ReplyResolution::as_error                        stage-7   reply routes arrive with channels
-ReplyTokenTable::clear                           stage-7   reply routes arrive with channels
-ReplyTokenTable::expire                          stage-7   reply routes arrive with channels
-ReplyTokenTable::is_empty                        stage-7   reply routes arrive with channels
-ReplyTokenTable::len                             stage-7   reply routes arrive with channels
-ReplyTokenTable::mint                            stage-7   reply routes arrive with channels
-ReplyTokenTable::new                             stage-7   reply routes arrive with channels
-ReplyTokenTable::resolve                         stage-7   reply routes arrive with channels
-SubscriptionRegistry::backend_should_subscribe   stage-7   broadcast subscription surface, no mesh before GossipSub
-SubscriptionRegistry::join                       stage-7   broadcast subscription surface, no mesh before GossipSub
-SubscriptionRegistry::leave                      stage-7   broadcast subscription surface, no mesh before GossipSub
-SubscriptionRegistry::may_publish                stage-7   broadcast subscription surface, no mesh before GossipSub
-SubscriptionRegistry::release_session            stage-7   broadcast subscription surface, no mesh before GossipSub
-SubscriptionRegistry::subscriptions              stage-7   broadcast subscription surface, no mesh before GossipSub
 
 # --- stage-8 -----------------------------------------------------
 DirectDestination::to_default                    stage-8   identifier projections used by the endpoint directory

@@ -563,12 +563,25 @@ direct wire carries the frozen binary frames instead. Marking it `active`
 would tell a consumer that an unimplemented Stage 13 shape is current
 behaviour.
 
-`common/channel-id` stays `approved`. ADR-0049 defines `active` as
-describing the **current wire**, and ChannelId addresses broadcast
-topics, which no wire carries until Stage 7. The original wording named
-the whole of `common`; flipping a schema for a wire that does not exist
-would make the status field mean "we intend to" — which is precisely
-what `approved` already means.
+`common/channel-id` stays `approved`, and Stage 7 closing did **not**
+change that. ADR-0049 defines `active` as describing the **current
+wire**, and no wire carries a ChannelId string. Stage 7 derives a topic
+from one — `sha256("interweave/topic/v1\0" ‖ channel)`, transmitted as
+the hex of that hash — and the `BroadcastMessageV1` envelope carries no
+ChannelId at all, deliberately, so that a publisher cannot assert a
+channel that disagrees with the topic it published on. Join, Leave and
+Publish are in-process commands, not wire documents.
+
+Flipping it would tell a consumer enumerating active schemas that raw
+ChannelId strings are an implemented interoperable shape. They are not:
+what crosses the wire is a hash, and the string exists only either side
+of it. This is the same reasoning that keeps `endpoints/message-received`
+approved above, for the same reason — the difference between a shape the
+project intends and a shape something transmits.
+
+The original wording named the whole of `common`, which was the mistake
+worth recording: a family-wide flip would have carried schemas whose wire
+does not exist.
 
 `endpoints/directory-response` and `endpoints/endpoint-config` likewise
 stay `approved`: the directory exchange is Stage 8, and the config shape
@@ -726,6 +739,88 @@ Under `tests/pubsub`:
 ### Exit gate
 
 Broadcast and direct semantics are independently functional and do not substitute for each other.
+
+**Met.** Every clause of the implement list is exercised over loopback TCP
+between real peers, and the frozen values are byte-compared against
+`fixtures/gossipsub/` rather than re-derived.
+
+- **Signed GossipSub, strict validation.** The behaviour is built
+  `MessageAuthenticity::Signed` with `ValidationMode::Strict` and
+  `validate_messages()`, so every message reaching the application has an
+  authenticated source and must be reported exactly once.
+  `invalid_signature_traffic_cannot_poison_the_cache_for_authentic_traffic`
+  drives a peer that signs nothing while claiming another's identity, from
+  a raw backend with validation disabled — the only way to emit what a
+  conforming node cannot.
+- **Frozen `GossipSubMessageIdV1`.** `mesh_message_id` is tested against
+  the frozen vector without a Swarm, and
+  `the_frozen_vectors_keep_two_publishers_and_two_sequences_apart` holds
+  the two inputs distinct. The application envelope ID is never an input:
+  two publishers may legitimately choose the same 128 bits.
+- **ChannelId → topic derivation.** `topic_key_v1` reproduces every frozen
+  vector, and `the_frozen_case_twin_is_a_different_topic` pins case
+  sensitivity. The reverse map is total for every topic this node
+  subscribed to, so a channel is never guessed.
+- **ADR-0029 mapping.** Reject:
+  `a_signed_but_malformed_envelope_is_reject_and_does_not_wedge_later_valid_traffic`.
+  Ignore: `an_unauthorized_publisher_is_ignored_not_delivered_and_not_relayed_further`,
+  four peers because the claim has three parts — not delivered at the
+  neighbour, not forwarded to the peer behind it, and the honest relay not
+  penalised. Accept: the same test's positive control.
+- **Join/leave and local subscription state.**
+  `the_last_leave_on_an_undesired_channel_drops_the_backend_subscription`
+  and `leaving_a_desired_channel_keeps_the_mesh_warm` are twins, each
+  failing the other's mutation;
+  `only_the_joined_session_of_two_is_delivered_to` and
+  `a_desired_channel_with_no_join_delivers_nothing_and_replays_nothing`
+  hold delivery to explicit joins.
+- **Resource and backpressure limits.** `a_broadcast_flood_does_not_wedge_the_direct_path`,
+  `a_broadcast_to_many_sessions_cannot_overrun_the_outbox`,
+  `a_full_session_queue_drops_for_that_session_and_the_mesh_still_forwards`,
+  `repeated_unreachable_publishes_cannot_grow_the_outbox` and
+  `a_final_leave_closes_the_session_queue_and_a_partial_one_does_not`.
+- **Exit gate.** `broadcast_and_direct_are_independently_functional`.
+
+**Three limits, stated because a `Met.` block that omits them is worse
+than no block.**
+
+- **The demotion layer is not isolable end to end.** `set_trust` closes a
+  demoted peer's connection, blacklists it, and updates the broadcast
+  trust copy; removing the third leaves
+  `revoking_trust_stops_broadcast_delivery` passing, which mutation
+  confirmed. The test proves the OUTCOME, not which layer produced it.
+- **A literal `(source, sequence)` cache collision is not constructible.**
+  `sequence_number` is assigned inside the backend, so no publisher
+  chooses it and the exact pair a genuine publisher will next use cannot
+  be forged from outside. What is observable — and tested — is that
+  forged traffic bearing a publisher's identity does not stop that
+  publisher's real message being delivered.
+
+  The MECHANISM that makes this hold is upstream of the cache entirely:
+  signature verification runs in the GossipSub codec's decoder, so a
+  message that fails it becomes an invalid-message event with no source
+  and no sequence number, and the behaviour that owns the duplicate cache
+  is never reached. A forgery therefore cannot occupy an entry under ANY
+  id — stronger than an ordering, and the reason the wire test cannot see
+  it. Since that is a property of a dependency's internals, no test of
+  ours can assert it and no version pin describes it:
+  `tools/checks/check_gossipsub_rejects_bad_signatures_at_decode.sh`
+  fails if an upgrade moves it.
+- **Only the Accept arm of the validation report is verified.**
+  Suppressing the report on Accept fails the four-peer control, because
+  forwarding is what reporting Accept releases; suppressing it on Reject
+  or Ignore is invisible end to end, since the unreported message occupies
+  backend cache and blocks nothing.
+
+**Deferred, with the stage that owns each.** The broadcast
+`message-received` local delivery shape, `broadcast_reachability`, and
+session-disconnect cleanup — `SubscriptionRegistry::release_session` —
+all go to **Stage 13**, the daemon and desktop IPC v2. That is where a
+client session first exists to disconnect and an admin surface first
+exists to read a counter; Stage 8 is the endpoint-directory protocol and
+has neither. `testing.md`'s reply-after-leave case goes to Stage 16 with
+the bridge: `ReplyRoute::Broadcast` needs a session field before that
+question can be asked.
 
 ## 11. Stage 8 — endpoint directory
 

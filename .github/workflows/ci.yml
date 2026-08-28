@@ -141,6 +141,11 @@ jobs:
       - name: No first-party source selects the vulnerable yamux muxer
         run: bash tools/checks/check_yamux_muxer.sh
 
+      # Also outside cargo-deny's reach: this is a property of a
+      # dependency's internals, which no version pin describes.
+      - name: GossipSub still refuses invalid signatures during decode
+        run: bash tools/checks/check_gossipsub_rejects_bad_signatures_at_decode.sh
+
       # Installed from the upstream release binary, verified by checksum,
       # rather than through a third-party action.
       #
