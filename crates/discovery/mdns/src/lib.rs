@@ -348,12 +348,21 @@ impl MdnsDiscovery {
         }
         self.seen.retain(|_, addresses| !addresses.is_empty());
         self.last_emitted.retain(|p, _| self.seen.contains_key(p));
+        // THROUGH THE COALESCING PATH, not straight onto the queue.
+        // Pushing here bypassed every bound `queue_expiry` enforces, so an
+        // unauthenticated LAN sender could announce a batch of distinct
+        // fake peers, let them lapse, and repeat with fresh identities:
+        // `seen` never exceeded MAX_PEERS because each batch aged out,
+        // while `pending` grew a batch per cycle for a consumer that was
+        // not draining.
+        //
+        // A TTL lapse and a goodbye are the same statement about the same
+        // address, so they belong on the same path — the earlier fix
+        // bounded one caller of it and left this one.
         for (peer_id, addresses) in lapsed {
-            self.pending.push(DiscoveryEvent::CandidateExpired {
-                peer_id,
-                source: SOURCE.to_owned(),
-                addresses,
-            });
+            for address in &addresses {
+                self.queue_expiry(&peer_id, address);
+            }
         }
     }
 }
@@ -439,6 +448,24 @@ mod tests {
     fn peer(s: &str) -> TransportIdentity {
         TransportIdentity::parse(s).expect("valid identity")
     }
+    /// A synthetic well-formed PeerId string. The grammar is a prefix,
+    /// an alphabet and a length with no checksum, so a generated id is as
+    /// valid to this provider as a captured one — and nothing here dials.
+    fn synthetic_peer(n: u64) -> String {
+        const B58: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+        let mut tail = [b'1'; 44];
+        let (mut v, mut i) = (n as usize, 43usize);
+        loop {
+            tail[i] = B58[v % B58.len()];
+            v /= B58.len();
+            if v == 0 || i == 0 {
+                break;
+            }
+            i -= 1;
+        }
+        format!("12D3KooW{}", core::str::from_utf8(&tail).expect("ascii"))
+    }
+
     fn started() -> MdnsDiscovery {
         let mut p = MdnsDiscovery::new();
         p.start(0).expect("starts");
@@ -906,4 +933,37 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn rotating_fake_peers_cannot_grow_the_queue_through_the_sweep() {
+        // The finding's shape: an unauthenticated LAN sender announces a
+        // batch of distinct identities, lets them lapse, and repeats with
+        // fresh ones. `seen` never exceeds MAX_PEERS because each batch
+        // ages out — but the sweep pushed straight onto `pending`, so a
+        // consumer that was not draining accumulated a batch per cycle.
+        let mut p = started();
+        let _ = p.drain_events(0, 64);
+
+        let mut now = 0u64;
+        for cycle in 0..40u64 {
+            for i in 0..8u64 {
+                p.push_discovered(
+                    &synthetic_peer(cycle * 8 + i),
+                    "/ip4/10.0.0.1/tcp/4001",
+                    now,
+                );
+            }
+            // Past the observation TTL: the whole batch lapses, and the
+            // sweep runs on the next drain-driven tick.
+            now += OBSERVATION_TTL_MS + 1;
+            p.sweep(now);
+        }
+
+        let queued = p.drain_events(now, usize::MAX);
+        assert!(
+            queued.len() <= 2 * MAX_PEERS,
+            "the queue stays bounded by what `seen` can hold, got {}",
+            queued.len()
+        );
+    }
+
 }
