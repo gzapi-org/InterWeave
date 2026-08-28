@@ -396,13 +396,25 @@ impl DirectoryCache {
         self.entries.entry(peer).insert_entry(entry).into_mut()
     }
 
-    /// Change the local cache TTL term, in ms.
+    /// Change the local cache TTL term, in ms, and RE-CLAMP existing
+    /// entries to it.
     ///
-    /// Applies to entries inserted AFTER the change; entries already held
-    /// keep the freshness they were computed with. Used when a profile
-    /// reload carries a new `directory.cache_ttl`.
+    /// Directory TTL is reloadable, so a lowered term must take effect on
+    /// entries already held, not only on future inserts — otherwise a
+    /// reload from five minutes to ten seconds would keep serving the old
+    /// entries for the original five minutes. Every deadline becomes
+    /// `min(current, received_at + new_ttl)`: a lower term shortens it, and
+    /// a higher term never EXTENDS a deadline (the entry was already
+    /// bounded by the remote's advertised ttl, which the reload cannot
+    /// widen). `lowering_the_ttl_expires_entries_already_held`.
     pub fn set_local_ttl(&mut self, local_ttl_ms: u32) {
         self.local_ttl_ms = local_ttl_ms;
+        let ttl = u64::from(local_ttl_ms);
+        for entry in self.entries.values_mut() {
+            entry.fresh_until_ms = entry
+                .fresh_until_ms
+                .min(entry.received_at_ms.saturating_add(ttl));
+        }
     }
 
     /// The fresh entry for `peer` at `now_ms`, if any.
@@ -600,6 +612,37 @@ mod tests {
         cache.insert(peer(P2), validate_response(&raw(&["b"])).expect("valid"), 0);
         assert!(cache.get(&peer(P2), 59_999).is_some());
         assert!(cache.get(&peer(P2), 60_000).is_none());
+    }
+
+    #[test]
+    fn lowering_the_ttl_expires_entries_already_held() {
+        // An entry cached with a generous 5-minute local term.
+        let mut cache = DirectoryCache::new(8, 300_000);
+        let mut r = raw(&["a"]);
+        r.ttl_ms = u32::MAX; // the remote does not constrain; the local term does
+        cache.insert(peer(P1), validate_response(&r).expect("valid"), 0);
+        assert!(cache.get(&peer(P1), 299_999).is_some());
+
+        // Reload to a 10-second term: the held entry is re-clamped and now
+        // expires at 10s, not the original 5 minutes.
+        cache.set_local_ttl(10_000);
+        assert!(cache.get(&peer(P1), 9_999).is_some());
+        assert!(
+            cache.get(&peer(P1), 10_000).is_none(),
+            "the lowered TTL applies to the entry already held"
+        );
+
+        // Raising the term back does NOT extend a live entry beyond what it
+        // already carries.
+        let mut cache = DirectoryCache::new(8, 30_000);
+        cache.insert(peer(P1), validate_response(&raw(&["a"])).expect("valid"), 0);
+        cache.set_local_ttl(300_000);
+        // raw()'s ttl_ms is 60_000, clamped to the 30s term at insert.
+        assert!(cache.get(&peer(P1), 29_999).is_some());
+        assert!(
+            cache.get(&peer(P1), 30_000).is_none(),
+            "a raised term does not extend an entry already bounded"
+        );
     }
 
     #[test]
