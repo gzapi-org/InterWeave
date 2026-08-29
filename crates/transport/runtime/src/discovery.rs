@@ -567,6 +567,9 @@ impl CandidateSet {
         }
 
         let entry = self.peers.entry(candidate.peer_id.clone()).or_default();
+        // Displacements are counted locally — the stats live on `self`,
+        // which the entry borrow holds — and added once it ends.
+        let mut displaced_here = 0u64;
 
         // THE THRESHOLD LIVES HERE NOW, not on the records. Applied
         // evidence raises it; nothing that removes a record can lower it,
@@ -644,6 +647,7 @@ impl CandidateSet {
                 match victim {
                     Some(addr) => {
                         entry.addresses.remove(&addr);
+                        displaced_here += 1;
                     }
                     // Every slot is already pinned: the bound is the
                     // bound, and configuration cannot grow it.
@@ -697,6 +701,7 @@ impl CandidateSet {
                     match victim {
                         Some(i) => {
                             records.remove(i);
+                            displaced_here += 1;
                         }
                         None => continue,
                     }
@@ -762,6 +767,7 @@ impl CandidateSet {
                 match victim {
                     Some(k) => {
                         entry.observations.remove(&k);
+                        displaced_here += 1;
                     }
                     None => continue,
                 }
@@ -800,7 +806,9 @@ impl CandidateSet {
         // to `len()` and as "expired, evict first" to overflow, and that
         // the next change would have tripped over. Removing it here also
         // spills its thresholds, which stranding silently kept.
-        if entry.addresses.is_empty() {
+        let emptied = entry.addresses.is_empty();
+        self.overflow.displaced += displaced_here;
+        if emptied {
             self.remove_entry(&candidate.peer_id);
         }
     }
@@ -1025,6 +1033,10 @@ pub struct OverflowStats {
     pub evicted: u64,
     /// Candidates refused because nothing could be evicted for them.
     pub refused: u64,
+    /// Live routes, records, or facts displaced within a peer by pinned
+    /// pressure — the sub-candidate caps' authority loss, which was
+    /// silent while only whole-candidate outcomes were counted.
+    pub displaced: u64,
 }
 
 /// Composes providers and owns the merged candidate set.
@@ -4992,6 +5004,93 @@ mod tests {
                 .any(|(proto, _)| proto.as_str() == "/interweave/direct/2.0.0"),
             "an unpinned newcomer is refused at the bound, not admitted by \
              displacing another unpinned fact"
+        );
+    }
+    #[test]
+    fn displacement_is_counted_at_all_three_sub_candidate_caps() {
+        // DESIGN.md: eviction is diagnostic, not silent authority loss.
+        // The whole-candidate outcomes were counted; displacing a live
+        // route, record, or fact WITHIN a peer was not, so pinned
+        // pressure could reshape reachability with nothing for an
+        // operator to look at.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+
+        // Door 7: a pinned address displaces an unpinned address key.
+        let p7 = identity(95);
+        let mut pinned = for_id(&p7, "static", "/ip4/10.0.0.1/tcp/1", 4_000, None);
+        for i in 2..=15 {
+            pinned.addresses.insert(format!("/ip4/10.0.0.{i}/tcp/{i}"));
+        }
+        set.observe(&pinned, 4_000, &trust, false, true);
+        set.observe(
+            &for_id(&p7, "mdns", "/ip4/10.9.9.9/tcp/9", 6_000, Some(u64::MAX)),
+            6_000,
+            &trust,
+            true,
+            false,
+        );
+        set.observe(
+            &for_id(&p7, "static", "/ip4/10.0.0.16/tcp/16", 7_000, None),
+            7_000,
+            &trust,
+            false,
+            true,
+        );
+        assert_eq!(set.overflow_stats().displaced, 1, "door 7 counted");
+
+        // Door 8: a pinned source displaces a provenance record.
+        let p8 = identity(96);
+        let addr = "/ip4/10.0.0.1/tcp/1";
+        for i in 0..7 {
+            set.observe(
+                &for_id(&p8, &format!("static-{i}"), addr, 500, None),
+                500,
+                &trust,
+                false,
+                true,
+            );
+        }
+        set.observe(
+            &for_id(&p8, "mdns", addr, 6_000, Some(u64::MAX)),
+            6_000,
+            &trust,
+            true,
+            false,
+        );
+        set.observe(
+            &for_id(&p8, "static-7", addr, 7_000, None),
+            7_000,
+            &trust,
+            false,
+            true,
+        );
+        assert_eq!(set.overflow_stats().displaced, 2, "door 8 counted");
+
+        // The fact cap: a pinned source's fact displaces an unpinned one.
+        let p9 = identity(97);
+        let mut facts = for_id(&p9, "mdns", addr, 100, Some(u64::MAX));
+        for i in 0..MAX_OBSERVATIONS_PER_PEER {
+            facts.protocol_observations.insert(ProtocolObservation {
+                protocol_id: ProtocolId::parse(format!("/interweave/p{i}/1.0.0")).expect("valid"),
+                supported: true,
+                observed_at: 100 + i as u64,
+            });
+        }
+        set.observe(&facts, 100, &trust, true, false);
+        let mut pf = for_id(&p9, "static", "/ip4/10.0.0.2/tcp/2", 500, None);
+        pf.protocol_observations.insert(ProtocolObservation {
+            protocol_id: ProtocolId::parse("/interweave/direct/2.0.0").expect("valid"),
+            supported: true,
+            observed_at: 500,
+        });
+        set.observe(&pf, 500, &trust, false, true);
+        assert_eq!(set.overflow_stats().displaced, 3, "the fact cap counted");
+
+        assert_eq!(
+            set.overflow_stats().evicted + set.overflow_stats().refused,
+            0,
+            "and nothing here was a whole-candidate outcome"
         );
     }
 }
