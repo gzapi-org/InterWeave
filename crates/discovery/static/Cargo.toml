@@ -26,3 +26,8 @@ workspace = true
 [dependencies]
 interweave-discovery-api = { path = "../../api/discovery-api" }
 interweave-transport-api = { path = "../../api/transport-api" }
+
+[dev-dependencies]
+# Synthetic test identities are built from BYTES, since `parse` decodes
+# the base58btc and checks the multihash. Test-only.
+bs58 = { workspace = true }

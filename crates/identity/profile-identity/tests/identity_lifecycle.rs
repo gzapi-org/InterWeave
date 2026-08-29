@@ -876,3 +876,49 @@ fn a_restore_into_an_empty_profile_is_a_creation() {
             .exists()
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_key_path_is_refused_not_followed() {
+    // `exists` and the permission check both follow links, so a link
+    // pointing at another account's mode-0600 file passed both and the
+    // key was read from wherever it pointed.
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let elsewhere = dir.path().join("elsewhere.key");
+    std::fs::write(&elsewhere, b"not a key").expect("target exists");
+    std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o600))
+        .expect("owner-only target");
+
+    let link = dir.path().join("identity.key");
+    std::os::unix::fs::symlink(&elsewhere, &link).expect("link created");
+
+    assert!(
+        matches!(ProfileIdentity::load(&link), Err(IdentityError::NotAFile)),
+        "a symlinked key path is refused rather than followed"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_oversized_key_file_is_refused_before_it_is_read() {
+    // `read` sized its buffer from the file, so a local oversized file
+    // could exhaust memory before the decoder rejected it. Nothing
+    // legitimate approaches the ceiling: a protobuf Ed25519 keypair is
+    // well under a hundred bytes.
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("identity.key");
+    std::fs::write(&path, vec![0u8; 64 * 1024]).expect("oversized file");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("owner-only");
+
+    match ProfileIdentity::load(&path) {
+        Err(IdentityError::Corrupt(detail)) => assert!(
+            detail.contains("maximum"),
+            "the refusal names the ceiling: {detail}"
+        ),
+        other => panic!("an oversized key file must be refused: {other:?}"),
+    }
+}

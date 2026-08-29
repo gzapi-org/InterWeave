@@ -140,9 +140,21 @@ pub(super) fn handle_command(
                     // SUBSCRIBE AFTER the registry accepted the set, so a
                     // refused configuration leaves the mesh untouched
                     // rather than half-applied.
+                    // PARTIAL BY CONTRACT, AND REPORTED. A refused
+                    // subscription cannot be rolled back across the whole
+                    // set without unsubscribing channels live sessions
+                    // still hold, so the configuration is applied as far
+                    // as the backend allows and the caller is told which
+                    // channel failed. Silence here reported a
+                    // configuration that the mesh had not accepted.
+                    let mut refused: Option<interweave_transport_api::ChannelId> = None;
                     for channel in &config.desired {
                         let topic = broadcast_state.remember(channel);
-                        let _ = swarm.subscribe_topic(&topic);
+                        if swarm.subscribe_topic(&topic).is_err() {
+                            broadcast_state.forget(channel);
+                            refused = Some(channel.clone());
+                            break;
+                        }
                     }
 
                     // AND DROP WHAT IS NO LONGER HELD. Subscribing to the
@@ -161,11 +173,22 @@ pub(super) fn handle_command(
                         broadcast_state.channels.values().cloned().collect();
                     for channel in held {
                         if !broadcast_state.subs.backend_should_subscribe(&channel) {
+                            // `unsubscribe_topic` returns whether this
+                            // node WAS subscribed, not whether the call
+                            // failed — it cannot fail — so discarding it
+                            // states nothing about the mesh. Unlike the
+                            // subscribe above, there is no divergence to
+                            // guard against here.
                             let topic = broadcast_state.forget(&channel);
                             let _ = swarm.unsubscribe_topic(&topic);
                         }
                     }
-                    let _ = reply.send(Ok(()));
+                    let _ = match refused {
+                        Some(channel) => reply.send(Err(format!(
+                            "the mesh refused {channel:?}; the configuration is applied only up to it"
+                        ))),
+                        None => reply.send(Ok(())),
+                    };
                 }
                 Err(denial) => {
                     let _ = reply.send(Err(format!("{denial:?}")));
@@ -179,6 +202,24 @@ pub(super) fn handle_command(
         } => {
             match broadcast_state.subs.join(channel.clone(), session.clone()) {
                 Ok(()) => {
+                    // THE BACKEND DECIDES BEFORE THE SESSION IS TOLD.
+                    // Discarding this result reported a join that opened
+                    // a queue, registered the channel and permitted local
+                    // publishing while GossipSub was not subscribed — the
+                    // application then missed inbound traffic with every
+                    // local view saying the join had succeeded.
+                    let topic = broadcast_state.remember(&channel);
+                    if swarm.subscribe_topic(&topic).is_err() {
+                        // Roll back to the state before the join: the
+                        // registry entry, and the topic name if no other
+                        // session still holds the channel.
+                        broadcast_state.subs.leave(&channel, &session);
+                        if !broadcast_state.subs.backend_should_subscribe(&channel) {
+                            broadcast_state.forget(&channel);
+                        }
+                        let _ = reply.send(Err(DirectError::Overloaded));
+                        return;
+                    }
                     // The queue is opened by the JOIN, which is what
                     // bounds the key set by local state rather than by
                     // anything a remote peer names.
@@ -187,8 +228,6 @@ pub(super) fn handle_command(
                             .queues
                             .open(session, broadcast_state.queue_bound);
                     }
-                    let topic = broadcast_state.remember(&channel);
-                    let _ = swarm.subscribe_topic(&topic);
                     let _ = reply.send(Ok(()));
                 }
                 Err(_) => {

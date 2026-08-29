@@ -239,7 +239,7 @@ Important properties:
 - results are advisory and short-lived;
 - a caller may send to an out-of-band EndpointId without first querying the directory;
 - directory support is not required for endpoint-addressed delivery itself;
-- directory requests are rate/concurrency bounded independently of direct-message requests;
+- directory requests are rate/concurrency bounded independently of direct-message requests. The per-peer rate is a **pre-trust** budget: it is charged for every syntactically valid query that reaches the handler, refused ones included, because an infrastructure-only connection can open a directory substream and the in-flight bound caps concurrency rather than frequency. An allowance granted to a peer already found data-plane trusted is a separate concept and is not this one;
 - remote directory data is validated before cache/tool/UI use: >32 entries, invalid EndpointId grammar, or duplicates are `ProtocolViolation`; valid unsorted unique lists are sorted locally; `ttl_ms` is clamped to the local/hard 5-minute ceiling and freshness starts at local receipt, while `generated_at_ms` is diagnostic only.
 - `advertise: false` controls directory listing only; if such an endpoint is selected explicitly or as the profile default and accepts a direct message, normal direct-protocol routing metadata/acceptance may reveal that route to the communicating peer.
 

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:interweave:schemas:common:peer-id",
   "title": "Transport PeerId",
-  "description": "A libp2p PeerId in its canonical string form. One profile owns exactly one persistent PeerId (ADR-0030); it is the only cryptographic identity in the transport. EndpointId is a routing selector beneath it and is never an identity.",
+  "description": "A libp2p PeerId in its canonical string form. One profile owns exactly one persistent PeerId (ADR-0030); it is the only cryptographic identity in the transport. EndpointId is a routing selector beneath it and is never an identity. The pattern below is NECESSARY BUT NOT SUFFICIENT: the 44 tail characters are a base58btc number whose bytes have a fixed structure — an identity multihash wrapping a libp2p Ed25519 public-key protobuf for the 12D3KooW form, a sha2-256 multihash for the Qm form — and most strings the pattern admits decode to neither. A JSON Schema matches text and cannot express the decode, so an implementation must perform it; validating the pattern alone accepts values every libp2p parser rejects.",
   "type": "string",
   "pattern": "^(12D3KooW[1-9A-HJ-NP-Za-km-z]{44}|Qm[1-9A-HJ-NP-Za-km-z]{44})$",
   "examples": ["12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN"],

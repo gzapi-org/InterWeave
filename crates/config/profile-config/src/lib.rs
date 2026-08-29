@@ -2493,10 +2493,12 @@ mod tests {
 
     #[test]
     fn a_widening_subset_names_the_offending_peer() {
-        let stranger = peer(&format!(
-            "12D3KooW{}",
-            "Stranger".to_owned() + &"z".repeat(36)
-        ));
+        // From bytes: `TransportIdentity::parse` decodes and checks the
+        // multihash, so a readable tail is not a peer id.
+        let mut bytes = [0_u8; 38];
+        bytes[..6].copy_from_slice(&[0x00, 0x24, 0x08, 0x01, 0x12, 0x20]);
+        bytes[6..14].copy_from_slice(&0x5747_414e_4552_5453_u64.to_be_bytes());
+        let stranger = peer(&bs58::encode(bytes).into_string());
         let mut e = endpoint("human");
         e.inbound = EndpointTrustPolicy::StaticSubset {
             allowed_peers: [peer(P1), stranger.clone()].into_iter().collect(),

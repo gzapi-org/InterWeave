@@ -41,6 +41,7 @@ Rules:
 - direct transport metadata is authoritative for `source_peer` and peer-asserted `source_endpoint`; any conflicting application `from_endpoint` is ignored for routing/authority;
 - on broadcast, `from_endpoint` is an explicitly **unauthenticated display hint** because transport broadcast origin is PeerId-only;
 - unknown fields are ignored for forward compatibility within v2 bounds;
+- **a member name that appears more than once in any object makes the envelope malformed**, including inside a field this version does not model. JSON permits the duplicate and does not say which copy wins; implementations take the first, the last, or refuse. A sender controls both copies, so any rule that picks one lets the same bytes mean different things to a person's client and to whatever logs, filters or bridges them — and an ambiguity parked inside an ignored field is ambiguous for the later version that reads it, whose only chance to refuse it was this one. Refusal is the only rule under which every reader agrees. JSON Schema validates a parsed document and cannot express this, so it is stated here and enforced by the decoder;
 - attachments, edits, reactions, typing indicators, delivery/read receipts, and multi-device sync are not part of HumanChatV2.
 
 A later richer chat protocol can version independently of transport.
