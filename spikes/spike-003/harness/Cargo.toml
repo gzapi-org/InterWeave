@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# SPIKE-003 harness — EVIDENCE ONLY, and deliberately not a workspace
+# member. Nothing depends on it, and its results reach production as
+# permanent tests rather than as code (CLAUDE.md §4, spikes/README.md).
+#
+# Staying outside the workspace is what keeps `kad` off the production
+# feature list. Cargo unifies features across one build of one
+# workspace, so as a member this harness would switch Kademlia on inside
+# `interweave-transport-libp2p` — undoing CLAUDE.md §3's "absent from
+# the feature list rather than merely unused", and doing it invisibly,
+# because nothing in the production crate would have changed. That rule
+# is the whole reason this spike runs BEFORE Stage 10 rather than during
+# it.
+#
+# An EMPTY workspace table is what keeps it out: the package is its own
+# workspace root, so it is never built by `cargo xtask ci`, never enters
+# the root `Cargo.lock`, and is one deliberate `path =` away from
+# production rather than one accident away.
+[workspace]
+
+[package]
+name = "spike-003-harness"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+# PINNED TO WHAT THE PRODUCT RESOLVES, with the lock committed beside
+# it. `kad` is the one spike-only FEATURE; every version below is the
+# one the root Cargo.lock resolves today. A floating "0.56" resolves a
+# later patch, and half of what this spike records — implicit bootstrap
+# on routing insertion, mode advertisement, query event ordering — is
+# exactly what a patch release may change. A result that cannot be
+# rebuilt is not evidence.
+libp2p = { version = "=0.56.0", default-features = false, features = [
+    "tcp",
+    "noise",
+    "yamux",
+    "identify",
+    "tokio",
+    "macros",
+    "ed25519",
+    "kad",
+] }
+tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+futures = "=0.3.34"
+sha2 = "=0.10.9"
+
+# THE PRODUCTION DIAL GATE, by path and on purpose. The question this
+# spike exists to answer is whether Kademlia-originated dials are
+# subject to the root admission, and measuring a copy of the gate would
+# measure a copy. The dependency runs spike -> product, which is the
+# direction CLAUDE.md §4 permits; the reverse is what it forbids.
+interweave-transport-libp2p = { path = "../../../crates/transport/libp2p" }
+interweave-transport-runtime = { path = "../../../crates/transport/runtime" }
+interweave-transport-api = { path = "../../../crates/api/transport-api" }
+interweave-trust-api = { path = "../../../crates/api/trust-api" }

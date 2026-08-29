@@ -1,5 +1,107 @@
-# SPIKE-003
+# SPIKE-003 — Kademlia integration validation
 
-Kademlia implementation/security/performance evidence.
+**Status: PASS**, with six findings that change how Stage 10 must be written — one of which says Stage 10 cannot begin by enabling the feature.
 
-Do not treat experiments placed here as production implementation. Evidence and final decision must be recorded against [`architecture/roadmap/SPIKES.md`](../../architecture/roadmap/SPIKES.md).
+Authoritative objective, evidence requirements, and decision gate live in [`architecture/roadmap/SPIKES.md`](../../architecture/roadmap/SPIKES.md); this file records what was actually observed.
+
+Do not treat the experiment in [`harness/`](./harness) as production implementation. It is deliberately outside the workspace — an empty `[workspace]` table in its manifest — so it cannot be built by `cargo xtask ci`, cannot enter the root `Cargo.lock`, and cannot become a production dependency by a stray `path =`.
+
+**That isolation is what keeps `kad` off the production feature list.** Cargo unifies features across one build of one workspace, so as a member this harness would switch Kademlia on inside `interweave-transport-libp2p` — undoing CLAUDE.md §3's "absent from the feature list rather than merely unused", and doing it with nothing in the production crate having changed. That rule is the whole reason this spike runs *before* Stage 10 rather than during it.
+
+## What was pinned
+
+```text
+libp2p =0.56.0   features: tcp, noise, yamux, identify, tokio, macros,
+                           ed25519, kad
+tokio  =1.53.1   futures =0.3.34   sha2 =0.10.9
+```
+
+Every version is the one the root `Cargo.lock` resolves; `kad` is the only spike-only *feature*. The lock is committed, because half of what is recorded below is `libp2p-kad`'s own behaviour — an implicit bootstrap on routing insertion, protocol withdrawal on a mode change, what `BucketInserts::Manual` does and does not do — and every one of those is a patch-release-visible detail that Stage 10 is built on.
+
+The harness uses the **production dial gate and the production connection policy by path**: `interweave-transport-libp2p`, `interweave-transport-runtime`, `interweave-transport-api`, `interweave-trust-api`. The dependency runs spike → product, which is the direction CLAUDE.md §4 permits. Measuring a copy of the gate would have measured a copy.
+
+## How the dial measurement is honest
+
+The brief forbids inferring behaviour-originated dial volume from the absence of ordinary scheduler calls. `SwarmEvent::Dialing` cannot answer the question either: it says a dial happened, not who asked for it, and a `ToSwarm::Dial` from Kademlia is indistinguishable there from one the application made.
+
+libp2p routes **every** dial through `NetworkBehaviour::handle_pending_outbound_connection`, synchronously inside `Swarm::dial` — which is the hook the production `OutboundAdmission` already uses. The harness's `InstrumentedGate` is that hook with counters, in the same first position in the behaviour struct. A dial arriving there with no registered admission ticket is behaviour-originated *by construction*, not by inference.
+
+It runs in two modes, and both are measured:
+
+- **`DenyUnadmitted`** — what production does today: refuse any dial without a root admission ticket.
+- **`PolicyAdmit`** — the Stage 10 proposal: hand the dial to the real `PolicySnapshot::admit` under `DialOrigin::KademliaQuery`, so trust, per-peer backoff, drain state and the limits all apply.
+
+Measuring only the first would say the gate refuses everything; measuring only the second would say nothing about what ships now.
+
+## What was observed
+
+87 assertions across 17 experiments, two consecutive clean runs. The harness exits non-zero when any required observation is false, so `cargo run` cannot report success while its own output disproves the record.
+
+**Namespace (K1).** The published golden vector reproduces exactly: `network_id: example-private-network` → `ssbtblqj7mexczivog5qfbfjvi` → `/interweave/kad/1.0.0/ssbtblqj7mexczivog5qfbfjvi`. The derivation is implemented from the specification text rather than from a shared helper, so a derivation that merely agrees with itself could not pass. The 26-character unpadded base32 tag is a valid `libp2p::StreamProtocol`, and the `^[a-z0-9][a-z0-9._-]{0,63}$` grammar accepts and refuses what the spec says it should.
+
+**Silence when absent (K2).** A node built without the behaviour advertises no Kademlia protocol, originates no dial, and runs no query — against a server-mode control in the same run that advertises the derived protocol, so the negative is a fact about the node and not about the topology.
+
+**Manual bucket inserts (K3).** An authenticated, identified connection puts **nobody** in the routing table. One explicit `add_address` on the same peer over the same connection does, and is reported as a routing update.
+
+**Modes (K4).** A server advertises the derived protocol; a client does not, so a client is not a routing target. A client-mode node still runs a query to completion.
+
+**Bootstrap (K5).** `bootstrap()` on an empty routing table returns `NoKnownPeers`, and succeeds and completes once one peer is known.
+
+**Behaviour dials, gated as production gates them today (K6).** A three-node walk where the asker knows only the router, and the router knows the target: the query originates a dial the application never requested, aimed at the peer the walk is walking toward, and **today's gate refuses every one of them**. No connection is established — and the refusal is what prevents it, not the topology, because the same walk under `PolicyAdmit` (K7) reaches the peer through a behaviour dial the policy admitted.
+
+**Trust (K8).** The same walk with the target *not* in the asker's trust policy: the router returns it, the query tries to dial it, the gate refuses with `unauthorized`, and the asker never dials it. A malicious trusted router cannot cause a connection to an unauthorized peer by placing it in a response.
+
+**Backoff and drain (K9).** A peer put into backoff through the *production* `ConnectionPolicy::record_address_failure` — nothing about Kademlia is told — has its Kademlia dials refused for `peer backoff`. A draining node refuses them as `shutting down`.
+
+**Records (K10).** `PUT_VALUE` and `ADD_PROVIDER` arrive at the receiver, are counted as inbound requests, and store nothing: zero records, zero provider records. `StoreInserts::FilterBoth` is what does it.
+
+**Exploration and convergence (K11, K17).** A ten-node line seeded one-deep expands to full routing coverage under random exploration. Twenty nodes seeded in a star at a single hub converge to 19/19 routing entries each within five rounds, ~60s of wall clock on one machine, with no routing table exceeding its bound and 220–231 behaviour dials passing the gate in the run.
+
+**Project exploration rules (K12).** Effective target, no-progress backoff and saturation are project logic, not library behaviour. Implemented as a state machine over the signal the library actually provides: the delay doubles per no-progress round and caps at 15 minutes, saturation needs three consecutive no-progress rounds *and* a usable peer *and* no targetable observation outside the routing set, progress resets it, and a trust or seed change invalidates it. `effective_target(64, 256, 2) == 2` is what stops a three-peer overlay being permanently degraded by a default of 64.
+
+**Capability observation (K13).** A server on *this* `network_id` is observed advertising the exact protocol; a server on a different `network_id` is not — the hash is genuinely part of the evidence. A node dropped to client mode stops advertising the server protocol, and the fresh Identify exchange **replaces** the observation rather than merging it.
+
+**Snapshot (K15).** Every `SnapshotResult` field the driver port specifies is computable from the real API, and every one is a scalar or a fixed-width tag: no routing dump, no peer list, no payload.
+
+**Disjoint paths (K16).** With `parallelism = 3` and disjoint paths enabled, a single query contacts five routers rather than one.
+
+**Stale routing response (K18).** A router holding a real trusted peer at a dead address hands it over; the asker dials it and the dial fails. Fed to the production policy the way the runtime would, that address-scoped failure does **not** advance peer backoff, and the known-good route to the same peer stays dialable.
+
+## Findings that constrain Stage 10
+
+**F1 — Stage 10 cannot begin by enabling the feature.** The production `OutboundAdmission` refuses every dial carrying no root admission ticket, and every Kademlia query dial carries none. Turning `kad` on without extending the gate produces a subsystem whose every query dies at the first hop it does not already have a connection for — silently, since a refused behaviour dial surfaces as an ordinary dial failure. The gate must learn to admit a behaviour-originated dial *through* `PolicySnapshot::admit` under `DialOrigin::KademliaQuery`, which is what `InstrumentedGate`'s `PolicyAdmit` mode prototypes. That mode is a **proposal measured in the harness, not production code**.
+
+**F2 — A routing insertion starts one query nobody asked for.** `add_address` on a previously-empty routing table produced exactly one `OutboundQueryProgressed` for a query the caller never started, on every run. The design already anticipated this ("any automatic bootstrap triggered by the selected rust-libp2p version on routing-table insertion must be measured and counted"); it is real, it is one query per transition, and it **dials**. Two consequences: the provider's query budget must account for it, and any code that installs policy *after* seeding will install it after the dial it meant to govern. Both experiments that measure a gated dial had to seed and query in that order to observe anything, which is the same trap the implementation will hit.
+
+**F3 — Under `BucketInserts::Manual`, a seed node routes nobody, and a star does not converge.** The first run of the twenty-node experiment measured total non-convergence: every spoke had one routing entry and the hub had zero, because inbound connections insert nobody and the hub therefore answered every query with an empty list. The admission pipeline must treat an **inbound** connection's Identify observation as a candidate — peer, its reported listen addresses, and the exact advertised server protocol — not only the peers a query returns. `kademlia-integration.md` §7 describes the pipeline but reads as an outbound story; the inbound direction is what a bootstrap node lives on.
+
+**F4 — A query result cannot distinguish a lying router from a peer that is down.** `GetClosestPeers` does not report a peer whose only address fails to connect, so "the router handed over a poisoned address" and "the peer moved" look identical in the result set. The diagnostic must come from the dial outcome, which is where the address is named — and it is why K18 asserts on the dial error rather than the query result.
+
+**F5 — Capability evidence is withdrawn, not merely aged out.** A mode change removes the advertised protocol from the very next Identify exchange. The cache must therefore *replace* an observation on fresh evidence rather than union it, and negative evidence must be able to overwrite positive evidence before the TTL expires.
+
+**F6 — `network_id` separation holds at the protocol level.** Two nodes on the same crate and version, differing only in `network_id`, advertise different protocols and do not mix. Positive capability evidence keyed to the exact wire major and network hash is implementable as specified.
+
+## Stated limits
+
+These are the things this spike did **not** establish, recorded so no future reader mistakes its silence for a result.
+
+- **No adversary.** K16 measures query path **width** — five routers contacted rather than one. Reduced single-path capture is a claim about an adversary controlling a subset of routers, and this harness has none. Disjoint paths is not shown to resist anything; it is shown to be configurable and to widen the walk.
+- **No hostile *protocol* peer.** K8, K10 and K18 model a peer that returns unauthorized peers, writes records, and hands over dead addresses. None models a peer that violates the Kademlia wire format itself.
+- **One machine, loopback only.** No NAT, no latency, no loss, no interface change. The twenty-node convergence figure is a convergence *shape*, not a deployment number.
+- **Server-mode reachability evidence is not consumed.** The design requires AutoNAT-verified direct reachability or an active relay reservation as strong evidence before a node advertises server mode. AutoNAT and Relay are absent from the feature list — SPIKE-004 is where they arrive — so this spike **cannot** validate that rule, and Stage 10 must not treat it as validated. A node here advertises server mode because it was configured to.
+- **The exploration rules are validated as logic, not as deployment behaviour.** K12 exercises the state machine over synthetic rounds. Whether three no-progress rounds is the right threshold on a real network is not a question a five-node loopback topology can answer.
+- **`PolicyAdmit` is a prototype.** It demonstrates that the production policy *can* decide a behaviour dial and that its answers reach the library correctly. It is not the production gate, has not been reviewed as one, and Stage 10 owns writing it.
+
+## Reproducing
+
+```
+cd spikes/spike-003/harness
+cargo run
+```
+
+Around six minutes, mostly waiting on real socket timeouts and query settling. Exit code 0 means every required observation held; non-zero prints which did not.
+
+Two mutations confirm the assertions are load-bearing rather than agreeing with the code for free:
+
+- making the gate admit every behaviour dial unconditionally fails K8.3, K8.4, K9.2 and K9.3 — the trust and backoff refusals;
+- setting `StoreInserts::Unfiltered` and `BucketInserts::OnConnected` fails K3.2, K5.1, K10.3, K11.2 and the K18 block.
