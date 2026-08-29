@@ -621,6 +621,16 @@ pub const MAX_ENDPOINTS: usize = 64;
 /// `config.schema.yaml`: `providers: list[ProviderConfig, max=16]`.
 pub const MAX_DISCOVERY_PROVIDERS: usize = 16;
 
+/// The peer cache's frozen ceiling on retained peers.
+///
+/// Mirrored rather than imported: `interweave-discovery-cache` is a
+/// provider implementation that reads and writes files, and a
+/// configuration crate depending on it to learn one number would invert
+/// the layering. A test asserts this equals
+/// `interweave_discovery_cache::limits::MAX_PEERS`, through a
+/// dev-dependency, so the mirror cannot drift without failing.
+pub const CACHE_MAX_PEERS: usize = 1_024;
+
 /// `config.schema.yaml`: `seed_sources: list[enum[...], max=3]`.
 pub const MAX_KADEMLIA_SEED_SOURCES: usize = 3;
 
@@ -2145,16 +2155,20 @@ impl ProfileConfig {
                         Ok(_) => {}
                     }
                 }
-                // The same rule one field over, which the builder also
-                // enforces and the review did not name: a cache holding
-                // zero peers is the same misconfiguration wearing a
-                // different word. No upper bound here — the schema states
-                // none, and the cache's own ceiling is its to apply.
-                if entry.config.max_entries == Some(0) {
+                // BOTH ENDS, because `CacheLimitsBuilder::build` refuses
+                // both and a profile that cannot build the cache is not a
+                // valid profile. I argued the other way for the ceiling
+                // one round earlier — that the schema states no maximum
+                // and the cache's limit is its own to apply — and the
+                // distinction from zero was arbitrary: the reason to
+                // check either is that the cache will refuse it, and it
+                // refuses both.
+                if let Some(max_entries) = entry.config.max_entries
+                    && (max_entries == 0 || max_entries as usize > CACHE_MAX_PEERS)
+                {
                     errors.push(ConfigError::InvalidCacheSetting {
                         field: "max_entries",
-                        reason: "must be greater than zero; the cache would hold nothing"
-                            .to_owned(),
+                        reason: format!("must be 1..={CACHE_MAX_PEERS}, got {max_entries}"),
                     });
                 }
             }
@@ -3992,5 +4006,64 @@ mod tests {
         // The control: dropping the ceiling must not drop the bound.
         assert!(parse_duration_ms_u64("999999999999999999999d").is_err());
         assert!(parse_duration_ms_u64(&format!("{}d", u64::MAX)).is_err());
+    }
+    #[test]
+    fn the_mirrored_cache_ceiling_matches_the_cache() {
+        // The drift check that makes mirroring the constant honest. If
+        // the cache's frozen limit moves, this fails rather than the
+        // profile quietly accepting something the cache will refuse.
+        assert_eq!(
+            CACHE_MAX_PEERS,
+            interweave_discovery_cache::limits::MAX_PEERS,
+            "the mirrored ceiling must equal the cache's own"
+        );
+    }
+
+    #[test]
+    fn max_entries_is_refused_at_both_ends() {
+        for value in [0u32, CACHE_MAX_PEERS as u32 + 1, 100_000] {
+            let json = serde_json::json!({
+                "providers": [{
+                    "type": "peer-cache",
+                    "enabled": true,
+                    "priority": 10,
+                    "config": { "max_entries": value }
+                }]
+            });
+            let mut profile = config(vec![endpoint("chat")]);
+            profile.discovery = serde_json::from_value(json).expect("parses");
+            assert!(
+                profile.validate().iter().any(|e| matches!(
+                    e,
+                    ConfigError::InvalidCacheSetting { field, .. } if *field == "max_entries"
+                )),
+                "max_entries {value} is outside what the cache will build"
+            );
+        }
+    }
+
+    #[test]
+    fn max_entries_at_the_ceiling_is_accepted() {
+        // The control, including the boundary itself: the cache builds at
+        // exactly its maximum, so validation must not refuse it.
+        for value in [1u32, 512, CACHE_MAX_PEERS as u32] {
+            let json = serde_json::json!({
+                "providers": [{
+                    "type": "peer-cache",
+                    "enabled": true,
+                    "priority": 10,
+                    "config": { "max_entries": value }
+                }]
+            });
+            let mut profile = config(vec![endpoint("chat")]);
+            profile.discovery = serde_json::from_value(json).expect("parses");
+            assert!(
+                !profile
+                    .validate()
+                    .iter()
+                    .any(|e| matches!(e, ConfigError::InvalidCacheSetting { .. })),
+                "max_entries {value} is buildable and must be accepted"
+            );
+        }
     }
 }

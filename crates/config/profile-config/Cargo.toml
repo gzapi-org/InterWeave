@@ -34,5 +34,9 @@ interweave-trust-api = { path = "../../api/trust-api" }
 serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
+# For one assertion only: that `CACHE_MAX_PEERS` still equals the cache's
+# own frozen limit. A dev-dependency keeps the mirror honest without
+# making a configuration crate depend on a provider implementation.
+interweave-discovery-cache = { path = "../../discovery/cache" }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

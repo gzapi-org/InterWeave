@@ -1712,6 +1712,7 @@ name = "interweave-profile-config"
 version = "0.0.0"
 dependencies = [
  "interweave-discovery-api",
+ "interweave-discovery-cache",
  "interweave-transport-api",
  "interweave-trust-api",
  "serde",
