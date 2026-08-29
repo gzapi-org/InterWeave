@@ -147,6 +147,24 @@ impl MdnsDiscovery {
             return false;
         }
 
+        // A DEAD ENTRY IS NOT AN OCCUPIED ONE. `seen` holds records until
+        // `sweep` runs, and `sweep` runs on drain — so an announcement
+        // arriving after the TTL but before the next drain met a map full
+        // of peers that had already lapsed, and was refused. The drain
+        // afterwards clears them but cannot recover the announcement,
+        // which for mDNS is one shot: nothing repeats it until the peer
+        // announces again.
+        //
+        // Same rule as the manager's address and observation caps, and
+        // the third place it was needed. Pruning here rather than
+        // depending on drain ordering makes both caps mean "records that
+        // have not lapsed", which is what they were always read as.
+        self.seen.retain(|_, addresses| {
+            addresses.retain(|_, expires_at| now_ms < *expires_at);
+            !addresses.is_empty()
+        });
+        self.last_emitted.retain(|p, _| self.seen.contains_key(p));
+
         let known = self.seen.contains_key(&peer_id);
         if !known && self.seen.len() >= MAX_PEERS {
             return false;
@@ -1149,6 +1167,56 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, DiscoveryEvent::HealthChanged { .. })),
             "the health transition is still delivered"
+        );
+    }
+    #[test]
+    fn a_lapsed_peer_map_does_not_reject_a_new_announcement() {
+        // `sweep` runs on drain, so an announcement arriving after the
+        // TTL but before the next drain met a map full of peers that had
+        // already lapsed. For mDNS the refusal is final: nothing repeats
+        // the announcement until that peer announces again.
+        let mut p = started();
+        for i in 0..MAX_PEERS as u64 {
+            p.push_discovered(&synthetic_peer(i), "/ip4/10.0.0.1/tcp/4001", 0);
+        }
+        let _ = p.drain_events(0, usize::MAX);
+
+        // Past every one of those lifetimes, with no drain in between.
+        let late = OBSERVATION_TTL_MS + 1;
+        let newcomer = synthetic_peer(9_999);
+        assert!(
+            p.push_discovered(&newcomer, "/ip4/10.0.0.9/tcp/4001", late),
+            "a lapsed map holds no live peer, so the newcomer is admitted"
+        );
+    }
+
+    #[test]
+    fn lapsed_addresses_do_not_reject_a_new_one_for_a_known_peer() {
+        let mut p = started();
+        let subject = synthetic_peer(1);
+        for i in 0..MAX_ADDRESSES_PER_PEER {
+            p.push_discovered(&subject, &format!("/ip4/192.168.1.{i}/tcp/4001"), 0);
+        }
+        let _ = p.drain_events(0, usize::MAX);
+
+        let late = OBSERVATION_TTL_MS + 1;
+        assert!(
+            p.push_discovered(&subject, "/ip4/10.0.0.9/tcp/4001", late),
+            "every held address has lapsed, so a live one is admitted"
+        );
+    }
+
+    #[test]
+    fn a_live_peer_map_still_refuses_a_newcomer() {
+        // The control: pruning must free only LAPSED entries, or the caps
+        // stop bounding what unauthenticated LAN traffic can hold here.
+        let mut p = started();
+        for i in 0..MAX_PEERS as u64 {
+            p.push_discovered(&synthetic_peer(i), "/ip4/10.0.0.1/tcp/4001", 0);
+        }
+        assert!(
+            !p.push_discovered(&synthetic_peer(9_999), "/ip4/10.0.0.9/tcp/4001", 1),
+            "the map is full of LIVE peers, so the newcomer is refused"
         );
     }
 }
