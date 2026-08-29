@@ -39,4 +39,5 @@ serde = { workspace = true, features = ["derive"] }
 # making a configuration crate depend on a provider implementation.
 interweave-discovery-cache = { path = "../../discovery/cache" }
 serde_json = { workspace = true }
+serde_norway = "0.9.42"
 tempfile = { workspace = true }
