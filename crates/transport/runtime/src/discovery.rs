@@ -564,6 +564,33 @@ impl CandidateSet {
             self.remember_watermark(&candidate.peer_id, &candidate.source, candidate.observed_at);
         }
 
+        // The prune below REMOVES records, and a removed record may have
+        // been the coverage a discarded watermark relied on — the same
+        // withdrawal `retract` and `sweep` record, reached through a
+        // different door: an observation for one source pruning another
+        // source's expired records. Remembered BEFORE the entry borrow,
+        // because that is when the records are still there to read.
+        let lapsed: Vec<(String, u64)> = self
+            .peers
+            .get(&candidate.peer_id)
+            .map(|e| {
+                let mut newest: BTreeMap<&str, u64> = BTreeMap::new();
+                for record in e.addresses.values().flat_map(|rs| rs.iter()) {
+                    if now_ms >= record.expires_at {
+                        let slot = newest.entry(record.source.as_str()).or_default();
+                        *slot = (*slot).max(record.observed_at);
+                    }
+                }
+                newest
+                    .into_iter()
+                    .map(|(source, at)| (source.to_owned(), at))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (source, at) in lapsed {
+            self.remember_watermark(&candidate.peer_id, &source, at);
+        }
+
         let entry = self.peers.entry(candidate.peer_id.clone()).or_default();
 
         // A DEAD SLOT IS NOT AN OCCUPIED ONE. The cap counts address
@@ -4146,5 +4173,64 @@ mod tests {
         let stats = m.overflow_stats();
         assert_eq!(stats.refused, 1, "the newcomer was turned away");
         assert_eq!(stats.evicted, 0, "and nothing trusted was displaced for it");
+    }
+    #[test]
+    fn the_observe_prune_leaves_a_mark_behind_like_the_sweep_does() {
+        // The third door into the same withdrawal: an observation for one
+        // source prunes another source's expired records. Without
+        // recording the mark, a delayed older observation from the pruned
+        // source bypasses the stale check and revives the lapsed address.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(1_102);
+        let address = "/ip4/10.0.0.1/tcp/4001";
+
+        // Source A: a record that will have lapsed by the next event.
+        set.observe(
+            &for_id(&subject, "peer-cache", address, 1_000, Some(2_000)),
+            1_000,
+            &trust,
+            true,
+            false,
+        );
+        // The redundant-first policy's doing, applied directly as in the
+        // sibling tests: the mark is discarded while the record lives.
+        set.high_water
+            .remove(&(subject.clone(), "peer-cache".to_owned()));
+
+        // Source B's observation arrives after A's record lapsed — the
+        // in-observe prune removes A's record here, not the sweep.
+        set.observe(
+            &for_id(
+                &subject,
+                "mdns",
+                "/ip4/192.168.1.5/tcp/4001",
+                5_000,
+                Some(u64::MAX),
+            ),
+            5_000,
+            &trust,
+            true,
+            false,
+        );
+
+        // A delayed OLDER observation from A.
+        set.observe(
+            &for_id(&subject, "peer-cache", address, 500, Some(u64::MAX)),
+            9_000_000,
+            &trust,
+            true,
+            false,
+        );
+
+        assert!(
+            !set.candidates(9_000_000, &|_| None)
+                .iter()
+                .find(|c| c.peer_id == subject)
+                .expect("the peer is live through mdns")
+                .address_list()
+                .contains(&address),
+            "the lapsed address is not revived by older evidence"
+        );
     }
 }
