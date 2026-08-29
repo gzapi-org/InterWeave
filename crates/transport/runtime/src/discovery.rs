@@ -410,7 +410,15 @@ impl CandidateSet {
         // says what it means with `CandidateExpired`.
         let expires_at = match candidate.expires_at {
             Some(stated) => stated,
-            None if provider_expires => now_ms.saturating_add(DEFAULT_OBSERVATION_TTL_MS),
+            // ANCHORED TO WHEN IT WAS OBSERVED, not when it arrived. A
+            // delayed event would otherwise be granted a fresh ten
+            // minutes on delivery, so queue backpressure would mint
+            // freshness for an observation an hour old — the same
+            // mistake the cache's reachability hints made, in the layer
+            // above them.
+            None if provider_expires => candidate
+                .observed_at
+                .saturating_add(DEFAULT_OBSERVATION_TTL_MS),
             None => u64::MAX,
         };
 
@@ -2897,6 +2905,43 @@ mod tests {
             found.protocol_observations.is_empty(),
             "mdns supports no live address, so its claims go with it: {:?}",
             found.protocol_observations
+        );
+    }
+
+    #[test]
+    fn a_delayed_event_without_a_stated_expiry_does_not_get_a_fresh_lifetime() {
+        // The provider expresses expiry but omitted one, so the manager
+        // supplies its default. Anchored to DELIVERY it would grant a
+        // stale observation a fresh ten minutes for having sat in a
+        // queue.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(92);
+
+        const OBSERVED: u64 = 1_000;
+        let delivered = OBSERVED + DEFAULT_OBSERVATION_TTL_MS / 2;
+        set.observe(
+            &for_id(
+                &subject,
+                "peer-cache",
+                "/ip4/10.0.0.1/tcp/1",
+                OBSERVED,
+                None,
+            ),
+            delivered,
+            &trust,
+            true,
+            false,
+        );
+
+        let lapse = OBSERVED + DEFAULT_OBSERVATION_TTL_MS;
+        assert!(
+            set.candidates(lapse, &|_| None).is_empty(),
+            "the lifetime runs from when it was observed, so it is over"
+        );
+        assert!(
+            !set.candidates(lapse - 1, &|_| None).is_empty(),
+            "and it really was alive until then"
         );
     }
 }
