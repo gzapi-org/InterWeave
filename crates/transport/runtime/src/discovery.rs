@@ -513,7 +513,7 @@ impl CandidateSet {
         }
 
         if !self.peers.contains_key(&candidate.peer_id) && self.peers.len() >= MAX_CANDIDATES {
-            self.evict_one(now_ms, trust, candidate.observed_at);
+            self.evict_one(now_ms, trust, candidate.observed_at, provider_pinned);
             if self.peers.len() >= MAX_CANDIDATES {
                 // Nothing could be evicted — every slot is a live trusted
                 // candidate. Refusing the new one is correct: the bound is
@@ -782,7 +782,13 @@ impl CandidateSet {
     ///
     /// An EXPIRED peer is still evicted unconditionally: it contributes
     /// nothing, so anything outranks it.
-    fn evict_one(&mut self, now_ms: u64, trust: &PeerTrustPolicy, incoming: u64) -> bool {
+    fn evict_one(
+        &mut self,
+        now_ms: u64,
+        trust: &PeerTrustPolicy,
+        incoming: u64,
+        incoming_pinned: bool,
+    ) -> bool {
         let expired: Option<TransportIdentity> = self
             .peers
             .iter()
@@ -836,6 +842,22 @@ impl CandidateSet {
             .min_by_key(|(_, e)| e.recency(now_ms))
             .map(|(p, e)| (p.clone(), e.recency(now_ms)));
         match victim {
+            // A PINNED NEWCOMER IS NOT RANKED BY RECENCY, within the
+            // configured cap. Static bootstrap emits once at start, so
+            // its `observed_at` is by construction the oldest thing in
+            // any overflow comparison — ranking it on recency rejected
+            // precisely the entry that cannot be re-learned, and the
+            // ranking fix in the previous commit made that worse rather
+            // than introducing it.
+            //
+            // The same asymmetry as the address slots and the provenance
+            // cap, at the candidate level: pinned displaces unpinned,
+            // configuration does not grow a bound, and past the cap a
+            // pinned newcomer is ranked like anything else.
+            Some((peer, _)) if incoming_pinned && configured.len() < MAX_CONFIGURED_RETAINED => {
+                self.peers.remove(&peer);
+                true
+            }
             // STRICTLY older loses. A tie admits the newcomer, matching
             // how the observation watermark treats equal timestamps: they
             // are the same evidence, not staler evidence, and refusing on
@@ -3734,6 +3756,121 @@ mod tests {
                 .iter()
                 .any(|c| c.peer_id == tied),
             "a tie admits the newcomer"
+        );
+    }
+    #[test]
+    fn a_pinned_newcomer_is_admitted_into_a_full_set() {
+        // Static bootstrap emits once at start, so its `observed_at` is
+        // by construction the oldest thing in any overflow comparison.
+        // Ranking it on recency rejected precisely the entry that cannot
+        // be re-learned — and unlike a cache or mDNS candidate, nothing
+        // offers it again without a reload.
+        let mut m = DiscoveryManager::new();
+        m.register(descriptor("mdns"), 0).expect("registers");
+        m.register(descriptor_without_expiry("static-bootstrap"), 0)
+            .expect("registers");
+        let trust = nobody();
+
+        for i in 0..MAX_CANDIDATES {
+            let at = 10_000 + i as u64;
+            m.on_event(
+                "mdns",
+                observed(for_id(
+                    &identity(700_000 + i),
+                    "mdns",
+                    "/ip4/10.1.0.1/tcp/1",
+                    at,
+                    Some(u64::MAX),
+                )),
+                at,
+                &trust,
+            )
+            .expect("accepted");
+        }
+        assert_eq!(
+            m.candidates(9_000_000).len(),
+            MAX_CANDIDATES,
+            "the set is full"
+        );
+
+        // Configured, and observed long before everything held.
+        let boot = identity(799_999);
+        m.on_event(
+            "static-bootstrap",
+            observed(for_id(
+                &boot,
+                "static-bootstrap",
+                "/ip4/10.0.0.1/tcp/1",
+                5,
+                None,
+            )),
+            9_000_000,
+            &trust,
+        )
+        .expect("accepted");
+
+        assert!(
+            m.candidates(9_000_000).iter().any(|c| c.peer_id == boot),
+            "the configured entry is admitted rather than ranked out"
+        );
+    }
+
+    #[test]
+    fn a_pinned_newcomer_past_the_configured_cap_is_ranked_like_anything_else() {
+        // The control: configuration does not grow a bound. Past
+        // MAX_CONFIGURED_RETAINED a pinned newcomer competes on recency
+        // like everything else, or an operator could pin the whole set.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+
+        // The cap's worth of pinned peers, all more recent than the
+        // newcomer that follows.
+        for i in 0..MAX_CONFIGURED_RETAINED {
+            set.observe(
+                &for_id(
+                    &identity(800_000 + i),
+                    "static-bootstrap",
+                    "/ip4/10.0.0.1/tcp/1",
+                    50_000 + i as u64,
+                    None,
+                ),
+                50_000 + i as u64,
+                &trust,
+                false,
+                true,
+            );
+        }
+        // Fill the rest with live unpinned peers, all newer.
+        for i in 0..(MAX_CANDIDATES - MAX_CONFIGURED_RETAINED) {
+            set.observe(
+                &for_id(
+                    &identity(900_000 + i),
+                    "mdns",
+                    "/ip4/10.1.0.1/tcp/1",
+                    60_000 + i as u64,
+                    Some(u64::MAX),
+                ),
+                60_000 + i as u64,
+                &trust,
+                true,
+                false,
+            );
+        }
+
+        let laggard = identity(999_999);
+        set.observe(
+            &for_id(&laggard, "static-bootstrap", "/ip4/10.0.0.2/tcp/2", 5, None),
+            9_000_000,
+            &trust,
+            false,
+            true,
+        );
+
+        assert!(
+            !set.candidates(9_000_000, &|_| None)
+                .iter()
+                .any(|c| c.peer_id == laggard),
+            "past the cap a pinned newcomer is ranked on recency like any other"
         );
     }
 }
