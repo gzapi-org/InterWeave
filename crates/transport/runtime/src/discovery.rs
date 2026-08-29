@@ -605,6 +605,19 @@ impl CandidateSet {
             }
         }
 
+        // Provenance may have been REMOVED above — by the pruning, by a
+        // pinned address displacing an unpinned one, or by a pinned
+        // source displacing a record at the provenance cap. Any of those
+        // can leave a source supporting nothing, so the rule is applied
+        // once here rather than at each site that removes something.
+        //
+        // BEFORE the cap below, not after. Run afterwards it still
+        // cleaned up, but too late to matter: a source whose last address
+        // had gone could hold sixteen longer-lived facts, so a live
+        // source's new fact hit a full map and was discarded, and the
+        // cleanup then emptied the slots without recovering it.
+        entry.drop_orphaned_facts();
+
         // A DEAD SLOT IS NOT AN OCCUPIED ONE — the same rule the address
         // cap follows, for the same reason. An expired observation is
         // still a map entry until `sweep` runs, so under pump-then-sweep
@@ -638,13 +651,6 @@ impl CandidateSet {
                 }
             }
         }
-
-        // Provenance may have been REMOVED above — by the pruning, by a
-        // pinned address displacing an unpinned one, or by a pinned
-        // source displacing a record at the provenance cap. Any of those
-        // can leave a source supporting nothing, so the rule is applied
-        // once here rather than at each site that removes something.
-        entry.drop_orphaned_facts();
     }
 
     /// Retract `source`'s support: the named addresses, or all of them.
@@ -3121,6 +3127,80 @@ mod tests {
         assert!(
             found.protocol_observations.is_empty(),
             "so its claim is not readable either: {:?}",
+            found.protocol_observations
+        );
+    }
+    #[test]
+    fn orphaned_facts_do_not_occupy_the_observation_cap() {
+        // Source A's last address has gone, but its longer-lived facts
+        // still fill the map. A live source's new fact then met a full
+        // cap and was discarded — and the cleanup, run afterwards, freed
+        // the slots without recovering it.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(112);
+
+        // A: one short-lived address carrying a full set of long facts.
+        let mut a = for_id(
+            &subject,
+            "mdns",
+            "/ip4/192.168.1.5/tcp/4001",
+            0,
+            Some(1_000),
+        );
+        for i in 0..MAX_OBSERVATIONS_PER_PEER {
+            a.protocol_observations.insert(ProtocolObservation {
+                protocol_id: ProtocolId::parse(format!("/interweave/p{i}/1.0.0")).expect("valid"),
+                supported: true,
+                observed_at: 0,
+            });
+        }
+        set.observe(&a, 0, &trust, true, false);
+        // Refresh the facts alone so they outlive the address.
+        let mut refresh = for_id(
+            &subject,
+            "mdns",
+            "/ip4/192.168.1.5/tcp/4001",
+            10,
+            Some(u64::MAX),
+        );
+        refresh.addresses.clear();
+        for i in 0..MAX_OBSERVATIONS_PER_PEER {
+            refresh.protocol_observations.insert(ProtocolObservation {
+                protocol_id: ProtocolId::parse(format!("/interweave/p{i}/1.0.0")).expect("valid"),
+                supported: true,
+                observed_at: 10,
+            });
+        }
+        set.observe(&refresh, 10, &trust, true, false);
+
+        // B arrives after A's address has lapsed, with a live address and
+        // a fact of its own. No sweep in between.
+        let mut b = for_id(
+            &subject,
+            "peer-cache",
+            "/ip4/10.0.0.1/tcp/1",
+            5_000,
+            Some(u64::MAX),
+        );
+        b.protocol_observations.insert(ProtocolObservation {
+            protocol_id: ProtocolId::parse("/interweave/direct/2.0.0").expect("valid"),
+            supported: true,
+            observed_at: 5_000,
+        });
+        set.observe(&b, 5_000, &trust, true, false);
+
+        let candidates = set.candidates(5_000, &|_| None);
+        let found = candidates
+            .iter()
+            .find(|c| c.peer_id == subject)
+            .expect("the peer is known through the live source");
+        assert!(
+            found
+                .protocol_observations
+                .iter()
+                .any(|o| o.protocol.as_str() == "/interweave/direct/2.0.0"),
+            "the live source's fact was admitted: {:?}",
             found.protocol_observations
         );
     }
