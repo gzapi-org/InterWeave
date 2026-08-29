@@ -88,13 +88,6 @@ pub enum StoreError {
         /// The paged accessor to use instead.
         use_instead: &'static str,
     },
-    /// A file or directory holding message content is reachable by
-    /// someone other than its owner.
-    ///
-    /// Refused rather than repaired, for the reason the identity key is:
-    /// content that has been broadly readable should be treated as
-    /// exposed, and quietly narrowing the mode would hide that it ever
-    /// was.
     /// The database path is not a regular file.
     ///
     /// A symlink, directory, or device where the store expects its own
@@ -105,6 +98,13 @@ pub enum StoreError {
         /// What was found.
         what: &'static str,
     },
+    /// A file or directory holding message content is reachable by
+    /// someone other than its owner.
+    ///
+    /// Refused rather than repaired, for the reason the identity key is:
+    /// content that has been broadly readable should be treated as
+    /// exposed, and quietly narrowing the mode would hide that it ever
+    /// was.
     PermissionsTooOpen {
         /// Which file or directory.
         what: String,
