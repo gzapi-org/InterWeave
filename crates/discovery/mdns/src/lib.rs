@@ -367,14 +367,30 @@ impl MdnsDiscovery {
         // A candidate event is recoverable: the next announcement repeats
         // it, or the manager ages the address out itself. That asymmetry
         // is the whole reason for the exception.
+        // DROPPING A LIVE OBSERVATION ROLLS BACK ITS BOOKKEEPING. The
+        // asymmetry note above said a candidate event is recoverable
+        // because "the next announcement repeats it" — but a ONE-SHOT
+        // announcement has no next: `last_emitted` said the peer was
+        // told, the queue no longer says it, and the manager never
+        // learns the candidate at all. Clearing `last_emitted` marks the
+        // difference as outstanding, and the drain pump regenerates it
+        // from `seen` — the same derive-from-state recovery the cache
+        // and static providers use for their trims.
         let mut excess = self.pending.len() - MAX_PENDING_EVENTS;
+        let mut rolled_back: Vec<TransportIdentity> = Vec::new();
         self.pending.retain(|event| {
             if excess > 0 && !matches!(event, DiscoveryEvent::HealthChanged { .. }) {
                 excess -= 1;
+                if let DiscoveryEvent::CandidateObserved { candidate } = event {
+                    rolled_back.push(candidate.peer_id.clone());
+                }
                 return false;
             }
             true
         });
+        for peer_id in rolled_back {
+            self.last_emitted.remove(&peer_id);
+        }
     }
 
     fn queue_observation(&mut self, peer_id: &TransportIdentity, now_ms: u64) {
@@ -495,6 +511,20 @@ impl DiscoveryProvider for MdnsDiscovery {
             return Vec::new();
         }
         self.sweep(now_ms);
+        // THE REGENERATION PUMP. Every peer in `seen` is in
+        // `last_emitted` the moment its observation is queued, so a
+        // live peer missing from it is exactly one whose queued
+        // observation the bound rolled back — requeue it from state.
+        // A steady-state no-op.
+        let unemitted: Vec<TransportIdentity> = self
+            .seen
+            .keys()
+            .filter(|p| !self.last_emitted.contains_key(*p))
+            .cloned()
+            .collect();
+        for peer_id in unemitted {
+            self.queue_observation(&peer_id, now_ms);
+        }
         let take = max.min(self.pending.len());
         self.pending.drain(..take).collect()
     }
@@ -1311,6 +1341,55 @@ mod tests {
             observation.expires_at,
             Some(OBSERVATION_TTL_MS),
             "and it carries ITS deadline, not the withdrawn address's"
+        );
+    }
+    #[test]
+    fn a_one_shot_announcement_trimmed_by_the_bound_is_regenerated() {
+        // The bound's asymmetry claim was "the next announcement repeats
+        // it" — but a one-shot announcement has no next. Trimmed, its
+        // peer stayed live in `seen` with `last_emitted` claiming it was
+        // told, and the manager never learned the candidate.
+        //
+        // All at the same instant, deliberately: an earlier version of
+        // this test advanced past the TTL to force the trim, which
+        // expired the one-shot from `seen` first — the queue emptied
+        // through goodbye-coalescing, not the bound, and the test proved
+        // nothing.
+        let mut p = started();
+        let _ = p.drain_events(0, 64);
+
+        let one_shot = synthetic_peer(1);
+        p.push_discovered(&one_shot, "/ip4/10.0.0.1/tcp/4001", 0);
+
+        // Each discover+expire pair of a FRESH identity nets one expiry
+        // event (its own observation is goodbye-coalesced away), so the
+        // queue grows without `seen` filling and without any sweep. The
+        // one-shot's observation is the oldest non-health event, so the
+        // trim takes it first.
+        for i in 0..(MAX_PENDING_EVENTS as u64 + 8) {
+            p.push_discovered(&synthetic_peer(100 + i), "/ip4/10.0.0.2/tcp/4001", 0);
+            p.push_expired(&synthetic_peer(100 + i), "/ip4/10.0.0.2/tcp/4001", 0);
+        }
+        assert!(
+            !p.pending.iter().any(|e| matches!(
+                e,
+                DiscoveryEvent::CandidateObserved { candidate }
+                    if candidate.peer_id.as_str() == one_shot
+            )),
+            "the one-shot's observation was trimmed, or this proves nothing"
+        );
+
+        // The peer is still live in `seen`; the drain must tell the
+        // consumer about it anyway.
+        let drained = p.drain_events(1, usize::MAX);
+        assert!(
+            drained.iter().any(|e| matches!(
+                e,
+                DiscoveryEvent::CandidateObserved { candidate }
+                    if candidate.peer_id.as_str() == one_shot
+            )),
+            "a live peer whose queued observation was trimmed is requeued \
+             from `seen`, never silently untold"
         );
     }
 }
