@@ -52,6 +52,13 @@ pub const MAX_OBSERVATIONS_PER_PEER: usize = 16;
 /// Registered providers, which also bounds how many can be composed.
 pub const MAX_PROVIDERS: usize = 16;
 
+/// Retained `(peer, source)` observation watermarks.
+///
+/// One per candidate the set can hold, which is what a fully-populated
+/// set observed through a single provider needs; a peer seen by several
+/// providers uses one each.
+pub const MAX_HIGH_WATER: usize = MAX_CANDIDATES;
+
 /// Configured candidates retained against overflow eviction.
 ///
 /// `DESIGN.md` says configured static entries are retained "within their
@@ -123,19 +130,6 @@ struct Entry {
     addresses: BTreeMap<String, Vec<Provenance>>,
     /// `(protocol, source)` -> (supported, observed_at, expires_at).
     observations: BTreeMap<(ProtocolId, String), (bool, u64, u64)>,
-    /// source -> the newest `observed_at` already applied from it.
-    ///
-    /// OUTLIVES THE PROVENANCE ON PURPOSE. The forward-only rule on a
-    /// record can only speak while that record exists, so a retraction
-    /// removed the record and the guard with it — and a delayed older
-    /// observation then re-inserted the retracted address as if new,
-    /// restoring a route the source had withdrawn.
-    ///
-    /// Bounded by the registered provider count: `on_event` refuses an
-    /// event whose source is not a registered provider, and registration
-    /// is capped at `MAX_PROVIDERS`. The cap is applied here too, because
-    /// `CandidateSet` is reachable without going through the manager.
-    source_high_water: BTreeMap<String, u64>,
     /// The most recent observation of this peer from any source, for the
     /// least-recently-observed half of the eviction rule.
     ///
@@ -277,6 +271,20 @@ impl AggregatedCandidate {
 #[derive(Debug, Clone, Default)]
 pub struct CandidateSet {
     peers: BTreeMap<TransportIdentity, Entry>,
+    /// `(peer, source)` -> the newest `observed_at` already applied.
+    ///
+    /// OUTLIVES BOTH THE RECORD AND THE PEER. The forward-only rule on a
+    /// provenance record can only speak while that record exists, and a
+    /// retraction removes the record — and, when it takes the last
+    /// address, the whole `Entry` with it. Both are exactly the windows a
+    /// delayed older observation would use to revive a route the source
+    /// had withdrawn, so this cannot live inside what it guards.
+    ///
+    /// Bounded at [`MAX_HIGH_WATER`] and evicted oldest-first. Past the
+    /// cap the guard is defeatable by a delayed event, which is the same
+    /// trade every bound here makes: the bound is the bound, and holding
+    /// one mark per peer-source pair forever is the alternative.
+    high_water: BTreeMap<(TransportIdentity, String), u64>,
 }
 
 impl CandidateSet {
@@ -285,6 +293,7 @@ impl CandidateSet {
     pub fn new() -> Self {
         Self {
             peers: BTreeMap::new(),
+            high_water: BTreeMap::new(),
         }
     }
 
@@ -525,18 +534,25 @@ impl CandidateSet {
         // carry their own timestamps and are guarded individually below,
         // so a candidate that is stale about reachability may still carry
         // a fact worth merging.
-        let stale = entry
-            .source_high_water
-            .get(&candidate.source)
+        let key = (candidate.peer_id.clone(), candidate.source.clone());
+        let stale = self
+            .high_water
+            .get(&key)
             .is_some_and(|high| candidate.observed_at < *high);
-        if !stale
-            && (entry.source_high_water.len() < MAX_PROVIDERS
-                || entry.source_high_water.contains_key(&candidate.source))
-        {
-            let mark = entry
-                .source_high_water
-                .entry(candidate.source.clone())
-                .or_default();
+        if !stale {
+            if self.high_water.len() >= MAX_HIGH_WATER && !self.high_water.contains_key(&key) {
+                // Oldest first: the mark least likely to still be
+                // guarding against an event still in flight.
+                if let Some(oldest) = self
+                    .high_water
+                    .iter()
+                    .min_by_key(|(_, at)| **at)
+                    .map(|(k, _)| k.clone())
+                {
+                    self.high_water.remove(&oldest);
+                }
+            }
+            let mark = self.high_water.entry(key).or_default();
             *mark = (*mark).max(candidate.observed_at);
         }
 
@@ -3353,6 +3369,112 @@ mod tests {
                 .address_list()
                 .contains(&address),
             "newer evidence restores it"
+        );
+    }
+    #[test]
+    fn a_stale_event_cannot_revive_a_peer_removed_by_its_last_retraction() {
+        // The watermark lived inside the `Entry`, and a retraction that
+        // takes the last address deletes the `Entry` — so the guard went
+        // with the thing it was guarding, and a delayed older event
+        // recreated the peer at the withdrawn address.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(131);
+        let address = "/ip4/10.0.0.1/tcp/4001";
+
+        set.observe(
+            &for_id(&subject, "peer-cache", address, 1_000, Some(u64::MAX)),
+            1_000,
+            &trust,
+            true,
+            false,
+        );
+        // The ONLY address: retracting it removes the peer entirely.
+        set.retract(&subject, "peer-cache", &BTreeSet::new());
+        assert!(
+            !set.candidates(2_000, &|_| None)
+                .iter()
+                .any(|c| c.peer_id == subject),
+            "the peer is gone"
+        );
+
+        set.observe(
+            &for_id(&subject, "peer-cache", address, 500, Some(u64::MAX)),
+            3_000,
+            &trust,
+            true,
+            false,
+        );
+
+        assert!(
+            !set.candidates(4_000, &|_| None)
+                .iter()
+                .any(|c| c.peer_id == subject),
+            "older evidence does not bring back a peer its source withdrew"
+        );
+    }
+
+    #[test]
+    fn a_newer_event_still_brings_back_a_peer_the_source_re_announces() {
+        // The control: a source may legitimately re-announce a peer it
+        // withdrew, and the watermark must not make removal permanent.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(132);
+        let address = "/ip4/10.0.0.1/tcp/4001";
+
+        set.observe(
+            &for_id(&subject, "peer-cache", address, 1_000, Some(u64::MAX)),
+            1_000,
+            &trust,
+            true,
+            false,
+        );
+        set.retract(&subject, "peer-cache", &BTreeSet::new());
+        set.observe(
+            &for_id(&subject, "peer-cache", address, 5_000, Some(u64::MAX)),
+            5_000,
+            &trust,
+            true,
+            false,
+        );
+
+        assert!(
+            set.candidates(6_000, &|_| None)
+                .iter()
+                .any(|c| c.peer_id == subject),
+            "newer evidence restores it"
+        );
+    }
+
+    #[test]
+    fn the_watermark_map_is_bounded() {
+        // It outlives peers by design, so nothing else would ever remove
+        // an entry: the cap is the only thing standing between that and
+        // one mark per peer-source pair held forever.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        for i in 0..(MAX_HIGH_WATER + 500) {
+            let id = identity(200_000 + i);
+            set.observe(
+                &for_id(
+                    &id,
+                    "peer-cache",
+                    "/ip4/10.0.0.1/tcp/1",
+                    i as u64,
+                    Some(u64::MAX),
+                ),
+                i as u64,
+                &trust,
+                true,
+                false,
+            );
+            set.retract(&id, "peer-cache", &BTreeSet::new());
+        }
+        assert!(
+            set.high_water.len() <= MAX_HIGH_WATER,
+            "the watermark map stays within its bound, got {}",
+            set.high_water.len()
         );
     }
 }
