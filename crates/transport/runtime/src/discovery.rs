@@ -547,10 +547,29 @@ impl CandidateSet {
         // for an empty entry. It belongs with the other "this event buys
         // nothing" tests, which is where it now is.
         let key = (candidate.peer_id.clone(), candidate.source.clone());
-        let stale = self
-            .high_water
-            .get(&key)
-            .is_some_and(|high| candidate.observed_at < *high);
+        // The threshold is the mark OR the newest record this source has
+        // already placed, whichever is higher. A record proves an event
+        // with that `observed_at` was applied, so it carries the same
+        // forward-only threshold the mark does — for EVERY address, not
+        // only its own. Without this, evicting a covered mark left a
+        // window where an older snapshot could re-insert a withdrawn
+        // sibling address as a new key: the surviving record's per-record
+        // guard only speaks for the address it names.
+        let applied = self
+            .peers
+            .get(&candidate.peer_id)
+            .map(|e| {
+                e.addresses
+                    .values()
+                    .flat_map(|records| records.iter())
+                    .filter(|r| r.source == candidate.source)
+                    .map(|r| r.observed_at)
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+        let threshold = self.high_water.get(&key).copied().unwrap_or(0).max(applied);
+        let stale = candidate.observed_at < threshold;
 
         let contributes_nothing = candidate.addresses.is_empty() || expires_at <= now_ms || stale;
         if contributes_nothing && !self.peers.contains_key(&candidate.peer_id) {
@@ -840,29 +859,33 @@ impl CandidateSet {
     fn remember_watermark(&mut self, peer: &TransportIdentity, source: &str, at: u64) {
         let key = (peer.clone(), source.to_owned());
         if self.high_water.len() >= MAX_HIGH_WATER && !self.high_water.contains_key(&key) {
-            // REDUNDANT MARKS GO FIRST, not oldest ones. A mark whose
-            // `(peer, source)` still has live provenance is already
-            // covered by the forward-only rule on that record, and by
-            // this function running when that record is removed. A mark
-            // for a source that supports nothing has neither, and is the
-            // only thing between a delayed event and the address it
-            // withdrew.
+            // REDUNDANT MARKS GO FIRST, not oldest ones — and redundant
+            // means a live record CARRIES THE MARK'S VALUE, not merely
+            // that one exists. The stale threshold is derived from the
+            // records as well as the mark, so a mark at or below a
+            // record's `observed_at` loses nothing when dropped: the
+            // record reproduces the threshold, and the withdrawal doors
+            // re-record it when the record goes. A record OLDER than the
+            // mark reproduces a lower threshold, which is a window — a
+            // source that selectively retracted its newer address would
+            // have exactly that shape, and dropping its mark let an old
+            // snapshot re-insert the withdrawn sibling.
             //
             // Oldest-first was the obvious policy and the wrong one: a
             // retracted peer's mark is by construction among the oldest,
             // so it evicted exactly the marks the guard exists for.
             let redundant = self
                 .high_water
-                .keys()
-                .find(|(p, s)| {
+                .iter()
+                .find(|((p, s), mark)| {
                     self.peers.get(p).is_some_and(|e| {
                         e.addresses
                             .values()
                             .flat_map(|records| records.iter())
-                            .any(|r| r.source == *s)
+                            .any(|r| r.source == *s && r.observed_at >= **mark)
                     })
                 })
-                .cloned();
+                .map(|(k, _)| k.clone());
             let victim = redundant.or_else(|| {
                 self.high_water
                     .iter()
@@ -4369,6 +4392,148 @@ mod tests {
                 .iter()
                 .any(|c| c.peer_id == subject),
             "older evidence does not revive what eviction removed"
+        );
+    }
+    #[test]
+    fn a_live_record_carries_the_threshold_for_its_siblings() {
+        // A surviving record's per-record guard speaks only for the
+        // address it names, but its `observed_at` proves an event that
+        // recent was APPLIED — so it carries the stale threshold for
+        // every address, and losing the mark loses nothing.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(1_800);
+        let kept = "/ip4/10.0.0.1/tcp/1";
+        let withdrawn = "/ip4/10.0.0.2/tcp/2";
+
+        // One snapshot naming both addresses, then a selective
+        // retraction of one.
+        let mut c = for_id(&subject, "peer-cache", kept, 2_000, Some(u64::MAX));
+        c.addresses.insert(withdrawn.to_owned());
+        set.observe(&c, 2_000, &trust, true, false);
+        set.retract(
+            &subject,
+            "peer-cache",
+            &[withdrawn.to_owned()].into_iter().collect(),
+        );
+
+        // ANY eviction drops the mark.
+        set.high_water
+            .remove(&(subject.clone(), "peer-cache".to_owned()));
+
+        // An older snapshot re-asserting the withdrawn address.
+        let mut old = for_id(&subject, "peer-cache", withdrawn, 500, Some(u64::MAX));
+        old.addresses.insert(kept.to_owned());
+        set.observe(&old, 9_000_000, &trust, true, false);
+
+        assert!(
+            !set.candidates(9_000_000, &|_| None)[0]
+                .address_list()
+                .contains(&withdrawn),
+            "the surviving record's threshold refuses the older snapshot"
+        );
+    }
+
+    #[test]
+    fn a_newer_snapshot_still_reintroduces_a_withdrawn_sibling() {
+        // The control: the threshold is forward-only, not a tombstone.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(1_801);
+        let kept = "/ip4/10.0.0.1/tcp/1";
+        let withdrawn = "/ip4/10.0.0.2/tcp/2";
+
+        let mut c = for_id(&subject, "peer-cache", kept, 2_000, Some(u64::MAX));
+        c.addresses.insert(withdrawn.to_owned());
+        set.observe(&c, 2_000, &trust, true, false);
+        set.retract(
+            &subject,
+            "peer-cache",
+            &[withdrawn.to_owned()].into_iter().collect(),
+        );
+
+        let mut newer = for_id(&subject, "peer-cache", withdrawn, 5_000, Some(u64::MAX));
+        newer.addresses.insert(kept.to_owned());
+        set.observe(&newer, 5_000, &trust, true, false);
+
+        assert!(
+            set.candidates(9_000_000, &|_| None)[0]
+                .address_list()
+                .contains(&withdrawn),
+            "newer evidence brings the address back"
+        );
+    }
+
+    #[test]
+    fn an_uncovered_mark_is_not_the_one_evicted_as_redundant() {
+        // Peer A's key sorts FIRST, so the loose predicate — any live
+        // record at all — picks A's mark. The tight one requires a record
+        // carrying the mark's value: A's surviving record is OLDER than
+        // its mark (the selective retraction took the newer address), so
+        // A is skipped and B's genuinely covered mark goes instead.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let a = identity(0); // sorts before every synthetic id below
+        let b = identity(1);
+        let withdrawn = "/ip4/10.0.0.2/tcp/2";
+
+        let mut c = for_id(
+            &a,
+            "peer-cache",
+            "/ip4/10.0.0.1/tcp/1",
+            1_000,
+            Some(u64::MAX),
+        );
+        c.addresses.insert(withdrawn.to_owned());
+        set.observe(&c, 1_000, &trust, true, false);
+        // The newer sighting of only the sibling, then its retraction:
+        // mark 2_000, surviving record at 1_000.
+        set.observe(
+            &for_id(&a, "peer-cache", withdrawn, 2_000, Some(u64::MAX)),
+            2_000,
+            &trust,
+            true,
+            false,
+        );
+        set.retract(
+            &a,
+            "peer-cache",
+            &[withdrawn.to_owned()].into_iter().collect(),
+        );
+        assert_eq!(
+            set.high_water.get(&(a.clone(), "peer-cache".to_owned())),
+            Some(&2_000),
+            "the scenario needs a mark above its surviving record"
+        );
+
+        // B: covered — its record carries its mark.
+        set.observe(
+            &for_id(
+                &b,
+                "peer-cache",
+                "/ip4/10.0.0.3/tcp/3",
+                3_000,
+                Some(u64::MAX),
+            ),
+            3_000,
+            &trust,
+            true,
+            false,
+        );
+
+        // Saturate and force one eviction.
+        let mut filler = 0usize;
+        while set.high_water.len() < MAX_HIGH_WATER {
+            set.high_water
+                .insert((identity(2_000_000 + filler), "x".to_owned()), 9_999);
+            filler += 1;
+        }
+        set.remember_watermark(&identity(3_000_000), "y", 10_000);
+
+        assert!(
+            set.high_water
+                .contains_key(&(a.clone(), "peer-cache".to_owned())),
+            "the uncovered mark survives; it is the only guard its address has"
         );
     }
 }
