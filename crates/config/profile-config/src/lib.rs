@@ -322,7 +322,6 @@ impl DiscoveryProviderSettings {
         }
 
         for (field, got, range) in [
-
             (
                 "query_timeout",
                 self.query_timeout.as_ref(),

@@ -121,6 +121,8 @@ DiscoveryManager::aggregate_health               stage-9   the conformance suite
 DiscoveryManager::descriptor                     stage-9   the conformance suite composes the manager over real providers
 CandidateSet::new                                stage-12  the manager owns one; TransportRuntime composition is the first outside holder
 CandidateSet::candidates                         stage-12  reached through DiscoveryManager::candidates until composition
+CandidateSet::overflow_stats                     stage-12  reached through DiscoveryManager::overflow_stats until composition
+DiscoveryManager::overflow_stats                 stage-12  the diagnostic DESIGN.md requires; its first reader is runtime composition
 CandidateSet::sweep                              stage-12  reached through DiscoveryManager::sweep until composition
 CandidateSet::len                                stage-12  reached through DiscoveryManager::candidate_count until composition
 CandidateSet::is_empty                           stage-12  candidate-set introspection, first read at runtime composition

@@ -271,6 +271,8 @@ impl AggregatedCandidate {
 #[derive(Debug, Clone, Default)]
 pub struct CandidateSet {
     peers: BTreeMap<TransportIdentity, Entry>,
+    /// What capacity pressure has cost, for diagnosis.
+    overflow: OverflowStats,
     /// `(peer, source)` -> the newest `observed_at` already applied.
     ///
     /// OUTLIVES BOTH THE RECORD AND THE PEER. The forward-only rule on a
@@ -293,6 +295,7 @@ impl CandidateSet {
     pub fn new() -> Self {
         Self {
             peers: BTreeMap::new(),
+            overflow: OverflowStats::default(),
             high_water: BTreeMap::new(),
         }
     }
@@ -398,6 +401,17 @@ impl CandidateSet {
                 })
             })
             .collect()
+    }
+
+    /// What capacity pressure has cost since this set was created.
+    ///
+    /// Monotonic counters rather than events: a consumer polls them
+    /// beside the other health it already reads, and a count that only
+    /// rises cannot be missed by a consumer that was not looking at the
+    /// moment it happened.
+    #[must_use]
+    pub fn overflow_stats(&self) -> OverflowStats {
+        self.overflow
     }
 
     /// Peers held, live or not.
@@ -533,8 +547,11 @@ impl CandidateSet {
         }
 
         if !self.peers.contains_key(&candidate.peer_id) && self.peers.len() >= MAX_CANDIDATES {
-            self.evict_one(now_ms, trust, candidate.observed_at, provider_pinned);
+            if self.evict_one(now_ms, trust, candidate.observed_at, provider_pinned) {
+                self.overflow.evicted += 1;
+            }
             if self.peers.len() >= MAX_CANDIDATES {
+                self.overflow.refused += 1;
                 // Nothing could be evicted — every slot is a live trusted
                 // candidate. Refusing the new one is correct: the bound is
                 // the bound, and dropping a trusted peer for an unknown
@@ -933,6 +950,21 @@ struct Registered {
     health: ProviderHealth,
 }
 
+/// What the set did with a candidate under capacity pressure.
+///
+/// `DESIGN.md` requires eviction to be "diagnostic, not silent authority
+/// loss", and a count is the least that satisfies it: without one, an
+/// operator whose reachability was churned away by hostile discovery
+/// traffic has nothing to look at, and the bound doing its job and the
+/// bound being abused are indistinguishable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OverflowStats {
+    /// Candidates removed to make room for another.
+    pub evicted: u64,
+    /// Candidates refused because nothing could be evicted for them.
+    pub refused: u64,
+}
+
 /// Composes providers and owns the merged candidate set.
 ///
 /// The manager never holds the providers themselves: it is a pure state
@@ -1130,6 +1162,17 @@ impl DiscoveryManager {
     /// Drop everything that has expired at `now_ms`.
     pub fn sweep(&mut self, now_ms: u64) {
         self.candidates.sweep(now_ms);
+    }
+    /// What capacity pressure has cost, for diagnosis.
+    ///
+    /// `architecture/discovery/DESIGN.md` requires eviction to be
+    /// "diagnostic, not silent authority loss". Without a count, an
+    /// operator whose reachability was churned away by hostile discovery
+    /// traffic has nothing to look at, and the bound doing its job is
+    /// indistinguishable from the bound being abused.
+    #[must_use]
+    pub fn overflow_stats(&self) -> OverflowStats {
+        self.candidates.overflow_stats()
     }
 
     /// The merged candidates a consumer may consider.
@@ -4009,5 +4052,99 @@ mod tests {
                 .any(|c| c.peer_id == subject),
             "a lapsed record leaves a mark behind, as a retracted one does"
         );
+    }
+    #[test]
+    fn overflow_is_counted_rather_than_silent() {
+        // DESIGN.md: eviction is "diagnostic, not silent authority loss".
+        // Without a count, the bound doing its job and the bound being
+        // abused look identical from outside.
+        let mut m = DiscoveryManager::new();
+        m.register(descriptor("mdns"), 0).expect("registers");
+        let trust = nobody();
+
+        assert_eq!(
+            m.overflow_stats(),
+            OverflowStats::default(),
+            "nothing has been displaced yet"
+        );
+
+        for i in 0..(MAX_CANDIDATES + 32) {
+            let at = 10_000 + i as u64;
+            m.on_event(
+                "mdns",
+                observed(for_id(
+                    &identity(1_300_000 + i),
+                    "mdns",
+                    "/ip4/10.1.0.1/tcp/1",
+                    at,
+                    Some(u64::MAX),
+                )),
+                at,
+                &trust,
+            )
+            .expect("accepted");
+        }
+
+        let stats = m.overflow_stats();
+        assert_eq!(
+            stats.evicted, 32,
+            "one eviction per candidate past the bound, got {}",
+            stats.evicted
+        );
+        assert_eq!(
+            stats.refused, 0,
+            "each of them found a victim, so none was refused"
+        );
+    }
+
+    #[test]
+    fn a_refusal_is_counted_separately_from_an_eviction() {
+        // The two outcomes mean different things to an operator: churn
+        // that displaces reachability, and pressure that turns new
+        // candidates away. Collapsing them would hide which is happening.
+        let mut m = DiscoveryManager::new();
+        m.register(descriptor("mdns"), 0).expect("registers");
+        // Every held peer trusted, so nothing is evictable.
+        let mut names: Vec<String> = Vec::new();
+        for i in 0..MAX_CANDIDATES {
+            names.push(identity(1_400_000 + i).as_str().to_owned());
+        }
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let trust = trusting(&refs);
+
+        for i in 0..MAX_CANDIDATES {
+            let at = 10_000 + i as u64;
+            m.on_event(
+                "mdns",
+                observed(for_id(
+                    &identity(1_400_000 + i),
+                    "mdns",
+                    "/ip4/10.1.0.1/tcp/1",
+                    at,
+                    Some(u64::MAX),
+                )),
+                at,
+                &trust,
+            )
+            .expect("accepted");
+        }
+
+        m.on_event(
+            "mdns",
+            observed(for_id(
+                &identity(1_499_999),
+                "mdns",
+                "/ip4/10.1.0.1/tcp/1",
+                99_999,
+                Some(u64::MAX),
+            )),
+            99_999,
+            &trust,
+        )
+        .expect("accepted");
+
+        let stats = m.overflow_stats();
+        assert_eq!(stats.refused, 1, "the newcomer was turned away");
+        assert_eq!(stats.evicted, 0, "and nothing trusted was displaced for it");
     }
 }
