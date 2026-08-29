@@ -323,10 +323,21 @@ impl DiscoveryProvider for StaticBootstrapDiscovery {
         Ok(())
     }
 
-    fn drain_events(&mut self, _now_ms: u64, max: usize) -> Vec<DiscoveryEvent> {
+    fn drain_events(&mut self, now_ms: u64, max: usize) -> Vec<DiscoveryEvent> {
         if !self.started || self.stopped {
             return Vec::new();
         }
+        // RECOMPUTE BEFORE HANDING ANYTHING OVER. The queue bound rolls a
+        // dropped event out of `emitted`, which only says the difference
+        // is outstanding again — something has to look. Recomputing only
+        // in `set_entries` meant a consumer that resumed WITHOUT a further
+        // reload never saw it, so the last trim of a churn burst left a
+        // retraction missing indefinitely. That is permanent here: the
+        // manager holds static provenance without expiry.
+        //
+        // Cheap and idempotent: with nothing rolled back the difference is
+        // empty and this queues nothing.
+        self.refresh(now_ms);
         let take = max.min(self.pending.len());
         self.pending.drain(..take).collect()
     }
@@ -367,6 +378,32 @@ mod tests {
     fn peer(s: &str) -> TransportIdentity {
         TransportIdentity::parse(s).expect("valid identity")
     }
+    /// An entry for an already-parsed identity.
+    fn entry_id(id: &TransportIdentity, address: &str) -> StaticEntry {
+        StaticEntry::new(id.clone(), address.to_owned()).expect("legal entry")
+    }
+
+    /// A synthetic well-formed identity: the grammar is a prefix, an
+    /// alphabet and a length with no checksum, and nothing here dials.
+    fn synthetic(n: usize) -> TransportIdentity {
+        const B58: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+        let mut tail = [b'1'; 44];
+        let (mut v, mut i) = (n, 43usize);
+        loop {
+            tail[i] = B58[v % B58.len()];
+            v /= B58.len();
+            if v == 0 || i == 0 {
+                break;
+            }
+            i -= 1;
+        }
+        TransportIdentity::parse(format!(
+            "12D3KooW{}",
+            core::str::from_utf8(&tail).expect("ascii")
+        ))
+        .expect("matches the grammar")
+    }
+
     fn entry(p: &str, address: &str) -> StaticEntry {
         StaticEntry::new(peer(p), address).expect("within bounds")
     }
@@ -706,5 +743,83 @@ mod tests {
             "the retraction for a peer removed from configuration survives \
              the queue bound"
         );
+    }
+    #[test]
+    fn a_trimmed_retraction_is_recreated_without_a_further_reload() {
+        // The rollback marks the difference outstanding again; something
+        // has to look. Recomputing only on reload meant a consumer that
+        // simply resumed never saw it, and here that is permanent — the
+        // manager holds static provenance without expiry.
+        //
+        // The shape has to be exact. A retraction trimmed EARLY is
+        // recomputed by the next reload and survives, which is how a
+        // first version of this test passed with the fix removed. The bug
+        // needs the trim to happen on the LAST refresh, with the dropped
+        // event queued by an earlier one — so the final reload has
+        // already recomputed before the trim discards it.
+        let mut others: Vec<StaticEntry> = (1..MAX_ENTRIES)
+            .map(|i| entry_id(&synthetic(i), "/ip4/10.0.0.1/tcp/1"))
+            .collect();
+        let mut all = vec![entry(P1, "/ip4/10.0.0.1/tcp/1")];
+        all.extend(others.clone());
+
+        let mut p = StaticBootstrapDiscovery::new(all).expect("legal entries");
+        p.start(0).expect("starts");
+        let _ = p.drain_events(0, usize::MAX);
+
+        // P1 is removed. One retraction is queued, and `emitted` no
+        // longer holds P1 — so no later refresh will recompute it.
+        p.set_entries(others.clone(), 10).expect("reload");
+
+        // Churn the rest, without draining, so the SECOND reload's trim
+        // discards that queued retraction. Exactly two: a third would
+        // find P1 restored in `emitted` and recompute the retraction, and
+        // the newly queued copy survives — which is how a first version
+        // of this test passed with the fix removed.
+        for round in 1..=2u64 {
+            others = (1..MAX_ENTRIES)
+                .map(|i| {
+                    entry_id(
+                        &synthetic(i),
+                        &format!("/ip4/10.9.{round}.{}/tcp/4001", i % 250),
+                    )
+                })
+                .collect();
+            p.set_entries(others.clone(), 100 + round).expect("reload");
+        }
+
+        // The consumer simply resumes. No configuration change.
+        let mut retracted = false;
+        for _ in 0..40 {
+            for event in p.drain_events(10_000, usize::MAX) {
+                if let DiscoveryEvent::CandidateExpired { peer_id, .. } = event
+                    && peer_id == peer(P1)
+                {
+                    retracted = true;
+                }
+            }
+        }
+        assert!(
+            retracted,
+            "the retraction is recreated by draining alone, with no \
+             configuration change to prompt it"
+        );
+    }
+
+    #[test]
+    fn draining_a_settled_provider_queues_nothing() {
+        // The control: refresh-on-drain must be idempotent, or every
+        // drain manufactures events for an unchanged configuration.
+        let mut p = StaticBootstrapDiscovery::new(vec![entry(P1, "/ip4/10.0.0.1/tcp/1")])
+            .expect("legal entries");
+        p.start(0).expect("starts");
+        let _ = p.drain_events(0, usize::MAX);
+
+        for tick in 1..=5 {
+            assert!(
+                p.drain_events(tick, usize::MAX).is_empty(),
+                "nothing changed, so draining queues nothing"
+            );
+        }
     }
 }
