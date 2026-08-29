@@ -561,9 +561,26 @@ impl CandidateSet {
             }
         }
         entry.addresses.retain(|_, records| !records.is_empty());
-        if addresses.is_empty() {
+
+        // A SOURCE THAT SUPPORTS NOTHING KEEPS NO FACTS. Dropping
+        // observations only on a whole-peer retraction was too narrow: a
+        // source with one address that selectively retracts it has no
+        // remaining provenance either, and if another provider still
+        // supplies an address the peer survives — carrying the departed
+        // source's protocol claims until their original TTL, asserted by
+        // something that no longer vouches for a single way to reach the
+        // peer.
+        //
+        // Asking whether the source has any provenance left covers both
+        // shapes, so the whole-peer case is no longer special.
+        let still_supports = entry
+            .addresses
+            .values()
+            .any(|records| records.iter().any(|r| r.source == source));
+        if !still_supports {
             entry.observations.retain(|(_, s), _| s != source);
         }
+
         if entry.addresses.is_empty() {
             self.peers.remove(peer_id);
         }
@@ -2430,5 +2447,131 @@ mod tests {
             "every slot is live, so an unpinned newcomer is still refused"
         );
         assert_eq!(found.addresses.len(), MAX_ADDRESSES_PER_PEER);
+    }
+    #[test]
+    fn a_selective_retraction_drops_the_facts_of_a_source_left_supporting_nothing() {
+        // The source has one address and one protocol claim. It retracts
+        // the address selectively, so the whole-peer branch never runs —
+        // and because another provider still supplies an address, the
+        // peer survives carrying the departed source's claim until its
+        // original TTL.
+        let mut m = DiscoveryManager::new();
+        m.register(descriptor("mdns"), 0).expect("registers");
+        m.register(descriptor("peer-cache"), 0).expect("registers");
+        let trust = nobody();
+        let subject = identity(61);
+        let protocol = ProtocolId::parse("/interweave/direct/2.0.0").expect("valid");
+
+        let leaving = "/ip4/192.168.1.5/tcp/4001";
+        let mut c = for_id(&subject, "mdns", leaving, 0, Some(u64::MAX));
+        c.protocol_observations.insert(ProtocolObservation {
+            protocol_id: protocol.clone(),
+            supported: true,
+            observed_at: 0,
+        });
+        m.on_event("mdns", observed(c), 0, &trust)
+            .expect("accepted");
+
+        // Another provider keeps the peer alive.
+        m.on_event(
+            "peer-cache",
+            observed(for_id(
+                &subject,
+                "peer-cache",
+                "/ip4/10.0.0.1/tcp/1",
+                0,
+                Some(u64::MAX),
+            )),
+            0,
+            &trust,
+        )
+        .expect("accepted");
+
+        assert_eq!(
+            m.candidates(10)
+                .iter()
+                .find(|c| c.peer_id == subject)
+                .expect("known")
+                .protocol_observations
+                .len(),
+            1,
+            "the fact is present while mdns supports an address"
+        );
+
+        m.on_event(
+            "mdns",
+            DiscoveryEvent::CandidateExpired {
+                peer_id: subject.clone(),
+                source: "mdns".to_owned(),
+                addresses: [leaving.to_owned()].into_iter().collect(),
+            },
+            20,
+            &trust,
+        )
+        .expect("accepted");
+
+        let candidates = m.candidates(30);
+        let found = candidates
+            .iter()
+            .find(|c| c.peer_id == subject)
+            .expect("the peer survives on the other provider");
+        assert!(
+            found.protocol_observations.is_empty(),
+            "mdns supports no address now, so its claims go with it: {:?}",
+            found.protocol_observations
+        );
+    }
+
+    #[test]
+    fn a_selective_retraction_keeps_the_facts_of_a_source_still_supporting_an_address() {
+        // The control: only a source left with NO provenance loses its
+        // facts, or a peer announcing several addresses forfeits its
+        // protocol evidence the moment one lapses.
+        let mut m = DiscoveryManager::new();
+        m.register(descriptor("mdns"), 0).expect("registers");
+        let trust = nobody();
+        let subject = identity(62);
+        let protocol = ProtocolId::parse("/interweave/direct/2.0.0").expect("valid");
+
+        let mut c = for_id(
+            &subject,
+            "mdns",
+            "/ip4/192.168.1.5/tcp/4001",
+            0,
+            Some(u64::MAX),
+        );
+        c.addresses.insert("/ip4/192.168.1.6/tcp/4001".to_owned());
+        c.protocol_observations.insert(ProtocolObservation {
+            protocol_id: protocol,
+            supported: true,
+            observed_at: 0,
+        });
+        m.on_event("mdns", observed(c), 0, &trust)
+            .expect("accepted");
+
+        m.on_event(
+            "mdns",
+            DiscoveryEvent::CandidateExpired {
+                peer_id: subject.clone(),
+                source: "mdns".to_owned(),
+                addresses: ["/ip4/192.168.1.5/tcp/4001".to_owned()]
+                    .into_iter()
+                    .collect(),
+            },
+            20,
+            &trust,
+        )
+        .expect("accepted");
+
+        let candidates = m.candidates(30);
+        let found = candidates
+            .iter()
+            .find(|c| c.peer_id == subject)
+            .expect("known");
+        assert_eq!(
+            found.protocol_observations.len(),
+            1,
+            "mdns still supports an address, so its claim stands"
+        );
     }
 }
