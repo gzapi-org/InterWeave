@@ -307,8 +307,22 @@ impl DiscoveryProviderSettings {
             }
         }
 
+        // UNRANGED, so it uses the 64-bit parser. The schema gives
+        // `candidate_ttl` no maximum, unlike every duration below it, and
+        // the 32-bit parser stops at about 49.7 days — so a staged
+        // profile using `60d` was refused for a reason no document gives.
+        // The same narrowing the peer-cache TTL had.
+        if let Some(text) = self.candidate_ttl.as_ref()
+            && let Err(reason) = parse_duration_ms_u64(text)
+        {
+            errors.push(ConfigError::InvalidKademliaSetting {
+                field: "candidate_ttl",
+                reason,
+            });
+        }
+
         for (field, got, range) in [
-            ("candidate_ttl", self.candidate_ttl.as_ref(), None),
+
             (
                 "query_timeout",
                 self.query_timeout.as_ref(),
@@ -3451,6 +3465,10 @@ mod tests {
             ),
             ("seed_sources", serde_json::json!(["peer-cache"])),
             ("candidate_ttl", serde_json::json!("30m")),
+            // Unranged in the schema, unlike every duration beside it —
+            // so past the 32-bit millisecond ceiling is still legal.
+            ("candidate_ttl", serde_json::json!("60d")),
+            ("candidate_ttl", serde_json::json!("365d")),
             ("kbucket_size", serde_json::json!(20)),
             ("max_routing_peers", serde_json::json!(256)),
             ("query_timeout", serde_json::json!("30s")),
@@ -3624,6 +3642,7 @@ mod tests {
             ("bootstrap_min_interval", serde_json::json!("59s")),
             ("bootstrap_refresh_interval", serde_json::json!("25h")),
             ("candidate_ttl", serde_json::json!("garbage")),
+            ("candidate_ttl", serde_json::json!("30x")),
         ];
 
         for (key, value) in bad {
@@ -3675,6 +3694,10 @@ mod tests {
             ("bootstrap_refresh_interval", serde_json::json!("15m")),
             ("bootstrap_refresh_interval", serde_json::json!("24h")),
             ("candidate_ttl", serde_json::json!("30m")),
+            // Unranged in the schema, unlike every duration beside it —
+            // so past the 32-bit millisecond ceiling is still legal.
+            ("candidate_ttl", serde_json::json!("60d")),
+            ("candidate_ttl", serde_json::json!("365d")),
         ];
 
         for (key, value) in good {
