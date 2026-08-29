@@ -92,6 +92,11 @@ fn tree_checks() -> Vec<Task> {
             &["tools/checks/check_discovery_config_keys.sh"],
         ),
         Task::new(
+            "shipped example profiles satisfy the enforced bounds",
+            "bash",
+            &["tools/checks/check_example_profiles.sh"],
+        ),
+        Task::new(
             "required check contexts match the workflow's job names",
             "bash",
             &["tools/checks/check_required_contexts.sh"],
