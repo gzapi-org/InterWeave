@@ -219,6 +219,139 @@ pub struct DiscoveryProviderSettings {
 }
 
 impl DiscoveryProviderSettings {
+    /// Every kademlia setting outside the value `config.schema.yaml`
+    /// documents.
+    ///
+    /// CHECKED EVEN WHEN THE ENTRY IS DISABLED. A disabled entry is how an
+    /// operator stages a profile ahead of the build, so leaving these
+    /// unchecked means `mode: "typo"` or `kbucket_size: 1` is reported
+    /// valid here and surfaces only after deployment on a supporting
+    /// build — the profile silently changes meaning between the machine
+    /// that validated it and the one that runs it.
+    ///
+    /// Per-field only. The schema's cross-field rules
+    /// (`target_routing_peers <= max_routing_peers` and the rest) are
+    /// explicitly gated on `enabled=true`, which this build refuses
+    /// outright, so they belong with the provider that implements them.
+    #[must_use]
+    pub fn kademlia_value_errors(&self) -> Vec<ConfigError> {
+        let mut errors = Vec::new();
+
+        let mut literal = |field: &'static str, got: Option<&String>, want: &str| {
+            if let Some(value) = got
+                && value != want
+            {
+                errors.push(ConfigError::InvalidKademliaSetting {
+                    field,
+                    reason: format!("must be '{want}', got '{value}'"),
+                });
+            }
+        };
+        literal(
+            "routing_peer_policy",
+            self.routing_peer_policy.as_ref(),
+            "data-plane-trusted",
+        );
+        literal("record_mode", self.record_mode.as_ref(), "disabled");
+
+        if let Some(mode) = &self.mode
+            && mode != "client"
+            && mode != "server"
+        {
+            errors.push(ConfigError::InvalidKademliaSetting {
+                field: "mode",
+                reason: format!("must be 'client' or 'server', got '{mode}'"),
+            });
+        }
+        if let Some(version) = self.config_version
+            && version != 1
+        {
+            errors.push(ConfigError::InvalidKademliaSetting {
+                field: "config_version",
+                reason: format!("must be 1, got {version}"),
+            });
+        }
+        if let Some(id) = &self.network_id
+            && !is_network_id(id)
+        {
+            errors.push(ConfigError::InvalidKademliaSetting {
+                field: "network_id",
+                reason: format!("must match ^[a-z0-9][a-z0-9._-]{{0,63}}$, got '{id}'"),
+            });
+        }
+
+        for (field, got, lo, hi) in [
+            ("kbucket_size", self.kbucket_size, 8, 20),
+            ("max_routing_peers", self.max_routing_peers, 20, 1024),
+            ("parallelism", self.parallelism, 1, 10),
+            ("max_concurrent_queries", self.max_concurrent_queries, 1, 8),
+            ("max_queries_per_minute", self.max_queries_per_minute, 1, 60),
+            (
+                "exploration_jitter_percent",
+                self.exploration_jitter_percent,
+                0,
+                50,
+            ),
+            ("max_results_per_query", self.max_results_per_query, 1, 20),
+            ("target_routing_peers", self.target_routing_peers, 8, 256),
+        ] {
+            if let Some(value) = got
+                && (value < lo || value > hi)
+            {
+                errors.push(ConfigError::InvalidKademliaSetting {
+                    field,
+                    reason: format!("must be {lo}..={hi}, got {value}"),
+                });
+            }
+        }
+
+        for (field, got, range) in [
+            ("candidate_ttl", self.candidate_ttl.as_ref(), None),
+            (
+                "query_timeout",
+                self.query_timeout.as_ref(),
+                Some((5_000u32, 120_000u32)),
+            ),
+            (
+                "exploration_interval",
+                self.exploration_interval.as_ref(),
+                Some((30_000, 3_600_000)),
+            ),
+            (
+                "targeted_lookup_cooldown",
+                self.targeted_lookup_cooldown.as_ref(),
+                Some((30_000, 3_600_000)),
+            ),
+            (
+                "bootstrap_min_interval",
+                self.bootstrap_min_interval.as_ref(),
+                Some((60_000, 3_600_000)),
+            ),
+            (
+                "bootstrap_refresh_interval",
+                self.bootstrap_refresh_interval.as_ref(),
+                Some((300_000, 86_400_000)),
+            ),
+        ] {
+            let Some(text) = got else { continue };
+            match parse_duration_ms(text) {
+                Err(reason) => errors.push(ConfigError::InvalidKademliaSetting { field, reason }),
+                Ok(ms) => {
+                    if let Some((lo, hi)) = range
+                        && (ms < lo || ms > hi)
+                    {
+                        errors.push(ConfigError::InvalidKademliaSetting {
+                            field,
+                            reason: format!("must be {lo}ms..={hi}ms, got {ms}ms"),
+                        });
+                    }
+                }
+            }
+        }
+
+        errors
+    }
+
     /// The first kademlia-only key this block carries, if any.
     ///
     /// Named rather than boolean so the error can point an operator at
@@ -1068,9 +1201,31 @@ const fn default_cache_ttl_ms() -> u32 {
 
 /// Parse a duration string (`"60s"`, `"5m"`, `"500ms"`) into milliseconds.
 ///
-/// The config documents durations as `<integer><unit>`; this is the only
-/// duration a profile carries. A bare integer is also accepted and read as
-/// milliseconds, so a JSON producer that emits a number round-trips.
+/// The config documents durations as `<integer><unit>`. A bare integer is
+/// also accepted and read as milliseconds, so a JSON producer that emits a
+/// number round-trips.
+///
+/// `h` and `d` are here because the kademlia block uses them (`1h`,
+/// `24h`, and `7d` for the cache TTL). `ms` is tested before `m`, and `d`
+/// cannot collide with anything else this accepts.
+/// `^[a-z0-9][a-z0-9._-]{0,63}$`, spelled out rather than regexed: the
+/// crate carries no regex dependency and the grammar is three rules.
+fn is_network_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let Some(&first) = bytes.first() else {
+        return false;
+    };
+    if bytes.len() > 64 {
+        return false;
+    }
+    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
+        return false;
+    }
+    bytes
+        .iter()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-'))
+}
+
 fn parse_duration_ms(text: &str) -> Result<u32, String> {
     let text = text.trim();
     let (digits, unit): (&str, u64) = if let Some(n) = text.strip_suffix("ms") {
@@ -1079,13 +1234,17 @@ fn parse_duration_ms(text: &str) -> Result<u32, String> {
         (n, 1_000)
     } else if let Some(n) = text.strip_suffix('m') {
         (n, 60_000)
+    } else if let Some(n) = text.strip_suffix('h') {
+        (n, 3_600_000)
+    } else if let Some(n) = text.strip_suffix('d') {
+        (n, 86_400_000)
     } else {
         (text, 1)
     };
     let value: u64 = digits
         .trim()
         .parse()
-        .map_err(|_| format!("'{text}' is not a duration like 60s, 5m, or 500ms"))?;
+        .map_err(|_| format!("'{text}' is not a duration like 60s, 5m, 1h, or 500ms"))?;
     u32::try_from(value.saturating_mul(unit))
         .map_err(|_| format!("duration '{text}' overflows the millisecond range"))
 }
@@ -1404,6 +1563,13 @@ pub enum ConfigError {
         /// Which type carried them.
         provider: &'static str,
     },
+    /// A kademlia setting is outside the value the schema documents.
+    InvalidKademliaSetting {
+        /// Which key.
+        field: &'static str,
+        /// What is wrong with it.
+        reason: String,
+    },
     /// Kademlia settings were set on a provider that has no such fields.
     KademliaSettingsOnWrongProvider {
         /// Which type carried them.
@@ -1551,6 +1717,9 @@ impl core::fmt::Display for ConfigError {
                 f,
                 "provider '{provider}' carries `ttl`/`max_entries`, which only peer-cache accepts"
             ),
+            Self::InvalidKademliaSetting { field, reason } => {
+                write!(f, "kademlia setting `{field}`: {reason}")
+            }
             Self::KademliaSettingsOnWrongProvider { provider, field } => write!(
                 f,
                 "provider '{provider}' carries `{field}`, which only kademlia accepts"
@@ -1780,6 +1949,14 @@ impl ProfileConfig {
             // deserialized, validated, and was silently ignored — the
             // failure mode `deny_unknown_fields` exists to prevent,
             // reintroduced one level down by the struct being shared.
+            // CHECKED EVEN WHEN DISABLED. A disabled entry is how an
+            // operator stages a profile ahead of the build, so an invalid
+            // value there is caught at deployment on a supporting build
+            // rather than here — the profile reports valid and changes
+            // meaning later, which is the worst moment for it.
+            if entry.provider_type == DiscoveryProviderType::Kademlia {
+                errors.extend(entry.config.kademlia_value_errors());
+            }
             if entry.provider_type != DiscoveryProviderType::Kademlia
                 && let Some(field) = entry.config.first_kademlia_field()
             {
@@ -3172,5 +3349,118 @@ mod tests {
             err.to_string().contains("prioriti"),
             "a misspelled key is named, not ignored: {err}"
         );
+    }
+    /// A disabled kademlia profile carrying one setting.
+    fn kad(key: &str, value: serde_json::Value) -> ProfileConfig {
+        let json = serde_json::json!({
+            "providers": [{
+                "type": "kademlia",
+                "enabled": false,
+                "config": { key: value }
+            }]
+        });
+        let mut profile = config(vec![endpoint("chat")]);
+        profile.discovery = serde_json::from_value(json).expect("parses");
+        profile
+    }
+
+    #[test]
+    fn kademlia_values_are_checked_even_when_the_entry_is_disabled() {
+        // Staging a profile ahead of the build is legal, so an invalid
+        // value here would otherwise surface only after deployment on a
+        // supporting build.
+        let bad: Vec<(&str, serde_json::Value)> = vec![
+            ("mode", serde_json::json!("typo")),
+            ("config_version", serde_json::json!(99)),
+            ("routing_peer_policy", serde_json::json!("trust-everyone")),
+            ("record_mode", serde_json::json!("enabled")),
+            ("network_id", serde_json::json!("Has-Capitals")),
+            ("network_id", serde_json::json!("-leading-dash")),
+            ("kbucket_size", serde_json::json!(1)),
+            ("kbucket_size", serde_json::json!(21)),
+            ("max_routing_peers", serde_json::json!(19)),
+            ("max_routing_peers", serde_json::json!(1025)),
+            ("parallelism", serde_json::json!(0)),
+            ("parallelism", serde_json::json!(11)),
+            ("max_concurrent_queries", serde_json::json!(9)),
+            ("max_queries_per_minute", serde_json::json!(61)),
+            ("exploration_jitter_percent", serde_json::json!(51)),
+            ("max_results_per_query", serde_json::json!(21)),
+            ("target_routing_peers", serde_json::json!(7)),
+            ("target_routing_peers", serde_json::json!(257)),
+            ("query_timeout", serde_json::json!("4s")),
+            ("query_timeout", serde_json::json!("121s")),
+            ("query_timeout", serde_json::json!("not-a-duration")),
+            ("exploration_interval", serde_json::json!("29s")),
+            ("exploration_interval", serde_json::json!("2h")),
+            ("targeted_lookup_cooldown", serde_json::json!("29s")),
+            ("bootstrap_min_interval", serde_json::json!("59s")),
+            ("bootstrap_refresh_interval", serde_json::json!("25h")),
+            ("candidate_ttl", serde_json::json!("garbage")),
+        ];
+
+        for (key, value) in bad {
+            let profile = kad(key, value.clone());
+            assert!(
+                profile.validate().iter().any(|e| matches!(
+                    e,
+                    ConfigError::InvalidKademliaSetting { field, .. } if *field == key
+                )),
+                "'{key}' = {value} must be refused and named"
+            );
+        }
+    }
+
+    #[test]
+    fn the_documented_kademlia_defaults_are_all_accepted() {
+        // The control: every value the schema gives as a default, and the
+        // bounds themselves, must pass — a checker that refuses the
+        // canonical profile is worse than none.
+        let good: Vec<(&str, serde_json::Value)> = vec![
+            ("mode", serde_json::json!("client")),
+            ("mode", serde_json::json!("server")),
+            ("config_version", serde_json::json!(1)),
+            (
+                "routing_peer_policy",
+                serde_json::json!("data-plane-trusted"),
+            ),
+            ("record_mode", serde_json::json!("disabled")),
+            ("network_id", serde_json::json!("example-private-network")),
+            ("network_id", serde_json::json!("0")),
+            ("kbucket_size", serde_json::json!(8)),
+            ("kbucket_size", serde_json::json!(20)),
+            ("max_routing_peers", serde_json::json!(20)),
+            ("max_routing_peers", serde_json::json!(1024)),
+            ("parallelism", serde_json::json!(1)),
+            ("parallelism", serde_json::json!(10)),
+            ("max_concurrent_queries", serde_json::json!(2)),
+            ("max_queries_per_minute", serde_json::json!(6)),
+            ("exploration_jitter_percent", serde_json::json!(0)),
+            ("exploration_jitter_percent", serde_json::json!(50)),
+            ("max_results_per_query", serde_json::json!(20)),
+            ("target_routing_peers", serde_json::json!(64)),
+            ("query_timeout", serde_json::json!("5s")),
+            ("query_timeout", serde_json::json!("120s")),
+            ("exploration_interval", serde_json::json!("60s")),
+            ("exploration_interval", serde_json::json!("1h")),
+            ("targeted_lookup_cooldown", serde_json::json!("5m")),
+            ("bootstrap_min_interval", serde_json::json!("5m")),
+            ("bootstrap_refresh_interval", serde_json::json!("15m")),
+            ("bootstrap_refresh_interval", serde_json::json!("24h")),
+            ("candidate_ttl", serde_json::json!("30m")),
+        ];
+
+        for (key, value) in good {
+            let profile = kad(key, value.clone());
+            let offending: Vec<_> = profile
+                .validate()
+                .into_iter()
+                .filter(|e| matches!(e, ConfigError::InvalidKademliaSetting { .. }))
+                .collect();
+            assert!(
+                offending.is_empty(),
+                "'{key}' = {value} is documented and must be accepted: {offending:?}"
+            );
+        }
     }
 }
