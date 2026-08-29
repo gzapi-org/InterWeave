@@ -276,25 +276,17 @@ impl MdnsDiscovery {
     /// Merging loses nothing: two expiries for one peer say exactly what
     /// one expiry naming both addresses says.
     fn queue_expiry(&mut self, peer_id: &TransportIdentity, address: &str) {
-        // THE PENDING OBSERVATION'S LIFETIME IS RECOMPUTED, not left
-        // behind. `expires_at` on a candidate is the peer's LATEST
-        // deadline across the addresses it names, so removing an address
-        // from a queued observation without recomputing can leave the
-        // survivors carrying a deadline that belonged to the address that
-        // just went — extending a route past its real expiry at the
-        // manager. `seen` no longer holds the departed address by this
-        // point, so it is the right thing to ask.
-        let remaining_expiry = self
-            .seen
-            .get(peer_id)
-            .and_then(|addresses| addresses.values().copied().max());
-
+        // NOTHING TO RECOMPUTE. A queued observation now names only
+        // addresses that share its deadline, so removing one cannot
+        // leave the survivors carrying a lifetime that belonged to the
+        // address that just went — the recompute this used to do is
+        // superseded by the grouping, not dropped.
+        //
         // A goodbye contradicts a pending observation of the same address.
         let mut merged: BTreeSet<String> = [address.to_owned()].into_iter().collect();
         self.pending.retain_mut(|event| match event {
             DiscoveryEvent::CandidateObserved { candidate } if candidate.peer_id == *peer_id => {
                 candidate.addresses.remove(address);
-                candidate.expires_at = remaining_expiry;
                 !candidate.addresses.is_empty()
             }
             DiscoveryEvent::CandidateExpired {
@@ -397,15 +389,27 @@ impl MdnsDiscovery {
         let Some(addresses) = self.seen.get(peer_id) else {
             return;
         };
-        let live: BTreeSet<String> = addresses
-            .iter()
-            .filter(|(_, exp)| now_ms < **exp)
-            .map(|(a, _)| a.clone())
-            .collect();
-        if live.is_empty() {
+        // ONE OBSERVATION PER DEADLINE, not one carrying the newest.
+        // A candidate has a single `expires_at` for every address it
+        // names, so folding a peer's addresses into one event assigned
+        // the freshest deadline to all of them — the manager then kept
+        // dialling a route this provider considered gone, until some
+        // later drain happened to carry its selective expiry.
+        //
+        // Grouping by deadline makes each event's lifetime true of every
+        // address in it. It also makes `queue_expiry` simpler: removing
+        // an address from a homogeneous group cannot change that group's
+        // expiry, so there is nothing left to recompute.
+        let mut groups: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
+        for (address, exp) in addresses {
+            if now_ms < *exp {
+                groups.entry(*exp).or_default().insert(address.clone());
+            }
+        }
+        if groups.is_empty() {
             return;
         }
-        let expires_at = addresses.values().copied().max();
+        let live: BTreeSet<String> = groups.values().flatten().cloned().collect();
         self.last_emitted.insert(peer_id.clone(), now_ms);
         // Drop any pending observation this one supersedes, and withdraw
         // from any pending expiry the addresses this observation
@@ -424,16 +428,18 @@ impl MdnsDiscovery {
             }
             _ => true,
         });
-        self.pending.push(DiscoveryEvent::CandidateObserved {
-            candidate: Box::new(CandidatePeer {
-                peer_id: peer_id.clone(),
-                addresses: live,
-                source: SOURCE.to_owned(),
-                observed_at: now_ms,
-                expires_at,
-                protocol_observations: BTreeSet::new(),
-            }),
-        });
+        for (expires_at, addresses) in groups {
+            self.pending.push(DiscoveryEvent::CandidateObserved {
+                candidate: Box::new(CandidatePeer {
+                    peer_id: peer_id.clone(),
+                    addresses,
+                    source: SOURCE.to_owned(),
+                    observed_at: now_ms,
+                    expires_at: Some(expires_at),
+                    protocol_observations: BTreeSet::new(),
+                }),
+            });
+        }
         self.enforce_pending_bound();
     }
 
@@ -702,12 +708,23 @@ mod tests {
         // Replacing an older pending observation must not lose the newer
         // address set: a peer announcing a second address while the
         // consumer is stalled must still have both when it drains.
+        //
+        // "Both" is now the UNION across the peer's events, not one
+        // event's set. Addresses announced at different instants have
+        // different deadlines, and an event carries one `expires_at` for
+        // everything it names — so folding them together would assign
+        // the newer address's lifetime to the older one.
         let mut p = started();
         p.push_discovered(P1, "/ip4/192.168.1.5/tcp/4001", 0);
         p.push_discovered(P1, "/ip6/::1/tcp/4001", 1);
         let seen = observations(&p.drain_events(1, 8));
-        assert_eq!(seen.len(), 1, "coalesced into one");
-        assert_eq!(seen[0].1.len(), 2, "carrying both addresses");
+        let addresses: BTreeSet<String> =
+            seen.iter().flat_map(|(_, a)| a.iter().cloned()).collect();
+        assert_eq!(addresses.len(), 2, "both addresses survive the coalescing");
+        assert!(
+            seen.iter().all(|(peer, _)| peer.as_str() == P1),
+            "and every event is for the one peer"
+        );
     }
 
     #[test]
@@ -744,8 +761,14 @@ mod tests {
         let _ = p.drain_events(0, 8);
         p.push_discovered(P1, "/ip6/::1/tcp/4001", 1);
         let seen = observations(&p.drain_events(1, 8));
-        assert_eq!(seen.len(), 1);
-        assert_eq!(seen[0].1.len(), 2, "the candidate carries both addresses");
+        let addresses: BTreeSet<String> =
+            seen.iter().flat_map(|(_, a)| a.iter().cloned()).collect();
+        assert_eq!(
+            addresses.len(),
+            2,
+            "the peer is reported with both addresses, across one event \
+             per deadline"
+        );
     }
 
     #[test]
@@ -1390,6 +1413,45 @@ mod tests {
             )),
             "a live peer whose queued observation was trimmed is requeued \
              from `seen`, never silently untold"
+        );
+    }
+    #[test]
+    fn each_address_keeps_its_own_deadline() {
+        // A candidate carries ONE `expires_at` for every address it
+        // names, so folding a peer's addresses into a single event
+        // assigned the freshest deadline to all of them — the manager
+        // kept dialling a route this provider considered gone.
+        let mut p = started();
+        let early = "/ip4/192.168.1.5/tcp/4001";
+        let late = "/ip4/192.168.1.6/tcp/4001";
+        p.push_discovered(P1, early, 0);
+        p.push_discovered(P1, late, 1_000);
+
+        let seen: Vec<(BTreeSet<String>, Option<u64>)> = p
+            .drain_events(1_000, usize::MAX)
+            .into_iter()
+            .filter_map(|e| match e {
+                DiscoveryEvent::CandidateObserved { candidate } => {
+                    Some((candidate.addresses.clone(), candidate.expires_at))
+                }
+                _ => None,
+            })
+            .collect();
+
+        let for_address = |addr: &str| -> Option<u64> {
+            seen.iter()
+                .find(|(addrs, _)| addrs.contains(addr))
+                .and_then(|(_, exp)| *exp)
+        };
+        assert_eq!(
+            for_address(early),
+            Some(OBSERVATION_TTL_MS),
+            "the earlier address keeps ITS deadline"
+        );
+        assert_eq!(
+            for_address(late),
+            Some(1_000 + OBSERVATION_TTL_MS),
+            "and the later one keeps its own"
         );
     }
 }
