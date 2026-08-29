@@ -415,6 +415,26 @@ impl CandidateSet {
     /// Drop every provenance record and observation that has expired, and
     /// every peer left with no addresses.
     pub fn sweep(&mut self, now_ms: u64) {
+        // The same withdrawal the retraction path records: a mark evicted
+        // as redundant was covered by records, and expiry removes them
+        // just as surely as a retraction does.
+        let mut withdrawn: Vec<(TransportIdentity, String, u64)> = Vec::new();
+        for (peer_id, entry) in &self.peers {
+            let mut newest: BTreeMap<&str, u64> = BTreeMap::new();
+            for record in entry.addresses.values().flat_map(|rs| rs.iter()) {
+                if now_ms >= record.expires_at {
+                    let slot = newest.entry(record.source.as_str()).or_default();
+                    *slot = (*slot).max(record.observed_at);
+                }
+            }
+            for (source, at) in newest {
+                withdrawn.push((peer_id.clone(), source.to_owned(), at));
+            }
+        }
+        for (peer_id, source, at) in withdrawn {
+            self.remember_watermark(&peer_id, &source, at);
+        }
+
         for entry in self.peers.values_mut() {
             for records in entry.addresses.values_mut() {
                 records.retain(|r| now_ms < r.expires_at);
@@ -524,42 +544,7 @@ impl CandidateSet {
         }
 
         if !stale {
-            if self.high_water.len() >= MAX_HIGH_WATER && !self.high_water.contains_key(&key) {
-                // REDUNDANT MARKS GO FIRST, not oldest ones. A mark whose
-                // `(peer, source)` still has live provenance is already
-                // covered by the forward-only rule on that record, so
-                // dropping it costs nothing. A mark for a source that
-                // supports nothing is the only thing standing between a
-                // delayed event and the address it withdrew.
-                //
-                // Oldest-first was the obvious policy and the wrong one:
-                // a retracted peer's mark is by construction among the
-                // oldest, so it evicted exactly the marks the guard
-                // exists for — filling the set was enough to defeat it.
-                let redundant = self
-                    .high_water
-                    .keys()
-                    .find(|(peer, source)| {
-                        self.peers.get(peer).is_some_and(|e| {
-                            e.addresses
-                                .values()
-                                .flat_map(|records| records.iter())
-                                .any(|r| r.source == *source)
-                        })
-                    })
-                    .cloned();
-                let victim = redundant.or_else(|| {
-                    self.high_water
-                        .iter()
-                        .min_by_key(|(_, at)| **at)
-                        .map(|(k, _)| k.clone())
-                });
-                if let Some(victim) = victim {
-                    self.high_water.remove(&victim);
-                }
-            }
-            let mark = self.high_water.entry(key).or_default();
-            *mark = (*mark).max(candidate.observed_at);
+            self.remember_watermark(&candidate.peer_id, &candidate.source, candidate.observed_at);
         }
 
         let entry = self.peers.entry(candidate.peer_id.clone()).or_default();
@@ -739,6 +724,20 @@ impl CandidateSet {
         let Some(entry) = self.peers.get_mut(peer_id) else {
             return;
         };
+        // REMEMBER BEFORE REMOVING. A mark evicted as redundant was
+        // covered by these very records, and that coverage ends here — so
+        // the withdrawal is exactly the moment the mark has to exist
+        // again, or a delayed older observation revives what this call is
+        // taking away.
+        let withdrawn: Option<u64> = entry
+            .addresses
+            .iter()
+            .filter(|(address, _)| addresses.is_empty() || addresses.contains(*address))
+            .flat_map(|(_, records)| records.iter())
+            .filter(|r| r.source == source)
+            .map(|r| r.observed_at)
+            .max();
+
         for (address, records) in &mut entry.addresses {
             if addresses.is_empty() || addresses.contains(address) {
                 records.retain(|r| r.source != source);
@@ -762,6 +761,10 @@ impl CandidateSet {
         if entry.addresses.is_empty() {
             self.peers.remove(peer_id);
         }
+
+        if let Some(at) = withdrawn {
+            self.remember_watermark(peer_id, source, at);
+        }
     }
 
     /// Make room: an expired peer first, then the least recently observed
@@ -771,6 +774,54 @@ impl CandidateSet {
     /// is preferred over an untrusted one under pressure — it is not
     /// granted anything, and an untrusted candidate that survives is not
     /// thereby endorsed.
+    /// Record that `source` has been seen at `at` for `peer`, bounded.
+    ///
+    /// Called wherever a source's evidence is applied OR withdrawn. The
+    /// withdrawal case is the one that is easy to miss and the one that
+    /// matters: a mark dropped as "redundant" was covered by a live
+    /// record, and that coverage lasts exactly until the record goes —
+    /// so the moment provenance is removed, the mark has to exist again
+    /// or a delayed older event revives the address.
+    fn remember_watermark(&mut self, peer: &TransportIdentity, source: &str, at: u64) {
+        let key = (peer.clone(), source.to_owned());
+        if self.high_water.len() >= MAX_HIGH_WATER && !self.high_water.contains_key(&key) {
+            // REDUNDANT MARKS GO FIRST, not oldest ones. A mark whose
+            // `(peer, source)` still has live provenance is already
+            // covered by the forward-only rule on that record, and by
+            // this function running when that record is removed. A mark
+            // for a source that supports nothing has neither, and is the
+            // only thing between a delayed event and the address it
+            // withdrew.
+            //
+            // Oldest-first was the obvious policy and the wrong one: a
+            // retracted peer's mark is by construction among the oldest,
+            // so it evicted exactly the marks the guard exists for.
+            let redundant = self
+                .high_water
+                .keys()
+                .find(|(p, s)| {
+                    self.peers.get(p).is_some_and(|e| {
+                        e.addresses
+                            .values()
+                            .flat_map(|records| records.iter())
+                            .any(|r| r.source == *s)
+                    })
+                })
+                .cloned();
+            let victim = redundant.or_else(|| {
+                self.high_water
+                    .iter()
+                    .min_by_key(|(_, at)| **at)
+                    .map(|(k, _)| k.clone())
+            });
+            if let Some(victim) = victim {
+                self.high_water.remove(&victim);
+            }
+        }
+        let mark = self.high_water.entry(key).or_default();
+        *mark = (*mark).max(at);
+    }
+
     /// Make room, refusing to do so for a newcomer that ranks last.
     ///
     /// `incoming` is the arriving candidate's `observed_at`. Without it
@@ -3871,6 +3922,92 @@ mod tests {
                 .iter()
                 .any(|c| c.peer_id == laggard),
             "past the cap a pinned newcomer is ranked on recency like any other"
+        );
+    }
+    #[test]
+    fn a_mark_dropped_as_redundant_is_re_established_when_its_record_goes() {
+        // "Redundant" means covered by a live provenance record — and
+        // that coverage ends when the record does. Without re-recording
+        // the mark at withdrawal, a delayed older observation revives the
+        // route the retraction just removed.
+        //
+        // The eviction is applied directly rather than by filling the
+        // map: which mark the policy picks depends on map ordering, so
+        // reaching this one through 4096 peers would be a test of that
+        // ordering. The state fed in is exactly what the policy produces.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(1_100);
+        let address = "/ip4/10.0.0.1/tcp/4001";
+
+        set.observe(
+            &for_id(&subject, "peer-cache", address, 1_000, Some(u64::MAX)),
+            1_000,
+            &trust,
+            true,
+            false,
+        );
+
+        // Exactly what the redundant-first policy does to a mark whose
+        // record is live.
+        set.high_water
+            .remove(&(subject.clone(), "peer-cache".to_owned()));
+        assert!(
+            !set.high_water
+                .contains_key(&(subject.clone(), "peer-cache".to_owned())),
+            "the mark is gone, or this proves nothing"
+        );
+
+        set.retract(&subject, "peer-cache", &BTreeSet::new());
+        set.observe(
+            &for_id(&subject, "peer-cache", address, 500, Some(u64::MAX)),
+            9_000_000,
+            &trust,
+            true,
+            false,
+        );
+
+        assert!(
+            !set.candidates(9_000_000, &|_| None)
+                .iter()
+                .any(|c| c.peer_id == subject),
+            "the withdrawn route is not revived by older evidence"
+        );
+    }
+
+    #[test]
+    fn expiry_re_establishes_a_dropped_mark_as_a_retraction_does() {
+        // The same withdrawal through the sweep, which removes records
+        // just as surely and was the second half of this gap.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(1_101);
+        let address = "/ip4/10.0.0.1/tcp/4001";
+
+        set.observe(
+            &for_id(&subject, "peer-cache", address, 1_000, Some(2_000)),
+            1_000,
+            &trust,
+            true,
+            false,
+        );
+        set.high_water
+            .remove(&(subject.clone(), "peer-cache".to_owned()));
+
+        set.sweep(5_000);
+        set.observe(
+            &for_id(&subject, "peer-cache", address, 500, Some(u64::MAX)),
+            9_000_000,
+            &trust,
+            true,
+            false,
+        );
+
+        assert!(
+            !set.candidates(9_000_000, &|_| None)
+                .iter()
+                .any(|c| c.peer_id == subject),
+            "a lapsed record leaves a mark behind, as a retracted one does"
         );
     }
 }
