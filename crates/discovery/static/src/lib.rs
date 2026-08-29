@@ -80,6 +80,20 @@ impl StaticEntry {
     }
 }
 
+/// A queued event, with the bookkeeping needed to undo it.
+///
+/// `before` is what `emitted` held for this peer immediately BEFORE the
+/// event was queued. An event says what CHANGED, and a whole-peer
+/// retraction deliberately says nothing about the addresses it
+/// withdraws — so a rollback reconstructing state from the event, or
+/// from the configuration as it stands now, cannot recover what the
+/// consumer was actually holding.
+#[derive(Debug, Clone)]
+struct Queued {
+    event: DiscoveryEvent,
+    before: Option<BTreeSet<String>>,
+}
+
 /// Configured bootstrap entries, presented as a discovery provider.
 #[derive(Debug, Default)]
 pub struct StaticBootstrapDiscovery {
@@ -90,7 +104,7 @@ pub struct StaticBootstrapDiscovery {
     emitted: BTreeMap<TransportIdentity, BTreeSet<String>>,
     started: bool,
     stopped: bool,
-    pending: Vec<DiscoveryEvent>,
+    pending: Vec<Queued>,
 }
 
 impl StaticBootstrapDiscovery {
@@ -172,22 +186,28 @@ impl StaticBootstrapDiscovery {
     /// safely. It is the same model `PeerCacheDiscovery` uses, for the
     /// same reason.
     fn refresh(&mut self, now_ms: u64) {
-        let mut queued: Vec<DiscoveryEvent> = Vec::new();
+        let mut queued: Vec<Queued> = Vec::new();
 
         for (peer_id, addresses) in &self.emitted {
             match self.entries.get(peer_id) {
-                None => queued.push(DiscoveryEvent::CandidateExpired {
-                    peer_id: peer_id.clone(),
-                    source: SOURCE.to_owned(),
-                    addresses: BTreeSet::new(),
+                None => queued.push(Queued {
+                    event: DiscoveryEvent::CandidateExpired {
+                        peer_id: peer_id.clone(),
+                        source: SOURCE.to_owned(),
+                        addresses: BTreeSet::new(),
+                    },
+                    before: Some(addresses.clone()),
                 }),
                 Some(kept) => {
                     let dropped: BTreeSet<String> = addresses.difference(kept).cloned().collect();
                     if !dropped.is_empty() {
-                        queued.push(DiscoveryEvent::CandidateExpired {
-                            peer_id: peer_id.clone(),
-                            source: SOURCE.to_owned(),
-                            addresses: dropped,
+                        queued.push(Queued {
+                            event: DiscoveryEvent::CandidateExpired {
+                                peer_id: peer_id.clone(),
+                                source: SOURCE.to_owned(),
+                                addresses: dropped,
+                            },
+                            before: Some(addresses.clone()),
                         });
                     }
                 }
@@ -195,7 +215,10 @@ impl StaticBootstrapDiscovery {
         }
         for (peer_id, addresses) in &self.entries {
             if self.emitted.get(peer_id) != Some(addresses) {
-                queued.push(observed(peer_id, addresses, now_ms));
+                queued.push(Queued {
+                    event: observed(peer_id, addresses, now_ms),
+                    before: self.emitted.get(peer_id).cloned(),
+                });
             }
         }
 
@@ -206,8 +229,8 @@ impl StaticBootstrapDiscovery {
         // Growth from repeated reloads is the bound's job, and the bound
         // can do it safely precisely because every event it drops is
         // rolled back out of `emitted` and recomputed here.
-        for event in &queued {
-            match event {
+        for queued in &queued {
+            match &queued.event {
                 DiscoveryEvent::CandidateObserved { candidate } => {
                     self.emitted.insert(
                         candidate.peer_id.clone(),
@@ -240,51 +263,41 @@ impl StaticBootstrapDiscovery {
         if self.pending.len() <= MAX_PENDING_EVENTS {
             return;
         }
-        // HEALTH IS NEVER THE THING DROPPED: the manager learns health
-        // only from that event, so trimming the sole transition leaves
-        // this provider reported unavailable indefinitely while it is
-        // plainly working. Every other event is recoverable — that is
-        // what the rollback below is for — and this one is not, because
-        // nothing recomputes a transition that already happened.
+        // Health is never the thing dropped: the manager learns health
+        // only from that event, and nothing recomputes a transition that
+        // already happened.
         let mut excess = self.pending.len() - MAX_PENDING_EVENTS;
-        let mut kept: Vec<DiscoveryEvent> = Vec::with_capacity(MAX_PENDING_EVENTS);
-        let mut dropped: Vec<DiscoveryEvent> = Vec::new();
-        for event in self.pending.drain(..) {
-            if excess > 0 && !matches!(event, DiscoveryEvent::HealthChanged { .. }) {
+        let mut kept: Vec<Queued> = Vec::with_capacity(MAX_PENDING_EVENTS);
+        let mut dropped: Vec<Queued> = Vec::new();
+        for queued in self.pending.drain(..) {
+            if excess > 0 && !matches!(queued.event, DiscoveryEvent::HealthChanged { .. }) {
                 excess -= 1;
-                dropped.push(event);
+                dropped.push(queued);
             } else {
-                kept.push(event);
+                kept.push(queued);
             }
         }
         self.pending = kept;
 
-        // UNDONE IN REVERSE: a dropped pair for one peer is [retraction,
-        // observation] in queue order, and applying the rollbacks
-        // forwards restored the retracted addresses and then deleted the
-        // whole record, losing the retraction the first step existed to
-        // preserve. Here that is permanent, because the manager holds
-        // static provenance without expiry.
-        for event in dropped.into_iter().rev() {
-            match event {
-                DiscoveryEvent::CandidateObserved { candidate } => {
-                    self.emitted.remove(&candidate.peer_id);
+        // UNDONE IN REVERSE, restoring each event's own `before`. Reverse
+        // order because a peer may have several dropped events and the
+        // EARLIEST one's snapshot is the state to end at. Restoring a
+        // recorded snapshot rather than deriving one is what makes a
+        // whole-peer retraction recoverable: it carries no addresses, and
+        // the configuration may have been reloaded since.
+        for queued in dropped.into_iter().rev() {
+            let peer_id = match &queued.event {
+                DiscoveryEvent::CandidateObserved { candidate } => candidate.peer_id.clone(),
+                DiscoveryEvent::CandidateExpired { peer_id, .. } => peer_id.clone(),
+                DiscoveryEvent::HealthChanged { .. } => continue,
+            };
+            match queued.before {
+                Some(addresses) => {
+                    self.emitted.insert(peer_id, addresses);
                 }
-                DiscoveryEvent::CandidateExpired {
-                    peer_id, addresses, ..
-                } => {
-                    // Restore what the retraction was withdrawing, so the
-                    // next refresh finds the difference again.
-                    let held = self.emitted.entry(peer_id.clone()).or_default();
-                    if addresses.is_empty() {
-                        if let Some(configured) = self.entries.get(&peer_id) {
-                            held.extend(configured.iter().cloned());
-                        }
-                    } else {
-                        held.extend(addresses.iter().cloned());
-                    }
+                None => {
+                    self.emitted.remove(&peer_id);
                 }
-                DiscoveryEvent::HealthChanged { .. } => {}
             }
         }
     }
@@ -336,9 +349,12 @@ impl DiscoveryProvider for StaticBootstrapDiscovery {
         // provider as Unavailable and learns health only from
         // `HealthChanged`, so a provider that merely becomes healthy
         // internally leaves aggregate health wrong forever.
-        self.pending.push(DiscoveryEvent::HealthChanged {
-            source: SOURCE.to_owned(),
-            health: ProviderHealth::Healthy,
+        self.pending.push(Queued {
+            event: DiscoveryEvent::HealthChanged {
+                source: SOURCE.to_owned(),
+                health: ProviderHealth::Healthy,
+            },
+            before: None,
         });
         // The configured entries, as the difference from having told
         // the consumer nothing.
@@ -362,7 +378,7 @@ impl DiscoveryProvider for StaticBootstrapDiscovery {
         // empty and this queues nothing.
         self.refresh(now_ms);
         let take = max.min(self.pending.len());
-        self.pending.drain(..take).collect()
+        self.pending.drain(..take).map(|q| q.event).collect()
     }
 
     fn add_hint(&mut self, _hint: PeerHint, _now_ms: u64) -> HintDisposition {
@@ -903,8 +919,8 @@ mod tests {
         );
         p.refresh(20);
         assert!(
-            p.pending.iter().any(|e| matches!(
-                e,
+            p.pending.iter().any(|q| matches!(
+                &q.event,
                 DiscoveryEvent::CandidateExpired { addresses, .. }
                     if addresses.contains(removed)
             )),
@@ -912,16 +928,19 @@ mod tests {
         );
 
         for i in 0..MAX_PENDING_EVENTS {
-            p.pending.push(observed(
-                &synthetic(1_000 + i),
-                &[kept.to_owned()].into_iter().collect(),
-                30,
-            ));
+            p.pending.push(Queued {
+                event: observed(
+                    &synthetic(1_000 + i),
+                    &[kept.to_owned()].into_iter().collect(),
+                    30,
+                ),
+                before: None,
+            });
         }
         p.enforce_pending_bound();
         assert!(
-            !p.pending.iter().any(|e| matches!(
-                e,
+            !p.pending.iter().any(|q| matches!(
+                &q.event,
                 DiscoveryEvent::CandidateExpired { addresses, .. }
                     if addresses.contains(removed)
             )),
@@ -941,6 +960,61 @@ mod tests {
         assert!(
             recreated,
             "the retraction is recreated after both halves were dropped"
+        );
+    }
+    #[test]
+    fn a_dropped_whole_peer_retraction_still_retracts_the_old_address() {
+        // A peer removed from configuration and re-added at a DIFFERENT
+        // address before the drain. The whole-peer retraction carries no
+        // addresses, so a rollback rebuilding from the current entries
+        // lands on the re-added state — `refresh` then finds no
+        // difference and recreates neither event, leaving the manager
+        // holding a non-expiring static address for a route the operator
+        // removed.
+        let old_address = "/ip4/10.0.0.1/tcp/1";
+        let new_address = "/ip4/10.0.0.2/tcp/2";
+        let mut p =
+            StaticBootstrapDiscovery::new(vec![entry(P1, old_address)]).expect("legal entries");
+        p.start(0).expect("starts");
+        let _ = p.drain_events(0, usize::MAX);
+
+        p.set_entries(vec![], 10).expect("removed");
+        p.set_entries(vec![entry(P1, new_address)], 20)
+            .expect("re-added elsewhere");
+
+        for i in 0..MAX_PENDING_EVENTS {
+            p.pending.push(Queued {
+                event: observed(
+                    &synthetic(2_000 + i),
+                    &[new_address.to_owned()].into_iter().collect(),
+                    30,
+                ),
+                before: None,
+            });
+        }
+        p.enforce_pending_bound();
+        assert!(
+            !p.pending.iter().any(|q| matches!(
+                &q.event,
+                DiscoveryEvent::CandidateExpired { peer_id, .. } if *peer_id == peer(P1)
+            )),
+            "the retraction was indeed trimmed, or this proves nothing"
+        );
+
+        let mut retracted = false;
+        for _ in 0..10 {
+            for event in p.drain_events(40, usize::MAX) {
+                if let DiscoveryEvent::CandidateExpired { peer_id, .. } = event
+                    && peer_id == peer(P1)
+                {
+                    retracted = true;
+                }
+            }
+        }
+        assert!(
+            retracted,
+            "the whole-peer retraction is recreated, so the removed \
+             address is withdrawn rather than left dialable for good"
         );
     }
 }
