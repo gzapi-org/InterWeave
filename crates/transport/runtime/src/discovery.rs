@@ -494,6 +494,17 @@ impl CandidateSet {
         // nothing changed and so nothing is re-emitted. Such a provider
         // says what it means with `CandidateExpired`.
         let expires_at = match candidate.expires_at {
+            // THE DESCRIPTOR IS AUTHORITATIVE over the event. A provider
+            // that registered `supports_expiry: false` may not age an
+            // entry out by stamping a timestamp on one candidate: the
+            // whole retention design keys on the declaration — pinning,
+            // eviction, the no-default-TTL rule below — and honouring a
+            // stray `expires_at` deleted a configured entry with no
+            // `CandidateExpired` ever emitted and nothing to re-learn it.
+            // The inconsistent field is ignored rather than the event
+            // rejected, because the candidate itself is legitimate; it is
+            // the metadata that contradicts the registration.
+            Some(_) if !provider_expires => u64::MAX,
             Some(stated) => stated,
             // ANCHORED TO WHEN IT WAS OBSERVED, not when it arrived. A
             // delayed event would otherwise be granted a fresh ten
@@ -4231,6 +4242,37 @@ mod tests {
                 .address_list()
                 .contains(&address),
             "the lapsed address is not revived by older evidence"
+        );
+    }
+    #[test]
+    fn a_non_expiring_provider_cannot_age_an_entry_out_with_a_stray_timestamp() {
+        // The descriptor is authoritative: retention, pinning and the
+        // no-default-TTL rule all key on `supports_expiry: false`, so one
+        // candidate carrying `expires_at` anyway must not delete a
+        // configured entry that nothing will re-emit.
+        let mut m = DiscoveryManager::new();
+        m.register(descriptor_without_expiry("static-bootstrap"), 0)
+            .expect("registers");
+        let trust = nobody();
+        let boot = identity(1_500);
+
+        m.on_event(
+            "static-bootstrap",
+            observed(for_id(
+                &boot,
+                "static-bootstrap",
+                "/ip4/10.0.0.1/tcp/1",
+                0,
+                Some(1_000), // the inconsistent stamp
+            )),
+            0,
+            &trust,
+        )
+        .expect("accepted");
+
+        assert!(
+            m.candidates(9_000_000).iter().any(|c| c.peer_id == boot),
+            "the configured entry outlives the stray timestamp"
         );
     }
 }
