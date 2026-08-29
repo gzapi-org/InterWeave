@@ -85,6 +85,9 @@ impl StaticEntry {
 pub struct StaticBootstrapDiscovery {
     /// peer -> the addresses configured for it.
     entries: BTreeMap<TransportIdentity, BTreeSet<String>>,
+    /// What the consumer has been told, so the outstanding difference is
+    /// always derivable from state rather than accumulated from events.
+    emitted: BTreeMap<TransportIdentity, BTreeSet<String>>,
     started: bool,
     stopped: bool,
     pending: Vec<DiscoveryEvent>,
@@ -116,6 +119,7 @@ impl StaticBootstrapDiscovery {
         }
         Ok(Self {
             entries: grouped,
+            emitted: BTreeMap::new(),
             started: false,
             stopped: false,
             pending: Vec::new(),
@@ -144,87 +148,121 @@ impl StaticBootstrapDiscovery {
     ) -> Result<(), DiscoveryError> {
         let replacement = Self::new(entries)?.entries;
 
-        if self.started && !self.stopped {
-            for (peer_id, addresses) in &self.entries {
-                match replacement.get(peer_id) {
-                    // Gone entirely.
-                    None => self.pending.push(DiscoveryEvent::CandidateExpired {
-                        peer_id: peer_id.clone(),
-                        source: SOURCE.to_owned(),
-                        addresses: BTreeSet::new(),
-                    }),
-                    // Still configured, but some addresses went.
-                    Some(kept) => {
-                        let dropped: BTreeSet<String> =
-                            addresses.difference(kept).cloned().collect();
-                        if !dropped.is_empty() {
-                            self.pending.push(DiscoveryEvent::CandidateExpired {
-                                peer_id: peer_id.clone(),
-                                source: SOURCE.to_owned(),
-                                addresses: dropped,
-                            });
-                        }
-                    }
-                }
-            }
-            for (peer_id, addresses) in &replacement {
-                if self.entries.get(peer_id) != Some(addresses) {
-                    self.queue_observation(peer_id, addresses, now_ms);
-                }
-            }
-            self.enforce_pending_bound();
-        }
         self.entries = replacement;
+        if self.started && !self.stopped {
+            self.refresh(now_ms);
+        }
         Ok(())
     }
 
-    /// Queue an observation for `peer_id`, superseding an undrained one.
+    /// Queue the difference between what the consumer was told and what
+    /// is configured now.
     ///
-    /// Repeated reloads against a stalled consumer appended a full set of
-    /// events per reload, so `pending` grew without limit while `entries`
-    /// stayed at its 64-entry cap — the bound was on the configuration
-    /// and not on the queue.
+    /// DERIVED FROM STATE, NOT ACCUMULATED FROM EVENTS. Emitting the diff
+    /// eagerly in `set_entries` compared only the previous configuration
+    /// to the next one, so an event the queue bound later discarded could
+    /// never be recreated — a subsequent reload had nothing to compare
+    /// against that would produce it again. A dropped RETRACTION was
+    /// unrecoverable and permanent: the manager holds static provenance
+    /// without expiry, so the removed address stayed a candidate for
+    /// good.
     ///
-    /// A pending EXPIRY is not dropped wholesale, only the addresses this
-    /// observation re-announces. The manager's `observe` is additive: a
-    /// fresh snapshot refreshes what it names and says nothing about what
-    /// it omits, so discarding the retraction would strand an address the
-    /// operator removed. That is the same mistake the cache made, found
-    /// one review round earlier.
-    fn queue_observation(
-        &mut self,
-        peer_id: &TransportIdentity,
-        addresses: &BTreeSet<String>,
-        now_ms: u64,
-    ) {
-        self.pending.retain_mut(|event| match event {
-            DiscoveryEvent::CandidateObserved { candidate } => candidate.peer_id != *peer_id,
-            DiscoveryEvent::CandidateExpired {
-                peer_id: expired_peer,
-                addresses: gone,
-                ..
-            } if expired_peer == peer_id => {
-                // An empty set retracts the whole peer, and this
-                // observation says it is configured again.
-                if gone.is_empty() {
-                    return false;
+    /// Computing against `emitted` instead makes every queued event
+    /// reproducible from state, which is what lets the bound discard one
+    /// safely. It is the same model `PeerCacheDiscovery` uses, for the
+    /// same reason.
+    fn refresh(&mut self, now_ms: u64) {
+        let mut queued: Vec<DiscoveryEvent> = Vec::new();
+
+        for (peer_id, addresses) in &self.emitted {
+            match self.entries.get(peer_id) {
+                None => queued.push(DiscoveryEvent::CandidateExpired {
+                    peer_id: peer_id.clone(),
+                    source: SOURCE.to_owned(),
+                    addresses: BTreeSet::new(),
+                }),
+                Some(kept) => {
+                    let dropped: BTreeSet<String> = addresses.difference(kept).cloned().collect();
+                    if !dropped.is_empty() {
+                        queued.push(DiscoveryEvent::CandidateExpired {
+                            peer_id: peer_id.clone(),
+                            source: SOURCE.to_owned(),
+                            addresses: dropped,
+                        });
+                    }
                 }
-                gone.retain(|a| !addresses.contains(a));
-                !gone.is_empty()
             }
-            _ => true,
-        });
-        self.pending.push(observed(peer_id, addresses, now_ms));
+        }
+        for (peer_id, addresses) in &self.entries {
+            if self.emitted.get(peer_id) != Some(addresses) {
+                queued.push(observed(peer_id, addresses, now_ms));
+            }
+        }
+
+        // APPENDED, and `emitted` advanced to match. Wiping what was
+        // already queued would discard events whose effect `emitted` has
+        // already absorbed — a reload that changes nothing then computes
+        // an empty difference and the earlier retraction is simply gone.
+        // Growth from repeated reloads is the bound's job, and the bound
+        // can do it safely precisely because every event it drops is
+        // rolled back out of `emitted` and recomputed here.
+        for event in &queued {
+            match event {
+                DiscoveryEvent::CandidateObserved { candidate } => {
+                    self.emitted.insert(
+                        candidate.peer_id.clone(),
+                        candidate.addresses.iter().cloned().collect(),
+                    );
+                }
+                DiscoveryEvent::CandidateExpired {
+                    peer_id, addresses, ..
+                } => {
+                    if addresses.is_empty() {
+                        self.emitted.remove(peer_id);
+                    } else if let Some(held) = self.emitted.get_mut(peer_id) {
+                        held.retain(|a| !addresses.contains(a));
+                    }
+                }
+                DiscoveryEvent::HealthChanged { .. } => {}
+            }
+        }
+        self.pending.extend(queued);
+        self.enforce_pending_bound();
     }
 
-    /// Hold `pending` to [`MAX_PENDING_EVENTS`], oldest first.
+    /// Hold `pending` to [`MAX_PENDING_EVENTS`], oldest first, rolling
+    /// back the bookkeeping behind each dropped event.
     ///
-    /// A dropped event costs what the next reload re-emits, since this
-    /// provider's whole state is the configuration it holds.
+    /// The rollback is what makes the drop safe: `refresh` recomputes the
+    /// outstanding difference from `emitted`, so undoing the record an
+    /// event was going to establish means the next drain queues it again.
     fn enforce_pending_bound(&mut self) {
-        if self.pending.len() > MAX_PENDING_EVENTS {
-            let excess = self.pending.len() - MAX_PENDING_EVENTS;
-            self.pending.drain(..excess);
+        if self.pending.len() <= MAX_PENDING_EVENTS {
+            return;
+        }
+        let excess = self.pending.len() - MAX_PENDING_EVENTS;
+        let dropped: Vec<DiscoveryEvent> = self.pending.drain(..excess).collect();
+        for event in dropped {
+            match event {
+                DiscoveryEvent::CandidateObserved { candidate } => {
+                    self.emitted.remove(&candidate.peer_id);
+                }
+                DiscoveryEvent::CandidateExpired {
+                    peer_id, addresses, ..
+                } => {
+                    // Restore what the retraction was withdrawing, so the
+                    // next refresh finds the difference again.
+                    let held = self.emitted.entry(peer_id.clone()).or_default();
+                    if addresses.is_empty() {
+                        if let Some(configured) = self.entries.get(&peer_id) {
+                            held.extend(configured.iter().cloned());
+                        }
+                    } else {
+                        held.extend(addresses.iter().cloned());
+                    }
+                }
+                DiscoveryEvent::HealthChanged { .. } => {}
+            }
         }
     }
 }
@@ -279,9 +317,9 @@ impl DiscoveryProvider for StaticBootstrapDiscovery {
             source: SOURCE.to_owned(),
             health: ProviderHealth::Healthy,
         });
-        for (peer_id, addresses) in &self.entries {
-            self.pending.push(observed(peer_id, addresses, now_ms));
-        }
+        // The configured entries, as the difference from having told
+        // the consumer nothing.
+        self.refresh(now_ms);
         Ok(())
     }
 
@@ -315,6 +353,7 @@ impl DiscoveryProvider for StaticBootstrapDiscovery {
     fn shutdown(&mut self, _now_ms: u64) {
         self.stopped = true;
         self.pending.clear();
+        self.emitted.clear();
     }
 }
 
@@ -621,6 +660,51 @@ mod tests {
                     if addresses.contains("/ip4/10.0.0.2/tcp/2")
             )),
             "the removed address is still retracted: {events:?}"
+        );
+    }
+    #[test]
+    fn a_retraction_dropped_by_the_bound_is_recreated() {
+        // The manager holds static provenance WITHOUT expiry, so a lost
+        // retraction is permanent: the removed address stays a candidate
+        // for good. Eager diffing could not recreate one, because a later
+        // reload compared only the previous configuration to the next.
+        let mut p = StaticBootstrapDiscovery::new(vec![entry(P1, "/ip4/10.0.0.1/tcp/1")])
+            .expect("legal entries");
+        p.start(0).expect("starts");
+
+        // The consumer learns the entry, then stalls.
+        let learned = p.drain_events(0, usize::MAX);
+        assert!(
+            learned
+                .iter()
+                .any(|e| matches!(e, DiscoveryEvent::CandidateObserved { .. })),
+            "the consumer was told about the peer"
+        );
+
+        // Reload it away, then churn far past the bound while stalled.
+        p.set_entries(vec![], 10).expect("reload");
+        for round in 0..(MAX_PENDING_EVENTS as u64 * 3) {
+            let addr = format!("/ip4/10.9.0.{}/tcp/4001", round % 250 + 1);
+            p.set_entries(vec![entry(P2, &addr)], 100 + round)
+                .expect("reload");
+            let _ = p.drain_events(100 + round, 0);
+        }
+
+        // P1 must still be retracted, however much churn buried it.
+        let mut retracted = false;
+        for _ in 0..40 {
+            for event in p.drain_events(10_000, usize::MAX) {
+                if let DiscoveryEvent::CandidateExpired { peer_id, .. } = event
+                    && peer_id == peer(P1)
+                {
+                    retracted = true;
+                }
+            }
+        }
+        assert!(
+            retracted,
+            "the retraction for a peer removed from configuration survives \
+             the queue bound"
         );
     }
 }
