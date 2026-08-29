@@ -5417,20 +5417,25 @@ mod tests {
         // one whose fact is gone is the only guard its key has.
         // Min-value alone cannot tell them apart.
         //
-        // Reaching the floor cap needs expiry, not volume: the
-        // OBSERVATIONS cap refuses a seventeenth fact before its floor
-        // is ever written, so floors only outnumber facts once facts
-        // have aged out and left their floors behind. An earlier version
-        // just inserted 33 facts and never reached the cap at all.
+        // Reaching the floor cap takes both expiry AND a pinned arrival,
+        // and neither is optional. The OBSERVATIONS cap refuses an
+        // unpinned seventeenth fact before its floor is written, so
+        // floors can only outnumber facts once earlier facts have lapsed
+        // and left floors behind — and the arrival that finally exceeds
+        // the floor cap must be PINNED, or it is refused at the
+        // observations cap before reaching the floor eviction at all.
+        // Two earlier versions of this test missed one requirement each
+        // and never evicted anything, passing under min-value for that
+        // reason rather than any behaviour.
         let mut set = CandidateSet::new();
         let trust = nobody();
         let p = identity(102);
         let addr = "/ip4/10.0.0.1/tcp/1";
         let cap = MAX_OBSERVATIONS_PER_PEER;
 
-        // Round one: 16 facts with a SHORT life. Their floors persist
-        // after they expire out of `observations`.
-        let mut first = for_id(&p, "mdns", addr, 100, Some(u64::MAX));
+        // Round one: 16 facts on a short-lived candidate. They lapse,
+        // leaving UNCOVERED floors — the oldest in the map.
+        let mut first = for_id(&p, "mdns", addr, 100, Some(1_000));
         for i in 0..cap {
             first.protocol_observations.insert(ProtocolObservation {
                 protocol_id: ProtocolId::parse(format!("/interweave/old{i}/1.0.0")).expect("valid"),
@@ -5438,16 +5443,13 @@ mod tests {
                 observed_at: 100 + i as u64,
             });
         }
-        // A short candidate expiry gives the FACTS a short life.
-        let mut short = first.clone();
-        short.expires_at = Some(1_000);
-        set.observe(&short, 100, &trust, true, false);
+        set.observe(&first, 100, &trust, true, false);
         let oldest_uncovered = (
             ProtocolId::parse("/interweave/old0/1.0.0").expect("valid"),
             "mdns".to_owned(),
         );
 
-        // Keep the peer alive on a long-lived address while the facts lapse.
+        // Keep the peer alive on another source while they lapse.
         set.observe(
             &for_id(
                 &p,
@@ -5462,22 +5464,32 @@ mod tests {
             false,
         );
         set.sweep(2_000);
-        assert!(
-            set.peers.get(&p).expect("alive").observations.is_empty(),
-            "round one's facts lapsed, leaving their floors uncovered"
-        );
 
-        // Round two: 16 fresh facts, live and newer — covered floors.
-        // This takes the floor map to the cap and one past it.
-        for i in 0..=cap {
-            let mut c = for_id(&p, "mdns", addr, 3_000 + i as u64, Some(u64::MAX));
-            c.protocol_observations.insert(ProtocolObservation {
+        // Round two: 16 long-lived facts — COVERED floors, all newer.
+        let mut second = for_id(&p, "mdns", addr, 3_000, Some(u64::MAX));
+        for i in 0..cap {
+            second.protocol_observations.insert(ProtocolObservation {
                 protocol_id: ProtocolId::parse(format!("/interweave/new{i}/1.0.0")).expect("valid"),
                 supported: true,
                 observed_at: 3_000 + i as u64,
             });
-            set.observe(&c, 3_000 + i as u64, &trust, true, false);
         }
+        set.observe(&second, 3_000, &trust, true, false);
+        assert_eq!(
+            set.peers.get(&p).expect("known").fact_applied.len(),
+            2 * cap,
+            "the floor map is at its cap: 16 uncovered, 16 covered"
+        );
+
+        // A PINNED fact: it displaces an unpinned observation, so it
+        // reaches the floor cap and forces exactly one eviction.
+        let mut pinned = for_id(&p, "static", "/ip4/10.0.0.2/tcp/2", 5_000, None);
+        pinned.protocol_observations.insert(ProtocolObservation {
+            protocol_id: ProtocolId::parse("/interweave/pinned/1.0.0").expect("valid"),
+            supported: true,
+            observed_at: 5_000,
+        });
+        set.observe(&pinned, 5_000, &trust, false, true);
 
         assert!(
             set.peers
@@ -5486,7 +5498,7 @@ mod tests {
                 .fact_applied
                 .contains_key(&oldest_uncovered),
             "the uncovered floor survives; nothing else guards its key, \
-             while every covered floor is reproduced by its own fact"
+             while a covered floor is reproduced by its own live fact"
         );
     }
 }
