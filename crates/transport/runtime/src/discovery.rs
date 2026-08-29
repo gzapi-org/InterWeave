@@ -900,6 +900,36 @@ impl CandidateSet {
         *mark = (*mark).max(at);
     }
 
+    /// Remove a peer's entry, recording the withdrawal it performs.
+    ///
+    /// EVERY ENTRY REMOVAL GOES THROUGH HERE. Each record the entry held
+    /// may have been the coverage a discarded watermark relied on, so
+    /// each source's newest timestamp is re-recorded — the same rule the
+    /// four earlier withdrawal doors follow, given one owner after the
+    /// fifth and sixth doors (both live-victim eviction branches) were
+    /// found lacking it one round after the fourth.
+    fn remove_entry(&mut self, peer: &TransportIdentity) {
+        let withdrawn: Vec<(String, u64)> = self
+            .peers
+            .get(peer)
+            .map(|e| {
+                let mut newest: BTreeMap<&str, u64> = BTreeMap::new();
+                for record in e.addresses.values().flat_map(|rs| rs.iter()) {
+                    let slot = newest.entry(record.source.as_str()).or_default();
+                    *slot = (*slot).max(record.observed_at);
+                }
+                newest
+                    .into_iter()
+                    .map(|(source, at)| (source.to_owned(), at))
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.peers.remove(peer);
+        for (source, at) in withdrawn {
+            self.remember_watermark(peer, &source, at);
+        }
+    }
+
     /// Make room, refusing to do so for a newcomer that ranks last.
     ///
     /// `incoming` is the arriving candidate's `observed_at`. Without it
@@ -928,31 +958,7 @@ impl CandidateSet {
             })
             .map(|(p, _)| p.clone());
         if let Some(peer) = expired {
-            // THE FOURTH DOOR. Every record this entry held is being
-            // removed, and any of them may have been the coverage a
-            // discarded watermark relied on — the same withdrawal
-            // retract, sweep and the observe prune already record. Found
-            // one round after the third, for the same reason as the
-            // others: I fixed the doors that were named.
-            let withdrawn: Vec<(String, u64)> = self
-                .peers
-                .get(&peer)
-                .map(|e| {
-                    let mut newest: BTreeMap<&str, u64> = BTreeMap::new();
-                    for record in e.addresses.values().flat_map(|rs| rs.iter()) {
-                        let slot = newest.entry(record.source.as_str()).or_default();
-                        *slot = (*slot).max(record.observed_at);
-                    }
-                    newest
-                        .into_iter()
-                        .map(|(source, at)| (source.to_owned(), at))
-                        .collect()
-                })
-                .unwrap_or_default();
-            self.peers.remove(&peer);
-            for (source, at) in withdrawn {
-                self.remember_watermark(&peer, &source, at);
-            }
+            self.remove_entry(&peer);
             return true;
         }
         // CONFIGURED ENTRIES ARE RETAINED WITHIN THEIR OWN CAP
@@ -1008,7 +1014,7 @@ impl CandidateSet {
             // configuration does not grow a bound, and past the cap a
             // pinned newcomer is ranked like anything else.
             Some((peer, _)) if incoming_pinned && configured.len() < MAX_CONFIGURED_RETAINED => {
-                self.peers.remove(&peer);
+                self.remove_entry(&peer);
                 true
             }
             // STRICTLY older loses. A tie admits the newcomer, matching
@@ -1018,7 +1024,7 @@ impl CandidateSet {
             // anything it holds.
             Some((_, recency)) if incoming < recency => false,
             Some((peer, _)) => {
-                self.peers.remove(&peer);
+                self.remove_entry(&peer);
                 true
             }
             None => false,
@@ -4534,6 +4540,70 @@ mod tests {
             set.high_water
                 .contains_key(&(a.clone(), "peer-cache".to_owned())),
             "the uncovered mark survives; it is the only guard its address has"
+        );
+    }
+    #[test]
+    fn evicting_a_live_victim_leaves_marks_behind_too() {
+        // The fifth and sixth doors: both live-victim eviction branches
+        // deleted the entry directly. A live record may be the coverage a
+        // discarded watermark relied on, so once a slot reopens, a
+        // delayed observation older than an earlier selective retraction
+        // revived the withdrawn address.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(1_900);
+        let address = "/ip4/10.0.0.1/tcp/4001";
+
+        // A live record whose mark is discarded while it lives.
+        set.observe(
+            &for_id(&subject, "peer-cache", address, 1_000, Some(u64::MAX)),
+            1_000,
+            &trust,
+            true,
+            false,
+        );
+        set.high_water
+            .remove(&(subject.clone(), "peer-cache".to_owned()));
+
+        // Fill the set with FRESHER peers, then one more: `subject` is
+        // the least recently observed live victim and is evicted.
+        for i in 0..MAX_CANDIDATES {
+            set.observe(
+                &for_id(
+                    &identity(2_100_000 + i),
+                    "mdns",
+                    "/ip4/10.1.0.1/tcp/1",
+                    10_000 + i as u64,
+                    Some(u64::MAX),
+                ),
+                10_000 + i as u64,
+                &trust,
+                true,
+                false,
+            );
+        }
+        assert!(
+            !set.candidates(9_000_000, &|_| None)
+                .iter()
+                .any(|c| c.peer_id == subject),
+            "the live victim was evicted, or this proves nothing"
+        );
+
+        // A slot opens, then the delayed OLDER observation arrives.
+        set.retract(&identity(2_100_000), "mdns", &BTreeSet::new());
+        set.observe(
+            &for_id(&subject, "peer-cache", address, 500, Some(u64::MAX)),
+            9_000_000,
+            &trust,
+            true,
+            false,
+        );
+
+        assert!(
+            !set.candidates(9_000_000, &|_| None)
+                .iter()
+                .any(|c| c.peer_id == subject),
+            "older evidence does not revive what eviction removed"
         );
     }
 }
