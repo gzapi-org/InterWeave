@@ -84,11 +84,26 @@ impl core::error::Error for FrameError {}
 
 /// Encode a JSON body into a complete frame.
 ///
+/// Every rule `decode_frame` enforces is enforced here too, on the same
+/// body, so a local bug cannot emit a frame no conforming peer would
+/// accept. That symmetry used to be claimed rather than kept: the size
+/// and emptiness rules were checked on the way out, and the "a frame
+/// carries a JSON OBJECT" rule was not, so this function encoded `null`,
+/// `[1,2]` and `"text"` into frames a conforming receiver refuses. The
+/// sender then sees a clean send and a dropped connection, which is the
+/// hardest possible shape to diagnose — the error arrives with no
+/// reference to the message that caused it, at the wrong end of the link.
+///
+/// The cost is one parse of the body being sent. It is paid on a local
+/// IPC path whose bodies are already bounded at 128 KiB, and it buys the
+/// failure being reported to the code that built the value, by name,
+/// before anything is written to a socket.
+///
 /// # Errors
-/// Returns [`FrameError::BodyTooLarge`] above [`MAX_BODY_BYTES`] or
-/// [`FrameError::ZeroLength`] for an empty body — checked on the way out
-/// as well as in, so a local bug cannot emit a frame no conforming peer
-/// would accept.
+/// Returns [`FrameError::ZeroLength`] for an empty body,
+/// [`FrameError::BodyTooLarge`] above [`MAX_BODY_BYTES`],
+/// [`FrameError::NotJson`] when the body does not parse, and
+/// [`FrameError::NotAnObject`] when it parses to anything but an object.
 pub fn encode_frame(body: &str) -> Result<Vec<u8>, FrameError> {
     let bytes = body.as_bytes();
     if bytes.is_empty() {
@@ -99,6 +114,15 @@ pub fn encode_frame(body: &str) -> Result<Vec<u8>, FrameError> {
             declared: bytes.len(),
             max: MAX_BODY_BYTES,
         });
+    }
+    // SAME ORDER as the decoder: size before content, so an over-ceiling
+    // body is refused without being parsed at either end.
+    let value =
+        serde_json::from_str::<serde_json::Value>(body).map_err(|e| FrameError::NotJson {
+            detail: e.to_string(),
+        })?;
+    if !value.is_object() {
+        return Err(FrameError::NotAnObject);
     }
     let mut out = Vec::with_capacity(LENGTH_PREFIX_BYTES + bytes.len());
     // Big-endian, matching DirectMessageV2 and the content fingerprint.
@@ -182,6 +206,21 @@ pub fn decode_frame(buffer: &[u8]) -> Result<DecodedFrame, FrameError> {
 mod tests {
     use super::*;
 
+    /// Length-prefix a body WITHOUT validating it.
+    ///
+    /// `encode_frame` refuses everything the decoder refuses, which is
+    /// the point of it — and which means the decoder's own negative
+    /// tests cannot use it to build their subjects. This is what a
+    /// non-conforming peer would put on the wire.
+    fn frame_raw(body: &str) -> Vec<u8> {
+        let mut out = u32::try_from(body.len())
+            .expect("test body fits")
+            .to_be_bytes()
+            .to_vec();
+        out.extend_from_slice(body.as_bytes());
+        out
+    }
+
     #[test]
     fn a_frame_round_trips() {
         let body = r#"{"type":"hello"}"#;
@@ -196,8 +235,14 @@ mod tests {
     fn the_prefix_is_big_endian() {
         // 258 = 0x0102. Little-endian would put 0x02 first, and the frame
         // would disagree with DirectMessageV2 and the fingerprint.
+        // Padded to 258 bytes. Not an object, so it is framed raw: the
+        // assertion is about the prefix, not about the body.
         let body = format!("{:258}", 1);
-        let framed = encode_frame(&body).expect("encodes");
+        assert_eq!(&frame_raw(&body)[..4], &[0x00, 0x00, 0x01, 0x02]);
+        // And a real 258-byte object frames to the same prefix.
+        let object = format!(r#"{{"pad":"{}"}}"#, "x".repeat(258 - 10));
+        assert_eq!(object.len(), 258);
+        let framed = encode_frame(&object).expect("encodes");
         assert_eq!(&framed[..4], &[0x00, 0x00, 0x01, 0x02]);
     }
 
@@ -260,9 +305,14 @@ mod tests {
         bad.extend_from_slice(&[0xff, 0xfe, 0xfd, 0xfc]);
         assert_eq!(decode_frame(&bad), Err(FrameError::NotUtf8));
 
-        let framed = encode_frame("not json at all").expect("encodes");
         assert!(matches!(
-            decode_frame(&framed),
+            decode_frame(&frame_raw("not json at all")),
+            Err(FrameError::NotJson { .. })
+        ));
+        // And the encoder refuses to produce that frame in the first
+        // place, which is the half that used to be missing.
+        assert!(matches!(
+            encode_frame("not json at all"),
             Err(FrameError::NotJson { .. })
         ));
     }
@@ -273,11 +323,18 @@ mod tests {
         // every message class is discriminated by a property. These five
         // are all valid JSON and none of them is a frame.
         for body in ["null", "[]", "7", "\"text\"", "true"] {
-            let framed = encode_frame(body).expect("encodes");
             assert_eq!(
-                decode_frame(&framed),
+                decode_frame(&frame_raw(body)),
                 Err(FrameError::NotAnObject),
                 "{body} must not decode as a frame"
+            );
+            // SYMMETRY: and this process will not send one either. A
+            // frame only a non-conforming peer could produce is a frame
+            // this encoder must not produce.
+            assert_eq!(
+                encode_frame(body),
+                Err(FrameError::NotAnObject),
+                "{body} must not encode as a frame"
             );
         }
         // And an object still does.

@@ -147,7 +147,12 @@ fn the_frame_ceiling_matches_the_contract_and_the_fixture() {
         // And the codec agrees: a body of that size frames successfully,
         // with the prefix the fixture recorded.
         let prefix = v["frame_length_prefix_hex"].as_str().expect("prefix");
-        let framed = encode_frame(&"x".repeat(body)).expect("encodes");
+        // A real object of exactly that size: `encode_frame` enforces
+        // every rule the decoder does, so a body of raw padding is no
+        // longer a frame this process will produce.
+        let padded = format!(r#"{{"pad":"{}"}}"#, "x".repeat(body - 10));
+        assert_eq!(padded.len(), body);
+        let framed = encode_frame(&padded).expect("encodes");
         assert_eq!(hex(&framed[..4]), prefix, "{} prefix", v["name"]);
     }
 }
