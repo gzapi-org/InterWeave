@@ -453,8 +453,23 @@ impl CandidateSet {
             // what makes "the address dies when no source supports it"
             // mean something.
             if let Some(existing) = records.iter_mut().find(|r| r.source == candidate.source) {
-                existing.observed_at = candidate.observed_at;
-                existing.expires_at = expires_at;
+                // ONLY FORWARD. An older event delivered after a newer one
+                // would otherwise roll this source's timestamp and expiry
+                // BACKWARD — and since a known peer deliberately accepts
+                // an already-expired candidate (so its observations still
+                // merge), a delayed stale event could retire a live
+                // address, or the whole peer when it was the only source
+                // supporting it. That path exists because of the
+                // addressless/expired guard added earlier in this branch,
+                // so the guard owes this check.
+                //
+                // Same rule as the protocol observations below, for the
+                // same reason: evidence is ordered by when it was
+                // observed, not by when it arrived.
+                if candidate.observed_at >= existing.observed_at {
+                    existing.observed_at = candidate.observed_at;
+                    existing.expires_at = expires_at;
+                }
             } else {
                 // THE SAME ASYMMETRY AS THE ADDRESS SLOTS, one level
                 // down. At the cap a ninth source was dropped by arrival
@@ -2235,5 +2250,77 @@ mod tests {
             "a newer observation replaces the held one"
         );
         assert_eq!(found.protocol_observations[0].observed_at_ms, 90);
+    }
+    #[test]
+    fn a_stale_address_event_cannot_retire_a_live_address() {
+        // A known peer deliberately accepts an already-expired candidate
+        // so its observations still merge. That makes a delayed stale
+        // event able to roll the provenance backward — retiring an
+        // address, or the peer entirely when it was the only source.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(41);
+        let address = "/ip4/10.0.0.1/tcp/4001";
+
+        // Live: observed at 1000, good until 100_000.
+        set.observe(
+            &for_id(&subject, "peer-cache", address, 1_000, Some(100_000)),
+            1_000,
+            &trust,
+            true,
+            false,
+        );
+
+        // A delayed event from the SAME source, observed long before and
+        // already expired by the time it lands.
+        set.observe(
+            &for_id(&subject, "peer-cache", address, 10, Some(50)),
+            2_000,
+            &trust,
+            true,
+            false,
+        );
+
+        let candidates = set.candidates(3_000, &|_| None);
+        let found = candidates
+            .iter()
+            .find(|c| c.peer_id == subject)
+            .expect("the peer must survive a stale event");
+        assert!(
+            found.address_list().contains(&address),
+            "the live address is not retired by older evidence: {:?}",
+            found.address_list()
+        );
+    }
+
+    #[test]
+    fn a_newer_address_event_still_refreshes_the_lifetime() {
+        // The control: forward-only must not become never.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(42);
+        let address = "/ip4/10.0.0.1/tcp/4001";
+
+        set.observe(
+            &for_id(&subject, "peer-cache", address, 1_000, Some(2_000)),
+            1_000,
+            &trust,
+            true,
+            false,
+        );
+        set.observe(
+            &for_id(&subject, "peer-cache", address, 1_500, Some(100_000)),
+            1_500,
+            &trust,
+            true,
+            false,
+        );
+
+        assert!(
+            set.candidates(5_000, &|_| None)
+                .iter()
+                .any(|c| c.peer_id == subject),
+            "a newer observation extends the lifetime past the old expiry"
+        );
     }
 }
