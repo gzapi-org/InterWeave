@@ -667,19 +667,19 @@ fn validate_address_grammar(address: &str) -> Result<(), &'static str> {
         return Err("the port is not a number in 0..=65535");
     }
     match *host {
+        // PARSED, not approximated. Checking the alphabet accepted
+        // `:::`, which no dial can use — a check that describes what a
+        // literal LOOKS like rather than what one is will always have
+        // another shape like that in it. `std::net` owns both grammars
+        // exactly and costs no dependency.
         "ip4" => {
-            let octets: Vec<&str> = host_value.split('.').collect();
-            if octets.len() != 4 || octets.iter().any(|o| o.parse::<u8>().is_err()) {
-                return Err("the /ip4 value is not a dotted-quad address");
+            if host_value.parse::<std::net::Ipv4Addr>().is_err() {
+                return Err("the /ip4 value is not an IPv4 address");
             }
         }
         "ip6" => {
-            if !host_value
-                .chars()
-                .all(|c| c.is_ascii_hexdigit() || c == ':')
-                || !host_value.contains(':')
-            {
-                return Err("the /ip6 value is not a hexadecimal address");
+            if host_value.parse::<std::net::Ipv6Addr>().is_err() {
+                return Err("the /ip6 value is not an IPv6 address");
             }
         }
         // A DNS name is not resolved here and must not be: resolution is
@@ -2068,14 +2068,43 @@ impl ProfileConfig {
             // so `ttl: "garbage"` was accepted as an arbitrary string and
             // silently ignored, and would first be noticed by the runtime
             // that grows a use for it.
-            if entry.provider_type == DiscoveryProviderType::PeerCache
-                && let Some(ttl) = &entry.config.ttl
-                && let Err(reason) = parse_duration_ms(ttl)
-            {
-                errors.push(ConfigError::InvalidCacheSetting {
-                    field: "ttl",
-                    reason,
-                });
+            if entry.provider_type == DiscoveryProviderType::PeerCache {
+                if let Some(ttl) = &entry.config.ttl {
+                    match parse_duration_ms(ttl) {
+                        Err(reason) => {
+                            errors.push(ConfigError::InvalidCacheSetting {
+                                field: "ttl",
+                                reason,
+                            });
+                        }
+                        // A zero TTL expires every record the instant it
+                        // is written, so the cache holds nothing and
+                        // every start is cold. `CacheLimitsBuilder`
+                        // already calls that a misconfiguration; without
+                        // this the profile validates here and fails when
+                        // the cache is built, which is the wrong place
+                        // for an operator to meet it.
+                        Ok(0) => errors.push(ConfigError::InvalidCacheSetting {
+                            field: "ttl",
+                            reason: "must be greater than zero; every record would expire \
+                                     as it was written"
+                                .to_owned(),
+                        }),
+                        Ok(_) => {}
+                    }
+                }
+                // The same rule one field over, which the builder also
+                // enforces and the review did not name: a cache holding
+                // zero peers is the same misconfiguration wearing a
+                // different word. No upper bound here — the schema states
+                // none, and the cache's own ceiling is its to apply.
+                if entry.config.max_entries == Some(0) {
+                    errors.push(ConfigError::InvalidCacheSetting {
+                        field: "max_entries",
+                        reason: "must be greater than zero; the cache would hold nothing"
+                            .to_owned(),
+                    });
+                }
             }
             if entry.provider_type != DiscoveryProviderType::Kademlia
                 && let Some(field) = entry.config.first_kademlia_field()
@@ -3781,5 +3810,76 @@ mod tests {
             assert_eq!(address, good);
             assert_eq!(id, peer(P1));
         }
+    }
+    #[test]
+    fn a_malformed_ip_literal_fails_config_validation() {
+        // Checking the ALPHABET accepted `:::`, which no dial can use. A
+        // check describing what a literal looks like will always have
+        // another shape like that in it; `std::net` owns both grammars.
+        for bad in [
+            "/ip6/:::/tcp/4001",
+            "/ip6/2001:db8:::1/tcp/4001",
+            "/ip6/gggg::1/tcp/4001",
+            "/ip4/10.0.0/tcp/4001",
+            "/ip4/10.0.0.1.1/tcp/4001",
+            "/ip4/010.0.0.1/tcp/4001",
+        ] {
+            let entry = format!("{bad}/p2p/{P1}");
+            assert!(
+                split_peer_multiaddr(&entry).is_err(),
+                "'{bad}' is not a usable literal and must fail validation"
+            );
+        }
+    }
+
+    #[test]
+    fn a_zero_cache_setting_is_refused_where_the_operator_can_read_it() {
+        // `CacheLimitsBuilder` rejects both of these, so without a check
+        // here the profile validates and the failure surfaces when the
+        // cache is built — the wrong place to meet it.
+        for (field, settings) in [
+            ("ttl", serde_json::json!({ "ttl": "0" })),
+            ("max_entries", serde_json::json!({ "max_entries": 0 })),
+        ] {
+            let json = serde_json::json!({
+                "providers": [{
+                    "type": "peer-cache",
+                    "enabled": true,
+                    "priority": 10,
+                    "config": settings
+                }]
+            });
+            let mut profile = config(vec![endpoint("chat")]);
+            profile.discovery = serde_json::from_value(json).expect("parses");
+            assert!(
+                profile.validate().iter().any(|e| matches!(
+                    e,
+                    ConfigError::InvalidCacheSetting { field: f, .. } if *f == field
+                )),
+                "a zero `{field}` must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_nonzero_cache_setting_is_accepted() {
+        // The control: only ZERO is refused.
+        let json = serde_json::json!({
+            "providers": [{
+                "type": "peer-cache",
+                "enabled": true,
+                "priority": 10,
+                "config": { "ttl": "7d", "max_entries": 1024 }
+            }]
+        });
+        let mut profile = config(vec![endpoint("chat")]);
+        profile.discovery = serde_json::from_value(json).expect("parses");
+        assert!(
+            !profile
+                .validate()
+                .iter()
+                .any(|e| matches!(e, ConfigError::InvalidCacheSetting { .. })),
+            "the documented values are legal"
+        );
     }
 }
