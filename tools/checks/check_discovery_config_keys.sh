@@ -55,7 +55,11 @@ USAGE
 ROOT=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        --root) ROOT="${2:-}"; shift 2 ;;
+        --root)
+            # `shift 2` with one argument left FAILS, and with no
+            # `set -e` the loop then spins on an unchanged $1 forever.
+            [ $# -ge 2 ] || { echo "check_discovery_config_keys: --root needs a directory" >&2; exit 2; }
+            ROOT="$2"; shift 2 ;;
         --help|-h) usage; exit 0 ;;
         *) echo "check_discovery_config_keys: unknown option '$1'" >&2; exit 2 ;;
     esac

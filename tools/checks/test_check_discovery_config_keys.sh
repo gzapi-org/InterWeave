@@ -74,7 +74,26 @@ scaffold "$tmp/norust" "" ""
 printf 'pub struct SomethingElse {}\n' > "$tmp/norust/crates/config/profile-config/src/lib.rs"
 expect "a moved struct declaration is an invocation error" 2 "$tmp/norust"
 
-# 6. --help works and says the script's name.
+# 6. `--root` with no value must not hang. Guarded by `timeout`, because
+#    the failure mode being tested is an infinite loop: a bare assertion
+#    on the exit code would hang the suite rather than fail it.
+if timeout 5 bash "$CHECK" --root >/dev/null 2>&1; then
+    echo "FAIL --root with no value: expected an invocation error" >&2
+    failures=$((failures + 1))
+else
+    got=$?
+    if [ "$got" = 124 ]; then
+        echo "FAIL --root with no value: hung instead of failing" >&2
+        failures=$((failures + 1))
+    elif [ "$got" != 2 ]; then
+        echo "FAIL --root with no value: wanted exit 2, got $got" >&2
+        failures=$((failures + 1))
+    else
+        echo "ok   --root with no value is an invocation error"
+    fi
+fi
+
+# 7. --help works and says the script's name.
 if bash "$CHECK" --help 2>&1 | grep -q 'check_discovery_config_keys.sh'; then
     echo "ok   --help describes the script"
 else
@@ -86,4 +105,4 @@ if [ "$failures" -ne 0 ]; then
     echo "test_check_discovery_config_keys: $failures failure(s)" >&2
     exit 1
 fi
-echo "test_check_discovery_config_keys: OK — 6 cases."
+echo "test_check_discovery_config_keys: OK — 7 cases."
