@@ -34,6 +34,20 @@ const INTERFACE_VERSION: &str = "1.0";
 /// replaced by different ones.
 pub const MAX_PENDING_EVENTS: usize = 2 * crate::limits::MAX_PEERS;
 
+/// A queued event, with the bookkeeping needed to undo it.
+///
+/// `before` is what `emitted` held for this peer immediately BEFORE the
+/// event was queued. That is the only thing that reliably reverses a
+/// drop: an event says what CHANGED, and for a whole-peer retraction it
+/// deliberately says nothing about the addresses being withdrawn — so a
+/// rollback reconstructing state from the event, or from the cache as it
+/// stands now, cannot recover what the consumer was actually holding.
+#[derive(Debug, Clone)]
+struct Queued {
+    event: DiscoveryEvent,
+    before: Option<EmittedRecord>,
+}
+
 /// What a consumer was last told about one peer.
 ///
 /// Compared as a whole to decide re-emission: any field that a
@@ -52,7 +66,7 @@ pub struct PeerCacheDiscovery {
     started: bool,
     stopped: bool,
     /// Events waiting to be drained, oldest first.
-    pending: Vec<DiscoveryEvent>,
+    pending: Vec<Queued>,
     /// Peers emitted as candidates, with the freshness last reported for
     /// each, so ageing out is an expiry rather than silence AND a record
     /// whose life was extended is re-emitted rather than stranded.
@@ -119,51 +133,38 @@ impl PeerCacheDiscovery {
         // what the rollback below is for — and this one is not, because
         // nothing recomputes a transition that already happened.
         let mut excess = self.pending.len() - MAX_PENDING_EVENTS;
-        let mut kept: Vec<DiscoveryEvent> = Vec::with_capacity(MAX_PENDING_EVENTS);
-        let mut dropped: Vec<DiscoveryEvent> = Vec::new();
-        for event in self.pending.drain(..) {
-            if excess > 0 && !matches!(event, DiscoveryEvent::HealthChanged { .. }) {
+        let mut kept: Vec<Queued> = Vec::with_capacity(MAX_PENDING_EVENTS);
+        let mut dropped: Vec<Queued> = Vec::new();
+        for queued in self.pending.drain(..) {
+            if excess > 0 && !matches!(queued.event, DiscoveryEvent::HealthChanged { .. }) {
                 excess -= 1;
-                dropped.push(event);
+                dropped.push(queued);
             } else {
-                kept.push(event);
+                kept.push(queued);
             }
         }
         self.pending = kept;
 
-        // UNDONE IN REVERSE, because these rollbacks are not independent.
-        // A dropped pair for one peer is [retraction, observation] in
-        // queue order, and applying them forwards restored the retracted
-        // addresses and then deleted the whole record — losing exactly the
-        // retraction the first step existed to preserve. Reversed, the
-        // observation is forgotten first and the retracted addresses land
-        // in an empty record, which is precisely the state that was true
-        // before either event, so the next refresh recomputes both.
-        for event in dropped.into_iter().rev() {
-            match event {
-                DiscoveryEvent::CandidateObserved { candidate } => {
-                    self.emitted.remove(&candidate.peer_id);
+        // UNDONE IN REVERSE, restoring each event's own `before`. Reverse
+        // order matters because a peer may have several dropped events —
+        // a retraction and the observation that followed it — and the
+        // EARLIEST one's snapshot is the state to end at. Restoring a
+        // recorded snapshot rather than deriving one is what makes a
+        // whole-peer retraction recoverable at all: it carries no
+        // addresses, and the cache no longer holds them either.
+        for queued in dropped.into_iter().rev() {
+            let peer_id = match &queued.event {
+                DiscoveryEvent::CandidateObserved { candidate } => candidate.peer_id.clone(),
+                DiscoveryEvent::CandidateExpired { peer_id, .. } => peer_id.clone(),
+                DiscoveryEvent::HealthChanged { .. } => continue,
+            };
+            match queued.before {
+                Some(record) => {
+                    self.emitted.insert(peer_id, record);
                 }
-                DiscoveryEvent::CandidateExpired {
-                    peer_id, addresses, ..
-                } => {
-                    // PUT THE RETRACTED ADDRESSES BACK. `or_default()`
-                    // alone was right only for a whole-peer retraction,
-                    // where re-inserting the key is enough for `refresh`
-                    // to re-detect the peer as absent from the cache. For
-                    // a SELECTIVE one the peer is still live and its
-                    // record already sits in `emitted`, so the entry call
-                    // changed nothing, the next refresh saw no address
-                    // difference, and the retraction was gone — leaving
-                    // the manager dialling an address this cache had
-                    // already dropped.
-                    //
-                    // Restoring them recreates exactly the difference the
-                    // discarded event reported.
-                    let held = self.emitted.entry(peer_id).or_default();
-                    held.addresses.extend(addresses);
+                None => {
+                    self.emitted.remove(&peer_id);
                 }
-                DiscoveryEvent::HealthChanged { .. } => {}
             }
         }
     }
@@ -202,8 +203,8 @@ impl PeerCacheDiscovery {
                 expires_at: candidate.expires_at,
                 addresses: candidate.addresses.iter().cloned().collect(),
             };
-            let previously = self.emitted.get(&candidate.peer_id);
-            let changed = previously != Some(&record);
+            let previously = self.emitted.get(&candidate.peer_id).cloned();
+            let changed = previously.as_ref() != Some(&record);
 
             // AN ADDRESS THE CACHE DROPPED MUST BE RETRACTED, not merely
             // omitted. `record_success` truncates the least-recently-used
@@ -218,17 +219,20 @@ impl PeerCacheDiscovery {
             // Emitted BEFORE the observation so the consumer never sees a
             // window with neither, and named selectively so a peer keeps
             // the addresses that survived.
-            if let Some(prev) = previously {
+            if let Some(prev) = previously.as_ref() {
                 let dropped: BTreeSet<String> = prev
                     .addresses
                     .difference(&record.addresses)
                     .cloned()
                     .collect();
                 if !dropped.is_empty() {
-                    self.pending.push(DiscoveryEvent::CandidateExpired {
-                        peer_id: candidate.peer_id.clone(),
-                        source: SOURCE.to_owned(),
-                        addresses: dropped,
+                    self.pending.push(Queued {
+                        event: DiscoveryEvent::CandidateExpired {
+                            peer_id: candidate.peer_id.clone(),
+                            source: SOURCE.to_owned(),
+                            addresses: dropped,
+                        },
+                        before: previously.clone(),
                     });
                 }
             }
@@ -242,15 +246,29 @@ impl PeerCacheDiscovery {
                 // The newest snapshot strictly supersedes an undrained
                 // older one, so replacing loses nothing.
                 let peer_id = candidate.peer_id.clone();
-                self.pending.retain(|event| {
-                    !matches!(
-                        event,
+                // The superseded event's `before` is INHERITED, not
+                // discarded: it is older, so it is the state a rollback
+                // has to reach. Keeping the newer one would undo only
+                // half of what the pair did.
+                let mut before = previously.clone();
+                let mut inherited = false;
+                self.pending.retain(|queued| {
+                    let is_mine = matches!(
+                        &queued.event,
                         DiscoveryEvent::CandidateObserved { candidate }
                             if candidate.peer_id == peer_id
-                    )
+                    );
+                    if is_mine && !inherited {
+                        before = queued.before.clone();
+                        inherited = true;
+                    }
+                    !is_mine
                 });
-                self.pending.push(DiscoveryEvent::CandidateObserved {
-                    candidate: Box::new(candidate),
+                self.pending.push(Queued {
+                    event: DiscoveryEvent::CandidateObserved {
+                        candidate: Box::new(candidate),
+                    },
+                    before,
                 });
             }
         }
@@ -265,12 +283,16 @@ impl PeerCacheDiscovery {
             .cloned()
             .collect();
         for peer_id in expired {
-            self.pending.push(DiscoveryEvent::CandidateExpired {
-                peer_id,
-                source: SOURCE.to_owned(),
-                // Empty: this provider's lifetime is per PEER (the record
-                // ages as a whole), not per address.
-                addresses: BTreeSet::new(),
+            let before = self.emitted.get(&peer_id).cloned();
+            self.pending.push(Queued {
+                event: DiscoveryEvent::CandidateExpired {
+                    peer_id,
+                    source: SOURCE.to_owned(),
+                    // Empty: this provider's lifetime is per PEER (the
+                    // record ages as a whole), not per address.
+                    addresses: BTreeSet::new(),
+                },
+                before,
             });
         }
         self.emitted = live;
@@ -311,9 +333,12 @@ impl DiscoveryProvider for PeerCacheDiscovery {
         } else {
             ProviderHealth::Degraded
         };
-        self.pending.push(DiscoveryEvent::HealthChanged {
-            source: SOURCE.to_owned(),
-            health,
+        self.pending.push(Queued {
+            event: DiscoveryEvent::HealthChanged {
+                source: SOURCE.to_owned(),
+                health,
+            },
+            before: None,
         });
         // The cold-start emission: everything still fresh on disk.
         self.refresh(now_ms);
@@ -326,7 +351,7 @@ impl DiscoveryProvider for PeerCacheDiscovery {
         }
         self.refresh(now_ms);
         let take = max.min(self.pending.len());
-        self.pending.drain(..take).collect()
+        self.pending.drain(..take).map(|q| q.event).collect()
     }
 
     fn add_hint(&mut self, hint: PeerHint, now_ms: u64) -> HintDisposition {
@@ -1204,8 +1229,8 @@ mod tests {
         );
         p.refresh(20);
         assert!(
-            p.pending.iter().any(|e| matches!(
-                e,
+            p.pending.iter().any(|q| matches!(
+                &q.event,
                 DiscoveryEvent::CandidateExpired { addresses, .. }
                     if addresses.contains(removed)
             )),
@@ -1214,21 +1239,24 @@ mod tests {
 
         // Bury the pair past the bound, then let the trim take it.
         for i in 0..MAX_PENDING_EVENTS {
-            p.pending.push(DiscoveryEvent::CandidateObserved {
-                candidate: Box::new(interweave_discovery_api::CandidatePeer {
-                    peer_id: synthetic(9, i),
-                    addresses: [kept.to_owned()].into_iter().collect(),
-                    source: SOURCE.to_owned(),
-                    observed_at: 30,
-                    expires_at: None,
-                    protocol_observations: BTreeSet::new(),
-                }),
+            p.pending.push(Queued {
+                event: DiscoveryEvent::CandidateObserved {
+                    candidate: Box::new(interweave_discovery_api::CandidatePeer {
+                        peer_id: synthetic(9, i),
+                        addresses: [kept.to_owned()].into_iter().collect(),
+                        source: SOURCE.to_owned(),
+                        observed_at: 30,
+                        expires_at: None,
+                        protocol_observations: BTreeSet::new(),
+                    }),
+                },
+                before: None,
             });
         }
         p.enforce_pending_bound();
         assert!(
-            !p.pending.iter().any(|e| matches!(
-                e,
+            !p.pending.iter().any(|q| matches!(
+                &q.event,
                 DiscoveryEvent::CandidateExpired { addresses, .. }
                     if addresses.contains(removed)
             )),
@@ -1249,6 +1277,81 @@ mod tests {
         assert!(
             recreated,
             "the retraction is recreated after both halves were dropped"
+        );
+    }
+    #[test]
+    fn a_dropped_whole_peer_retraction_still_retracts_the_old_address() {
+        // A whole-peer `CandidateExpired` carries NO addresses by design,
+        // so a rollback that reconstructs from the event, or from the
+        // cache as it stands now, cannot recover what the consumer was
+        // holding. If the peer is re-added with a different address
+        // before the drain, the recomputed state already matches and
+        // neither event is recreated — leaving the manager, whose
+        // observations are additive, dialling the old address until its
+        // own TTL.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut p = provider(&dir);
+        p.start(0).expect("start");
+        let _ = p.drain_events(0, usize::MAX);
+
+        let subject = peer(P1);
+        let old_address = "/ip4/10.0.0.1/tcp/1";
+        let new_address = "/ip4/10.0.0.2/tcp/2";
+
+        // The consumer was told about the peer at its old address.
+        p.emitted.insert(
+            subject.clone(),
+            EmittedRecord {
+                expires_at: None,
+                addresses: [old_address.to_owned()].into_iter().collect(),
+            },
+        );
+        // It is gone from the cache, then comes back at a different one.
+        p.refresh(10);
+        p.cache_mut()
+            .record_success(&subject, new_address, 20)
+            .expect("within bounds");
+        p.refresh(20);
+
+        // Bury both events past the bound.
+        for i in 0..MAX_PENDING_EVENTS {
+            p.pending.push(Queued {
+                event: DiscoveryEvent::CandidateObserved {
+                    candidate: Box::new(interweave_discovery_api::CandidatePeer {
+                        peer_id: synthetic(9, i),
+                        addresses: [new_address.to_owned()].into_iter().collect(),
+                        source: SOURCE.to_owned(),
+                        observed_at: 30,
+                        expires_at: None,
+                        protocol_observations: BTreeSet::new(),
+                    }),
+                },
+                before: None,
+            });
+        }
+        p.enforce_pending_bound();
+        assert!(
+            !p.pending.iter().any(|q| matches!(
+                &q.event,
+                DiscoveryEvent::CandidateExpired { peer_id, .. } if *peer_id == subject
+            )),
+            "the retraction was indeed trimmed, or this proves nothing"
+        );
+
+        let mut retracted = false;
+        for _ in 0..10 {
+            for event in p.drain_events(40, usize::MAX) {
+                if let DiscoveryEvent::CandidateExpired { peer_id, .. } = event
+                    && peer_id == subject
+                {
+                    retracted = true;
+                }
+            }
+        }
+        assert!(
+            retracted,
+            "the whole-peer retraction is recreated, so the old address is \
+             withdrawn rather than left dialable"
         );
     }
 }
