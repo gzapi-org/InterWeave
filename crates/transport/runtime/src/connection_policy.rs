@@ -235,19 +235,32 @@ impl AddressState {
         self.last_success_ms.is_some()
     }
 
-    /// Whether this entry is currently PROTECTING something.
+    /// Whether this entry is currently SUPPRESSING a dial.
     ///
-    /// A live quarantine, or a failure count that is shaping retries.
-    /// Such an entry must never be evicted to make room: dropping it
-    /// restores a route the policy had decided to suppress, and an
-    /// attacker who can cause evictions could then clear their own
-    /// quarantine by flooding the table.
+    /// A live quarantine, and nothing else. Such an entry must never be
+    /// evicted to make room: dropping it restores a route the policy had
+    /// decided to suppress, and an attacker who can cause evictions could
+    /// then clear their own quarantine by flooding the table.
+    ///
+    /// `consecutive_failures` deliberately does NOT count. At the address
+    /// scope it suppresses nothing — its only reader is
+    /// [`ConnectionPolicy::preferred_addresses`], where it is a RANKING
+    /// hint — while a failure that suppresses is one that also set
+    /// `quarantined_until_ms`. Treating the counter as punitive made every
+    /// ordinary transient failure a permanent entry: `record_success` is
+    /// the only thing that clears it, so an address that never succeeds is
+    /// never pruned and never evictable, and enough of them fill the table
+    /// until `make_room_for_address` refuses and every new dial is denied.
+    /// That is the exhaustion the bound exists to prevent, reached through
+    /// failures no attacker has to work for. Losing the hint to eviction
+    /// costs a preference order; losing a quarantine costs the
+    /// suppression, which is why only the latter pins an entry here. The
+    /// hint still outlives its traffic by the ordinary idle TTL, because
+    /// `prune` keeps what is not yet idle.
     #[must_use]
     pub fn is_punitive_at(&self, now_ms: u64) -> bool {
-        self.consecutive_failures > 0
-            || self
-                .quarantined_until_ms
-                .is_some_and(|until| now_ms < until)
+        self.quarantined_until_ms
+            .is_some_and(|until| now_ms < until)
     }
 }
 
@@ -541,16 +554,17 @@ impl ConnectionPolicy {
     ) -> bool {
         let key = (peer.clone(), address.to_owned());
         // A failure that cannot be recorded is worse than one that can:
-        // it is the entry that would have suppressed a retry. Prune
+        // it is the entry that would have shaped the next retry. Prune
         // first, then evict a benign entry to hold it.
         //
         // But when there is nothing evictable the answer is to NOT
         // record it. Inserting anyway — which is what discarding this
-        // result did — grows a map whose whole purpose is being bounded:
-        // enough concurrent failures fill the table with live punitive
-        // entries, after which every further failed address is appended
-        // without limit. The peer branch below already refuses on the
-        // same terms; this one only looked like it did.
+        // result did — grows a map whose whole purpose is being bounded.
+        // Nothing evictable now means every entry is a LIVE QUARANTINE,
+        // which ordinary failures do not create; a table in that state
+        // describes a hostile peer set, not a busy one. The peer branch
+        // below already refuses on the same terms; this one only looked
+        // like it did.
         let room = self.addresses.contains_key(&key) || {
             self.prune(now_ms);
             self.make_room_for_address(now_ms)
@@ -1351,11 +1365,74 @@ mod tests {
             "a punitive entry outlives the traffic that created it"
         );
 
-        // And once the quarantine lapses it becomes prunable like any other.
+        // And once the quarantine lapses it becomes prunable like any
+        // other: the failure count it still carries is a ranking hint,
+        // not a suppression, so nothing is being forgotten that was
+        // holding a dial back.
         let after = IDENTITY_MISMATCH_QUARANTINE_MS + 10_000;
-        assert_eq!(p.prune(after), 0, "consecutive_failures still protects it");
-        p.record_success(&peer(), "/ip4/10.0.0.2/tcp/1", after);
-        assert_eq!(p.prune(after + 10_000), 1);
+        assert_eq!(p.prune(after), 1, "a lapsed quarantine protects nothing");
+    }
+
+    #[test]
+    fn ordinary_failures_never_exhaust_the_address_table() {
+        // The defect this pins: while `is_punitive_at` counted
+        // `consecutive_failures`, every transient dial failure became a
+        // permanently non-evictable entry — `record_success` is its only
+        // clearer, and an address that never succeeds never gets one. A
+        // table filled that way makes `make_room_for_address` refuse and
+        // `admit` deny EVERY new address with `PolicyStateFull`, which is
+        // the exhaustion the bound exists to prevent, reached by ordinary
+        // traffic rather than by an attacker.
+        let mut p = ConnectionPolicy::new(64, 64);
+        p.max_addresses = 8;
+        // Failures recent enough that the idle TTL is not what saves us.
+        for i in 0..40_usize {
+            let _ = p.record_address_failure(&peer(), &format!("/ip4/10.0.0.{i}/tcp/1"), 0, 30_000);
+        }
+        assert_eq!(
+            p.address_entries(),
+            8,
+            "the bound holds either way; that was never the defect"
+        );
+
+        // The table is full of failed-but-unsuppressed entries, and a
+        // fresh dial is still admissible and its failure still recordable.
+        // Asked as a DIFFERENT peer, so the answer is about the shared
+        // address table and not about the first peer's own backoff.
+        let other = TransportIdentity::parse(P2).expect("valid identity");
+        let fresh = "/ip4/10.0.0.99/tcp/1";
+        let ask = DialRequest {
+            peer: Some(other.clone()),
+            address: fresh.to_owned(),
+            origin: DialOrigin::Manual,
+        };
+        assert_eq!(
+            p.admit(&ask, ConnectionClass::DataPlaneTrusted, 0),
+            Ok(()),
+            "a table of ordinary failures must not deny every new dial"
+        );
+        let _ = p.record_address_failure(&other, fresh, 0, 30_000);
+        assert!(
+            p.address(&other, fresh).is_some(),
+            "and the new failure is actually recorded, not silently dropped"
+        );
+
+        // POSITIVE CONTROL: fill the same table with LIVE QUARANTINES and
+        // the refusal comes back. That is the state the bound is for, and
+        // the reason this test is not simply "the cap never refuses".
+        let mut q = ConnectionPolicy::new(64, 64);
+        q.max_addresses = 8;
+        for i in 0..8_usize {
+            assert!(
+                q.record_identity_mismatch(&peer(), &format!("/ip4/10.0.1.{i}/tcp/1"), 0),
+                "each quarantine must actually land"
+            );
+        }
+        assert_eq!(
+            q.admit(&ask, ConnectionClass::DataPlaneTrusted, 0),
+            Err(DialDenial::PolicyStateFull),
+            "a table of live suppressions still denies rather than forgetting one"
+        );
     }
 
     #[test]
