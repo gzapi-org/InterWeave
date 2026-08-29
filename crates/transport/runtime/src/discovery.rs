@@ -130,6 +130,13 @@ struct Entry {
     addresses: BTreeMap<String, Vec<Provenance>>,
     /// `(protocol, source)` -> (supported, observed_at, expires_at).
     observations: BTreeMap<(ProtocolId, String), (bool, u64, u64)>,
+    /// source -> the newest `observed_at` applied from that source, for
+    /// this peer. Forward-only, never decays, removed only with the
+    /// entry (spilled into `high_water` at that moment).
+    applied: BTreeMap<String, u64>,
+    /// `(protocol, source)` -> the newest fact `observed_at` applied.
+    /// Forward-only; survives the fact's removal.
+    fact_applied: BTreeMap<(ProtocolId, String), u64>,
     /// The most recent observation of this peer from any source, for the
     /// least-recently-observed half of the eviction rule.
     ///
@@ -273,19 +280,19 @@ pub struct CandidateSet {
     peers: BTreeMap<TransportIdentity, Entry>,
     /// What capacity pressure has cost, for diagnosis.
     overflow: OverflowStats,
-    /// `(peer, source)` -> the newest `observed_at` already applied.
+    /// `(peer, source)` -> the spilled threshold of a REMOVED peer.
     ///
-    /// OUTLIVES BOTH THE RECORD AND THE PEER. The forward-only rule on a
-    /// provenance record can only speak while that record exists, and a
-    /// retraction removes the record — and, when it takes the last
-    /// address, the whole `Entry` with it. Both are exactly the windows a
-    /// delayed older observation would use to revive a route the source
-    /// had withdrawn, so this cannot live inside what it guards.
+    /// A live peer's forward-only thresholds ride in `Entry::applied`
+    /// and are consulted from there; this map exists so that removing
+    /// the entry does not lose them. `remove_entry` is the only writer
+    /// besides the apply path's own spill-eviction.
     ///
-    /// Bounded at [`MAX_HIGH_WATER`] and evicted oldest-first. Past the
-    /// cap the guard is defeatable by a delayed event, which is the same
-    /// trade every bound here makes: the bound is the bound, and holding
-    /// one mark per peer-source pair forever is the alternative.
+    /// Bounded at [`MAX_HIGH_WATER`]. Eviction takes a REDUNDANT mark
+    /// first — one a live peer's `applied` entry covers, which loses
+    /// nothing because the entry reproduces the threshold and spills it
+    /// again on removal — then falls back to oldest-first. Past the cap
+    /// a delayed event can revive a long-removed peer; that is the one
+    /// residual window, and it is the same trade every bound here makes.
     high_water: BTreeMap<(TransportIdentity, String), u64>,
 }
 
@@ -429,26 +436,6 @@ impl CandidateSet {
     /// Drop every provenance record and observation that has expired, and
     /// every peer left with no addresses.
     pub fn sweep(&mut self, now_ms: u64) {
-        // The same withdrawal the retraction path records: a mark evicted
-        // as redundant was covered by records, and expiry removes them
-        // just as surely as a retraction does.
-        let mut withdrawn: Vec<(TransportIdentity, String, u64)> = Vec::new();
-        for (peer_id, entry) in &self.peers {
-            let mut newest: BTreeMap<&str, u64> = BTreeMap::new();
-            for record in entry.addresses.values().flat_map(|rs| rs.iter()) {
-                if now_ms >= record.expires_at {
-                    let slot = newest.entry(record.source.as_str()).or_default();
-                    *slot = (*slot).max(record.observed_at);
-                }
-            }
-            for (source, at) in newest {
-                withdrawn.push((peer_id.clone(), source.to_owned(), at));
-            }
-        }
-        for (peer_id, source, at) in withdrawn {
-            self.remember_watermark(&peer_id, &source, at);
-        }
-
         for entry in self.peers.values_mut() {
             for records in entry.addresses.values_mut() {
                 records.retain(|r| now_ms < r.expires_at);
@@ -456,23 +443,19 @@ impl CandidateSet {
             entry.addresses.retain(|_, records| !records.is_empty());
             entry.observations.retain(|_, (_, _, exp)| now_ms < *exp);
 
-            // A SOURCE THAT SUPPORTS NOTHING KEEPS NO FACTS — the rule
-            // `retract` already applies, and natural expiry bypassed it.
-            // A source's address can lapse while another source keeps the
-            // peer alive, leaving that source's still-live protocol
-            // claims attributed to something that vouches for no way to
-            // reach the peer.
-            let live: BTreeSet<String> = entry
-                .addresses
-                .values()
-                .flat_map(|records| records.iter())
-                .map(|r| r.source.clone())
-                .collect();
-            entry
-                .observations
-                .retain(|(_, source), _| live.contains(source));
+            // A source that supports nothing keeps no facts — through
+            // the one owner, not an inline copy of its rule.
+            entry.drop_orphaned_facts();
         }
-        self.peers.retain(|_, e| !e.addresses.is_empty());
+        let empty: Vec<TransportIdentity> = self
+            .peers
+            .iter()
+            .filter(|(_, e)| e.addresses.is_empty())
+            .map(|(p, _)| p.clone())
+            .collect();
+        for peer in empty {
+            self.remove_entry(&peer);
+        }
     }
 
     /// Record an observation from `source`.
@@ -558,15 +541,8 @@ impl CandidateSet {
         let applied = self
             .peers
             .get(&candidate.peer_id)
-            .map(|e| {
-                e.addresses
-                    .values()
-                    .flat_map(|records| records.iter())
-                    .filter(|r| r.source == candidate.source)
-                    .map(|r| r.observed_at)
-                    .max()
-                    .unwrap_or(0)
-            })
+            .and_then(|e| e.applied.get(&candidate.source))
+            .copied()
             .unwrap_or(0);
         let threshold = self.high_water.get(&key).copied().unwrap_or(0).max(applied);
         let stale = candidate.observed_at < threshold;
@@ -590,38 +566,27 @@ impl CandidateSet {
             }
         }
 
-        if !stale {
-            self.remember_watermark(&candidate.peer_id, &candidate.source, candidate.observed_at);
-        }
-
-        // The prune below REMOVES records, and a removed record may have
-        // been the coverage a discarded watermark relied on — the same
-        // withdrawal `retract` and `sweep` record, reached through a
-        // different door: an observation for one source pruning another
-        // source's expired records. Remembered BEFORE the entry borrow,
-        // because that is when the records are still there to read.
-        let lapsed: Vec<(String, u64)> = self
-            .peers
-            .get(&candidate.peer_id)
-            .map(|e| {
-                let mut newest: BTreeMap<&str, u64> = BTreeMap::new();
-                for record in e.addresses.values().flat_map(|rs| rs.iter()) {
-                    if now_ms >= record.expires_at {
-                        let slot = newest.entry(record.source.as_str()).or_default();
-                        *slot = (*slot).max(record.observed_at);
-                    }
-                }
-                newest
-                    .into_iter()
-                    .map(|(source, at)| (source.to_owned(), at))
-                    .collect()
-            })
-            .unwrap_or_default();
-        for (source, at) in lapsed {
-            self.remember_watermark(&candidate.peer_id, &source, at);
-        }
-
         let entry = self.peers.entry(candidate.peer_id.clone()).or_default();
+
+        // THE THRESHOLD LIVES HERE NOW, not on the records. Applied
+        // evidence raises it; nothing that removes a record can lower it,
+        // so no removal site owes a re-recording any more.
+        if !stale {
+            if !entry.applied.contains_key(&candidate.source)
+                && entry.applied.len() >= MAX_PROVIDERS
+            {
+                let victim = entry
+                    .applied
+                    .iter()
+                    .min_by_key(|(_, at)| **at)
+                    .map(|(s, _)| s.clone());
+                if let Some(victim) = victim {
+                    entry.applied.remove(&victim);
+                }
+            }
+            let slot = entry.applied.entry(candidate.source.clone()).or_default();
+            *slot = (*slot).max(candidate.observed_at);
+        }
 
         // A DEAD SLOT IS NOT AN OCCUPIED ONE. The cap counts address
         // KEYS, and a key whose every provenance record has expired is
@@ -773,45 +738,45 @@ impl CandidateSet {
             {
                 continue;
             }
-            // THE NEWEST EVIDENCE WINS, not the last one iterated.
-            // `protocol_observations` is a `BTreeSet`, so a candidate may
-            // legally carry both `supported: true` and `supported: false`
-            // for one protocol and the derived ordering decides which is
-            // applied last — and an event delivered late can overwrite
-            // fresher evidence with stale. Either way a consumer could be
-            // told a peer supports something a newer observation had
-            // already withdrawn.
-            match entry.observations.get(&key) {
-                Some((_, held_at, _)) if *held_at > observation.observed_at => {}
-                _ => {
-                    entry.observations.insert(
-                        key,
-                        (observation.supported, observation.observed_at, expires_at),
-                    );
+            // THE NEWEST EVIDENCE WINS, not the last one iterated —
+            // and the threshold survives the fact's own removal, so a
+            // withdrawn fact cannot be re-asserted by delayed evidence.
+            let floor = entry.fact_applied.get(&key).copied().unwrap_or(0);
+            if floor > observation.observed_at {
+                continue;
+            }
+            if !entry.fact_applied.contains_key(&key)
+                && entry.fact_applied.len() >= 2 * MAX_OBSERVATIONS_PER_PEER
+            {
+                let victim = entry
+                    .fact_applied
+                    .iter()
+                    .min_by_key(|(_, at)| **at)
+                    .map(|(k, _)| k.clone());
+                if let Some(victim) = victim {
+                    entry.fact_applied.remove(&victim);
                 }
             }
+            let slot = entry.fact_applied.entry(key.clone()).or_default();
+            *slot = (*slot).max(observation.observed_at);
+            entry.observations.insert(
+                key,
+                (observation.supported, observation.observed_at, expires_at),
+            );
         }
     }
 
     /// Retract `source`'s support: the named addresses, or all of them.
+    ///
+    /// A KNOWN LIMIT, acknowledged rather than defended: `CandidateExpired`
+    /// carries no timestamp, so a retraction reordered BEFORE the
+    /// observation it revokes leaves no threshold to raise, and the late
+    /// observation lands. Closing that needs the event to carry when the
+    /// withdrawal was decided, which is an API change for a later stage.
     fn retract(&mut self, peer_id: &TransportIdentity, source: &str, addresses: &BTreeSet<String>) {
         let Some(entry) = self.peers.get_mut(peer_id) else {
             return;
         };
-        // REMEMBER BEFORE REMOVING. A mark evicted as redundant was
-        // covered by these very records, and that coverage ends here — so
-        // the withdrawal is exactly the moment the mark has to exist
-        // again, or a delayed older observation revives what this call is
-        // taking away.
-        let withdrawn: Option<u64> = entry
-            .addresses
-            .iter()
-            .filter(|(address, _)| addresses.is_empty() || addresses.contains(*address))
-            .flat_map(|(_, records)| records.iter())
-            .filter(|r| r.source == source)
-            .map(|r| r.observed_at)
-            .max();
-
         for (address, records) in &mut entry.addresses {
             if addresses.is_empty() || addresses.contains(address) {
                 records.retain(|r| r.source != source);
@@ -833,29 +798,10 @@ impl CandidateSet {
         entry.drop_orphaned_facts();
 
         if entry.addresses.is_empty() {
-            self.peers.remove(peer_id);
-        }
-
-        if let Some(at) = withdrawn {
-            self.remember_watermark(peer_id, source, at);
+            self.remove_entry(peer_id);
         }
     }
 
-    /// Make room: an expired peer first, then the least recently observed
-    /// UNTRUSTED one.
-    ///
-    /// Trust is read for ORDER and nothing else (ADR-0012). A trusted peer
-    /// is preferred over an untrusted one under pressure — it is not
-    /// granted anything, and an untrusted candidate that survives is not
-    /// thereby endorsed.
-    /// Record that `source` has been seen at `at` for `peer`, bounded.
-    ///
-    /// Called wherever a source's evidence is applied OR withdrawn. The
-    /// withdrawal case is the one that is easy to miss and the one that
-    /// matters: a mark dropped as "redundant" was covered by a live
-    /// record, and that coverage lasts exactly until the record goes —
-    /// so the moment provenance is removed, the mark has to exist again
-    /// or a delayed older event revives the address.
     fn remember_watermark(&mut self, peer: &TransportIdentity, source: &str, at: u64) {
         let key = (peer.clone(), source.to_owned());
         if self.high_water.len() >= MAX_HIGH_WATER && !self.high_water.contains_key(&key) {
@@ -878,12 +824,10 @@ impl CandidateSet {
                 .high_water
                 .iter()
                 .find(|((p, s), mark)| {
-                    self.peers.get(p).is_some_and(|e| {
-                        e.addresses
-                            .values()
-                            .flat_map(|records| records.iter())
-                            .any(|r| r.source == *s && r.observed_at >= **mark)
-                    })
+                    self.peers
+                        .get(p)
+                        .and_then(|e| e.applied.get(s))
+                        .is_some_and(|a| *a >= **mark)
                 })
                 .map(|(k, _)| k.clone());
             let victim = redundant.or_else(|| {
@@ -900,32 +844,20 @@ impl CandidateSet {
         *mark = (*mark).max(at);
     }
 
-    /// Remove a peer's entry, recording the withdrawal it performs.
+    /// Remove a peer's entry, spilling its applied thresholds.
     ///
-    /// EVERY ENTRY REMOVAL GOES THROUGH HERE. Each record the entry held
-    /// may have been the coverage a discarded watermark relied on, so
-    /// each source's newest timestamp is re-recorded — the same rule the
-    /// four earlier withdrawal doors follow, given one owner after the
-    /// fifth and sixth doors (both live-victim eviction branches) were
-    /// found lacking it one round after the fourth.
+    /// EVERY ENTRY REMOVAL GOES THROUGH HERE — retraction emptying a
+    /// peer, the sweep collecting emptied peers, and all three eviction
+    /// branches. The spill is what lets `high_water` hold only REMOVED
+    /// peers' thresholds: while a peer lives its thresholds ride in
+    /// `Entry::applied` and no removal of records owes any bookkeeping,
+    /// which is what ended the per-door re-recording that eight separate
+    /// review findings each caught one site of.
     fn remove_entry(&mut self, peer: &TransportIdentity) {
-        let withdrawn: Vec<(String, u64)> = self
-            .peers
-            .get(peer)
-            .map(|e| {
-                let mut newest: BTreeMap<&str, u64> = BTreeMap::new();
-                for record in e.addresses.values().flat_map(|rs| rs.iter()) {
-                    let slot = newest.entry(record.source.as_str()).or_default();
-                    *slot = (*slot).max(record.observed_at);
-                }
-                newest
-                    .into_iter()
-                    .map(|(source, at)| (source.to_owned(), at))
-                    .collect()
-            })
-            .unwrap_or_default();
-        self.peers.remove(peer);
-        for (source, at) in withdrawn {
+        let Some(entry) = self.peers.remove(peer) else {
+            return;
+        };
+        for (source, at) in entry.applied {
             self.remember_watermark(peer, &source, at);
         }
     }
@@ -4472,47 +4404,64 @@ mod tests {
 
     #[test]
     fn an_uncovered_mark_is_not_the_one_evicted_as_redundant() {
-        // Peer A's key sorts FIRST, so the loose predicate — any live
-        // record at all — picks A's mark. The tight one requires a record
-        // carrying the mark's value: A's surviving record is OLDER than
-        // its mark (the selective retraction took the newer address), so
-        // A is skipped and B's genuinely covered mark goes instead.
+        // Under the applied-map design, `high_water` holds only removed
+        // peers' spilled thresholds. A peer re-added through a DIFFERENT
+        // source leaves its old source's spilled mark uncovered — no
+        // live `applied` entry can reproduce it — so eviction must skip
+        // it: it is the only guard its addresses have. Peer A's key
+        // sorts first, so the loose predicate would pick A's mark; the
+        // tight one skips to B's covered one.
         let mut set = CandidateSet::new();
         let trust = nobody();
-        let a = identity(0); // sorts before every synthetic id below
+        let a = identity(0);
         let b = identity(1);
-        let withdrawn = "/ip4/10.0.0.2/tcp/2";
 
-        let mut c = for_id(
-            &a,
-            "peer-cache",
-            "/ip4/10.0.0.1/tcp/1",
-            1_000,
-            Some(u64::MAX),
-        );
-        c.addresses.insert(withdrawn.to_owned());
-        set.observe(&c, 1_000, &trust, true, false);
-        // The newer sighting of only the sibling, then its retraction:
-        // mark 2_000, surviving record at 1_000.
+        // A: applied at 2_000 through peer-cache, removed (spilling the
+        // mark), re-added through mdns at 1_000. The (A, peer-cache)
+        // mark is now uncovered.
         set.observe(
-            &for_id(&a, "peer-cache", withdrawn, 2_000, Some(u64::MAX)),
+            &for_id(
+                &a,
+                "peer-cache",
+                "/ip4/10.0.0.1/tcp/1",
+                2_000,
+                Some(u64::MAX),
+            ),
             2_000,
             &trust,
             true,
             false,
         );
-        set.retract(
-            &a,
-            "peer-cache",
-            &[withdrawn.to_owned()].into_iter().collect(),
+        set.remove_entry(&a);
+        set.observe(
+            &for_id(&a, "mdns", "/ip4/10.0.0.2/tcp/2", 1_000, Some(u64::MAX)),
+            1_000,
+            &trust,
+            true,
+            false,
         );
         assert_eq!(
             set.high_water.get(&(a.clone(), "peer-cache".to_owned())),
             Some(&2_000),
-            "the scenario needs a mark above its surviving record"
+            "the scenario needs a spilled, uncovered mark"
         );
 
-        // B: covered — its record carries its mark.
+        // B: spilled at 3_000 and re-added at 3_000 through the same
+        // source — genuinely covered.
+        set.observe(
+            &for_id(
+                &b,
+                "peer-cache",
+                "/ip4/10.0.0.3/tcp/3",
+                3_000,
+                Some(u64::MAX),
+            ),
+            3_000,
+            &trust,
+            true,
+            false,
+        );
+        set.remove_entry(&b);
         set.observe(
             &for_id(
                 &b,
@@ -4540,6 +4489,11 @@ mod tests {
             set.high_water
                 .contains_key(&(a.clone(), "peer-cache".to_owned())),
             "the uncovered mark survives; it is the only guard its address has"
+        );
+        assert!(
+            !set.high_water
+                .contains_key(&(b.clone(), "peer-cache".to_owned())),
+            "and the covered mark is the one that goes"
         );
     }
     #[test]
@@ -4604,6 +4558,228 @@ mod tests {
                 .iter()
                 .any(|c| c.peer_id == subject),
             "older evidence does not revive what eviction removed"
+        );
+    }
+    #[test]
+    fn a_lapsed_record_is_not_coverage_for_a_spilled_mark() {
+        // Two peers whose records lapse in the same sweep, with the map
+        // saturated by fillers OLDER than either mark — so the
+        // oldest-first fallback never picks them, and only a wrong
+        // redundancy call could. Both spills must survive the pass.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let pv = identity(0);
+        let pe = identity(1);
+
+        set.observe(
+            &for_id(&pv, "peer-cache", "/ip4/10.0.0.1/tcp/1", 2_000, Some(3_000)),
+            2_000,
+            &trust,
+            true,
+            false,
+        );
+        set.observe(
+            &for_id(&pe, "mdns", "/ip4/10.0.0.2/tcp/2", 500, Some(3_000)),
+            500,
+            &trust,
+            true,
+            false,
+        );
+        let mut filler = 0usize;
+        while set.high_water.len() < MAX_HIGH_WATER {
+            set.high_water
+                .insert((identity(2_000_000 + filler), "x".to_owned()), 100);
+            filler += 1;
+        }
+
+        set.sweep(5_000);
+        assert!(
+            set.high_water
+                .contains_key(&(pv.clone(), "peer-cache".to_owned())),
+            "the first spilled mark survives the same pass"
+        );
+
+        set.observe(
+            &for_id(
+                &pv,
+                "peer-cache",
+                "/ip4/10.0.0.1/tcp/1",
+                1_000,
+                Some(u64::MAX),
+            ),
+            6_000,
+            &trust,
+            true,
+            false,
+        );
+        assert!(
+            !set.candidates(6_500, &|_| None)
+                .iter()
+                .any(|c| c.peer_id == pv),
+            "older evidence does not revive what expiry withdrew"
+        );
+    }
+
+    #[test]
+    fn displacing_a_sources_last_address_keeps_its_threshold() {
+        // Door seven: a pinned address displaces the unpinned address
+        // key carrying another source's ONLY record. The threshold now
+        // rides in `Entry::applied`, which no record removal touches.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let p = identity(50);
+
+        let mut pinned = for_id(&p, "static", "/ip4/10.0.0.1/tcp/1", 4_000, None);
+        for i in 2..=15 {
+            pinned.addresses.insert(format!("/ip4/10.0.0.{i}/tcp/{i}"));
+        }
+        set.observe(&pinned, 4_000, &trust, false, true);
+        set.observe(
+            &for_id(&p, "mdns", "/ip4/10.9.9.9/tcp/9", 6_000, Some(u64::MAX)),
+            6_000,
+            &trust,
+            true,
+            false,
+        );
+
+        set.observe(
+            &for_id(&p, "static", "/ip4/10.0.0.16/tcp/16", 7_000, None),
+            7_000,
+            &trust,
+            false,
+            true,
+        );
+        let entry = set.peers.get(&p).expect("known");
+        assert!(
+            !entry.addresses.contains_key("/ip4/10.9.9.9/tcp/9"),
+            "the unpinned address was displaced, or this proves nothing"
+        );
+        assert_eq!(
+            entry.applied.get("mdns"),
+            Some(&6_000),
+            "displacement is a record removal; the threshold survives it"
+        );
+
+        set.observe(
+            &for_id(&p, "mdns", "/ip4/10.0.0.16/tcp/16", 1_000, Some(u64::MAX)),
+            8_000,
+            &trust,
+            true,
+            false,
+        );
+        let cands = set.candidates(8_500, &|_| None);
+        let cand = cands.iter().find(|c| c.peer_id == p).expect("known");
+        assert!(
+            !cand.sources.contains("mdns"),
+            "stale evidence does not restore a displaced source"
+        );
+    }
+
+    #[test]
+    fn displacing_a_sources_last_record_keeps_its_threshold() {
+        // Door eight: a pinned source displaces the unpinned provenance
+        // record at the per-address cap. Asserted through a SIBLING
+        // address — the displaced address itself is pinned-full, so
+        // asserting on it would be vacuous.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let p = identity(60);
+        let addr = "/ip4/10.0.0.1/tcp/1";
+
+        for i in 0..7 {
+            set.observe(
+                &for_id(&p, &format!("static-{i}"), addr, 500, None),
+                500,
+                &trust,
+                false,
+                true,
+            );
+        }
+        set.observe(
+            &for_id(&p, "mdns", addr, 6_000, Some(u64::MAX)),
+            6_000,
+            &trust,
+            true,
+            false,
+        );
+
+        set.observe(
+            &for_id(&p, "static-7", addr, 7_000, None),
+            7_000,
+            &trust,
+            false,
+            true,
+        );
+        let entry = set.peers.get(&p).expect("known");
+        assert!(
+            !entry.addresses[addr].iter().any(|r| r.source == "mdns"),
+            "the unpinned record was displaced, or this proves nothing"
+        );
+        assert_eq!(
+            entry.applied.get("mdns"),
+            Some(&6_000),
+            "the threshold survives the record"
+        );
+
+        set.observe(
+            &for_id(&p, "mdns", "/ip4/10.0.0.2/tcp/2", 1_000, Some(u64::MAX)),
+            8_000,
+            &trust,
+            true,
+            false,
+        );
+        assert!(
+            !set.candidates(8_500, &|_| None)
+                .iter()
+                .any(|c| c.address_list().contains(&"/ip4/10.0.0.2/tcp/2")),
+            "stale evidence does not introduce a sibling after displacement"
+        );
+    }
+
+    #[test]
+    fn a_withdrawn_fact_is_not_reasserted_by_delayed_evidence() {
+        // The fact threshold must survive the fact's own removal: mdns
+        // withdraws support at 200, retracts entirely, then re-announces
+        // with a NEWER address event replaying an OLDER stored fact.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let p = identity(70);
+        let addr = "/ip4/10.0.0.1/tcp/1";
+        let kad = ProtocolId::parse("/interweave/direct/2.0.0").expect("valid");
+
+        set.observe(
+            &for_id(&p, "peer-cache", "/ip4/10.0.0.9/tcp/9", 100, Some(u64::MAX)),
+            100,
+            &trust,
+            true,
+            false,
+        );
+
+        let mut c = for_id(&p, "mdns", addr, 200, Some(u64::MAX));
+        c.protocol_observations.insert(ProtocolObservation {
+            protocol_id: kad.clone(),
+            supported: false,
+            observed_at: 200,
+        });
+        set.observe(&c, 200, &trust, true, false);
+        set.retract(&p, "mdns", &BTreeSet::new());
+
+        let mut replay = for_id(&p, "mdns", addr, 300, Some(u64::MAX));
+        replay.protocol_observations.insert(ProtocolObservation {
+            protocol_id: kad.clone(),
+            supported: true,
+            observed_at: 150,
+        });
+        set.observe(&replay, 300, &trust, true, false);
+
+        let cands = set.candidates(400, &|_| None);
+        let cand = cands.iter().find(|c| c.peer_id == p).expect("known");
+        assert!(
+            !cand
+                .protocol_observations
+                .iter()
+                .any(|o| o.protocol == kad && o.supported),
+            "a fact withdrawn at 200 is not re-asserted by evidence from 150"
         );
     }
 }
