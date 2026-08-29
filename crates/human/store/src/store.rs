@@ -88,7 +88,13 @@ impl HumanStore {
         // window in which it is world-traversable. This duplicates three
         // lines of `interweave-profile-config` on purpose: the store must
         // not depend on configuration to protect its own files.
-        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        // AN EMPTY PARENT IS THE WORKING DIRECTORY, not "no parent".
+        // `Path::new("messages.db").parent()` is `Some("")`, so filtering
+        // the empty string out skipped every check below for a bare
+        // relative path — in a shared or attacker-writable working
+        // directory, exactly the case that most needed them.
+        let parent = private_parent_of(path);
+        {
             create_private_dir(parent)?;
             // CREATED owner-only says nothing about one that was already
             // there. A pre-existing state directory — restored, copied,
@@ -124,6 +130,31 @@ impl HumanStore {
                 Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(StoreError::Io(e)),
+            }
+
+            // WHAT IS ACTUALLY THERE, not what the name resolves to. The
+            // lost `create_new` race above is not an error precisely
+            // because this decides whether the existing file is
+            // acceptable — and `metadata` FOLLOWS symlinks, so it
+            // answered about the target. Another local account can
+            // pre-create the database path as a link and redirect this
+            // process, using its own authority, into creating or opening
+            // a database somewhere else entirely.
+            //
+            // `symlink_metadata` asks about the path itself, and anything
+            // that is not a regular file is refused rather than repaired:
+            // a store that has been redirected should be reported, not
+            // silently relocated.
+            let here = std::fs::symlink_metadata(path).map_err(StoreError::Io)?;
+            if here.file_type().is_symlink() {
+                return Err(StoreError::NotAFile {
+                    what: "the database path is a symbolic link",
+                });
+            }
+            if !here.is_file() {
+                return Err(StoreError::NotAFile {
+                    what: "the database path is not a regular file",
+                });
             }
         }
 
@@ -1025,5 +1056,44 @@ fn is_medium_failure(err: &rusqlite::Error) -> bool {
                 | ErrorCode::DatabaseLocked
         ),
         _ => false,
+    }
+}
+
+/// The directory whose privacy protects `path`.
+///
+/// AN EMPTY PARENT IS THE WORKING DIRECTORY, not "no parent".
+/// `Path::new("messages.db").parent()` is `Some("")`, so treating that as
+/// absent skipped every directory check for a bare relative path — in a
+/// shared or attacker-writable working directory, exactly the case that
+/// most needed them.
+fn private_parent_of(path: &std::path::Path) -> &std::path::Path {
+    match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => std::path::Path::new("."),
+    }
+}
+
+#[cfg(test)]
+mod parent_tests {
+    use super::private_parent_of;
+    use std::path::Path;
+
+    #[test]
+    fn a_bare_name_resolves_to_the_working_directory_not_to_nothing() {
+        assert_eq!(
+            private_parent_of(Path::new("messages.db")),
+            Path::new("."),
+            "a bare name is protected by the working directory"
+        );
+        assert_eq!(
+            private_parent_of(Path::new("state/messages.db")),
+            Path::new("state"),
+            "an explicit parent is unchanged"
+        );
+        assert_eq!(
+            private_parent_of(Path::new("/")),
+            Path::new("."),
+            "a path with no parent at all still yields a directory to check"
+        );
     }
 }

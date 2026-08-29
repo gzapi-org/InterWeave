@@ -95,6 +95,16 @@ pub enum StoreError {
     /// content that has been broadly readable should be treated as
     /// exposed, and quietly narrowing the mode would hide that it ever
     /// was.
+    /// The database path is not a regular file.
+    ///
+    /// A symlink, directory, or device where the store expects its own
+    /// file. Refused rather than followed: another local account that
+    /// can pre-create the path could otherwise redirect this process,
+    /// using its own authority, into opening a database elsewhere.
+    NotAFile {
+        /// What was found.
+        what: &'static str,
+    },
     PermissionsTooOpen {
         /// Which file or directory.
         what: String,
@@ -166,6 +176,7 @@ impl core::fmt::Display for StoreError {
                 f,
                 "more rows than this accessor materializes; walk them with {use_instead}"
             ),
+            Self::NotAFile { what } => write!(f, "{what}"),
             Self::PermissionsTooOpen { what, mode } => write!(
                 f,
                 "{what} is mode {mode:04o}; message content must be owner-only"
