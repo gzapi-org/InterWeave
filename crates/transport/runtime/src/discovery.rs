@@ -513,7 +513,7 @@ impl CandidateSet {
         }
 
         if !self.peers.contains_key(&candidate.peer_id) && self.peers.len() >= MAX_CANDIDATES {
-            self.evict_one(now_ms, trust);
+            self.evict_one(now_ms, trust, candidate.observed_at);
             if self.peers.len() >= MAX_CANDIDATES {
                 // Nothing could be evicted — every slot is a live trusted
                 // candidate. Refusing the new one is correct: the bound is
@@ -771,7 +771,18 @@ impl CandidateSet {
     /// is preferred over an untrusted one under pressure — it is not
     /// granted anything, and an untrusted candidate that survives is not
     /// thereby endorsed.
-    fn evict_one(&mut self, now_ms: u64, trust: &PeerTrustPolicy) {
+    /// Make room, refusing to do so for a newcomer that ranks last.
+    ///
+    /// `incoming` is the arriving candidate's `observed_at`. Without it
+    /// the set always evicted its least-recently-observed peer, so a
+    /// delayed but unexpired candidate older than everything held
+    /// displaced a fresher route while being itself the least recent
+    /// thing in the overflow set — a bound that made the set worse the
+    /// slower a provider was.
+    ///
+    /// An EXPIRED peer is still evicted unconditionally: it contributes
+    /// nothing, so anything outranks it.
+    fn evict_one(&mut self, now_ms: u64, trust: &PeerTrustPolicy, incoming: u64) -> bool {
         let expired: Option<TransportIdentity> = self
             .peers
             .iter()
@@ -783,7 +794,7 @@ impl CandidateSet {
             .map(|(p, _)| p.clone());
         if let Some(peer) = expired {
             self.peers.remove(&peer);
-            return;
+            return true;
         }
         // CONFIGURED ENTRIES ARE RETAINED WITHIN THEIR OWN CAP
         // (`architecture/discovery/DESIGN.md`). Static bootstrap is the
@@ -823,9 +834,19 @@ impl CandidateSet {
             .filter(|(peer, _)| !trust.decide(peer).is_allowed())
             .filter(|(peer, _)| !protect.contains(peer))
             .min_by_key(|(_, e)| e.recency(now_ms))
-            .map(|(p, _)| p.clone());
-        if let Some(peer) = victim {
-            self.peers.remove(&peer);
+            .map(|(p, e)| (p.clone(), e.recency(now_ms)));
+        match victim {
+            // STRICTLY older loses. A tie admits the newcomer, matching
+            // how the observation watermark treats equal timestamps: they
+            // are the same evidence, not staler evidence, and refusing on
+            // one would make a full set reject a peer as recent as
+            // anything it holds.
+            Some((_, recency)) if incoming < recency => false,
+            Some((peer, _)) => {
+                self.peers.remove(&peer);
+                true
+            }
+            None => false,
         }
     }
 }
@@ -3564,6 +3585,155 @@ mod tests {
                 .iter()
                 .any(|c| c.peer_id == ghost),
             "and the forgotten peer did not come back"
+        );
+    }
+    #[test]
+    fn a_newcomer_older_than_everything_held_does_not_displace_it() {
+        // The set always evicted its least-recently-observed peer, so a
+        // delayed but unexpired candidate older than everything held
+        // displaced a fresher route while being itself the least recent
+        // thing in the overflow set — a bound that made the set worse the
+        // slower a provider was.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+
+        for i in 0..MAX_CANDIDATES {
+            set.observe(
+                &for_id(
+                    &identity(400_000 + i),
+                    "mdns",
+                    "/ip4/10.1.0.1/tcp/1",
+                    10_000 + i as u64,
+                    Some(u64::MAX),
+                ),
+                10_000 + i as u64,
+                &trust,
+                true,
+                false,
+            );
+        }
+        let before = set.candidates(9_000_000, &|_| None).len();
+        assert_eq!(before, MAX_CANDIDATES, "the set is full of live peers");
+
+        // Observed long before every held peer, delivered now, still live.
+        let laggard = identity(499_999);
+        set.observe(
+            &for_id(
+                &laggard,
+                "peer-cache",
+                "/ip4/10.0.0.9/tcp/1",
+                5,
+                Some(u64::MAX),
+            ),
+            9_000_000,
+            &trust,
+            true,
+            false,
+        );
+
+        assert!(
+            !set.candidates(9_000_000, &|_| None)
+                .iter()
+                .any(|c| c.peer_id == laggard),
+            "the newcomer ranks last, so it is refused rather than admitted"
+        );
+        assert_eq!(
+            set.candidates(9_000_000, &|_| None).len(),
+            before,
+            "and nothing fresher was displaced for it"
+        );
+    }
+
+    #[test]
+    fn a_newcomer_fresher_than_the_victim_is_still_admitted() {
+        // The control: ranking the newcomer must not turn a full set into
+        // a closed one.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+
+        for i in 0..MAX_CANDIDATES {
+            set.observe(
+                &for_id(
+                    &identity(500_000 + i),
+                    "mdns",
+                    "/ip4/10.1.0.1/tcp/1",
+                    10_000 + i as u64,
+                    Some(u64::MAX),
+                ),
+                10_000 + i as u64,
+                &trust,
+                true,
+                false,
+            );
+        }
+
+        let fresher = identity(599_999);
+        set.observe(
+            &for_id(
+                &fresher,
+                "peer-cache",
+                "/ip4/10.0.0.9/tcp/1",
+                8_000_000,
+                Some(u64::MAX),
+            ),
+            8_000_000,
+            &trust,
+            true,
+            false,
+        );
+
+        assert!(
+            set.candidates(9_000_000, &|_| None)
+                .iter()
+                .any(|c| c.peer_id == fresher),
+            "a newcomer observed more recently than the victim is admitted"
+        );
+    }
+    #[test]
+    fn a_newcomer_as_recent_as_the_victim_is_admitted() {
+        // The tie, pinned deliberately: equal timestamps are the same
+        // evidence rather than staler evidence, which is also how the
+        // observation watermark treats them. Refusing here would make a
+        // full set reject a peer as recent as anything it holds.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+
+        for i in 0..MAX_CANDIDATES {
+            set.observe(
+                &for_id(
+                    &identity(600_000 + i),
+                    "mdns",
+                    "/ip4/10.1.0.1/tcp/1",
+                    10_000 + i as u64,
+                    Some(u64::MAX),
+                ),
+                10_000 + i as u64,
+                &trust,
+                true,
+                false,
+            );
+        }
+        // Exactly the recency of the least-recently-observed held peer.
+        let tied = identity(699_999);
+        set.observe(
+            &for_id(
+                &tied,
+                "peer-cache",
+                "/ip4/10.0.0.9/tcp/1",
+                10_000,
+                Some(u64::MAX),
+            ),
+            9_000_000,
+            &trust,
+            true,
+            false,
+        );
+
+        assert!(
+            set.candidates(9_000_000, &|_| None)
+                .iter()
+                .any(|c| c.peer_id == tied),
+            "a tie admits the newcomer"
         );
     }
 }
