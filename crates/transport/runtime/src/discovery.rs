@@ -905,7 +905,31 @@ impl CandidateSet {
             })
             .map(|(p, _)| p.clone());
         if let Some(peer) = expired {
+            // THE FOURTH DOOR. Every record this entry held is being
+            // removed, and any of them may have been the coverage a
+            // discarded watermark relied on — the same withdrawal
+            // retract, sweep and the observe prune already record. Found
+            // one round after the third, for the same reason as the
+            // others: I fixed the doors that were named.
+            let withdrawn: Vec<(String, u64)> = self
+                .peers
+                .get(&peer)
+                .map(|e| {
+                    let mut newest: BTreeMap<&str, u64> = BTreeMap::new();
+                    for record in e.addresses.values().flat_map(|rs| rs.iter()) {
+                        let slot = newest.entry(record.source.as_str()).or_default();
+                        *slot = (*slot).max(record.observed_at);
+                    }
+                    newest
+                        .into_iter()
+                        .map(|(source, at)| (source.to_owned(), at))
+                        .collect()
+                })
+                .unwrap_or_default();
             self.peers.remove(&peer);
+            for (source, at) in withdrawn {
+                self.remember_watermark(&peer, &source, at);
+            }
             return true;
         }
         // CONFIGURED ENTRIES ARE RETAINED WITHIN THEIR OWN CAP
@@ -4273,6 +4297,78 @@ mod tests {
         assert!(
             m.candidates(9_000_000).iter().any(|c| c.peer_id == boot),
             "the configured entry outlives the stray timestamp"
+        );
+    }
+    #[test]
+    fn evicting_an_expired_peer_leaves_marks_behind_like_every_other_removal() {
+        // The fourth door: capacity pressure removes a fully-expired
+        // entry, and every record it held goes with it — including one
+        // whose watermark had been discarded as redundant.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(1_600);
+        let address = "/ip4/10.0.0.1/tcp/4001";
+
+        // A record that will be fully expired, whose mark is discarded
+        // while it lives — the redundant-first policy's doing, applied
+        // directly as in the sibling tests.
+        set.observe(
+            &for_id(&subject, "peer-cache", address, 1_000, Some(2_000)),
+            1_000,
+            &trust,
+            true,
+            false,
+        );
+        set.high_water
+            .remove(&(subject.clone(), "peer-cache".to_owned()));
+
+        // Fill the set so the next observation must evict, and the
+        // expired shortcut takes `subject`.
+        for i in 0..MAX_CANDIDATES {
+            set.observe(
+                &for_id(
+                    &identity(1_700_000 + i),
+                    "mdns",
+                    "/ip4/10.1.0.1/tcp/1",
+                    10_000 + i as u64,
+                    Some(u64::MAX),
+                ),
+                10_000 + i as u64,
+                &trust,
+                true,
+                false,
+            );
+        }
+        assert!(
+            !set.candidates(9_000_000, &|_| None)
+                .iter()
+                .any(|c| c.peer_id == subject),
+            "the expired peer was evicted, or this proves nothing"
+        );
+
+        // OPEN A SLOT FIRST. Delivered into a full set, the delayed
+        // observation is refused by the newcomer RANKING — its
+        // `observed_at` is older than everything held — and the watermark
+        // is never consulted. An earlier version of this test did exactly
+        // that and passed with the fix removed. With room available, the
+        // watermark is the only thing standing between the event and the
+        // revival.
+        set.retract(&identity(1_700_000), "mdns", &BTreeSet::new());
+
+        // The delayed older observation.
+        set.observe(
+            &for_id(&subject, "peer-cache", address, 500, Some(u64::MAX)),
+            9_000_000,
+            &trust,
+            true,
+            false,
+        );
+
+        assert!(
+            !set.candidates(9_000_000, &|_| None)
+                .iter()
+                .any(|c| c.peer_id == subject),
+            "older evidence does not revive what eviction removed"
         );
     }
 }
