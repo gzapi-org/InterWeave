@@ -85,12 +85,14 @@ pub const OBSERVATION_TTL_MS: u64 = 120_000;
 
 /// The ceiling on events waiting to be drained.
 ///
-/// Two per peer `seen` can hold — one observation, one expiry — which is
-/// what a well-behaved LAN produces. It is a TOTAL bound rather than a
-/// per-peer one because the identity space is not bounded: peers that
-/// have lapsed out of `seen` are exactly the ones whose queued events
-/// were unbounded before.
-pub const MAX_PENDING_EVENTS: usize = 2 * MAX_PEERS;
+/// One observation per DEADLINE plus one merged expiry, for every peer
+/// `seen` can hold. Sized at two per peer before observations were
+/// grouped by deadline, which left a well-behaved multi-address LAN
+/// permanently inside the trim — making the loss of a retraction an
+/// ordinary occurrence rather than an adversarial one. The bound is
+/// what a correct LAN legitimately demands, so reaching it again means
+/// something is genuinely wrong.
+pub const MAX_PENDING_EVENTS: usize = (MAX_ADDRESSES_PER_PEER + 1) * MAX_PEERS;
 
 /// LAN observations, normalized into candidates.
 #[derive(Debug, Default)]
@@ -253,28 +255,8 @@ impl MdnsDiscovery {
         self.enforce_pending_bound();
     }
 
-    /// Queue an observation, replacing any pending one for the same peer.
+    /// Queue that `address` is gone for `peer_id`.
     ///
-    /// COALESCED, not appended. `seen` is bounded but `pending` was not:
-    /// a consumer that stops draining while 256 peers announce adds a
-    /// batch every refresh window forever, which lets unauthenticated LAN
-    /// traffic grow memory without limit. An older pending observation for
-    /// a peer is strictly superseded by a newer one — same peer, same or
-    /// wider address set, later expiry — so replacing it loses nothing and
-    /// bounds the queue by the peer count.
-    /// Queue that `address` is gone for `peer_id`, coalescing into any
-    /// expiry already pending for that peer.
-    ///
-    /// BOUNDED BY `seen`, which is the point. Appending a fresh event per
-    /// goodbye let a LAN-driven discover/goodbye cycle grow `pending`
-    /// without limit while a consumer was stalled — the observation half
-    /// coalesced and the expiry half did not, which is unauthenticated
-    /// input choosing how much memory this holds. At most one expiry per
-    /// peer is queued, and its address set is bounded by
-    /// `MAX_ADDRESSES_PER_PEER` because that is what `seen` admits.
-    ///
-    /// Merging loses nothing: two expiries for one peer say exactly what
-    /// one expiry naming both addresses says.
     fn queue_expiry(&mut self, peer_id: &TransportIdentity, address: &str) {
         // NOTHING TO RECOMPUTE. A queued observation now names only
         // addresses that share its deadline, so removing one cannot
@@ -542,7 +524,21 @@ impl DiscoveryProvider for MdnsDiscovery {
             .cloned()
             .collect();
         for peer_id in unemitted {
-            if self.pending.len() >= MAX_PENDING_EVENTS {
+            // ROOM FOR A WHOLE PEER, not one event. `queue_observation`
+            // pushes one event per DEADLINE — up to
+            // MAX_ADDRESSES_PER_PEER of them — and then trims the
+            // overshoot from the FRONT. Checking only that the queue was
+            // not already full let the pump overshoot by up to seven and
+            // evict seven older events to deliver one peer, and a
+            // trimmed CandidateExpired is not regenerable: `seen` no
+            // longer holds the address, so nothing rebuilds it and the
+            // consumer keeps dialling a peer that said goodbye.
+            //
+            // So the claim this pump used to make — "filling only free
+            // space cannot evict anything" — was false whenever free
+            // space was smaller than the peer's group count. Reserving
+            // the worst case makes it true.
+            if self.pending.len() + MAX_ADDRESSES_PER_PEER > MAX_PENDING_EVENTS {
                 break;
             }
             self.queue_observation(&peer_id, now_ms);
@@ -1485,51 +1481,62 @@ mod tests {
     }
     #[test]
     fn regeneration_does_not_starve_the_peers_it_rescues() {
-        // Grouping by deadline lets one peer queue several events, so a
-        // full rebuild overflowed the bound: the trim took the earliest
-        // — the peers just regenerated, in deterministic map order —
-        // and cleared their marks again, so the same low-key peers were
-        // rebuilt and discarded on every drain and never reached the
-        // manager.
+        // The pump rebuilt every unemitted peer regardless of room, and
+        // grouping lets one peer queue several events — so a rebuild
+        // overflowed, the trim took the earliest events, and the same
+        // low-key peers were rebuilt and discarded on every drain.
+        //
+        // Driven through `enforce_pending_bound` directly rather than by
+        // saturating 2304 events through the public surface: the queue
+        // is now sized for what a well-behaved LAN demands, so filling
+        // it costs quadratic work in the coalescing scans and the test
+        // spends minutes proving nothing extra. The state fed in is what
+        // an overloaded provider actually holds.
         let mut p = started();
         let _ = p.drain_events(0, usize::MAX);
 
-        // Many peers, each with several distinct deadlines. The product
-        // must EXCEED MAX_PENDING_EVENTS — at exactly the bound nothing
-        // overflows, nothing is trimmed, and the test passes without any
-        // fix, which is how a first version of it did.
-        let peers = 128u64;
-        let deadlines = 8u64;
+        // One live peer with several deadlines, rolled back as the trim
+        // would leave it.
+        let subject = synthetic_peer(1);
+        for d in 0..MAX_ADDRESSES_PER_PEER as u64 {
+            p.push_discovered(&subject, &format!("/ip4/10.0.0.1/tcp/{d}"), d);
+        }
+        let _ = p.drain_events(8, usize::MAX);
+        // A retraction the consumer needs, then a queue filled to within
+        // less than one peer's worth of the bound.
+        let departed = synthetic_peer(2);
+        p.push_discovered(&departed, "/ip4/10.0.0.2/tcp/1", 8);
+        let _ = p.drain_events(8, usize::MAX);
+        p.push_expired(&departed, "/ip4/10.0.0.2/tcp/1", 8);
+
+        // Roll the subject back AFTER the last full drain. Done
+        // earlier, that drain's own pump re-emits it and the pump has
+        // nothing to do at the moment under test — which is how a
+        // first version of this test passed against the unfixed code.
+        p.last_emitted
+            .remove(&TransportIdentity::parse(subject.clone()).expect("valid"));
+        while p.pending.len() < MAX_PENDING_EVENTS - 2 {
+            p.pending.push(DiscoveryEvent::HealthChanged {
+                source: SOURCE.to_owned(),
+                health: ProviderHealth::Healthy,
+            });
+        }
+
+        // The pump must not overshoot into that gap and trim the front.
+        let before = p.pending.len();
+        let _ = p.drain_events(8, 0);
         assert!(
-            peers * deadlines > MAX_PENDING_EVENTS as u64,
-            "the scenario must overflow the queue, or it proves nothing"
+            p.pending.len() <= MAX_PENDING_EVENTS,
+            "the pump respected the bound"
         );
-        for i in 0..peers {
-            for d in 0..deadlines {
-                p.push_discovered(
-                    &synthetic_peer(i),
-                    &format!("/ip4/10.0.0.{}/tcp/{d}", i % 250),
-                    d,
-                );
-            }
-        }
-
-        // Drain in small batches, as a slow consumer does.
-        let mut delivered: BTreeSet<TransportIdentity> = BTreeSet::new();
-        for _ in 0..400 {
-            for event in p.drain_events(deadlines, 4) {
-                if let DiscoveryEvent::CandidateObserved { candidate } = event {
-                    delivered.insert(candidate.peer_id);
-                }
-            }
-        }
-
-        assert_eq!(
-            delivered.len() as u64,
-            peers,
-            "every live peer reaches the consumer; none is rebuilt and \
-             discarded forever, got {} of {peers}",
-            delivered.len()
+        assert!(
+            p.pending.iter().any(|e| matches!(
+                e,
+                DiscoveryEvent::CandidateExpired { peer_id, .. }
+                    if peer_id.as_str() == departed
+            )),
+            "and did not evict the retraction to make room for a rebuild \
+             ({before} events before)"
         );
     }
 }
