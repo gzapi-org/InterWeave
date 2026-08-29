@@ -454,7 +454,13 @@ impl<'de> Deserialize<'de> for DiscoveryProviderConfig {
             #[serde(default)]
             enabled: Option<bool>,
             #[serde(default)]
-            priority: i32,
+            // No default: `config.schema.yaml` declares `priority: int`
+            // on every provider type without one. Defaulting to 0 turned
+            // a forgotten field into routing policy — and in the
+            // preferred direction, since lower sorts first, so the
+            // omission silently outranked every provider an operator had
+            // actually thought about.
+            priority: Option<i32>,
             #[serde(default)]
             config: DiscoveryProviderSettings,
         }
@@ -471,10 +477,16 @@ impl<'de> Deserialize<'de> for DiscoveryProviderConfig {
                 )));
             }
         };
+        let Some(priority) = wire.priority else {
+            return Err(serde::de::Error::custom(format!(
+                "provider '{}' requires `priority`; the schema gives none a default",
+                wire.provider_type.as_str()
+            )));
+        };
         Ok(Self {
             provider_type: wire.provider_type,
             enabled,
-            priority: wire.priority,
+            priority,
             config: wire.config,
         })
     }
@@ -2912,6 +2924,7 @@ mod tests {
         let json = serde_json::json!({
             "providers": [{
                 "type": "static-bootstrap",
+                "priority": 10,
                 "enabled": true,
                 "config": { "peers": peers }
             }]
@@ -2931,6 +2944,7 @@ mod tests {
         let json = serde_json::json!({
             "providers": [{
                 "type": "static-bootstrap",
+                "priority": 10,
                 "enabled": true,
                 "config": { "peers": ["/ip4/10.0.0.1/".to_owned()
                     + &"x".repeat(MAX_STATIC_PEER_BYTES)] }
@@ -2954,6 +2968,7 @@ mod tests {
         let json = serde_json::json!({
             "providers": [{
                 "type": "static-bootstrap",
+                "priority": 10,
                 "enabled": true,
                 "config": { "peers": peers }
             }]
@@ -3057,6 +3072,7 @@ mod tests {
         let json = serde_json::json!({
             "providers": [{
                 "type": "kademlia",
+                "priority": 10,
                 "enabled": false,
                 "priority": 40,
                 "config": {
@@ -3093,6 +3109,7 @@ mod tests {
         let json = serde_json::json!({
             "providers": [{
                 "type": "kademlia",
+                "priority": 10,
                 "enabled": true,
                 "config": { "network_id": "n", "mode": "client" }
             }]
@@ -3116,7 +3133,7 @@ mod tests {
         // lists, so materializing the array before `validate` sees it is
         // the expensive version of the same mistake as the peer list.
         let providers: Vec<_> = (0..MAX_DISCOVERY_PROVIDERS + 1)
-            .map(|_| serde_json::json!({ "type": "mdns", "enabled": false }))
+            .map(|_| serde_json::json!({ "type": "mdns", "enabled": false, "priority": 10 }))
             .collect();
         let err = serde_json::from_value::<DiscoveryConfig>(
             serde_json::json!({ "providers": providers }),
@@ -3131,7 +3148,7 @@ mod tests {
     #[test]
     fn a_provider_array_at_the_limit_still_parses() {
         let providers: Vec<_> = (0..MAX_DISCOVERY_PROVIDERS)
-            .map(|_| serde_json::json!({ "type": "mdns", "enabled": false }))
+            .map(|_| serde_json::json!({ "type": "mdns", "enabled": false, "priority": 10 }))
             .collect();
         let parsed: DiscoveryConfig =
             serde_json::from_value(serde_json::json!({ "providers": providers }))
@@ -3150,6 +3167,7 @@ mod tests {
         let json = serde_json::json!({
             "providers": [{
                 "type": "kademlia",
+                "priority": 10,
                 "enabled": false,
                 "priority": 40,
                 "config": {
@@ -3190,6 +3208,7 @@ mod tests {
         let json = serde_json::json!({
             "providers": [{
                 "type": "kademlia",
+                "priority": 10,
                 "enabled": false,
                 "config": { "seed_sources":
                     ["peer-cache", "mdns", "static-bootstrap", "peer-cache"] }
@@ -3208,6 +3227,7 @@ mod tests {
         let json = serde_json::json!({
             "providers": [{
                 "type": "kademlia",
+                "priority": 10,
                 "enabled": false,
                 "config": { "seed_sources": ["peer-cache", "not-a-provider"] }
             }]
@@ -3226,6 +3246,7 @@ mod tests {
         let json = serde_json::json!({
             "providers": [{
                 "type": "kademlia",
+                "priority": 10,
                 "enabled": false,
                 "config": { "seed_sources": ["peer-cache", "mdns", "static-bootstrap"] }
             }]
@@ -3275,6 +3296,7 @@ mod tests {
                     "providers": [{
                         "type": provider,
                         "enabled": false,
+                        "priority": 10,
                         "config": { (*key): value }
                     }]
                 });
@@ -3302,6 +3324,7 @@ mod tests {
         let json = serde_json::json!({
             "providers": [{
                 "type": "kademlia",
+                "priority": 10,
                 "enabled": false,
                 "config": { "network_id": "n", "record_mode": "disabled" }
             }]
@@ -3355,7 +3378,7 @@ mod tests {
             ("kademlia", false),
         ] {
             let parsed: DiscoveryConfig = serde_json::from_value(serde_json::json!({
-                "providers": [{ "type": provider, "enabled": value }]
+                "providers": [{ "type": provider, "enabled": value, "priority": 10 }]
             }))
             .expect("an explicit value parses");
             assert_eq!(parsed.providers[0].enabled, value, "for '{provider}'");
@@ -3380,6 +3403,7 @@ mod tests {
         let json = serde_json::json!({
             "providers": [{
                 "type": "kademlia",
+                "priority": 10,
                 "enabled": false,
                 "config": { key: value }
             }]
@@ -3494,6 +3518,7 @@ mod tests {
             let json = serde_json::json!({
                 "providers": [{
                     "type": "peer-cache",
+                    "priority": 10,
                     "enabled": true,
                     "config": { "ttl": bad }
                 }]
@@ -3518,6 +3543,7 @@ mod tests {
             let json = serde_json::json!({
                 "providers": [{
                     "type": "peer-cache",
+                    "priority": 10,
                     "enabled": true,
                     "config": { "ttl": good }
                 }]
@@ -3530,6 +3556,35 @@ mod tests {
                 .filter(|e| matches!(e, ConfigError::InvalidCacheSetting { .. }))
                 .collect();
             assert!(offending.is_empty(), "ttl '{good}' is legal: {offending:?}");
+        }
+    }
+    #[test]
+    fn omitting_priority_is_refused_on_every_provider() {
+        // Lower sorts first, so a defaulted 0 does not merely fill a gap
+        // — it outranks every provider an operator actually thought
+        // about. The schema gives no type a default.
+        for provider in ["peer-cache", "mdns", "static-bootstrap", "kademlia"] {
+            let json = serde_json::json!({
+                "providers": [{ "type": provider, "enabled": false }]
+            });
+            let err = serde_json::from_value::<DiscoveryConfig>(json).unwrap_err();
+            assert!(
+                err.to_string().contains("requires `priority`"),
+                "'{provider}' must require the field: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_priority_is_honoured_including_zero() {
+        // The control: requiring the field must not stop it being read,
+        // and 0 is a legal value an operator may mean.
+        for value in [-5i32, 0, 10, 40] {
+            let parsed: DiscoveryConfig = serde_json::from_value(serde_json::json!({
+                "providers": [{ "type": "mdns", "enabled": false, "priority": value }]
+            }))
+            .expect("an explicit priority parses");
+            assert_eq!(parsed.providers[0].priority, value);
         }
     }
 }
