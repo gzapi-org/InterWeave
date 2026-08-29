@@ -32,7 +32,10 @@
 # `pub(crate)` announces a narrower audience and is out of scope.
 #
 # WHAT COUNTS AS A CALLER. A mention of the name in a different tracked
-# `.rs` file — and, for a method, a mention of its enclosing type in
+# PRODUCTION `.rs` file — `tests/` and `spikes/` are excluded wholesale
+# and `#[cfg(test)]` is stripped, because a unit test and an evidence
+# harness are each exactly as much "not a caller" as the other — and,
+# for a method, a mention of its enclosing type in
 # that same file, OR a call in method position. Deliberately loose about
 # the call itself: this asks
 # "does anyone anywhere know this exists", not "is there a call edge".
@@ -196,7 +199,15 @@ fi
 # through. Integration suites under `tests/` and any `tests/` directory
 # inside a crate are excluded wholesale; `#[cfg(test)]` modules are cut
 # off the remaining files.
-mapfile -t all_rs < <(git ls-files '*.rs' 2>/dev/null | grep -vE '(^|/)tests/')
+#
+# `spikes/` is excluded for the SAME reason, and it is not hypothetical:
+# the SPIKE-003 harness depends on the production crates by path — which
+# CLAUDE.md §4 permits, spike -> product — and the moment it called
+# `SnapshotHandle::admit` this guard reported that function as called
+# and demanded its exemption be dropped. It has no production caller. A
+# spike is evidence, never a consumer; a harness vouching for a domain
+# function is the same false green a unit test would give.
+mapfile -t all_rs < <(git ls-files '*.rs' 2>/dev/null | grep -vE '(^|/)tests/|^spikes/')
 
 # The production half of every source file, stripped ONCE up front.
 #

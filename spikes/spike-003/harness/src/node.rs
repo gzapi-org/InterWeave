@@ -18,7 +18,10 @@ use libp2p::{Multiaddr, PeerId, Swarm, StreamProtocol, identify, kad, noise, tcp
 use libp2p::swarm::behaviour::toggle::Toggle;
 
 use crate::gate::{InstrumentedGate, Mode};
-use interweave_transport_runtime::ConnectionPolicy;
+use interweave_transport_runtime::{
+    ConnectionManager, ConnectionPolicy, SnapshotHandle, TrustSources,
+};
+use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 
 /// The identify protocol this spike advertises, so a node's Kademlia
 /// mode is observable the way the design says it must be: through an
@@ -59,6 +62,10 @@ pub struct NodeConfig {
     /// `None` is what the design requires: the provider scheduler owns
     /// the refresh, so the library must not run its own.
     pub periodic_bootstrap: Option<Duration>,
+    /// The root pending-dial ceiling, so an experiment can exhaust it.
+    pub max_pending_dials: usize,
+    /// The root connection ceiling, likewise.
+    pub max_connections: usize,
 }
 
 impl Default for NodeConfig {
@@ -72,6 +79,8 @@ impl Default for NodeConfig {
             query_timeout: Duration::from_secs(10),
             disjoint_paths: true,
             periodic_bootstrap: None,
+            max_pending_dials: 64,
+            max_connections: 64,
         }
     }
 }
@@ -84,8 +93,16 @@ pub struct Node {
     pub listen: Multiaddr,
     pub ledger: crate::gate::DialLedger,
     pub admitted: interweave_transport_libp2p::outbound_gate::AdmittedDials,
-    pub policy: std::sync::Arc<std::sync::Mutex<ConnectionPolicy>>,
-    pub trusted: std::sync::Arc<std::sync::Mutex<Vec<PeerId>>>,
+    /// The root admission this node's gate consults — trust, backoff,
+    /// drain, AND the pending/connection ceilings.
+    ///
+    /// Behind a `Mutex` because revising trust, recording a failure and
+    /// beginning a drain all need `&mut`; the gate itself never takes
+    /// this lock, holding a `SnapshotHandle` instead.
+    pub manager: std::sync::Arc<std::sync::Mutex<ConnectionManager>>,
+    /// Peers this node trusts, mirrored so `trust` can republish the
+    /// whole set — `set_trust` replaces rather than adds.
+    trusted: Vec<PeerId>,
     /// Query ids this node started deliberately. Anything else the
     /// library ran is unattributed work, which the brief requires be
     /// counted rather than assumed absent.
@@ -103,9 +120,17 @@ impl Node {
     pub async fn start(config: &NodeConfig) -> Self {
         let keypair = Keypair::generate_ed25519();
         let peer_id = keypair.public().to_peer_id();
-        let policy = ConnectionPolicy::new(64, 64);
+        // THE ONE root admission this node has. Built before the
+        // behaviour, because the gate needs its handle.
+        let manager = ConnectionManager::new(
+            ConnectionPolicy::new(config.max_pending_dials, config.max_connections),
+            config.max_pending_dials,
+        );
+        let admission = manager.handle();
+        let manager = std::sync::Arc::new(std::sync::Mutex::new(manager));
 
         let cfg = config.clone();
+        let gate_admission = admission.clone();
         let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
             .with_tcp(
@@ -114,7 +139,7 @@ impl Node {
                 yamux::Config::default,
             )
             .expect("tcp transport")
-            .with_behaviour(move |key| build_behaviour(key, &cfg, policy))
+            .with_behaviour(move |key| build_behaviour(key, &cfg, gate_admission))
             .expect("behaviour")
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(30)))
             .build();
@@ -122,8 +147,6 @@ impl Node {
         let gate = &swarm.behaviour().gate;
         let ledger = gate.ledger();
         let admitted = gate.admitted();
-        let policy_handle = gate.policy();
-        let trusted = gate.trusted();
 
         swarm
             .listen_on("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
@@ -145,8 +168,8 @@ impl Node {
             listen,
             ledger,
             admitted,
-            policy: policy_handle,
-            trusted,
+            manager,
+            trusted: Vec::new(),
             own_queries: HashSet::new(),
             observed: crate::topology::Observations::default(),
         }
@@ -158,12 +181,43 @@ impl Node {
         self.listen.clone()
     }
 
-    /// Mark `peer` data-plane trusted for this node's gate AND policy.
-    pub fn trust(&self, peer: PeerId) {
-        self.trusted
+    /// Mark `peer` data-plane trusted, through the REAL trust policy.
+    ///
+    /// `set_trust` replaces the whole set rather than adding to it, so
+    /// the accumulated list is republished each time. An earlier version
+    /// kept a private `Vec<PeerId>` the gate consulted directly, which
+    /// meant the gate answered from a set the `ConnectionManager` had
+    /// never seen — the classification would have been the harness's
+    /// opinion rather than the product's.
+    ///
+    /// # Panics
+    /// If a generated `PeerId` is not a canonical identity, which would
+    /// mean the identity types disagree with libp2p.
+    pub fn trust(&mut self, peer: PeerId) {
+        self.trusted.push(peer);
+        let ids: Vec<interweave_transport_api::TransportIdentity> = self
+            .trusted
+            .iter()
+            .map(|p| {
+                interweave_transport_api::TransportIdentity::parse(p.to_base58())
+                    .expect("a libp2p PeerId is a canonical identity")
+            })
+            .collect();
+        let sources = TrustSources::new(
+            PeerTrustPolicy::new(ids.into_iter()).expect("within bounds"),
+            InfrastructureSet::new(std::iter::empty()).expect("empty"),
+        );
+        let _ = self
+            .manager
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push(peer);
+            .set_trust(sources, &[]);
+    }
+
+    /// This node's own view of who it trusts.
+    #[must_use]
+    pub fn trusts(&self) -> Vec<PeerId> {
+        self.trusted.clone()
     }
 
     /// Dial through the ROOT admission: register the ticket the way
@@ -200,7 +254,7 @@ impl Node {
 fn build_behaviour(
     key: &Keypair,
     config: &NodeConfig,
-    policy: ConnectionPolicy,
+    admission: SnapshotHandle,
 ) -> SpikeBehaviour {
     let identify = identify::Behaviour::new(identify::Config::new(
         IDENTIFY_PROTOCOL.to_owned(),
@@ -243,7 +297,7 @@ fn build_behaviour(
     };
 
     SpikeBehaviour {
-        gate: InstrumentedGate::new(config.gate_mode, policy),
+        gate: InstrumentedGate::new(config.gate_mode, admission),
         identify,
         kad,
     }

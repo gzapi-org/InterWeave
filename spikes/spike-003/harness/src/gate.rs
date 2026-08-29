@@ -38,7 +38,7 @@ use std::task::{Context, Poll};
 
 use interweave_transport_api::TransportIdentity;
 use interweave_transport_runtime::{
-    ConnectionClass, ConnectionPolicy, DialDenial, DialOrigin, DialRequest,
+    DialDenial, DialOrigin, DialRequest, DialTicket, SnapshotHandle,
 };
 use interweave_transport_libp2p::outbound_gate::AdmittedDials;
 use libp2p::PeerId;
@@ -124,27 +124,51 @@ pub struct InstrumentedGate {
     admitted: AdmittedDials,
     ledger: DialLedger,
     mode: Mode,
-    /// The real policy the `PolicyAdmit` mode consults.
-    policy: Arc<Mutex<ConnectionPolicy>>,
-    /// How the policy classifies a target. A spike stands in for the
-    /// ConnectionManager's trust lookup with an explicit set, because
-    /// what is being measured is that the CLASS reaches the decision.
-    trusted: Arc<Mutex<Vec<PeerId>>>,
+    /// THE WHOLE ROOT ADMISSION, not its policy half.
+    ///
+    /// `PolicySnapshot::admit` answers trust, backoff, quarantine and
+    /// drain; the pending-dial and connection CEILINGS are enforced one
+    /// layer up, in `ConnectionManager::admit`, which is also what mints
+    /// the ticket that reserves them. A gate calling the policy directly
+    /// therefore refuses an untrusted or backed-off peer correctly and
+    /// lets every dial past the limits — which is exactly the release
+    /// criterion this spike has to satisfy, so it asks the manager.
+    ///
+    /// Through a `SnapshotHandle` rather than a locked manager, because
+    /// this runs synchronously inside the Swarm poll: ADR-0011's rule is
+    /// that the gate must not block on the policy. The handle also
+    /// retries a `PolicySuperseded` refusal, which makes a trust
+    /// revision landing mid-dial a reload rather than a spurious denial.
+    admission: SnapshotHandle,
+    /// Tickets held for in-flight behaviour dials, so the slots they
+    /// reserved are released when the dial settles rather than leaking
+    /// one ceiling slot per query.
+    held: Arc<Mutex<BTreeMap<ConnectionId, DialTicket>>>,
     now_ms: u64,
 }
 
 impl InstrumentedGate {
-    /// Build a gate in `mode` over `policy`.
+    /// Build a gate in `mode` over one manager's admission handle.
     #[must_use]
-    pub fn new(mode: Mode, policy: ConnectionPolicy) -> Self {
+    pub fn new(mode: Mode, admission: SnapshotHandle) -> Self {
         Self {
             admitted: AdmittedDials::default(),
             ledger: DialLedger::default(),
             mode,
-            policy: Arc::new(Mutex::new(policy)),
-            trusted: Arc::new(Mutex::new(Vec::new())),
+            admission,
+            held: Arc::new(Mutex::new(BTreeMap::new())),
             now_ms: 0,
         }
+    }
+
+    /// Tickets this gate is holding for in-flight behaviour dials.
+    ///
+    /// Each one is reserving a pending-dial slot and a connection slot,
+    /// so an experiment that wants to know whether a ceiling is actually
+    /// consumed can ask.
+    #[must_use]
+    pub fn held_tickets(&self) -> usize {
+        self.held.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// The counters this gate writes.
@@ -157,28 +181,6 @@ impl InstrumentedGate {
     #[must_use]
     pub fn admitted(&self) -> AdmittedDials {
         self.admitted.clone()
-    }
-
-    /// The policy this gate consults, so an experiment can put a peer
-    /// into backoff or shrink a limit and watch the answer change.
-    #[must_use]
-    pub fn policy(&self) -> Arc<Mutex<ConnectionPolicy>> {
-        Arc::clone(&self.policy)
-    }
-
-    /// Peers the gate treats as data-plane trusted.
-    #[must_use]
-    pub fn trusted(&self) -> Arc<Mutex<Vec<PeerId>>> {
-        Arc::clone(&self.trusted)
-    }
-
-    fn class_of(&self, peer: Option<PeerId>) -> ConnectionClass {
-        match peer {
-            Some(p) if self.trusted.lock().unwrap_or_else(|e| e.into_inner()).contains(&p) => {
-                ConnectionClass::DataPlaneTrusted
-            }
-            _ => ConnectionClass::Unauthorized,
-        }
     }
 
     fn record_refusal(&self, reason: &str) {
@@ -243,15 +245,21 @@ impl NetworkBehaviour for InstrumentedGate {
                 .map_or_else(String::new, std::string::ToString::to_string),
             origin: DialOrigin::KademliaQuery,
         };
-        let class = self.class_of(peer);
-        let decision = self
-            .policy
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .admit(&request, class, self.now_ms);
+        // THE MANAGER, so the ceilings are consulted and the ticket that
+        // reserves them exists. The class is not passed: the manager
+        // classifies from its own trust policy, which is the point —
+        // a caller cannot assert a class it does not have.
+        let decision = self.admission.admit(&request, self.now_ms);
         match decision {
-            Ok(()) => {
+            Ok(ticket) => {
                 self.ledger.lock().behaviour_allowed += 1;
+                // HELD, not dropped. Dropping it here would release the
+                // pending and connection slots it just reserved, and the
+                // ceilings would bound nothing.
+                self.held
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(connection_id, ticket);
                 Ok(Vec::new())
             }
             Err(denial) => {
@@ -284,7 +292,36 @@ impl NetworkBehaviour for InstrumentedGate {
         Ok(dummy::ConnectionHandler)
     }
 
-    fn on_swarm_event(&mut self, _event: FromSwarm<'_>) {}
+    /// Release a behaviour dial's ticket when the dial settles.
+    ///
+    /// Without this every query permanently consumes a pending-dial slot
+    /// and the ceiling reaches zero after a few rounds — the ceilings
+    /// would then "work" for the wrong reason, which is worse than not
+    /// enforcing them.
+    fn on_swarm_event(&mut self, event: FromSwarm<'_>) {
+        let settled = match event {
+            FromSwarm::ConnectionEstablished(e) => Some((e.connection_id, true)),
+            FromSwarm::ConnectionClosed(e) => Some((e.connection_id, false)),
+            FromSwarm::DialFailure(e) => Some((e.connection_id, false)),
+            _ => None,
+        };
+        if let Some((id, _connected)) = settled {
+            // DROPPED, which is what releases the reservation: an
+            // unsettled `DialTicket` returns its pending slot and its
+            // connection slot in `Drop`. The manager's `record_*`
+            // methods need `&mut`, which a `NetworkBehaviour` hook does
+            // not have — and they exist to update backoff and the
+            // reconnect schedule, neither of which this gate is
+            // measuring. What it measures is the CEILING, and the
+            // ceiling is exactly what the drop restores.
+            drop(
+                self.held
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&id),
+            );
+        }
+    }
 
     fn on_connection_handler_event(
         &mut self,

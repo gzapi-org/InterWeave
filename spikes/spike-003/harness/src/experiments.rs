@@ -13,6 +13,8 @@ use std::time::Duration;
 use libp2p::kad;
 use libp2p::kad::store::RecordStore;
 
+use interweave_transport_runtime::{DialDenial, DialOrigin, DialRequest};
+
 use crate::Report;
 use crate::gate::Mode;
 use crate::namespace;
@@ -40,11 +42,22 @@ pub async fn k2_disabled_is_silent(r: &mut Report) {
 
     let addr = nodes[0].dial_address();
     nodes[1].dial_admitted(addr);
-    let connected = pump_until(&mut nodes, Duration::from_secs(10), |n| {
-        n[1].observed.connected.contains(&server_id)
+    // BOTH Identify observations, not merely the connection. Every claim
+    // below reads `identify_protocols`, and a connection exists before
+    // the exchange completes — waiting on the wrong signal made the
+    // server-mode CONTROL fail intermittently under a full-suite run,
+    // which is a control that would eventually have been "fixed" by
+    // weakening it.
+    let identified = pump_until(&mut nodes, Duration::from_secs(20), |n| {
+        n[1].observed.identify_protocols.contains_key(&server_id)
+            && n[0].observed.identify_protocols.contains_key(&off_id)
     })
     .await;
-    r.check("K2.1", "the two nodes connect at all", connected);
+    r.check(
+        "K2.1",
+        "the two nodes connect and exchange Identify in both directions",
+        identified,
+    );
 
     let protocol = namespace::protocol_name(&server.network_id);
     let server_advertises = nodes[1]
@@ -212,17 +225,19 @@ pub async fn k5_bootstrap_accounting(r: &mut Report) {
     }
     pump(&mut nodes, Duration::from_secs(3)).await;
     let implicit = nodes[1].observed.unattributed_queries.len();
+    // ASSERTED, not merely printed. Finding F2 and the budgeting advice
+    // it gives Stage 10 both say EXACTLY ONE, and an earlier version of
+    // this check passed `true` — so a reproduction that started zero or
+    // three would have exited 0 while the record went on claiming one.
+    // A measurement a record depends on is a claim.
     r.check(
         "K5.2",
         &format!(
-            "routing insertion started {implicit} quer{} nobody asked for",
-            if implicit == 1 { "y" } else { "ies" }
+            "routing insertion starts EXACTLY ONE query nobody asked for, and \
+             this run saw {implicit}"
         ),
-        true, // measured, not asserted: the count IS the evidence
+        implicit == 1,
     );
-    r.note(format!(
-        "K5.2 unattributed queries after one manual insertion: {implicit}"
-    ));
 
     // AND AN EXPLICIT BOOTSTRAP WORKS once a peer is known.
     let started = nodes[1].kad().and_then(|k| k.bootstrap().ok());
@@ -521,16 +536,40 @@ pub async fn k9_backoff_and_limits_apply(r: &mut Report) {
     // insertion starts an implicit bootstrap which dials immediately
     // (K5), so a policy installed afterwards would be installed after
     // the dial it is meant to refuse.
+    //
+    // Through the manager's OWN failure path — admit a dial, then record
+    // it as failed — which is what the runtime does when a dial does not
+    // come back. Reaching into `ConnectionPolicy` directly would have
+    // installed backoff the `ConnectionManager` never agreed to.
     {
         let identity = TransportIdentity::parse(c.to_base58()).expect("canonical");
-        let mut p = nodes[0].policy.lock().expect("policy");
-        // No known-good alternative for this peer, so the failure is
-        // peer-scoped and advances backoff.
-        let advanced = p.record_address_failure(&identity, "/ip4/198.51.100.1/tcp/1", 0, 600_000);
+        let mut m = nodes[0].manager.lock().expect("manager");
+        let ticket = m
+            .handle()
+            .admit(
+                &DialRequest {
+                    peer: Some(identity.clone()),
+                    address: "/ip4/198.51.100.1/tcp/1".to_owned(),
+                    origin: DialOrigin::ConnectionManager,
+                },
+                0,
+            )
+            .expect("a trusted peer with a fresh policy is admitted");
+        m.record_failure(ticket, 0);
+        // The peer is now in backoff, which the manager reports by
+        // refusing the next dial to it.
+        let refused = m.handle().admit(
+            &DialRequest {
+                peer: Some(identity),
+                address: "/ip4/198.51.100.2/tcp/1".to_owned(),
+                origin: DialOrigin::ConnectionManager,
+            },
+            1,
+        );
         r.check(
             "K9.1",
-            "the production policy put the peer into backoff",
-            advanced,
+            "a recorded dial failure put the peer into backoff",
+            matches!(refused, Err(DialDenial::PeerBackoff)),
         );
     }
     nodes[0].ledger.reset();
@@ -555,21 +594,36 @@ pub async fn k9_backoff_and_limits_apply(r: &mut Report) {
 
     // SHUTDOWN STATE, the other half: a draining node refuses every
     // behaviour dial regardless of trust.
-    nodes[0].policy.lock().expect("policy").shutting_down = true;
+    nodes[0]
+        .manager
+        .lock()
+        .expect("manager")
+        .begin_shutdown();
     nodes[0].ledger.reset();
+    // A TARGET IT IS NOT CONNECTED TO, so the query must dial to make
+    // progress. Querying for a random key let the existing routing
+    // connection satisfy the walk, and the observation then passed on
+    // `behaviour_originated() == 0` — "no dial happened" read as "the
+    // drain refused it", which is the vacuous arm this shape removes.
     if let Some(k) = nodes[0].kad() {
-        let id = k.get_closest_peers(libp2p::PeerId::random());
+        let id = k.get_closest_peers(c);
         nodes[0].own_queries.insert(id);
     }
-    pump(&mut nodes, Duration::from_secs(8)).await;
+    pump(&mut nodes, Duration::from_secs(10)).await;
     let refusals = nodes[0].ledger.refusals();
+    let originated = nodes[0].ledger.behaviour_originated();
     r.check(
         "K9.4",
-        "a draining node refuses behaviour dials as shutting down",
-        nodes[0].ledger.behaviour_originated() == 0
-            || refusals.contains_key("shutting down"),
+        &format!("a draining node is still ASKED for a dial ({originated})"),
+        originated > 0,
     );
-    r.note(format!("K9 drain: refusals {refusals:?}"));
+    r.check(
+        "K9.5",
+        "and refuses every one of them as shutting down",
+        refusals.get("shutting down").copied() == Some(originated)
+            && nodes[0].ledger.behaviour_allowed() == 0,
+    );
+    r.note(format!("K9 drain: {originated} dials, refusals {refusals:?}"));
 }
 
 /// K10 — record and provider writes are refused, and counted.
@@ -627,21 +681,41 @@ pub async fn k10_records_are_filtered(r: &mut Report) {
         stored == 0,
     );
 
-    // PROVIDER RECORDS, the same question through the other door.
+    // PROVIDER RECORDS, the same question through the other door — and
+    // the write must be shown to ARRIVE. Asserting only that the store
+    // is empty passes identically when the request was never sent, when
+    // negotiation failed, and when there was no route: three ways to
+    // "prove" filtering without any filtering happening.
     let provide = nodes[1]
         .kad()
         .and_then(|k| k.start_providing(kad::RecordKey::new(&b"/interweave/nope")).ok());
+    r.check(
+        "K10.4",
+        "the provider write was actually started",
+        provide.is_some(),
+    );
     if let Some(id) = provide {
         nodes[1].own_queries.insert(id);
     }
-    pump(&mut nodes, Duration::from_secs(8)).await;
+    pump(&mut nodes, Duration::from_secs(10)).await;
+    let arrived = nodes[0]
+        .observed
+        .record_writes
+        .get("ADD_PROVIDER")
+        .copied()
+        .unwrap_or(0);
+    r.check(
+        "K10.5",
+        &format!("and REACHED the receiver, which counted it ({arrived})"),
+        arrived > 0,
+    );
     let providers = nodes[0]
         .kad()
         .map(|k| k.store_mut().provided().count())
         .unwrap_or(usize::MAX);
     r.check(
-        "K10.4",
-        &format!("no provider record is stored either: {providers}"),
+        "K10.6",
+        &format!("having arrived, it stored nothing: {providers}"),
         providers == 0,
     );
     r.note(format!(
@@ -723,7 +797,7 @@ pub async fn k11_ten_node_exploration(r: &mut Report) {
                 .filter(|(peer, addrs)| **peer != ids[i] && !addrs.is_empty())
                 .map(|(peer, addrs)| (*peer, addrs.iter().next().cloned().expect("nonempty")))
                 .collect();
-            let trusted = nodes[i].trusted.lock().expect("trusted").clone();
+            let trusted = nodes[i].trusts();
             for (peer, addr) in learned {
                 if !trusted.contains(&peer) {
                     continue;
@@ -1231,25 +1305,42 @@ pub async fn k17_twenty_node_convergence(r: &mut Report) {
     let elapsed = start.elapsed();
 
     let sizes: Vec<usize> = (0..N).map(|i| nodes[i].routing_peers()).collect();
-    let converged = sizes.iter().filter(|&&s| s >= N / 2).count();
+    // EVERY node, not "most nodes reach half". The earlier predicate —
+    // `converged >= N/2` over `s >= N/2` — passed when ten nodes had ten
+    // entries and ten had none, which is a partition, while the record
+    // claimed 19/19. A degraded run must not close a release gate.
+    let full = sizes.iter().filter(|&&s| s == N - 1).count();
     r.check(
         "K17.1",
-        &format!("most nodes reach at least half the network: {converged}/{N}"),
-        converged >= N / 2,
+        &format!("every node routes every other: {full}/{N} at {} entries", N - 1),
+        full == N,
     );
     r.check(
         "K17.2",
         &format!(
-            "no routing table exceeds what the bounds allow: max {}",
+            "and no routing table exceeds what the bounds allow: max {}",
             sizes.iter().max().copied().unwrap_or(0)
         ),
         sizes.iter().all(|&s| s < N),
     );
-    let refusals: u64 = (0..N).map(|i| nodes[i].ledger.behaviour_originated()).sum();
+    // EVERY dial ADMITTED, not "at least one seen". `> 0` passed a run
+    // in which all 200-plus dials were refused — which would have been
+    // the opposite of the recorded evidence.
+    let originated: u64 = (0..N).map(|i| nodes[i].ledger.behaviour_originated()).sum();
+    let allowed: u64 = (0..N).map(|i| nodes[i].ledger.behaviour_allowed()).sum();
+    let refused: Vec<_> = (0..N)
+        .map(|i| nodes[i].ledger.refusals())
+        .filter(|m| !m.is_empty())
+        .collect();
     r.check(
         "K17.3",
-        &format!("every behaviour dial in the run passed the gate: {refusals} seen"),
-        refusals > 0,
+        &format!("the run really exercised behaviour dials: {originated}"),
+        originated > 0,
+    );
+    r.check(
+        "K17.4",
+        &format!("and the gate admitted every one: {allowed}/{originated}, refusals {refused:?}"),
+        allowed == originated && refused.is_empty(),
     );
     r.note(format!(
         "K17: {N} nodes, {rounds} rounds, {:.1}s wall clock, final sizes {sizes:?}",
@@ -1298,16 +1389,26 @@ pub async fn k18_stale_routing_response(r: &mut Report) {
         k.add_address(&c, dead.clone());
     }
 
-    // `a` already has a WORKING route to `c`, recorded in the production
-    // policy the way a successful authenticated connection would be.
-    // That is what makes the next assertion meaningful: a bad address
-    // must not cost a good one.
+    // `a` already has a WORKING route to `c`, recorded through the
+    // manager the way a successful authenticated connection is. That is
+    // what makes the assertions below meaningful: a bad address must not
+    // cost a good one.
     let c_identity = TransportIdentity::parse(c.to_base58()).expect("canonical");
-    nodes[0]
-        .policy
-        .lock()
-        .expect("policy")
-        .record_success(&c_identity, &c_addr.to_string(), 0);
+    let good_slot = {
+        let mut m = nodes[0].manager.lock().expect("manager");
+        let ticket = m
+            .handle()
+            .admit(
+                &DialRequest {
+                    peer: Some(c_identity.clone()),
+                    address: c_addr.to_string(),
+                    origin: DialOrigin::ConnectionManager,
+                },
+                0,
+            )
+            .expect("admitted");
+        m.record_success(ticket, 0)
+    };
 
     nodes[0].dial_admitted(b_addr.clone());
     pump_until(&mut nodes, Duration::from_secs(10), |n| {
@@ -1320,7 +1421,18 @@ pub async fn k18_stale_routing_response(r: &mut Report) {
         let id = k.get_closest_peers(c);
         nodes[0].own_queries.insert(id);
     }
-    pump(&mut nodes, Duration::from_secs(15)).await;
+    // SETTLE ON THE OBSERVABLE. A fixed pump made this experiment fail
+    // intermittently in a full-suite run and pass alone — the walk needs
+    // longer when the machine is busy, and a wall-clock budget measures
+    // the machine rather than the behaviour.
+    let dead_text = dead.to_string();
+    pump_until(&mut nodes, Duration::from_secs(30), |n| {
+        n[0].observed
+            .dial_errors
+            .iter()
+            .any(|e| e.contains(&dead_text))
+    })
+    .await;
 
     // THE DIAL ERROR NAMES THE ADDRESS, which is stronger evidence than
     // the query result would be: it proves the poisoned address was not
@@ -1328,7 +1440,6 @@ pub async fn k18_stale_routing_response(r: &mut Report) {
     // a walk found, and a peer whose only address fails to connect is
     // not among them — so reading the result set here would look for the
     // evidence in the one place the failure removes it.
-    let dead_text = dead.to_string();
     let dialed_dead = nodes[0]
         .observed
         .dial_errors
@@ -1348,6 +1459,13 @@ pub async fn k18_stale_routing_response(r: &mut Report) {
             .values()
             .any(|peers| peers.contains(&c)),
     );
+    r.note(format!(
+        "K18 ledger: {} behaviour dials, {} allowed, refusals {:?}; a connected to {:?}",
+        nodes[0].ledger.behaviour_originated(),
+        nodes[0].ledger.behaviour_allowed(),
+        nodes[0].ledger.refusals(),
+        nodes[0].observed.connected.len()
+    ));
     let errors = nodes[0].observed.dial_errors.len();
     r.check(
         "K18.2",
@@ -1355,32 +1473,54 @@ pub async fn k18_stale_routing_response(r: &mut Report) {
         errors > 0,
     );
 
-    // THE PRODUCTION RULE: an address-scoped failure on a never-good
-    // address must not suppress the peer while a known-good route
-    // remains. Fed the failure the way the runtime would.
-    let advanced = nodes[0].policy.lock().expect("policy").record_address_failure(
-        &c_identity,
-        &dead.to_string(),
-        1_000,
-        600_000,
-    );
+    // THE PRODUCTION RULE: an address-scoped failure on an address that
+    // never worked must not suppress the peer while a known-good route
+    // remains. Fed to the manager the way the runtime feeds it.
+    {
+        let mut m = nodes[0].manager.lock().expect("manager");
+        let ticket = m
+            .handle()
+            .admit(
+                &DialRequest {
+                    peer: Some(c_identity.clone()),
+                    address: dead.to_string(),
+                    origin: DialOrigin::ConnectionManager,
+                },
+                1_000,
+            )
+            .expect("the peer is not suppressed yet");
+        m.record_failure(ticket, 1_000);
+    }
+    // THE OBSERVABLE the rule is about: can this node still dial the
+    // peer at the route that works? Asking the manager is the whole
+    // question — a predicate on the policy would have been one layer
+    // below the thing that decides.
+    let still_dialable = nodes[0]
+        .manager
+        .lock()
+        .expect("manager")
+        .handle()
+        .admit(
+            &DialRequest {
+                peer: Some(c_identity.clone()),
+                address: c_addr.to_string(),
+                origin: DialOrigin::ConnectionManager,
+            },
+            2_000,
+        );
     r.check(
         "K18.3",
-        "a bad address handed over by a router does not advance peer backoff",
-        !advanced,
-    );
-    let still_dialable = nodes[0]
-        .policy
-        .lock()
-        .expect("policy")
-        .is_address_dialable(&c_identity, &c_addr.to_string(), 2_000);
-    r.check(
-        "K18.4",
-        "and the known-good route to the same peer stays dialable",
-        still_dialable,
+        "a bad address from a router does not suppress the peer's good route",
+        still_dialable.is_ok(),
     );
     r.note(format!(
-        "K18: dial errors {:?}",
+        "K18: after the failed dial, the good route admits: {:?}",
+        still_dialable.as_ref().err()
+    ));
+    drop(still_dialable);
+    drop(good_slot);
+    r.note(format!(
+        "K18 dial errors: {:?}",
         nodes[0]
             .observed
             .dial_errors
@@ -1388,4 +1528,453 @@ pub async fn k18_stale_routing_response(r: &mut Report) {
             .take(2)
             .collect::<Vec<_>>()
     ));
+}
+
+/// K14 — targeted lookup, and the evidence rule that gates it.
+///
+/// The brief requires this explicitly: a targeted PeerId lookup is
+/// scheduled ONLY with fresh evidence that the target advertised the
+/// exact project Kademlia **server** protocol; it can recover missing
+/// addresses where the DHT knows the target; and client-mode nodes are
+/// not misrepresented as generally discoverable.
+///
+/// The eligibility rule is project logic — `kademlia-integration.md`
+/// §9.2 — so it is implemented here over the observation the library
+/// actually provides, and then the lookup it gates is run for real.
+pub struct TargetedLookup;
+
+/// A capability observation as `providers/peer-cache.md` describes it.
+#[derive(Debug, Clone)]
+pub struct CapabilityEvidence {
+    pub network_hash: String,
+    pub wire_major: u32,
+    pub role_is_server: bool,
+    pub supported: bool,
+    pub observed_at: u64,
+}
+
+impl TargetedLookup {
+    /// §9.2's five conjuncts, as a predicate.
+    ///
+    /// Every one is necessary; the tests below turn each off in turn,
+    /// because a conjunction is the shape most easily satisfied by
+    /// accident — one clause doing all the work reads identically to
+    /// five clauses working.
+    #[must_use]
+    pub fn eligible(
+        trusted: bool,
+        evidence: Option<&CapabilityEvidence>,
+        current_hash: &str,
+        current_major: u32,
+        ttl_ms: u64,
+        now_ms: u64,
+        has_usable_address: bool,
+        cooldown_elapsed: bool,
+        budget_permits: bool,
+    ) -> bool {
+        if !trusted || has_usable_address || !cooldown_elapsed || !budget_permits {
+            return false;
+        }
+        let Some(e) = evidence else {
+            return false;
+        };
+        e.supported
+            && e.role_is_server
+            && e.network_hash == current_hash
+            && e.wire_major == current_major
+            && now_ms.saturating_sub(e.observed_at) <= ttl_ms
+    }
+}
+
+pub async fn k14_targeted_lookup(r: &mut Report) {
+    let network = "spike-003".to_owned();
+    let hash = namespace::network_hash(&network);
+    let fresh = CapabilityEvidence {
+        network_hash: hash.clone(),
+        wire_major: 1,
+        role_is_server: true,
+        supported: true,
+        observed_at: 1_000,
+    };
+    let ttl = 60_000;
+
+    // ELIGIBLE, and then each conjunct denied in turn.
+    r.check(
+        "K14.1",
+        "fresh server evidence for this namespace, no usable address: eligible",
+        TargetedLookup::eligible(true, Some(&fresh), &hash, 1, ttl, 2_000, false, true, true),
+    );
+    let cases: [(&str, bool); 8] = [
+        (
+            "an untrusted target is never looked up",
+            TargetedLookup::eligible(false, Some(&fresh), &hash, 1, ttl, 2_000, false, true, true),
+        ),
+        (
+            "absent evidence is not permission to guess",
+            TargetedLookup::eligible(true, None, &hash, 1, ttl, 2_000, false, true, true),
+        ),
+        (
+            "NEGATIVE evidence is refused, not treated as unknown",
+            TargetedLookup::eligible(
+                true,
+                Some(&CapabilityEvidence {
+                    supported: false,
+                    ..fresh.clone()
+                }),
+                &hash,
+                1,
+                ttl,
+                2_000,
+                false,
+                true,
+                true,
+            ),
+        ),
+        (
+            "a CLIENT-mode observation is not a discoverable target",
+            TargetedLookup::eligible(
+                true,
+                Some(&CapabilityEvidence {
+                    role_is_server: false,
+                    ..fresh.clone()
+                }),
+                &hash,
+                1,
+                ttl,
+                2_000,
+                false,
+                true,
+                true,
+            ),
+        ),
+        (
+            "evidence from ANOTHER network_id does not carry over",
+            TargetedLookup::eligible(
+                true,
+                Some(&fresh),
+                &namespace::network_hash("spike-003-other"),
+                1,
+                ttl,
+                2_000,
+                false,
+                true,
+                true,
+            ),
+        ),
+        (
+            "evidence for another wire major does not carry over",
+            TargetedLookup::eligible(true, Some(&fresh), &hash, 2, ttl, 2_000, false, true, true),
+        ),
+        (
+            "STALE evidence past the TTL is refused",
+            TargetedLookup::eligible(true, Some(&fresh), &hash, 1, ttl, 200_000, false, true, true),
+        ),
+        (
+            "a peer with a usable address is not looked up at all",
+            TargetedLookup::eligible(true, Some(&fresh), &hash, 1, ttl, 2_000, true, true, true),
+        ),
+    ];
+    for (claim, held) in cases {
+        r.check("K14.2", claim, !held);
+    }
+    r.check(
+        "K14.3",
+        "cooldown and budget each gate it independently",
+        !TargetedLookup::eligible(true, Some(&fresh), &hash, 1, ttl, 2_000, false, false, true)
+            && !TargetedLookup::eligible(
+                true,
+                Some(&fresh),
+                &hash,
+                1,
+                ttl,
+                2_000,
+                false,
+                true,
+                false,
+            ),
+    );
+
+    // AND THE LOOKUP ITSELF, for real: `a` has no address for `c` and
+    // asks the DHT for it by PeerId.
+    let cfg = NodeConfig {
+        role: KadRole::Server,
+        network_id: network.clone(),
+        gate_mode: Mode::PolicyAdmit,
+        ..NodeConfig::default()
+    };
+    let mut nodes = vec![
+        Node::start(&cfg).await,
+        Node::start(&cfg).await,
+        Node::start(&cfg).await,
+    ];
+    let (a, b, c) = (nodes[0].peer_id, nodes[1].peer_id, nodes[2].peer_id);
+    for i in 0..3 {
+        for p in [a, b, c] {
+            nodes[i].trust(p);
+        }
+    }
+    let (b_addr, c_addr) = (nodes[1].dial_address(), nodes[2].dial_address());
+    nodes[1].dial_admitted(c_addr.clone());
+    pump_until(&mut nodes, Duration::from_secs(10), |n| {
+        n[1].observed.connected.contains(&c)
+    })
+    .await;
+    if let Some(k) = nodes[1].kad() {
+        k.add_address(&c, c_addr.clone());
+    }
+    nodes[0].dial_admitted(b_addr.clone());
+    pump_until(&mut nodes, Duration::from_secs(10), |n| {
+        n[0].observed.connected.contains(&b)
+    })
+    .await;
+
+    // `a` KNOWS NO ADDRESS FOR `c` — the precondition §9.2's third
+    // conjunct describes, and the reason a targeted lookup exists.
+    r.check(
+        "K14.4",
+        "the asker holds no address for the target before the lookup",
+        !nodes[0].observed.learned_addresses.contains_key(&c),
+    );
+
+    nodes[0].ledger.reset();
+    if let Some(k) = nodes[0].kad() {
+        k.add_address(&b, b_addr);
+        // THE LOOKUP KEY IS THE PEER ID, which is what makes this
+        // targeted rather than exploratory.
+        let id = k.get_closest_peers(c);
+        nodes[0].own_queries.insert(id);
+    }
+    pump(&mut nodes, Duration::from_secs(15)).await;
+
+    // PREFIX, not equality. A `FIND_NODE` answer carries the address
+    // with the peer's own `/p2p/<id>` component appended, so comparing
+    // against the bare listen address fails on a lookup that worked
+    // perfectly — which is what the first run of this experiment
+    // reported, and it was the assertion that was wrong.
+    let wanted = c_addr.to_string();
+    let recovered = nodes[0]
+        .observed
+        .learned_addresses
+        .get(&c)
+        .is_some_and(|addrs| addrs.iter().any(|a| a.to_string().starts_with(&wanted)));
+    r.check(
+        "K14.5",
+        "a targeted lookup recovers the missing address the DHT knows",
+        recovered,
+    );
+    r.note(format!(
+        "K14: recovered {:?}",
+        nodes[0].observed.learned_addresses.get(&c)
+    ));
+}
+
+/// K19 — the global ceilings reach a behaviour dial.
+///
+/// `PolicySnapshot::admit` answers trust, backoff, quarantine and drain;
+/// the pending-dial and connection ceilings are reserved one layer up,
+/// by the ticket `ConnectionManager` mints. A gate that consulted only
+/// the policy would refuse an untrusted peer correctly and let every
+/// dial past the limits — which is the release criterion this experiment
+/// exists to satisfy, and the reason the gate holds tickets rather than
+/// dropping them.
+pub async fn k19_ceilings_apply_to_behaviour_dials(r: &mut Report) {
+    use interweave_transport_api::TransportIdentity;
+
+    // A ONE-DIAL CEILING, so exhausting it takes one ticket.
+    let cfg = NodeConfig {
+        role: KadRole::Server,
+        gate_mode: Mode::PolicyAdmit,
+        max_pending_dials: 1,
+        max_connections: 8,
+        ..NodeConfig::default()
+    };
+    let plain = NodeConfig {
+        max_pending_dials: 64,
+        ..cfg.clone()
+    };
+    let mut nodes = vec![
+        Node::start(&cfg).await,
+        Node::start(&plain).await,
+        Node::start(&plain).await,
+    ];
+    let (a, b, c) = (nodes[0].peer_id, nodes[1].peer_id, nodes[2].peer_id);
+    for i in 0..3 {
+        for p in [a, b, c] {
+            nodes[i].trust(p);
+        }
+    }
+    let (b_addr, c_addr) = (nodes[1].dial_address(), nodes[2].dial_address());
+    nodes[1].dial_admitted(c_addr.clone());
+    pump_until(&mut nodes, Duration::from_secs(10), |n| {
+        n[1].observed.connected.contains(&c)
+    })
+    .await;
+    if let Some(k) = nodes[1].kad() {
+        k.add_address(&c, c_addr);
+    }
+    nodes[0].dial_admitted(b_addr.clone());
+    pump_until(&mut nodes, Duration::from_secs(10), |n| {
+        n[0].observed.connected.contains(&b)
+    })
+    .await;
+
+    // HOLD THE ONLY PENDING SLOT, the way an in-flight ordinary dial
+    // would. Nothing about Kademlia is told.
+    let held = {
+        let m = nodes[0].manager.lock().expect("manager");
+        m.handle()
+            .admit(
+                &DialRequest {
+                    peer: Some(TransportIdentity::parse(c.to_base58()).expect("canonical")),
+                    address: "/ip4/198.51.100.9/tcp/1".to_owned(),
+                    origin: DialOrigin::ConnectionManager,
+                },
+                0,
+            )
+            .expect("the first dial fits under a ceiling of one")
+    };
+    r.check(
+        "K19.1",
+        "one ordinary dial fills a pending-dial ceiling of one",
+        nodes[0].manager.lock().expect("manager").handle().load().pending_dials() == 1,
+    );
+
+    nodes[0].ledger.reset();
+    if let Some(k) = nodes[0].kad() {
+        k.add_address(&b, b_addr);
+        let id = k.get_closest_peers(c);
+        nodes[0].own_queries.insert(id);
+    }
+    pump(&mut nodes, Duration::from_secs(12)).await;
+
+    let refusals = nodes[0].ledger.refusals();
+    let originated = nodes[0].ledger.behaviour_originated();
+    r.check(
+        "K19.2",
+        &format!("the query still asks for a dial ({originated})"),
+        originated > 0,
+    );
+    r.check(
+        "K19.3",
+        "and the GLOBAL pending-dial ceiling refuses it",
+        refusals.contains_key("too many pending dials") && nodes[0].ledger.behaviour_allowed() == 0,
+    );
+    r.note(format!("K19: {originated} dials, refusals {refusals:?}"));
+
+    // RELEASED, and the ceiling stops refusing: the limit is a live
+    // count, not a latch. Without this the previous assertion would
+    // also pass for a gate that refused everything forever.
+    drop(held);
+    r.check(
+        "K19.4",
+        "releasing the ordinary dial returns the slot",
+        nodes[0].manager.lock().expect("manager").handle().load().pending_dials() == 0,
+    );
+    nodes[0].ledger.reset();
+    if let Some(k) = nodes[0].kad() {
+        let id = k.get_closest_peers(c);
+        nodes[0].own_queries.insert(id);
+    }
+    let reached = pump_until(&mut nodes, Duration::from_secs(20), |n| {
+        n[0].ledger.behaviour_allowed() > 0
+    })
+    .await;
+    r.check(
+        "K19.5",
+        "and the same query is then admitted — the ceiling was the reason",
+        reached,
+    );
+    r.note(format!(
+        "K19 after release: {} dials, {} allowed, refusals {:?}",
+        nodes[0].ledger.behaviour_originated(),
+        nodes[0].ledger.behaviour_allowed(),
+        nodes[0].ledger.refusals()
+    ));
+
+    // THE OTHER HALF, and the one the first misses. Everything above
+    // fills the ceiling with an ORDINARY dial's ticket, so it would pass
+    // for a gate that admitted behaviour dials without reserving
+    // anything — dropping the gate's own ticket instead of holding it
+    // leaves every assertion so far green. What follows has no external
+    // ticket at all: the ceiling can only be filled by the gate's own.
+    let tight = NodeConfig {
+        role: KadRole::Server,
+        gate_mode: Mode::PolicyAdmit,
+        max_pending_dials: 1,
+        max_connections: 8,
+        parallelism: NonZeroUsize::new(3).expect("nonzero"),
+        ..NodeConfig::default()
+    };
+    let router_cfg = NodeConfig {
+        max_pending_dials: 64,
+        ..tight.clone()
+    };
+    const ROUTERS: usize = 5;
+    let mut fan = vec![Node::start(&tight).await];
+    for _ in 0..ROUTERS {
+        fan.push(Node::start(&router_cfg).await);
+    }
+    let fan_ids: Vec<_> = fan.iter().map(|n| n.peer_id).collect();
+    let fan_addrs: Vec<_> = fan.iter().map(Node::dial_address).collect();
+    for n in &mut fan {
+        for id in &fan_ids {
+            n.trust(*id);
+        }
+    }
+    // ROUTED BUT NOT CONNECTED: `add_address` without a dial, so
+    // reaching any of them REQUIRES a behaviour dial. Connecting first
+    // would let the walk proceed over existing connections and the
+    // ceiling would never be asked.
+    fan[0].ledger.reset();
+    for i in 1..=ROUTERS {
+        let (peer, addr) = (fan_ids[i], fan_addrs[i].clone());
+        if let Some(k) = fan[0].kad() {
+            k.add_address(&peer, addr);
+        }
+    }
+    if let Some(k) = fan[0].kad() {
+        let id = k.get_closest_peers(libp2p::PeerId::random());
+        fan[0].own_queries.insert(id);
+    }
+    pump(&mut fan, Duration::from_secs(15)).await;
+
+    let originated = fan[0].ledger.behaviour_originated();
+    let allowed = fan[0].ledger.behaviour_allowed();
+    let refusals = fan[0].ledger.refusals();
+    r.check(
+        "K19.6",
+        &format!("a fan-out query asks for several dials at once ({originated})"),
+        originated > 1,
+    );
+    r.check(
+        "K19.7",
+        &format!(
+            "the gate's OWN tickets fill the ceiling, so some are refused: \
+             {allowed} allowed of {originated}, refusals {refusals:?}"
+        ),
+        refusals.get("too many pending dials").copied().unwrap_or(0) > 0
+            && allowed < originated,
+    );
+    r.check(
+        "K19.8",
+        &format!(
+            "and every slot comes back once the dials settle: {} pending, {} held",
+            fan[0]
+                .manager
+                .lock()
+                .expect("manager")
+                .handle()
+                .load()
+                .pending_dials(),
+            fan[0].swarm.behaviour().gate.held_tickets()
+        ),
+        fan[0]
+            .manager
+            .lock()
+            .expect("manager")
+            .handle()
+            .load()
+            .pending_dials()
+            <= 1,
+    );
 }

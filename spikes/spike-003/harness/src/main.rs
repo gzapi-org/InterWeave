@@ -47,57 +47,107 @@ impl Report {
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     let mut r = Report::new();
+    // A single-experiment filter, so a failing observation can be
+    // iterated on without paying six minutes for the whole set. No
+    // argument runs everything, which is what the record's reproduction
+    // instructions describe.
+    let only = std::env::args().nth(1);
+    let want = |id: &str| only.as_deref().is_none_or(|o| o == id);
 
-    println!("K1 — deterministic protocol derivation from network_id");
-    k1(&mut r);
+    if want("K1") {
+        println!("K1 — deterministic protocol derivation from network_id");
+        k1(&mut r);
+    }
 
-    println!("\nK2 — no Kademlia activity when the behaviour is absent");
-    experiments::k2_disabled_is_silent(&mut r).await;
+    if want("K2") {
+        println!("\nK2 — no Kademlia activity when the behaviour is absent");
+        experiments::k2_disabled_is_silent(&mut r).await;
+    }
 
-    println!("\nK3 — BucketInserts::Manual: connecting is not routing");
-    experiments::k3_manual_bucket_inserts(&mut r).await;
+    if want("K3") {
+        println!("\nK3 — BucketInserts::Manual: connecting is not routing");
+        experiments::k3_manual_bucket_inserts(&mut r).await;
+    }
 
-    println!("\nK4 — client and server mode semantics");
-    experiments::k4_client_server_modes(&mut r).await;
+    if want("K4") {
+        println!("\nK4 — client and server mode semantics");
+        experiments::k4_client_server_modes(&mut r).await;
+    }
 
-    println!("\nK5 — bootstrap, and work the library starts by itself");
-    experiments::k5_bootstrap_accounting(&mut r).await;
+    if want("K5") {
+        println!("\nK5 — bootstrap, and work the library starts by itself");
+        experiments::k5_bootstrap_accounting(&mut r).await;
+    }
 
-    println!("\nK6 — behaviour-originated dials, measured and gated as production does today");
-    experiments::k6_behaviour_dials_are_gated(&mut r).await;
+    if want("K6") {
+        println!("\nK6 — behaviour-originated dials, measured and gated as production does today");
+        experiments::k6_behaviour_dials_are_gated(&mut r).await;
+    }
 
-    println!("\nK7 — the same walk under the Stage 10 policy gate");
-    experiments::k7_policy_admits_and_refuses(&mut r).await;
+    if want("K7") {
+        println!("\nK7 — the same walk under the Stage 10 policy gate");
+        experiments::k7_policy_admits_and_refuses(&mut r).await;
+    }
 
-    println!("\nK8 — an untrusted peer returned by a query cannot be connected to");
-    experiments::k8_untrusted_returned_peer_is_refused(&mut r).await;
+    if want("K8") {
+        println!("\nK8 — an untrusted peer returned by a query cannot be connected to");
+        experiments::k8_untrusted_returned_peer_is_refused(&mut r).await;
+    }
 
-    println!("\nK9 — backoff and drain state reach a behaviour dial too");
-    experiments::k9_backoff_and_limits_apply(&mut r).await;
+    if want("K9") {
+        println!("\nK9 — backoff and drain state reach a behaviour dial too");
+        experiments::k9_backoff_and_limits_apply(&mut r).await;
+    }
 
-    println!("\nK10 — record and provider writes are refused and counted");
-    experiments::k10_records_are_filtered(&mut r).await;
+    if want("K10") {
+        println!("\nK10 — record and provider writes are refused and counted");
+        experiments::k10_records_are_filtered(&mut r).await;
+    }
 
-    println!("\nK11 — a ten-node line, expanded by random exploration");
-    experiments::k11_ten_node_exploration(&mut r).await;
+    if want("K11") {
+        println!("\nK11 — a ten-node line, expanded by random exploration");
+        experiments::k11_ten_node_exploration(&mut r).await;
+    }
 
-    println!("\nK12 — effective target, no-progress backoff, saturation");
-    experiments::k12_effective_target_and_saturation(&mut r).await;
+    if want("K12") {
+        println!("\nK12 — effective target, no-progress backoff, saturation");
+        experiments::k12_effective_target_and_saturation(&mut r).await;
+    }
 
-    println!("\nK13 — capability observation, namespace separation, supersession");
-    experiments::k13_capability_observation(&mut r).await;
+    if want("K13") {
+        println!("\nK13 — capability observation, namespace separation, supersession");
+        experiments::k13_capability_observation(&mut r).await;
+    }
 
-    println!("\nK15 — every SnapshotResult field is computable and bounded");
-    experiments::k15_snapshot_is_bounded(&mut r).await;
+    if want("K14") {
+        println!("\nK14 — targeted lookup, and the evidence rule that gates it");
+        experiments::k14_targeted_lookup(&mut r).await;
+    }
 
-    println!("\nK16 — disjoint query paths");
-    experiments::k16_disjoint_paths(&mut r).await;
+    if want("K19") {
+        println!("\nK19 — the global ceilings reach a behaviour dial");
+        experiments::k19_ceilings_apply_to_behaviour_dials(&mut r).await;
+    }
 
-    println!("\nK18 — a malicious or stale routing response");
-    experiments::k18_stale_routing_response(&mut r).await;
+    if want("K15") {
+        println!("\nK15 — every SnapshotResult field is computable and bounded");
+        experiments::k15_snapshot_is_bounded(&mut r).await;
+    }
 
-    println!("\nK17 — twenty nodes: convergence and bounded routing state");
-    experiments::k17_twenty_node_convergence(&mut r).await;
+    if want("K16") {
+        println!("\nK16 — disjoint query paths");
+        experiments::k16_disjoint_paths(&mut r).await;
+    }
+
+    if want("K18") {
+        println!("\nK18 — a malicious or stale routing response");
+        experiments::k18_stale_routing_response(&mut r).await;
+    }
+
+    if want("K17") {
+        println!("\nK17 — twenty nodes: convergence and bounded routing state");
+        experiments::k17_twenty_node_convergence(&mut r).await;
+    }
 
     println!();
     if r.failures.is_empty() {

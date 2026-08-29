@@ -1,6 +1,6 @@
 # SPIKE-003 — Kademlia integration validation
 
-**Status: PASS**, with six findings that change how Stage 10 must be written — one of which says Stage 10 cannot begin by enabling the feature.
+**Status: PASS**, with seven findings that change how Stage 10 must be written — one of which says Stage 10 cannot begin by enabling the feature.
 
 Authoritative objective, evidence requirements, and decision gate live in [`architecture/roadmap/SPIKES.md`](../../architecture/roadmap/SPIKES.md); this file records what was actually observed.
 
@@ -29,13 +29,15 @@ libp2p routes **every** dial through `NetworkBehaviour::handle_pending_outbound_
 It runs in two modes, and both are measured:
 
 - **`DenyUnadmitted`** — what production does today: refuse any dial without a root admission ticket.
-- **`PolicyAdmit`** — the Stage 10 proposal: hand the dial to the real `PolicySnapshot::admit` under `DialOrigin::KademliaQuery`, so trust, per-peer backoff, drain state and the limits all apply.
+- **`PolicyAdmit`** — the Stage 10 proposal: hand the dial to the root admission under `DialOrigin::KademliaQuery`, so trust, per-peer backoff, drain state and the ceilings all apply.
 
 Measuring only the first would say the gate refuses everything; measuring only the second would say nothing about what ships now.
 
+**`PolicyAdmit` asks the `ConnectionManager`, not `ConnectionPolicy`**, and the distinction is finding F7 below rather than an implementation detail. It also **holds** the `DialTicket` it receives for the life of the dial and drops it when the dial settles: the ticket is what reserves the pending-dial and connection slots, so a gate that dropped it immediately would admit every behaviour dial while reporting a ceiling that bounds nothing.
+
 ## What was observed
 
-87 assertions across 17 experiments, two consecutive clean runs. The harness exits non-zero when any required observation is false, so `cargo run` cannot report success while its own output disproves the record.
+110 assertions across 19 experiments, three consecutive clean runs. The harness exits non-zero when any required observation is false, so `cargo run` cannot report success while its own output disproves the record.
 
 **Namespace (K1).** The published golden vector reproduces exactly: `network_id: example-private-network` → `ssbtblqj7mexczivog5qfbfjvi` → `/interweave/kad/1.0.0/ssbtblqj7mexczivog5qfbfjvi`. The derivation is implemented from the specification text rather than from a shared helper, so a derivation that merely agrees with itself could not pass. The 26-character unpadded base32 tag is a valid `libp2p::StreamProtocol`, and the `^[a-z0-9][a-z0-9._-]{0,63}$` grammar accepts and refuses what the spec says it should.
 
@@ -45,21 +47,25 @@ Measuring only the first would say the gate refuses everything; measuring only t
 
 **Modes (K4).** A server advertises the derived protocol; a client does not, so a client is not a routing target. A client-mode node still runs a query to completion.
 
-**Bootstrap (K5).** `bootstrap()` on an empty routing table returns `NoKnownPeers`, and succeeds and completes once one peer is known.
+**Bootstrap (K5).** `bootstrap()` on an empty routing table returns `NoKnownPeers`, and succeeds and completes once one peer is known. A single `add_address` on a previously-empty table starts **exactly one** query the caller never requested, asserted rather than printed — the count is what finding F2 rests on.
 
 **Behaviour dials, gated as production gates them today (K6).** A three-node walk where the asker knows only the router, and the router knows the target: the query originates a dial the application never requested, aimed at the peer the walk is walking toward, and **today's gate refuses every one of them**. No connection is established — and the refusal is what prevents it, not the topology, because the same walk under `PolicyAdmit` (K7) reaches the peer through a behaviour dial the policy admitted.
 
 **Trust (K8).** The same walk with the target *not* in the asker's trust policy: the router returns it, the query tries to dial it, the gate refuses with `unauthorized`, and the asker never dials it. A malicious trusted router cannot cause a connection to an unauthorized peer by placing it in a response.
 
-**Backoff and drain (K9).** A peer put into backoff through the *production* `ConnectionPolicy::record_address_failure` — nothing about Kademlia is told — has its Kademlia dials refused for `peer backoff`. A draining node refuses them as `shutting down`.
+**Backoff and drain (K9).** A peer put into backoff through the manager's own failure path — admit a dial, record it failed, exactly as the runtime does when a dial does not come back, and nothing about Kademlia is told — has its Kademlia dials refused for `peer backoff`. A draining node is still *asked* for dials and refuses **every one** as `shutting down`; the experiment queries for a peer it is not connected to, because querying a random key let the existing routing connection satisfy the walk and "no dial happened" then read as "the drain refused it".
 
-**Records (K10).** `PUT_VALUE` and `ADD_PROVIDER` arrive at the receiver, are counted as inbound requests, and store nothing: zero records, zero provider records. `StoreInserts::FilterBoth` is what does it.
+**The ceilings (K19).** With a pending-dial ceiling of one already filled by an ordinary dial, a Kademlia query's dials are refused as `too many pending dials`; releasing that dial returns the slot and the same query is then admitted, so the ceiling is a live count rather than a latch. The second half has **no external ticket at all** — five routed-but-unconnected routers and a fan-out query — so the ceiling can only be filled by the gate's own tickets, and 10 of 15 dials were refused. That half is what fails when the gate drops its ticket instead of holding it; the first half passes either way.
 
-**Exploration and convergence (K11, K17).** A ten-node line seeded one-deep expands to full routing coverage under random exploration. Twenty nodes seeded in a star at a single hub converge to 19/19 routing entries each within five rounds, ~60s of wall clock on one machine, with no routing table exceeding its bound and 220–231 behaviour dials passing the gate in the run.
+**Records (K10).** `PUT_VALUE` and `ADD_PROVIDER` are shown to be **sent**, to **arrive** — counted as inbound requests at the receiver — and to store nothing: zero records, zero provider records. Arrival is asserted rather than assumed, because an empty store proves filtering only if the write reached it; a negotiation failure, an absent route and an unsent request all produce the same empty store.
+
+**Exploration and convergence (K11, K17).** A ten-node line seeded one-deep expands to full routing coverage under random exploration. Twenty nodes seeded in a star at a single hub converge to **19/19 routing entries on every node** within five rounds, ~60s of wall clock on one machine, with no routing table exceeding its bound. Every behaviour dial in that run — 217 of them — was admitted by the gate, with zero refusals: asserted as `allowed == originated`, because "at least one dial was seen" would have passed a run in which all 200-plus were refused.
 
 **Project exploration rules (K12).** Effective target, no-progress backoff and saturation are project logic, not library behaviour. Implemented as a state machine over the signal the library actually provides: the delay doubles per no-progress round and caps at 15 minutes, saturation needs three consecutive no-progress rounds *and* a usable peer *and* no targetable observation outside the routing set, progress resets it, and a trust or seed change invalidates it. `effective_target(64, 256, 2) == 2` is what stops a three-peer overlay being permanently degraded by a default of 64.
 
 **Capability observation (K13).** A server on *this* `network_id` is observed advertising the exact protocol; a server on a different `network_id` is not — the hash is genuinely part of the evidence. A node dropped to client mode stops advertising the server protocol, and the fresh Identify exchange **replaces** the observation rather than merging it.
+
+**Targeted lookup (K14).** §9.2's eligibility rule is project logic, implemented over the observation the library provides and denied one conjunct at a time: an untrusted target, absent evidence, *negative* evidence, a client-mode observation, evidence from another `network_id`, evidence for another wire major, stale evidence past the TTL, a peer that already has a usable address, an unexpired cooldown, and an exhausted budget each refuse it on their own. Then the lookup itself runs for real — an asker holding **no** address for the target asks the DHT by PeerId and recovers the address a router knows.
 
 **Snapshot (K15).** Every `SnapshotResult` field the driver port specifies is computable from the real API, and every one is a scalar or a fixed-width tag: no routing dump, no peer list, no payload.
 
@@ -81,6 +87,8 @@ Measuring only the first would say the gate refuses everything; measuring only t
 
 **F6 — `network_id` separation holds at the protocol level.** Two nodes on the same crate and version, differing only in `network_id`, advertise different protocols and do not mix. Positive capability evidence keyed to the exact wire major and network hash is implementable as specified.
 
+**F7 — `ConnectionPolicy::admit` is not the root admission, and the difference is invisible until it matters.** The policy answers trust, per-peer backoff, address quarantine and drain state. The **pending-dial and connection ceilings are enforced one layer up**, in the manager, which is also what mints the `DialTicket` that reserves them. A Stage 10 gate that consults the policy directly will therefore refuse an untrusted or backed-off peer perfectly — every trust test passes — while `max_pending_dials` and `max_connections` influence no Kademlia dial at all. This spike's first version did exactly that, and its limits experiment passed. Ask the manager, and **hold the ticket** until the dial settles: dropping it on receipt releases the slots it just reserved, which is the same bug wearing a different hat.
+
 ## Stated limits
 
 These are the things this spike did **not** establish, recorded so no future reader mistakes its silence for a result.
@@ -90,7 +98,7 @@ These are the things this spike did **not** establish, recorded so no future rea
 - **One machine, loopback only.** No NAT, no latency, no loss, no interface change. The twenty-node convergence figure is a convergence *shape*, not a deployment number.
 - **Server-mode reachability evidence is not consumed.** The design requires AutoNAT-verified direct reachability or an active relay reservation as strong evidence before a node advertises server mode. AutoNAT and Relay are absent from the feature list — SPIKE-004 is where they arrive — so this spike **cannot** validate that rule, and Stage 10 must not treat it as validated. A node here advertises server mode because it was configured to.
 - **The exploration rules are validated as logic, not as deployment behaviour.** K12 exercises the state machine over synthetic rounds. Whether three no-progress rounds is the right threshold on a real network is not a question a five-node loopback topology can answer.
-- **`PolicyAdmit` is a prototype.** It demonstrates that the production policy *can* decide a behaviour dial and that its answers reach the library correctly. It is not the production gate, has not been reviewed as one, and Stage 10 owns writing it.
+- **`PolicyAdmit` is a prototype.** It demonstrates that the production admission *can* decide a behaviour dial, that its answers reach the library correctly, and that the ceilings bind when the ticket is held. It is not the production gate, has not been reviewed as one, and Stage 10 owns writing it. In particular it drops a settled ticket rather than calling `record_success` / `record_failure`, so it exercises the ceilings but not the backoff and reconnect bookkeeping those methods own.
 
 ## Reproducing
 
@@ -101,7 +109,10 @@ cargo run
 
 Around six minutes, mostly waiting on real socket timeouts and query settling. Exit code 0 means every required observation held; non-zero prints which did not.
 
-Two mutations confirm the assertions are load-bearing rather than agreeing with the code for free:
+Passing a single experiment id — `cargo run -- K14` — runs only that one, for iterating on a failure without paying the whole set.
+
+Three mutations confirm the assertions are load-bearing rather than agreeing with the code for free:
 
 - making the gate admit every behaviour dial unconditionally fails K8.3, K8.4, K9.2 and K9.3 — the trust and backoff refusals;
-- setting `StoreInserts::Unfiltered` and `BucketInserts::OnConnected` fails K3.2, K5.1, K10.3, K11.2 and the K18 block.
+- setting `StoreInserts::Unfiltered` and `BucketInserts::OnConnected` fails K3.2, K5.1, K10.3, K11.2 and the K18 block;
+- making the gate **drop** its `DialTicket` instead of holding it fails K19.7 — and nothing else, which is the point: every other ceiling assertion in that experiment passes, because they fill the ceiling with an ordinary dial's ticket.

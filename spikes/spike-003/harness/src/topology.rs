@@ -123,7 +123,7 @@ pub async fn pump_until(
 /// more than it looks, because under `BucketInserts::Manual` it is the
 /// only way a seed node learns the peers that dialled it.
 pub fn admit_candidates(node: &mut Node, protocol: &str) -> usize {
-    let trusted = node.trusted.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let trusted = node.trusts();
     let me = node.peer_id;
     let mut candidates: Vec<(PeerId, libp2p::Multiaddr)> = Vec::new();
 
