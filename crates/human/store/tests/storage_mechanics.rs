@@ -1400,3 +1400,51 @@ fn a_generated_key_that_drops_a_legal_character_class_is_refused() {
         "an expression that drops a legal character must be refused"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn a_bare_relative_path_still_checks_its_directory() {
+    // `Path::new("messages.db").parent()` is `Some("")`, and filtering
+    // the empty string out skipped every parent check — in a shared
+    // working directory, the case that most needed them. The check now
+    // resolves an empty parent to ".", so a bare name is judged exactly
+    // as an explicit path into the same directory would be.
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
+        .expect("world-traversable on purpose");
+
+    let explicit = HumanStore::open(&dir.path().join("messages.db"), StoreOptions::default());
+    assert!(
+        matches!(explicit, Err(StoreError::PermissionsTooOpen { .. })),
+        "an explicit path into a world-traversable directory is refused: {explicit:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_database_path_is_refused_not_followed() {
+    // `metadata` follows links, so the mode check answered about the
+    // TARGET. Another local account able to pre-create the path could
+    // redirect this process into opening a database elsewhere, using
+    // its own authority.
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    // Owner-only, so the parent check passes and the symlink check is
+    // what this test actually reaches.
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("private parent");
+    let elsewhere = dir.path().join("elsewhere.db");
+    std::fs::write(&elsewhere, b"").expect("target exists");
+
+    let link = dir.path().join("messages.db");
+    std::os::unix::fs::symlink(&elsewhere, &link).expect("link created");
+
+    let opened = HumanStore::open(&link, StoreOptions::default());
+    assert!(
+        matches!(opened, Err(StoreError::NotAFile { .. })),
+        "a symlinked database path is refused: {opened:?}"
+    );
+}

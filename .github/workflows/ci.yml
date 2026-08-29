@@ -79,13 +79,23 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        # `--locked` so CI validates the COMMITTED resolution. Without
+        # it a manifest change with a stale lockfile lets cargo rewrite
+        # the lockfile in the runner, and the graph that was tested is
+        # then one no commit contains.
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       # Includes tests/support's fixture-loading suite, which is the
       # Stage-0 gate that the frozen vectors load from Rust with no
       # product networking in the graph.
       - name: Tests
-        run: cargo test --workspace --all-targets
+        run: cargo test --workspace --all-targets --locked
+
+      - name: The lockfile is the one that was committed
+        # Belt and braces to `--locked`: if any step did rewrite it, say
+        # so here rather than letting a green run attest to a graph the
+        # commit does not carry.
+        run: git diff --exit-code -- Cargo.lock
 
   tree-checks:
     name: tree checks

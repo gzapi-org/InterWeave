@@ -678,8 +678,10 @@ impl PeerCache {
     /// survivable, but avoidable for the price of a rename.
     ///
     /// # Errors
-    /// Returns [`CacheError`] if the directory is not writable or the
-    /// rename fails.
+    /// Returns [`CacheError`] if the directory is not writable, the
+    /// rename fails, or the directory cannot be fsynced afterwards — the
+    /// last meaning the bytes are on disk and the name pointing at them
+    /// may not survive a crash.
     pub fn flush(&mut self, now_ms: u64) -> Result<(), CacheError> {
         let file = CacheFile {
             version: FORMAT_VERSION,
@@ -735,12 +737,19 @@ impl PeerCache {
         // fsync the DIRECTORY, so the rename itself survives a crash.
         // Without it the bytes are durable and the name that points at
         // them may not be, which is the same cold start by a different
-        // route. Best-effort: a filesystem that refuses to open a
-        // directory for this is not a reason to fail a flush that has
-        // already landed.
-        if let Ok(dir) = fs::File::open(parent) {
-            let _ = dir.sync_all();
-        }
+        // route.
+        //
+        // REPORTED, not discarded. This was written as best-effort on
+        // the grounds that a flush which has already landed should not
+        // fail — but a discarded error does not make the flush more
+        // durable, it only makes the caller believe it is. `flush`
+        // already returns an error for a failed write or rename, so a
+        // failure to make that rename durable belongs in the same
+        // channel. What the CALLER does about it is still its decision:
+        // for this cache the loss is a cold start, and a caller that
+        // knows that can carry on.
+        let dir = fs::File::open(parent).map_err(CacheError::Io)?;
+        dir.sync_all().map_err(CacheError::Io)?;
 
         self.dirty = false;
         self.last_write_ms = Some(now_ms);
@@ -752,6 +761,65 @@ impl PeerCache {
 mod publish_tests {
     use super::publish_via_temp;
     use std::fs;
+
+    use super::{CacheError, CacheLimits, PeerCache};
+    use interweave_transport_api::TransportIdentity;
+
+    /// A directory whose fsync cannot succeed, without a race.
+    ///
+    /// `0o300` is write plus execute and NO READ: `rename` into it still
+    /// works, and `File::open` on the directory itself fails with
+    /// EACCES. That is precisely the failure the flush used to discard.
+    /// Returns false when the mode did not actually block anything —
+    /// running as root, or a filesystem that ignores it — so the test
+    /// says so rather than passing vacuously.
+    #[cfg(unix)]
+    fn make_unreadable(dir: &std::path::Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o300)).expect("chmod");
+        fs::File::open(dir).is_err()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_flush_whose_directory_cannot_be_synced_says_so() {
+        // The bytes reach the disk and the NAME pointing at them may not
+        // survive a crash. `let _ = dir.sync_all()` reported that as a
+        // successful flush, which does not make the rename durable — it
+        // only makes the caller believe it is.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cache = PeerCache::load(&dir.path().join("peers.json"), CacheLimits::default())
+            .expect("a fresh cache loads");
+        let peer = TransportIdentity::parse("12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN")
+            .expect("valid identity");
+        cache
+            .record_success(&peer, "/ip4/10.0.0.1/tcp/1", 0)
+            .expect("recorded");
+
+        // POSITIVE CONTROL FIRST: the same flush succeeds while the
+        // directory is readable, so the failure below is about the
+        // permission and not about the cache.
+        cache.flush(0).expect("an ordinary flush succeeds");
+
+        cache
+            .record_success(&peer, "/ip4/10.0.0.2/tcp/1", 1)
+            .expect("recorded");
+        if !make_unreadable(dir.path()) {
+            // Root, or a filesystem that ignores the mode. Say so rather
+            // than assert something this environment cannot show.
+            println!("skipped: 0o300 did not block opening the directory here");
+            return;
+        }
+        let refused = cache.flush(1);
+        // Restore before the assertion, so a failure does not leave an
+        // undeletable temporary directory behind.
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).expect("chmod back");
+        assert!(
+            matches!(refused, Err(CacheError::Io(_))),
+            "a flush that could not fsync its directory must not report success: {refused:?}"
+        );
+    }
 
     /// THE FINDING. `create_new` refuses an existing file, so a failure
     /// at that step means this call did not create the temporary — a

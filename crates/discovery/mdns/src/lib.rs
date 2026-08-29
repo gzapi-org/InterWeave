@@ -586,22 +586,20 @@ mod tests {
     fn peer(s: &str) -> TransportIdentity {
         TransportIdentity::parse(s).expect("valid identity")
     }
-    /// A synthetic well-formed PeerId string. The grammar is a prefix,
-    /// an alphabet and a length with no checksum, so a generated id is as
-    /// valid to this provider as a captured one — and nothing here dials.
+    /// A synthetic PeerId string that DECODES, not merely one that
+    /// matches the pattern.
+    ///
+    /// `TransportIdentity::parse` decodes the base58btc and checks the
+    /// multihash, so the 44 tail characters are not free: the id is built
+    /// from its bytes — the identity-multihash envelope of a libp2p
+    /// Ed25519 public-key protobuf — and only the 32 key bytes vary. A
+    /// hand-spelled tail is a string no libp2p parser accepts, which is a
+    /// test population that could never arrive over the LAN.
     fn synthetic_peer(n: u64) -> String {
-        const B58: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-        let mut tail = [b'1'; 44];
-        let (mut v, mut i) = (n as usize, 43usize);
-        loop {
-            tail[i] = B58[v % B58.len()];
-            v /= B58.len();
-            if v == 0 || i == 0 {
-                break;
-            }
-            i -= 1;
-        }
-        format!("12D3KooW{}", core::str::from_utf8(&tail).expect("ascii"))
+        let mut bytes = [0_u8; 38];
+        bytes[..6].copy_from_slice(&[0x00, 0x24, 0x08, 0x01, 0x12, 0x20]);
+        bytes[6..14].copy_from_slice(&n.to_be_bytes());
+        bs58::encode(bytes).into_string()
     }
 
     fn started() -> MdnsDiscovery {
@@ -943,16 +941,10 @@ mod tests {
         assert!(p.drain_events(0, 8).is_empty(), "and then it is empty");
     }
 
-    /// A distinct valid PeerId per index, for the flood test.
+    /// A distinct DECODABLE PeerId per index, for the flood test. See
+    /// `synthetic_peer` for why a spelled tail will not do.
     fn synthetic(i: usize) -> String {
-        const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-        let mut s = String::from("12D3KooW");
-        let mut n = i;
-        for _ in 0..44 {
-            s.push(char::from(ALPHABET[n % ALPHABET.len()]));
-            n /= ALPHABET.len();
-        }
-        s
+        synthetic_peer(i as u64)
     }
     #[test]
     fn a_discover_goodbye_cycle_cannot_grow_the_pending_queue() {

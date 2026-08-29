@@ -20,6 +20,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+bs58 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]

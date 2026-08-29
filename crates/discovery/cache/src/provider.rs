@@ -434,27 +434,21 @@ mod tests {
     const P1: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
     const P2: &str = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
 
-    /// A synthetic well-formed identity, for tests needing more peers
-    /// than there are named constants. The PeerId grammar checked here is
-    /// a prefix, an alphabet and a length with no checksum, so a
-    /// generated id is as valid to this provider as a captured one.
+    /// A synthetic identity that DECODES, not merely one that matches the
+    /// pattern.
+    ///
+    /// `TransportIdentity::parse` decodes the base58btc and checks the
+    /// multihash, so the 44 tail characters are not free: an id is built
+    /// from its bytes — the identity-multihash envelope of a libp2p
+    /// Ed25519 public-key protobuf — and only the 32 key bytes vary.
+    /// Spelling a tail by hand produces strings no libp2p parser accepts,
+    /// which is a test population that could never arrive over a wire.
     fn synthetic(cycle: u64, n: usize) -> TransportIdentity {
-        const B58: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-        let mut tail = [b'1'; 44];
-        let (mut v, mut i) = (cycle as usize * 100_000 + n, 43usize);
-        loop {
-            tail[i] = B58[v % B58.len()];
-            v /= B58.len();
-            if v == 0 || i == 0 {
-                break;
-            }
-            i -= 1;
-        }
-        TransportIdentity::parse(format!(
-            "12D3KooW{}",
-            core::str::from_utf8(&tail).expect("ascii")
-        ))
-        .expect("matches the grammar")
+        let mut bytes = [0_u8; 38];
+        bytes[..6].copy_from_slice(&[0x00, 0x24, 0x08, 0x01, 0x12, 0x20]);
+        bytes[6..14].copy_from_slice(&(cycle * 100_000 + n as u64).to_be_bytes());
+        TransportIdentity::parse(bs58::encode(bytes).into_string())
+            .expect("a decodable synthetic identity")
     }
 
     fn peer(s: &str) -> TransportIdentity {

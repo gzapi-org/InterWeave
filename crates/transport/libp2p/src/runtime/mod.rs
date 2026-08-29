@@ -716,9 +716,23 @@ impl SwarmRuntime {
                             // outcome itself was already settled above
                             // regardless of whether this line runs.
                             if let Some(refusal) = last {
-                                let has_room = outbox.len()
-                                    < config.event_capacity.saturating_add(listens.len());
-                                if has_room {
+                                // BASE CAPACITY ONLY. The slack above
+                                // `event_capacity` is PROGRESS capacity:
+                                // `polling_room` adds one slot per
+                                // pending listener, exchange and inbound
+                                // response precisely so the Swarm keeps
+                                // being polled until those finish.
+                                // Counting `listens.len()` here let this
+                                // diagnostic take the slot reserved for
+                                // observing `NewListenAddr` — after
+                                // which `polling_room` is false, the
+                                // Swarm is no longer polled, and the
+                                // `listen()` caller waits forever for
+                                // progress the runtime has just disabled.
+                                // The deadlock this reservation exists to
+                                // prevent, caused by an informational
+                                // event that nothing is waiting on.
+                                if may_buffer_delivery(outbox.len(), config.event_capacity) {
                                     outbox.push_back(SwarmEvent::DialFailed {
                                         peer: Some(peer.clone()),
                                         detail: format!("scheduled retry: {refusal:?}"),
@@ -1138,6 +1152,40 @@ mod outbound_bound_tests {
 #[cfg(test)]
 mod backpressure_tests {
     use super::{may_buffer_delivery, polling_room};
+
+    #[test]
+    fn a_retry_diagnostic_cannot_consume_a_pending_listener_s_progress_slot() {
+        // The reserved slack above `event_capacity` is what keeps the
+        // Swarm polled until a pending listener sees `NewListenAddr`.
+        // A failed scheduled retry that spends it stalls `listen()`
+        // forever: the runtime stops polling for the very event that
+        // would resolve the wait.
+        //
+        // Stated as the two calls the loop actually makes, at the exact
+        // state the reporter identified: base capacity 1, one buffered
+        // event, one pending listener.
+        let event_capacity = 1;
+        let buffered = 1;
+        let listens = 1;
+
+        assert!(
+            polling_room(buffered, event_capacity, listens, 0, 0),
+            "with a listener pending the Swarm must still be polled"
+        );
+        assert!(
+            !may_buffer_delivery(buffered, event_capacity),
+            "and an informational event must not be buffered into that slot"
+        );
+
+        // The old spelling admitted it, and the admission is what turns
+        // the next `polling_room` false.
+        let old_spelling = buffered < event_capacity + listens;
+        assert!(old_spelling, "the previous condition admitted the push");
+        assert!(
+            !polling_room(buffered + 1, event_capacity, listens, 0, 0),
+            "which is precisely the state where the listener can never resolve"
+        );
+    }
 
     /// The bound still bounds: with nothing in flight, the base capacity
     /// is the whole allowance.

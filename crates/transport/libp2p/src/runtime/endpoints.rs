@@ -282,8 +282,10 @@ pub(super) fn handle_endpoints(
 }
 
 /// Decide what to answer a querying peer. The caller has already reserved
-/// an in-flight slot; this only charges the per-peer RATE, and only when
-/// it is about to serve a real directory.
+/// an in-flight slot; this charges the per-peer RATE, which is a
+/// PRE-TRUST budget — every query reaching here spends it, refused ones
+/// included. See the comment on the charge itself for why the ordering is
+/// the security property and not an accident.
 fn build_answer(
     querier: &TransportIdentity,
     direct_state: &DirectState,
@@ -511,6 +513,56 @@ mod bound_tests {
             admit_query_dispatch(held.iter(), &identity(P1)),
             Err(DirectError::Overloaded),
             "at the total ceiling, even a peer with nothing in flight waits"
+        );
+    }
+
+    #[test]
+    fn an_unauthorized_query_spends_the_pre_trust_directory_budget() {
+        use interweave_transport_api::DirectoryRefusal;
+        use interweave_transport_runtime::{ConnectionManager, ConnectionPolicy, TrustSources};
+        use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
+
+        use super::super::direct::DirectState;
+        use super::{DirectoryResponse, DirectoryState, build_answer};
+
+        // NOBODY is data-plane trusted, so every query below is refused
+        // for trust. The question is whether being refused was free.
+        let mut manager = ConnectionManager::new(ConnectionPolicy::default(), 8);
+        manager.set_trust(
+            TrustSources::new(
+                PeerTrustPolicy::new(std::iter::empty()).expect("empty policy"),
+                InfrastructureSet::new(std::iter::empty()).expect("empty set"),
+            ),
+            &[],
+        );
+        let direct_state = DirectState::new(0);
+        let mut directory = DirectoryState::new(0, 16, 60_000);
+        let querier = identity(P1);
+
+        // Ask until the RATE refuses. Each answer before that is
+        // `Unauthorized` — the trust check — and each one still charged.
+        let mut asked = 0u32;
+        let exhausted = loop {
+            let answer = build_answer(&querier, &direct_state, &mut directory, &manager, 0, 0);
+            match answer {
+                DirectoryResponse::Refused(DirectoryRefusal::Unauthorized) => {
+                    asked += 1;
+                    assert!(asked < 10_000, "the pre-trust rate must be finite");
+                }
+                other => break other,
+            }
+        };
+        assert!(
+            asked > 0,
+            "the untrusted querier was refused for trust first"
+        );
+        assert!(
+            matches!(
+                exhausted,
+                DirectoryResponse::Refused(DirectoryRefusal::Overloaded)
+            ),
+            "unauthorized queries spend the budget: after {asked} refusals \
+             the next is refused as OVERLOADED, not unauthorized"
         );
     }
 }

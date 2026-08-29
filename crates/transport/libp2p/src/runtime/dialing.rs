@@ -110,10 +110,18 @@ pub(super) fn attempt_dial(
 /// trusted peer with a remembered address retried that identical
 /// conversion failure forever once the scheduler became active.
 ///
-/// The `PeerId` case is reachable rather than theoretical:
-/// `TransportIdentity` validates a prefix, an alphabet and a length,
-/// while libp2p decodes the multihash. `Qm` followed by 44 base58
-/// characters satisfies the first and fails the second.
+/// The ADDRESS case is the reachable one: an address is an opaque string
+/// to every neutral type it passes through, so a configured or discovered
+/// value that is not a multiaddr arrives here intact.
+///
+/// The `PeerId` case USED to be reachable the same way — the neutral
+/// grammar checked a prefix, an alphabet and a length while libp2p
+/// decoded the multihash, so `Qm` plus 44 base58 characters satisfied the
+/// first and failed the second. `TransportIdentity::parse` now decodes
+/// too, and `every_identity_the_neutral_grammar_accepts_libp2p_accepts`
+/// is what says the two agree. The branch stays as a fail-closed guard on
+/// a conversion this module does not own; it is unreachable rather than
+/// untested.
 pub(super) fn settle_undialable(
     manager: &mut ConnectionManager,
     undialable: UndialableAdmission,
@@ -593,23 +601,24 @@ mod tests {
     /// second.
     #[test]
     fn a_ticket_libp2p_cannot_dial_is_settled_permanently() {
-        let shaped_but_not_a_peer_id = format!("Qm{}", "z".repeat(44));
-        let peer = TransportIdentity::parse(shaped_but_not_a_peer_id.clone())
-            .expect("the neutral grammar accepts it");
-        assert!(
-            shaped_but_not_a_peer_id.parse::<libp2p::PeerId>().is_err(),
-            "and libp2p does not -- the precondition this test exists for"
-        );
-
+        // Through the ADDRESS branch, which is the one still reachable:
+        // an address is an opaque string to every neutral type it
+        // crosses, so a configured or discovered value that is not a
+        // multiaddr arrives at the conversion intact. This test used to
+        // go through the PeerId branch instead, on `Qm` plus 44 base58
+        // characters — a string the neutral grammar took and libp2p
+        // refused. `TransportIdentity::parse` now decodes the base58btc
+        // and checks the multihash, so no such string exists any more;
+        // the property being asserted is unchanged.
         let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
-        m.set_trust(trust(&[&shaped_but_not_a_peer_id], &[]), &[]);
+        m.set_trust(trust(&[RELAY], &[]), &[]);
         let ticket: DialTicket = m
             .handle()
             .load()
             .admit(
                 &DialRequest {
-                    peer: Some(peer.clone()),
-                    address: "/ip4/192.0.2.1/tcp/4001".to_owned(),
+                    peer: Some(ident(RELAY)),
+                    address: "127.0.0.1:4001".to_owned(),
                     origin: DialOrigin::ConnectionManager,
                 },
                 0,
@@ -619,12 +628,60 @@ mod tests {
         let undialable =
             AdmittedDial::from_ticket(ticket).expect_err("libp2p cannot build a dial from it");
         let reason = settle_undialable(&mut m, *undialable, 0);
-        assert!(reason.contains("PeerId"), "it says why: {reason}");
+        assert!(reason.contains("not a multiaddr"), "it says why: {reason}");
         assert_eq!(
             m.scheduled_retries(),
             0,
             "nothing to retry: the same ticket converts the same way every time"
         );
+    }
+
+    #[test]
+    fn every_identity_the_neutral_grammar_accepts_libp2p_accepts() {
+        // What makes `from_ticket`'s PeerId branch unreachable, and the
+        // guard that says so if the neutral grammar is ever loosened.
+        // The two parsers are independent implementations of the same
+        // rule, so agreement is a property to assert rather than assume.
+        let mut seed = 0x2545_F491_4F6C_DD1D_u64;
+        let mut accepted = 0u32;
+        for _ in 0..2_000u32 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let mut bytes = [0_u8; 38];
+            for (i, b) in bytes.iter_mut().enumerate() {
+                *b = ((seed >> ((i % 8) * 8)) as u8) ^ (i as u8);
+            }
+            // Both accepted forms, and the identity form's fixed header
+            // so the sample is not all rejections.
+            let mut identity_form = bytes;
+            identity_form[..6].copy_from_slice(&[0x00, 0x24, 0x08, 0x01, 0x12, 0x20]);
+            for candidate in [
+                bs58::encode(&bytes[..34]).into_string(),
+                bs58::encode(&bytes[..]).into_string(),
+                bs58::encode(&identity_form[..]).into_string(),
+            ] {
+                if TransportIdentity::parse(candidate.clone()).is_ok() {
+                    accepted += 1;
+                    assert!(
+                        candidate.parse::<libp2p::PeerId>().is_ok(),
+                        "the neutral grammar accepted {candidate}, libp2p did not"
+                    );
+                }
+            }
+        }
+        assert!(
+            accepted > 1_000,
+            "only {accepted} candidates were accepted; a sample that rejects \
+             everything would pass this test while proving nothing"
+        );
+
+        // NEGATIVE CONTROL: the string this test's neighbour used to be
+        // built on. Both parsers refuse it, which is the agreement in the
+        // other direction.
+        let shaped_only = format!("Qm{}", "z".repeat(44));
+        assert!(TransportIdentity::parse(shaped_only.clone()).is_err());
+        assert!(shaped_only.parse::<libp2p::PeerId>().is_err());
     }
 
     fn addr() -> Multiaddr {

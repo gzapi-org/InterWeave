@@ -29,4 +29,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+# Synthetic test identities are built from BYTES, since `parse` decodes
+# the base58btc and checks the multihash. Test-only.
+bs58 = { workspace = true }
 tempfile = { workspace = true }

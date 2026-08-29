@@ -1439,26 +1439,18 @@ mod tests {
     /// A synthetic well-formed identity, for tests that need more peers
     /// than there are named constants.
     ///
-    /// The PeerId grammar this crate checks is a prefix, an alphabet and a
-    /// length with no checksum (`TransportIdentity::parse`), so a
-    /// generated string is exactly as valid to every layer under test as a
-    /// captured one. Nothing here dials, so a peer that no key backs is
-    /// the right test subject rather than a shortcut.
+    /// Built from BYTES, not spelled as a tail. `TransportIdentity::parse`
+    /// decodes the base58btc and checks the multihash, so the 44 tail
+    /// characters are not free: only the 32 key bytes inside the identity
+    /// multihash vary. Nothing here dials, so a peer that no key backs is
+    /// the right test subject rather than a shortcut — but it has to be a
+    /// peer every layer under test would actually accept.
     fn identity(n: usize) -> TransportIdentity {
-        const B58: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-        let mut tail = [b'1'; 44];
-        let mut v = n;
-        let mut i = 43;
-        loop {
-            tail[i] = B58[v % B58.len()];
-            v /= B58.len();
-            if v == 0 || i == 0 {
-                break;
-            }
-            i -= 1;
-        }
-        let s = format!("12D3KooW{}", core::str::from_utf8(&tail).expect("ascii"));
-        TransportIdentity::parse(s).expect("the generated id matches the grammar")
+        let mut bytes = [0_u8; 38];
+        bytes[..6].copy_from_slice(&[0x00, 0x24, 0x08, 0x01, 0x12, 0x20]);
+        bytes[6..14].copy_from_slice(&(n as u64).to_be_bytes());
+        TransportIdentity::parse(bs58::encode(bytes).into_string())
+            .expect("a decodable synthetic identity")
     }
 
     fn peer(s: &str) -> TransportIdentity {
@@ -1984,18 +1976,10 @@ mod tests {
         assert!(!live.contains(&peer(P2)), "the untrusted one was evicted");
     }
 
-    /// A distinct valid PeerId per index, for the bound tests.
+    /// A distinct DECODABLE PeerId per index, for the bound tests. See
+    /// `identity` for why a spelled tail will not do.
     fn synthetic(i: usize) -> String {
-        // Ed25519 identity PeerIds are `12D3KooW` + 44 base58 chars. Vary
-        // the tail deterministically over the base58 alphabet.
-        const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-        let mut s = String::from("12D3KooW");
-        let mut n = i;
-        for _ in 0..44 {
-            s.push(char::from(ALPHABET[n % ALPHABET.len()]));
-            n /= ALPHABET.len();
-        }
-        s
+        identity(i).as_str().to_owned()
     }
 
     #[test]

@@ -47,6 +47,9 @@ rand = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+# Synthetic identities are built from BYTES: the neutral grammar decodes
+# the base58btc, so a spelled tail is not a peer id. Test-only.
+bs58 = { workspace = true }
 # The codec's frozen-frame test reads the fixture file rather than
 # quoting bytes it could have copied from the encoder.
 serde_json = { workspace = true }

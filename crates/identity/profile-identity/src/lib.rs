@@ -154,6 +154,13 @@ pub enum IdentityError {
     /// profile must never silently regenerate, so the caller has to
     /// decide between "create a new profile" and "restore this one".
     NotFound,
+    /// The key path is not a regular file.
+    ///
+    /// A symlink, directory, or device where the identity key belongs.
+    /// Refused rather than followed: the permission check answers about
+    /// what a link POINTS AT, so a link to some other account's
+    /// mode-0600 file would otherwise pass it.
+    NotAFile,
     /// The key file exists but is readable by someone other than its owner.
     ///
     /// Refused rather than repaired. A key that has been world-readable
@@ -223,6 +230,7 @@ impl From<PersistError> for IdentityError {
 impl core::fmt::Display for IdentityError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::NotAFile => write!(f, "the identity key path is not a regular file"),
             Self::NotFound => write!(
                 f,
                 "no identity key file; an established profile is never regenerated silently"
@@ -277,6 +285,25 @@ impl core::error::Error for IdentityError {
 /// places than intended, and nothing here needs a second one.
 pub struct ProfileIdentity {
     keypair: ed25519::Keypair,
+}
+
+/// The ceiling on a key file, in bytes.
+///
+/// A protobuf-encoded Ed25519 keypair is well under a hundred bytes. The
+/// bound exists so an oversized local file cannot be allocated before the
+/// decoder rejects it, not because any real key approaches it.
+const MAX_KEY_FILE_BYTES: u64 = 4096;
+
+/// A byte buffer cleared when it is dropped, however it is dropped.
+///
+/// The seed must not outlive the read on the error path either, and a
+/// `fill(0)` after the decode only runs when the decode SUCCEEDS.
+struct Zeroizing(Vec<u8>);
+
+impl Drop for Zeroizing {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
 }
 
 impl ProfileIdentity {
@@ -557,19 +584,44 @@ impl ProfileIdentity {
     /// has been exposed should be treated as disclosed, and tightening
     /// the mode quietly would hide that it ever was.
     pub fn load(path: &Path) -> Result<Self, IdentityError> {
-        if !path.exists() {
-            return Err(IdentityError::NotFound);
+        // WHAT IS AT THE PATH, not what it resolves to. `exists` and the
+        // permission check both follow symlinks, so a link pointing at
+        // some other account's mode-0600 file passed both and this went
+        // on to read it. The key file is refused rather than followed:
+        // an identity that has been redirected should be reported, not
+        // silently loaded from elsewhere.
+        let here = match std::fs::symlink_metadata(path) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(IdentityError::NotFound);
+            }
+            Err(e) => return Err(IdentityError::Storage(PersistError::Io(e))),
+        };
+        if here.file_type().is_symlink() || !here.is_file() {
+            return Err(IdentityError::NotAFile);
         }
         if !is_owner_only(path)? {
             return Err(IdentityError::PermissionsTooOpen);
         }
-        let mut bytes =
-            std::fs::read(path).map_err(|e| IdentityError::Storage(PersistError::Io(e)))?;
-        let keypair = Keypair::from_protobuf_encoding(&bytes)
+        // A CEILING BEFORE THE ALLOCATION. `read` sized its buffer from
+        // the file, so a local oversized file could exhaust memory before
+        // the decoder ever rejected it. A protobuf Ed25519 keypair is a
+        // handful of bytes; nothing legitimate approaches this.
+        if here.len() > MAX_KEY_FILE_BYTES {
+            return Err(IdentityError::Corrupt(format!(
+                "key file is {} bytes; the maximum is {MAX_KEY_FILE_BYTES}",
+                here.len()
+            )));
+        }
+        // ZEROED ON EVERY PATH, including the failing one. Filling the
+        // buffer after a successful decode left the seed in allocator
+        // memory whenever decoding FAILED — the case where a caller is
+        // least likely to be looking.
+        let bytes = Zeroizing(
+            std::fs::read(path).map_err(|e| IdentityError::Storage(PersistError::Io(e)))?,
+        );
+        let keypair = Keypair::from_protobuf_encoding(&bytes.0)
             .map_err(|e| IdentityError::Corrupt(e.to_string()))?;
-        // The buffer held the seed. Overwrite it rather than leaving a
-        // copy for whatever reuses the allocation.
-        bytes.fill(0);
 
         let ed = keypair
             .try_into_ed25519()

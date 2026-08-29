@@ -422,25 +422,21 @@ mod tests {
         StaticEntry::new(id.clone(), address.to_owned()).expect("legal entry")
     }
 
-    /// A synthetic well-formed identity: the grammar is a prefix, an
-    /// alphabet and a length with no checksum, and nothing here dials.
+    /// A synthetic identity that DECODES, not merely one that matches the
+    /// pattern.
+    ///
+    /// `TransportIdentity::parse` decodes the base58btc and checks the
+    /// multihash, so the 44 tail characters are not free: an id is built
+    /// from its bytes — the identity-multihash envelope of a libp2p
+    /// Ed25519 public-key protobuf — and only the 32 key bytes vary.
+    /// Spelling a tail by hand produces strings no libp2p parser accepts,
+    /// which is a test population that could never arrive over a wire.
     fn synthetic(n: usize) -> TransportIdentity {
-        const B58: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-        let mut tail = [b'1'; 44];
-        let (mut v, mut i) = (n, 43usize);
-        loop {
-            tail[i] = B58[v % B58.len()];
-            v /= B58.len();
-            if v == 0 || i == 0 {
-                break;
-            }
-            i -= 1;
-        }
-        TransportIdentity::parse(format!(
-            "12D3KooW{}",
-            core::str::from_utf8(&tail).expect("ascii")
-        ))
-        .expect("matches the grammar")
+        let mut bytes = [0_u8; 38];
+        bytes[..6].copy_from_slice(&[0x00, 0x24, 0x08, 0x01, 0x12, 0x20]);
+        bytes[6..14].copy_from_slice(&(n as u64).to_be_bytes());
+        TransportIdentity::parse(bs58::encode(bytes).into_string())
+            .expect("a decodable synthetic identity")
     }
 
     fn entry(p: &str, address: &str) -> StaticEntry {

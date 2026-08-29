@@ -169,6 +169,32 @@ pub struct SubstrateBehaviour {
     pub endpoints: request_response::Behaviour<EndpointsCodec>,
 }
 
+// EVERY DATA-PLANE BEHAVIOUR ABOVE IS INSTALLED UNIFORMLY, on every
+// connection this Swarm holds. That is correct today and must change at
+// Stage 11.
+//
+// It is correct today because the only connections that exist are ones
+// the gated swarm admitted for the data plane: relay, AutoNAT and DCUtR
+// are absent from the libp2p feature list, so no
+// `ConnectivityInfrastructureOnly` connection can be established at all.
+// The class is modelled and gate-tested; nothing can currently produce
+// one.
+//
+// Stage 11 produces the first one, and then this shape is a gap. Each
+// entry point classifies its caller — direct ingress, the GossipSub
+// publisher check, `endpoints::build_answer` — so an infrastructure-only
+// peer gains no AUTHORITY. What it gains is EXPOSURE: the three
+// protocols are advertised to it and it can open their substreams, so a
+// refusal costs a parse and an accounting charge rather than a closed
+// stream. `build_answer`'s pre-trust rate budget exists precisely
+// because that is where the exposure lands today.
+//
+// The Stage 11 correction is to restrict the protocol set offered on an
+// infrastructure-only connection, at the connection rather than at the
+// request. The plan's Stage 11 invariants carry it; this comment is here
+// so the next reader of THIS struct does not conclude from the
+// per-request checks that the work is done.
+
 impl SubstrateBehaviour {
     /// Build the behaviour for `keypair`.
     ///

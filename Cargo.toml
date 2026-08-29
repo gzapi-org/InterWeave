@@ -105,6 +105,14 @@ rand = "0.8"
 # SHA-256 for DirectContentFingerprintV1. A pure function with frozen
 # vectors, so the implementation is checkable rather than trusted.
 sha2 = "0.10"
+# base58btc, to decode a PeerId string rather than merely recognising its
+# shape. A prefix, an alphabet and a length say a string LOOKS like a
+# PeerId; only the decode says it IS one. Already in the graph via
+# libp2p-identity, so this adds no crate and no licence term — and no
+# `check` feature, because a PeerId carries a multihash rather than a
+# base58check payload and enabling it would pull sha2 into a crate that
+# does not hash.
+bs58 = { version = "0.5", default-features = false, features = ["std"] }
 # Brotli for the HumanChatV2 fit-fallback decode path. Used through its
 # streaming interface so the decompressed ceiling aborts mid-stream.
 brotli = { version = "8", default-features = false, features = ["std"] }
