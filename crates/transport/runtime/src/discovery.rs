@@ -409,6 +409,22 @@ impl CandidateSet {
         let entry = self.peers.entry(candidate.peer_id.clone()).or_default();
         entry.last_observed_ms = entry.last_observed_ms.max(candidate.observed_at);
 
+        // A DEAD SLOT IS NOT AN OCCUPIED ONE. The cap counts address
+        // KEYS, and a key whose every provenance record has expired is
+        // still a key until `sweep` runs — so under pump-then-sweep a
+        // peer could hold sixteen dead addresses and reject a live one.
+        // The sweep afterwards frees the slot but cannot recover the
+        // rejected address, and a provider that already considers its
+        // snapshot emitted will not offer it again.
+        //
+        // Pruning here rather than relying on sweep ordering makes the
+        // cap mean "sixteen addresses a source still vouches for", which
+        // is what it was always meant to say.
+        entry.addresses.retain(|_, records| {
+            records.retain(|r| now_ms < r.expires_at);
+            !records.is_empty()
+        });
+
         for address in &candidate.addresses {
             if !entry.addresses.contains_key(address)
                 && entry.addresses.len() >= MAX_ADDRESSES_PER_PEER
@@ -2322,5 +2338,97 @@ mod tests {
                 .any(|c| c.peer_id == subject),
             "a newer observation extends the lifetime past the old expiry"
         );
+    }
+    #[test]
+    fn an_expired_address_slot_does_not_reject_a_live_address() {
+        // Under pump-then-sweep a peer can hold a full set of address
+        // KEYS whose provenance has already expired. The cap counted
+        // those, so a live address was rejected; the later sweep frees the
+        // slot but cannot recover it, and a provider that considers its
+        // snapshot emitted will not offer it again.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(51);
+
+        for i in 0..MAX_ADDRESSES_PER_PEER {
+            set.observe(
+                &for_id(
+                    &subject,
+                    "mdns",
+                    &format!("/ip4/192.168.1.{i}/tcp/4001"),
+                    0,
+                    Some(1_000),
+                ),
+                0,
+                &trust,
+                true,
+                false,
+            );
+        }
+
+        // Past every one of those lifetimes, with no sweep in between.
+        let fresh = "/ip4/10.0.0.9/tcp/4001";
+        set.observe(
+            &for_id(&subject, "peer-cache", fresh, 5_000, Some(u64::MAX)),
+            5_000,
+            &trust,
+            true,
+            false,
+        );
+
+        let candidates = set.candidates(5_000, &|_| None);
+        let found = candidates
+            .iter()
+            .find(|c| c.peer_id == subject)
+            .expect("the peer is still known");
+        assert!(
+            found.address_list().contains(&fresh),
+            "the live address is admitted into a slot only a dead one held: {:?}",
+            found.address_list()
+        );
+    }
+
+    #[test]
+    fn a_live_address_slot_still_refuses_an_unpinned_newcomer() {
+        // The control: pruning must free only EXPIRED slots, or the cap
+        // stops being a cap.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(52);
+
+        for i in 0..MAX_ADDRESSES_PER_PEER {
+            set.observe(
+                &for_id(
+                    &subject,
+                    "mdns",
+                    &format!("/ip4/192.168.1.{i}/tcp/4001"),
+                    0,
+                    Some(u64::MAX),
+                ),
+                0,
+                &trust,
+                true,
+                false,
+            );
+        }
+        let late = "/ip4/10.0.0.9/tcp/4001";
+        set.observe(
+            &for_id(&subject, "mdns", late, 100, Some(u64::MAX)),
+            100,
+            &trust,
+            true,
+            false,
+        );
+
+        let candidates = set.candidates(200, &|_| None);
+        let found = candidates
+            .iter()
+            .find(|c| c.peer_id == subject)
+            .expect("known");
+        assert!(
+            !found.address_list().contains(&late),
+            "every slot is live, so an unpinned newcomer is still refused"
+        );
+        assert_eq!(found.addresses.len(), MAX_ADDRESSES_PER_PEER);
     }
 }
