@@ -39,7 +39,7 @@ pub const MAX_PENDING_EVENTS: usize = 2 * crate::limits::MAX_PEERS;
 /// Compared as a whole to decide re-emission: any field that a
 /// `CandidateObserved` carries belongs here, or a change to it is
 /// invisible and the consumer keeps stale content.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct EmittedRecord {
     expires_at: Option<u64>,
     addresses: BTreeSet<String>,
@@ -95,13 +95,38 @@ impl PeerCacheDiscovery {
     ///
     /// Oldest because a consumer this far behind has already missed more
     /// recent news, and because refusing NEW events instead would let the
-    /// provider's view freeze at whatever filled the queue. A dropped
-    /// event costs a refresh the next drain recomputes from the cache,
-    /// which is the whole reason this provider can afford to drop one.
+    /// provider's view freeze at whatever filled the queue.
+    ///
+    /// DROPPING AN EVENT ROLLS BACK THE BOOKKEEPING THAT PRODUCED IT.
+    /// `refresh` emits the difference between `emitted` and the cache and
+    /// then advances `emitted`, so a dropped event was otherwise gone for
+    /// good — the next drain saw no difference and never recreated it. A
+    /// discarded selective retraction was the expensive case: the manager
+    /// keeps dialling an address the cache no longer holds, until its own
+    /// peer-wide TTL, which is seven days.
+    ///
+    /// So the rollback is per event, and it is the inverse of what each
+    /// one reported: forget an observation so the peer looks new again,
+    /// and restore a retracted peer so it is re-detected as gone.
     fn enforce_pending_bound(&mut self) {
-        if self.pending.len() > MAX_PENDING_EVENTS {
-            let excess = self.pending.len() - MAX_PENDING_EVENTS;
-            self.pending.drain(..excess);
+        if self.pending.len() <= MAX_PENDING_EVENTS {
+            return;
+        }
+        let excess = self.pending.len() - MAX_PENDING_EVENTS;
+        let dropped: Vec<DiscoveryEvent> = self.pending.drain(..excess).collect();
+        for event in dropped {
+            match event {
+                DiscoveryEvent::CandidateObserved { candidate } => {
+                    self.emitted.remove(&candidate.peer_id);
+                }
+                DiscoveryEvent::CandidateExpired { peer_id, .. } => {
+                    // Any record will do: `refresh` re-detects the peer as
+                    // gone because it is absent from the cache, not
+                    // because of what this holds.
+                    self.emitted.entry(peer_id).or_default();
+                }
+                DiscoveryEvent::HealthChanged { .. } => {}
+            }
         }
     }
 
@@ -938,4 +963,69 @@ mod tests {
             "every peer recorded is still reported"
         );
     }
+    #[test]
+    fn a_retraction_dropped_by_the_bound_is_recreated_on_the_next_drain() {
+        // `refresh` advances `emitted` and then the bound discarded the
+        // event it produced, so the difference was gone for good — the
+        // manager would keep dialling an address this cache no longer
+        // holds until its own peer-wide TTL, seven days out.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut p = provider(&dir);
+        p.start(0).expect("start");
+        let _ = p.drain_events(0, 64);
+
+        // 1. The consumer LEARNS a batch of peers.
+        let mut now = 10u64;
+        let mut known: BTreeSet<TransportIdentity> = BTreeSet::new();
+        for i in 0..crate::limits::MAX_PEERS {
+            let id = synthetic(0, i);
+            p.cache_mut()
+                .record_success(&id, "/ip4/10.0.0.1/tcp/1", now)
+                .expect("within bounds");
+            known.insert(id);
+        }
+        for event in p.drain_events(now, usize::MAX) {
+            if let DiscoveryEvent::CandidateObserved { candidate } = event {
+                assert!(known.contains(&candidate.peer_id));
+            }
+        }
+
+        // 2. Now it stalls. The known peers age out — owing retractions —
+        // while fresh peers keep arriving, so the queue grows past the
+        // bound and the trim reaches those retractions. A single batch
+        // cannot get here: the cache's own 1024-peer cap holds the queue
+        // at exactly the bound, which is how an earlier version of this
+        // test failed to fire the trim at all.
+        for cycle in 1..6u64 {
+            now += crate::limits::DEFAULT_TTL_MS + 1;
+            for i in 0..crate::limits::MAX_PEERS {
+                p.cache_mut()
+                    .record_success(&synthetic(cycle, i), "/ip4/10.0.0.1/tcp/1", now)
+                    .expect("within bounds");
+            }
+            let _ = p.drain_events(now, 0);
+        }
+
+        // 3. Every peer the consumer was told about must still be
+        // retracted. Drain repeatedly: a dropped event has to be
+        // recreated, not merely survive one pass.
+        let mut retracted: BTreeSet<TransportIdentity> = BTreeSet::new();
+        for _ in 0..40 {
+            for event in p.drain_events(now, usize::MAX) {
+                if let DiscoveryEvent::CandidateExpired { peer_id, .. } = event {
+                    retracted.insert(peer_id);
+                }
+            }
+        }
+
+        let stranded: Vec<_> = known.difference(&retracted).collect();
+        assert!(
+            stranded.is_empty(),
+            "{} of {} peers the consumer was told about were never \
+             retracted; a dropped retraction must be recreated, not lost",
+            stranded.len(),
+            known.len()
+        );
+    }
+
 }
