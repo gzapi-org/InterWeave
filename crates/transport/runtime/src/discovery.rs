@@ -736,7 +736,35 @@ impl CandidateSet {
             if !entry.observations.contains_key(&key)
                 && entry.observations.len() >= MAX_OBSERVATIONS_PER_PEER
             {
-                continue;
+                // THE FOURTH CAP GETS THE SAME ASYMMETRY as the other
+                // three: pinned displaces unpinned, oldest first, and
+                // never the converse. A configured provider's fact is
+                // not re-emitted without a reload, so a plain refusal
+                // lost it for good; an unpinned fact is re-announced or
+                // ages out. A fact's pinnedness is its source's — any
+                // pinned live record. When every held fact is pinned the
+                // bound stands: configuration does not grow it.
+                if !provider_pinned {
+                    continue;
+                }
+                let victim = entry
+                    .observations
+                    .iter()
+                    .filter(|((_, held_source), _)| {
+                        !entry
+                            .addresses
+                            .values()
+                            .flat_map(|records| records.iter())
+                            .any(|r| r.source == *held_source && r.pinned)
+                    })
+                    .min_by_key(|(_, (_, at, _))| *at)
+                    .map(|(k, _)| k.clone());
+                match victim {
+                    Some(k) => {
+                        entry.observations.remove(&k);
+                    }
+                    None => continue,
+                }
             }
             // THE NEWEST EVIDENCE WINS, not the last one iterated —
             // and the threshold survives the fact's own removal, so a
@@ -4837,6 +4865,133 @@ mod tests {
         assert!(
             set.candidates(6_500, &|_| None).is_empty(),
             "the spilled threshold still refuses older evidence"
+        );
+    }
+    #[test]
+    fn a_pinned_sources_fact_displaces_an_unpinned_one_at_the_cap() {
+        // The fourth cap. A configured provider's fact is not re-emitted
+        // without a reload, so a plain refusal lost it for good — the
+        // same asymmetry as the address slots, the provenance cap and
+        // the candidate cap, found at its fourth site by audit rather
+        // than by a fifth review round.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let p = identity(90);
+        let addr = "/ip4/10.0.0.1/tcp/1";
+
+        let mut unpinned = for_id(&p, "mdns", addr, 100, Some(u64::MAX));
+        for i in 0..MAX_OBSERVATIONS_PER_PEER {
+            unpinned.protocol_observations.insert(ProtocolObservation {
+                protocol_id: ProtocolId::parse(format!("/interweave/p{i}/1.0.0")).expect("valid"),
+                supported: true,
+                observed_at: 100 + i as u64,
+            });
+        }
+        set.observe(&unpinned, 100, &trust, true, false);
+
+        let mut pinned = for_id(&p, "static", "/ip4/10.0.0.2/tcp/2", 500, None);
+        pinned.protocol_observations.insert(ProtocolObservation {
+            protocol_id: ProtocolId::parse("/interweave/direct/2.0.0").expect("valid"),
+            supported: true,
+            observed_at: 500,
+        });
+        set.observe(&pinned, 500, &trust, false, true);
+
+        let cands = set.candidates(1_000, &|_| None);
+        let cand = cands.iter().find(|c| c.peer_id == p).expect("known");
+        assert!(
+            cand.protocol_observations
+                .iter()
+                .any(|o| o.protocol.as_str() == "/interweave/direct/2.0.0"),
+            "the pinned fact lands by displacing an unpinned one"
+        );
+        assert!(
+            set.peers.get(&p).expect("known").observations.len() <= MAX_OBSERVATIONS_PER_PEER,
+            "and the cap still holds"
+        );
+    }
+
+    #[test]
+    fn a_fact_map_full_of_pinned_facts_still_refuses_a_pinned_newcomer() {
+        // The control: configuration does not grow the bound, at this
+        // cap as at every other.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let p = identity(91);
+        let addr = "/ip4/10.0.0.1/tcp/1";
+
+        let mut pinned = for_id(&p, "static", addr, 100, None);
+        for i in 0..MAX_OBSERVATIONS_PER_PEER {
+            pinned.protocol_observations.insert(ProtocolObservation {
+                protocol_id: ProtocolId::parse(format!("/interweave/p{i}/1.0.0")).expect("valid"),
+                supported: true,
+                observed_at: 100 + i as u64,
+            });
+        }
+        set.observe(&pinned, 100, &trust, false, true);
+
+        let mut extra = for_id(&p, "static-b", "/ip4/10.0.0.2/tcp/2", 500, None);
+        extra.protocol_observations.insert(ProtocolObservation {
+            protocol_id: ProtocolId::parse("/interweave/direct/2.0.0").expect("valid"),
+            supported: true,
+            observed_at: 500,
+        });
+        set.observe(&extra, 500, &trust, false, true);
+
+        let entry = set.peers.get(&p).expect("known");
+        assert_eq!(
+            entry.observations.len(),
+            MAX_OBSERVATIONS_PER_PEER,
+            "every slot is pinned, so the bound stands"
+        );
+        assert!(
+            !entry
+                .observations
+                .keys()
+                .any(|(proto, _)| proto.as_str() == "/interweave/direct/2.0.0"),
+            "and the newcomer was refused, not admitted past it"
+        );
+    }
+    #[test]
+    fn an_unpinned_fact_at_a_full_cap_is_refused_not_displacing() {
+        // The other control, and the one my first mutation pass proved
+        // missing: with the pinned gate deleted, NO test failed — the
+        // all-pinned control cannot see this case, and the len-based cap
+        // test passes because displacement keeps the count at the cap.
+        // Only asking whether the newcomer's protocol LANDED tells the
+        // gate from its absence.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let p = identity(92);
+        let addr = "/ip4/10.0.0.1/tcp/1";
+
+        let mut full = for_id(&p, "mdns", addr, 100, Some(u64::MAX));
+        for i in 0..MAX_OBSERVATIONS_PER_PEER {
+            full.protocol_observations.insert(ProtocolObservation {
+                protocol_id: ProtocolId::parse(format!("/interweave/p{i}/1.0.0")).expect("valid"),
+                supported: true,
+                observed_at: 100 + i as u64,
+            });
+        }
+        set.observe(&full, 100, &trust, true, false);
+
+        let mut extra = for_id(&p, "peer-cache", "/ip4/10.0.0.2/tcp/2", 500, Some(u64::MAX));
+        extra.protocol_observations.insert(ProtocolObservation {
+            protocol_id: ProtocolId::parse("/interweave/direct/2.0.0").expect("valid"),
+            supported: true,
+            observed_at: 500,
+        });
+        set.observe(&extra, 500, &trust, true, false);
+
+        assert!(
+            !set.peers
+                .get(&p)
+                .expect("known")
+                .observations
+                .keys()
+                .any(|(proto, _)| proto.as_str() == "/interweave/direct/2.0.0"),
+            "an unpinned newcomer is refused at the bound, not admitted by \
+             displacing another unpinned fact"
         );
     }
 }
