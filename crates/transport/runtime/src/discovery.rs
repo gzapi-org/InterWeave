@@ -136,15 +136,24 @@ struct Entry {
 }
 
 impl Entry {
-    /// The newest observation across live provenance.
+    /// The newest observation across provenance still LIVE at `now_ms`.
     ///
     /// Addresses only: a protocol observation never keeps a peer alive
     /// (COMPOSITION.md), so it must not make one look recently reachable
     /// either.
-    fn recency(&self) -> u64 {
+    ///
+    /// The time argument is the point. Reading every record regardless of
+    /// expiry made a peer with an old live source and a newer LAPSED one
+    /// report the lapsed timestamp — and eviction then preserved it over
+    /// a candidate whose live reachability was genuinely more recent.
+    /// Records are only removed by `sweep`, which runs on a pump the
+    /// caller controls, so "expired" and "gone" are not the same state
+    /// here and this must judge the first.
+    fn recency(&self, now_ms: u64) -> u64 {
         self.addresses
             .values()
             .flat_map(|records| records.iter())
+            .filter(|r| now_ms < r.expires_at)
             .map(|r| r.observed_at)
             .max()
             .unwrap_or(0)
@@ -333,7 +342,7 @@ impl CandidateSet {
                     peer_id: peer_id.clone(),
                     addresses,
                     sources,
-                    last_observed_ms: entry.recency(),
+                    last_observed_ms: entry.recency(now_ms),
                     protocol_observations,
                 })
             })
@@ -660,7 +669,9 @@ impl CandidateSet {
             // so the excess is evictable in the same order as anything
             // else.
             let mut ranked: Vec<&TransportIdentity> = configured.iter().collect();
-            ranked.sort_by_key(|p| std::cmp::Reverse(self.peers.get(*p).map_or(0, Entry::recency)));
+            ranked.sort_by_key(|p| {
+                std::cmp::Reverse(self.peers.get(*p).map_or(0, |e| e.recency(now_ms)))
+            });
             ranked.truncate(MAX_CONFIGURED_RETAINED);
             ranked.into_iter().collect()
         };
@@ -670,7 +681,7 @@ impl CandidateSet {
             .iter()
             .filter(|(peer, _)| !trust.decide(peer).is_allowed())
             .filter(|(peer, _)| !protect.contains(peer))
-            .min_by_key(|(_, e)| e.recency())
+            .min_by_key(|(_, e)| e.recency(now_ms))
             .map(|(p, _)| p.clone());
         if let Some(peer) = victim {
             self.peers.remove(&peer);
@@ -2784,11 +2795,25 @@ mod tests {
             false,
         );
 
+        // NO SWEEP. An earlier version of this test called `sweep` first,
+        // so it passed by REMOVING the lapsed record rather than by
+        // recency judging it — and `recency` reading every record
+        // regardless of expiry went undetected. Records are removed only
+        // by a pump the caller controls, so "expired" and "gone" are
+        // different states and this asserts the first.
+        assert_eq!(
+            set.candidates(10_000, &|_| None)[0].last_observed_ms,
+            100,
+            "a lapsed source stops counting toward recency before any sweep"
+        );
+
+        // And still so afterwards, which is the weaker claim the earlier
+        // version was accidentally making.
         set.sweep(10_000);
         assert_eq!(
             set.candidates(10_000, &|_| None)[0].last_observed_ms,
             100,
-            "a lapsed source stops counting toward recency"
+            "and after the sweep removes it"
         );
     }
 }
