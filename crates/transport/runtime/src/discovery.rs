@@ -578,6 +578,7 @@ impl CandidateSet {
         // Displacements are counted locally — the stats live on `self`,
         // which the entry borrow holds — and added once it ends.
         let mut displaced_here = 0u64;
+        let mut configured_refused_here = 0u64;
         // Spilled fact floors for this candidate's keys, read before the
         // entry borrow holds `self` out of reach. Zero for a peer that
         // was never removed.
@@ -674,8 +675,13 @@ impl CandidateSet {
                         displaced_here += 1;
                     }
                     // Every slot is already pinned: the bound is the
-                    // bound, and configuration cannot grow it.
-                    None => continue,
+                    // bound, and configuration cannot grow it. Counted,
+                    // because the refused route is CONFIGURED and will
+                    // not be offered again.
+                    None => {
+                        configured_refused_here += 1;
+                        continue;
+                    }
                 }
             }
             let records = entry.addresses.entry(address.clone()).or_default();
@@ -727,7 +733,10 @@ impl CandidateSet {
                             records.remove(i);
                             displaced_here += 1;
                         }
-                        None => continue,
+                        None => {
+                            configured_refused_here += 1;
+                            continue;
+                        }
                     }
                 }
                 records.push(Provenance {
@@ -824,7 +833,10 @@ impl CandidateSet {
                         entry.observations.remove(&k);
                         displaced_here += 1;
                     }
-                    None => continue,
+                    None => {
+                        configured_refused_here += 1;
+                        continue;
+                    }
                 }
             }
             // THE NEWEST EVIDENCE WINS, not the last one iterated —
@@ -877,6 +889,7 @@ impl CandidateSet {
         // spills its thresholds, which stranding silently kept.
         let emptied = entry.addresses.is_empty();
         self.overflow.displaced += displaced_here;
+        self.overflow.configured_refused += configured_refused_here;
         if emptied {
             self.remove_entry(&candidate.peer_id);
         }
@@ -1152,6 +1165,16 @@ pub struct OverflowStats {
     /// pressure — the sub-candidate caps' authority loss, which was
     /// silent while only whole-candidate outcomes were counted.
     pub displaced: u64,
+    /// CONFIGURED routes, records, or facts refused at a sub-candidate
+    /// cap whose every slot was already pinned.
+    ///
+    /// Counted apart from `refused`, which is whole candidates, because
+    /// the loss here is PERMANENT: a configured provider does not
+    /// re-emit, so an operator whose profile was accepted has part of it
+    /// simply absent with nothing else to explain the gap. An unpinned
+    /// refusal at the same cap is not counted — that data is
+    /// re-announced or ages out.
+    pub configured_refused: u64,
 }
 
 /// Composes providers and owns the merged candidate set.
@@ -5499,6 +5522,119 @@ mod tests {
                 .contains_key(&oldest_uncovered),
             "the uncovered floor survives; nothing else guards its key, \
              while a covered floor is reproduced by its own live fact"
+        );
+    }
+    #[test]
+    fn a_configured_route_refused_at_a_full_pinned_cap_is_counted() {
+        // "Diagnostic, not silent authority loss" one level below the
+        // displacement counter. When every slot is already pinned the
+        // bound stands — but the refused route is CONFIGURED, so unlike
+        // an unpinned refusal it is never offered again, and an operator
+        // whose profile was accepted has part of it simply absent.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let p = identity(110);
+
+        // 16 pinned addresses fill the per-peer cap.
+        let mut pinned = for_id(&p, "static", "/ip4/10.0.0.1/tcp/1", 1_000, None);
+        for i in 2..=MAX_ADDRESSES_PER_PEER {
+            pinned.addresses.insert(format!("/ip4/10.0.0.{i}/tcp/{i}"));
+        }
+        set.observe(&pinned, 1_000, &trust, false, true);
+        assert_eq!(
+            set.peers.get(&p).expect("known").addresses.len(),
+            MAX_ADDRESSES_PER_PEER,
+            "every slot is pinned, or this proves nothing"
+        );
+        assert_eq!(set.overflow_stats().configured_refused, 0);
+
+        // A seventeenth configured address: refused, permanently.
+        set.observe(
+            &for_id(&p, "static", "/ip4/10.0.0.99/tcp/99", 2_000, None),
+            2_000,
+            &trust,
+            false,
+            true,
+        );
+        assert_eq!(
+            set.overflow_stats().configured_refused,
+            1,
+            "the configured route the operator will never see is counted"
+        );
+        assert_eq!(
+            set.overflow_stats().displaced,
+            0,
+            "and nothing was displaced for it"
+        );
+    }
+
+    #[test]
+    fn an_unpinned_refusal_at_the_same_cap_is_not_counted_as_configured() {
+        // The control: an unpinned address refused at a full cap is
+        // re-announced or ages out, so counting it would drown the
+        // signal the configured counter exists to carry.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let p = identity(111);
+
+        let mut full = for_id(&p, "mdns", "/ip4/192.168.1.1/tcp/1", 1_000, Some(u64::MAX));
+        for i in 2..=MAX_ADDRESSES_PER_PEER {
+            full.addresses.insert(format!("/ip4/192.168.1.{i}/tcp/{i}"));
+        }
+        set.observe(&full, 1_000, &trust, true, false);
+
+        set.observe(
+            &for_id(
+                &p,
+                "mdns",
+                "/ip4/192.168.1.99/tcp/99",
+                2_000,
+                Some(u64::MAX),
+            ),
+            2_000,
+            &trust,
+            true,
+            false,
+        );
+        assert_eq!(
+            set.overflow_stats().configured_refused,
+            0,
+            "an unpinned refusal is ordinary backpressure, not lost configuration"
+        );
+    }
+
+    #[test]
+    fn a_configured_fact_refused_at_a_full_pinned_cap_is_counted() {
+        // The same clause at the fact cap, which has the same asymmetry
+        // and the same permanence.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let p = identity(112);
+        let addr = "/ip4/10.0.0.1/tcp/1";
+
+        let mut pinned = for_id(&p, "static", addr, 1_000, None);
+        for i in 0..MAX_OBSERVATIONS_PER_PEER {
+            pinned.protocol_observations.insert(ProtocolObservation {
+                protocol_id: ProtocolId::parse(format!("/interweave/p{i}/1.0.0")).expect("valid"),
+                supported: true,
+                observed_at: 1_000 + i as u64,
+            });
+        }
+        set.observe(&pinned, 1_000, &trust, false, true);
+        let before = set.overflow_stats().configured_refused;
+
+        let mut extra = for_id(&p, "static-b", "/ip4/10.0.0.2/tcp/2", 2_000, None);
+        extra.protocol_observations.insert(ProtocolObservation {
+            protocol_id: ProtocolId::parse("/interweave/direct/2.0.0").expect("valid"),
+            supported: true,
+            observed_at: 2_000,
+        });
+        set.observe(&extra, 2_000, &trust, false, true);
+
+        assert_eq!(
+            set.overflow_stats().configured_refused,
+            before + 1,
+            "the configured fact refused at a fully-pinned cap is counted"
         );
     }
 }
