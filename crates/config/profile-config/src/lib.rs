@@ -26,6 +26,7 @@
 
 use std::collections::BTreeSet;
 
+use interweave_discovery_api::MAX_ADDRESS_BYTES;
 use interweave_transport_api::{ChannelId, EndpointId, TransportIdentity};
 use interweave_trust_api::{EndpointTrustPolicy, PeerTrustPolicy};
 use serde::{Deserialize, Serialize};
@@ -669,11 +670,18 @@ pub fn split_peer_multiaddr(entry: &str) -> Result<(&str, TransportIdentity), &'
         .map_err(|_| "the PeerId is not a valid identity")?;
     Ok((address, identity))
 }
-/// Longest single static bootstrap entry, in bytes.
+/// The ceiling on one configured `<multiaddr>/p2p/<PeerId>` entry.
 ///
-/// The same ceiling `discovery-api` puts on an opaque address, because
-/// that is what the entry becomes.
-pub const MAX_STATIC_PEER_BYTES: usize = 256;
+/// DERIVED FROM THE PARTS, not chosen. A flat 256 was applied to the
+/// whole value while `StaticEntry` accepts an address of 256 on its own,
+/// so a legal 220-byte address became illegal the moment its required
+/// peer suffix was appended — a limit that contradicted the API it feeds.
+///
+/// Each half is also checked against its own limit after the split, so
+/// this bound stops an oversized entry from being read and the halves
+/// decide what is actually well-formed.
+pub const MAX_STATIC_PEER_BYTES: usize =
+    MAX_ADDRESS_BYTES + "/p2p/".len() + TransportIdentity::MAX_BYTES;
 /// Maximum advertised endpoints the directory may hold.
 ///
 /// The wire's own bound (ADR-0031), read from the contract crate rather
@@ -1943,11 +1951,24 @@ impl ProfileConfig {
                     // become a usable entry, and deferring the complaint
                     // to wiring turns a configuration error into a
                     // startup failure with no line number in it.
-                    if let Err(reason) = split_peer_multiaddr(peer) {
-                        errors.push(ConfigError::StaticPeerNotPeerQualified {
+                    match split_peer_multiaddr(peer) {
+                        Err(reason) => errors.push(ConfigError::StaticPeerNotPeerQualified {
                             entry: peer.clone(),
                             reason,
-                        });
+                        }),
+                        // EACH HALF AGAINST ITS OWN LIMIT. The wire
+                        // ceiling bounds what is READ and is the sum of
+                        // the parts, so on its own it would accept an
+                        // address longer than `StaticEntry` will take —
+                        // moving the rejection to wiring, where it is a
+                        // startup failure with no line number in it.
+                        Ok((address, _)) if address.len() > MAX_ADDRESS_BYTES => {
+                            errors.push(ConfigError::StaticPeerNotPeerQualified {
+                                entry: peer.clone(),
+                                reason: "the address is longer than a candidate address may be",
+                            });
+                        }
+                        Ok(_) => {}
                     }
                 }
             } else if !entry.config.peers.is_empty() {
@@ -3586,5 +3607,73 @@ mod tests {
             .expect("an explicit priority parses");
             assert_eq!(parsed.providers[0].priority, value);
         }
+    }
+    #[test]
+    fn a_long_address_is_not_rejected_merely_for_carrying_a_peer_id() {
+        // A flat 256-byte ceiling on the whole value made a legal address
+        // illegal the moment its required `/p2p/<PeerId>` suffix was
+        // appended — a limit contradicting the API it feeds, since
+        // `StaticEntry` accepts an address of 256 on its own.
+        let address = format!("/dns4/{}/tcp/4001", "a".repeat(200));
+        assert!(
+            address.len() <= MAX_ADDRESS_BYTES,
+            "the address alone is within what a candidate address may be"
+        );
+        let entry = format!("{address}/p2p/{P1}");
+        assert!(
+            entry.len() > 256,
+            "and the whole entry is past the old flat ceiling, or this \
+             test proves nothing"
+        );
+
+        let json = serde_json::json!({
+            "providers": [{
+                "type": "static-bootstrap",
+                "enabled": true,
+                "priority": 20,
+                "config": { "peers": [entry] }
+            }]
+        });
+        let mut profile = config(vec![endpoint("chat")]);
+        profile.discovery = serde_json::from_value(json).expect("the entry is readable");
+        let offending: Vec<_> = profile
+            .validate()
+            .into_iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    ConfigError::StaticPeerNotPeerQualified { .. }
+                        | ConfigError::InvalidStaticPeer { .. }
+                )
+            })
+            .collect();
+        assert!(offending.is_empty(), "it is a legal entry: {offending:?}");
+    }
+
+    #[test]
+    fn an_address_longer_than_a_candidate_address_is_still_refused() {
+        // The control: raising the wire ceiling must not widen what is
+        // ACCEPTED, or the rejection simply moves to wiring, where it is
+        // a startup failure with no line number in it.
+        let address = format!("/dns4/{}/tcp/4001", "a".repeat(MAX_ADDRESS_BYTES));
+        let entry = format!("{address}/p2p/{P1}");
+        let json = serde_json::json!({
+            "providers": [{
+                "type": "static-bootstrap",
+                "enabled": true,
+                "priority": 20,
+                "config": { "peers": [entry] }
+            }]
+        });
+        let mut profile = config(vec![endpoint("chat")]);
+        profile.discovery = serde_json::from_value(json).expect("within the wire ceiling");
+        assert!(
+            profile.validate().iter().any(|e| matches!(
+                e,
+                ConfigError::StaticPeerNotPeerQualified { reason, .. }
+                    if reason.contains("longer than a candidate address")
+            )),
+            "the address half is checked against its own limit"
+        );
     }
 }
