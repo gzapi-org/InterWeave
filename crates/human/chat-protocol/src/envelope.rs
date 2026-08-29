@@ -90,6 +90,14 @@ pub enum EnvelopeError {
     TimestampOutOfRange,
     /// `from_endpoint` was not a valid EndpointId.
     MalformedFromEndpoint,
+    /// An object named the same member twice.
+    ///
+    /// JSON permits it; every parser resolves it differently, so no
+    /// document containing one has a single meaning.
+    DuplicateMember {
+        /// The member name that repeated.
+        name: String,
+    },
 }
 
 impl core::fmt::Display for EnvelopeError {
@@ -109,6 +117,9 @@ impl core::fmt::Display for EnvelopeError {
                 write!(f, "sent_at_ms must be within 0..={MAX_SENT_AT_MS}")
             }
             Self::MalformedFromEndpoint => write!(f, "from_endpoint is not a valid EndpointId"),
+            Self::DuplicateMember { name } => {
+                write!(f, "the member '{name}' appears more than once")
+            }
         }
     }
 }
@@ -150,6 +161,114 @@ fn is_canonical_id(value: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// A JSON value that refuses an object naming the same member twice.
+///
+/// `serde_json::Value` is a map, so it silently keeps the LAST of a
+/// repeated pair. RFC 8259 permits the duplicate and says nothing about
+/// which one wins, and implementations genuinely differ — first, last, or
+/// reject. A document that says `"text"` twice therefore has no single
+/// meaning, and a sender who controls both copies chooses which meaning
+/// each receiver sees: the one this parser shows a person, and a
+/// different one for anything that logs, filters, or bridges the same
+/// bytes with a different library.
+///
+/// This is the same argument the explicit-null handling below already
+/// makes — do not be more permissive than a schema-driven implementation
+/// — reached one step earlier. Rejection is the only answer that leaves
+/// every reader agreeing.
+///
+/// Rejection is RECURSIVE, and deliberately reaches inside members this
+/// version does not model. Unknown members are ignored here for forward
+/// compatibility, which means a later version WILL read them; an
+/// ambiguity parked inside one is ambiguous for that reader, and this is
+/// the only pass over those bytes that could have refused it.
+struct StrictValue(serde_json::Value);
+
+impl<'de> serde::Deserialize<'de> for StrictValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(StrictVisitor)
+    }
+}
+
+struct StrictVisitor;
+
+impl<'de> serde::de::Visitor<'de> for StrictVisitor {
+    type Value = StrictValue;
+
+    fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("any JSON value whose objects have unique member names")
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(StrictValue(serde_json::Value::Null))
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(StrictValue(serde_json::Value::Null))
+    }
+
+    fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E> {
+        Ok(StrictValue(serde_json::Value::Bool(v)))
+    }
+
+    fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E> {
+        Ok(StrictValue(serde_json::Value::from(v)))
+    }
+
+    fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E> {
+        Ok(StrictValue(serde_json::Value::from(v)))
+    }
+
+    fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E> {
+        Ok(StrictValue(serde_json::Value::from(v)))
+    }
+
+    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> {
+        Ok(StrictValue(serde_json::Value::String(v.to_owned())))
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        let mut items = Vec::new();
+        while let Some(StrictValue(item)) = seq.next_element()? {
+            items.push(item);
+        }
+        Ok(StrictValue(serde_json::Value::Array(items)))
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::MapAccess<'de>,
+    {
+        let mut out = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            let StrictValue(value) = map.next_value()?;
+            // INSERT AND CHECK, not check-then-insert: the returned
+            // Option IS the duplicate, so there is no window where the
+            // two can disagree.
+            if out.insert(key.clone(), value).is_some() {
+                return Err(serde::de::Error::custom(format!(
+                    "{DUPLICATE_MEMBER_PREFIX}{key}"
+                )));
+            }
+        }
+        Ok(StrictValue(serde_json::Value::Object(out)))
+    }
+}
+
+/// Marks a duplicate-member failure inside a `serde_json` error string.
+///
+/// `serde::de::Error::custom` is the only channel a visitor has, and it
+/// yields a `serde_json::Error`; this prefix is how `parse` recovers the
+/// specific refusal rather than reporting a generic syntax error. It is
+/// internal and never appears in `EnvelopeError`'s own Display.
+const DUPLICATE_MEMBER_PREFIX: &str = "interweave-duplicate-member:";
+
 impl HumanChatV2 {
     /// Parse and validate an envelope from its raw JSON text.
     ///
@@ -158,10 +277,23 @@ impl HumanChatV2 {
     /// kind, a non-canonical id, missing text, an out-of-range timestamp,
     /// or a malformed `from_endpoint`.
     pub fn parse(text: &str) -> Result<Self, EnvelopeError> {
-        let raw: serde_json::Value =
-            serde_json::from_str(text).map_err(|e| EnvelopeError::NotJson {
-                detail: e.to_string(),
-            })?;
+        let StrictValue(raw) = serde_json::from_str::<StrictValue>(text).map_err(|e| {
+            let detail = e.to_string();
+            detail.find(DUPLICATE_MEMBER_PREFIX).map_or(
+                EnvelopeError::NotJson {
+                    detail: detail.clone(),
+                },
+                |at| {
+                    let rest = &detail[at + DUPLICATE_MEMBER_PREFIX.len()..];
+                    // serde_json appends " at line L column C"; the member
+                    // name is everything before it.
+                    let name = rest.split(" at line ").next().unwrap_or(rest);
+                    EnvelopeError::DuplicateMember {
+                        name: name.to_owned(),
+                    }
+                },
+            )
+        })?;
 
         if raw.get("v").and_then(serde_json::Value::as_u64) != Some(2) {
             return Err(EnvelopeError::UnsupportedVersion);
@@ -390,5 +522,81 @@ mod tests {
         assert_eq!(MAX_BLOCK_NESTING, 16);
         assert_eq!(MAX_TABLE_ROWS, 256);
         assert_eq!(MAX_TABLE_COLUMNS, 32);
+    }
+
+    #[test]
+    fn a_repeated_member_is_refused_rather_than_resolved() {
+        // The sender controls both copies, so whichever one a parser
+        // keeps is the sender's choice per implementation: this one
+        // would have shown the LAST, and a logger, filter or bridge
+        // reading the same bytes with a different library can be shown
+        // the first. No answer that picks a copy is safe; only refusing
+        // leaves every reader agreeing.
+        let doubled = format!(
+            r#"{{"v":2,"kind":"text","app_message_id":"{ID}","text":"hello","text":"pay attention"}}"#
+        );
+        assert_eq!(
+            HumanChatV2::parse(&doubled),
+            Err(EnvelopeError::DuplicateMember {
+                name: "text".to_owned()
+            }),
+            "a duplicate member is refused, and names itself"
+        );
+
+        // POSITIVE CONTROL: the same document with one `text` is fine, so
+        // this is not a parser that refuses everything.
+        assert_eq!(
+            HumanChatV2::parse(&envelope(""))
+                .expect("the single-member form still parses")
+                .text,
+            "hi"
+        );
+
+        // The version and kind gates run AFTER the whole document is
+        // read, so a duplicate cannot hide behind them either.
+        let bad_version =
+            format!(r#"{{"v":9,"kind":"text","app_message_id":"{ID}","text":"a","text":"b"}}"#);
+        assert!(
+            matches!(
+                HumanChatV2::parse(&bad_version),
+                Err(EnvelopeError::DuplicateMember { .. })
+            ),
+            "ambiguity is refused before any field is interpreted"
+        );
+    }
+
+    #[test]
+    fn a_repeated_member_inside_an_unknown_field_is_refused_too() {
+        // Unknown members are ignored HERE for forward compatibility,
+        // which is exactly why an ambiguity parked inside one matters: a
+        // later version reads that field, and this is the only pass over
+        // these bytes that could have refused it.
+        let nested = format!(
+            r#"{{"v":2,"kind":"text","app_message_id":"{ID}","text":"hi","future":{{"x":1,"x":2}}}}"#
+        );
+        assert_eq!(
+            HumanChatV2::parse(&nested),
+            Err(EnvelopeError::DuplicateMember {
+                name: "x".to_owned()
+            }),
+            "the refusal reaches inside a member this version does not model"
+        );
+
+        // Arrays are walked too — an object inside one is still an
+        // object — and the unknown field itself is otherwise ignored.
+        let in_array = format!(
+            r#"{{"v":2,"kind":"text","app_message_id":"{ID}","text":"hi","future":[{{"y":1,"y":2}}]}}"#
+        );
+        assert!(matches!(
+            HumanChatV2::parse(&in_array),
+            Err(EnvelopeError::DuplicateMember { .. })
+        ));
+        let clean = format!(
+            r#"{{"v":2,"kind":"text","app_message_id":"{ID}","text":"hi","future":[{{"y":1}},2,null]}}"#
+        );
+        assert!(
+            HumanChatV2::parse(&clean).is_ok(),
+            "an unknown field with no ambiguity in it is still ignored, not rejected"
+        );
     }
 }
