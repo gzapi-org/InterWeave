@@ -113,7 +113,8 @@ impl DiscoveryProviderType {
 #[serde(deny_unknown_fields)]
 pub struct DiscoveryProviderSettings {
     /// `static-bootstrap`: the configured entries, each a multiaddr
-    /// ending in `/p2p/<PeerId>`.
+    /// ending in `/p2p/<PeerId>`, checked against the vocabulary
+    /// `architecture/discovery/providers/static-bootstrap.md` accepts.
     #[serde(
         default,
         skip_serializing_if = "Vec::is_empty",
@@ -628,6 +629,71 @@ pub const KADEMLIA_SEED_SOURCES: [&str; 3] = ["peer-cache", "mdns", "static-boot
 /// Maximum static bootstrap entries.
 pub const MAX_STATIC_BOOTSTRAP_PEERS: usize = 64;
 
+/// Host protocols a configured address may name.
+///
+/// From `architecture/discovery/providers/static-bootstrap.md`, which
+/// names `/dns4` and `/dns6` explicitly, plus the IP literals every
+/// documented profile uses. Not a guess at what libp2p can parse: it is
+/// the set an operator is allowed to configure, and it widens by
+/// decision.
+const ADDRESS_HOST_PROTOCOLS: [&str; 4] = ["ip4", "ip6", "dns4", "dns6"];
+
+/// Transport protocols a configured address may name.
+///
+/// TCP alone, which is what the substrate builds (Stage 4). A profile
+/// naming a transport this build cannot dial is a configuration error an
+/// operator should read here, not a dial failure later.
+const ADDRESS_TRANSPORT_PROTOCOLS: [&str; 1] = ["tcp"];
+
+/// `/<host>/<value>/<transport>/<port>` against the documented set.
+fn validate_address_grammar(address: &str) -> Result<(), &'static str> {
+    if !address.starts_with('/') {
+        return Err("the address does not start with '/'");
+    }
+    let parts: Vec<&str> = address.split('/').skip(1).collect();
+    if parts.iter().any(|component| component.is_empty()) {
+        return Err("the address has an empty component");
+    }
+    let [host, host_value, transport, port] = parts.as_slice() else {
+        return Err("the address is not /<host>/<value>/<transport>/<port>");
+    };
+    if !ADDRESS_HOST_PROTOCOLS.contains(host) {
+        return Err("the address names a host protocol this build does not support");
+    }
+    if !ADDRESS_TRANSPORT_PROTOCOLS.contains(transport) {
+        return Err("the address names a transport this build does not support");
+    }
+    if port.parse::<u16>().is_err() {
+        return Err("the port is not a number in 0..=65535");
+    }
+    match *host {
+        "ip4" => {
+            let octets: Vec<&str> = host_value.split('.').collect();
+            if octets.len() != 4 || octets.iter().any(|o| o.parse::<u8>().is_err()) {
+                return Err("the /ip4 value is not a dotted-quad address");
+            }
+        }
+        "ip6" => {
+            if !host_value
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || c == ':')
+                || !host_value.contains(':')
+            {
+                return Err("the /ip6 value is not a hexadecimal address");
+            }
+        }
+        // A DNS name is not resolved here and must not be: resolution is
+        // the dial path's job, and a name that fails to resolve later is
+        // a dial diagnostic rather than a bad profile (the same file).
+        _ => {
+            if host_value.starts_with('.') || host_value.ends_with('.') {
+                return Err("the DNS name has an empty label");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Split a `multiaddr-with-peer-id` into its address and PeerId halves.
 ///
 /// The address half is checked STRUCTURALLY and not against the multiaddr
@@ -647,22 +713,18 @@ pub fn split_peer_multiaddr(entry: &str) -> Result<(&str, TransportIdentity), &'
     if address.is_empty() {
         return Err("no address before /p2p/");
     }
-    // STRUCTURAL, not the multiaddr grammar itself: the protocol table is
-    // a backend concept, and a configuration crate importing libp2p to
-    // spell it would invert the layering `crates/api` exists to hold.
-    // This rejects `garbage/p2p/<id>` and `/ip4//tcp/1/p2p/<id>` — the
-    // shapes an operator actually typos — while `/nonsense/1/p2p/<id>`
-    // reaches the dial path, which owns that vocabulary.
-    if !address.starts_with('/') {
-        return Err("the address does not start with '/'");
-    }
-    if address
-        .split('/')
-        .skip(1)
-        .any(|component| component.is_empty())
-    {
-        return Err("the address has an empty component");
-    }
+    // THE DOCUMENTED VOCABULARY, not merely a shape.
+    // `architecture/discovery/providers/static-bootstrap.md` requires
+    // invalid multiaddress syntax to fail CONFIG validation, and a
+    // structural check alone let `/nonsense/1/p2p/<valid id>` validate,
+    // report healthy, and fail at every dial.
+    //
+    // Spelled out here rather than delegated to libp2p: a configuration
+    // crate pulling in a networking stack to name five protocols inverts
+    // the layering, and the accepted set is a documented decision (that
+    // same file) rather than whatever a dependency happens to parse. It
+    // widens when a transport is added, in the commit that adds it.
+    validate_address_grammar(address)?;
     if peer.is_empty() || peer.contains('/') {
         return Err("the /p2p/ component is not a single PeerId");
     }
@@ -3675,5 +3737,49 @@ mod tests {
             )),
             "the address half is checked against its own limit"
         );
+    }
+    #[test]
+    fn an_unknown_protocol_fails_config_validation() {
+        // static-bootstrap.md: "Invalid PeerId/multiaddress syntax fails
+        // config validation." A structural check let this validate,
+        // report healthy, and fail at every dial.
+        for bad in [
+            "/nonsense/1/tcp/4001",
+            "/ip4/10.0.0.1/udp/4001",
+            "/ip4/999.0.0.1/tcp/4001",
+            "/ip4/10.0.0.1/tcp/70000",
+            "/ip4/10.0.0.1/tcp/http",
+            "/ip4/10.0.0.1",
+            "/dns4/host.example/tcp/4001/ws",
+            "/ip6/nothex/tcp/4001",
+            "/dns4/.leading/tcp/4001",
+        ] {
+            let entry = format!("{bad}/p2p/{P1}");
+            assert!(
+                split_peer_multiaddr(&entry).is_err(),
+                "'{bad}' must fail config validation"
+            );
+        }
+    }
+
+    #[test]
+    fn every_documented_address_shape_is_accepted() {
+        // The control, drawn from the shapes the schema's own examples
+        // and static-bootstrap.md use. A validator that refuses the
+        // documented profiles is worse than none.
+        for good in [
+            "/ip4/10.0.0.1/tcp/4001",
+            "/ip4/127.0.0.1/tcp/0",
+            "/ip6/::1/tcp/4001",
+            "/ip6/2001:db8::1/tcp/4001",
+            "/dns4/bootstrap.example.net/tcp/4001",
+            "/dns6/bootstrap.example.net/tcp/4001",
+        ] {
+            let entry = format!("{good}/p2p/{P1}");
+            let (address, id) = split_peer_multiaddr(&entry)
+                .unwrap_or_else(|reason| panic!("'{good}' is documented: {reason}"));
+            assert_eq!(address, good);
+            assert_eq!(id, peer(P1));
+        }
     }
 }
