@@ -258,7 +258,14 @@ impl StaticBootstrapDiscovery {
             }
         }
         self.pending = kept;
-        for event in dropped {
+
+        // UNDONE IN REVERSE: a dropped pair for one peer is [retraction,
+        // observation] in queue order, and applying the rollbacks
+        // forwards restored the retracted addresses and then deleted the
+        // whole record, losing the retraction the first step existed to
+        // preserve. Here that is permanent, because the manager holds
+        // static provenance without expiry.
+        for event in dropped.into_iter().rev() {
             match event {
                 DiscoveryEvent::CandidateObserved { candidate } => {
                     self.emitted.remove(&candidate.peer_id);
@@ -868,6 +875,72 @@ mod tests {
                 .any(|e| matches!(e, DiscoveryEvent::HealthChanged { .. })),
             "the health transition is still delivered after {} events",
             queued.len()
+        );
+    }
+    #[test]
+    fn dropping_a_retraction_and_its_observation_together_still_recreates_both() {
+        // A peer whose configured address set shrank queues a retraction
+        // and an observation ADJACENTLY, so queue pressure takes both or
+        // neither. Rolling them back in queue order restored the
+        // retracted addresses and then deleted the whole record — and
+        // here the loss is permanent, because the manager holds static
+        // provenance without expiry.
+        //
+        // Driven at the bound directly with the state `refresh` produces:
+        // burying the pair through reloads alone would have to leave the
+        // peer untouched for long enough, and any reload that touches it
+        // requeues its observation at the end.
+        let kept = "/ip4/10.0.0.1/tcp/1";
+        let removed = "/ip4/10.0.0.2/tcp/2";
+        let mut p = StaticBootstrapDiscovery::new(vec![entry(P1, kept)]).expect("legal entries");
+        p.start(0).expect("starts");
+        let _ = p.drain_events(0, usize::MAX);
+
+        // The consumer was told about both; only one is configured.
+        p.emitted.insert(
+            peer(P1),
+            [kept.to_owned(), removed.to_owned()].into_iter().collect(),
+        );
+        p.refresh(20);
+        assert!(
+            p.pending.iter().any(|e| matches!(
+                e,
+                DiscoveryEvent::CandidateExpired { addresses, .. }
+                    if addresses.contains(removed)
+            )),
+            "the pair is queued"
+        );
+
+        for i in 0..MAX_PENDING_EVENTS {
+            p.pending.push(observed(
+                &synthetic(1_000 + i),
+                &[kept.to_owned()].into_iter().collect(),
+                30,
+            ));
+        }
+        p.enforce_pending_bound();
+        assert!(
+            !p.pending.iter().any(|e| matches!(
+                e,
+                DiscoveryEvent::CandidateExpired { addresses, .. }
+                    if addresses.contains(removed)
+            )),
+            "the retraction was indeed trimmed, or this proves nothing"
+        );
+
+        let mut recreated = false;
+        for _ in 0..10 {
+            for event in p.drain_events(40, usize::MAX) {
+                if let DiscoveryEvent::CandidateExpired { addresses, .. } = event
+                    && addresses.contains(removed)
+                {
+                    recreated = true;
+                }
+            }
+        }
+        assert!(
+            recreated,
+            "the retraction is recreated after both halves were dropped"
         );
     }
 }
