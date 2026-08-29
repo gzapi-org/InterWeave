@@ -813,7 +813,23 @@ impl CandidateSet {
                 // ages out. A fact's pinnedness is its source's — any
                 // pinned live record. When every held fact is pinned the
                 // bound stands: configuration does not grow it.
-                if !provider_pinned {
+                //
+                // ASKED OF THE INCOMING SOURCE THE SAME WAY IT IS ASKED
+                // OF THE VICTIM. `provider_pinned` is the descriptor's
+                // claim, not evidence: a configured provider sending an
+                // ADDRESSLESS observation, or one whose every address was
+                // refused at the per-peer cap, holds no live provenance
+                // here. Trusting the claim let it destroy a valid
+                // unpinned fact and insert one `candidates()` then hides,
+                // because that read filters facts to sources in the live
+                // set — a fact lost for a fact nobody can see.
+                let incoming_is_pinned = provider_pinned
+                    && entry
+                        .addresses
+                        .values()
+                        .flat_map(|records| records.iter())
+                        .any(|r| r.source == candidate.source && r.pinned);
+                if !incoming_is_pinned {
                     continue;
                 }
                 let victim = entry
@@ -5635,6 +5651,63 @@ mod tests {
             set.overflow_stats().configured_refused,
             before + 1,
             "the configured fact refused at a fully-pinned cap is counted"
+        );
+    }
+    #[test]
+    fn a_pinned_source_with_no_live_record_does_not_displace_a_fact() {
+        // `provider_pinned` is the descriptor's claim; the victim side
+        // asks for a live pinned RECORD. Asked only of the victim, a
+        // configured provider sending an addressless observation — no
+        // provenance here at all — destroyed a valid unpinned fact and
+        // inserted one `candidates()` hides, because that read filters
+        // facts to sources in the live set.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let p = identity(120);
+        let addr = "/ip4/192.168.1.5/tcp/4001";
+
+        let mut full = for_id(&p, "mdns", addr, 1_000, Some(u64::MAX));
+        for i in 0..MAX_OBSERVATIONS_PER_PEER {
+            full.protocol_observations.insert(ProtocolObservation {
+                protocol_id: ProtocolId::parse(format!("/interweave/p{i}/1.0.0")).expect("valid"),
+                supported: true,
+                observed_at: 1_000 + i as u64,
+            });
+        }
+        set.observe(&full, 1_000, &trust, true, false);
+        let held: BTreeSet<(ProtocolId, String)> = set
+            .peers
+            .get(&p)
+            .expect("known")
+            .observations
+            .keys()
+            .cloned()
+            .collect();
+
+        // A configured provider with NO addresses for this peer.
+        let mut addressless = for_id(&p, "static", addr, 2_000, None);
+        addressless.addresses.clear();
+        addressless
+            .protocol_observations
+            .insert(ProtocolObservation {
+                protocol_id: ProtocolId::parse("/interweave/direct/2.0.0").expect("valid"),
+                supported: true,
+                observed_at: 2_000,
+            });
+        set.observe(&addressless, 2_000, &trust, false, true);
+
+        let entry = set.peers.get(&p).expect("known");
+        assert_eq!(
+            entry.observations.keys().cloned().collect::<BTreeSet<_>>(),
+            held,
+            "no live fact was destroyed for a source holding no provenance"
+        );
+        assert!(
+            !entry
+                .observations
+                .keys()
+                .any(|(proto, _)| proto.as_str() == "/interweave/direct/2.0.0"),
+            "and the invisible orphan was not inserted"
         );
     }
 }
