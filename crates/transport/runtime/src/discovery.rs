@@ -495,7 +495,19 @@ impl CandidateSet {
         // A peer ALREADY known still takes the event: its observations
         // merge, its recency advances, and it is holding its
         // slot on addresses it already has.
-        let contributes_nothing = candidate.addresses.is_empty() || expires_at <= now_ms;
+        // STALENESS IS DECIDED BEFORE CAPACITY, not after. Computed
+        // below the eviction it would otherwise have been, a stale event
+        // for a peer the set no longer holds evicted a live candidate to
+        // make room and then added no address — trading a reachable peer
+        // for an empty entry. It belongs with the other "this event buys
+        // nothing" tests, which is where it now is.
+        let key = (candidate.peer_id.clone(), candidate.source.clone());
+        let stale = self
+            .high_water
+            .get(&key)
+            .is_some_and(|high| candidate.observed_at < *high);
+
+        let contributes_nothing = candidate.addresses.is_empty() || expires_at <= now_ms || stale;
         if contributes_nothing && !self.peers.contains_key(&candidate.peer_id) {
             return;
         }
@@ -509,6 +521,45 @@ impl CandidateSet {
                 // one is what an attacker would want.
                 return;
             }
+        }
+
+        if !stale {
+            if self.high_water.len() >= MAX_HIGH_WATER && !self.high_water.contains_key(&key) {
+                // REDUNDANT MARKS GO FIRST, not oldest ones. A mark whose
+                // `(peer, source)` still has live provenance is already
+                // covered by the forward-only rule on that record, so
+                // dropping it costs nothing. A mark for a source that
+                // supports nothing is the only thing standing between a
+                // delayed event and the address it withdrew.
+                //
+                // Oldest-first was the obvious policy and the wrong one:
+                // a retracted peer's mark is by construction among the
+                // oldest, so it evicted exactly the marks the guard
+                // exists for — filling the set was enough to defeat it.
+                let redundant = self
+                    .high_water
+                    .keys()
+                    .find(|(peer, source)| {
+                        self.peers.get(peer).is_some_and(|e| {
+                            e.addresses
+                                .values()
+                                .flat_map(|records| records.iter())
+                                .any(|r| r.source == *source)
+                        })
+                    })
+                    .cloned();
+                let victim = redundant.or_else(|| {
+                    self.high_water
+                        .iter()
+                        .min_by_key(|(_, at)| **at)
+                        .map(|(k, _)| k.clone())
+                });
+                if let Some(victim) = victim {
+                    self.high_water.remove(&victim);
+                }
+            }
+            let mark = self.high_water.entry(key).or_default();
+            *mark = (*mark).max(candidate.observed_at);
         }
 
         let entry = self.peers.entry(candidate.peer_id.clone()).or_default();
@@ -534,28 +585,6 @@ impl CandidateSet {
         // carry their own timestamps and are guarded individually below,
         // so a candidate that is stale about reachability may still carry
         // a fact worth merging.
-        let key = (candidate.peer_id.clone(), candidate.source.clone());
-        let stale = self
-            .high_water
-            .get(&key)
-            .is_some_and(|high| candidate.observed_at < *high);
-        if !stale {
-            if self.high_water.len() >= MAX_HIGH_WATER && !self.high_water.contains_key(&key) {
-                // Oldest first: the mark least likely to still be
-                // guarding against an event still in flight.
-                if let Some(oldest) = self
-                    .high_water
-                    .iter()
-                    .min_by_key(|(_, at)| **at)
-                    .map(|(k, _)| k.clone())
-                {
-                    self.high_water.remove(&oldest);
-                }
-            }
-            let mark = self.high_water.entry(key).or_default();
-            *mark = (*mark).max(candidate.observed_at);
-        }
-
         for address in &candidate.addresses {
             if stale {
                 break;
@@ -3475,6 +3504,66 @@ mod tests {
             set.high_water.len() <= MAX_HIGH_WATER,
             "the watermark map stays within its bound, got {}",
             set.high_water.len()
+        );
+    }
+    #[test]
+    fn a_stale_event_for_a_forgotten_peer_does_not_evict_a_live_one() {
+        // Computed below the eviction, staleness came too late: the event
+        // evicted a live candidate to make room and then added no
+        // address, trading a reachable peer for an empty entry.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let ghost = identity(141);
+        let address = "/ip4/10.0.0.1/tcp/4001";
+
+        // Known, then retracted: the watermark survives, the peer does not.
+        set.observe(
+            &for_id(&ghost, "peer-cache", address, 1_000, Some(u64::MAX)),
+            1_000,
+            &trust,
+            true,
+            false,
+        );
+        set.retract(&ghost, "peer-cache", &BTreeSet::new());
+
+        // Fill the set with live peers.
+        for i in 0..MAX_CANDIDATES {
+            set.observe(
+                &for_id(
+                    &identity(300_000 + i),
+                    "mdns",
+                    "/ip4/10.1.0.1/tcp/1",
+                    2_000 + i as u64,
+                    Some(u64::MAX),
+                ),
+                2_000 + i as u64,
+                &trust,
+                true,
+                false,
+            );
+        }
+        let before = set.candidates(9_000_000, &|_| None).len();
+        assert_eq!(before, MAX_CANDIDATES, "the set is full of live peers");
+
+        // The delayed stale event for the forgotten peer.
+        set.observe(
+            &for_id(&ghost, "peer-cache", address, 500, Some(u64::MAX)),
+            9_000_000,
+            &trust,
+            true,
+            false,
+        );
+
+        assert_eq!(
+            set.candidates(9_000_000, &|_| None).len(),
+            before,
+            "nothing was displaced for an event that adds no address"
+        );
+        assert!(
+            !set.candidates(9_000_000, &|_| None)
+                .iter()
+                .any(|c| c.peer_id == ghost),
+            "and the forgotten peer did not come back"
         );
     }
 }
