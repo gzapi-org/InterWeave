@@ -682,12 +682,31 @@ fn validate_address_grammar(address: &str) -> Result<(), &'static str> {
                 return Err("the /ip6 value is not an IPv6 address");
             }
         }
-        // A DNS name is not resolved here and must not be: resolution is
+        // A DNS name is not RESOLVED here and must not be: resolution is
         // the dial path's job, and a name that fails to resolve later is
         // a dial diagnostic rather than a bad profile (the same file).
+        // Its SYNTAX is another matter — `a..b` cannot resolve for any
+        // nameserver, so it is a bad profile and not a dial diagnostic,
+        // and checking only the ends left every interior fault standing.
         _ => {
-            if host_value.starts_with('.') || host_value.ends_with('.') {
-                return Err("the DNS name has an empty label");
+            if host_value.is_empty() || host_value.len() > 253 {
+                return Err("the DNS name is empty or longer than 253 bytes");
+            }
+            for label in host_value.split('.') {
+                if label.is_empty() || label.len() > 63 {
+                    return Err("the DNS name has an empty or over-long label");
+                }
+                // Letters, digits and hyphen — the preferred name syntax,
+                // and what a hostname a dial can use is limited to.
+                if !label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                {
+                    return Err("a DNS label has a character outside [A-Za-z0-9-]");
+                }
+                if label.starts_with('-') || label.ends_with('-') {
+                    return Err("a DNS label starts or ends with '-'");
+                }
             }
         }
     }
@@ -3705,7 +3724,13 @@ mod tests {
         // illegal the moment its required `/p2p/<PeerId>` suffix was
         // appended — a limit contradicting the API it feeds, since
         // `StaticEntry` accepts an address of 256 on its own.
-        let address = format!("/dns4/{}/tcp/4001", "a".repeat(200));
+        // Built from LEGAL labels: a single 200-byte label is over the
+        // 63-byte DNS limit, and this test is about the byte ceiling
+        // rather than DNS syntax.
+        let name = std::iter::repeat_n("a".repeat(46), 4)
+            .collect::<Vec<_>>()
+            .join(".");
+        let address = format!("/dns4/{name}/tcp/4001");
         assert!(
             address.len() <= MAX_ADDRESS_BYTES,
             "the address alone is within what a candidate address may be"
@@ -3746,7 +3771,12 @@ mod tests {
         // The control: raising the wire ceiling must not widen what is
         // ACCEPTED, or the rejection simply moves to wiring, where it is
         // a startup failure with no line number in it.
-        let address = format!("/dns4/{}/tcp/4001", "a".repeat(MAX_ADDRESS_BYTES));
+        // 244 bytes: within the 253-byte DNS ceiling, so the grammar
+        // passes and the ADDRESS limit is what refuses it.
+        let name = std::iter::repeat_n("a".repeat(48), 5)
+            .collect::<Vec<_>>()
+            .join(".");
+        let address = format!("/dns4/{name}/tcp/4001");
         let entry = format!("{address}/p2p/{P1}");
         let json = serde_json::json!({
             "providers": [{
@@ -3782,6 +3812,12 @@ mod tests {
             "/dns4/host.example/tcp/4001/ws",
             "/ip6/nothex/tcp/4001",
             "/dns4/.leading/tcp/4001",
+            "/dns4/a..b/tcp/4001",
+            "/dns4/trailing./tcp/4001",
+            "/dns4/has space/tcp/4001",
+            "/dns4/-leading-hyphen.example/tcp/4001",
+            "/dns4/trailing-hyphen-.example/tcp/4001",
+            "/dns4/under_score.example/tcp/4001",
         ] {
             let entry = format!("{bad}/p2p/{P1}");
             assert!(
@@ -3803,6 +3839,9 @@ mod tests {
             "/ip6/2001:db8::1/tcp/4001",
             "/dns4/bootstrap.example.net/tcp/4001",
             "/dns6/bootstrap.example.net/tcp/4001",
+            "/dns4/host-with-hyphens.example.net/tcp/4001",
+            "/dns4/localhost/tcp/4001",
+            "/dns4/a1.b2.c3/tcp/4001",
         ] {
             let entry = format!("{good}/p2p/{P1}");
             let (address, id) = split_peer_multiaddr(&entry)
