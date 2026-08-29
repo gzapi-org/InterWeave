@@ -90,6 +90,17 @@ else
     bad "this repository fails: $(run "$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)")"
 fi
 
+echo "check_component_status: --root with no value is an invocation error"
+# Guarded by `timeout`: the failure mode is an infinite loop, so a bare
+# assertion would hang the suite rather than fail it.
+if timeout 5 bash "$GUARD" --root >/dev/null 2>&1; then
+    bad "--root with no value should be an invocation error"
+elif [ "$?" = 124 ]; then
+    bad "--root with no value hung instead of failing"
+else
+    ok "--root with no value"
+fi
+
 echo
 if [ "$failures" -eq 0 ]; then
     echo "test_check_component_status: OK — all assertions passed."
