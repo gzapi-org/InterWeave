@@ -89,7 +89,7 @@ discovery:
       priority: 10
       config:
         ttl: 24h
-        max_entries: 4096
+        max_entries: 1024
     - type: kademlia
       enabled: true
       priority: 40
