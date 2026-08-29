@@ -147,23 +147,21 @@ impl MdnsDiscovery {
             return false;
         }
 
-        // A DEAD ENTRY IS NOT AN OCCUPIED ONE. `seen` holds records until
-        // `sweep` runs, and `sweep` runs on drain — so an announcement
-        // arriving after the TTL but before the next drain met a map full
-        // of peers that had already lapsed, and was refused. The drain
-        // afterwards clears them but cannot recover the announcement,
-        // which for mDNS is one shot: nothing repeats it until the peer
-        // announces again.
+        // A DEAD ENTRY IS NOT AN OCCUPIED ONE, and clearing one is a
+        // RETRACTION rather than a deletion. `seen` holds records until
+        // they are swept, so an announcement arriving after the TTL but
+        // before the next drain met a map of peers that had already
+        // lapsed and was refused — and for mDNS that refusal is final,
+        // since nothing repeats a one-shot announcement.
         //
-        // Same rule as the manager's address and observation caps, and
-        // the third place it was needed. Pruning here rather than
-        // depending on drain ordering makes both caps mean "records that
-        // have not lapsed", which is what they were always read as.
-        self.seen.retain(|_, addresses| {
-            addresses.retain(|_, expires_at| now_ms < *expires_at);
-            !addresses.is_empty()
-        });
-        self.last_emitted.retain(|p, _| self.seen.contains_key(p));
+        // This calls `sweep` rather than pruning here. A second prune was
+        // the obvious shape and was wrong: it deleted the record while
+        // `sweep` also QUEUES the expiry, so a peer whose addresses lapse
+        // at different times lost the retraction for the first one, and
+        // any pending observation still naming it kept the manager
+        // dialling a route this provider had silently forgotten. One
+        // place decides what lapsing means.
+        self.sweep(now_ms);
 
         let known = self.seen.contains_key(&peer_id);
         if !known && self.seen.len() >= MAX_PEERS {
@@ -1217,6 +1215,49 @@ mod tests {
         assert!(
             !p.push_discovered(&synthetic_peer(9_999), "/ip4/10.0.0.9/tcp/4001", 1),
             "the map is full of LIVE peers, so the newcomer is refused"
+        );
+    }
+    #[test]
+    fn an_address_lapsing_before_its_peers_others_is_retracted_not_deleted() {
+        // One address lapses while another is still live, and an
+        // announcement arrives before the next drain. Pruning the lapsed
+        // record silently deleted it: no retraction was queued, and a
+        // pending observation naming it gave every included address the
+        // peer's MAXIMUM expiry — so the manager kept, or newly received,
+        // a route this provider had already forgotten, and no later sweep
+        // could repair it because the record was gone.
+        let mut p = started();
+        let subject = synthetic_peer(1);
+        let short = "/ip4/192.168.1.5/tcp/4001";
+        let long = "/ip4/192.168.1.6/tcp/4001";
+
+        p.push_discovered(&subject, short, 0);
+        // The second address is announced later, so it outlives the first.
+        let later = OBSERVATION_TTL_MS / 2;
+        p.push_discovered(&subject, long, later);
+        let _ = p.drain_events(later, usize::MAX);
+
+        // Past the first address's lifetime, not the second's. An
+        // announcement arrives, which is what reaches the capacity path.
+        let after_short = OBSERVATION_TTL_MS + 1;
+        p.push_discovered(&subject, long, after_short);
+
+        let events = p.drain_events(after_short, usize::MAX);
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                DiscoveryEvent::CandidateExpired { addresses, .. }
+                    if addresses.contains(short)
+            )),
+            "the lapsed address is retracted by name: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                DiscoveryEvent::CandidateObserved { candidate }
+                    if candidate.addresses.contains(short)
+            )),
+            "and no observation still names it: {events:?}"
         );
     }
 }
