@@ -738,6 +738,15 @@ impl CandidateSet {
 
         for observation in &candidate.protocol_observations {
             let key = (observation.protocol_id.clone(), candidate.source.clone());
+            // STALENESS IS DECIDED BEFORE CAPACITY — the same ordering
+            // the candidate cap already learned, one level down. Judged
+            // after the displacement, a stale pinned fact evicted a live
+            // unpinned one and was then refused itself: a slot emptied
+            // for evidence that was never going to land.
+            let floor = entry.fact_applied.get(&key).copied().unwrap_or(0);
+            if floor > observation.observed_at {
+                continue;
+            }
             if !entry.observations.contains_key(&key)
                 && entry.observations.len() >= MAX_OBSERVATIONS_PER_PEER
             {
@@ -773,12 +782,9 @@ impl CandidateSet {
                 }
             }
             // THE NEWEST EVIDENCE WINS, not the last one iterated —
-            // and the threshold survives the fact's own removal, so a
-            // withdrawn fact cannot be re-asserted by delayed evidence.
-            let floor = entry.fact_applied.get(&key).copied().unwrap_or(0);
-            if floor > observation.observed_at {
-                continue;
-            }
+            // and the threshold survives the fact's own removal (checked
+            // above, before capacity), so a withdrawn fact cannot be
+            // re-asserted by delayed evidence.
             if !entry.fact_applied.contains_key(&key)
                 && entry.fact_applied.len() >= 2 * MAX_OBSERVATIONS_PER_PEER
             {
@@ -5091,6 +5097,83 @@ mod tests {
             set.overflow_stats().evicted + set.overflow_stats().refused,
             0,
             "and nothing here was a whole-candidate outcome"
+        );
+    }
+    #[test]
+    fn a_stale_pinned_fact_does_not_displace_a_live_one() {
+        // The floor ran after the displacement, so a stale fact evicted
+        // a live unpinned one and was then refused itself — a slot
+        // emptied for evidence that was never going to land.
+        //
+        // The peer is kept alive through mdns THROUGHOUT: entry removal
+        // discards `fact_applied` (a stated residual), so a whole-peer
+        // retraction here would silently drop the floor this test needs.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let p = identity(98);
+        let addr = "/ip4/10.0.0.1/tcp/1";
+        let proto = ProtocolId::parse("/interweave/direct/2.0.0").expect("valid");
+
+        set.observe(
+            &for_id(&p, "mdns", addr, 400, Some(u64::MAX)),
+            400,
+            &trust,
+            true,
+            false,
+        );
+
+        // static's fact applied at 500; static then retracts. The entry
+        // survives on mdns, so the fact goes and its floor stays.
+        let mut early = for_id(&p, "static", "/ip4/10.0.0.2/tcp/2", 500, None);
+        early.protocol_observations.insert(ProtocolObservation {
+            protocol_id: proto.clone(),
+            supported: true,
+            observed_at: 500,
+        });
+        set.observe(&early, 500, &trust, false, true);
+        set.retract(&p, "static", &BTreeSet::new());
+        assert_eq!(
+            set.peers
+                .get(&p)
+                .expect("alive")
+                .fact_applied
+                .get(&(proto.clone(), "static".to_owned())),
+            Some(&500),
+            "the scenario needs the floor to survive the retraction"
+        );
+
+        // Fill the fact map with live unpinned facts.
+        let mut full = for_id(&p, "mdns", addr, 1_000, Some(u64::MAX));
+        for i in 0..MAX_OBSERVATIONS_PER_PEER {
+            full.protocol_observations.insert(ProtocolObservation {
+                protocol_id: ProtocolId::parse(format!("/interweave/p{i}/1.0.0")).expect("valid"),
+                supported: true,
+                observed_at: 1_000 + i as u64,
+            });
+        }
+        set.observe(&full, 1_000, &trust, true, false);
+
+        // static returns with a fresh candidate replaying the OLD fact.
+        let mut stale = for_id(&p, "static", "/ip4/10.0.0.2/tcp/2", 2_000, None);
+        stale.protocol_observations.insert(ProtocolObservation {
+            protocol_id: proto.clone(),
+            supported: true,
+            observed_at: 300,
+        });
+        set.observe(&stale, 2_000, &trust, false, true);
+
+        let entry = set.peers.get(&p).expect("known");
+        assert_eq!(
+            entry.observations.len(),
+            MAX_OBSERVATIONS_PER_PEER,
+            "no slot was emptied for a fact that could never land"
+        );
+        assert!(
+            entry
+                .observations
+                .keys()
+                .all(|(pr, s)| s == "mdns" && pr.as_str().starts_with("/interweave/p")),
+            "every live unpinned fact survived the stale arrival"
         );
     }
 }
