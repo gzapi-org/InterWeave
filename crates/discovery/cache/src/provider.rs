@@ -119,11 +119,24 @@ impl PeerCacheDiscovery {
                 DiscoveryEvent::CandidateObserved { candidate } => {
                     self.emitted.remove(&candidate.peer_id);
                 }
-                DiscoveryEvent::CandidateExpired { peer_id, .. } => {
-                    // Any record will do: `refresh` re-detects the peer as
-                    // gone because it is absent from the cache, not
-                    // because of what this holds.
-                    self.emitted.entry(peer_id).or_default();
+                DiscoveryEvent::CandidateExpired {
+                    peer_id, addresses, ..
+                } => {
+                    // PUT THE RETRACTED ADDRESSES BACK. `or_default()`
+                    // alone was right only for a whole-peer retraction,
+                    // where re-inserting the key is enough for `refresh`
+                    // to re-detect the peer as absent from the cache. For
+                    // a SELECTIVE one the peer is still live and its
+                    // record already sits in `emitted`, so the entry call
+                    // changed nothing, the next refresh saw no address
+                    // difference, and the retraction was gone — leaving
+                    // the manager dialling an address this cache had
+                    // already dropped.
+                    //
+                    // Restoring them recreates exactly the difference the
+                    // discarded event reported.
+                    let held = self.emitted.entry(peer_id).or_default();
+                    held.addresses.extend(addresses);
                 }
                 DiscoveryEvent::HealthChanged { .. } => {}
             }
@@ -1025,6 +1038,79 @@ mod tests {
              retracted; a dropped retraction must be recreated, not lost",
             stranded.len(),
             known.len()
+        );
+    }
+    #[test]
+    fn a_trimmed_selective_retraction_is_recreated() {
+        // The peer stays LIVE and only some of its addresses go, so
+        // `emitted` still holds its record — `entry(..).or_default()`
+        // changed nothing, the next refresh saw no address difference,
+        // and the retraction was lost. The manager then keeps dialling an
+        // address this cache already dropped.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut p = provider(&dir);
+        p.start(0).expect("start");
+        let _ = p.drain_events(0, usize::MAX);
+
+        // One peer at its per-peer address cap, learned by the consumer.
+        let subject = peer(P1);
+        let cap = crate::limits::MAX_ADDRESSES_PER_PEER;
+        for i in 0..cap {
+            p.cache_mut()
+                .record_success(&subject, &format!("/ip4/10.0.0.1/tcp/{i}"), i as u64)
+                .expect("within bounds");
+        }
+        let _ = p.drain_events(cap as u64, usize::MAX);
+        let evicted = "/ip4/10.0.0.1/tcp/0";
+
+        // Push the oldest address out, which owes a selective retraction,
+        // then bury it under enough other traffic to be trimmed.
+        p.cache_mut()
+            .record_success(&subject, "/ip4/10.0.0.1/tcp/999", 1_000)
+            .expect("within bounds");
+
+        // Bury it. Two things have to be true at once, and getting
+        // either wrong makes the test prove nothing:
+        //
+        //   * the queue must actually exceed the bound, which needs
+        //     churning IDENTITIES — per-peer coalescing holds a fixed
+        //     peer set at roughly one event each, so re-addressing the
+        //     same peers never reaches MAX_PENDING_EVENTS;
+        //   * P1 must stay LIVE, or it is evicted from the cache and owes
+        //     a whole-peer retraction instead, which the previous
+        //     rollback already handled.
+        //
+        // So fresh identities arrive each cycle while P1 is touched every
+        // cycle and is never the least-recently-used victim.
+        let mut now = 2_000u64;
+        for cycle in 1..=3u64 {
+            for i in 0..(crate::limits::MAX_PEERS - 1) {
+                p.cache_mut()
+                    .record_success(&synthetic(cycle, i), "/ip4/10.5.0.1/tcp/1", now)
+                    .expect("within bounds");
+            }
+            p.cache_mut()
+                .record_success(&subject, "/ip4/10.0.0.1/tcp/999", now)
+                .expect("within bounds");
+            let _ = p.drain_events(now, 0);
+            now += 1;
+        }
+
+        // Drain to settle. The retraction for the evicted address must
+        // appear, however deeply it was buried.
+        let mut retracted = false;
+        for _ in 0..40 {
+            for event in p.drain_events(now, usize::MAX) {
+                if let DiscoveryEvent::CandidateExpired { addresses, .. } = event
+                    && addresses.contains(evicted)
+                {
+                    retracted = true;
+                }
+            }
+        }
+        assert!(
+            retracted,
+            "the selective retraction survives the queue bound"
         );
     }
 }
