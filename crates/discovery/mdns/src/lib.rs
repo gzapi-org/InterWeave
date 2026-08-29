@@ -517,11 +517,24 @@ impl DiscoveryProvider for MdnsDiscovery {
             return Vec::new();
         }
         self.sweep(now_ms);
-        // THE REGENERATION PUMP. Every peer in `seen` is in
-        // `last_emitted` the moment its observation is queued, so a
-        // live peer missing from it is exactly one whose queued
-        // observation the bound rolled back — requeue it from state.
-        // A steady-state no-op.
+        // THE REGENERATION PUMP, BOUNDED BY FREE SPACE. Every peer in
+        // `seen` is in `last_emitted` the moment its observation is
+        // queued, so a live peer missing from it is exactly one whose
+        // queued observation the bound rolled back — requeue it from
+        // state. A steady-state no-op.
+        //
+        // Regenerating without regard to space STARVED the peers it was
+        // meant to rescue. Grouping by deadline means one peer can queue
+        // several events, so a full rebuild overflowed the bound, the
+        // trim removed the earliest — the very peers just regenerated,
+        // in deterministic map order — and cleared their marks again.
+        // The same low-key peers were rebuilt and discarded on every
+        // drain, never reaching the manager before their TTLs ran out.
+        //
+        // Filling only free space cannot evict anything, so nothing this
+        // pump queues competes with what it is trying to deliver. Each
+        // drain frees more room, so the backlog is worked off across
+        // calls rather than churned in place.
         let unemitted: Vec<TransportIdentity> = self
             .seen
             .keys()
@@ -529,6 +542,9 @@ impl DiscoveryProvider for MdnsDiscovery {
             .cloned()
             .collect();
         for peer_id in unemitted {
+            if self.pending.len() >= MAX_PENDING_EVENTS {
+                break;
+            }
             self.queue_observation(&peer_id, now_ms);
         }
         let take = max.min(self.pending.len());
@@ -1402,15 +1418,28 @@ mod tests {
             "the one-shot's observation was trimmed, or this proves nothing"
         );
 
-        // The peer is still live in `seen`; the drain must tell the
-        // consumer about it anyway.
-        let drained = p.drain_events(1, usize::MAX);
+        // The peer is still live in `seen`; draining must tell the
+        // consumer about it EVENTUALLY.
+        //
+        // Not within a single drain, deliberately. The pump fills only
+        // free space, and this queue is saturated — regenerating into a
+        // full queue is what starved the peers it was meant to rescue,
+        // because the trim then took the very events it had just
+        // rebuilt. Each drain frees room and the backlog is worked off
+        // across calls, so the property is "never silently untold", not
+        // "told on the next call".
+        let mut told = false;
+        for tick in 1..=8 {
+            told |= p.drain_events(tick, usize::MAX).iter().any(|e| {
+                matches!(
+                    e,
+                    DiscoveryEvent::CandidateObserved { candidate }
+                        if candidate.peer_id.as_str() == one_shot
+                )
+            });
+        }
         assert!(
-            drained.iter().any(|e| matches!(
-                e,
-                DiscoveryEvent::CandidateObserved { candidate }
-                    if candidate.peer_id.as_str() == one_shot
-            )),
+            told,
             "a live peer whose queued observation was trimmed is requeued \
              from `seen`, never silently untold"
         );
@@ -1452,6 +1481,55 @@ mod tests {
             for_address(late),
             Some(1_000 + OBSERVATION_TTL_MS),
             "and the later one keeps its own"
+        );
+    }
+    #[test]
+    fn regeneration_does_not_starve_the_peers_it_rescues() {
+        // Grouping by deadline lets one peer queue several events, so a
+        // full rebuild overflowed the bound: the trim took the earliest
+        // — the peers just regenerated, in deterministic map order —
+        // and cleared their marks again, so the same low-key peers were
+        // rebuilt and discarded on every drain and never reached the
+        // manager.
+        let mut p = started();
+        let _ = p.drain_events(0, usize::MAX);
+
+        // Many peers, each with several distinct deadlines. The product
+        // must EXCEED MAX_PENDING_EVENTS — at exactly the bound nothing
+        // overflows, nothing is trimmed, and the test passes without any
+        // fix, which is how a first version of it did.
+        let peers = 128u64;
+        let deadlines = 8u64;
+        assert!(
+            peers * deadlines > MAX_PENDING_EVENTS as u64,
+            "the scenario must overflow the queue, or it proves nothing"
+        );
+        for i in 0..peers {
+            for d in 0..deadlines {
+                p.push_discovered(
+                    &synthetic_peer(i),
+                    &format!("/ip4/10.0.0.{}/tcp/{d}", i % 250),
+                    d,
+                );
+            }
+        }
+
+        // Drain in small batches, as a slow consumer does.
+        let mut delivered: BTreeSet<TransportIdentity> = BTreeSet::new();
+        for _ in 0..400 {
+            for event in p.drain_events(deadlines, 4) {
+                if let DiscoveryEvent::CandidateObserved { candidate } = event {
+                    delivered.insert(candidate.peer_id);
+                }
+            }
+        }
+
+        assert_eq!(
+            delivered.len() as u64,
+            peers,
+            "every live peer reaches the consumer; none is rebuilt and \
+             discarded forever, got {} of {peers}",
+            delivered.len()
         );
     }
 }
