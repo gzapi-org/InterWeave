@@ -767,12 +767,29 @@ impl CandidateSet {
             // after the displacement, a stale pinned fact evicted a live
             // unpinned one and was then refused itself: a slot emptied
             // for evidence that was never going to land.
-            let floor = entry.fact_applied.get(&key).copied().unwrap_or(0).max(
-                spilled_fact_floors
-                    .get(&observation.protocol_id)
-                    .copied()
-                    .unwrap_or(0),
-            );
+            // A LIVE FACT CARRIES ITS OWN FLOOR — the address side's
+            // rule, unported until now: a held observation proves
+            // evidence that recent was applied, exactly as a live
+            // provenance record does for a source. Without it, evicting
+            // the floor of a still-present fact dropped the threshold to
+            // zero and a delayed older claim overwrote the newer one.
+            let floor = entry
+                .fact_applied
+                .get(&key)
+                .copied()
+                .unwrap_or(0)
+                .max(
+                    spilled_fact_floors
+                        .get(&observation.protocol_id)
+                        .copied()
+                        .unwrap_or(0),
+                )
+                .max(
+                    entry
+                        .observations
+                        .get(&key)
+                        .map_or(0, |(_, held_at, _)| *held_at),
+                );
             if floor > observation.observed_at {
                 continue;
             }
@@ -817,11 +834,28 @@ impl CandidateSet {
             if !entry.fact_applied.contains_key(&key)
                 && entry.fact_applied.len() >= 2 * MAX_OBSERVATIONS_PER_PEER
             {
-                let victim = entry
+                // REDUNDANT FLOORS GO FIRST — a floor a live observation
+                // covers loses nothing, because that observation
+                // reproduces it above. Min-value alone evicted covered
+                // and uncovered floors alike, which is the same mistake
+                // oldest-first made on the address side.
+                let redundant = entry
                     .fact_applied
                     .iter()
-                    .min_by_key(|(_, at)| **at)
+                    .find(|(k, at)| {
+                        entry
+                            .observations
+                            .get(k)
+                            .is_some_and(|(_, held_at, _)| held_at >= at)
+                    })
                     .map(|(k, _)| k.clone());
+                let victim = redundant.or_else(|| {
+                    entry
+                        .fact_applied
+                        .iter()
+                        .min_by_key(|(_, at)| **at)
+                        .map(|(k, _)| k.clone())
+                });
                 if let Some(victim) = victim {
                     entry.fact_applied.remove(&victim);
                 }
@@ -5328,6 +5362,131 @@ mod tests {
                 .iter()
                 .any(|o| o.protocol == proto && o.supported),
             "newer evidence lands as it always did"
+        );
+    }
+    #[test]
+    fn a_live_fact_carries_its_own_floor() {
+        // Past the fact-floor cap, min-value eviction could take the
+        // floor of a fact still held — a long-lived configured claim
+        // while an expiring provider cycles newer ones. The floor then
+        // read zero and a delayed older claim overwrote the newer one.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let p = identity(101);
+        let addr = "/ip4/10.0.0.1/tcp/1";
+        let proto = ProtocolId::parse("/interweave/direct/2.0.0").expect("valid");
+
+        let mut c = for_id(&p, "mdns", addr, 5_000, Some(u64::MAX));
+        c.protocol_observations.insert(ProtocolObservation {
+            protocol_id: proto.clone(),
+            supported: false,
+            observed_at: 5_000,
+        });
+        set.observe(&c, 5_000, &trust, true, false);
+
+        // Evict its floor exactly as the cap would.
+        set.peers
+            .get_mut(&p)
+            .expect("known")
+            .fact_applied
+            .remove(&(proto.clone(), "mdns".to_owned()));
+
+        // A delayed older claim for the SAME key.
+        let mut stale = for_id(&p, "mdns", addr, 6_000, Some(u64::MAX));
+        stale.protocol_observations.insert(ProtocolObservation {
+            protocol_id: proto.clone(),
+            supported: true,
+            observed_at: 1_000,
+        });
+        set.observe(&stale, 6_000, &trust, true, false);
+
+        let cands = set.candidates(7_000, &|_| None);
+        let cand = cands.iter().find(|c| c.peer_id == p).expect("known");
+        assert!(
+            !cand
+                .protocol_observations
+                .iter()
+                .any(|o| o.protocol == proto && o.supported),
+            "the held fact's own timestamp is the floor when its mark is gone"
+        );
+    }
+
+    #[test]
+    fn an_uncovered_fact_floor_is_not_the_one_evicted() {
+        // A floor a live observation covers loses nothing when dropped;
+        // one whose fact is gone is the only guard its key has.
+        // Min-value alone cannot tell them apart.
+        //
+        // Reaching the floor cap needs expiry, not volume: the
+        // OBSERVATIONS cap refuses a seventeenth fact before its floor
+        // is ever written, so floors only outnumber facts once facts
+        // have aged out and left their floors behind. An earlier version
+        // just inserted 33 facts and never reached the cap at all.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let p = identity(102);
+        let addr = "/ip4/10.0.0.1/tcp/1";
+        let cap = MAX_OBSERVATIONS_PER_PEER;
+
+        // Round one: 16 facts with a SHORT life. Their floors persist
+        // after they expire out of `observations`.
+        let mut first = for_id(&p, "mdns", addr, 100, Some(u64::MAX));
+        for i in 0..cap {
+            first.protocol_observations.insert(ProtocolObservation {
+                protocol_id: ProtocolId::parse(format!("/interweave/old{i}/1.0.0")).expect("valid"),
+                supported: true,
+                observed_at: 100 + i as u64,
+            });
+        }
+        // A short candidate expiry gives the FACTS a short life.
+        let mut short = first.clone();
+        short.expires_at = Some(1_000);
+        set.observe(&short, 100, &trust, true, false);
+        let oldest_uncovered = (
+            ProtocolId::parse("/interweave/old0/1.0.0").expect("valid"),
+            "mdns".to_owned(),
+        );
+
+        // Keep the peer alive on a long-lived address while the facts lapse.
+        set.observe(
+            &for_id(
+                &p,
+                "peer-cache",
+                "/ip4/10.0.0.9/tcp/9",
+                2_000,
+                Some(u64::MAX),
+            ),
+            2_000,
+            &trust,
+            true,
+            false,
+        );
+        set.sweep(2_000);
+        assert!(
+            set.peers.get(&p).expect("alive").observations.is_empty(),
+            "round one's facts lapsed, leaving their floors uncovered"
+        );
+
+        // Round two: 16 fresh facts, live and newer — covered floors.
+        // This takes the floor map to the cap and one past it.
+        for i in 0..=cap {
+            let mut c = for_id(&p, "mdns", addr, 3_000 + i as u64, Some(u64::MAX));
+            c.protocol_observations.insert(ProtocolObservation {
+                protocol_id: ProtocolId::parse(format!("/interweave/new{i}/1.0.0")).expect("valid"),
+                supported: true,
+                observed_at: 3_000 + i as u64,
+            });
+            set.observe(&c, 3_000 + i as u64, &trust, true, false);
+        }
+
+        assert!(
+            set.peers
+                .get(&p)
+                .expect("known")
+                .fact_applied
+                .contains_key(&oldest_uncovered),
+            "the uncovered floor survives; nothing else guards its key, \
+             while every covered floor is reproduced by its own fact"
         );
     }
 }
