@@ -72,8 +72,8 @@ endpoints:
       enabled: true
       advertise: true
       allowed_client_kinds: [human-client]
-      inbound: { policy: inherit-profile-trust, allowed_peers: [] }
-      outbound: { policy: inherit-profile-trust, allowed_peers: [] }
+      inbound: inherit_profile_trust
+      outbound: inherit_profile_trust
 discovery:
   providers:
     - type: peer-cache

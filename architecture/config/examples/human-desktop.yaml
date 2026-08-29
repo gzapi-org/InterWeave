@@ -30,8 +30,8 @@ endpoints:
   default_direct_endpoint: human
   directory: { enabled: true }
   entries:
-    - { id: human, enabled: true, advertise: true, allowed_client_kinds: [human-client], inbound: {policy: inherit-profile-trust}, outbound: {policy: inherit-profile-trust} }
-    - { id: claude, enabled: true, advertise: true, allowed_client_kinds: [claude-channel], inbound: {policy: inherit-profile-trust}, outbound: {policy: inherit-profile-trust} }
+    - { id: human, enabled: true, advertise: true, allowed_client_kinds: [human-client], inbound: inherit_profile_trust, outbound: inherit_profile_trust }
+    - { id: claude, enabled: true, advertise: true, allowed_client_kinds: [claude-channel], inbound: inherit_profile_trust, outbound: inherit_profile_trust }
 discovery:
   providers:
     - { type: peer-cache, enabled: true, priority: 10, config: { ttl: 7d, max_entries: 1024 } }
