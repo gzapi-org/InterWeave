@@ -1439,16 +1439,15 @@ mod tests {
     fn peer_backoff_entries_are_bounded_too() {
         let mut p = ConnectionPolicy::new(64, 64);
         p.max_peers = 4;
-        for i in 0..40_u8 {
-            let mut raw = [b'1'; 44];
-            raw[0] = b'1' + (i % 9);
-            raw[1] = b'A' + (i / 9);
-            let Ok(id) = TransportIdentity::parse(format!(
-                "12D3KooW{}",
-                core::str::from_utf8(&raw).expect("ascii")
-            )) else {
-                continue;
-            };
+        for i in 0..40_u64 {
+            // Built from bytes rather than spelled as a tail: `parse`
+            // decodes the base58btc and checks the multihash, so a
+            // hand-written tail is a peer no libp2p parser would accept.
+            let mut bytes = [0_u8; 38];
+            bytes[..6].copy_from_slice(&[0x00, 0x24, 0x08, 0x01, 0x12, 0x20]);
+            bytes[6..14].copy_from_slice(&i.to_be_bytes());
+            let id = TransportIdentity::parse(bs58::encode(bytes).into_string())
+                .expect("a decodable synthetic identity");
             // A failure with no alternative address advances peer backoff.
             p.record_address_failure(&id, "/ip4/10.0.0.1/tcp/1", 1_000, 5_000);
         }

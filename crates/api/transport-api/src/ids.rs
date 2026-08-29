@@ -340,8 +340,24 @@ impl TransportIdentity {
         Ok(Self(value))
     }
 
-    /// `^(12D3KooW[1-9A-HJ-NP-Za-km-z]{44}|Qm[1-9A-HJ-NP-Za-km-z]{44})$`
+    /// `^(12D3KooW[1-9A-HJ-NP-Za-km-z]{44}|Qm[1-9A-HJ-NP-Za-km-z]{44})$`,
+    /// **and** the multihash those characters actually encode.
+    ///
+    /// The pattern is what `common/peer-id.schema.json` can express: a
+    /// JSON Schema matches text, so the prefix, the alphabet and the
+    /// length are the whole of what it can assert. They say a string
+    /// LOOKS like a PeerId. They do not say it IS one — the 44 tail
+    /// characters are not free, they are a base58btc number whose bytes
+    /// have a fixed structure, and most strings the pattern admits decode
+    /// to something no libp2p parser will accept.
+    ///
+    /// Checking only the pattern put that failure exactly where the doc
+    /// on `parse` says this type exists to prevent it: past the neutral
+    /// boundary, inside a backend parser, far from the input that caused
+    /// it. So the decode happens here, where the value is still a string
+    /// and the error still names the field it came from.
     fn check_canonical(value: &str) -> Result<(), IdError> {
+        let ed25519 = value.starts_with("12D3KooW");
         let rest = value
             .strip_prefix("12D3KooW")
             .or_else(|| value.strip_prefix("Qm"))
@@ -350,10 +366,41 @@ impl TransportIdentity {
             return Err(IdError::NotCanonicalPeerId);
         }
         // base58btc omits 0, O, I and l precisely so the remaining glyphs
-        // cannot be confused by a human reading one aloud.
+        // cannot be confused by a human reading one aloud. Checked before
+        // the decode so a bad glyph reports the same error either way,
+        // rather than depending on which layer noticed.
         for &b in rest.as_bytes() {
             let ok = b.is_ascii_alphanumeric() && !matches!(b, b'0' | b'O' | b'I' | b'l');
             if !ok {
+                return Err(IdError::NotCanonicalPeerId);
+            }
+        }
+
+        // A fixed buffer, so a decode cannot allocate on input: both
+        // accepted forms are far under it and anything longer is not one
+        // of them, which `into_vec`'s length error reports.
+        let mut bytes = [0_u8; 64];
+        let len = bs58::decode(value)
+            .onto(&mut bytes[..])
+            .map_err(|_| IdError::NotCanonicalPeerId)?;
+        let decoded = &bytes[..len];
+
+        if ed25519 {
+            // IDENTITY MULTIHASH of a libp2p Ed25519 public-key protobuf:
+            // 0x00 identity code, 0x24 = 36 bytes, then the protobuf —
+            // field 1 varint KeyType::Ed25519, field 2 bytes of length
+            // 0x20. Every byte here is fixed except the key itself, which
+            // is why the pattern's 44 free characters overstate the space
+            // by a wide margin.
+            if decoded.len() != 38 || decoded[..6] != [0x00, 0x24, 0x08, 0x01, 0x12, 0x20] {
+                return Err(IdError::NotCanonicalPeerId);
+            }
+        } else {
+            // SHA-256 MULTIHASH: 0x12 code, 0x20 = 32 bytes of digest.
+            // The digest itself is opaque and unconstrained — this says
+            // the envelope is a sha2-256 multihash, not that any
+            // particular key hashes to it.
+            if decoded.len() != 34 || decoded[..2] != [0x12, 0x20] {
                 return Err(IdError::NotCanonicalPeerId);
             }
         }
@@ -602,6 +649,65 @@ mod tests {
         assert_eq!(
             TransportIdentity::parse("p".repeat(257)),
             Err(IdError::TooLong { got: 257, max: 256 })
+        );
+    }
+
+    #[test]
+    fn a_string_that_only_looks_like_a_peer_id_is_refused() {
+        // The pattern is what the JSON Schema can express — text — and
+        // it is not the whole rule. The 44 tail characters are a
+        // base58btc number whose bytes have a fixed structure, so most
+        // strings the pattern admits decode to something no libp2p
+        // parser accepts, and used to reach one to find that out.
+
+        // `Qm` + 44 valid glyphs, decoding to a multihash whose declared
+        // length disagrees with the bytes that follow: 0x12 0x22 says 34
+        // bytes of sha2-256 digest and 32 arrive.
+        let shaped_only = format!("Qm{}", "z".repeat(44));
+        assert_eq!(
+            TransportIdentity::parse(shaped_only.clone()),
+            Err(IdError::NotCanonicalPeerId),
+            "a well-shaped string is not a well-formed multihash"
+        );
+        // It really does match the schema's pattern — otherwise this
+        // would be testing the length check again.
+        assert!(
+            shaped_only.len() == 46
+                && shaped_only.starts_with("Qm")
+                && shaped_only[2..]
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() && !matches!(b, b'0' | b'O' | b'I' | b'l')),
+            "the negative case must satisfy the pattern, or it proves nothing"
+        );
+
+        // The identity form, with the key-length byte one off: 0x21 says
+        // 33 key bytes and 32 follow. Every other byte is correct.
+        let mut bytes = [7_u8; 38];
+        bytes[..6].copy_from_slice(&[0x00, 0x24, 0x08, 0x01, 0x12, 0x21]);
+        let wrong_key_length = bs58::encode(bytes).into_string();
+        assert!(wrong_key_length.starts_with("12D3KooW") && wrong_key_length.len() == 52);
+        assert_eq!(
+            TransportIdentity::parse(wrong_key_length),
+            Err(IdError::NotCanonicalPeerId),
+            "one byte wrong inside the envelope is still not a PeerId"
+        );
+
+        // And a sha2-256 multihash under the 12D3KooW prefix is not one
+        // either: the prefix and the code have to agree.
+        let mut swapped = [3_u8; 38];
+        swapped[..6].copy_from_slice(&[0x12, 0x20, 0x08, 0x01, 0x12, 0x20]);
+        assert_eq!(
+            TransportIdentity::parse(bs58::encode(swapped).into_string()),
+            Err(IdError::NotCanonicalPeerId)
+        );
+
+        // POSITIVE CONTROL: the same envelope, correct, parses — so this
+        // is a decoder and not a blanket refusal.
+        bytes[..6].copy_from_slice(&[0x00, 0x24, 0x08, 0x01, 0x12, 0x20]);
+        let well_formed = bs58::encode(bytes).into_string();
+        assert!(
+            TransportIdentity::parse(well_formed.clone()).is_ok(),
+            "{well_formed} is a canonical Ed25519 PeerId"
         );
     }
     #[test]

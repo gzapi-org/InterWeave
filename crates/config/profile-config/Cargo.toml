@@ -34,6 +34,9 @@ interweave-trust-api = { path = "../../api/trust-api" }
 serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
+# Synthetic test identities are built from BYTES, since `parse` decodes
+# the base58btc and checks the multihash. Test-only.
+bs58 = { workspace = true }
 # For one assertion only: that `CACHE_MAX_PEERS` still equals the cache's
 # own frozen limit. A dev-dependency keeps the mirror honest without
 # making a configuration crate depend on a provider implementation.
