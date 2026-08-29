@@ -130,7 +130,16 @@ impl PeerCacheDiscovery {
             }
         }
         self.pending = kept;
-        for event in dropped {
+
+        // UNDONE IN REVERSE, because these rollbacks are not independent.
+        // A dropped pair for one peer is [retraction, observation] in
+        // queue order, and applying them forwards restored the retracted
+        // addresses and then deleted the whole record — losing exactly the
+        // retraction the first step existed to preserve. Reversed, the
+        // observation is forgotten first and the retracted addresses land
+        // in an empty record, which is precisely the state that was true
+        // before either event, so the next refresh recomputes both.
+        for event in dropped.into_iter().rev() {
             match event {
                 DiscoveryEvent::CandidateObserved { candidate } => {
                     self.emitted.remove(&candidate.peer_id);
@@ -1158,6 +1167,88 @@ mod tests {
                 .any(|e| matches!(e, DiscoveryEvent::HealthChanged { .. })),
             "the health transition is still delivered after {} events",
             queued.len()
+        );
+    }
+    #[test]
+    fn dropping_a_retraction_and_its_observation_together_still_recreates_both() {
+        // A peer whose address set shrank queues a retraction and an
+        // observation ADJACENTLY, so queue pressure takes both or
+        // neither. Rolling them back in queue order restored the
+        // retracted addresses and then deleted the whole record, losing
+        // the retraction the first step existed to preserve.
+        //
+        // Driven at the bound directly: reaching this pair through the
+        // public path needs 2048 later events without touching the peer,
+        // and anything that produces them evicts it from the cache —
+        // which turns this into the whole-peer case that already worked.
+        // The state fed in is exactly what `refresh` produces.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut p = provider(&dir);
+        p.start(0).expect("start");
+        let _ = p.drain_events(0, usize::MAX);
+
+        let subject = peer(P1);
+        let kept = "/ip4/10.0.0.1/tcp/1";
+        let removed = "/ip4/10.0.0.2/tcp/2";
+        p.cache_mut()
+            .record_success(&subject, kept, 10)
+            .expect("within bounds");
+
+        // The consumer was told about both addresses; the cache holds one.
+        p.emitted.insert(
+            subject.clone(),
+            EmittedRecord {
+                expires_at: None,
+                addresses: [kept.to_owned(), removed.to_owned()].into_iter().collect(),
+            },
+        );
+        p.refresh(20);
+        assert!(
+            p.pending.iter().any(|e| matches!(
+                e,
+                DiscoveryEvent::CandidateExpired { addresses, .. }
+                    if addresses.contains(removed)
+            )),
+            "the pair is queued"
+        );
+
+        // Bury the pair past the bound, then let the trim take it.
+        for i in 0..MAX_PENDING_EVENTS {
+            p.pending.push(DiscoveryEvent::CandidateObserved {
+                candidate: Box::new(interweave_discovery_api::CandidatePeer {
+                    peer_id: synthetic(9, i),
+                    addresses: [kept.to_owned()].into_iter().collect(),
+                    source: SOURCE.to_owned(),
+                    observed_at: 30,
+                    expires_at: None,
+                    protocol_observations: BTreeSet::new(),
+                }),
+            });
+        }
+        p.enforce_pending_bound();
+        assert!(
+            !p.pending.iter().any(|e| matches!(
+                e,
+                DiscoveryEvent::CandidateExpired { addresses, .. }
+                    if addresses.contains(removed)
+            )),
+            "the retraction was indeed trimmed, or this proves nothing"
+        );
+
+        // Draining recomputes: the retraction must come back.
+        let mut recreated = false;
+        for _ in 0..10 {
+            for event in p.drain_events(40, usize::MAX) {
+                if let DiscoveryEvent::CandidateExpired { addresses, .. } = event
+                    && addresses.contains(removed)
+                {
+                    recreated = true;
+                }
+            }
+        }
+        assert!(
+            recreated,
+            "the retraction is recreated after both halves were dropped"
         );
     }
 }
