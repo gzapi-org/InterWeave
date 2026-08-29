@@ -1050,7 +1050,7 @@ Run and close **SPIKE-004**.
 ### Mandatory invariants
 
 - all behavior-originated dials pass DialAdmissionGate;
-- connectivity-infrastructure peers never gain GossipSub/direct/endpoint/Kademlia authority merely by being connected;
+- connectivity-infrastructure peers never gain GossipSub/direct/endpoint/Kademlia authority merely by being connected. **Read this as EXPOSURE, not only authority.** Stages 6-9 built each data-plane entry point to classify its caller — direct ingress, the GossipSub publisher check, `build_answer`'s trust check — so authority is already refused, and an implementer who checks only that will find the invariant apparently met. What is NOT met is the other half: `SubstrateBehaviour` installs `direct`, `broadcast` and `endpoints` on every connection uniformly, so once an infrastructure-only connection exists, that peer can advertise and open those substreams and be refused only after the request has been parsed and accounted. Nothing exercises this today because relay, AutoNAT and DCUtR are absent from the libp2p feature list, so no infrastructure-only connection can be established at all — Stage 11 is the change that creates the first one, which is why the correction belongs here. The protocol set an infrastructure-only connection offers must be restricted at the connection, not merely answered at the request;
 - AutoNAT server dial-back candidate is literal IP, matches requester observed source IP, and rejects prohibited address classes;
 - statically configured infrastructure is preferred; Identify-learned relay/probe promotion remains explicit opt-in;
 - relayed pre-Noise accounting is charged to authenticated relay connection/PeerId plus global limits when original IP is unavailable;
