@@ -112,8 +112,24 @@ impl PeerCacheDiscovery {
         if self.pending.len() <= MAX_PENDING_EVENTS {
             return;
         }
-        let excess = self.pending.len() - MAX_PENDING_EVENTS;
-        let dropped: Vec<DiscoveryEvent> = self.pending.drain(..excess).collect();
+        // HEALTH IS NEVER THE THING DROPPED: the manager learns health
+        // only from that event, so trimming the sole transition leaves
+        // this provider reported unavailable indefinitely while it is
+        // plainly working. Every other event is recoverable — that is
+        // what the rollback below is for — and this one is not, because
+        // nothing recomputes a transition that already happened.
+        let mut excess = self.pending.len() - MAX_PENDING_EVENTS;
+        let mut kept: Vec<DiscoveryEvent> = Vec::with_capacity(MAX_PENDING_EVENTS);
+        let mut dropped: Vec<DiscoveryEvent> = Vec::new();
+        for event in self.pending.drain(..) {
+            if excess > 0 && !matches!(event, DiscoveryEvent::HealthChanged { .. }) {
+                excess -= 1;
+                dropped.push(event);
+            } else {
+                kept.push(event);
+            }
+        }
+        self.pending = kept;
         for event in dropped {
             match event {
                 DiscoveryEvent::CandidateObserved { candidate } => {
@@ -1111,6 +1127,37 @@ mod tests {
         assert!(
             retracted,
             "the selective retraction survives the queue bound"
+        );
+    }
+    #[test]
+    fn the_health_transition_survives_a_trimmed_queue() {
+        // Same rule as the other providers: the manager learns health
+        // only from this event, and nothing recomputes a transition that
+        // already happened.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut p = provider(&dir);
+        p.start(0).expect("start");
+
+        // Never drained since start, so the health event is the oldest
+        // thing in the queue — exactly what an oldest-first trim takes.
+        let mut now = 10u64;
+        for cycle in 0..6u64 {
+            for i in 0..crate::limits::MAX_PEERS {
+                p.cache_mut()
+                    .record_success(&synthetic(cycle, i), "/ip4/10.0.0.1/tcp/1", now)
+                    .expect("within bounds");
+            }
+            let _ = p.drain_events(now, 0);
+            now += crate::limits::DEFAULT_TTL_MS + 1;
+        }
+
+        let queued = p.drain_events(now, usize::MAX);
+        assert!(
+            queued
+                .iter()
+                .any(|e| matches!(e, DiscoveryEvent::HealthChanged { .. })),
+            "the health transition is still delivered after {} events",
+            queued.len()
         );
     }
 }

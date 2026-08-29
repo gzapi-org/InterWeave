@@ -240,8 +240,24 @@ impl StaticBootstrapDiscovery {
         if self.pending.len() <= MAX_PENDING_EVENTS {
             return;
         }
-        let excess = self.pending.len() - MAX_PENDING_EVENTS;
-        let dropped: Vec<DiscoveryEvent> = self.pending.drain(..excess).collect();
+        // HEALTH IS NEVER THE THING DROPPED: the manager learns health
+        // only from that event, so trimming the sole transition leaves
+        // this provider reported unavailable indefinitely while it is
+        // plainly working. Every other event is recoverable — that is
+        // what the rollback below is for — and this one is not, because
+        // nothing recomputes a transition that already happened.
+        let mut excess = self.pending.len() - MAX_PENDING_EVENTS;
+        let mut kept: Vec<DiscoveryEvent> = Vec::with_capacity(MAX_PENDING_EVENTS);
+        let mut dropped: Vec<DiscoveryEvent> = Vec::new();
+        for event in self.pending.drain(..) {
+            if excess > 0 && !matches!(event, DiscoveryEvent::HealthChanged { .. }) {
+                excess -= 1;
+                dropped.push(event);
+            } else {
+                kept.push(event);
+            }
+        }
+        self.pending = kept;
         for event in dropped {
             match event {
                 DiscoveryEvent::CandidateObserved { candidate } => {
@@ -821,5 +837,37 @@ mod tests {
                 "nothing changed, so draining queues nothing"
             );
         }
+    }
+    #[test]
+    fn the_health_transition_survives_a_trimmed_queue() {
+        // Same rule as the other providers. This one is queued once at
+        // start and never again, so an oldest-first trim takes it first.
+        let entries: Vec<StaticEntry> = (1..MAX_ENTRIES)
+            .map(|i| entry_id(&synthetic(i), "/ip4/10.0.0.1/tcp/1"))
+            .collect();
+        let mut p = StaticBootstrapDiscovery::new(entries).expect("legal entries");
+        p.start(0).expect("starts");
+
+        // Never drained, so the health event is the oldest thing queued.
+        for round in 1..=3u64 {
+            let churned: Vec<StaticEntry> = (1..MAX_ENTRIES)
+                .map(|i| {
+                    entry_id(
+                        &synthetic(i),
+                        &format!("/ip4/10.9.{round}.{}/tcp/4001", i % 250),
+                    )
+                })
+                .collect();
+            p.set_entries(churned, 100 + round).expect("reload");
+        }
+
+        let queued = p.drain_events(1_000, usize::MAX);
+        assert!(
+            queued
+                .iter()
+                .any(|e| matches!(e, DiscoveryEvent::HealthChanged { .. })),
+            "the health transition is still delivered after {} events",
+            queued.len()
+        );
     }
 }

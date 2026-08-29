@@ -323,10 +323,28 @@ impl MdnsDiscovery {
     /// A dropped event costs a retraction the manager will make itself on
     /// its own TTL, or an observation the next announcement repeats.
     fn enforce_pending_bound(&mut self) {
-        if self.pending.len() > MAX_PENDING_EVENTS {
-            let excess = self.pending.len() - MAX_PENDING_EVENTS;
-            self.pending.drain(..excess);
+        if self.pending.len() <= MAX_PENDING_EVENTS {
+            return;
         }
+        // HEALTH IS NEVER THE THING DROPPED. Coalescing leaves at most one
+        // health event, and the manager learns health ONLY from it: seed
+        // `Unavailable` at registration, updated by nothing else. So
+        // trimming the sole transition leaves the provider reported
+        // unavailable indefinitely — discovering peers while aggregate
+        // health says it does none — and no later event fixes it unless
+        // multicast happens to flap.
+        //
+        // A candidate event is recoverable: the next announcement repeats
+        // it, or the manager ages the address out itself. That asymmetry
+        // is the whole reason for the exception.
+        let mut excess = self.pending.len() - MAX_PENDING_EVENTS;
+        self.pending.retain(|event| {
+            if excess > 0 && !matches!(event, DiscoveryEvent::HealthChanged { .. }) {
+                excess -= 1;
+                return false;
+            }
+            true
+        });
     }
 
     fn queue_observation(&mut self, peer_id: &TransportIdentity, now_ms: u64) {
@@ -1094,6 +1112,43 @@ mod tests {
             ),
             "and it is the LATEST state, not the first: {:?}",
             health[0]
+        );
+    }
+    #[test]
+    fn the_health_transition_survives_a_trimmed_queue() {
+        // The manager seeds a provider `Unavailable` and updates it only
+        // from `HealthChanged`. Trimming the sole transition therefore
+        // leaves this provider reported unavailable indefinitely while it
+        // is plainly discovering peers, and no later event repairs it
+        // unless multicast happens to flap.
+        let mut p = started();
+
+        // Stall the consumer and overrun the queue: one batch expires
+        // while a second is discovered.
+        let mut now = 0u64;
+        for cycle in 0..4u64 {
+            for i in 0..MAX_PEERS as u64 {
+                p.push_discovered(
+                    &synthetic_peer(cycle * 1_000 + i),
+                    "/ip4/10.0.0.1/tcp/1",
+                    now,
+                );
+            }
+            now += OBSERVATION_TTL_MS + 1;
+            p.sweep(now);
+        }
+
+        let queued = p.drain_events(now, usize::MAX);
+        assert!(
+            queued.len() > MAX_PEERS,
+            "the queue must actually have been trimmed, got {}",
+            queued.len()
+        );
+        assert!(
+            queued
+                .iter()
+                .any(|e| matches!(e, DiscoveryEvent::HealthChanged { .. })),
+            "the health transition is still delivered"
         );
     }
 }
