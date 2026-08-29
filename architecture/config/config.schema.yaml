@@ -177,16 +177,18 @@ endpoints:
     advertise: bool
     # Hygiene guard only; client.kind is not cryptographic authentication.
     allowed_client_kinds: list[string[1..64], max=16, unique]
-    inbound:
-      policy: enum[inherit-profile-trust,static-subset] = inherit-profile-trust
-      allowed_peers: list[PeerId, max=4096]
-    outbound:
-      policy: enum[inherit-profile-trust,static-subset] = inherit-profile-trust
-      allowed_peers: list[PeerId, max=4096]
+    # The shape is the frozen one in
+    # `contracts/schemas/endpoints/endpoint-config.schema.json`: the bare
+    # string, or an object naming the subset. This file previously
+    # documented a `{policy, allowed_peers}` pair that the contract and
+    # the implementation never accepted, and every shipped example
+    # followed it — so no example parsed.
+    inbound: "inherit_profile_trust | { static_subset: list[PeerId, max=4096] }"
+    outbound: "inherit_profile_trust | { static_subset: list[PeerId, max=4096] }"
   # Cross-field validation:
   #   endpoint IDs are unique
   #   default_direct_endpoint, when set, references an enabled endpoint
-  #   static-subset allowed_peers are subsets of trust.allowed_peers
+  #   static_subset peers are subsets of trust.allowed_peers
   #   endpoint policy can narrow but never widen profile trust
   #   number of advertise=true enabled entries <= directory.max_advertised
 discovery:
