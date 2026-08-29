@@ -523,6 +523,14 @@ impl CandidateSet {
             }
         }
 
+        // A DEAD SLOT IS NOT AN OCCUPIED ONE — the same rule the address
+        // cap follows, for the same reason. An expired observation is
+        // still a map entry until `sweep` runs, so under pump-then-sweep
+        // a peer with sixteen lapsed facts rejected a live one, and the
+        // sweep afterwards frees the slot but cannot recover what was
+        // refused.
+        entry.observations.retain(|_, (_, _, exp)| now_ms < *exp);
+
         for observation in &candidate.protocol_observations {
             let key = (observation.protocol_id.clone(), candidate.source.clone());
             if !entry.observations.contains_key(&key)
@@ -2572,6 +2580,95 @@ mod tests {
             found.protocol_observations.len(),
             1,
             "mdns still supports an address, so its claim stands"
+        );
+    }
+    #[test]
+    fn an_expired_observation_slot_does_not_reject_a_live_fact() {
+        // The cap counted map entries, and an expired observation is
+        // still an entry until `sweep` runs — so a peer holding sixteen
+        // lapsed facts rejected a live one, and the sweep afterwards
+        // cannot recover it.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(71);
+
+        // Sixteen facts with a short lifetime, on an address that lives.
+        let mut old = for_id(&subject, "mdns", "/ip4/10.0.0.1/tcp/1", 0, Some(1_000));
+        for i in 0..MAX_OBSERVATIONS_PER_PEER {
+            old.protocol_observations.insert(ProtocolObservation {
+                protocol_id: ProtocolId::parse(format!("/interweave/p{i}/1.0.0")).expect("valid"),
+                supported: true,
+                observed_at: 0,
+            });
+        }
+        set.observe(&old, 0, &trust, true, false);
+
+        // Past those lifetimes, with no sweep, a live fact arrives from
+        // another source on an address that is still good.
+        let mut fresh = for_id(
+            &subject,
+            "peer-cache",
+            "/ip4/10.0.0.2/tcp/2",
+            5_000,
+            Some(u64::MAX),
+        );
+        fresh.protocol_observations.insert(ProtocolObservation {
+            protocol_id: ProtocolId::parse("/interweave/direct/2.0.0").expect("valid"),
+            supported: true,
+            observed_at: 5_000,
+        });
+        set.observe(&fresh, 5_000, &trust, true, false);
+
+        let candidates = set.candidates(5_000, &|_| None);
+        let found = candidates
+            .iter()
+            .find(|c| c.peer_id == subject)
+            .expect("the peer is known");
+        assert!(
+            found
+                .protocol_observations
+                .iter()
+                .any(|o| o.protocol.as_str() == "/interweave/direct/2.0.0"),
+            "the live fact is admitted into a slot only lapsed ones held: {:?}",
+            found.protocol_observations
+        );
+    }
+
+    #[test]
+    fn a_live_observation_slot_still_refuses_a_newcomer() {
+        // The control: pruning must free only EXPIRED slots, or the cap
+        // stops bounding what a peer can assert.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(72);
+
+        let mut full = for_id(&subject, "mdns", "/ip4/10.0.0.1/tcp/1", 0, Some(u64::MAX));
+        for i in 0..MAX_OBSERVATIONS_PER_PEER {
+            full.protocol_observations.insert(ProtocolObservation {
+                protocol_id: ProtocolId::parse(format!("/interweave/p{i}/1.0.0")).expect("valid"),
+                supported: true,
+                observed_at: 0,
+            });
+        }
+        set.observe(&full, 0, &trust, true, false);
+
+        let mut extra = for_id(&subject, "mdns", "/ip4/10.0.0.1/tcp/1", 100, Some(u64::MAX));
+        extra.protocol_observations.insert(ProtocolObservation {
+            protocol_id: ProtocolId::parse("/interweave/direct/2.0.0").expect("valid"),
+            supported: true,
+            observed_at: 100,
+        });
+        set.observe(&extra, 100, &trust, true, false);
+
+        let candidates = set.candidates(200, &|_| None);
+        let found = candidates
+            .iter()
+            .find(|c| c.peer_id == subject)
+            .expect("known");
+        assert_eq!(
+            found.protocol_observations.len(),
+            MAX_OBSERVATIONS_PER_PEER,
+            "every slot is live, so the cap still holds"
         );
     }
 }
