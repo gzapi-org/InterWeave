@@ -370,6 +370,22 @@ impl CandidateSet {
             }
             entry.addresses.retain(|_, records| !records.is_empty());
             entry.observations.retain(|_, (_, _, exp)| now_ms < *exp);
+
+            // A SOURCE THAT SUPPORTS NOTHING KEEPS NO FACTS — the rule
+            // `retract` already applies, and natural expiry bypassed it.
+            // A source's address can lapse while another source keeps the
+            // peer alive, leaving that source's still-live protocol
+            // claims attributed to something that vouches for no way to
+            // reach the peer.
+            let live: BTreeSet<String> = entry
+                .addresses
+                .values()
+                .flat_map(|records| records.iter())
+                .map(|r| r.source.clone())
+                .collect();
+            entry
+                .observations
+                .retain(|(_, source), _| live.contains(source));
         }
         self.peers.retain(|_, e| !e.addresses.is_empty());
     }
@@ -2814,6 +2830,73 @@ mod tests {
             set.candidates(10_000, &|_| None)[0].last_observed_ms,
             100,
             "and after the sweep removes it"
+        );
+    }
+    #[test]
+    fn sweeping_a_sources_last_address_drops_its_facts_too() {
+        // `retract` applies this rule; natural expiry bypassed it. The
+        // source's address lapses while another source keeps the peer
+        // alive, leaving its protocol claims attributed to something that
+        // vouches for no way to reach the peer.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(91);
+
+        let mut short = for_id(
+            &subject,
+            "mdns",
+            "/ip4/192.168.1.5/tcp/4001",
+            0,
+            Some(1_000),
+        );
+        short.protocol_observations.insert(ProtocolObservation {
+            protocol_id: ProtocolId::parse("/interweave/direct/2.0.0").expect("valid"),
+            supported: true,
+            // Outlives the address it came with.
+            observed_at: 0,
+        });
+        set.observe(&short, 0, &trust, true, false);
+        // A refresh of the FACT alone, with a long life and no addresses.
+        let mut fact = for_id(
+            &subject,
+            "mdns",
+            "/ip4/192.168.1.5/tcp/4001",
+            10,
+            Some(u64::MAX),
+        );
+        fact.addresses.clear();
+        fact.protocol_observations.insert(ProtocolObservation {
+            protocol_id: ProtocolId::parse("/interweave/direct/2.0.0").expect("valid"),
+            supported: true,
+            observed_at: 10,
+        });
+        set.observe(&fact, 10, &trust, true, false);
+
+        // Another source keeps the peer present.
+        set.observe(
+            &for_id(
+                &subject,
+                "peer-cache",
+                "/ip4/10.0.0.1/tcp/1",
+                0,
+                Some(u64::MAX),
+            ),
+            0,
+            &trust,
+            true,
+            false,
+        );
+
+        set.sweep(5_000);
+        let candidates = set.candidates(5_000, &|_| None);
+        let found = candidates
+            .iter()
+            .find(|c| c.peer_id == subject)
+            .expect("the peer survives on the other source");
+        assert!(
+            found.protocol_observations.is_empty(),
+            "mdns supports no live address, so its claims go with it: {:?}",
+            found.protocol_observations
         );
     }
 }
