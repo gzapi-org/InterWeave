@@ -123,6 +123,19 @@ struct Entry {
     addresses: BTreeMap<String, Vec<Provenance>>,
     /// `(protocol, source)` -> (supported, observed_at, expires_at).
     observations: BTreeMap<(ProtocolId, String), (bool, u64, u64)>,
+    /// source -> the newest `observed_at` already applied from it.
+    ///
+    /// OUTLIVES THE PROVENANCE ON PURPOSE. The forward-only rule on a
+    /// record can only speak while that record exists, so a retraction
+    /// removed the record and the guard with it — and a delayed older
+    /// observation then re-inserted the retracted address as if new,
+    /// restoring a route the source had withdrawn.
+    ///
+    /// Bounded by the registered provider count: `on_event` refuses an
+    /// event whose source is not a registered provider, and registration
+    /// is capped at `MAX_PROVIDERS`. The cap is applied here too, because
+    /// `CandidateSet` is reachable without going through the manager.
+    source_high_water: BTreeMap<String, u64>,
     /// The most recent observation of this peer from any source, for the
     /// least-recently-observed half of the eviction rule.
     ///
@@ -507,7 +520,30 @@ impl CandidateSet {
             !records.is_empty()
         });
 
+        // STALE FROM THIS SOURCE, whether or not a record survives to
+        // say so. Rejecting only the ADDRESS half: protocol observations
+        // carry their own timestamps and are guarded individually below,
+        // so a candidate that is stale about reachability may still carry
+        // a fact worth merging.
+        let stale = entry
+            .source_high_water
+            .get(&candidate.source)
+            .is_some_and(|high| candidate.observed_at < *high);
+        if !stale
+            && (entry.source_high_water.len() < MAX_PROVIDERS
+                || entry.source_high_water.contains_key(&candidate.source))
+        {
+            let mark = entry
+                .source_high_water
+                .entry(candidate.source.clone())
+                .or_default();
+            *mark = (*mark).max(candidate.observed_at);
+        }
+
         for address in &candidate.addresses {
+            if stale {
+                break;
+            }
             if !entry.addresses.contains_key(address)
                 && entry.addresses.len() >= MAX_ADDRESSES_PER_PEER
             {
@@ -3202,6 +3238,121 @@ mod tests {
                 .any(|o| o.protocol.as_str() == "/interweave/direct/2.0.0"),
             "the live source's fact was admitted: {:?}",
             found.protocol_observations
+        );
+    }
+    #[test]
+    fn a_stale_event_cannot_revive_a_retracted_address() {
+        // The forward-only rule on a record can only speak while that
+        // record exists. A retraction removes it — and the guard with it
+        // — so a delayed older observation re-inserted the withdrawn
+        // address as if it were new, restoring a route the source had
+        // explicitly taken back.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(121);
+        let address = "/ip4/10.0.0.1/tcp/4001";
+
+        set.observe(
+            &for_id(&subject, "peer-cache", address, 1_000, Some(u64::MAX)),
+            1_000,
+            &trust,
+            true,
+            false,
+        );
+        // Keep the peer alive through another source, so the retraction
+        // does not simply remove it.
+        set.observe(
+            &for_id(
+                &subject,
+                "mdns",
+                "/ip4/192.168.1.5/tcp/4001",
+                1_000,
+                Some(u64::MAX),
+            ),
+            1_000,
+            &trust,
+            true,
+            false,
+        );
+
+        set.retract(
+            &subject,
+            "peer-cache",
+            &[address.to_owned()].into_iter().collect(),
+        );
+        assert!(
+            !set.candidates(2_000, &|_| None)[0]
+                .address_list()
+                .contains(&address),
+            "the address is withdrawn"
+        );
+
+        // An older event from the same source, delivered late.
+        set.observe(
+            &for_id(&subject, "peer-cache", address, 500, Some(u64::MAX)),
+            3_000,
+            &trust,
+            true,
+            false,
+        );
+
+        assert!(
+            !set.candidates(4_000, &|_| None)[0]
+                .address_list()
+                .contains(&address),
+            "and older evidence does not bring it back: {:?}",
+            set.candidates(4_000, &|_| None)[0].address_list()
+        );
+    }
+
+    #[test]
+    fn a_newer_event_still_restores_an_address_the_source_takes_back_up() {
+        // The control: a source may legitimately re-announce an address
+        // it had withdrawn, and newer evidence must be able to say so.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(122);
+        let address = "/ip4/10.0.0.1/tcp/4001";
+
+        set.observe(
+            &for_id(&subject, "peer-cache", address, 1_000, Some(u64::MAX)),
+            1_000,
+            &trust,
+            true,
+            false,
+        );
+        set.observe(
+            &for_id(
+                &subject,
+                "mdns",
+                "/ip4/192.168.1.5/tcp/4001",
+                1_000,
+                Some(u64::MAX),
+            ),
+            1_000,
+            &trust,
+            true,
+            false,
+        );
+        set.retract(
+            &subject,
+            "peer-cache",
+            &[address.to_owned()].into_iter().collect(),
+        );
+
+        set.observe(
+            &for_id(&subject, "peer-cache", address, 5_000, Some(u64::MAX)),
+            5_000,
+            &trust,
+            true,
+            false,
+        );
+
+        assert!(
+            set.candidates(6_000, &|_| None)[0]
+                .address_list()
+                .contains(&address),
+            "newer evidence restores it"
         );
     }
 }
