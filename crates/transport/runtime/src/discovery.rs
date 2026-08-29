@@ -125,10 +125,31 @@ struct Entry {
     observations: BTreeMap<(ProtocolId, String), (bool, u64, u64)>,
     /// The most recent observation of this peer from any source, for the
     /// least-recently-observed half of the eviction rule.
-    last_observed_ms: u64,
+    ///
+    /// DERIVED, never accumulated. Held as a monotonic maximum it only
+    /// ever rose, so a peer whose most recent source retracted or expired
+    /// kept that source's recency forever — and `evict_one` then
+    /// preserved it over a peer whose live reachability had actually been
+    /// observed more recently. `Entry::recency` computes it, and nothing
+    /// stores it.
+    _recency_is_derived: (),
 }
 
 impl Entry {
+    /// The newest observation across live provenance.
+    ///
+    /// Addresses only: a protocol observation never keeps a peer alive
+    /// (COMPOSITION.md), so it must not make one look recently reachable
+    /// either.
+    fn recency(&self) -> u64 {
+        self.addresses
+            .values()
+            .flat_map(|records| records.iter())
+            .map(|r| r.observed_at)
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Any live provenance from a pinned provider.
     fn is_pinned(&self) -> bool {
         self.addresses
@@ -312,7 +333,7 @@ impl CandidateSet {
                     peer_id: peer_id.clone(),
                     addresses,
                     sources,
-                    last_observed_ms: entry.last_observed_ms,
+                    last_observed_ms: entry.recency(),
                     protocol_observations,
                 })
             })
@@ -388,7 +409,7 @@ impl CandidateSet {
         // candidate its slot.
         //
         // A peer ALREADY known still takes the event: its observations
-        // merge, its `last_observed_ms` advances, and it is holding its
+        // merge, its recency advances, and it is holding its
         // slot on addresses it already has.
         let contributes_nothing = candidate.addresses.is_empty() || expires_at <= now_ms;
         if contributes_nothing && !self.peers.contains_key(&candidate.peer_id) {
@@ -407,7 +428,6 @@ impl CandidateSet {
         }
 
         let entry = self.peers.entry(candidate.peer_id.clone()).or_default();
-        entry.last_observed_ms = entry.last_observed_ms.max(candidate.observed_at);
 
         // A DEAD SLOT IS NOT AN OCCUPIED ONE. The cap counts address
         // KEYS, and a key whose every provenance record has expired is
@@ -640,9 +660,7 @@ impl CandidateSet {
             // so the excess is evictable in the same order as anything
             // else.
             let mut ranked: Vec<&TransportIdentity> = configured.iter().collect();
-            ranked.sort_by_key(|p| {
-                std::cmp::Reverse(self.peers.get(*p).map_or(0, |e| e.last_observed_ms))
-            });
+            ranked.sort_by_key(|p| std::cmp::Reverse(self.peers.get(*p).map_or(0, Entry::recency)));
             ranked.truncate(MAX_CONFIGURED_RETAINED);
             ranked.into_iter().collect()
         };
@@ -652,7 +670,7 @@ impl CandidateSet {
             .iter()
             .filter(|(peer, _)| !trust.decide(peer).is_allowed())
             .filter(|(peer, _)| !protect.contains(peer))
-            .min_by_key(|(_, e)| e.last_observed_ms)
+            .min_by_key(|(_, e)| e.recency())
             .map(|(p, _)| p.clone());
         if let Some(peer) = victim {
             self.peers.remove(&peer);
@@ -1938,8 +1956,16 @@ mod tests {
             false,
         );
 
+        // Asserted on the facts themselves rather than on recency, which
+        // is derived from ADDRESS provenance and so does not move for an
+        // observation carrying none.
         let mut empty = for_id(&known, "mdns", "/ip4/10.0.0.1/tcp/1", 100, Some(u64::MAX));
         empty.addresses.clear();
+        empty.protocol_observations.insert(ProtocolObservation {
+            protocol_id: ProtocolId::parse("/interweave/direct/2.0.0").expect("valid"),
+            supported: true,
+            observed_at: 100,
+        });
         set.observe(&empty, 100, &trust, true, false);
 
         let candidates = set.candidates(200, &|_| None);
@@ -1948,10 +1974,10 @@ mod tests {
             .find(|c| c.peer_id == known)
             .expect("the known peer keeps its addresses and its slot");
         assert_eq!(
-            found.last_observed_ms, 100,
-            "and the event is APPLIED, not merely survived: refusing it \
-             outright would leave this at 0 and discard the protocol \
-             observations such an event carries"
+            found.protocol_observations.len(),
+            1,
+            "the event is APPLIED, not merely survived: its protocol fact \
+             reached the consumer"
         );
     }
     #[test]
@@ -2669,6 +2695,100 @@ mod tests {
             found.protocol_observations.len(),
             MAX_OBSERVATIONS_PER_PEER,
             "every slot is live, so the cap still holds"
+        );
+    }
+    #[test]
+    fn recency_falls_back_when_the_newest_source_retracts() {
+        // Held as a monotonic maximum, recency only ever rose — so a peer
+        // whose most recent source retracted kept that source's
+        // timestamp forever, and eviction preserved it over a peer whose
+        // LIVE reachability was observed more recently.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(81);
+
+        set.observe(
+            &for_id(
+                &subject,
+                "peer-cache",
+                "/ip4/10.0.0.1/tcp/1",
+                100,
+                Some(u64::MAX),
+            ),
+            100,
+            &trust,
+            true,
+            false,
+        );
+        set.observe(
+            &for_id(
+                &subject,
+                "mdns",
+                "/ip4/192.168.1.5/tcp/4001",
+                9_000,
+                Some(u64::MAX),
+            ),
+            9_000,
+            &trust,
+            true,
+            false,
+        );
+        assert_eq!(
+            set.candidates(10_000, &|_| None)[0].last_observed_ms,
+            9_000,
+            "the newest source sets recency while it is live"
+        );
+
+        set.retract(&subject, "mdns", &BTreeSet::new());
+
+        assert_eq!(
+            set.candidates(10_000, &|_| None)[0].last_observed_ms,
+            100,
+            "and it falls back to the newest source that REMAINS, rather \
+             than keeping a departed source's recency forever"
+        );
+    }
+
+    #[test]
+    fn an_expired_source_does_not_hold_recency_either() {
+        // The same rule through expiry rather than retraction, since a
+        // sweep is the ordinary way a source leaves.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(82);
+
+        set.observe(
+            &for_id(
+                &subject,
+                "peer-cache",
+                "/ip4/10.0.0.1/tcp/1",
+                100,
+                Some(u64::MAX),
+            ),
+            100,
+            &trust,
+            true,
+            false,
+        );
+        set.observe(
+            &for_id(
+                &subject,
+                "mdns",
+                "/ip4/192.168.1.5/tcp/4001",
+                9_000,
+                Some(9_500),
+            ),
+            9_000,
+            &trust,
+            true,
+            false,
+        );
+
+        set.sweep(10_000);
+        assert_eq!(
+            set.candidates(10_000, &|_| None)[0].last_observed_ms,
+            100,
+            "a lapsed source stops counting toward recency"
         );
     }
 }
