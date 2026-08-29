@@ -339,9 +339,19 @@ impl CandidateSet {
                 // observations are dropped by the same `now_ms` the
                 // addresses are judged against, so a consumer never reads
                 // a fact this manager would no longer stand behind.
+                //
+                // AND ONLY FROM SOURCES STILL LISTED ABOVE. A fact can
+                // outlive its source's last address — an addressless
+                // refresh with a longer life is the ordinary way — and
+                // the cleanup that removes those runs on `observe` and
+                // `sweep`, both of which are pumps the caller controls.
+                // This is a READ, so it cannot depend on when either last
+                // ran: it filters against the live source set derived
+                // from this same `now_ms`, which makes an orphaned claim
+                // unreadable rather than merely short-lived.
                 let mut merged: BTreeMap<(ProtocolId, bool), MergedObservation> = BTreeMap::new();
                 for ((protocol, source), (supported, at, exp)) in &entry.observations {
-                    if now_ms >= *exp {
+                    if now_ms >= *exp || !sources.contains(source) {
                         continue;
                     }
                     let slot = merged
@@ -3038,6 +3048,79 @@ mod tests {
         assert!(
             found.protocol_observations.is_empty(),
             "so its claims go with it: {:?}",
+            found.protocol_observations
+        );
+    }
+    #[test]
+    fn a_fact_outliving_its_sources_last_address_is_not_readable() {
+        // The cleanup runs on `observe` and `sweep`, both pumps the
+        // caller controls. This is a READ, so it must not depend on when
+        // either last ran — an addressless refresh with a longer life is
+        // the ordinary way a fact outlives its source's addresses.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(111);
+        let protocol = ProtocolId::parse("/interweave/direct/2.0.0").expect("valid");
+
+        // Source A: a short-lived address, then a long-lived fact.
+        let mut short = for_id(
+            &subject,
+            "mdns",
+            "/ip4/192.168.1.5/tcp/4001",
+            0,
+            Some(1_000),
+        );
+        short.protocol_observations.insert(ProtocolObservation {
+            protocol_id: protocol.clone(),
+            supported: true,
+            observed_at: 0,
+        });
+        set.observe(&short, 0, &trust, true, false);
+        let mut fact = for_id(
+            &subject,
+            "mdns",
+            "/ip4/192.168.1.5/tcp/4001",
+            10,
+            Some(u64::MAX),
+        );
+        fact.addresses.clear();
+        fact.protocol_observations.insert(ProtocolObservation {
+            protocol_id: protocol,
+            supported: true,
+            observed_at: 10,
+        });
+        set.observe(&fact, 10, &trust, true, false);
+
+        // Source B keeps the peer reachable.
+        set.observe(
+            &for_id(
+                &subject,
+                "peer-cache",
+                "/ip4/10.0.0.1/tcp/1",
+                0,
+                Some(u64::MAX),
+            ),
+            0,
+            &trust,
+            true,
+            false,
+        );
+
+        // NO sweep, NO further observe: exactly the state a consumer can
+        // find the set in.
+        let candidates = set.candidates(5_000, &|_| None);
+        let found = candidates
+            .iter()
+            .find(|c| c.peer_id == subject)
+            .expect("the peer is reachable through the other source");
+        assert!(
+            !found.sources.contains("mdns"),
+            "mdns supports no live address at this instant: {:?}",
+            found.sources
+        );
+        assert!(
+            found.protocol_observations.is_empty(),
+            "so its claim is not readable either: {:?}",
             found.protocol_observations
         );
     }
