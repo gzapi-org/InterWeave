@@ -1563,6 +1563,13 @@ pub enum ConfigError {
         /// Which type carried them.
         provider: &'static str,
     },
+    /// A peer-cache setting is outside the value the schema documents.
+    InvalidCacheSetting {
+        /// Which key.
+        field: &'static str,
+        /// What is wrong with it.
+        reason: String,
+    },
     /// A kademlia setting is outside the value the schema documents.
     InvalidKademliaSetting {
         /// Which key.
@@ -1717,6 +1724,9 @@ impl core::fmt::Display for ConfigError {
                 f,
                 "provider '{provider}' carries `ttl`/`max_entries`, which only peer-cache accepts"
             ),
+            Self::InvalidCacheSetting { field, reason } => {
+                write!(f, "peer-cache setting `{field}`: {reason}")
+            }
             Self::InvalidKademliaSetting { field, reason } => {
                 write!(f, "kademlia setting `{field}`: {reason}")
             }
@@ -1956,6 +1966,21 @@ impl ProfileConfig {
             // meaning later, which is the worst moment for it.
             if entry.provider_type == DiscoveryProviderType::Kademlia {
                 errors.extend(entry.config.kademlia_value_errors());
+            }
+            // The cache's own settings, for the same reason as kademlia's:
+            // the misplacement check below says only that they are on the
+            // right provider, and this build does not consume them yet —
+            // so `ttl: "garbage"` was accepted as an arbitrary string and
+            // silently ignored, and would first be noticed by the runtime
+            // that grows a use for it.
+            if entry.provider_type == DiscoveryProviderType::PeerCache
+                && let Some(ttl) = &entry.config.ttl
+                && let Err(reason) = parse_duration_ms(ttl)
+            {
+                errors.push(ConfigError::InvalidCacheSetting {
+                    field: "ttl",
+                    reason,
+                });
             }
             if entry.provider_type != DiscoveryProviderType::Kademlia
                 && let Some(field) = entry.config.first_kademlia_field()
@@ -3461,6 +3486,50 @@ mod tests {
                 offending.is_empty(),
                 "'{key}' = {value} is documented and must be accepted: {offending:?}"
             );
+        }
+    }
+    #[test]
+    fn a_malformed_peer_cache_ttl_is_refused() {
+        for bad in ["garbage", "", "30x", "-5m"] {
+            let json = serde_json::json!({
+                "providers": [{
+                    "type": "peer-cache",
+                    "enabled": true,
+                    "config": { "ttl": bad }
+                }]
+            });
+            let mut profile = config(vec![endpoint("chat")]);
+            profile.discovery = serde_json::from_value(json).expect("parses");
+            assert!(
+                profile
+                    .validate()
+                    .iter()
+                    .any(|e| matches!(e, ConfigError::InvalidCacheSetting { field, .. } if *field == "ttl")),
+                "ttl '{bad}' must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_documented_peer_cache_ttl_is_accepted() {
+        // The control, including the schema's own `7d` — which needed the
+        // duration parser to learn `d`.
+        for good in ["7d", "24h", "30m", "60s", "500ms", "1000"] {
+            let json = serde_json::json!({
+                "providers": [{
+                    "type": "peer-cache",
+                    "enabled": true,
+                    "config": { "ttl": good }
+                }]
+            });
+            let mut profile = config(vec![endpoint("chat")]);
+            profile.discovery = serde_json::from_value(json).expect("parses");
+            let offending: Vec<_> = profile
+                .validate()
+                .into_iter()
+                .filter(|e| matches!(e, ConfigError::InvalidCacheSetting { .. }))
+                .collect();
+            assert!(offending.is_empty(), "ttl '{good}' is legal: {offending:?}");
         }
     }
 }
