@@ -764,6 +764,17 @@ impl CandidateSet {
                 (observation.supported, observation.observed_at, expires_at),
             );
         }
+
+        // A PEER THE PRUNE EMPTIED LEAVES THROUGH THE ONE DOOR. The
+        // dead-slot reclaim above can take a known peer's last records
+        // on an event that adds none back, and nothing else in `observe`
+        // removed the entry — a nameless state that read as "present"
+        // to `len()` and as "expired, evict first" to overflow, and that
+        // the next change would have tripped over. Removing it here also
+        // spills its thresholds, which stranding silently kept.
+        if entry.addresses.is_empty() {
+            self.remove_entry(&candidate.peer_id);
+        }
     }
 
     /// Retract `source`'s support: the named addresses, or all of them.
@@ -847,8 +858,8 @@ impl CandidateSet {
     /// Remove a peer's entry, spilling its applied thresholds.
     ///
     /// EVERY ENTRY REMOVAL GOES THROUGH HERE — retraction emptying a
-    /// peer, the sweep collecting emptied peers, and all three eviction
-    /// branches. The spill is what lets `high_water` hold only REMOVED
+    /// peer, the sweep collecting emptied peers, `observe` removing a
+    /// peer its own prune emptied, and all three eviction branches. The spill is what lets `high_water` hold only REMOVED
     /// peers' thresholds: while a peer lives its thresholds ride in
     /// `Entry::applied` and no removal of records owes any bookkeeping,
     /// which is what ended the per-door re-recording that eight separate
@@ -4780,6 +4791,52 @@ mod tests {
                 .iter()
                 .any(|o| o.protocol == kad && o.supported),
             "a fact withdrawn at 200 is not re-asserted by evidence from 150"
+        );
+    }
+    #[test]
+    fn a_peer_pruned_empty_in_observe_is_removed_not_stranded() {
+        // The dead-slot reclaim can take a known peer's last records on
+        // an event that adds none back. Stranded, the empty entry counts
+        // toward `len`, ranks "expired — evict first" under pressure,
+        // and holds thresholds that never spill.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(80);
+        let addr = "/ip4/10.0.0.1/tcp/1";
+
+        set.observe(
+            &for_id(&subject, "peer-cache", addr, 1_000, Some(2_000)),
+            1_000,
+            &trust,
+            true,
+            false,
+        );
+
+        // An addressless refresh after the record lapsed: the prune
+        // empties the entry, and the event restocks nothing.
+        let mut refresh = for_id(&subject, "peer-cache", addr, 5_000, Some(u64::MAX));
+        refresh.addresses.clear();
+        set.observe(&refresh, 5_000, &trust, true, false);
+
+        assert!(
+            set.is_empty(),
+            "the emptied entry is removed, not stranded at len {}",
+            set.len()
+        );
+
+        // And it left through the spilling door: the refresh raised the
+        // threshold to 5_000 before the removal, so older evidence stays
+        // refused.
+        set.observe(
+            &for_id(&subject, "peer-cache", addr, 3_000, Some(u64::MAX)),
+            6_000,
+            &trust,
+            true,
+            false,
+        );
+        assert!(
+            set.candidates(6_500, &|_| None).is_empty(),
+            "the spilled threshold still refuses older evidence"
         );
     }
 }
