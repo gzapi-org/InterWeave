@@ -1327,6 +1327,37 @@ fn is_network_id(value: &str) -> bool {
         .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-'))
 }
 
+/// The same grammar without the 32-bit ceiling.
+///
+/// `parse_duration_ms` narrows to `u32`, which stops at about 49.7 days.
+/// That is right for the settings whose schema states a maximum well
+/// inside it, and wrong for one that states none: a peer-cache `ttl` of
+/// `60d` is representable by the cache (`CacheLimitsBuilder::ttl_ms` is
+/// `u64`) and was refused here for a reason no document gives.
+fn parse_duration_ms_u64(text: &str) -> Result<u64, String> {
+    let text = text.trim();
+    let (digits, unit): (&str, u64) = if let Some(n) = text.strip_suffix("ms") {
+        (n, 1)
+    } else if let Some(n) = text.strip_suffix('s') {
+        (n, 1_000)
+    } else if let Some(n) = text.strip_suffix('m') {
+        (n, 60_000)
+    } else if let Some(n) = text.strip_suffix('h') {
+        (n, 3_600_000)
+    } else if let Some(n) = text.strip_suffix('d') {
+        (n, 86_400_000)
+    } else {
+        (text, 1)
+    };
+    let value: u64 = digits
+        .trim()
+        .parse()
+        .map_err(|_| format!("'{text}' is not a duration like 60s, 5m, 1h, or 500ms"))?;
+    value
+        .checked_mul(unit)
+        .ok_or_else(|| format!("duration '{text}' overflows the millisecond range"))
+}
+
 fn parse_duration_ms(text: &str) -> Result<u32, String> {
     let text = text.trim();
     let (digits, unit): (&str, u64) = if let Some(n) = text.strip_suffix("ms") {
@@ -2089,7 +2120,9 @@ impl ProfileConfig {
             // that grows a use for it.
             if entry.provider_type == DiscoveryProviderType::PeerCache {
                 if let Some(ttl) = &entry.config.ttl {
-                    match parse_duration_ms(ttl) {
+                    // The 64-bit parser: this setting's schema states no
+                    // maximum, and the cache holds it as `u64`.
+                    match parse_duration_ms_u64(ttl) {
                         Err(reason) => {
                             errors.push(ConfigError::InvalidCacheSetting {
                                 field: "ttl",
@@ -3670,7 +3703,10 @@ mod tests {
     fn a_documented_peer_cache_ttl_is_accepted() {
         // The control, including the schema's own `7d` — which needed the
         // duration parser to learn `d`.
-        for good in ["7d", "24h", "30m", "60s", "500ms", "1000"] {
+        // `60d` is past the 32-bit millisecond ceiling and inside what
+        // the cache can hold: the schema states no maximum for this
+        // setting, so neither does validation.
+        for good in ["7d", "24h", "30m", "60s", "500ms", "1000", "60d", "365d"] {
             let json = serde_json::json!({
                 "providers": [{
                     "type": "peer-cache",
@@ -3920,5 +3956,41 @@ mod tests {
                 .any(|e| matches!(e, ConfigError::InvalidCacheSetting { .. })),
             "the documented values are legal"
         );
+    }
+    #[test]
+    fn a_ttl_past_the_32_bit_millisecond_ceiling_is_accepted() {
+        // ~49.7 days is where `u32` milliseconds stop. Nothing documents
+        // that as a limit on this setting, and the cache holds the value
+        // as `u64`, so a profile the cache can represent must validate.
+        let beyond = parse_duration_ms_u64("60d").expect("a legal duration");
+        assert!(
+            beyond > u64::from(u32::MAX),
+            "the case must actually be past the old ceiling, got {beyond}"
+        );
+
+        let json = serde_json::json!({
+            "providers": [{
+                "type": "peer-cache",
+                "enabled": true,
+                "priority": 10,
+                "config": { "ttl": "60d" }
+            }]
+        });
+        let mut profile = config(vec![endpoint("chat")]);
+        profile.discovery = serde_json::from_value(json).expect("parses");
+        assert!(
+            !profile
+                .validate()
+                .iter()
+                .any(|e| matches!(e, ConfigError::InvalidCacheSetting { .. })),
+            "a duration the cache can hold is not refused here"
+        );
+    }
+
+    #[test]
+    fn a_duration_that_overflows_even_64_bits_is_still_refused() {
+        // The control: dropping the ceiling must not drop the bound.
+        assert!(parse_duration_ms_u64("999999999999999999999d").is_err());
+        assert!(parse_duration_ms_u64(&format!("{}d", u64::MAX)).is_err());
     }
 }
