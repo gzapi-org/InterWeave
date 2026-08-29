@@ -68,8 +68,12 @@ pub fn create_private_dir(dir: &Path) -> Result<(), PersistError> {
 /// # Errors
 /// Returns [`PersistError::Io`] if any step fails, or
 /// [`PersistError::UnsupportedPlatform`] where owner-only permissions
-/// cannot be enforced. A failure leaves the previous file untouched:
-/// nothing is removed until the replacement is fully on disk.
+/// cannot be enforced. A failure BEFORE the rename leaves the previous
+/// file untouched: nothing is removed until the replacement is fully on
+/// disk. The one error that arrives after it is the directory fsync,
+/// which reports that the new file is in place and its NAME may not
+/// survive a crash — a different fact, and the reason it is reported
+/// rather than swallowed.
 pub fn write_private_atomic(path: &Path, contents: &[u8]) -> Result<(), PersistError> {
     write_atomic_with_mode(path, contents, Some(OWNER_ONLY_FILE))
 }
@@ -130,10 +134,17 @@ fn write_atomic_with_mode(
     // fsync the DIRECTORY too, so the rename itself survives a crash.
     // Without this the file contents are durable but the name they were
     // renamed to may not be.
+    //
+    // REPORTED, not discarded. `let _ =` here meant a failure to make
+    // the rename durable was indistinguishable from success, and this
+    // function writes a profile's configuration and its identity key —
+    // state whose name failing to survive a reboot is the loss of the
+    // identity itself. The bytes may well be on disk and the caller
+    // cannot know that, which is exactly why it has to be told: an error
+    // after the rename says "possibly not durable", and reporting it is
+    // the only honest answer available.
     #[cfg(unix)]
-    if let Ok(dir) = fs::File::open(parent) {
-        let _ = dir.sync_all();
-    }
+    fsync_dir(parent)?;
 
     Ok(())
 }
@@ -157,7 +168,10 @@ fn write_atomic_with_mode(
 /// Returns [`PersistError::AlreadyExists`] if `path` is taken,
 /// [`PersistError::Io`] if any step fails, or
 /// [`PersistError::UnsupportedPlatform`] where owner-only permissions
-/// cannot be enforced. Nothing at `path` is touched in any case.
+/// cannot be enforced. Nothing at `path` is touched in any of those
+/// cases. The exception is the directory fsync, which runs after the
+/// link is published: that error means `path` EXISTS and its name may
+/// not survive a crash.
 pub fn create_private_exclusive(path: &Path, contents: &[u8]) -> Result<(), PersistError> {
     let parent = parent_dir(path);
     create_private_dir(parent)?;
@@ -191,12 +205,25 @@ pub fn create_private_exclusive(path: &Path, contents: &[u8]) -> Result<(), Pers
     let _ = fs::remove_file(&temp);
     outcome?;
 
+    // As in `save`: the link is published, and whether that name
+    // survives a crash is reported rather than assumed.
     #[cfg(unix)]
-    if let Ok(dir) = fs::File::open(parent) {
-        let _ = dir.sync_all();
-    }
+    fsync_dir(parent)?;
 
     Ok(())
+}
+
+/// fsync a directory, so a rename or link into it survives a crash.
+///
+/// # Errors
+/// Returns [`PersistError::Io`] if the directory cannot be opened or
+/// synced. Both are real answers: this is called after the entry is
+/// published, so a failure means the name may not be durable, and the
+/// caller is the only party that can decide what to do about it.
+#[cfg(unix)]
+fn fsync_dir(parent: &Path) -> Result<(), PersistError> {
+    let dir = fs::File::open(parent).map_err(PersistError::Io)?;
+    dir.sync_all().map_err(PersistError::Io)
 }
 
 /// The directory `path` names a file in, as a path that can be opened.
@@ -400,6 +427,88 @@ pub fn is_owner_only(path: &Path) -> Result<bool, PersistError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A directory whose fsync cannot succeed, without a race.
+    ///
+    /// `0o300` is write plus execute and NO READ: `rename` into it still
+    /// works, and `File::open` on the directory itself fails with
+    /// EACCES — precisely the failure the write used to discard. Returns
+    /// false when the mode blocked nothing (running as root, or a
+    /// filesystem that ignores it), so the test says so rather than
+    /// passing vacuously.
+    #[cfg(unix)]
+    fn make_unreadable(dir: &Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o300)).expect("chmod");
+        fs::File::open(dir).is_err()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_write_whose_directory_cannot_be_synced_says_so() {
+        // The rename has landed and the NAME may not survive a crash.
+        // `let _ = dir.sync_all()` reported that as a successful write —
+        // and this function writes a profile's configuration and its
+        // identity key, so the name failing to survive a reboot is the
+        // loss of the identity itself.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("profile.json");
+
+        // POSITIVE CONTROL FIRST: the same write succeeds while the
+        // directory is readable.
+        write_atomic(&path, b"{}").expect("an ordinary write succeeds");
+
+        if !make_unreadable(dir.path()) {
+            println!("skipped: 0o300 did not block opening the directory here");
+            return;
+        }
+        let refused = write_atomic(&path, b"{\"v\":2}");
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).expect("chmod back");
+        assert!(
+            matches!(refused, Err(PersistError::Io(_))),
+            "a write that could not fsync its directory must not report success: {refused:?}"
+        );
+        // And the rename really did land: the failure is about
+        // durability of the NAME, not about the write not happening.
+        assert_eq!(
+            fs::read(&path).expect("the new contents are in place"),
+            b"{\"v\":2}",
+            "the error says the name may not be durable, not that nothing was written"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_exclusive_create_whose_directory_cannot_be_synced_says_so() {
+        // The THIRD door, which the two above do not reach: this one
+        // publishes by hard link rather than rename, and `0o300` passes
+        // `require_private_dir` — it checks that group and other have no
+        // bits, not that the owner can read.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).expect("chmod");
+
+        // POSITIVE CONTROL: a readable directory takes the key.
+        create_private_exclusive(&dir.path().join("first.key"), b"k").expect("an ordinary create");
+
+        if !make_unreadable(dir.path()) {
+            println!("skipped: 0o300 did not block opening the directory here");
+            return;
+        }
+        let path = dir.path().join("identity.key");
+        let refused = create_private_exclusive(&path, b"k");
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).expect("chmod back");
+        assert!(
+            matches!(refused, Err(PersistError::Io(_))),
+            "an exclusive create that could not fsync its directory must not \
+             report success: {refused:?}"
+        );
+        assert!(
+            path.exists(),
+            "the link was published; what is in doubt is whether its name survives"
+        );
+    }
 
     #[test]
     fn every_writer_gets_its_own_temporary() {
