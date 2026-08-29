@@ -173,13 +173,27 @@ impl DirectoryBudget {
         Ok(())
     }
 
-    /// Charge one query against `peer`'s rate — only for a real directory.
+    /// Charge one query against `peer`'s rate — for EVERY query that
+    /// reaches the handler, served or refused.
     ///
     /// Separate from [`reserve`](Self::reserve): the in-flight bound counts
-    /// every queued response, but the per-peer RATE limits how often a peer
-    /// earns an actual endpoint list. A refusal does not charge the rate,
-    /// so an unauthorized or disabled query cannot exhaust a peer's own
-    /// budget — only a served directory does.
+    /// every queued response, while this limits how often a peer may ask.
+    ///
+    /// THIS IS A PRE-TRUST BUDGET, and the ordering is the security
+    /// property rather than an implementation detail. The runtime charges
+    /// it BEFORE the trust and disabled checks, so an unauthorized peer —
+    /// an infrastructure-only connection can open a directory substream —
+    /// pays for the refusals it provokes. The in-flight bound caps
+    /// concurrency, not frequency, so a peer issuing refusals as fast as
+    /// they settle would otherwise spend unbounded processing and
+    /// bandwidth for free.
+    ///
+    /// This doc previously said the opposite — that a refusal does not
+    /// charge, so an unauthorized query cannot exhaust a peer's own
+    /// budget. The implementation never behaved that way, and the
+    /// behaviour is the safer of the two; the description was wrong, not
+    /// the code. Any allowance granted to a TRUSTED peer for work beyond
+    /// answering is a separate concept and is not this one.
     ///
     /// # Errors
     /// [`BudgetDenial::PeerExhausted`] when the peer is over its rate.
@@ -448,6 +462,34 @@ impl DirectoryCache {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_unauthorized_query_spends_the_pre_trust_directory_budget() {
+        // The budget is charged BEFORE the trust and disabled checks, so
+        // a peer that will be refused still pays for asking. Named for
+        // the property because the doc above once claimed the opposite:
+        // the in-flight bound caps concurrency, not frequency, so a peer
+        // issuing refusals as fast as they settle would otherwise spend
+        // unbounded processing and bandwidth for free.
+        let mut b = DirectoryBudget::new(4, 16, 0).expect("valid");
+        let querier = peer(P1);
+
+        // Spend the peer's whole per-minute rate on queries that will be
+        // refused for trust — the charge does not know or care.
+        let mut charged = 0u32;
+        while b.charge_rate(&querier, 0).is_ok() {
+            charged += 1;
+            assert!(charged < 10_000, "the rate must be finite");
+        }
+        assert!(charged > 0, "the first query was charged");
+
+        // The next one is refused by the BUDGET, before any trust
+        // decision could be reached.
+        assert!(
+            matches!(b.charge_rate(&querier, 0), Err(BudgetDenial::PeerExhausted)),
+            "an unauthorized peer exhausts its own pre-trust rate"
+        );
+    }
     use super::*;
 
     const P1: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
