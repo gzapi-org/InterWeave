@@ -294,6 +294,13 @@ pub struct CandidateSet {
     /// a delayed event can revive a long-removed peer; that is the one
     /// residual window, and it is the same trade every bound here makes.
     high_water: BTreeMap<(TransportIdentity, String), u64>,
+    /// `(peer, protocol, source)` -> the spilled FACT floor of a removed
+    /// peer — the same design as `high_water`, for `Entry::fact_applied`.
+    /// Discarding these on removal was a stated residual until it bit:
+    /// a later reachability observation newer than the candidate-level
+    /// watermark recreated the entry with no fact floor, and a replayed
+    /// older capability claim landed. Same bound, same trades.
+    fact_high_water: BTreeMap<(TransportIdentity, ProtocolId, String), u64>,
 }
 
 impl CandidateSet {
@@ -304,6 +311,7 @@ impl CandidateSet {
             peers: BTreeMap::new(),
             overflow: OverflowStats::default(),
             high_water: BTreeMap::new(),
+            fact_high_water: BTreeMap::new(),
         }
     }
 
@@ -570,6 +578,22 @@ impl CandidateSet {
         // Displacements are counted locally — the stats live on `self`,
         // which the entry borrow holds — and added once it ends.
         let mut displaced_here = 0u64;
+        // Spilled fact floors for this candidate's keys, read before the
+        // entry borrow holds `self` out of reach. Zero for a peer that
+        // was never removed.
+        let spilled_fact_floors: BTreeMap<ProtocolId, u64> = candidate
+            .protocol_observations
+            .iter()
+            .filter_map(|o| {
+                self.fact_high_water
+                    .get(&(
+                        candidate.peer_id.clone(),
+                        o.protocol_id.clone(),
+                        candidate.source.clone(),
+                    ))
+                    .map(|at| (o.protocol_id.clone(), *at))
+            })
+            .collect();
 
         // THE THRESHOLD LIVES HERE NOW, not on the records. Applied
         // evidence raises it; nothing that removes a record can lower it,
@@ -743,7 +767,12 @@ impl CandidateSet {
             // after the displacement, a stale pinned fact evicted a live
             // unpinned one and was then refused itself: a slot emptied
             // for evidence that was never going to land.
-            let floor = entry.fact_applied.get(&key).copied().unwrap_or(0);
+            let floor = entry.fact_applied.get(&key).copied().unwrap_or(0).max(
+                spilled_fact_floors
+                    .get(&observation.protocol_id)
+                    .copied()
+                    .unwrap_or(0),
+            );
             if floor > observation.observed_at {
                 continue;
             }
@@ -897,7 +926,50 @@ impl CandidateSet {
         *mark = (*mark).max(at);
     }
 
-    /// Remove a peer's entry, spilling its applied thresholds.
+    /// Record a removed peer's fact floor, bounded like `high_water`.
+    ///
+    /// Redundant-first: a mark a live entry's `fact_applied` covers loses
+    /// nothing, because the entry reproduces the floor and spills it
+    /// again on removal. Fallback is min-value — the floor least likely
+    /// to still be guarding a replay in flight.
+    fn remember_fact_watermark(
+        &mut self,
+        peer: &TransportIdentity,
+        protocol: ProtocolId,
+        source: String,
+        at: u64,
+    ) {
+        let key = (peer.clone(), protocol, source);
+        if self.fact_high_water.len() >= MAX_HIGH_WATER && !self.fact_high_water.contains_key(&key)
+        {
+            let redundant = self
+                .fact_high_water
+                .iter()
+                .find(|((p, proto, src), mark)| {
+                    self.peers.get(p).is_some_and(|e| {
+                        e.fact_applied
+                            .get(&(proto.clone(), src.clone()))
+                            .is_some_and(|a| a >= mark)
+                    })
+                })
+                .map(|(k, _)| k.clone());
+            let victim = redundant.or_else(|| {
+                self.fact_high_water
+                    .iter()
+                    .min_by_key(|(_, at)| **at)
+                    .map(|(k, _)| k.clone())
+            });
+            if let Some(victim) = victim {
+                self.fact_high_water.remove(&victim);
+            }
+        }
+        let mark = self.fact_high_water.entry(key).or_default();
+        *mark = (*mark).max(at);
+    }
+
+    /// Remove a peer's entry, spilling BOTH its threshold maps —
+    /// `applied` into `high_water` and `fact_applied` into
+    /// `fact_high_water`.
     ///
     /// EVERY ENTRY REMOVAL GOES THROUGH HERE — retraction emptying a
     /// peer, the sweep collecting emptied peers, `observe` removing a
@@ -912,6 +984,9 @@ impl CandidateSet {
         };
         for (source, at) in entry.applied {
             self.remember_watermark(peer, &source, at);
+        }
+        for ((protocol, source), at) in entry.fact_applied {
+            self.remember_fact_watermark(peer, protocol, source, at);
         }
     }
 
@@ -5105,9 +5180,9 @@ mod tests {
         // a live unpinned one and was then refused itself — a slot
         // emptied for evidence that was never going to land.
         //
-        // The peer is kept alive through mdns THROUGHOUT: entry removal
-        // discards `fact_applied` (a stated residual), so a whole-peer
-        // retraction here would silently drop the floor this test needs.
+        // The peer is kept alive through mdns THROUGHOUT, so the floor
+        // this test relies on stays on the LIVE entry rather than taking
+        // the spill path, which has its own test.
         let mut set = CandidateSet::new();
         let trust = nobody();
         let p = identity(98);
@@ -5174,6 +5249,85 @@ mod tests {
                 .keys()
                 .all(|(pr, s)| s == "mdns" && pr.as_str().starts_with("/interweave/p")),
             "every live unpinned fact survived the stale arrival"
+        );
+    }
+    #[test]
+    fn a_fact_floor_survives_the_peers_removal() {
+        // The stated residual, closed now that it bit: `remove_entry`
+        // spilled `applied` and discarded `fact_applied`, so a later
+        // reachability observation newer than the candidate watermark
+        // recreated the entry with no fact floor, and a replayed older
+        // capability claim landed.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let p = identity(99);
+        let addr = "/ip4/10.0.0.1/tcp/1";
+        let proto = ProtocolId::parse("/interweave/direct/2.0.0").expect("valid");
+
+        let mut c = for_id(&p, "mdns", addr, 500, Some(u64::MAX));
+        c.protocol_observations.insert(ProtocolObservation {
+            protocol_id: proto.clone(),
+            supported: false,
+            observed_at: 500,
+        });
+        set.observe(&c, 500, &trust, true, false);
+        set.retract(&p, "mdns", &BTreeSet::new());
+        assert!(set.is_empty(), "the entry is gone, or this proves nothing");
+
+        // Newer reachability, replaying the OLDER positive claim.
+        let mut replay = for_id(&p, "mdns", addr, 1_000, Some(u64::MAX));
+        replay.protocol_observations.insert(ProtocolObservation {
+            protocol_id: proto.clone(),
+            supported: true,
+            observed_at: 300,
+        });
+        set.observe(&replay, 1_000, &trust, true, false);
+
+        let cands = set.candidates(1_500, &|_| None);
+        let cand = cands.iter().find(|c| c.peer_id == p).expect("recreated");
+        assert!(
+            !cand
+                .protocol_observations
+                .iter()
+                .any(|o| o.protocol == proto && o.supported),
+            "the withdrawal at 500 still outranks the replay from 300"
+        );
+    }
+
+    #[test]
+    fn a_genuinely_newer_fact_still_lands_after_the_peers_removal() {
+        // The control: the spilled floor is forward-only evidence, not a
+        // tombstone on the protocol.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let p = identity(100);
+        let addr = "/ip4/10.0.0.1/tcp/1";
+        let proto = ProtocolId::parse("/interweave/direct/2.0.0").expect("valid");
+
+        let mut c = for_id(&p, "mdns", addr, 500, Some(u64::MAX));
+        c.protocol_observations.insert(ProtocolObservation {
+            protocol_id: proto.clone(),
+            supported: false,
+            observed_at: 500,
+        });
+        set.observe(&c, 500, &trust, true, false);
+        set.retract(&p, "mdns", &BTreeSet::new());
+
+        let mut newer = for_id(&p, "mdns", addr, 1_000, Some(u64::MAX));
+        newer.protocol_observations.insert(ProtocolObservation {
+            protocol_id: proto.clone(),
+            supported: true,
+            observed_at: 800,
+        });
+        set.observe(&newer, 1_000, &trust, true, false);
+
+        let cands = set.candidates(1_500, &|_| None);
+        let cand = cands.iter().find(|c| c.peer_id == p).expect("recreated");
+        assert!(
+            cand.protocol_observations
+                .iter()
+                .any(|o| o.protocol == proto && o.supported),
+            "newer evidence lands as it always did"
         );
     }
 }
