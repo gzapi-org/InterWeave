@@ -276,11 +276,25 @@ impl MdnsDiscovery {
     /// Merging loses nothing: two expiries for one peer say exactly what
     /// one expiry naming both addresses says.
     fn queue_expiry(&mut self, peer_id: &TransportIdentity, address: &str) {
+        // THE PENDING OBSERVATION'S LIFETIME IS RECOMPUTED, not left
+        // behind. `expires_at` on a candidate is the peer's LATEST
+        // deadline across the addresses it names, so removing an address
+        // from a queued observation without recomputing can leave the
+        // survivors carrying a deadline that belonged to the address that
+        // just went — extending a route past its real expiry at the
+        // manager. `seen` no longer holds the departed address by this
+        // point, so it is the right thing to ask.
+        let remaining_expiry = self
+            .seen
+            .get(peer_id)
+            .and_then(|addresses| addresses.values().copied().max());
+
         // A goodbye contradicts a pending observation of the same address.
         let mut merged: BTreeSet<String> = [address.to_owned()].into_iter().collect();
         self.pending.retain_mut(|event| match event {
             DiscoveryEvent::CandidateObserved { candidate } if candidate.peer_id == *peer_id => {
                 candidate.addresses.remove(address);
+                candidate.expires_at = remaining_expiry;
                 !candidate.addresses.is_empty()
             }
             DiscoveryEvent::CandidateExpired {
@@ -1258,6 +1272,45 @@ mod tests {
                     if candidate.addresses.contains(short)
             )),
             "and no observation still names it: {events:?}"
+        );
+    }
+    #[test]
+    fn removing_an_address_from_a_pending_observation_recomputes_its_expiry() {
+        // `expires_at` is the peer's LATEST deadline across the addresses
+        // a candidate names. Remove the longest-lived address without
+        // recomputing and the survivors carry its deadline — a route kept
+        // dialable at the manager past its real expiry.
+        let mut p = started();
+        let subject = synthetic_peer(1);
+        let short = "/ip4/192.168.1.5/tcp/4001";
+        let long = "/ip4/192.168.1.6/tcp/4001";
+
+        p.push_discovered(&subject, short, 0);
+        // Announced later, so it holds the peer's maximum deadline.
+        let later = OBSERVATION_TTL_MS / 2;
+        p.push_discovered(&subject, long, later);
+
+        // The backend withdraws the LONGER-lived one while the
+        // observation is still queued.
+        p.push_expired(&subject, long, later);
+
+        let events = p.drain_events(later, usize::MAX);
+        let observation = events
+            .iter()
+            .find_map(|e| match e {
+                DiscoveryEvent::CandidateObserved { candidate } => Some(candidate),
+                _ => None,
+            })
+            .expect("the peer is still observed at its surviving address");
+        assert_eq!(
+            observation.addresses.len(),
+            1,
+            "only the surviving address is named"
+        );
+        assert_eq!(
+            observation.expires_at,
+            Some(OBSERVATION_TTL_MS),
+            "and it carries ITS deadline, not the withdrawn address's"
         );
     }
 }
