@@ -159,6 +159,25 @@ impl Entry {
             .unwrap_or(0)
     }
 
+    /// Drop protocol facts from any source that no longer supports an
+    /// address for this peer.
+    ///
+    /// ONE PLACE DECIDES THIS. The rule reached `retract`, then `sweep`,
+    /// then the two capacity-displacement paths — four callers found one
+    /// review round at a time, because each fix answered where the
+    /// question had been asked rather than where it applies. It applies
+    /// wherever provenance is removed.
+    fn drop_orphaned_facts(&mut self) {
+        let live: BTreeSet<String> = self
+            .addresses
+            .values()
+            .flat_map(|records| records.iter())
+            .map(|r| r.source.clone())
+            .collect();
+        self.observations
+            .retain(|(_, source), _| live.contains(source));
+    }
+
     /// Any live provenance from a pinned provider.
     fn is_pinned(&self) -> bool {
         self.addresses
@@ -609,6 +628,13 @@ impl CandidateSet {
                 }
             }
         }
+
+        // Provenance may have been REMOVED above — by the pruning, by a
+        // pinned address displacing an unpinned one, or by a pinned
+        // source displacing a record at the provenance cap. Any of those
+        // can leave a source supporting nothing, so the rule is applied
+        // once here rather than at each site that removes something.
+        entry.drop_orphaned_facts();
     }
 
     /// Retract `source`'s support: the named addresses, or all of them.
@@ -634,13 +660,7 @@ impl CandidateSet {
         //
         // Asking whether the source has any provenance left covers both
         // shapes, so the whole-peer case is no longer special.
-        let still_supports = entry
-            .addresses
-            .values()
-            .any(|records| records.iter().any(|r| r.source == source));
-        if !still_supports {
-            entry.observations.retain(|(_, s), _| s != source);
-        }
+        entry.drop_orphaned_facts();
 
         if entry.addresses.is_empty() {
             self.peers.remove(peer_id);
@@ -2942,6 +2962,83 @@ mod tests {
         assert!(
             !set.candidates(lapse - 1, &|_| None).is_empty(),
             "and it really was alive until then"
+        );
+    }
+    #[test]
+    fn displacing_a_sources_last_address_drops_its_facts_too() {
+        // The capacity-displacement path: a pinned configured address
+        // evicts an unpinned one whose source has no other provenance.
+        // That source then supports nothing, and its protocol claims were
+        // still exposed until their original TTL.
+        let mut m = DiscoveryManager::new();
+        m.register(descriptor("mdns"), 0).expect("registers");
+        m.register(descriptor_without_expiry("static-bootstrap"), 0)
+            .expect("registers");
+        let trust = nobody();
+        let subject = identity(101);
+        let protocol = ProtocolId::parse("/interweave/direct/2.0.0").expect("valid");
+
+        // Fill every slot from mdns, and have it assert a fact.
+        for i in 0..MAX_ADDRESSES_PER_PEER {
+            let mut c = for_id(
+                &subject,
+                "mdns",
+                &format!("/ip4/192.168.1.{i}/tcp/4001"),
+                100 + i as u64,
+                Some(u64::MAX),
+            );
+            if i == 0 {
+                c.protocol_observations.insert(ProtocolObservation {
+                    protocol_id: protocol.clone(),
+                    supported: true,
+                    observed_at: 100,
+                });
+            }
+            m.on_event("mdns", observed(c), 100 + i as u64, &trust)
+                .expect("accepted");
+        }
+        assert_eq!(
+            m.candidates(1_000)
+                .iter()
+                .find(|c| c.peer_id == subject)
+                .expect("known")
+                .protocol_observations
+                .len(),
+            1,
+            "the fact is present while mdns supports addresses"
+        );
+
+        // Every mdns address is displaced by pinned configured ones.
+        for i in 0..MAX_ADDRESSES_PER_PEER {
+            m.on_event(
+                "static-bootstrap",
+                observed(for_id(
+                    &subject,
+                    "static-bootstrap",
+                    &format!("/dns4/bootstrap{i}.example.net/tcp/4001"),
+                    200 + i as u64,
+                    None,
+                )),
+                200 + i as u64,
+                &trust,
+            )
+            .expect("accepted");
+        }
+
+        let candidates = m.candidates(1_000);
+        let found = candidates
+            .iter()
+            .find(|c| c.peer_id == subject)
+            .expect("the peer survives on the configured addresses");
+        assert!(
+            !found.sources.contains("mdns"),
+            "mdns supports nothing now: {:?}",
+            found.sources
+        );
+        assert!(
+            found.protocol_observations.is_empty(),
+            "so its claims go with it: {:?}",
+            found.protocol_observations
         );
     }
 }
