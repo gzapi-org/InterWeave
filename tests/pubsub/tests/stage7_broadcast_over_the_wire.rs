@@ -103,6 +103,7 @@ fn profile(desired: &[&str]) -> ProfileConfig {
             directory: DirectoryConfig::default(),
             entries: vec![entry("human")],
         },
+        discovery: interweave_profile_config::DiscoveryConfig::default(),
         channels: ChannelsConfig {
             desired: desired.iter().map(|c| channel(c)).collect(),
         },

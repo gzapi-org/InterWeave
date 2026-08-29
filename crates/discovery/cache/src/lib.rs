@@ -27,6 +27,7 @@
 
 pub mod cache;
 pub mod limits;
+pub mod provider;
 pub mod record;
 
 pub use cache::{CacheHealth, FORMAT_VERSION, PeerCache, SOURCE};
@@ -35,6 +36,7 @@ pub use limits::{
     MAX_ADDRESSES_PER_PEER, MAX_CACHE_FILE_BYTES, MAX_CAPABILITIES_PER_PEER, MAX_LABEL_BYTES,
     MAX_PEERS, WRITE_DEBOUNCE_MS,
 };
+pub use provider::PeerCacheDiscovery;
 pub use record::{AddressObservation, PeerRecord, ProtocolCapabilityObservation};
 
 /// What can go wrong reading or writing the cache.

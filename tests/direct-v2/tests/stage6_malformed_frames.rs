@@ -142,6 +142,7 @@ fn profile_with(entries: Vec<EndpointConfig>, default: Option<&str>) -> ProfileC
             directory: DirectoryConfig::default(),
             entries,
         },
+        discovery: interweave_profile_config::DiscoveryConfig::default(),
         channels: ChannelsConfig::default(),
     }
 }

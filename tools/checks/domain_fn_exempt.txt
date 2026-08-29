@@ -106,9 +106,26 @@ Refusal::to_wire                                 call  refusal.to_wire(
 
 
 # --- stage-9 -----------------------------------------------------
-CandidatePeer::validate                          stage-9   provider descriptors validated when a provider exists to supply them
-ProtocolId                                       stage-9   provider descriptors validated when a provider exists to supply them
-ProviderDescriptor                               stage-9   provider descriptors validated when a provider exists to supply them
+AggregatedCandidate::address_list                 stage-12  a consumer reads the ordered addresses at runtime composition
+ProtocolId::parse                                stage-9   the conformance suite drives ObservedProtocol hints through providers
+DiscoveryManager::new                            stage-9   the conformance suite composes the manager over real providers
+DiscoveryManager::register                       stage-9   the conformance suite composes the manager over real providers
+DiscoveryManager::on_event                       stage-9   the conformance suite composes the manager over real providers
+DiscoveryManager::sweep                          stage-9   the conformance suite composes the manager over real providers
+DiscoveryManager::candidates                     stage-9   the conformance suite composes the manager over real providers
+DiscoveryManager::candidate_count                stage-9   the conformance suite composes the manager over real providers
+DiscoveryManager::provider_count                 stage-9   the conformance suite composes the manager over real providers
+DiscoveryManager::provider_health                stage-9   the conformance suite composes the manager over real providers
+DiscoveryManager::provider_priority              stage-9   the conformance suite composes the manager over real providers
+DiscoveryManager::aggregate_health               stage-9   the conformance suite composes the manager over real providers
+DiscoveryManager::descriptor                     stage-9   the conformance suite composes the manager over real providers
+CandidateSet::new                                stage-12  the manager owns one; TransportRuntime composition is the first outside holder
+CandidateSet::candidates                         stage-12  reached through DiscoveryManager::candidates until composition
+CandidateSet::overflow_stats                     stage-12  reached through DiscoveryManager::overflow_stats until composition
+DiscoveryManager::overflow_stats                 stage-12  the diagnostic DESIGN.md requires; its first reader is runtime composition
+CandidateSet::sweep                              stage-12  reached through DiscoveryManager::sweep until composition
+CandidateSet::len                                stage-12  reached through DiscoveryManager::candidate_count until composition
+CandidateSet::is_empty                           stage-12  candidate-set introspection, first read at runtime composition
 
 # --- stage-10 ----------------------------------------------------
 ObservedCandidates                               stage-10  Kademlia control port, inert until the DHT is activated

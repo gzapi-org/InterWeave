@@ -25,10 +25,19 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+# The discovery contract owns the address ceiling this crate's static
+# bootstrap entries are built from; parsing that block without it means
+# duplicating a normative constant.
+interweave-discovery-api = { path = "../../api/discovery-api" }
 interweave-transport-api = { path = "../../api/transport-api" }
 interweave-trust-api = { path = "../../api/trust-api" }
 serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
+# For one assertion only: that `CACHE_MAX_PEERS` still equals the cache's
+# own frozen limit. A dev-dependency keeps the mirror honest without
+# making a configuration crate depend on a provider implementation.
+interweave-discovery-cache = { path = "../../discovery/cache" }
 serde_json = { workspace = true }
+serde_norway = "0.9.42"
 tempfile = { workspace = true }

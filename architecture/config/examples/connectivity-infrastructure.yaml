@@ -89,7 +89,7 @@ discovery:
       priority: 10
       config:
         ttl: 24h
-        max_entries: 4096
+        max_entries: 1024
     - type: kademlia
       enabled: true
       priority: 40
@@ -104,8 +104,8 @@ discovery:
         max_routing_peers: 256
         max_concurrent_queries: 4
         max_results_per_query: 20
-        random_walk_interval: 60s
-        target_lookup_cooldown: 5m
+        exploration_interval: 60s
+        targeted_lookup_cooldown: 5m
         bootstrap_min_interval: 5m
         bootstrap_refresh_interval: 15m
 

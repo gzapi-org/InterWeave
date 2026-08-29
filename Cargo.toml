@@ -14,6 +14,12 @@ members = [
     "crates/api/transport-api",
     "crates/config/profile-config",
     "crates/discovery/cache",
+    # Stage 9: configured bootstrap entries as candidates. Configuration
+    # is not trust (ADR-0010).
+    "crates/discovery/static",
+    # Stage 9: LAN candidate normalization. The multicast mechanism
+    # lives in transport/libp2p; this crate owns no socket.
+    "crates/discovery/mdns",
     "crates/identity/profile-identity",
     "crates/transport/libp2p",
     "crates/human/chat-protocol",
@@ -32,6 +38,9 @@ members = [
     # Stage 7: signed GossipSub broadcast, which must stay independently
     # functional from direct and must not substitute for it.
     "tests/pubsub",
+    # Stage 9: DiscoveryProvider conformance and the composition proof
+    # that discovery cannot bypass trust or ConnectionManager.
+    "tests/discovery-conformance",
     "xtask",
 ]
 
@@ -106,6 +115,21 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 # switch one on: CLAUDE.md §3 forbids turning on autonomous libp2p
 # behaviour and retrofitting admission policy later, and a feature that is
 # not compiled cannot be turned on by accident.
+#
+# `mdns` IS ALSO ABSENT, and for a different reason worth stating so the
+# next reader does not simply switch it on. Stage 9 tried: enabling it
+# pulls `libp2p-mdns 0.48`, which pins `hickory-proto 0.25.x`, which
+# carries RUSTSEC-2026-0118 (a DNSSEC validation loop that never
+# terminates — "No safe upgrade is available!") and RUSTSEC-2026-0119 (a
+# name-compression DoS amplification, fixed only in 0.26.1). No upgrade
+# resolves them inside the 0.48 line, so `check_dependencies.sh` fails,
+# and §8 makes that a real gate rather than a warning.
+#
+# So the LAN mechanism is deferred and `crates/discovery/mdns` ships
+# without it: that crate owns no socket by design, so its normalization,
+# bounds and expiry are complete and tested today, and the backend that
+# pushes observations into it arrives when libp2p-mdns moves to
+# hickory-proto 0.26.
 libp2p = { version = "0.56", default-features = false, features = [
     "tcp",
     "noise",

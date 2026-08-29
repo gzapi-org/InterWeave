@@ -126,6 +126,10 @@ jobs:
 
       - name: Component READMEs agree with their own directories
         run: bash tools/checks/check_component_status.sh
+      - name: Discovery schema config keys are representable
+        run: bash tools/checks/check_discovery_config_keys.sh
+      - name: Example profiles satisfy the enforced bounds
+        run: bash tools/checks/check_example_profiles.sh
 
       - name: Required check contexts match the workflow's job names
         run: bash tools/checks/check_required_contexts.sh

@@ -79,6 +79,7 @@ pub(crate) fn profile_with(entries: Vec<EndpointConfig>, default: Option<&str>) 
             directory: DirectoryConfig::default(),
             entries,
         },
+        discovery: interweave_profile_config::DiscoveryConfig::default(),
         channels: ChannelsConfig::default(),
     }
 }
