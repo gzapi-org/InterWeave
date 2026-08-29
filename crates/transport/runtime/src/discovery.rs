@@ -499,10 +499,23 @@ impl CandidateSet {
             {
                 continue;
             }
-            entry.observations.insert(
-                key,
-                (observation.supported, observation.observed_at, expires_at),
-            );
+            // THE NEWEST EVIDENCE WINS, not the last one iterated.
+            // `protocol_observations` is a `BTreeSet`, so a candidate may
+            // legally carry both `supported: true` and `supported: false`
+            // for one protocol and the derived ordering decides which is
+            // applied last — and an event delivered late can overwrite
+            // fresher evidence with stale. Either way a consumer could be
+            // told a peer supports something a newer observation had
+            // already withdrawn.
+            match entry.observations.get(&key) {
+                Some((_, held_at, _)) if *held_at > observation.observed_at => {}
+                _ => {
+                    entry.observations.insert(
+                        key,
+                        (observation.supported, observation.observed_at, expires_at),
+                    );
+                }
+            }
         }
     }
 
@@ -2124,5 +2137,103 @@ mod tests {
                 .any(|c| c.peer_id == subject),
             "an unpinned ninth source is refused, so nothing outlives the cap"
         );
+    }
+    #[test]
+    fn a_stale_protocol_observation_cannot_overwrite_a_newer_one() {
+        // One candidate carrying both verdicts for one protocol is legal:
+        // `protocol_observations` is a set, and its derived ordering puts
+        // `supported: false` first, so the stale positive was applied
+        // last and won.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(31);
+        let protocol = ProtocolId::parse("/interweave/direct/2.0.0").expect("valid");
+
+        let mut c = for_id(&subject, "mdns", "/ip4/10.0.0.1/tcp/1", 100, Some(u64::MAX));
+        c.protocol_observations.insert(ProtocolObservation {
+            protocol_id: protocol.clone(),
+            supported: true,
+            observed_at: 10,
+        });
+        c.protocol_observations.insert(ProtocolObservation {
+            protocol_id: protocol.clone(),
+            supported: false,
+            observed_at: 90,
+        });
+        set.observe(&c, 100, &trust, true, false);
+
+        let candidates = set.candidates(200, &|_| None);
+        let found = candidates
+            .iter()
+            .find(|c| c.peer_id == subject)
+            .expect("known");
+        assert_eq!(
+            found.protocol_observations.len(),
+            1,
+            "one source, one record"
+        );
+        assert!(
+            !found.protocol_observations[0].supported,
+            "the NEWER withdrawal stands, not the older claim of support"
+        );
+    }
+
+    #[test]
+    fn a_late_delivered_observation_does_not_revive_stale_support() {
+        // The same failure across two events rather than inside one.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(32);
+        let protocol = ProtocolId::parse("/interweave/direct/2.0.0").expect("valid");
+
+        for (supported, observed_at) in [(false, 90u64), (true, 10u64)] {
+            let mut c = for_id(&subject, "mdns", "/ip4/10.0.0.1/tcp/1", 100, Some(u64::MAX));
+            c.protocol_observations.insert(ProtocolObservation {
+                protocol_id: protocol.clone(),
+                supported,
+                observed_at,
+            });
+            set.observe(&c, 100, &trust, true, false);
+        }
+
+        let candidates = set.candidates(200, &|_| None);
+        let found = candidates
+            .iter()
+            .find(|c| c.peer_id == subject)
+            .expect("known");
+        assert!(
+            !found.protocol_observations[0].supported,
+            "an event delivered late does not overwrite fresher evidence"
+        );
+    }
+
+    #[test]
+    fn a_genuinely_newer_observation_does_replace_the_held_one() {
+        // The control: "newest wins" must not become "first wins".
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let subject = identity(33);
+        let protocol = ProtocolId::parse("/interweave/direct/2.0.0").expect("valid");
+
+        for (supported, observed_at) in [(true, 10u64), (false, 90u64)] {
+            let mut c = for_id(&subject, "mdns", "/ip4/10.0.0.1/tcp/1", 100, Some(u64::MAX));
+            c.protocol_observations.insert(ProtocolObservation {
+                protocol_id: protocol.clone(),
+                supported,
+                observed_at,
+            });
+            set.observe(&c, 100, &trust, true, false);
+        }
+
+        let candidates = set.candidates(200, &|_| None);
+        let found = candidates
+            .iter()
+            .find(|c| c.peer_id == subject)
+            .expect("known");
+        assert!(
+            !found.protocol_observations[0].supported,
+            "a newer observation replaces the held one"
+        );
+        assert_eq!(found.protocol_observations[0].observed_at_ms, 90);
     }
 }
