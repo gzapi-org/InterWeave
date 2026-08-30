@@ -292,6 +292,21 @@ pub(super) fn handle_command(
     now_ms: u64,
 ) -> Vec<KademliaEvent> {
     let mut out = Vec::new();
+    // STOPPED MEANS STOPPED, for every command. The guard lived only on
+    // the two obvious arms, and a SetMode { Server } arriving after
+    // Shutdown re-enabled serving and re-advertised the DHT protocol —
+    // the one thing the lifecycle's "disable participation" exists to
+    // prevent. A refused query is still SETTLED, or the caller's
+    // accounting waits forever.
+    if state.stopping {
+        if let KademliaCommand::StartQuery { class, .. } = command {
+            out.push(KademliaEvent::QueryFailed {
+                class,
+                reason: QueryFailure::ShuttingDown,
+            });
+        }
+        return out;
+    }
     match command {
         KademliaCommand::SetMode { mode } => {
             // Explicit, never inferred (§5) — and never `auto`.
@@ -301,9 +316,6 @@ pub(super) fn handle_command(
             }));
         }
         KademliaCommand::OfferRoutingPeer { addresses, peer } => {
-            if state.stopping {
-                return out;
-            }
             let Ok(pid) = peer.as_str().parse::<PeerId>() else {
                 return out;
             };
@@ -331,13 +343,6 @@ pub(super) fn handle_command(
             out.extend(try_admit(state, behaviour, manager, pid, &peer, now_ms));
         }
         KademliaCommand::StartQuery { class, key } => {
-            if state.stopping {
-                out.push(KademliaEvent::QueryFailed {
-                    class,
-                    reason: QueryFailure::ShuttingDown,
-                });
-                return out;
-            }
             // THE DRIVER'S OWN CEILING. The provider budgets its
             // commands, but the port is public: a caller pumping the
             // command channel faster than queries time out would grow
@@ -1146,5 +1151,70 @@ mod tests {
              the caller's accounting waiting forever"
         );
         assert_eq!(state.queries.len(), 2, "nothing past the ceiling exists");
+    }
+
+    #[test]
+    fn a_stopped_driver_ignores_every_command_and_settles_queries() {
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 256,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let mut state = KademliaState::new(&settings);
+        let mut behaviour = build_behaviour(&settings, PeerId::random()).expect("buildable");
+        let manager = interweave_transport_runtime::ConnectionManager::new(
+            interweave_transport_runtime::ConnectionPolicy::default(),
+            8,
+        );
+        let none = handle_command(
+            &mut state,
+            &mut behaviour,
+            &manager,
+            KademliaCommand::Shutdown,
+            0,
+        );
+        assert!(none.is_empty(), "nothing was outstanding");
+
+        // A SetMode { Server } after shutdown must NOT re-enable serving
+        // and re-advertise the protocol.
+        let none = handle_command(
+            &mut state,
+            &mut behaviour,
+            &manager,
+            KademliaCommand::SetMode {
+                mode: KademliaMode::Server,
+            },
+            1,
+        );
+        assert!(none.is_empty());
+        assert_eq!(
+            behaviour.mode(),
+            kad::Mode::Client,
+            "stopped means stopped: the DHT protocol is not re-advertised"
+        );
+        // And a refused query is still settled.
+        let refused = handle_command(
+            &mut state,
+            &mut behaviour,
+            &manager,
+            KademliaCommand::StartQuery {
+                class: QueryClass::Exploration,
+                key: [1; 32],
+            },
+            2,
+        );
+        assert_eq!(
+            refused,
+            vec![KademliaEvent::QueryFailed {
+                class: QueryClass::Exploration,
+                reason: QueryFailure::ShuttingDown,
+            }]
+        );
     }
 }

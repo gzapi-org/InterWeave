@@ -743,6 +743,24 @@ pub(super) fn handle_command(
             // publishes the flag every snapshot reads live, so a holder
             // that took its snapshot a moment ago is draining too.
             manager.begin_shutdown();
+            // THE DRIVER DRAINS WITH IT: outstanding queries settle as
+            // shutting down rather than being silently outlived, and
+            // nothing new starts during the grace. Without this, the
+            // root drain left the DHT answering and querying while the
+            // rest of the runtime wound down.
+            if let Some(state) = kademlia
+                && let Some(behaviour) = swarm.kademlia_mut()
+            {
+                for event in super::kademlia_driver::handle_command(
+                    state,
+                    behaviour,
+                    manager,
+                    interweave_kademlia_control_api::KademliaCommand::Shutdown,
+                    now_ms,
+                ) {
+                    outbox.push_back(SwarmEvent::Kademlia { event });
+                }
+            }
             let _ = reply.send(());
         }
         SwarmCommand::Kademlia { command } => {
@@ -750,6 +768,24 @@ pub(super) fn handle_command(
             // stream. A profile with no kademlia entry has no state and
             // no behaviour, and the command is dropped — §13's
             // `enabled: false` means zero activity, commands included.
+            //
+            // A DRAINING RUNTIME REFUSES NEW QUERIES the same way a
+            // stopping driver does: drain is "stop taking on new work",
+            // and a query is new work with dials inside it. Settled,
+            // not swallowed.
+            if manager.is_draining()
+                && let interweave_kademlia_control_api::KademliaCommand::StartQuery {
+                    class, ..
+                } = &command
+            {
+                outbox.push_back(SwarmEvent::Kademlia {
+                    event: interweave_kademlia_control_api::KademliaEvent::QueryFailed {
+                        class: *class,
+                        reason: interweave_kademlia_control_api::QueryFailure::ShuttingDown,
+                    },
+                });
+                return;
+            }
             if let Some(state) = kademlia
                 && let Some(behaviour) = swarm.kademlia_mut()
             {

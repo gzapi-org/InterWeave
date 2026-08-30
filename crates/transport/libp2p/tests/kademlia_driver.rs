@@ -439,3 +439,38 @@ async fn the_gate_refuses_the_walks_dial_to_a_stranger() {
     other.shutdown().await.expect("stops");
     asker.shutdown().await.expect("stops");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_draining_runtime_refuses_new_queries_and_settles_them() {
+    // Root drain reaches the driver: outstanding work settles, nothing
+    // new starts, and the refusal is SETTLED on the port rather than
+    // silently swallowed during the grace period.
+    let a_id = ProfileIdentity::generate();
+    let mut a = SwarmRuntime::start(
+        &a_id,
+        config("kad-drain", KademliaMode::Server),
+        trusting(&[]),
+    )
+    .expect("a");
+    let _ = listening(&mut a).await;
+    a.drain().await.expect("draining");
+    a.kademlia(KademliaCommand::StartQuery {
+        class: QueryClass::Exploration,
+        key: [7; 32],
+    })
+    .await
+    .expect("command delivered");
+    wait_for(&mut a, "the drained refusal to settle", |e| {
+        matches!(
+            e,
+            SwarmEvent::Kademlia {
+                event: KademliaEvent::QueryFailed {
+                    class: QueryClass::Exploration,
+                    reason: interweave_kademlia_control_api::QueryFailure::ShuttingDown,
+                },
+            }
+        )
+    })
+    .await;
+    a.shutdown().await.expect("stops");
+}
