@@ -147,18 +147,25 @@ impl PeerRecord {
 
     /// The capability observations still fresh at `now_ms`.
     ///
-    /// Bounded by the ENCLOSING record's expiry as well as their own age
-    /// — "capability freshness never outlives the enclosing peer-cache
-    /// record TTL". A capability observed yesterday on a record that
-    /// expired this morning is not fresh evidence; it is evidence about
-    /// a peer this cache has already stopped vouching for.
-    #[must_use]
-    pub fn fresh_capabilities(&self, now_ms: u64, ttl_ms: u64) -> &[ProtocolCapabilityObservation] {
-        if self.is_fresh_at(now_ms, ttl_ms) {
-            &self.capabilities
-        } else {
-            &[]
-        }
+    /// Bounded by the ENCLOSING record's expiry AND by each
+    /// observation's own age. The record bound: a capability observed
+    /// yesterday on a record that expired this morning is evidence
+    /// about a peer this cache has stopped vouching for. The own-age
+    /// bound: a record kept fresh by reachability alone must not
+    /// republish an arbitrarily old observation — refreshing an address
+    /// says nothing about what protocols the peer still serves.
+    /// `capability_freshness_never_outlives_the_enclosing_record` and
+    /// `a_refreshed_record_does_not_revive_an_aged_capability` each
+    /// hold one bound.
+    pub fn fresh_capabilities(
+        &self,
+        now_ms: u64,
+        ttl_ms: u64,
+    ) -> impl Iterator<Item = &ProtocolCapabilityObservation> {
+        let record_fresh = self.is_fresh_at(now_ms, ttl_ms);
+        self.capabilities
+            .iter()
+            .filter(move |c| record_fresh && now_ms < c.observed_at_ms.saturating_add(ttl_ms))
     }
 }
 

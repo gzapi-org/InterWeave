@@ -573,7 +573,6 @@ impl PeerCache {
                     // retrying a peer that stopped serving.
                     protocol_observations: r
                         .fresh_capabilities(now_ms, self.limits.ttl_ms())
-                        .iter()
                         .filter(|c| {
                             c.protocol_family == crate::record::KAD_PROTOCOL_FAMILY
                                 && c.role == crate::record::KAD_SERVER_ROLE
