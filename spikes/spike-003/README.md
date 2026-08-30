@@ -54,7 +54,7 @@ It also handles the ticket the way the runtime must, which is finding **F8**: a 
 
 ## What was observed
 
-193 assertions across 28 experiments, consecutive clean runs. The harness exits non-zero when any required observation is false, so `cargo run` cannot report success while its own output disproves the record.
+194 assertions across 28 experiments, consecutive clean runs. The harness exits non-zero when any required observation is false, so `cargo run` cannot report success while its own output disproves the record.
 
 **Namespace (K1).** The published golden vector reproduces exactly: `network_id: example-private-network` → `ssbtblqj7mexczivog5qfbfjvi` → `/interweave/kad/1.0.0/ssbtblqj7mexczivog5qfbfjvi`. The derivation is implemented from the specification text rather than from a shared helper, so a derivation that merely agrees with itself could not pass. The 26-character unpadded base32 tag is a valid `libp2p::StreamProtocol`, and the `^[a-z0-9][a-z0-9._-]{0,63}$` grammar accepts and refuses what the spec says it should.
 
@@ -76,7 +76,7 @@ It also handles the ticket the way the runtime must, which is finding **F8**: a 
 
 Each part fails to a different mutation and passes the others', which is the reason there are three: dropping the ticket on receipt fails the second only; dropping it on `ConnectionEstablished` fails the third only.
 
-**Records (K10).** `PUT_VALUE` and `ADD_PROVIDER` are shown to be **sent**, to **arrive** — counted as inbound requests at the receiver — and to store nothing: zero records, zero provider records. Arrival is asserted rather than assumed, because an empty store proves filtering only if the write reached it; a negotiation failure, an absent route and an unsent request all produce the same empty store.
+**Records (K10).** `PUT_VALUE` and `ADD_PROVIDER` are shown to be **sent**, to **arrive** — counted as inbound requests at the receiver — and to store nothing. The provider half asks the receiver `providers(&key)` for the key that was actually written: `provided()` enumerates records the *local* node provides, so on a receiver it reads zero whether or not the inbound record was stored, and an assertion built on it passed with the filter disabled entirely. Arrival is asserted rather than assumed, because an empty store proves filtering only if the write reached it; a negotiation failure, an absent route and an unsent request all produce the same empty store.
 
 **Exploration and convergence (K11, K17).** A ten-node line seeded one-deep closes to **9/9 entries on every node** under random exploration — asserted per node, because a weaker predicate passed a run that converged to a staircase. Twenty nodes seeded in a star at a single hub converge to **19/19 routing entries on every node** within five rounds, ~60s of wall clock on one machine, with no routing table exceeding its bound. Every behaviour dial in that run — around 220 of them — is **accounted for**: admitted plus refused equals originated, and every refusal is an explained policy outcome (`peer backoff`) rather than an unexpected class.
 

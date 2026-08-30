@@ -736,9 +736,15 @@ pub async fn k10_records_are_filtered(r: &mut Report) {
     // is empty passes identically when the request was never sent, when
     // negotiation failed, and when there was no route: three ways to
     // "prove" filtering without any filtering happening.
+    // THE KEY IS RETAINED, because the receiver must be asked about
+    // THIS key. `provided()` was the wrong question entirely: it
+    // enumerates records the LOCAL node provides, so it is zero on the
+    // receiver whether or not the inbound provider record was stored,
+    // and the check validated nothing.
+    let provider_key = kad::RecordKey::new(&b"/interweave/nope");
     let provide = nodes[1]
         .kad()
-        .and_then(|k| k.start_providing(kad::RecordKey::new(&b"/interweave/nope")).ok());
+        .and_then(|k| k.start_providing(provider_key.clone()).ok());
     r.check(
         "K10.4",
         "the provider write was actually started",
@@ -759,14 +765,19 @@ pub async fn k10_records_are_filtered(r: &mut Report) {
         &format!("and REACHED the receiver, which counted it ({arrived})"),
         arrived > 0,
     );
-    let providers = nodes[0]
+    // `providers(&key)` is what the RECEIVER stored for this key, which
+    // is the thing `StoreInserts::FilterBoth` is supposed to refuse.
+    let stored_providers = nodes[0]
         .kad()
-        .map(|k| k.store_mut().provided().count())
+        .map(|k| k.store_mut().providers(&provider_key).len())
         .unwrap_or(usize::MAX);
     r.check(
         "K10.6",
-        &format!("having arrived, it stored nothing: {providers}"),
-        providers == 0,
+        &format!(
+            "having arrived, no provider record is stored for that key: \
+             {stored_providers}"
+        ),
+        stored_providers == 0,
     );
     r.note(format!(
         "K10: inbound requests seen by the receiver: {:?}",
@@ -3284,7 +3295,34 @@ pub async fn k22_bounded_query_scheduler(r: &mut Report) {
     }
     pump(&mut fresh, Duration::from_secs(2)).await;
 
+    // HEADROOM RESERVED FIRST, before any explicit query. The
+    // `add_address` that seeded this node started an implicit bootstrap
+    // (F2) which no scheduler can refuse — it is not a call the
+    // provider makes — and it spends the same connections and dial
+    // ceilings as anything else. So the driver's budget must account
+    // for it BEFORE the driver spends the rest.
+    //
+    // An earlier version tried to charge it afterwards, which charged
+    // nothing: the explicit queries had already taken every slot, so
+    // the `acquire` failed for concurrency and never reached the
+    // `release` that was meant to hold the cost — and `release` refunds
+    // the rate anyway. Reserving means HOLDING a permit, not acquiring
+    // and giving it back.
+    let implicit = fresh[0].observed.unattributed_queries.len();
     let mut live = QueryScheduler::new(MAX_CONCURRENT, MAX_PER_MINUTE);
+    let reserved: Vec<Permit> = (0..implicit)
+        .filter_map(|_| live.acquire(0).ok())
+        .collect();
+    r.check(
+        "K22.14",
+        &format!(
+            "the library's own query is measured and its headroom RESERVED \
+             before the driver spends: {implicit} implicit, {} permit(s) held",
+            reserved.len()
+        ),
+        implicit > 0 && reserved.len() == implicit,
+    );
+
     let mut issued = 0;
     let mut refused = 0;
     // HOW MANY TIMES THE BEHAVIOUR WAS INVOKED. That is the enforcement
@@ -3308,8 +3346,12 @@ pub async fn k22_bounded_query_scheduler(r: &mut Report) {
     }
     r.check(
         "K22.12",
-        &format!("a driver asking for ten queries starts {issued} and is refused {refused}"),
-        issued == MAX_CONCURRENT && refused == 10 - MAX_CONCURRENT,
+        &format!(
+            "a driver asking for ten queries starts {issued} and is refused \
+             {refused} — the ceiling MINUS the headroom held for the library's \
+             own query"
+        ),
+        issued == MAX_CONCURRENT - reserved.len() && refused == 10 - issued,
     );
     r.check(
         "K22.13",
@@ -3317,43 +3359,29 @@ pub async fn k22_bounded_query_scheduler(r: &mut Report) {
             "the DRIVER invoked the behaviour only for permitted work: \
              {invocations} calls for {issued} permits"
         ),
-        invocations == MAX_CONCURRENT,
+        invocations == issued,
     );
-    // AND THE LIBRARY'S OWN WORK IS ACCOUNTED, not ignored. The
-    // `add_address` that seeds this node starts an implicit bootstrap
-    // (F2) which no scheduler can gate — it is not a call the provider
-    // makes. Calling the node "untouched" and counting only explicit
-    // invocations understated what actually ran on it.
-    //
-    // A driver therefore cannot treat its budget as the whole of the
-    // node's query load: it must RESERVE headroom for library-initiated
-    // work, because that work spends the same connections and the same
-    // dial ceilings. Here the implicit query is measured and charged.
-    let implicit = fresh[0].observed.unattributed_queries.len();
-    for _ in 0..implicit {
-        // Charged against the same budget, which is what a driver
-        // reserving headroom amounts to. It cannot be `bind`-ed: there
-        // is no permit, because there was no acquisition to make.
-        if let Ok(p) = live.acquire(0) {
-            live.release(p);
-        }
-    }
-    r.check(
-        "K22.14",
-        &format!(
-            "the library's own query is measured rather than ignored: {implicit} \
-             unattributed start(s) alongside {issued} permitted"
-        ),
-        implicit > 0,
-    );
+    // AND THE RESERVATION COST THE DRIVER SOMETHING. With headroom held
+    // for the implicit query the driver gets fewer slots than the
+    // ceiling — which is the whole point, and is what an assertion
+    // that merely observed the implicit query could not show.
     r.check(
         "K22.15",
         &format!(
-            "so the node's whole query load is {} = {issued} permitted + \
-             {implicit} the scheduler cannot gate",
+            "reserving headroom leaves the driver less than the whole ceiling: \
+             {issued} issued of {MAX_CONCURRENT}, {} reserved",
+            reserved.len()
+        ),
+        issued == MAX_CONCURRENT - reserved.len() && issued < MAX_CONCURRENT,
+    );
+    r.check(
+        "K22.16",
+        &format!(
+            "so the node's whole query load is inside the budget: {} = {issued} \
+             permitted + {implicit} reserved for work the scheduler cannot gate",
             issued + implicit
         ),
-        fresh[0].own_queries.len() == issued,
+        issued + implicit <= MAX_CONCURRENT,
     );
     // AND THE NODE AGREES. Its whole query history is what the driver
     // started plus whatever the library began on its own, so the
@@ -3362,14 +3390,14 @@ pub async fn k22_bounded_query_scheduler(r: &mut Report) {
     // counter can be wrong in the same direction as the loop it counts.
     pump(&mut fresh, Duration::from_secs(8)).await;
     r.check(
-        "K22.16",
+        "K22.17",
         &format!(
             "the node's own tally of deliberate queries matches: {} started, \
              {} unattributed to the driver",
             fresh[0].own_queries.len(),
             fresh[0].observed.unattributed_queries.len()
         ),
-        fresh[0].own_queries.len() == MAX_CONCURRENT,
+        fresh[0].own_queries.len() == issued,
     );
     r.note(
         "K22 LIMIT: the scheduler is project logic modelled here, not a \
