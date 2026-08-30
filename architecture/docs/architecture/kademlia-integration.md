@@ -293,7 +293,7 @@ A targeted lookup is eligible only when **all** are true:
 4. the per-target targeted-lookup cooldown has elapsed;
 5. global Kademlia query budget permits work.
 
-The provider may then issue a lookup using the PeerId bytes as the Kademlia lookup key. Results are advisory `PeerInfo` observations. The cached server-capability observation only answers "was this peer recently observed serving this DHT namespace?"; it does not prove current reachability, trust, or continued server mode.
+The provider may then issue a lookup keyed by the target's identity. On the driver port the 32-byte lookup key is the target's **Ed25519 public key** — a `12D3KooW…` PeerId is a constant six-byte identity-multihash envelope around exactly those 32 bytes, so the driver reconstructs the full PeerId from the key and queries the peer's true DHT location. An identity in the digest (`Qm…`) form has no recoverable key; the provider refuses it as untargetable rather than querying a point that is not the peer's — consistent with the paragraph below: client nodes are not promised discoverable by PeerId anyway. Results are advisory `PeerInfo` observations. The cached server-capability observation only answers "was this peer recently observed serving this DHT namespace?"; it does not prove current reachability, trust, or continued server mode.
 
 This is not a general directory for client-mode nodes. Client nodes are not assumed discoverable by PeerId through `FIND_NODE`; other discovery providers/configured hints remain necessary.
 

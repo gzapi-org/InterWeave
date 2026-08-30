@@ -1,6 +1,6 @@
 # KademliaDiscovery
 
-Status: **fully specified standard-v1 provider design; configured entries default `enabled: true` per ADR-0034; implementation remains for the subsequent implementation repository**.
+Status: **fully specified standard-v1 provider design; configured entries default `enabled: true` per ADR-0034; Stage 10 in progress — the provider core (`crates/discovery/kademlia`: §9.2 eligibility, §10 normalization, §14 health) is an active workspace member; the scheduler/budgets and the Swarm-owned driver land later in the stage**.
 
 The end-to-end design is [../../docs/architecture/kademlia-integration.md](../../docs/architecture/kademlia-integration.md). ADR-0009 is normative for role/security; ADR-0011 is normative for dial-policy ownership.
 

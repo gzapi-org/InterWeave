@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# KademliaDiscovery: the DHT presented as a discovery provider, over the
+# neutral kademlia-control-api port. Nothing here touches libp2p, a
+# Swarm, or a socket — the driver that consumes the commands owns all of
+# that (kademlia-integration.md §20), which is what keeps this crate's
+# eligibility and normalization logic testable without a network.
+#
+# Kademlia is peer routing only (ADR-0009): candidates leave here as
+# advisory CandidatePeer observations with "kademlia" provenance, never
+# as trust, membership, or application data.
+[package]
+name = "interweave-discovery-kademlia"
+version = "0.0.0"
+publish = false
+description = "Kademlia peer-routing discovery provider for InterWeave."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+interweave-discovery-api = { path = "../../api/discovery-api" }
+interweave-kademlia-control-api = { path = "../../api/kademlia-control-api" }
+interweave-transport-api = { path = "../../api/transport-api" }
+# A targeted lookup's 32-byte key is the target's Ed25519 public key,
+# recovered by decoding the PeerId string — production here, not
+# test-only: the extraction is what turns an identity into a lookup key.
+bs58 = { workspace = true }
+
+[dev-dependencies]
+# The frozen namespace vectors are JSON; the fixture round-trip is the
+# drift check between this crate's protocol rendering and the cache's.
+serde_json = { workspace = true }
