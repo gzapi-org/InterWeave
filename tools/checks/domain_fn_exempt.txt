@@ -143,9 +143,10 @@ CandidateSet::len                                stage-12  reached through Disco
 CandidateSet::is_empty                           stage-12  candidate-set introspection, first read at runtime composition
 
 # --- stage-10 ----------------------------------------------------
-# The provider crate consumes the port now; what remains exempt is the
-# slice of it only the Swarm driver or the config layer can reach.
-ObservedCandidates                               stage-10  Kademlia control port; the driver mints these from query results
+# BOTH Stage 10 halves are in: the provider consumes
+# OfferedAddress/OfferedAddresses/RoutingView, and the driver mints
+# ObservedCandidates. What is left is the slice only the config layer,
+# or a stage after this one, can reach.
 validate_limits                                  stage-10  profile-config calls it when the enabled-entry gate flips this stage
 RoutingView::effective_target                    stage-12  consumed inside the port's own health today; the composed daemon's §16 diagnostics surface the trust-capped target directly
 
