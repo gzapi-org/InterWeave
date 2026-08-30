@@ -3611,10 +3611,20 @@ pub async fn k23_dial_volume_by_class(r: &mut Report) {
     }
     pump(&mut nodes, Duration::from_secs(6)).await;
     let implicit = nodes[0].ledger.by_class();
+    let implicit_none = implicit.get("none").copied().unwrap_or(0);
+    // A NONZERO `none` COUNT, not merely the absence of other labels.
+    // With no dial at all — which this topology does not guarantee,
+    // since it connects to the router before `add_address` — the map is
+    // empty and `keys().all(..)` is vacuously true, so the check
+    // reported that implicit-work dials were measured and attributed
+    // when none had happened.
     r.check(
         "K23.1",
-        &format!("dials from work the provider never started are attributed to none: {implicit:?}"),
-        implicit.keys().all(|k| k == "none"),
+        &format!(
+            "dials from work the provider never started are attributed to none: \
+             {implicit_none} such dial(s), {implicit:?}"
+        ),
+        implicit_none > 0 && implicit.keys().all(|k| k == "none"),
     );
 
     // ONE CLASS IN FLIGHT: attribution is exact. The connection the

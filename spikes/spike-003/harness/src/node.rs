@@ -124,6 +124,10 @@ pub struct Node {
     pub own_queries: HashMap<kad::QueryId, QueryClass>,
     /// What this node saw, written only by `topology::record`.
     pub observed: crate::topology::Observations,
+    /// Tickets for the setup connections this node dialled, held for
+    /// its lifetime so those sockets occupy the ceilings they would
+    /// occupy in production.
+    setup_tickets: Vec<interweave_transport_runtime::DialTicket>,
 }
 
 impl Node {
@@ -187,6 +191,7 @@ impl Node {
             trusted: Vec::new(),
             own_queries: HashMap::new(),
             observed: crate::topology::Observations::default(),
+            setup_tickets: Vec::new(),
         }
     }
 
@@ -306,6 +311,19 @@ impl Node {
     /// If the dial cannot be started at all.
     pub fn dial_admitted(&mut self, address: Multiaddr) {
         use libp2p::swarm::dial_opts::DialOpts;
+        // THROUGH THE REAL ADMISSION, so a setup connection consumes the
+        // ceilings it would consume in production. Registering only the
+        // `AdmittedDials` marker left these sockets uncounted by the
+        // `ConnectionManager`, which made every tight-ceiling scenario
+        // less tight than it claimed: a node at `max_connections = 1`
+        // that was already connected through this helper still had its
+        // slot free.
+        //
+        // The ticket is held in `setup_tickets` for the life of the
+        // node rather than settled, which is what an established
+        // connection does to a slot — the alternative, settling
+        // immediately, would return the reservation and reintroduce the
+        // same gap.
         let opts: DialOpts = address.into();
         // SAVED BEFORE `opts` MOVES. The cleanup used to forget a
         // hardcoded id zero, which is not the id that was registered —
@@ -315,9 +333,34 @@ impl Node {
         // originated. That is a leak in the measurement apparatus, not
         // only in the cleanup.
         let id = opts.connection_id();
+        // The manager decides it, exactly as the gate makes it decide a
+        // behaviour dial. A refusal here is a real refusal: the node is
+        // at a ceiling the experiment set, and pretending otherwise is
+        // what the finding was about.
+        let ticket = opts.get_peer_id().and_then(|p| {
+            let identity = interweave_transport_api::TransportIdentity::parse(p.to_base58())
+                .ok()?;
+            self.manager
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .handle()
+                .admit(
+                    &interweave_transport_runtime::DialRequest {
+                        peer: Some(identity),
+                        address: String::new(),
+                        origin: interweave_transport_runtime::DialOrigin::Manual,
+                    },
+                    0,
+                )
+                .ok()
+        });
         self.admitted.register(id);
         if self.swarm.dial(opts).is_err() {
             self.admitted.forget(id);
+            return;
+        }
+        if let Some(t) = ticket {
+            self.setup_tickets.push(t);
         }
     }
 
