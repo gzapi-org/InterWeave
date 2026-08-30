@@ -269,6 +269,25 @@ impl PolicySnapshot {
         self.trust.classify(peer)
     }
 
+    /// Whether this address is dialable for this peer right now.
+    ///
+    /// CAPACITY-FREE AND TICKET-FREE, which is the point. The
+    /// established hook must judge the address a behaviour dial
+    /// actually used, and its only prior instrument was a probe through
+    /// [`Self::admit`] — which decides policy AND takes a reservation,
+    /// so at a full ceiling the probe was refused for capacity the very
+    /// connection being judged was occupying, and the caller had to
+    /// discard capacity denials by enumerating them (SPIKE-003 F11).
+    /// This reads the address quarantine and nothing else; it cannot
+    /// see capacity, so there is nothing to discard.
+    ///
+    /// A read of the PHOTOGRAPHED policy, like [`Self::classify`]: one
+    /// publication stale is permitted for a policy answer.
+    #[must_use]
+    pub fn address_dialable(&self, peer: &TransportIdentity, address: &str, now_ms: u64) -> bool {
+        self.policy.is_address_dialable(peer, address, now_ms)
+    }
+
     /// Decide one outbound dial and reserve its slot.
     ///
     /// # Errors
@@ -517,6 +536,30 @@ impl DialTicket {
     #[must_use]
     pub fn address(&self) -> &str {
         &self.address
+    }
+
+    /// Re-bind this permission to the address the dial actually used.
+    ///
+    /// The behaviour-dial escape hatch, and nothing else: a
+    /// behaviour-originated dial is admitted with an EMPTY placeholder
+    /// address, because at admission libp2p has not chosen one — the
+    /// pending hook receives no addresses (SPIKE-003 F9) — and settling
+    /// the placeholder would record every such route against one empty
+    /// address-policy entry (F12). This moves the ticket onto the real
+    /// address at the first moment it exists.
+    ///
+    /// Returns `false` — and changes nothing — unless the ticket holds
+    /// the placeholder and the replacement is non-empty: an ordinary
+    /// ticket's address was DECIDED at admission, and a caller that
+    /// could move it afterwards would settle a route the gate never
+    /// admitted. `a_placeholder_rebinds_exactly_once_and_a_bound_address_never`
+    /// holds that shut.
+    pub fn rebind_address(&mut self, address: &str) -> bool {
+        if !self.address.is_empty() || address.is_empty() {
+            return false;
+        }
+        address.clone_into(&mut self.address);
+        true
     }
 }
 
@@ -958,6 +1001,18 @@ impl ConnectionManager {
     /// answering "will retrying help" is the caller's job because only
     /// the backend knows which `DialError` it received.
     pub fn record_failure(&mut self, ticket: DialTicket, now_ms: u64) {
+        // A PLACEHOLDER NAMES NO ROUTE. A behaviour dial is admitted
+        // with an empty address (F9) and rebound to the real one at the
+        // established hook or from the failure's own address list; a
+        // ticket still empty here failed before any address was known.
+        // There is nothing to score, nothing worth learning — an empty
+        // string in the address book becomes a dial candidate — and
+        // nothing a retry could dial, so it settles and does no more.
+        if ticket.address().is_empty() {
+            self.settle(ticket);
+            self.publish();
+            return;
+        }
         if let Some(peer) = ticket.peer().cloned() {
             // ONE delay, used for both. The address-scoped backoff and
             // the reconnect schedule disagreeing would mean the manager
@@ -1003,6 +1058,40 @@ impl ConnectionManager {
             self.schedule_retry(peer, now_ms, delay, held_by_another);
         }
         self.settle(ticket);
+        self.publish();
+    }
+
+    /// Score an address-scoped failure with no ticket and no admission.
+    ///
+    /// SPIKE-003 F15: settling a multi-address `DialError::Transport`
+    /// needs one score per exhausted address, and the old route to a
+    /// score — mint a ticket through `admit` — required passing the very
+    /// policy the failure had just changed AND a spare slot per address.
+    /// Sequential settlement hit the peer backoff the first score
+    /// advanced; batched settlement hit the ceiling; either way the
+    /// remaining routes stayed unscored and immediately retryable. This
+    /// is the address-scoped failure API that needs no admission: it
+    /// scores the route, learns it (an attempted address is a candidate,
+    /// exactly as [`Self::record_failure`] argues), and reserves
+    /// nothing.
+    ///
+    /// It does NOT touch the retry schedule: the dial's primary ticket
+    /// settlement owns that, and a second reschedule for the same dial
+    /// would double-count one failure.
+    pub fn record_address_failure_unadmitted(
+        &mut self,
+        peer: &TransportIdentity,
+        address: &str,
+        now_ms: u64,
+    ) {
+        if address.is_empty() {
+            return;
+        }
+        let delay = self.retry_delay_ms(peer);
+        let _ = self
+            .policy
+            .record_address_failure(peer, address, now_ms, delay);
+        let _ = self.learn_address(peer, address, now_ms);
         self.publish();
     }
 
@@ -2646,5 +2735,139 @@ mod tests {
             m.record_failure(t, u64::from(i) * 1_000);
         }
         assert_eq!(m.scheduled_retries(), 4, "the table is bounded");
+    }
+
+    #[test]
+    fn a_placeholder_rebinds_exactly_once_and_a_bound_address_never() {
+        let mut m = manager(4);
+        let mut t = m
+            .handle()
+            .admit(&request_at(P1, "", DialOrigin::KademliaQuery), 0)
+            .expect("a trusted peer is admitted on the placeholder");
+        assert!(
+            !t.rebind_address(""),
+            "the placeholder cannot rebind to itself"
+        );
+        assert!(t.rebind_address("/ip4/10.0.0.1/tcp/4001"));
+        assert_eq!(t.address(), "/ip4/10.0.0.1/tcp/4001");
+        assert!(
+            !t.rebind_address("/ip4/10.0.0.2/tcp/4001"),
+            "a bound address never rebinds"
+        );
+        assert_eq!(t.address(), "/ip4/10.0.0.1/tcp/4001", "and nothing moved");
+        m.record_failure(t, 0);
+
+        let mut ordinary = m
+            .handle()
+            .admit(&request(P2, "/ip4/10.0.0.9/tcp/1"), 0)
+            .expect("admitted");
+        assert!(
+            !ordinary.rebind_address("/ip4/10.0.0.2/tcp/1"),
+            "an ordinary ticket's address was decided at admission and may not move"
+        );
+        assert_eq!(ordinary.address(), "/ip4/10.0.0.9/tcp/1");
+        m.record_failure(ordinary, 0);
+    }
+
+    #[test]
+    fn address_dialable_answers_at_a_full_ceiling() {
+        // F11: a probe through `admit` at a full ceiling was refused for
+        // capacity the judged connection itself occupied, and the caller
+        // had to enumerate which denials to discard. This API cannot see
+        // capacity, so the answer is about the ADDRESS or it is wrong.
+        let mut m = manager(1);
+        let t = m
+            .handle()
+            .admit(&request(P1, "/ip4/10.0.0.1/tcp/1"), 0)
+            .expect("admitted");
+        assert!(
+            m.record_identity_mismatch(t, 0),
+            "the quarantine is recorded"
+        );
+
+        let held = m
+            .handle()
+            .admit(&request(P2, "/ip4/10.0.0.7/tcp/1"), 1)
+            .expect("admitted");
+        assert!(
+            matches!(
+                m.handle().admit(&request(P1, "/ip4/10.0.0.2/tcp/1"), 1),
+                Err(DialDenial::TooManyPendingDials)
+            ),
+            "the control: the ceiling really is full while the reads below run"
+        );
+        let snapshot = m.handle().load();
+        assert!(
+            !snapshot.address_dialable(&peer(P1), "/ip4/10.0.0.1/tcp/1", 1),
+            "the quarantined route is refused"
+        );
+        assert!(
+            snapshot.address_dialable(&peer(P1), "/ip4/10.0.0.2/tcp/1", 1),
+            "the same peer's OTHER address answers dialable at a full ceiling: \
+             capacity cannot leak into an address answer"
+        );
+        drop(held);
+    }
+
+    #[test]
+    fn an_unadmitted_failure_scores_the_route_without_a_reservation() {
+        let mut m = manager(1);
+        // Full for the duration: nothing below may take a reservation.
+        let held = m
+            .handle()
+            .admit(&request(P2, "/ip4/10.0.0.7/tcp/1"), 0)
+            .expect("admitted");
+        let p = peer(P1);
+        m.record_address_failure_unadmitted(&p, "", 0);
+        assert_eq!(m.known_addresses(&p), 0, "an empty address is a no-op");
+        for i in 0..8 {
+            m.record_address_failure_unadmitted(&p, "/ip4/10.0.0.1/tcp/1", i);
+        }
+        assert_eq!(
+            m.known_addresses(&p),
+            1,
+            "an attempted address is a candidate"
+        );
+        assert_eq!(
+            m.scheduled_retries(),
+            0,
+            "the primary settlement owns the schedule; this API never touches it"
+        );
+        drop(held);
+        assert!(
+            matches!(
+                m.handle().admit(&request(P1, "/ip4/10.0.0.1/tcp/1"), 10),
+                Err(DialDenial::PeerBackoff)
+            ),
+            "the scoring reached the policy with no ticket ever minted"
+        );
+    }
+
+    #[test]
+    fn a_placeholder_failure_settles_without_scoring_anything() {
+        let mut m = manager(4);
+        let p = peer(P1);
+        let t = m
+            .handle()
+            .admit(&request_at(P1, "", DialOrigin::KademliaQuery), 0)
+            .expect("admitted");
+        assert_eq!(m.handle().load().pending_dials(), 1);
+        m.record_failure(t, 0);
+        assert_eq!(m.known_addresses(&p), 0, "an empty address is not learned");
+        assert_eq!(
+            m.scheduled_retries(),
+            0,
+            "nothing to dial, nothing to retry"
+        );
+        assert_eq!(
+            m.handle().load().pending_dials(),
+            0,
+            "but the slot is settled"
+        );
+        let readmitted = m
+            .handle()
+            .admit(&request(P1, "/ip4/10.0.0.1/tcp/1"), 1)
+            .expect("no backoff was advanced by a route nobody can name");
+        drop(readmitted);
     }
 }
