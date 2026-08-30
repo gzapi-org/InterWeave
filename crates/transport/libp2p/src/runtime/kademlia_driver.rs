@@ -678,14 +678,27 @@ fn accumulate(
     }
 }
 
-/// A query result's addresses, each held to the identity it claims.
+/// A query result's addresses, each held to the identity it claims —
+/// and to the discovery contract's bounds WHILE being read, because the
+/// list is remote-authored: collecting first and capping after would
+/// let one response hold an oversized candidate in the accumulator and
+/// emit a value downstream validation refuses.
 fn candidate_addresses(info: &kad::PeerInfo) -> std::collections::BTreeSet<String> {
-    info.addrs
-        .iter()
-        .filter_map(|a| suffix_checked(a, &info.peer_id))
-        .map(|a| a.to_string())
-        .filter(|a| !a.is_empty())
-        .collect()
+    let mut out = std::collections::BTreeSet::new();
+    for address in &info.addrs {
+        if out.len() >= interweave_discovery_api::MAX_ADDRESSES {
+            break;
+        }
+        let Some(bare) = suffix_checked(address, &info.peer_id) else {
+            continue;
+        };
+        let bare = bare.to_string();
+        if bare.is_empty() || bare.len() > interweave_discovery_api::MAX_ADDRESS_BYTES {
+            continue;
+        }
+        out.insert(bare);
+    }
+    out
 }
 
 /// One authenticated Identify observation enters the §7 pipeline (F3).
@@ -1215,6 +1228,43 @@ mod tests {
                 class: QueryClass::Exploration,
                 reason: QueryFailure::ShuttingDown,
             }]
+        );
+    }
+
+    #[test]
+    fn a_result_peers_addresses_are_bounded_while_read() {
+        let subject = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let mut addrs: Vec<Multiaddr> = (0..interweave_discovery_api::MAX_ADDRESSES + 8)
+            .map(|i| {
+                format!("/ip4/198.51.100.{}/tcp/{}", i % 250, 1_000 + i)
+                    .parse()
+                    .expect("valid")
+            })
+            .collect();
+        // One address past the byte bound, which must be skipped
+        // without costing a slot.
+        let oversized: Multiaddr = format!(
+            "/dns4/{}.example.net/tcp/4001",
+            "x".repeat(interweave_discovery_api::MAX_ADDRESS_BYTES)
+        )
+        .parse()
+        .expect("valid");
+        addrs.insert(0, oversized.clone());
+        let info = kad::PeerInfo {
+            peer_id: subject,
+            addrs,
+        };
+        let got = candidate_addresses(&info);
+        assert_eq!(
+            got.len(),
+            interweave_discovery_api::MAX_ADDRESSES,
+            "the remote-authored list is capped while being read"
+        );
+        assert!(
+            !got.contains(&oversized.to_string()),
+            "an address past the byte bound is skipped, not carried"
         );
     }
 }
