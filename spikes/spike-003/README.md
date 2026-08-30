@@ -1,6 +1,19 @@
 # SPIKE-003 — Kademlia integration validation
 
-**Status: PASS**, with thirteen findings that change how Stage 10 must be written — one of which says Stage 10 cannot begin by enabling the feature, and three of which say the gate cannot be written the obvious way.
+**Status: PASS for Stage 10 implementation. The v1 RELEASE gate is NOT closed** — two of the brief's expected-evidence items are not established, and both need infrastructure this harness does not have.
+
+Thirteen findings change how Stage 10 must be written, one of which says Stage 10 cannot begin by enabling the feature and three of which say the gate cannot be written the obvious way.
+
+## What this verdict does and does not unlock
+
+**Unlocked:** implementing the specified `KademliaDiscovery` and driver. Every design question Stage 10 has to answer before writing code was asked here, and the answers are below.
+
+**NOT unlocked:** ADR-0034 makes SPIKE-003 a *v1 release gate* for shipping configured Kademlia entries default-enabled. Two required items are unmet, so that gate stays open:
+
+- **Server-mode reachability evidence is not consumed.** The design requires AutoNAT-verified direct reachability or an active relay reservation before a node advertises server mode. AutoNAT and Relay are absent from the libp2p feature list; SPIKE-004 is where they arrive. A node here advertises server mode because it was configured to.
+- **Single-path capture is not shown to be reduced.** K24 measures it against controls — one seed versus three, `disjoint_paths` off versus on, nine routers of which two know the target, `parallelism` 3 so a walk cannot contact them all at once. **No capture was observed at all**: the single-seed asker reached the target too, so the topology cannot distinguish the configurations, and an absence of difference is not evidence for the option. K16 says the same about path width — five requests against five.
+
+Neither is a failure of the design; both are questions this harness cannot pose. Recording PASS without naming them would have closed a release gate on evidence that does not exist.
 
 Authoritative objective, evidence requirements, and decision gate live in [`architecture/roadmap/SPIKES.md`](../../architecture/roadmap/SPIKES.md); this file records what was actually observed.
 
@@ -41,7 +54,7 @@ It also handles the ticket the way the runtime must, which is finding **F8**: a 
 
 ## What was observed
 
-153 assertions across 23 experiments, consecutive clean runs. The harness exits non-zero when any required observation is false, so `cargo run` cannot report success while its own output disproves the record.
+155 assertions across 24 experiments, consecutive clean runs. The harness exits non-zero when any required observation is false, so `cargo run` cannot report success while its own output disproves the record.
 
 **Namespace (K1).** The published golden vector reproduces exactly: `network_id: example-private-network` → `ssbtblqj7mexczivog5qfbfjvi` → `/interweave/kad/1.0.0/ssbtblqj7mexczivog5qfbfjvi`. The derivation is implemented from the specification text rather than from a shared helper, so a derivation that merely agrees with itself could not pass. The 26-character unpadded base32 tag is a valid `libp2p::StreamProtocol`, and the `^[a-z0-9][a-z0-9._-]{0,63}$` grammar accepts and refuses what the spec says it should.
 
@@ -123,7 +136,7 @@ Each part fails to a different mutation and passes the others', which is the rea
 
 These are the things this spike did **not** establish, recorded so no future reader mistakes its silence for a result.
 
-- **No adversary, and disjoint paths is not shown to do anything.** K16 measures query path **width** against a disabled control and finds **no difference** at six nodes on loopback. So the option is shown to be configurable and harmless, and nothing more: not that it widens the walk at this scale, and certainly not that it resists capture — reduced single-path capture is a claim about an adversary controlling a subset of routers, and this harness has none.
+- **No adversary, and disjoint paths is not shown to do anything.** K16 measures query path **width** against a disabled control and finds no difference at six nodes; K24 measures single-path **capture** against controls at nine routers with `parallelism` 3, and finds no capture to reduce — a single-seed asker reached the target as reliably as a three-seed one. So the option is shown to be configurable and harmless, and nothing more. The weakest adversary K24 models is a router that truthfully does not know the target; nothing here models one that lies, and no claim about Byzantine resistance is made or implied.
 - **No hostile *protocol* peer.** K8, K10 and K18 model a peer that returns unauthorized peers, writes records, and hands over dead addresses. None models a peer that violates the Kademlia wire format itself.
 - **One machine, loopback only.** No NAT, no latency, no loss, no interface change. The twenty-node convergence figure is a convergence *shape*, not a deployment number.
 - **Server-mode reachability evidence is not consumed.** The design requires AutoNAT-verified direct reachability or an active relay reservation as strong evidence before a node advertises server mode. AutoNAT and Relay are absent from the feature list — SPIKE-004 is where they arrive — so this spike **cannot** validate that rule, and Stage 10 must not treat it as validated. A node here advertises server mode because it was configured to.

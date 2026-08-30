@@ -3106,3 +3106,151 @@ pub async fn k23_dial_volume_by_class(r: &mut Report) {
             .to_owned(),
     );
 }
+
+/// K24 — single-path capture, measured against controls.
+///
+/// The brief's expected evidence includes that "disjoint query paths and
+/// multi-seed topologies measurably reduce single-path capture, without
+/// claiming Byzantine resistance". K16 measured path WIDTH and found no
+/// difference at six nodes, which is not the same question: width is how
+/// many routers a query contacts, capture is how much of the answer
+/// depends on any ONE of them.
+///
+/// The adversary here is deliberately the weakest kind that still
+/// captures: a router that simply does not know the target. It is not
+/// Byzantine — it returns a truthful empty answer — and that is the
+/// point, because a claim about Byzantine resistance is exactly what
+/// this must not make.
+///
+/// Enough routers that a query cannot contact them all at once:
+/// `parallelism` is 3 and there are 9, so which routers a walk reaches
+/// is a real variable rather than "all of them".
+pub async fn k24_single_path_capture(r: &mut Report) {
+    const ROUTERS: usize = 9;
+    /// How many routers know the target. The rest are the capture.
+    const KNOWERS: usize = 2;
+
+    /// One run: returns whether the asker found the target's address.
+    async fn attempt(disjoint: bool, seeds: usize) -> bool {
+        let cfg = NodeConfig {
+            role: KadRole::Server,
+            gate_mode: Mode::PolicyAdmit,
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_paths: disjoint,
+            ..NodeConfig::default()
+        };
+        // 0 = asker, 1..=ROUTERS = routers, last = target.
+        let mut n = Vec::new();
+        for _ in 0..=(ROUTERS + 1) {
+            n.push(Node::start(&cfg).await);
+        }
+        let ids: Vec<_> = n.iter().map(|x| x.peer_id).collect();
+        let addrs: Vec<_> = n.iter().map(Node::dial_address).collect();
+        for x in &mut n {
+            for id in &ids {
+                x.trust(*id);
+            }
+        }
+        let target = ids[ROUTERS + 1];
+        let target_addr = addrs[ROUTERS + 1].clone();
+
+        // Only the first KNOWERS routers know the target.
+        for i in 1..=KNOWERS {
+            let a = target_addr.clone();
+            n[i].dial_admitted(a.clone());
+            if let Some(k) = n[i].kad() {
+                k.add_address(&target, a);
+            }
+        }
+        // The asker is seeded with `seeds` routers, chosen so that a
+        // single seed is one that does NOT know the target — which is
+        // what makes capture possible at all.
+        for i in 0..seeds {
+            let idx = ROUTERS - i; // from the far end: non-knowers first
+            n[0].dial_admitted(addrs[idx].clone());
+        }
+        // Routers know each other, so a walk can move between them.
+        for i in 1..=ROUTERS {
+            for j in 1..=ROUTERS {
+                if i != j {
+                    let (p, a) = (ids[j], addrs[j].clone());
+                    if let Some(k) = n[i].kad() {
+                        k.add_address(&p, a);
+                    }
+                }
+            }
+        }
+        pump(&mut n, Duration::from_secs(8)).await;
+        for i in 0..seeds {
+            let idx = ROUTERS - i;
+            let (p, a) = (ids[idx], addrs[idx].clone());
+            if let Some(k) = n[0].kad() {
+                k.add_address(&p, a);
+            }
+        }
+        pump(&mut n, Duration::from_secs(2)).await;
+
+        for _ in 0..3 {
+            if let Some(k) = n[0].kad() {
+                let q = k.get_closest_peers(target);
+                n[0].own_queries.insert(q, QueryClass::Targeted);
+            }
+            pump(&mut n, Duration::from_secs(10)).await;
+            if n[0]
+                .observed
+                .learned_addresses
+                .get(&target)
+                .is_some_and(|a| !a.is_empty())
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    // ONE SEED, a router that does not know the target: the walk depends
+    // entirely on that router's view.
+    let single_off = attempt(false, 1).await;
+    let single_on = attempt(true, 1).await;
+    // THREE SEEDS, so no single router's view is the whole answer.
+    let multi_off = attempt(false, 3).await;
+    let multi_on = attempt(true, 3).await;
+
+    r.note(format!(
+        "K24: found the target — 1 seed disjoint=false {single_off}, \
+         1 seed disjoint=true {single_on}, 3 seeds disjoint=false {multi_off}, \
+         3 seeds disjoint=true {multi_on}"
+    ));
+    r.check(
+        "K24.1",
+        &format!("a multi-seed asker reaches the target ({multi_on} / {multi_off})"),
+        multi_on || multi_off,
+    );
+    // WHAT IS AND IS NOT ESTABLISHED. If the single-seed runs also
+    // succeed, this topology does not exhibit capture at all and the
+    // comparison says nothing — which must be REPORTED, not read as a
+    // pass for the option.
+    let capture_observed = !(single_off && single_on);
+    r.check(
+        "K24.2",
+        &format!(
+            "the comparison is meaningful only if a single seed can FAIL to \\
+             reach the target; observed capture: {capture_observed}"
+        ),
+        // Not an assertion about the option — an assertion that the
+        // experiment reports which case it is in.
+        true,
+    );
+    r.note(if capture_observed {
+        "K24: single-seed capture WAS observed, so multi-seed is a measurable \
+         improvement on this topology."
+            .to_owned()
+    } else {
+        "K24: NO capture observed — a single seed reached the target too, so \
+         this topology cannot distinguish the configurations. The \
+         expected-evidence item about reducing single-path capture is \
+         therefore NOT established by this spike, and the record says so \
+         rather than treating the absence of a difference as a pass."
+            .to_owned()
+    });
+}
