@@ -156,21 +156,28 @@ pub fn admit_candidates_bounded(node: &mut Node, protocol: &str, max_routing: us
             .get(peer)
             .is_some_and(|p| p.contains(protocol))
     };
+    // EVERY ADDRESS, not the first. Taking `addrs.iter().next()` meant a
+    // peer was admitted at whichever address sorted first and every
+    // other one was dropped — so an Identify refresh or a query result
+    // carrying a NEW route never reached the driver while an older one
+    // existed, and the peer stayed pinned to it. §11 has address expiry
+    // and removal propagate to the driver, which needs the driver to
+    // have been told about the addresses in the first place.
+    //
+    // Found because the full-table update check was rewritten to go
+    // through this pipeline instead of calling `add_address` directly:
+    // the direct call had been hiding it.
     for (peer, addrs) in &node.observed.learned_addresses {
         if !serves(peer) {
             continue;
         }
-        if let Some(a) = addrs.iter().next() {
-            candidates.push((*peer, a.clone()));
-        }
+        candidates.extend(addrs.iter().map(|a| (*peer, a.clone())));
     }
     for (peer, addrs) in &node.observed.identify_listen_addrs {
         if !serves(peer) {
             continue;
         }
-        if let Some(a) = addrs.iter().next() {
-            candidates.push((*peer, a.clone()));
-        }
+        candidates.extend(addrs.iter().map(|a| (*peer, a.clone())));
     }
 
     let mut admitted = 0;

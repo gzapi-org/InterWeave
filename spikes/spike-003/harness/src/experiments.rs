@@ -1850,13 +1850,43 @@ pub async fn k17_twenty_node_convergence(r: &mut Report) {
         &format!("the bounded node has routed peers to update ({})", routed_peers.len()),
         !routed_peers.is_empty(),
     );
-    let subject = routed_peers[0];
+    // AND THE FAILURE PATH EXITS, rather than panicking. Indexing here
+    // aborted the process when convergence or bounded admission failed
+    // badly enough to leave the table empty — so the run that most
+    // needed the accumulated failure report was the one that never
+    // printed it.
+    let Some(&subject) = routed_peers.first() else {
+        r.note(
+            "K17: no routed peer to update, so K17.9/K17.10 are skipped — the \
+             failure above is the finding, and the report still runs."
+                .to_owned(),
+        );
+        return;
+    };
     let fresh: libp2p::Multiaddr = "/ip4/127.0.0.1/tcp/65000".parse().expect("valid");
     let before_count = all[N].routing_peers();
-    if let Some(k) = all[N].kad() {
-        k.add_address(&subject, fresh.clone());
-    }
+    // THROUGH THE BOUNDED PIPELINE, not around it. Calling
+    // `add_address` directly tested libp2p rather than the guard: the
+    // assertion passed unchanged even with `admit_candidates_bounded`
+    // regressed to rejecting every candidate at the bound, which is the
+    // exact regression it was written to catch.
+    //
+    // The address is placed where a real observation would arrive — the
+    // candidate data the pipeline reads — and the pipeline is invoked.
+    all[N]
+        .observed
+        .learned_addresses
+        .entry(subject)
+        .or_default()
+        .insert(fresh.clone());
+    let admitted_update =
+        crate::topology::admit_candidates_bounded(&mut all[N], &protocol, BOUND);
     pump(&mut all, Duration::from_secs(2)).await;
+    r.check(
+        "K17.8b",
+        &format!("the bounded pipeline accepted the update ({admitted_update} admitted)"),
+        admitted_update > 0,
+    );
     // The update reaches the driver, and the population is unchanged —
     // both halves, since an update that grew the table would be the
     // bound failing in the other direction.
@@ -3064,6 +3094,22 @@ impl QueryScheduler {
         }
     }
 
+    /// Give back the concurrency slot of a permit whose work has
+    /// FINISHED, keeping its rate charge.
+    ///
+    /// For headroom held against work the scheduler cannot gate: the
+    /// library's implicit bootstrap really ran, so it really spent the
+    /// window — but once it completes it is no longer occupying
+    /// concurrency, and holding the slot forever would suppress a valid
+    /// explicit query while claiming the two overlapped when they did
+    /// not.
+    ///
+    /// The mirror of [`Self::release`], which is for a permit whose work
+    /// never started and therefore spent nothing at all.
+    pub fn consume(&mut self, permit: Permit) {
+        self.unbound.remove(&permit.0);
+    }
+
     /// Give back a permit that was never bound to a query.
     ///
     /// The RATE is refunded too, not only the concurrency slot. An
@@ -3308,19 +3354,51 @@ pub async fn k22_bounded_query_scheduler(r: &mut Report) {
     // `release` that was meant to hold the cost — and `release` refunds
     // the rate anyway. Reserving means HOLDING a permit, not acquiring
     // and giving it back.
-    let implicit = fresh[0].observed.unattributed_queries.len();
+    // ACTIVE, not historical. `unattributed_queries` never forgets an
+    // id, so reserving against it held a slot for work that had already
+    // finished — suppressing a valid explicit query and then claiming
+    // two fit concurrently when they never overlapped.
+    let implicit_seen = fresh[0].observed.unattributed_queries.len();
+    let implicit_active: Vec<_> = fresh[0]
+        .observed
+        .unattributed_queries
+        .iter()
+        .filter(|q| !fresh[0].observed.finished_queries.contains(q))
+        .copied()
+        .collect();
     let mut live = QueryScheduler::new(MAX_CONCURRENT, MAX_PER_MINUTE);
-    let reserved: Vec<Permit> = (0..implicit)
+    let mut reserved: Vec<Permit> = (0..implicit_active.len())
         .filter_map(|_| live.acquire(0).ok())
         .collect();
     r.check(
         "K22.14",
         &format!(
-            "the library's own query is measured and its headroom RESERVED \
-             before the driver spends: {implicit} implicit, {} permit(s) held",
+            "headroom is reserved for the library's ACTIVE work only: \
+             {implicit_seen} implicit query(ies) seen, {} still running, \
+             {} permit(s) held",
+            implicit_active.len(),
             reserved.len()
         ),
-        implicit > 0 && reserved.len() == implicit,
+        implicit_seen > 0 && reserved.len() == implicit_active.len(),
+    );
+    // AND THE RATE IS SPENT EITHER WAY. A query that ran spent the
+    // window whether or not it is still running, so a finished one
+    // releases its concurrency slot and keeps its charge — which is
+    // what `consume` is for, as against `release` for work that never
+    // started.
+    let finished_implicit = implicit_seen - implicit_active.len();
+    for _ in 0..finished_implicit {
+        if let Ok(p) = live.acquire(0) {
+            live.consume(p);
+        }
+    }
+    r.check(
+        "K22.14b",
+        &format!(
+            "and work that already finished keeps its rate charge without \
+             holding a slot: {finished_implicit} consumed"
+        ),
+        live.held() == reserved.len(),
     );
 
     let mut issued = 0;
@@ -3368,20 +3446,48 @@ pub async fn k22_bounded_query_scheduler(r: &mut Report) {
     r.check(
         "K22.15",
         &format!(
-            "reserving headroom leaves the driver less than the whole ceiling: \
+            "the driver gets the ceiling minus whatever headroom is held: \
              {issued} issued of {MAX_CONCURRENT}, {} reserved",
             reserved.len()
         ),
-        issued == MAX_CONCURRENT - reserved.len() && issued < MAX_CONCURRENT,
+        issued == MAX_CONCURRENT - reserved.len(),
+    );
+    // AND HOLDING REALLY COSTS A SLOT. The assertion above is trivially
+    // true when nothing is held — which is the ordinary case here,
+    // because the implicit bootstrap finishes before the driver spends —
+    // so the mechanism is exercised on its own rather than left to a
+    // condition the run does not control.
+    let mut demo = QueryScheduler::new(MAX_CONCURRENT, MAX_PER_MINUTE);
+    let held = demo.acquire(0).expect("headroom for one implicit query");
+    let mut got = 0;
+    while demo.acquire(0).is_ok() {
+        got += 1;
+        assert!(got < 100, "the ceiling must be finite");
+    }
+    r.check(
+        "K22.15b",
+        &format!(
+            "with one slot held for ungatable work the driver gets {got} of \
+             {MAX_CONCURRENT}"
+        ),
+        got == MAX_CONCURRENT - 1,
+    );
+    // And returns it when that work completes, keeping the rate charge.
+    demo.consume(held);
+    r.check(
+        "K22.15c",
+        "and the slot comes back when it finishes",
+        demo.acquire(0).is_ok(),
     );
     r.check(
         "K22.16",
         &format!(
-            "so the node's whole query load is inside the budget: {} = {issued} \
-             permitted + {implicit} reserved for work the scheduler cannot gate",
-            issued + implicit
+            "so the node's whole concurrent load is inside the budget: {} = \
+             {issued} permitted + {} held for work the scheduler cannot gate",
+            issued + reserved.len(),
+            reserved.len()
         ),
-        issued + implicit <= MAX_CONCURRENT,
+        issued + reserved.len() <= MAX_CONCURRENT,
     );
     // AND THE NODE AGREES. Its whole query history is what the driver
     // started plus whatever the library began on its own, so the
@@ -3389,6 +3495,23 @@ pub async fn k22_bounded_query_scheduler(r: &mut Report) {
     // the check the invocation counter alone cannot make, since a
     // counter can be wrong in the same direction as the loop it counts.
     pump(&mut fresh, Duration::from_secs(8)).await;
+    // AND THE HELD SLOTS COME BACK when the library's work completes,
+    // rather than being pinned for the life of the node.
+    for id in &implicit_active {
+        if fresh[0].observed.finished_queries.contains(id)
+            && let Some(p) = reserved.pop()
+        {
+            live.consume(p);
+        }
+    }
+    r.check(
+        "K22.16b",
+        &format!(
+            "held headroom is returned as the library's work finishes: {} still held",
+            live.held() - issued
+        ),
+        live.held() >= issued,
+    );
     r.check(
         "K22.17",
         &format!(
