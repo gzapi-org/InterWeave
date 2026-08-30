@@ -146,14 +146,35 @@ pub struct KademliaSettings {
 impl KademliaSettings {
     /// Refuse a configuration the driver cannot honour.
     ///
+    /// THE SAME CEILINGS THE CANONICAL CONFIGURATION ENFORCES (§13, and
+    /// `profile-config`'s per-field ranges), because this boundary is
+    /// reachable without it: `SubstrateConfig` is public, and a caller
+    /// that bypassed profile validation could otherwise install a
+    /// routing table or query fan-out past every documented memory and
+    /// work-amplification bound. Values are refused, never clamped — a
+    /// caller learns its configuration was wrong instead of quietly
+    /// getting another.
+    ///
     /// # Errors
     /// A static description of the first violated rule.
     pub fn validate(&self) -> Result<(), &'static str> {
         if !network_id_is_legal(&self.network_id) {
             return Err("kademlia network_id is not ^[a-z0-9][a-z0-9._-]{0,63}$");
         }
-        if self.max_routing_peers == 0 {
-            return Err("kademlia max_routing_peers must admit at least one peer");
+        if !(8..=20).contains(&self.kbucket_size.get()) {
+            return Err("kademlia kbucket_size must be 8..=20");
+        }
+        if !(20..=1024).contains(&self.max_routing_peers) {
+            return Err("kademlia max_routing_peers must be 20..=1024");
+        }
+        if self.parallelism.get() > 10 {
+            return Err("kademlia parallelism must be 1..=10");
+        }
+        if self.max_concurrent_queries.get() > 8 {
+            return Err("kademlia max_concurrent_queries must be 1..=8");
+        }
+        if !(5_000..=120_000).contains(&self.query_timeout.as_millis()) {
+            return Err("kademlia query_timeout must be 5s..=120s");
         }
         if self.max_results_per_query.get() > MAX_RESULTS_PER_QUERY {
             return Err("kademlia max_results_per_query exceeds the port ceiling");
@@ -834,21 +855,82 @@ mod tests {
             max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
         };
         good.validate().expect("the canonical defaults validate");
-        let bad_id = KademliaSettings {
-            network_id: "Not-Legal".to_owned(),
-            ..good.clone()
-        };
-        assert!(bad_id.validate().is_err());
-        let zero_peers = KademliaSettings {
-            max_routing_peers: 0,
-            ..good.clone()
-        };
-        assert!(zero_peers.validate().is_err());
-        let over_cap = KademliaSettings {
-            max_results_per_query: NonZeroUsize::new(MAX_RESULTS_PER_QUERY + 1).expect("nonzero"),
-            ..good
-        };
-        assert!(over_cap.validate().is_err());
+        let nz = |n: usize| NonZeroUsize::new(n).expect("nonzero");
+        let cases: Vec<(&str, KademliaSettings)> = vec![
+            (
+                "illegal network id",
+                KademliaSettings {
+                    network_id: "Not-Legal".to_owned(),
+                    ..good.clone()
+                },
+            ),
+            (
+                "kbucket below the floor",
+                KademliaSettings {
+                    kbucket_size: nz(7),
+                    ..good.clone()
+                },
+            ),
+            (
+                "kbucket above K",
+                KademliaSettings {
+                    kbucket_size: nz(21),
+                    ..good.clone()
+                },
+            ),
+            (
+                "routing ceiling below the floor",
+                KademliaSettings {
+                    max_routing_peers: 19,
+                    ..good.clone()
+                },
+            ),
+            (
+                "routing ceiling above the port bound",
+                KademliaSettings {
+                    max_routing_peers: 1_025,
+                    ..good.clone()
+                },
+            ),
+            (
+                "parallelism amplification",
+                KademliaSettings {
+                    parallelism: nz(11),
+                    ..good.clone()
+                },
+            ),
+            (
+                "concurrency amplification",
+                KademliaSettings {
+                    max_concurrent_queries: nz(9),
+                    ..good.clone()
+                },
+            ),
+            (
+                "timeout below the floor",
+                KademliaSettings {
+                    query_timeout: Duration::from_secs(4),
+                    ..good.clone()
+                },
+            ),
+            (
+                "timeout above the ceiling",
+                KademliaSettings {
+                    query_timeout: Duration::from_secs(121),
+                    ..good.clone()
+                },
+            ),
+            (
+                "results above the port ceiling",
+                KademliaSettings {
+                    max_results_per_query: nz(MAX_RESULTS_PER_QUERY + 1),
+                    ..good
+                },
+            ),
+        ];
+        for (what, bad) in cases {
+            assert!(bad.validate().is_err(), "{what} must be refused");
+        }
     }
 
     #[test]
