@@ -45,6 +45,19 @@ pub const MAX_TRACKED_CANDIDATES: usize = MAX_ROUTING_PEERS;
 /// evidence with old.
 pub const MAX_CAPABILITY_EVIDENCE: usize = MAX_ROUTING_PEERS;
 
+/// Ceiling on implicit-bootstrap charges held at once.
+///
+/// Each empty-to-nonempty routing transition really starts one library
+/// bootstrap (F2), but the charges bypass the configured ceilings by
+/// design, so churn with stalled completions must not grow them without
+/// bound — an unbounded held count is provider memory an adversary can
+/// drive AND a permanent exclusion of every scheduled query. Past the
+/// cap a transition mints nothing: the held charges already say the
+/// budget is saturated with unscheduled work, which is the fail-closed
+/// message, and stalled completions this deep mean the driver stream is
+/// broken — health says so through the success ageing.
+pub const MAX_IMPLICIT_CHARGES: usize = 8;
+
 /// Ceiling on routing OFFERS waiting for the driver.
 ///
 /// When it is reached an incoming offer displaces the OLDEST offer, so a
@@ -437,7 +450,7 @@ impl KademliaDiscovery {
                 // charged like the work it is, past the ceilings if it
                 // must be, and the slot is settled by the bootstrap-class
                 // completion the driver reports for it.
-                if self.routing.is_empty() {
+                if self.routing.is_empty() && self.implicit_charges.len() < MAX_IMPLICIT_CHARGES {
                     self.implicit_charges
                         .push(self.budgets.charge_unscheduled(now_ms));
                 }
@@ -2382,5 +2395,32 @@ mod tests {
             Err(TargetedRefusal::NoServerEvidence),
             "and its observations do not become eligibility either"
         );
+    }
+
+    #[test]
+    fn stalled_implicit_charges_are_bounded() {
+        let mut p = started(KademliaMode::Client);
+        let peer = synthetic_peer(1);
+        trust(&mut p, &[&peer]);
+        // Churn far past the cap with every completion stalled.
+        for i in 0..(MAX_IMPLICIT_CHARGES as u64 + 4) {
+            p.ingest_driver_event(
+                KademliaEvent::RoutingPeerAdded { peer: peer.clone() },
+                i * 10,
+            );
+            p.ingest_driver_event(
+                KademliaEvent::RoutingPeerRemoved { peer: peer.clone() },
+                i * 10 + 5,
+            );
+        }
+        assert_eq!(
+            p.budgets.held(),
+            MAX_IMPLICIT_CHARGES,
+            "churn cannot grow the held count without bound"
+        );
+        for i in 0..MAX_IMPLICIT_CHARGES as u64 {
+            p.ingest_driver_event(done(QueryClass::Bootstrap), 1_000 + i);
+        }
+        assert_eq!(p.budgets.held(), 0, "completions still settle every charge");
     }
 }
