@@ -1095,6 +1095,32 @@ impl ConnectionManager {
         self.publish();
     }
 
+    /// Forget a route that retrying cannot fix, with no ticket at all.
+    ///
+    /// The admission-free counterpart of [`Self::record_permanent_failure`],
+    /// for the EXTRA addresses of a multi-address `DialError::Transport`
+    /// whose own attempt was structural: the same address fails the same
+    /// way every time this process asks, so scoring it as transient — the
+    /// only admission-free option before this existed — kept it
+    /// retryable forever. Removes the route from the book and schedules
+    /// nothing, exactly as the ticketed version does.
+    pub fn record_permanent_address_failure_unadmitted(
+        &mut self,
+        peer: &TransportIdentity,
+        address: &str,
+    ) {
+        if address.is_empty() {
+            return;
+        }
+        if let Some(known) = self.book.get_mut(peer) {
+            known.remove(address);
+            if known.is_empty() {
+                self.book.remove(peer);
+            }
+        }
+        self.publish();
+    }
+
     /// Record a failure that retrying cannot fix.
     ///
     /// A `MultiaddrNotSupported`, `NoAddresses`, or `LocalPeerId` dial
@@ -2869,5 +2895,23 @@ mod tests {
             .admit(&request(P1, "/ip4/10.0.0.1/tcp/1"), 1)
             .expect("no backoff was advanced by a route nobody can name");
         drop(readmitted);
+    }
+
+    #[test]
+    fn an_unadmitted_permanent_failure_forgets_the_route() {
+        let mut m = manager(4);
+        let p = peer(P1);
+        m.record_address_failure_unadmitted(&p, "/ip4/10.0.0.1/tcp/1", 0);
+        m.record_address_failure_unadmitted(&p, "/ip4/10.0.0.2/tcp/2", 0);
+        assert_eq!(m.known_addresses(&p), 2);
+        m.record_permanent_address_failure_unadmitted(&p, "/ip4/10.0.0.1/tcp/1");
+        assert_eq!(
+            m.known_addresses(&p),
+            1,
+            "the structural route is forgotten; the other survives on its own merit"
+        );
+        assert_eq!(m.scheduled_retries(), 0, "nothing is ever scheduled here");
+        m.record_permanent_address_failure_unadmitted(&p, "");
+        assert_eq!(m.known_addresses(&p), 1, "an empty address is a no-op");
     }
 }
