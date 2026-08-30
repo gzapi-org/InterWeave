@@ -211,7 +211,11 @@ impl SubstrateBehaviour {
     /// rather than a runtime condition, and it is propagated rather than
     /// unwrapped so a future edit that introduced one fails to start
     /// instead of panicking in a task.
-    pub fn new(keypair: &identity::Keypair, preauth: PreAuthLimits) -> Result<Self, &'static str> {
+    pub fn new(
+        keypair: &identity::Keypair,
+        preauth: PreAuthLimits,
+        outbound: OutboundAdmission,
+    ) -> Result<Self, &'static str> {
         let broadcast_config = gossipsub::ConfigBuilder::default()
             // STRICT, which is what makes the mesh id computable at all:
             // it guarantees every message reaching the application has an
@@ -231,7 +235,7 @@ impl SubstrateBehaviour {
 
         Ok(Self {
             preauth: PreAuthAdmission::new(preauth),
-            outbound: OutboundAdmission::default(),
+            outbound,
             identify: identify::Behaviour::new(identify::Config::new(
                 IDENTIFY_PROTOCOL.to_owned(),
                 keypair.public(),

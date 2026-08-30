@@ -43,13 +43,14 @@ use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::TransportError as DirectError;
 use interweave_transport_api::{EndpointId, TransportIdentity};
 use interweave_transport_runtime::{
-    ConnectionManager, ConnectionPolicy, DialDenial, DialOrigin, DialTicket, TrustSources,
+    ConnectionManager, ConnectionPolicy, DialDenial, DialOrigin, TrustSources,
 };
 use libp2p::{PeerId, noise, tcp, yamux};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::behaviour::SubstrateBehaviour;
 use crate::gated_swarm::{GatedSwarm, mesh_admits};
+use crate::outbound_gate::{InFlightTickets, OutboundAdmission};
 
 mod broadcast;
 mod commands;
@@ -360,40 +361,13 @@ impl SwarmRuntime {
         let keypair = identity.swarm_keypair();
         let local_peer = to_transport_identity(&PeerId::from_public_key(&keypair.public()))?;
 
-        let swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
-            .with_tokio()
-            .with_tcp(
-                tcp::Config::default().nodelay(true),
-                noise::Config::new,
-                yamux::Config::default,
-            )
-            .map_err(|e| SubstrateError::Transport(e.to_string()))?
-            // The behaviour is now fallible: GossipSub refuses a
-            // configuration whose authenticity and validation mode
-            // disagree, at construction. Boxed because the builder wants
-            // an error that implements `Error`, and a contradiction here
-            // should stop the runtime starting rather than panic inside
-            // the task that would have driven it.
-            .with_behaviour(|key| {
-                SubstrateBehaviour::new(key, config.preauth)
-                    .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
-            })
-            .map_err(|e| SubstrateError::Transport(e.to_string()))?
-            .with_swarm_config(|c| c.with_idle_connection_timeout(config.idle_timeout))
-            // THE HANDSHAKE TIMEOUT, taken from the same limits the
-            // pre-auth gate enforces rather than left to libp2p's
-            // default. The two happen to agree at ten seconds today,
-            // and a configuration that narrowed one without the other
-            // would produce a listener whose accounting and whose
-            // transport disagreed about when a handshake is over --
-            // slots reclaimed while the socket was still negotiating,
-            // or the reverse.
-            .with_connection_timeout(Duration::from_millis(config.preauth.handshake_timeout_ms()))
-            .build();
-        let mut swarm = GatedSwarm::new(swarm);
-
-        // The Stage 2 policy, driving a real dial path from the first
-        // line of substrate code rather than being wired in later.
+        // THE ROOT ADMISSION EXISTS BEFORE THE SWARM. The outbound gate
+        // inside the behaviour admits behaviour-originated dials through
+        // the manager's snapshot handle, so the manager — and the clock
+        // and in-flight set it shares with the runtime loop — must be
+        // constructed first. The ordering CLAUDE.md §3 demands, made
+        // structural: a behaviour cannot be built without the admission
+        // it consults.
         let policy = ConnectionPolicy::new(config.max_pending_dials, config.max_connections);
         let mut manager = ConnectionManager::new(policy, config.max_pending_dials);
         // THE LOCAL IDENTITY FIRST, from the keypair rather than from
@@ -413,17 +387,53 @@ impl SwarmRuntime {
         // A MONOTONIC CLOCK, because the policy is a state machine over
         // time and it had been given a literal `0` on every call. Every
         // backoff window, every quarantine, and every retry deadline was
-        // therefore evaluated at the same instant forever: an address
-        // quarantined for thirty minutes was quarantined until restart,
-        // and a peer in backoff never left it. `Instant` rather than
-        // wall time so a clock adjustment cannot move a deadline.
+        // therefore evaluated at the same instant forever. `Instant`
+        // rather than wall time so a clock adjustment cannot move a
+        // deadline. Shared with the gate: two clock origins would
+        // timestamp admissions and settlements on different axes, which
+        // is SPIKE-003's F8b in a new disguise.
         let started = tokio::time::Instant::now();
 
         // Tickets for dials the Swarm has accepted and not yet reported
         // on. Keyed by the connection id the dial was built with, which
         // is knowable before dialling and is what the outcome event
-        // carries back.
-        let mut in_flight: HashMap<libp2p::swarm::ConnectionId, DialTicket> = HashMap::new();
+        // carries back. SHARED with the gate, which deposits a
+        // behaviour dial's ticket in its pending hook and re-binds it
+        // at establishment.
+        let in_flight = InFlightTickets::default();
+        let outbound = OutboundAdmission::new(manager.handle(), in_flight.clone(), started);
+
+        let swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
+            .with_tokio()
+            .with_tcp(
+                tcp::Config::default().nodelay(true),
+                noise::Config::new,
+                yamux::Config::default,
+            )
+            .map_err(|e| SubstrateError::Transport(e.to_string()))?
+            // The behaviour is now fallible: GossipSub refuses a
+            // configuration whose authenticity and validation mode
+            // disagree, at construction. Boxed because the builder wants
+            // an error that implements `Error`, and a contradiction here
+            // should stop the runtime starting rather than panic inside
+            // the task that would have driven it.
+            .with_behaviour(|key| {
+                SubstrateBehaviour::new(key, config.preauth, outbound)
+                    .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
+            })
+            .map_err(|e| SubstrateError::Transport(e.to_string()))?
+            .with_swarm_config(|c| c.with_idle_connection_timeout(config.idle_timeout))
+            // THE HANDSHAKE TIMEOUT, taken from the same limits the
+            // pre-auth gate enforces rather than left to libp2p's
+            // default. The two happen to agree at ten seconds today,
+            // and a configuration that narrowed one without the other
+            // would produce a listener whose accounting and whose
+            // transport disagreed about when a handshake is over --
+            // slots reclaimed while the socket was still negotiating,
+            // or the reverse.
+            .with_connection_timeout(Duration::from_millis(config.preauth.handshake_timeout_ms()))
+            .build();
+        let mut swarm = GatedSwarm::new(swarm);
 
         // Every connection this process holds open, each holding the
         // slot it occupies under `max_connections`. Bounded by that
@@ -629,7 +639,7 @@ impl SwarmRuntime {
                                 match attempt_dial(
                                     &mut swarm,
                                     &mut manager,
-                                    &mut in_flight,
+                                    &in_flight,
                                     &peer,
                                     &address,
                                     DialOrigin::ConnectionManager,
@@ -812,7 +822,7 @@ impl SwarmRuntime {
                                     &mut direct_state,
                                     &mut directory_state,
                                     &mut broadcast_state,
-                                    &mut in_flight,
+                                    &in_flight,
                                     config.max_pending_listens,
                                     config.max_active_listeners,
                                     config.max_payload_bytes,
@@ -931,7 +941,7 @@ impl SwarmRuntime {
                         let announce = settle_outcome(
                             &event,
                             &mut manager,
-                            &mut in_flight,
+                            &in_flight,
                             &mut open,
                             &mut refuse,
                             now_ms(started),

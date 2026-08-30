@@ -21,9 +21,14 @@
 //! [`outbound_gate::OutboundAdmission`] closes the third door: libp2p
 //! routes a behaviour's own dials through
 //! `handle_pending_outbound_connection` rather than through
-//! [`GatedSwarm`], so that hook refuses any dial the root admission did
-//! not just issue a ticket for. It exists before any behaviour that
-//! dials, which is the order CLAUDE.md §3 requires.
+//! [`GatedSwarm`]. A dial carrying a ticket passes on it; one without —
+//! behaviour-originated, by definition — is admitted through the SAME
+//! root policy under `DialOrigin::KademliaQuery`, its ticket deposited
+//! for the ordinary settlement path, and its address judged at the
+//! established hook where one first exists. The gate existed and
+//! refused everything BEFORE any behaviour that dials, which is the
+//! order CLAUDE.md §3 requires; Stage 10 taught it to answer with
+//! policy rather than with a flat no.
 //!
 //! # What is absent, and why it is absent rather than merely unused
 //!
@@ -50,12 +55,12 @@
 //! `Swarm` is private to [`GatedSwarm`], so a call site that forgets to
 //! ask does not misbehave at runtime — it does not compile.
 //!
-//! What remains before a dialing behaviour may exist is the behaviour
-//! path: libp2p routes those through
-//! `NetworkBehaviour::handle_pending_outbound_connection`, and the same
-//! ticket has to be required there. Stage 4's behaviour set does not
-//! dial, so nothing is ungated today; Kademlia must not be enabled
-//! before that hook exists.
+//! The behaviour path is gated the same way: every dial a behaviour
+//! originates is decided by the root policy inside
+//! `NetworkBehaviour::handle_pending_outbound_connection`, before a
+//! socket is opened — which is what CLAUDE.md §3 required to be green
+//! before Kademlia could be activated, and it is green first: the
+//! `kad` feature arrives only in the commit after this gate's tests.
 
 #![forbid(unsafe_code)]
 

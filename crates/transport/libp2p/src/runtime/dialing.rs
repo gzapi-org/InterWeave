@@ -25,6 +25,7 @@ use interweave_transport_runtime::{
 
 use crate::behaviour::SubstrateBehaviourEvent;
 use crate::gated_swarm::{AdmittedDial, GatedSwarm, UndialableAdmission};
+use crate::outbound_gate::{InFlightTickets, strip_peer_suffix};
 
 use super::messages::DialRefusal;
 use super::to_transport_identity;
@@ -38,7 +39,7 @@ use super::to_transport_identity;
 pub(super) fn attempt_dial(
     swarm: &mut GatedSwarm,
     manager: &mut ConnectionManager,
-    in_flight: &mut HashMap<libp2p::swarm::ConnectionId, DialTicket>,
+    in_flight: &InFlightTickets,
     peer: &TransportIdentity,
     address: &str,
     origin: DialOrigin,
@@ -83,7 +84,7 @@ pub(super) fn attempt_dial(
             // would release the pending slot the instant the dial
             // began, and the ceiling would bound nothing but the rate
             // of the loop.
-            in_flight.insert(id, ticket);
+            in_flight.deposit(id, ticket);
             Ok(())
         }
         Err(boxed) => {
@@ -133,6 +134,117 @@ pub(super) fn settle_undialable(
     undialable.reason
 }
 
+/// Settle one ESTABLISHED outbound dial: keep it, or say it must go.
+///
+/// REVALIDATED, not merely recorded. Admission happened when the dial
+/// was ADMITTED; the handshake that just finished could have taken long
+/// enough for a trust revocation or a drain to land in between.
+/// Retaining the connection because it was admitted once would hold it
+/// open under authority that no longer exists.
+///
+/// THE ORIGIN IS PART OF THE QUESTION. An infrastructure-only peer is
+/// authorized for reachability and refused for the data plane, so
+/// asking only what the peer is authorized FOR — the inbound predicate,
+/// which has no origin to consult — closed relay reservations, relay
+/// circuits, AutoNAT probes and DCUtR hole punches that admission had
+/// correctly permitted. `authorizes_for` takes the ticket's own origin,
+/// so a `KademliaQuery` connection is revalidated by the SAME line that
+/// revalidates every other — the genericity
+/// `a_revoked_kademlia_dial_is_refused_at_establishment` proves rather
+/// than assumes.
+///
+/// Extracted from the event arm so it is reachable from a test:
+/// `SwarmEvent` is `#[non_exhaustive]` and cannot be constructed.
+pub(super) fn settle_established_outbound(
+    manager: &mut ConnectionManager,
+    peer: &TransportIdentity,
+    ticket: DialTicket,
+    now_ms: u64,
+) -> Option<(ConnectionSlot, DialOrigin)> {
+    let class = manager.classify(peer);
+    if !manager.authorizes_for(class, ticket.origin()) {
+        manager.record_authorization_withdrawn(ticket, now_ms);
+        return None;
+    }
+    // THE ADDRESS THAT WORKED. Learned from the ticket rather than from
+    // anything the peer said, so a route this profile has actually
+    // authenticated is in the book even if the peer never advertises it.
+    let address = ticket.address().to_owned();
+    let origin = ticket.origin();
+    let slot = manager.record_success(ticket, now_ms);
+    let _ = manager.learn_address(peer, &address, now_ms);
+    Some((slot, origin))
+}
+
+/// Settle one failed outbound dial against the manager.
+///
+/// Extracted from the event arm so it is reachable from a test —
+/// `SwarmEvent` is `#[non_exhaustive]` and cannot be constructed, while
+/// `DialError` can.
+///
+/// A BEHAVIOUR dial that failed before its established hook ran still
+/// carries the empty placeholder address (F9), and the error itself is
+/// the only place the attempted addresses exist: `WrongPeerId` names
+/// the address that authenticated wrong, and `DialError::Transport`
+/// carries one entry per address exhausted. The ticket is re-bound to
+/// the first (F12) and the REST are scored through the admission-free
+/// path (F15) — recording only the first leaves the others unscored
+/// and immediately retryable. A placeholder that no error names an
+/// address for settles as exactly that, and `record_failure` scores
+/// nothing for it.
+pub(super) fn settle_failed_dial(
+    manager: &mut ConnectionManager,
+    mut ticket: DialTicket,
+    error: &DialError,
+    now_ms: u64,
+) {
+    if ticket.address().is_empty() {
+        match error {
+            DialError::WrongPeerId { address, .. } => {
+                let stripped = strip_peer_suffix(address);
+                let _ = ticket.rebind_address(&stripped);
+            }
+            DialError::Transport(attempts) if !attempts.is_empty() => {
+                let _ = ticket.rebind_address(&strip_peer_suffix(&attempts[0].0));
+                if let Some(peer) = ticket.peer().cloned() {
+                    for (address, _) in &attempts[1..] {
+                        manager.record_address_failure_unadmitted(
+                            &peer,
+                            &strip_peer_suffix(address),
+                            now_ms,
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    // NOT EVERY FAILURE IS THE ADDRESS'S FAULT. A peer that answered
+    // with a different key is not an unreachable route to be retried on
+    // backoff -- it is an address that is serving somebody else, and
+    // ADR-0011 puts that into quarantine rather than into the retry
+    // schedule. Passing it to `record_failure` like any timeout made
+    // `record_identity_mismatch` unreachable, so the quarantine existed
+    // only as a method nobody called.
+    if matches!(error, DialError::WrongPeerId { .. }) {
+        let _ = manager.record_identity_mismatch(ticket, now_ms);
+    } else if is_permanent_dial_error(error) {
+        // STRUCTURAL, not transient. The same address fails the same
+        // way every time this process asks, so treating it as an
+        // ordinary network failure -- punitive backoff, a rescheduled
+        // retry -- retries a thing retrying cannot fix. The paused-time
+        // scheduler test caught this: a UDP address on a TCP-only Swarm
+        // was retried forever.
+        manager.record_permanent_failure(ticket, now_ms);
+    } else {
+        // ADDRESS-SCOPED, not peer-scoped. ADR-0011: a failure against
+        // one address must not advance a trusted peer into punitive
+        // backoff while a known-good route remains, and
+        // `record_failure` is the path that keeps that distinction.
+        manager.record_failure(ticket, now_ms);
+    }
+}
+
 /// Whether `error` describes THIS PROCESS's transport stack rather than
 /// the remote end's availability.
 ///
@@ -176,7 +288,7 @@ pub(super) fn is_permanent_dial_error(error: &DialError) -> bool {
 pub(super) fn settle_outcome(
     event: &Libp2pSwarmEvent<SubstrateBehaviourEvent>,
     manager: &mut ConnectionManager,
-    in_flight: &mut HashMap<libp2p::swarm::ConnectionId, DialTicket>,
+    in_flight: &InFlightTickets,
     open: &mut HashMap<libp2p::swarm::ConnectionId, OpenConnection>,
     refuse: &mut Vec<libp2p::swarm::ConnectionId>,
     now_ms: u64,
@@ -198,50 +310,25 @@ pub(super) fn settle_outcome(
                 refuse.push(*connection_id);
                 return Announce::Suppress;
             };
-            match in_flight.remove(connection_id) {
+            match in_flight.settle(*connection_id) {
                 // Outbound: the slot was reserved when the dial was
                 // admitted, and the connection takes it over.
-                Some(ticket) => {
-                    // REVALIDATED, not merely recorded. Admission
-                    // happened when the dial was ADMITTED; the
-                    // handshake that just finished could have taken
-                    // long enough for a trust revocation or a drain to
-                    // land in between. Retaining the connection because
-                    // it was admitted once would hold it open under
-                    // authority that no longer exists -- the exact
-                    // outbound counterpart of the check inbound already
-                    // gets below.
-                    // THE ORIGIN IS PART OF THE QUESTION. An
-                    // infrastructure-only peer is authorized for
-                    // reachability and refused for the data plane, so
-                    // asking only what the peer is authorized FOR --
-                    // the inbound predicate, which has no origin to
-                    // consult -- closed relay reservations, relay
-                    // circuits, AutoNAT probes and DCUtR hole punches
-                    // that admission had correctly permitted.
-                    let class = manager.classify(&peer);
-                    if !manager.authorizes_for(class, ticket.origin()) {
-                        manager.record_authorization_withdrawn(ticket, now_ms);
+                Some(ticket) => match settle_established_outbound(manager, &peer, ticket, now_ms) {
+                    Some((slot, origin)) => {
+                        open.insert(
+                            *connection_id,
+                            OpenConnection {
+                                peer,
+                                slot,
+                                origin: Some(origin),
+                            },
+                        );
+                    }
+                    None => {
                         refuse.push(*connection_id);
                         return Announce::Suppress;
                     }
-                    // THE ADDRESS THAT WORKED. Learned from the ticket
-                    // rather than from anything the peer said, so a
-                    // route this profile has actually authenticated is
-                    // in the book even if the peer never advertises it.
-                    let address = ticket.address().to_owned();
-                    let origin = ticket.origin();
-                    let slot = manager.record_success(ticket, now_ms);
-                    let _ = manager.learn_address(&peer, &address, now_ms);
-                    open.insert(
-                        *connection_id,
-                        OpenConnection {
-                            peer,
-                            slot,
-                            origin: Some(origin),
-                        },
-                    );
-                }
+                },
                 // INBOUND HAS NO ADMISSION. ADR-0011: the same current
                 // authorization that governs outbound applies before an
                 // inbound data-plane connection is retained -- arriving
@@ -295,34 +382,8 @@ pub(super) fn settle_outcome(
             error,
             ..
         } => {
-            if let Some(ticket) = in_flight.remove(connection_id) {
-                // NOT EVERY FAILURE IS THE ADDRESS'S FAULT. A peer that
-                // answered with a different key is not an unreachable
-                // route to be retried on backoff -- it is an address
-                // that is serving somebody else, and ADR-0011 puts that
-                // into quarantine rather than into the retry schedule.
-                // Passing it to `record_failure` like any timeout made
-                // `record_identity_mismatch` unreachable, so the
-                // quarantine existed only as a method nobody called.
-                if matches!(error, DialError::WrongPeerId { .. }) {
-                    let _ = manager.record_identity_mismatch(ticket, now_ms);
-                } else if is_permanent_dial_error(error) {
-                    // STRUCTURAL, not transient. The same address fails
-                    // the same way every time this process asks, so
-                    // treating it as an ordinary network failure --
-                    // punitive backoff, a rescheduled retry -- retries a
-                    // thing retrying cannot fix. The paused-time
-                    // scheduler test caught this: a UDP address on a
-                    // TCP-only Swarm was retried forever.
-                    manager.record_permanent_failure(ticket, now_ms);
-                } else {
-                    // ADDRESS-SCOPED, not peer-scoped. ADR-0011: a
-                    // failure against one address must not advance a
-                    // trusted peer into punitive backoff while a
-                    // known-good route remains, and `record_failure` is
-                    // the path that keeps that distinction.
-                    manager.record_failure(ticket, now_ms);
-                }
+            if let Some(ticket) = in_flight.settle(*connection_id) {
+                settle_failed_dial(manager, ticket, error, now_ms);
             }
         }
         // ADVISORY, and bounded. These are addresses the peer asserted
@@ -476,7 +537,10 @@ pub(super) type ActiveListeners = HashMap<ListenerId, Vec<Multiaddr>>;
 
 #[cfg(test)]
 mod tests {
-    use super::{connections_to_close, is_permanent_dial_error, settle_undialable};
+    use super::{
+        connections_to_close, is_permanent_dial_error, settle_established_outbound,
+        settle_failed_dial, settle_undialable,
+    };
     use crate::gated_swarm::AdmittedDial;
     use interweave_transport_api::TransportIdentity;
     use interweave_transport_runtime::{
@@ -746,5 +810,138 @@ mod tests {
     #[test]
     fn a_timeout_is_not_permanent() {
         assert!(!is_permanent_dial_error(&DialError::Aborted));
+    }
+
+    /// A manager whose ceilings admit — `ConnectionPolicy::default()`
+    /// reserves nothing, which is right for the trust tests above and
+    /// wrong for tests that need a ticket.
+    fn admitting_manager() -> ConnectionManager {
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        m.set_trust(trust(&[RELAY], &[]), &[]);
+        m
+    }
+
+    /// A placeholder ticket the way the outbound gate mints one.
+    fn placeholder_ticket(m: &ConnectionManager) -> DialTicket {
+        m.handle()
+            .admit(
+                &DialRequest {
+                    peer: Some(ident(RELAY)),
+                    address: String::new(),
+                    origin: DialOrigin::KademliaQuery,
+                },
+                0,
+            )
+            .expect("a trusted peer is admitted on the placeholder")
+    }
+
+    #[test]
+    fn a_multi_address_failure_settles_every_address() {
+        // F15's whole point: `DialError::Transport` carries one entry
+        // per exhausted address, and recording only the first leaves
+        // the rest unscored and immediately retryable.
+        let mut m = admitting_manager();
+        let peer = ident(RELAY);
+        let ticket = placeholder_ticket(&m);
+        let a1: Multiaddr = "/ip4/192.0.2.1/tcp/1".parse().expect("valid");
+        let a2: Multiaddr = "/ip4/192.0.2.2/tcp/2".parse().expect("valid");
+        let error = DialError::Transport(vec![
+            (
+                a1,
+                TransportError::Other(std::io::Error::from(std::io::ErrorKind::ConnectionRefused)),
+            ),
+            (
+                a2,
+                TransportError::Other(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+            ),
+        ]);
+        settle_failed_dial(&mut m, ticket, &error, 0);
+        assert_eq!(
+            m.known_addresses(&peer),
+            2,
+            "BOTH exhausted addresses were scored and learned, not only              the one the ticket settled"
+        );
+        assert_eq!(
+            m.handle().load().pending_dials(),
+            0,
+            "and the one reservation is settled"
+        );
+    }
+
+    #[test]
+    fn a_wrong_peer_answer_quarantines_the_address_it_used() {
+        let mut m = admitting_manager();
+        let peer = ident(RELAY);
+        let ticket = placeholder_ticket(&m);
+        let used: Multiaddr = format!("/ip4/192.0.2.1/tcp/1/p2p/{RELAY}")
+            .parse()
+            .expect("valid");
+        let error = DialError::WrongPeerId {
+            obtained: libp2p::PeerId::random(),
+            address: used,
+        };
+        settle_failed_dial(&mut m, ticket, &error, 0);
+        assert!(
+            !m.handle()
+                .load()
+                .address_dialable(&peer, "/ip4/192.0.2.1/tcp/1", 0),
+            "the quarantine binds to the REAL address, stripped of its              suffix — settled on the placeholder it would bind to nothing"
+        );
+        assert!(
+            m.handle()
+                .load()
+                .address_dialable(&peer, "/ip4/192.0.2.9/tcp/1", 0),
+            "and to nothing else"
+        );
+    }
+
+    #[test]
+    fn a_placeholder_with_no_address_information_settles_clean() {
+        let mut m = admitting_manager();
+        let peer = ident(RELAY);
+        let ticket = placeholder_ticket(&m);
+        settle_failed_dial(&mut m, ticket, &DialError::Aborted, 0);
+        assert_eq!(m.known_addresses(&peer), 0, "no address exists to learn");
+        assert_eq!(m.scheduled_retries(), 0, "or to retry");
+        assert_eq!(m.handle().load().pending_dials(), 0, "the slot is settled");
+    }
+
+    #[test]
+    fn a_revoked_kademlia_dial_is_refused_at_establishment() {
+        // The plan's genericity proof: revoked-mid-dial reclassification
+        // covers the KademliaQuery origin with ZERO new code, because
+        // `authorizes_for` takes the ticket's own origin. This test adds
+        // the origin the settlement path had never seen and watches the
+        // same line refuse it.
+        let mut m = admitting_manager();
+        let peer = ident(RELAY);
+        let mut ticket = placeholder_ticket(&m);
+        assert!(ticket.rebind_address("/ip4/192.0.2.1/tcp/1"));
+        // Trust revoked between admission and the completed handshake.
+        let _ = m.set_trust(trust(&[], &[]), std::slice::from_ref(&peer));
+        assert!(
+            settle_established_outbound(&mut m, &peer, ticket, 5).is_none(),
+            "authority that no longer exists retains nothing"
+        );
+        assert_eq!(
+            m.scheduled_retries(),
+            0,
+            "withdrawn is not a network failure; nothing is rescheduled"
+        );
+
+        // The control: with trust intact the same shape is kept, and
+        // the rebound address enters the book.
+        let mut m = admitting_manager();
+        let mut ticket = placeholder_ticket(&m);
+        assert!(ticket.rebind_address("/ip4/192.0.2.1/tcp/1"));
+        let (slot, origin) =
+            settle_established_outbound(&mut m, &peer, ticket, 5).expect("trusted and kept");
+        assert_eq!(origin, DialOrigin::KademliaQuery);
+        assert_eq!(
+            m.known_addresses(&peer),
+            1,
+            "the address that worked is in the book (F12's whole point)"
+        );
+        drop(slot);
     }
 }

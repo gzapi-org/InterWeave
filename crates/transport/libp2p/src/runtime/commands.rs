@@ -19,10 +19,11 @@ use libp2p::swarm::SwarmEvent as Libp2pSwarmEvent;
 use interweave_transport_api::TransportError as DirectError;
 use interweave_transport_api::TransportIdentity;
 use interweave_transport_runtime::endpoint_registry::LocalSessionId;
-use interweave_transport_runtime::{ConnectionClass, ConnectionManager, DialOrigin, DialTicket};
+use interweave_transport_runtime::{ConnectionClass, ConnectionManager, DialOrigin};
 
 use crate::behaviour::SubstrateBehaviourEvent;
 use crate::gated_swarm::{GatedSwarm, NotConnected, mesh_admits};
+use crate::outbound_gate::InFlightTickets;
 
 use super::dialing::{
     ActiveListeners, OpenConnection, PendingListens, attempt_dial, connections_to_close,
@@ -49,7 +50,7 @@ pub(super) fn handle_command(
     direct_state: &mut DirectState,
     directory_state: &mut super::endpoints::DirectoryState,
     broadcast_state: &mut super::broadcast::BroadcastState,
-    in_flight: &mut HashMap<libp2p::swarm::ConnectionId, DialTicket>,
+    in_flight: &InFlightTickets,
     max_pending_listens: usize,
     max_active_listeners: usize,
     effective_payload: usize,
