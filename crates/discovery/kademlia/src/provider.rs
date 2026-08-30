@@ -387,7 +387,23 @@ impl KademliaDiscovery {
         self.clock = self.clock.max(now_ms);
         match event {
             KademliaEvent::QueryResults { candidates, class } => {
-                self.settle(class, now_ms, true);
+                // §9.3 counts a NEW USABLE ADDRESS for a routed peer as
+                // progress, not only an admission. Judged BEFORE the
+                // candidates are tracked, against what was known when
+                // the round ran — tracking first would erase the very
+                // difference being measured.
+                let address_progress = candidates.as_slice().iter().any(|c| {
+                    self.routing.contains(&c.peer_id)
+                        && normalize::normalized_addresses(c, &self.local).is_some_and(
+                            |addresses| {
+                                let known = self.tracked.get(&c.peer_id);
+                                addresses
+                                    .iter()
+                                    .any(|a| known.is_none_or(|t| !t.addresses.contains(a)))
+                            },
+                        )
+                });
+                self.settle(class, now_ms, true, address_progress);
                 self.recent_queries_succeeded = true;
                 for candidate in candidates.as_slice() {
                     self.track(candidate, now_ms);
@@ -416,7 +432,7 @@ impl KademliaDiscovery {
                 }
             }
             KademliaEvent::QueryFailed { reason, class } => {
-                self.settle(class, now_ms, false);
+                self.settle(class, now_ms, false, false);
                 match reason {
                     QueryFailure::TimedOut | QueryFailure::NoRoutingPeers => {
                         self.recent_queries_succeeded = false;
@@ -431,7 +447,7 @@ impl KademliaDiscovery {
     }
 
     /// Settle the budget slot and pacing for one completed query.
-    fn settle(&mut self, class: QueryClass, now_ms: u64, succeeded: bool) {
+    fn settle(&mut self, class: QueryClass, now_ms: u64, succeeded: bool, address_progress: bool) {
         let was_commanded = self.budgets.finish_oldest(class);
         if class == QueryClass::Bootstrap
             && !was_commanded
@@ -444,10 +460,15 @@ impl KademliaDiscovery {
         if class == QueryClass::Exploration
             && let Some(snapshot) = self.exploration_snapshot.take()
         {
-            // §9.3: only a SUCCESSFUL round that admitted nothing counts
-            // toward saturation; a failed round proves nothing about the
-            // network being exhausted.
-            if succeeded && self.admissions == snapshot {
+            // §9.3: only a SUCCESSFUL round that admitted nothing AND
+            // surfaced no new address counts toward saturation; a failed
+            // round proves nothing about the network being exhausted.
+            if address_progress {
+                // A new usable address for a routed peer is progress:
+                // the backed-off pace no longer describes the situation.
+                self.no_progress_rounds = 0;
+                self.pacing.reset_exploration();
+            } else if succeeded && self.admissions == snapshot {
                 self.no_progress_rounds = self.no_progress_rounds.saturating_add(1);
             }
             // Schedule the next round from the count as it now stands,
@@ -2055,6 +2076,48 @@ mod tests {
             p.request_targeted_lookup(&target, 1_000 + TTL_MS + 1, false),
             Err(TargetedRefusal::StaleServerEvidence),
             "the record's long life does not keep an old observation eligible"
+        );
+    }
+
+    #[test]
+    fn a_new_address_for_a_routed_peer_is_exploration_progress() {
+        let mut p = started(KademliaMode::Client);
+        let router = synthetic_peer(1);
+        trust(&mut p, &[&router, &synthetic_peer(2), &synthetic_peer(3)]);
+        routed(&mut p, &router, 1_000);
+
+        assert!(p.tick(10_000, [0_u8; 32]));
+        p.ingest_driver_event(results(&[(router.clone(), "/ip4/192.0.2.1/tcp/1")]), 10_000);
+        assert_eq!(
+            p.no_progress_rounds, 0,
+            "a first address for a routed peer is progress"
+        );
+
+        assert!(p.tick(200_000, [0_u8; 32]));
+        p.ingest_driver_event(
+            results(&[(router.clone(), "/ip4/192.0.2.1/tcp/1")]),
+            200_000,
+        );
+        assert_eq!(p.no_progress_rounds, 1, "the same address again is not");
+
+        assert!(p.tick(400_000, [0_u8; 32]));
+        p.ingest_driver_event(
+            results(&[(synthetic_peer(9), "/ip4/192.0.2.5/tcp/5")]),
+            400_000,
+        );
+        assert_eq!(
+            p.no_progress_rounds, 2,
+            "a stranger's address is a candidate, not routed-peer progress"
+        );
+
+        assert!(p.tick(700_000, [0_u8; 32]));
+        p.ingest_driver_event(
+            results(&[(router.clone(), "/ip4/192.0.2.9/tcp/9")]),
+            700_000,
+        );
+        assert_eq!(
+            p.no_progress_rounds, 0,
+            "a NEW usable address for a routed peer is §9.3 progress"
         );
     }
 }
