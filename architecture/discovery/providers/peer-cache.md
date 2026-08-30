@@ -30,6 +30,8 @@ The record stores at most a small bounded number of capability observations (ini
 
 For Kademlia, this observation solves a cold-start scheduling problem: a prior authenticated Identify exchange can establish that a trusted PeerId advertised the exact project Kademlia server protocol. After restart, a targeted lookup may use that **fresh advisory observation** even when the peer's cached addresses are now stale/unusable. The cache entry does not prove the peer is currently online or still server-mode.
 
+On the candidate/hint path the observation is one `protocol_id` string: a fresh `interweave/kad` + `server` capability exports as `/interweave/kad/<wire_major>.0.0/<network_hash>`, and an `ObservedProtocol` hint matching that exact grammar is parsed back into the stored four-field form (`kademlia-integration.md` §7). Other families and roles have no wire form and are neither exported nor accepted as hints.
+
 A fresh authenticated Identify exchange supersedes the cached observation. If the peer no longer advertises the exact Kademlia server protocol/network namespace, the corresponding positive capability observation is replaced/removed (and an optional bounded negative observation may be recorded to suppress pointless targeting until expiry).
 
 ## Defaults

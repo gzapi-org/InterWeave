@@ -245,6 +245,14 @@ Rules:
 
 This capability field belongs to `PeerCacheDiscovery` because it is historical transport observation, not Kademlia authoritative state.
 
+**The wire mapping (decided 2026-08-30; the Stage 10 prerequisite).** A `CandidatePeer.protocol_observations` entry carries one `protocol_id` string, and the four-field observation above is encoded AS the derived server protocol name:
+
+```text
+protocol_id = /interweave/kad/<wire_major>.0.0/<network_hash>
+```
+
+`role = server` is implied by presence — only a server advertises this protocol, and rust-libp2p never returns a client-mode peer from a walk (SPIKE-003 F17) — and `<wire_major>.0.0` is the explicit generalisation of ADR-0047's `1.0.0`: the minor and patch of a derived protocol name are always zero, because compatibility is decided on the wire major alone. The reverse direction parses the exact grammar (family, `<digits>.0.0`, then a 26-character lowercase base32 hash); it is never a prefix match, so evidence for another network or another major cannot carry over. Families and roles other than `interweave/kad` + `server` have no wire form and are not exported.
+
 ## 8. Seeding
 
 Eligible hints can enter Kademlia from:
@@ -411,7 +419,7 @@ These are **implementation defaults, not protocol guarantees**. They remain boun
 
 | Setting | Initial default | Rationale |
 |---|---:|---|
-| `enabled` | `false` | opt-in rollout |
+| `enabled` | `true` for a configured entry | ADR-0034: the standard build defaults a configured `type: kademlia` entry on; opting out stays explicit (`enabled: false`), and an absent entry configures nothing |
 | `mode` | `client` | no accidental DHT server |
 | `routing_peer_policy` | `data-plane-trusted` | preserve established trust boundary |
 | `kbucket_size` | `20` | initial K value/profile bound |

@@ -556,37 +556,42 @@ impl PeerCache {
                     source: SOURCE.to_owned(),
                     observed_at: r.last_success_ms,
                     expires_at: Some(r.expires_at_ms(self.limits.ttl_ms())),
-                    // EMPTY, AND THIS IS A KNOWN GAP -- not "this peer
-                    // has no observations".
+                    // THE STAGE 10 MAPPING, decided 2026-08-30 in the
+                    // architecture first (`kademlia-integration.md` §7)
+                    // and only then implemented here: a fresh
+                    // `interweave/kad` SERVER capability exports as the
+                    // exact protocol string a server advertises,
+                    // `/interweave/kad/<wire_major>.0.0/<network_hash>`
+                    // — role carried by presence, the other three
+                    // fields by the string itself. Other families and
+                    // roles have no wire form yet and stay unexported
+                    // rather than being guessed at.
                     //
-                    // `providers/peer-cache.md` says the Kademlia
-                    // provider may read fresh capability observations
-                    // "through normal candidate/hint data", which is
-                    // this field. Nothing reads it yet: Kademlia is
-                    // Stage 10 and the discovery manager is later, so
-                    // the gap is not live.
-                    //
-                    // It is left empty rather than filled because the
-                    // mapping is NOT specified and guessing it here
-                    // would freeze a wire-adjacent decision in the
-                    // wrong place. A stored observation is
-                    // `(protocol_family, wire_major, network_hash,
-                    // role)`; a `ProtocolObservation` carries a single
-                    // `protocol_id`. ADR-0047 gives the canonical form
-                    // `/interweave/kad/1.0.0/<network-hash>`, so three
-                    // of those four fields have an evident home and
-                    // `role` has none -- and "wire_major 1 means 1.0.0"
-                    // is an inference, not something any document
-                    // states. Dropping `role` silently would be the
-                    // same class of loss as dropping the whole set.
-                    //
-                    // Whoever opens Stage 10 decides the mapping in the
-                    // architecture first, then fills this in. That is
-                    // named as a prerequisite in the Stage 10 section of
-                    // the bottom-up implementation plan, so it is a step
-                    // that stage has to walk past rather than a note only
-                    // a reader of this file would ever see.
-                    protocol_observations: Default::default(),
+                    // A NEGATIVE observation exports as
+                    // `supported: false`, never as absence: it is the
+                    // suppression signal that stops a targeted lookup
+                    // retrying a peer that stopped serving.
+                    protocol_observations: r
+                        .fresh_capabilities(now_ms, self.limits.ttl_ms())
+                        .iter()
+                        .filter(|c| {
+                            c.protocol_family == crate::record::KAD_PROTOCOL_FAMILY
+                                && c.role == crate::record::KAD_SERVER_ROLE
+                        })
+                        .filter_map(|c| {
+                            let id = crate::record::kad_server_protocol_id(
+                                c.wire_major,
+                                &c.network_hash,
+                            );
+                            Some(interweave_discovery_api::ProtocolObservation {
+                                protocol_id: interweave_discovery_api::ProtocolId::parse(id)
+                                    .ok()?,
+                                supported: c.supported,
+                                observed_at: c.observed_at_ms,
+                            })
+                        })
+                        .take(interweave_discovery_api::MAX_PROTOCOL_OBSERVATIONS)
+                        .collect(),
                 })
             })
             .collect()
@@ -882,5 +887,183 @@ mod publish_tests {
 
         assert!(!temp.exists(), "the temporary was renamed away");
         assert_eq!(fs::read(&final_path).expect("published"), b"the bytes");
+    }
+    #[test]
+    fn a_server_capability_exports_as_the_frozen_protocol_string() {
+        // Round-trip against the FROZEN fixture, not against this
+        // crate's own renderer — a mapping that only agrees with itself
+        // proves nothing. Every vector in the fixture carries the full
+        // protocol string precisely so an implementation can be checked
+        // here.
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../fixtures/kademlia/kad-network-namespace-v1.json"
+        ))
+        .expect("the frozen fixture parses");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cache =
+            PeerCache::load(&dir.path().join("peers.json"), CacheLimits::default()).expect("loads");
+        let peer = TransportIdentity::parse("12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN")
+            .expect("valid");
+        cache
+            .record_success(&peer, "/ip4/10.0.0.1/tcp/1", 1_000)
+            .expect("recorded");
+
+        for vector in fixture["vectors"].as_array().expect("vectors") {
+            let hash = vector["network_hash"].as_str().expect("hash");
+            let frozen = vector["protocol"].as_str().expect("protocol");
+            cache
+                .record_capability(
+                    &peer,
+                    crate::record::ProtocolCapabilityObservation {
+                        protocol_family: crate::record::KAD_PROTOCOL_FAMILY.to_owned(),
+                        wire_major: 1,
+                        network_hash: hash.to_owned(),
+                        role: crate::record::KAD_SERVER_ROLE.to_owned(),
+                        supported: true,
+                        observed_at_ms: 1_000,
+                    },
+                )
+                .expect("recorded");
+            let candidates = cache.candidates(2_000);
+            let exported = candidates
+                .iter()
+                .find(|c| c.peer_id == peer)
+                .expect("the peer is a candidate");
+            assert!(
+                exported
+                    .protocol_observations
+                    .iter()
+                    .any(|o| o.protocol_id.as_str() == frozen && o.supported),
+                "{hash}: expected the frozen string {frozen}, got {:?}",
+                exported
+                    .protocol_observations
+                    .iter()
+                    .map(|o| o.protocol_id.as_str())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn a_negative_capability_exports_as_supported_false_not_absence() {
+        // The suppression signal: a peer observed to have STOPPED
+        // serving must reach the consumer as `supported: false`, or a
+        // targeted lookup keeps retrying a peer the cache knows quit.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cache =
+            PeerCache::load(&dir.path().join("peers.json"), CacheLimits::default()).expect("loads");
+        let peer = TransportIdentity::parse("12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN")
+            .expect("valid");
+        cache
+            .record_success(&peer, "/ip4/10.0.0.1/tcp/1", 1_000)
+            .expect("recorded");
+        cache
+            .record_capability(
+                &peer,
+                crate::record::ProtocolCapabilityObservation {
+                    protocol_family: crate::record::KAD_PROTOCOL_FAMILY.to_owned(),
+                    wire_major: 1,
+                    network_hash: "ssbtblqj7mexczivog5qfbfjvi".to_owned(),
+                    role: crate::record::KAD_SERVER_ROLE.to_owned(),
+                    supported: false,
+                    observed_at_ms: 1_500,
+                },
+            )
+            .expect("recorded");
+        let candidates = cache.candidates(2_000);
+        let exported = candidates
+            .iter()
+            .find(|c| c.peer_id == peer)
+            .expect("candidate");
+        let observation = exported
+            .protocol_observations
+            .iter()
+            .next()
+            .expect("the negative observation is exported, not dropped");
+        assert!(!observation.supported);
+        assert_eq!(observation.observed_at, 1_500);
+    }
+
+    #[test]
+    fn only_kad_server_capabilities_have_a_wire_form() {
+        // Another family, or another role, has no protocol string yet:
+        // exporting a guessed one would freeze a wire-adjacent decision
+        // nobody made. They stay stored (supersession still works) and
+        // unexported.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cache =
+            PeerCache::load(&dir.path().join("peers.json"), CacheLimits::default()).expect("loads");
+        let peer = TransportIdentity::parse("12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN")
+            .expect("valid");
+        cache
+            .record_success(&peer, "/ip4/10.0.0.1/tcp/1", 1_000)
+            .expect("recorded");
+        for (family, role) in [
+            ("interweave/other", crate::record::KAD_SERVER_ROLE),
+            (crate::record::KAD_PROTOCOL_FAMILY, "client"),
+        ] {
+            cache
+                .record_capability(
+                    &peer,
+                    crate::record::ProtocolCapabilityObservation {
+                        protocol_family: family.to_owned(),
+                        wire_major: 1,
+                        network_hash: "ssbtblqj7mexczivog5qfbfjvi".to_owned(),
+                        role: role.to_owned(),
+                        supported: true,
+                        observed_at_ms: 1_000,
+                    },
+                )
+                .expect("stored");
+        }
+        let candidates = cache.candidates(2_000);
+        let exported = candidates
+            .iter()
+            .find(|c| c.peer_id == peer)
+            .expect("candidate");
+        assert!(
+            exported.protocol_observations.is_empty(),
+            "no wire form exists for these: {:?}",
+            exported.protocol_observations
+        );
+    }
+
+    #[test]
+    fn the_record_ttl_empties_the_capability_export_too() {
+        // Capability freshness never outlives the enclosing record: a
+        // capability observed yesterday on a record that expired this
+        // morning is evidence about a peer this cache stopped vouching
+        // for. Past the TTL the whole candidate disappears, capability
+        // included.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cache =
+            PeerCache::load(&dir.path().join("peers.json"), CacheLimits::default()).expect("loads");
+        let peer = TransportIdentity::parse("12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN")
+            .expect("valid");
+        cache
+            .record_success(&peer, "/ip4/10.0.0.1/tcp/1", 1_000)
+            .expect("recorded");
+        cache
+            .record_capability(
+                &peer,
+                crate::record::ProtocolCapabilityObservation {
+                    protocol_family: crate::record::KAD_PROTOCOL_FAMILY.to_owned(),
+                    wire_major: 1,
+                    network_hash: "ssbtblqj7mexczivog5qfbfjvi".to_owned(),
+                    role: crate::record::KAD_SERVER_ROLE.to_owned(),
+                    supported: true,
+                    observed_at_ms: 1_000,
+                },
+            )
+            .expect("recorded");
+        let ttl = CacheLimits::default().ttl_ms();
+        assert!(
+            !cache
+                .candidates(1_000 + ttl + 1)
+                .iter()
+                .any(|c| c.peer_id == peer),
+            "past the record TTL nothing is exported at all"
+        );
     }
 }
