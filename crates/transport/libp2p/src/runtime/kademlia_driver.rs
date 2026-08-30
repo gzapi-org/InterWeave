@@ -135,6 +135,12 @@ pub struct KademliaSettings {
     pub max_routing_peers: usize,
     /// Results accepted from one query.
     pub max_results_per_query: NonZeroUsize,
+    /// Concurrent query ceiling (§13's `max_concurrent_queries`),
+    /// enforced by the DRIVER as well as the provider's budgets: this
+    /// port is public, and a caller that bypassed the provider could
+    /// otherwise pump the bounded command channel into unbounded
+    /// long-lived queries.
+    pub max_concurrent_queries: NonZeroUsize,
 }
 
 impl KademliaSettings {
@@ -205,6 +211,7 @@ pub(super) struct KademliaState {
     protocol: String,
     max_routing_peers: usize,
     max_results_per_query: usize,
+    max_concurrent_queries: usize,
     /// Peers this driver has admitted to the routing table.
     routed: BTreeSet<PeerId>,
     /// Commanded queries in flight, by the class each was issued for.
@@ -230,6 +237,7 @@ impl KademliaState {
             protocol: kad_protocol(&settings.network_id),
             max_routing_peers: settings.max_routing_peers,
             max_results_per_query: settings.max_results_per_query.get(),
+            max_concurrent_queries: settings.max_concurrent_queries.get(),
             routed: BTreeSet::new(),
             queries: HashMap::new(),
             results: HashMap::new(),
@@ -306,6 +314,19 @@ pub(super) fn handle_command(
                 out.push(KademliaEvent::QueryFailed {
                     class,
                     reason: QueryFailure::ShuttingDown,
+                });
+                return out;
+            }
+            // THE DRIVER'S OWN CEILING. The provider budgets its
+            // commands, but the port is public: a caller pumping the
+            // command channel faster than queries time out would grow
+            // `queries`, `results` and the network work without bound.
+            // Refused, and SETTLED as refused — a silent drop would
+            // leave the caller's accounting waiting forever.
+            if state.queries.len() >= state.max_concurrent_queries {
+                out.push(KademliaEvent::QueryFailed {
+                    class,
+                    reason: QueryFailure::BudgetExhausted,
                 });
                 return out;
             }
@@ -810,6 +831,7 @@ mod tests {
             disjoint_query_paths: true,
             max_routing_peers: 256,
             max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
         };
         good.validate().expect("the canonical defaults validate");
         let bad_id = KademliaSettings {
@@ -843,6 +865,7 @@ mod tests {
             disjoint_query_paths: true,
             max_routing_peers: 256,
             max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
         };
         let mut state = KademliaState::new(&settings);
         let manager = interweave_transport_runtime::ConnectionManager::new(
@@ -891,6 +914,7 @@ mod tests {
             disjoint_query_paths: true,
             max_routing_peers: 1,
             max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
         };
         let mut state = KademliaState::new(&settings);
         let local = PeerId::random();
@@ -986,5 +1010,59 @@ mod tests {
         assert!(got.contains("/ip4/192.0.2.1/tcp/1"));
         assert!(got.contains("/ip4/192.0.2.9/tcp/9"));
         assert_eq!(got.len(), 2, "the misattributed route is dropped");
+    }
+
+    #[test]
+    fn the_driver_caps_concurrent_queries_and_settles_the_refusal() {
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 256,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let mut state = KademliaState::new(&settings);
+        let mut behaviour = build_behaviour(&settings, PeerId::random()).expect("buildable");
+        let manager = interweave_transport_runtime::ConnectionManager::new(
+            interweave_transport_runtime::ConnectionPolicy::default(),
+            8,
+        );
+        for i in 0..2_u8 {
+            let out = handle_command(
+                &mut state,
+                &mut behaviour,
+                &manager,
+                KademliaCommand::StartQuery {
+                    class: QueryClass::Exploration,
+                    key: [i; 32],
+                },
+                0,
+            );
+            assert!(out.is_empty(), "within the ceiling a query just runs");
+        }
+        let refused = handle_command(
+            &mut state,
+            &mut behaviour,
+            &manager,
+            KademliaCommand::StartQuery {
+                class: QueryClass::Exploration,
+                key: [9; 32],
+            },
+            0,
+        );
+        assert_eq!(
+            refused,
+            vec![KademliaEvent::QueryFailed {
+                class: QueryClass::Exploration,
+                reason: QueryFailure::BudgetExhausted,
+            }],
+            "the third is refused AND settled — a silent drop would leave \
+             the caller's accounting waiting forever"
+        );
+        assert_eq!(state.queries.len(), 2, "nothing past the ceiling exists");
     }
 }

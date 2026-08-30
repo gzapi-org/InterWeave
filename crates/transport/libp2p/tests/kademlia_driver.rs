@@ -43,6 +43,7 @@ fn kad_settings(network_id: &str, mode: KademliaMode) -> KademliaSettings {
         disjoint_query_paths: true,
         max_routing_peers: 256,
         max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+        max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
     }
 }
 
