@@ -968,14 +968,28 @@ its source.
 
 - **Every provider passes the shared suite, and the suite catches a
   provider that does not.** All fourteen `DISCOVERY-CONFORMANCE.md` tests
-  are written once over `&mut dyn DiscoveryProvider` and applied to all
-  three — `every_provider_passes_the_shared_suite`. That alone would be
-  worth little: a generic suite passes for a stub. So the crate also
-  carries a `MisbehavingProvider` that emits before start, ignores the
-  batch bound and keeps emitting after shutdown, and asserts the suite
-  CATCHES each — `the_suite_catches_a_provider_that_emits_before_start`,
+  are written once over a `Subject` trait and applied to all three —
+  `every_provider_passes_the_shared_suite`. That alone would be worth
+  little: a generic suite passes for a stub. So the crate also carries a
+  `MisbehavingProvider` that emits before start, ignores the batch bound
+  and keeps emitting after shutdown, and asserts the suite CATCHES each —
+  `the_suite_catches_a_provider_that_emits_before_start`,
   `…that_ignores_the_batch_bound`, `…that_emits_after_shutdown`. The
   suite's own mutation check is part of the suite.
+- **The suite requires an emission rather than validating one if it
+  happens.** This is a correction, and it is recorded because the earlier
+  version of this block cited the suite as evidence it could not carry.
+  Each subject owned a `Box<dyn DiscoveryProvider>` and a function
+  pointer, and mDNS learns exclusively through `push_discovered` on its
+  concrete type — so its `observe` was a no-op, it emitted nothing, and
+  every assertion nested inside `for event in drain_events(..)` was
+  reached zero times. **An mDNS provider emitting no candidates at all
+  passed all fourteen checks**, while "normalized candidate output" is a
+  mandatory guarantee. Each subject is now a concrete type behind a
+  `Subject` trait with a working input adapter, and the candidate,
+  duplicate, update and expiry checks assert that the event they are
+  about actually occurred. Restoring the no-op adapter fails three of
+  them.
 - **Composition merges by PeerId and keeps provenance.**
   `the_three_providers_compose_into_one_candidate_set`;
   `a_candidate_survives_one_providers_retraction_when_another_still_vouches`
@@ -1001,8 +1015,10 @@ its source.
 
 Three limits, stated because the tests cannot reach past them.
 
-- **The mDNS multicast MECHANISM was not built, and `mdns` is not on the
-  libp2p feature list.** Enabling it pulls `libp2p-mdns 0.48`, which pins
+- **The mDNS multicast MECHANISM was not built, `mdns` is not on the
+  libp2p feature list, and `DISCOVERY-CONFORMANCE.md` was amended to
+  defer its multicast tests to Stage 11 rather than leave a normative
+  requirement quietly unmet.** Enabling it pulls `libp2p-mdns 0.48`, which pins
   `hickory-proto 0.25.x`, carrying RUSTSEC-2026-0118 and
   RUSTSEC-2026-0119 with no upgrade available inside that line —
   `check_dependencies.sh` fails, and §8 makes that a gate rather than a
