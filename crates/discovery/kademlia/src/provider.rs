@@ -822,7 +822,7 @@ impl DiscoveryProvider for KademliaDiscovery {
         out
     }
 
-    fn add_hint(&mut self, hint: PeerHint, _now_ms: u64) -> HintDisposition {
+    fn add_hint(&mut self, hint: PeerHint, now_ms: u64) -> HintDisposition {
         // The lifecycle order in `providers/kademlia.md` accepts hints
         // AFTER mode is set: outside the running window there is no
         // driver to offer anything to.
@@ -844,6 +844,13 @@ impl DiscoveryProvider for KademliaDiscovery {
                     // targetable here.
                     return HintDisposition::Unsupported;
                 }
+                // JUDGED AT DELIVERY TIME. A hint that claims the
+                // future would out-recency every real observation until
+                // that time arrives: a forged negative becomes a
+                // suppression lever, a forged positive stale optimism
+                // with an artificial life. The cache provider clamps the
+                // same way.
+                let observed_at = observed_at.min(now_ms);
                 self.record_evidence(
                     &peer_id,
                     Evidence {
@@ -904,18 +911,21 @@ impl DiscoveryProvider for KademliaDiscovery {
                 }
                 for observation in &candidate.protocol_observations {
                     if observation.protocol_id == self.expected_protocol {
+                        // Clamped at delivery like the bare hint above,
+                        // and the expiry is the EARLIER of the record's
+                        // word and the observation's own age: a
+                        // long-lived record must not keep an old
+                        // observation eligible — the same class as the
+                        // cache export's own-age bound.
+                        let observed_at = observation.observed_at.min(now_ms);
                         self.record_evidence(
                             &candidate.peer_id,
                             Evidence {
                                 supported: observation.supported,
-                                observed_at: observation.observed_at,
-                                // §7: the evidence expires with the record
-                                // that carried it, when the record says.
-                                expires_at: candidate.expires_at.unwrap_or_else(|| {
-                                    observation
-                                        .observed_at
-                                        .saturating_add(self.config.candidate_ttl_ms)
-                                }),
+                                observed_at,
+                                expires_at: observed_at
+                                    .saturating_add(self.config.candidate_ttl_ms)
+                                    .min(candidate.expires_at.unwrap_or(u64::MAX)),
                             },
                         );
                     }
@@ -1977,6 +1987,74 @@ mod tests {
             ProviderHealth::Degraded,
             "a trust revision means the set explored is not the set any \
              more; saturation is invalidated (§9.3)"
+        );
+    }
+
+    #[test]
+    fn evidence_is_judged_at_delivery_time_not_at_its_claimed_instant() {
+        let mut p = started(KademliaMode::Client);
+        let target = synthetic_peer(7);
+        trust(&mut p, &[&target]);
+        // A future-dated POSITIVE arrives at t=1_000 claiming t=999_999.
+        let disposition = p.add_hint(
+            PeerHint::ObservedProtocol {
+                peer_id: target.clone(),
+                protocol_id: expected_id(&p),
+                supported: true,
+                observed_at: 999_999_999,
+            },
+            1_000,
+        );
+        assert_eq!(disposition, HintDisposition::Accepted);
+        // A real, honestly-dated negative afterwards must supersede it:
+        // unclamped, the forged timestamp out-recencies reality.
+        let real = p.add_hint(
+            PeerHint::ObservedProtocol {
+                peer_id: target.clone(),
+                protocol_id: expected_id(&p),
+                supported: false,
+                observed_at: 2_000,
+            },
+            2_000,
+        );
+        assert_eq!(real, HintDisposition::Accepted);
+        assert_eq!(
+            p.request_targeted_lookup(&target, 3_000, false),
+            Err(TargetedRefusal::NegativeServerEvidence),
+            "a forged future timestamp does not outvote a real observation"
+        );
+    }
+
+    #[test]
+    fn a_carried_observation_never_outlives_its_own_age() {
+        let mut p = started(KademliaMode::Client);
+        let target = synthetic_peer(7);
+        trust(&mut p, &[&target]);
+        let candidate = CandidatePeer {
+            peer_id: target.clone(),
+            addresses: BTreeSet::new(),
+            source: "peer-cache".to_owned(),
+            observed_at: 1_000,
+            // A record vouched-for far beyond the observation's age.
+            expires_at: Some(1_000 + 10 * TTL_MS),
+            protocol_observations: [interweave_discovery_api::ProtocolObservation {
+                protocol_id: expected_id(&p),
+                supported: true,
+                observed_at: 1_000,
+            }]
+            .into_iter()
+            .collect(),
+        };
+        assert_eq!(
+            p.add_hint(PeerHint::CandidateHint(Box::new(candidate)), 1_000),
+            HintDisposition::Accepted
+        );
+        p.request_targeted_lookup(&target, 1_000 + TTL_MS - 1, false)
+            .expect("inside its own age the evidence is eligible");
+        assert_eq!(
+            p.request_targeted_lookup(&target, 1_000 + TTL_MS + 1, false),
+            Err(TargetedRefusal::StaleServerEvidence),
+            "the record's long life does not keep an old observation eligible"
         );
     }
 }
