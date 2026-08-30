@@ -2907,7 +2907,12 @@ pub async fn k22_bounded_query_scheduler(r: &mut Report) {
     }
     pump(&mut nodes, Duration::from_secs(2)).await;
 
-    // Real `QueryId`s for the bookkeeping assertions, minted once.
+    // Real `QueryId`s for the bookkeeping assertions. These DO start
+    // real queries on this node — a `QueryId` cannot be obtained any
+    // other way — which is why the enforcement measurement below runs
+    // on a SEPARATE, untouched node. Counting invocations on a node
+    // that already holds twelve ungated queries would report two while
+    // fourteen had happened.
     let mut ids = Vec::new();
     for _ in 0..12 {
         if let Some(k) = nodes[0].kad() {
@@ -3007,6 +3012,26 @@ pub async fn k22_bounded_query_scheduler(r: &mut Report) {
     // called, so a scheduler consulted afterwards records a decision
     // already made and ten calls run ten queries whatever the budget
     // said.
+    // A FRESH PAIR. Nothing has ever started a query on this node, so
+    // the count below is the node's whole history rather than a delta
+    // against twelve queries the bookkeeping section already ran.
+    let mut fresh = vec![Node::start(&cfg).await, Node::start(&cfg).await];
+    let (fa, fb) = (fresh[0].peer_id, fresh[1].peer_id);
+    for i in 0..2 {
+        fresh[i].trust(fa);
+        fresh[i].trust(fb);
+    }
+    let fb_addr = fresh[1].dial_address();
+    fresh[0].dial_admitted(fb_addr.clone());
+    pump_until(&mut fresh, Duration::from_secs(10), |n| {
+        n[0].observed.connected.contains(&fb)
+    })
+    .await;
+    if let Some(k) = fresh[0].kad() {
+        k.add_address(&fb, fb_addr);
+    }
+    pump(&mut fresh, Duration::from_secs(2)).await;
+
     let mut live = QueryScheduler::new(MAX_CONCURRENT, MAX_PER_MINUTE);
     let mut issued = 0;
     let mut refused = 0;
@@ -3019,11 +3044,11 @@ pub async fn k22_bounded_query_scheduler(r: &mut Report) {
     for _ in 0..10 {
         match live.acquire(0) {
             Ok(permit) => {
-                let Some(k) = nodes[0].kad() else { break };
+                let Some(k) = fresh[0].kad() else { break };
                 invocations += 1;
                 let q = k.get_n_closest_peers(random_32(), NonZeroUsize::new(4).expect("nonzero"));
                 live.bind(permit, q);
-                nodes[0].own_queries.insert(q, QueryClass::Exploration);
+                fresh[0].own_queries.insert(q, QueryClass::Exploration);
                 issued += 1;
             }
             Err(_) => refused += 1,
@@ -3041,6 +3066,22 @@ pub async fn k22_bounded_query_scheduler(r: &mut Report) {
              {invocations} calls for {issued} permits"
         ),
         invocations == MAX_CONCURRENT,
+    );
+    // AND THE NODE AGREES. Its whole query history is what the driver
+    // started plus whatever the library began on its own, so the
+    // deliberate queries it reports must be exactly the permitted ones —
+    // the check the invocation counter alone cannot make, since a
+    // counter can be wrong in the same direction as the loop it counts.
+    pump(&mut fresh, Duration::from_secs(8)).await;
+    r.check(
+        "K22.14",
+        &format!(
+            "the node's own tally of deliberate queries matches: {} started, \
+             {} unattributed to the driver",
+            fresh[0].own_queries.len(),
+            fresh[0].observed.unattributed_queries.len()
+        ),
+        fresh[0].own_queries.len() == MAX_CONCURRENT,
     );
     r.note(
         "K22 LIMIT: the scheduler is project logic modelled here, not a \
@@ -3422,5 +3463,78 @@ pub async fn k25_every_candidate_fails(r: &mut Report) {
         ),
         candidates.iter().any(|x| x == &dead_a.to_string())
             && candidates.iter().any(|x| x == &dead_b.to_string()),
+    );
+    r.check(
+        "K25.3",
+        &format!(
+            "and nothing was silently dropped: {} unsettled",
+            nodes[0].ledger.unsettled_addresses()
+        ),
+        nodes[0].ledger.unsettled_addresses() == 0,
+    );
+
+    // THE SAME DIAL UNDER A TIGHT CEILING. Pre-minting one ticket per
+    // address is what decoupled settlement from peer backoff, and it
+    // bought a dependency on spare capacity: with one pending-dial slot
+    // the first ticket takes it and the rest are refused. That shortfall
+    // must be VISIBLE — a silent omission here is the same defect the
+    // pre-minting fixed, wearing the ceiling as a disguise.
+    let tight = NodeConfig {
+        max_pending_dials: 1,
+        max_connections: 1,
+        ..cfg.clone()
+    };
+    let mut t = vec![
+        Node::start(&tight).await,
+        Node::start(&cfg).await,
+        Node::start(&cfg).await,
+    ];
+    let (ta, tb, tc) = (t[0].peer_id, t[1].peer_id, t[2].peer_id);
+    for i in 0..3 {
+        for p in [ta, tb, tc] {
+            t[i].trust(p);
+        }
+    }
+    let (tb_addr, tc_addr) = (t[1].dial_address(), t[2].dial_address());
+    t[1].dial_admitted(tc_addr);
+    pump_until(&mut t, Duration::from_secs(10), |n| {
+        n[1].observed.connected.contains(&tc)
+    })
+    .await;
+    if let Some(k) = t[1].kad() {
+        k.add_address(&tc, dead_a.clone());
+        k.add_address(&tc, dead_b.clone());
+    }
+    t[0].dial_admitted(tb_addr.clone());
+    pump_until(&mut t, Duration::from_secs(10), |n| {
+        n[0].observed.connected.contains(&tb)
+    })
+    .await;
+    t[0].ledger.reset();
+    if let Some(k) = t[0].kad() {
+        k.add_address(&tb, tb_addr);
+        let id = k.get_closest_peers(tc);
+        t[0].own_queries.insert(id, QueryClass::Targeted);
+    }
+    pump(&mut t, Duration::from_secs(18)).await;
+
+    let tc_identity = TransportIdentity::parse(tc.to_base58()).expect("canonical");
+    let tight_candidates = t[0]
+        .manager
+        .lock()
+        .expect("manager")
+        .dial_candidates(&tc_identity, 60_000);
+    let shortfall = t[0].ledger.unsettled_addresses();
+    r.note(format!(
+        "K25 tight ceiling: candidates {tight_candidates:?}, unsettled {shortfall}"
+    ));
+    r.check(
+        "K25.4",
+        &format!(
+            "under a tight ceiling the shortfall is REPORTED rather than silent: \
+             {shortfall} unsettled, {} scored",
+            tight_candidates.len()
+        ),
+        shortfall > 0 || tight_candidates.len() >= 2,
     );
 }

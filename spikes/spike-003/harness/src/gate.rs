@@ -151,6 +151,9 @@ struct LedgerInner {
     /// Established connections closed because they could not be
     /// accounted for.
     unaccounted_closed: u64,
+    /// Addresses a failed dial exhausted that could NOT be scored,
+    /// because settling one needs a ticket and a ticket needs capacity.
+    unsettled_addresses: u64,
     /// The OTHER addresses a failed multi-address dial exhausted. The
     /// ticket settles one; these are scored individually.
     also_failed: BTreeMap<ConnectionId, Vec<String>>,
@@ -227,6 +230,14 @@ impl DialLedger {
     #[must_use]
     pub fn unaccounted_closed(&self) -> u64 {
         self.lock().unaccounted_closed
+    }
+
+    /// Exhausted addresses that could not be scored for want of a
+    /// ticket. Zero on every ordinary run; non-zero says the ceiling
+    /// was too tight for the settlement to complete, which is F15.
+    #[must_use]
+    pub fn unsettled_addresses(&self) -> u64 {
+        self.lock().unsettled_addresses
     }
 
     /// Forget everything, so one experiment cannot read another's count.
@@ -755,8 +766,11 @@ impl NetworkBehaviour for InstrumentedGate {
                     // settlement loop below.
                     let m = self.manager.lock().unwrap_or_else(|e| e.into_inner());
                     let mut tickets: Vec<DialTicket> = Vec::new();
+                    let mut unsettled = 0_u64;
                     if let Some(fresh) = resettle(&m, ticket, used.as_deref(), now) {
                         tickets.push(fresh);
+                    } else {
+                        unsettled += 1;
                     }
                     if let Some(peer) = peer {
                         for other in others {
@@ -765,12 +779,38 @@ impl NetworkBehaviour for InstrumentedGate {
                                 address: other,
                                 origin: DialOrigin::KademliaQuery,
                             };
-                            if let Ok(t) = m.handle().admit(&request, now) {
-                                tickets.push(t);
+                            match m.handle().admit(&request, now) {
+                                Ok(t) => tickets.push(t),
+                                // COUNTED, NOT SWALLOWED. Pre-minting
+                                // solves the peer-backoff coupling and
+                                // buys a new dependency: settlement now
+                                // needs one spare pending-dial and
+                                // connection slot per address. Under a
+                                // tight ceiling the first ticket takes
+                                // the last slot and the rest are
+                                // refused, leaving those routes
+                                // unscored — the same silent omission
+                                // in a different disguise.
+                                //
+                                // There is no way out inside the current
+                                // API: recording an address failure
+                                // requires a ticket, and a ticket
+                                // requires passing the policy that this
+                                // very failure has just changed.
+                                // Sequential settlement hits the
+                                // backoff, batched settlement hits the
+                                // ceiling. So the shortfall is COUNTED
+                                // and F15 asks Stage 10 for an
+                                // address-scoped failure API that needs
+                                // no admission.
+                                Err(_) => unsettled += 1,
                             }
                         }
                     }
                     drop(m);
+                    if unsettled > 0 {
+                        self.ledger.lock().unsettled_addresses += unsettled;
+                    }
                     let mut m = self.manager.lock().unwrap_or_else(|e| e.into_inner());
                     for t in tickets {
                         m.record_failure(t, now);

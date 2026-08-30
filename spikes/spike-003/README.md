@@ -54,7 +54,7 @@ It also handles the ticket the way the runtime must, which is finding **F8**: a 
 
 ## What was observed
 
-159 assertions across 25 experiments, consecutive clean runs. The harness exits non-zero when any required observation is false, so `cargo run` cannot report success while its own output disproves the record.
+162 assertions across 25 experiments, consecutive clean runs. The harness exits non-zero when any required observation is false, so `cargo run` cannot report success while its own output disproves the record.
 
 **Namespace (K1).** The published golden vector reproduces exactly: `network_id: example-private-network` → `ssbtblqj7mexczivog5qfbfjvi` → `/interweave/kad/1.0.0/ssbtblqj7mexczivog5qfbfjvi`. The derivation is implemented from the specification text rather than from a shared helper, so a derivation that merely agrees with itself could not pass. The 26-character unpadded base32 tag is a valid `libp2p::StreamProtocol`, and the `^[a-z0-9][a-z0-9._-]{0,63}$` grammar accepts and refuses what the spec says it should.
 
@@ -92,7 +92,7 @@ Each part fails to a different mutation and passes the others', which is the rea
 
 **The routing bound under pressure (K17.5/K17.6).** `max_routing_peers` is project logic applied before manual insertion, and `kbucket_size` does not stand in for it — a table can hold `kbucket_size` entries in each of many buckets and still exceed the total. It is only testable against a population *larger* than the bound and on a *fresh* node, since a bound stops a table growing and cannot shrink one already full. Two newcomers join the converged twenty-node network from the same seed: the bounded one stops at 5, its twin reaches 20.
 
-**A dial where every candidate fails (K25).** K18's topology keeps a good route to the target alive, which suppresses peer backoff — so its multi-address assertion never meets the ordinary case, where the first settlement advances peer backoff and every later `admit` is refused for it. With all candidates dead, a settlement loop that admits as it goes scores the first address and silently drops the rest. Every ticket is therefore minted *before* any is settled, and K25 names both dead addresses in the peer's candidates afterwards.
+**A dial where every candidate fails (K25).** K18's topology keeps a good route to the target alive, which suppresses peer backoff — so its multi-address assertion never meets the ordinary case, where the first settlement advances peer backoff and every later `admit` is refused for it. With all candidates dead, a settlement loop that admits as it goes scores the first address and silently drops the rest. Every ticket is therefore minted *before* any is settled, and K25 names both dead addresses in the peer's candidates afterwards. The same dial is then run under a ceiling of one, where pre-minting cannot get a ticket for the second address: one is scored, one is counted as unsettled, and the shortfall is reported rather than silent — F15.
 
 **Trust withdrawn mid-dial (K20).** The gate admits against the trust of the moment it is asked and settles later, so the settlement reclassifies rather than trusting the admission's answer. With trust intact a behaviour connection is retained; revocation genuinely changes what the settlement reads (`DataPlaneTrusted` → `Unauthorized`); and after revocation nothing is retained for that peer.
 
@@ -133,6 +133,8 @@ Each part fails to a different mutation and passes the others', which is the rea
 **F12 — a `DialTicket` binds its address at admission, which a behaviour dial cannot supply.** F9 says the address does not exist at the dial hook; the consequence is that the ticket carries an empty placeholder, and `record_success` / `record_failure` feed `ticket.address()` to the address policy and the address book. So **every Kademlia route settles against one empty entry**: the address that worked never becomes known-good, the address that failed is never scored, and the address book never learns either. The harness works around it by re-minting the settlement ticket against the address actually used — recovered from the established hook, or from `DialError::Transport` when the dial never established, which is the case the established hook cannot reach. That is a workaround, not a design: Stage 10 needs either a re-bindable ticket or a settlement API that takes the address.
 
 **F13 — the dial hook cannot attribute a dial to a query.** libp2p hands `handle_pending_outbound_connection` a connection id and a peer; for a behaviour dial there is no query id and no originating behaviour. Per-class dial volume therefore cannot be read off the dial and must come from the provider declaring what it is running — which is exact while one class is in flight and a set when several are. Stage 10 can narrow that by serialising classes or widening the driver port; it cannot recover it from libp2p.
+
+**F15 — an address failure cannot be recorded without passing the policy that failure just changed.** `record_failure` takes a `DialTicket`, and a ticket comes only from `admit`. Settling a fully-failed multi-address dial therefore has no correct ordering inside the current API: settle as you go and the first failure's peer backoff refuses the rest; mint every ticket first and settlement depends on one spare pending-dial and connection slot per address, which a tight ceiling does not have. The harness pre-mints, which is the better of the two, and **counts** what it could not settle. Stage 10 needs an address-scoped failure API that requires no admission.
 
 ## Stated limits
 
@@ -175,5 +177,7 @@ Three mutations confirm the assertions are load-bearing rather than agreeing wit
 - attributing every dial to `none` regardless of what is running fails K23.2;
 - invoking the behaviour before acquiring a permit fails K22.13 at ten calls for two permits;
 - settling only the first of a fully-failed dial's addresses fails K25.1 and K25.2.
+
+One measurement is reported rather than asserted, because both outcomes are legitimate: K25.4 accepts either a complete settlement or a counted shortfall, and refuses only the third case — addresses vanishing while the ledger reads zero.
 
 One mutation deliberately fails nothing: removing the settlement's reclassification. That is K20's stated limit, confirmed rather than papered over.
