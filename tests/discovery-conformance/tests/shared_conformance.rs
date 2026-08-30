@@ -287,36 +287,73 @@ fn provider_expires_when_semantics_support_ttl(s: &mut dyn Subject) {
     let source = s.provider().descriptor().name;
     let supports = s.provider().descriptor().supports_expiry;
     let observed = s.observe(&peer(P1), 1_000);
-    let _ = s.provider().drain_events(1_000, 32);
+    // WHAT WAS EMITTED IS RETAINED, because the retraction has to be
+    // checked against it. Asserting only that some expiry arrived, and
+    // only that its `source` was right, passed a provider that observed
+    // P1 and retracted P2 — which composed into `DiscoveryManager`
+    // leaves the observed candidate live and withdraws an unrelated one.
+    let emitted = candidates_in(s.provider().drain_events(1_000, 32));
 
     // Far in the future. A provider that models expiry must retract what
     // it emitted; one that does not must simply stay correct.
     let late = s.provider().drain_events(u64::from(u32::MAX), 32);
-    let expiries: Vec<_> = late
+    let expiries: Vec<(TransportIdentity, String, BTreeSet<String>)> = late
         .iter()
         .filter_map(|e| match e {
-            DiscoveryEvent::CandidateExpired { source, .. } => Some(source.clone()),
+            DiscoveryEvent::CandidateExpired {
+                peer_id,
+                source,
+                addresses,
+            } => Some((peer_id.clone(), source.clone(), addresses.clone())),
             _ => None,
         })
         .collect();
 
     if supports && observed {
-        // REQUIRED, not merely permitted. `supports_expiry: true` is a
-        // declaration the suite can hold the provider to, and the old
-        // check only validated an expiry that happened to arrive — so a
-        // provider declaring expiry and never expiring anything passed.
+        // REQUIRED, and required to be about the right peer.
         assert!(
             !expiries.is_empty(),
             "{name}: declares supports_expiry and retracted nothing at the \
              end of time"
         );
+        for candidate in &emitted {
+            let retraction = expiries
+                .iter()
+                .find(|(peer_id, _, _)| *peer_id == candidate.peer_id)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{name}: emitted a candidate for {} and never retracted \
+                         it; retractions were for {:?}",
+                        candidate.peer_id.as_str(),
+                        expiries
+                            .iter()
+                            .map(|(p, _, _)| p.as_str())
+                            .collect::<Vec<_>>()
+                    )
+                });
+            // AND THE ADDRESSES ARE ITS OWN. A retraction naming another
+            // candidate's addresses withdraws the wrong route.
+            let (_, _, addresses) = retraction;
+            assert!(
+                addresses.iter().all(|a| candidate.addresses.contains(a)),
+                "{name}: retracted addresses {addresses:?} that are not this \
+                 candidate's {:?}",
+                candidate.addresses
+            );
+        }
     }
-    for src in &expiries {
+    for (peer_id, src, _) in &expiries {
         assert!(
             supports,
             "{name}: a provider that declares no expiry emitted one"
         );
         assert_eq!(src, &source, "{name}");
+        // Never a retraction for something never observed.
+        assert!(
+            emitted.is_empty() || emitted.iter().any(|c| c.peer_id == *peer_id),
+            "{name}: retracted {} which it never emitted",
+            peer_id.as_str()
+        );
     }
 }
 
@@ -605,6 +642,10 @@ enum Violation {
     HealthyBeforeStart,
     /// A second start panics instead of returning an error.
     PanicsOnSecondStart,
+    /// Declares expiry, emits a candidate for one peer, and retracts a
+    /// DIFFERENT one — leaving what it observed live and withdrawing a
+    /// route it never announced.
+    ExpiresTheWrongPeer,
 }
 
 impl Misbehaving {
@@ -643,7 +684,7 @@ impl DiscoveryProvider for Misbehaving {
             config_version: None,
             scope: ProviderScope::Local,
             mode: ProviderMode::Passive,
-            supports_expiry: false,
+            supports_expiry: self.violation == Violation::ExpiresTheWrongPeer,
             supports_hints: false,
         }
     }
@@ -669,6 +710,20 @@ impl DiscoveryProvider for Misbehaving {
             Violation::EmitsAfterShutdown if self.started => vec![self.candidate(now_ms)],
             Violation::ForgesProvenance if self.started && !self.stopped => {
                 vec![self.candidate(now_ms)]
+            }
+            Violation::ExpiresTheWrongPeer if self.started && !self.stopped => {
+                // Early: the candidate. Late: a retraction naming the
+                // OTHER peer, which is the defect — the suite must not
+                // accept a retraction it cannot tie to what was emitted.
+                if now_ms < u64::from(u32::MAX) {
+                    vec![self.candidate(now_ms)]
+                } else {
+                    vec![DiscoveryEvent::CandidateExpired {
+                        peer_id: peer(P2),
+                        source: "misbehaving".to_owned(),
+                        addresses: BTreeSet::new(),
+                    }]
+                }
             }
             _ if !self.started || self.stopped => Vec::new(),
             _ => {
@@ -767,6 +822,21 @@ fn the_suite_catches_a_provider_that_emits_after_shutdown() {
         Violation::EmitsAfterShutdown,
         "provider_event_stream_closes_after_shutdown"
     ));
+}
+
+#[test]
+fn the_suite_catches_a_provider_that_expires_the_wrong_peer() {
+    // The expiry check used to reduce every retraction to its `source`,
+    // so a provider that observed P1 and retracted P2 satisfied it —
+    // and composed into `DiscoveryManager` that leaves the observed
+    // candidate live while withdrawing a route it never announced.
+    assert!(
+        suite_catches(
+            Violation::ExpiresTheWrongPeer,
+            "provider_expires_when_semantics_support_ttl"
+        ),
+        "a retraction must be tied to what the provider emitted"
+    );
 }
 
 #[test]
