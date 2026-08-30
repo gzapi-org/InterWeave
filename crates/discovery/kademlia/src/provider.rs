@@ -265,8 +265,14 @@ pub struct KademliaDiscovery {
     /// one, and a table that empties and refills before the first
     /// completes has two real queries running — an optional charge
     /// accounted for one and let the rest run outside both budgets.
-    /// Bounded by the pending-dial ceiling the charges occupy.
+    /// Bounded by [`MAX_IMPLICIT_CHARGES`].
     implicit_charges: Vec<Permit>,
+    /// Implicit queries running BEYOND the charge cap — a count, not
+    /// permits, so churn holds memory constant. Settled before any held
+    /// charge is: the budget must stay saturated until the overflow
+    /// work is also done, or eight completions would free every slot
+    /// while uncharged queries still run.
+    implicit_uncharged: usize,
     /// The local self-lookup key, if the local identity is Ed25519.
     local_key: Option<[u8; 32]>,
     /// The latest instant any timed call has seen; what `health()` —
@@ -356,6 +362,7 @@ impl KademliaDiscovery {
             admissions: 0,
             exploration_snapshot: None,
             implicit_charges: Vec::new(),
+            implicit_uncharged: 0,
             local_key,
             clock: 0,
             exploration_entropy: 0,
@@ -450,9 +457,16 @@ impl KademliaDiscovery {
                 // charged like the work it is, past the ceilings if it
                 // must be, and the slot is settled by the bootstrap-class
                 // completion the driver reports for it.
-                if self.routing.is_empty() && self.implicit_charges.len() < MAX_IMPLICIT_CHARGES {
-                    self.implicit_charges
-                        .push(self.budgets.charge_unscheduled(now_ms));
+                if self.routing.is_empty() {
+                    if self.implicit_charges.len() < MAX_IMPLICIT_CHARGES {
+                        self.implicit_charges
+                            .push(self.budgets.charge_unscheduled(now_ms));
+                    } else {
+                        // Past the cap the work is COUNTED even though
+                        // it cannot hold a permit: the held charges must
+                        // not be settled while this overflow still runs.
+                        self.implicit_uncharged = self.implicit_uncharged.saturating_add(1);
+                    }
                 }
                 self.routing.insert(peer);
                 self.admissions += 1;
@@ -485,13 +499,19 @@ impl KademliaDiscovery {
     /// Settle the budget slot and pacing for one completed query.
     fn settle(&mut self, class: QueryClass, now_ms: u64, succeeded: bool, address_progress: bool) {
         let was_commanded = self.budgets.finish_oldest(class);
-        if class == QueryClass::Bootstrap && !was_commanded && !self.implicit_charges.is_empty() {
-            // One implicit bootstrap finished: ITS slot comes back, its
-            // rate charge stays spent — the window really was used. One
-            // completion settles one charge; the others stay held for
-            // the queries still running.
-            let charge = self.implicit_charges.remove(0);
-            self.budgets.consume(charge);
+        if class == QueryClass::Bootstrap && !was_commanded {
+            // One implicit bootstrap finished. The UNCHARGED overflow
+            // settles first: a held charge released while uncharged
+            // queries still ran would open the ceiling under exactly the
+            // load it exists to reflect. Only when the overflow is gone
+            // does a completion return a slot — its rate charge stays
+            // spent, because the window really was used.
+            if self.implicit_uncharged > 0 {
+                self.implicit_uncharged -= 1;
+            } else if !self.implicit_charges.is_empty() {
+                let charge = self.implicit_charges.remove(0);
+                self.budgets.consume(charge);
+            }
         }
         if class == QueryClass::Exploration
             && let Some(snapshot) = self.exploration_snapshot.take()
@@ -1078,6 +1098,7 @@ impl DiscoveryProvider for KademliaDiscovery {
         for charge in self.implicit_charges.drain(..) {
             self.budgets.consume(charge);
         }
+        self.implicit_uncharged = 0;
     }
 }
 
@@ -2418,8 +2439,18 @@ mod tests {
             MAX_IMPLICIT_CHARGES,
             "churn cannot grow the held count without bound"
         );
-        for i in 0..MAX_IMPLICIT_CHARGES as u64 {
+        // Four completions settle the UNCHARGED overflow first: the
+        // held count must stay saturated while overflow queries run.
+        for i in 0..4_u64 {
             p.ingest_driver_event(done(QueryClass::Bootstrap), 1_000 + i);
+        }
+        assert_eq!(
+            p.budgets.held(),
+            MAX_IMPLICIT_CHARGES,
+            "a held charge is not released while uncharged work still runs"
+        );
+        for i in 0..MAX_IMPLICIT_CHARGES as u64 {
+            p.ingest_driver_event(done(QueryClass::Bootstrap), 2_000 + i);
         }
         assert_eq!(p.budgets.held(), 0, "completions still settle every charge");
     }
