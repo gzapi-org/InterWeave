@@ -25,7 +25,7 @@ use interweave_transport_runtime::{
 
 use crate::behaviour::SubstrateBehaviourEvent;
 use crate::gated_swarm::{AdmittedDial, GatedSwarm, UndialableAdmission};
-use crate::outbound_gate::{InFlightTickets, strip_peer_suffix};
+use crate::outbound_gate::{InFlightTickets, strip_own_suffix, strip_peer_suffix};
 
 use super::messages::DialRefusal;
 use super::to_transport_identity;
@@ -198,21 +198,39 @@ pub(super) fn settle_failed_dial(
     error: &DialError,
     now_ms: u64,
 ) {
+    let expected = ticket
+        .peer()
+        .and_then(|p| p.as_str().parse::<libp2p::PeerId>().ok());
+    let strip = |address: &Multiaddr| match &expected {
+        // The connection's peer is authenticated knowledge: only ITS
+        // claim strips, so a foreign claim stays in the settlement key
+        // and the policy records the literal that lied.
+        Some(peer) => strip_own_suffix(address, peer),
+        None => strip_peer_suffix(address),
+    };
     if ticket.address().is_empty() {
         match error {
             DialError::WrongPeerId { address, .. } => {
-                let stripped = strip_peer_suffix(address);
+                let stripped = strip(address);
                 let _ = ticket.rebind_address(&stripped);
             }
             DialError::Transport(attempts) if !attempts.is_empty() => {
-                let _ = ticket.rebind_address(&strip_peer_suffix(&attempts[0].0));
+                let _ = ticket.rebind_address(&strip(&attempts[0].0));
+                // EACH ATTEMPT SETTLES BY ITS OWN CLASS. The aggregate
+                // answer exists for the single-address dial; here every
+                // address carries its own error, and scoring a
+                // structural route as transient — the only option the
+                // old admission-free path had — kept it in the book and
+                // retryable forever, while a mixed batch's aggregate
+                // mis-labelled every member.
                 if let Some(peer) = ticket.peer().cloned() {
-                    for (address, _) in &attempts[1..] {
-                        manager.record_address_failure_unadmitted(
-                            &peer,
-                            &strip_peer_suffix(address),
-                            now_ms,
-                        );
+                    for (address, attempt_error) in &attempts[1..] {
+                        let stripped = strip(address);
+                        if attempt_is_structural(attempt_error) {
+                            manager.record_permanent_address_failure_unadmitted(&peer, &stripped);
+                        } else {
+                            manager.record_address_failure_unadmitted(&peer, &stripped, now_ms);
+                        }
                     }
                 }
             }
@@ -226,9 +244,21 @@ pub(super) fn settle_failed_dial(
     // schedule. Passing it to `record_failure` like any timeout made
     // `record_identity_mismatch` unreachable, so the quarantine existed
     // only as a method nobody called.
+    //
+    // THE TICKET'S OWN CLASS IS ITS OWN ATTEMPT'S. The ticket was
+    // re-bound to the FIRST attempted address above, so a multi-address
+    // error classifies it by that attempt's error rather than by the
+    // batch's aggregate — the aggregate said "transient" whenever the
+    // batch was mixed, which retried a structural route forever.
+    let ticket_is_permanent = match error {
+        DialError::Transport(attempts) if !attempts.is_empty() => {
+            attempt_is_structural(&attempts[0].1)
+        }
+        other => is_permanent_dial_error(other),
+    };
     if matches!(error, DialError::WrongPeerId { .. }) {
         let _ = manager.record_identity_mismatch(ticket, now_ms);
-    } else if is_permanent_dial_error(error) {
+    } else if ticket_is_permanent {
         // STRUCTURAL, not transient. The same address fails the same
         // way every time this process asks, so treating it as an
         // ordinary network failure -- punitive backoff, a rescheduled
@@ -243,6 +273,12 @@ pub(super) fn settle_failed_dial(
         // `record_failure` is the path that keeps that distinction.
         manager.record_failure(ticket, now_ms);
     }
+}
+
+/// Whether ONE transport attempt is structural: this process's own
+/// stack refusing the address's shape, which no retry changes.
+fn attempt_is_structural(error: &TransportError<std::io::Error>) -> bool {
+    matches!(error, TransportError::MultiaddrNotSupported(_))
 }
 
 /// Whether `error` describes THIS PROCESS's transport stack rather than
@@ -943,5 +979,59 @@ mod tests {
             "the address that worked is in the book (F12's whole point)"
         );
         drop(slot);
+    }
+
+    #[test]
+    fn an_all_unsupported_batch_forgets_every_route() {
+        let mut m = admitting_manager();
+        let peer = ident(RELAY);
+        let ticket = placeholder_ticket(&m);
+        // DISTINCT addresses, deliberately: with both attempts on one
+        // address, the ticket's permanent settlement erased the same
+        // route a wrongly-transient second scoring had just learned,
+        // and the mutation this test exists to kill passed.
+        let error = DialError::Transport(vec![
+            unsupported(),
+            (
+                "/ip4/192.0.2.7/tcp/7".parse().expect("valid"),
+                TransportError::MultiaddrNotSupported(
+                    "/ip4/192.0.2.7/tcp/7".parse().expect("valid"),
+                ),
+            ),
+        ]);
+        settle_failed_dial(&mut m, ticket, &error, 0);
+        assert_eq!(
+            m.known_addresses(&peer),
+            0,
+            "structural routes are forgotten, not learned as retryable"
+        );
+        assert_eq!(m.scheduled_retries(), 0);
+    }
+
+    #[test]
+    fn a_mixed_batch_settles_each_attempt_by_its_own_class() {
+        let mut m = admitting_manager();
+        let peer = ident(RELAY);
+        let ticket = placeholder_ticket(&m);
+        // First attempt structural, second a network refusal: the OLD
+        // aggregate said "not permanent" and learned both as retryable.
+        let error = DialError::Transport(vec![
+            unsupported(),
+            (
+                "/ip4/192.0.2.2/tcp/2".parse().expect("valid"),
+                TransportError::Other(std::io::Error::from(std::io::ErrorKind::ConnectionRefused)),
+            ),
+        ]);
+        settle_failed_dial(&mut m, ticket, &error, 0);
+        assert_eq!(
+            m.known_addresses(&peer),
+            1,
+            "only the transiently failed route is worth remembering"
+        );
+        assert!(
+            m.dial_candidates(&peer, 1)
+                .contains(&"/ip4/192.0.2.2/tcp/2".to_owned()),
+            "and it is the network-refused one, not the structural one"
+        );
     }
 }
