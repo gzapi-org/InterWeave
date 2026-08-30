@@ -107,18 +107,33 @@ Refusal::to_wire                                 call  refusal.to_wire(
 
 # --- stage-9 -----------------------------------------------------
 AggregatedCandidate::address_list                 stage-12  a consumer reads the ordered addresses at runtime composition
-ProtocolId::parse                                stage-9   the conformance suite drives ObservedProtocol hints through providers
-DiscoveryManager::new                            stage-9   the conformance suite composes the manager over real providers
-DiscoveryManager::register                       stage-9   the conformance suite composes the manager over real providers
-DiscoveryManager::on_event                       stage-9   the conformance suite composes the manager over real providers
-DiscoveryManager::sweep                          stage-9   the conformance suite composes the manager over real providers
-DiscoveryManager::candidates                     stage-9   the conformance suite composes the manager over real providers
-DiscoveryManager::candidate_count                stage-9   the conformance suite composes the manager over real providers
-DiscoveryManager::provider_count                 stage-9   the conformance suite composes the manager over real providers
-DiscoveryManager::provider_health                stage-9   the conformance suite composes the manager over real providers
-DiscoveryManager::provider_priority              stage-9   the conformance suite composes the manager over real providers
-DiscoveryManager::aggregate_health               stage-9   the conformance suite composes the manager over real providers
-DiscoveryManager::descriptor                     stage-9   the conformance suite composes the manager over real providers
+# RE-DATED AT THE STAGE 9 CLOSURE, and the old reason was wrong rather
+# than merely expired: every one of these said "the conformance suite
+# composes the manager", and a test is not a caller here — this check
+# strips `#[cfg(test)]` and excludes `tests/` wholesale, precisely
+# because `authorize_outbound` had unit tests and no production caller.
+# Stage 9 built the manager and proved it through the conformance suite,
+# which is what its exit gate asked for; it did not give it a production
+# holder, and the plan never said it would. §15 does: TransportRuntime
+# composition is where a DiscoveryManager is constructed and driven.
+DiscoveryManager::new                            stage-12  TransportRuntime composition constructs it (plan §15); nothing in production holds one before
+DiscoveryManager::register                       stage-12  composition registers the configured providers at startup
+DiscoveryManager::on_event                       stage-12  composition pumps provider events into it
+DiscoveryManager::sweep                          stage-12  composition drives expiry on the runtime clock
+DiscoveryManager::candidates                     stage-12  composition reads candidates to feed ConnectionManager::learn_address
+DiscoveryManager::candidate_count                stage-12  composition exposes it as runtime diagnostics
+DiscoveryManager::provider_count                 stage-12  composition exposes it as runtime diagnostics
+DiscoveryManager::provider_health                stage-12  composition answers per-provider health from it
+DiscoveryManager::provider_priority              stage-12  composition orders candidate application by it
+DiscoveryManager::aggregate_health               stage-12  composition answers discovery health from it
+DiscoveryManager::descriptor                     stage-12  composition names the source of each event it forwards
+# ONE STAGE, not one release. SPIKE-003 made the first production parse
+# concrete: a Kademlia capability observation is keyed to the exact
+# advertised protocol string, and the spike measured that string being
+# WITHDRAWN on a mode change (finding F5), so the Stage 10 driver
+# normalizes an Identify protocol into a `ProtocolId` before the cache
+# can supersede on it.
+ProtocolId::parse                                stage-10  the Kademlia driver parses an advertised protocol into a capability observation
 CandidateSet::new                                stage-12  the manager owns one; TransportRuntime composition is the first outside holder
 CandidateSet::candidates                         stage-12  reached through DiscoveryManager::candidates until composition
 CandidateSet::overflow_stats                     stage-12  reached through DiscoveryManager::overflow_stats until composition

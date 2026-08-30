@@ -142,10 +142,10 @@ Spikes are **just-in-time implementation gates**, not a large front-loaded phase
 
 | Spike | Run before | Decision/evidence that must be converted into permanent tests |
 |---|---|---|
-| SPIKE-002 | Stage 6 direct v2 | rust-libp2p request/response scheduling, concurrent same-key retries, negotiation/failure behavior |
-| SPIKE-003 | Stage 10 Kademlia | driver behavior, autonomous dials, client/server mode, private namespace, routing/query behavior |
+| SPIKE-002 | Stage 6 direct v2 | **CLOSED 2026-08-24, PASS** — rust-libp2p request/response scheduling, concurrent same-key retries, negotiation/failure behavior |
+| SPIKE-003 | Stage 10 Kademlia | **CLOSED 2026-08-30, PASS for the stage; v1 release gate still open** — driver behavior, autonomous dials, client/server mode, private namespace, routing/query behavior |
 | SPIKE-004 | Stage 11 mandatory connectivity | AutoNAT v2, Relay v2, DCUtR, infrastructure class, dial admission, deployment/NAT matrix |
-| SPIKE-006 | identity recovery implementation in Stage 3 | exact 32-byte Ed25519 secret import/export and same-PeerId restore |
+| SPIKE-006 | identity recovery implementation in Stage 3 | **CLOSED 2026-08-19, PASS** — exact 32-byte Ed25519 secret import/export and same-PeerId restore |
 | SPIKE-001 | Stage 16 Claude bridge | current Claude Code Channel/MCP packaging and runtime contract |
 | SPIKE-005 | admin hardening when enabled | stronger same-user local admin boundary |
 | SPIKE-007 | optional encrypted key-at-rest feature | selected audited envelope/KDF/AEAD behavior |
@@ -961,11 +961,143 @@ Static, cache and mDNS providers compose correctly and cannot bypass trust/Conne
 
 Flip to `active`: `contracts/schemas/discovery` (ADR-0049).
 
+**Met.** The three providers ship under `crates/discovery/{static,cache,mdns}`,
+the manager is `transport-runtime`'s pure `discovery` module, and every
+claim below is a named test under `tests/discovery-conformance` or beside
+its source.
+
+- **Every provider passes the shared suite, and the suite catches a
+  provider that does not.** All fourteen `DISCOVERY-CONFORMANCE.md` tests
+  are written once over a `Subject` trait and applied to all three —
+  `every_provider_passes_the_shared_suite`. That alone would be worth
+  little: a generic suite passes for a stub. So the crate also carries a
+  `MisbehavingProvider` that emits before start, ignores the batch bound
+  and keeps emitting after shutdown, and asserts the suite CATCHES each —
+  `the_suite_catches_a_provider_that_emits_before_start`,
+  `…that_ignores_the_batch_bound`, `…that_emits_after_shutdown`. The
+  suite's own mutation check is part of the suite.
+- **The suite requires an emission rather than validating one if it
+  happens.** This is a correction, and it is recorded because the earlier
+  version of this block cited the suite as evidence it could not carry.
+  Each subject owned a `Box<dyn DiscoveryProvider>` and a function
+  pointer, and mDNS learns exclusively through `push_discovered` on its
+  concrete type — so its `observe` was a no-op, it emitted nothing, and
+  every assertion nested inside `for event in drain_events(..)` was
+  reached zero times. **An mDNS provider emitting no candidates at all
+  passed all fourteen checks**, while "normalized candidate output" is a
+  mandatory guarantee. Each subject is now a concrete type behind a
+  `Subject` trait with a working input adapter — including
+  static-bootstrap, whose reload path through `set_entries` was equally
+  inert — and every check asserts that the event it is about actually
+  occurred **and was about the observation**. `observe` returns the
+  input tuple rather than a bare boolean, because knowing an observation
+  happened proved only that an emission was required, not that it
+  concerned the thing observed: a provider could turn an observation of
+  P1 at one address into a valid, correctly-attributed candidate for P2
+  at another and pass the entire suite.
+  `the_suite_catches_a_provider_that_fabricates_an_unrelated_candidate`
+  and `…that_expires_the_wrong_peer` make both permanent, and restoring
+  the no-op adapter still fails three checks.
+- **Composition merges by PeerId and keeps provenance.**
+  `the_three_providers_compose_into_one_candidate_set`;
+  `a_candidate_survives_one_providers_retraction_when_another_still_vouches`
+  is the address-lifetime rule — an address dies when no live source
+  supports it, not when one withdraws;
+  `a_long_running_node_keeps_its_configured_and_announcing_candidates`
+  covers the configured-entry retention;
+  `one_provider_cannot_speak_for_another` is the provenance refusal.
+- **Health aggregates as DISCOVERY.md L105-109 specifies.**
+  `starting_a_provider_makes_discovery_healthy_at_the_manager`,
+  `a_quarantined_cache_reports_degraded_at_start`, and
+  `aggregate_health_survives_one_degraded_provider` — one degraded
+  provider does not make the node look broken.
+- **The exit gate, over real sockets.**
+  `a_discovered_candidate_cannot_bypass_trust_or_the_connection_manager`
+  starts two real `SwarmRuntime`s on loopback, has
+  `StaticBootstrapDiscovery` produce a perfectly good candidate for a
+  reachable listener, and asserts the untrusting node neither remembers
+  the address (`add_address` returns false: `learn_address` is keyed by
+  trust class) nor can dial the peer. The positive control is in the same
+  test — the same flow, a node that trusts the listener, which connects.
+  Without it the assertions would prove only that the setup was broken.
+
+Three limits, stated because the tests cannot reach past them.
+
+- **The mDNS multicast MECHANISM was not built, `mdns` is not on the
+  libp2p feature list, and `DISCOVERY-CONFORMANCE.md` was amended to
+  defer its multicast tests to Stage 11 rather than leave a normative
+  requirement quietly unmet.** Enabling it pulls `libp2p-mdns 0.48`, which pins
+  `hickory-proto 0.25.x`, carrying RUSTSEC-2026-0118 and
+  RUSTSEC-2026-0119 with no upgrade available inside that line —
+  `check_dependencies.sh` fails, and §8 makes that a gate rather than a
+  warning. So `crates/discovery/mdns` ships its **normalization half
+  only**: PeerId grammar, address bounds, dedup, expiry and the degraded
+  report, driven by pushed observations rather than by a socket. The
+  degraded arm is real (`a_quarantined_cache_reports_degraded_at_start`'s
+  sibling, `aggregate_health_survives_one_degraded_provider`, drives
+  `report_backend_down`); the discovering arm has never seen a multicast
+  packet. **The exit gate's "mDNS provider composes correctly" is met for
+  the provider and NOT for LAN discovery**, and anything that reads this
+  stage as having proved LAN discovery is reading it wrong.
+- **The manager is a library, composed in tests.** There is no
+  `SwarmRuntime` task driving it and no production holder; plan §15 is
+  where TransportRuntime constructs one. The `stage-12` entries in
+  `tools/checks/domain_fn_exempt.txt` are that gap written down, and they
+  were re-dated at this closure because their previous reason — "the
+  conformance suite composes the manager" — was wrong about what counts:
+  that check strips `#[cfg(test)]` and excludes `tests/` wholesale.
+- **`protocol_observations` stay empty**, per the Stage 10 deferral at
+  L967-991. `PeerCacheDiscovery` does not fill them and says so at its
+  source.
+
 ## 13. Stage 10 — Kademlia
 
 ### Prerequisite
 
-Run and close **SPIKE-003**.
+**SPIKE-003 ran and closed on 2026-08-30: PASS FOR THIS STAGE.** It does
+**not** close ADR-0034's v1 release gate — two required evidence items
+are unmet, and both need infrastructure the spike does not have:
+server-mode reachability evidence is not consumed (AutoNAT and Relay are
+absent from the libp2p feature list — SPIKE-004), and single-path capture
+is not shown to be reduced (measured against controls; no capture was
+observed at all, so the comparison cannot speak for the option).
+Implementing this stage is unlocked; shipping configured entries
+default-enabled is not.
+
+Measured against `libp2p 0.56.0` with the `kad` feature. Record and
+reproducing harness in
+[`spikes/spike-003/`](../../spikes/spike-003/README.md); verdict and
+findings in [`SPIKES.md`](./SPIKES.md). **Seventeen findings bind this
+stage**, five of which say the gate cannot be written the obvious way and
+three of which name API changes the production crates need. One reorders
+the work:
+
+> **Do not begin by enabling the feature.** The production
+> `OutboundAdmission` refuses every dial carrying no root admission
+> ticket, and every Kademlia query dial carries none — the spike measured
+> this at the `handle_pending_outbound_connection` hook rather than
+> inferring it. Turning `kad` on before the gate can admit a
+> behaviour-originated dial *through* `PolicySnapshot::admit` under
+> `DialOrigin::KademliaQuery` produces a subsystem whose every query dies
+> at the first hop it lacks a connection for, silently, because a refused
+> behaviour dial surfaces as an ordinary dial failure. Extend the gate
+> first; the spike's `PolicyAdmit` mode is a measured proposal, not
+> production code.
+
+Two more that reading the design would not predict. A **routing insertion
+starts one query nobody asked for**, and it dials — so the provider's
+budget must account for it, and policy installed after seeding is
+installed after the dial it meant to govern. And under
+`BucketInserts::Manual` a **seed node routes nobody**: inbound
+connections insert nothing, so a bootstrap hub answers every query with
+an empty list until the provider admits the peers that dialled *it*.
+`kademlia-integration.md` §7's admission pipeline reads as an outbound
+story; the inbound direction is what a bootstrap node lives on.
+
+**Server-mode reachability evidence is NOT validated.** AutoNAT and Relay
+are absent from the libp2p feature list, so the spike could not consume
+the AutoNAT-verified-or-relay-reservation rule this stage's §14 requires.
+SPIKE-004 is where that arrives. Do not treat it as proved.
 
 **Decide the capability-observation mapping in the architecture before
 writing code.** `PeerCache::candidates` exports `protocol_observations`
