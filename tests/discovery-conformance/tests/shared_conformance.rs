@@ -50,13 +50,47 @@ trait Subject {
     fn name(&self) -> &'static str;
     fn provider(&mut self) -> &mut dyn DiscoveryProvider;
 
-    /// Make the provider observe `id`, and report whether this provider
-    /// CAN be made to observe on demand.
+    /// Make the provider observe `id`, and report WHAT was supplied.
     ///
-    /// The boolean is what lets the suite demand an emission from the
-    /// providers that have an input, without demanding one from a
-    /// provider whose candidates all arrive at `start`.
-    fn observe(&mut self, id: &TransportIdentity, now: u64) -> bool;
+    /// The return value used to be a bare `bool`, and that was the
+    /// second half of the same defect as the inert adapter: knowing
+    /// that an observation happened let the suite demand an emission,
+    /// but not that the emission was ABOUT the observation. Every check
+    /// then verified shape and provenance and nothing else — so a
+    /// provider could turn an observation of P1 at one address into a
+    /// valid candidate for P2 at another and pass the entire suite.
+    ///
+    /// Returning the input tuple is what lets every assertion be tied
+    /// to it.
+    fn observe(&mut self, id: &TransportIdentity, now: u64) -> Option<Supplied>;
+}
+
+/// What a subject supplied to its provider, so emissions can be checked
+/// against it rather than merely validated.
+#[derive(Debug, Clone)]
+struct Supplied {
+    peer: TransportIdentity,
+    address: String,
+}
+
+impl Supplied {
+    /// Assert that `candidate` is the one this input should have
+    /// produced — the right peer, carrying the address supplied.
+    fn assert_matches(&self, name: &str, candidate: &interweave_discovery_api::CandidatePeer) {
+        assert_eq!(
+            candidate.peer_id,
+            self.peer,
+            "{name}: emitted a candidate for {} after being given {}",
+            candidate.peer_id.as_str(),
+            self.peer.as_str()
+        );
+        assert!(
+            candidate.addresses.contains(&self.address),
+            "{name}: emitted addresses {:?} which do not include the supplied {}",
+            candidate.addresses,
+            self.address
+        );
+    }
 }
 
 /// Collect the candidates a drain produced, so a check can require one.
@@ -95,16 +129,22 @@ impl Subject for CacheSubject {
     fn provider(&mut self) -> &mut dyn DiscoveryProvider {
         &mut self.provider
     }
-    fn observe(&mut self, id: &TransportIdentity, now: u64) -> bool {
+    fn observe(&mut self, id: &TransportIdentity, now: u64) -> Option<Supplied> {
+        // A DISTINCT ADDRESS PER PEER, so an emission carrying the other
+        // peer's address is visible rather than accidentally correct.
+        let address = format!("/ip4/10.0.0.1/tcp/{}", 4001 + u16::from(id == &peer(P2)));
         self.provider.add_hint(
             PeerHint::ObservedReachable {
                 peer_id: id.clone(),
-                address: "/ip4/10.0.0.1/tcp/4001".to_owned(),
+                address: address.clone(),
                 observed_at: now,
             },
             now,
         );
-        true
+        Some(Supplied {
+            peer: id.clone(),
+            address,
+        })
     }
 }
 
@@ -131,11 +171,23 @@ impl Subject for StaticSubject {
     fn provider(&mut self) -> &mut dyn DiscoveryProvider {
         &mut self.provider
     }
-    /// FALSE, and that is a fact about the provider rather than an
-    /// exemption: its candidates arrive at `start`, so the suite demands
-    /// an emission there instead of after an observation.
-    fn observe(&mut self, _id: &TransportIdentity, _now: u64) -> bool {
-        false
+    /// THROUGH `set_entries`, which is how configuration reaches this
+    /// provider at runtime. This used to return false on the grounds
+    /// that its candidates arrive at `start` — true of the FIRST set,
+    /// and not a reason to leave the reload path unexercised. While it
+    /// was inert, `provider_handles_candidate_update` skipped its
+    /// assertions entirely and the duplicate check merely re-drained
+    /// what `start` had emitted.
+    fn observe(&mut self, id: &TransportIdentity, now: u64) -> Option<Supplied> {
+        let address = format!("/ip4/10.0.0.1/tcp/{}", 4001 + u16::from(id == &peer(P2)));
+        let entry = StaticEntry::new(id.clone(), &address).expect("within bounds");
+        self.provider
+            .set_entries(vec![entry], now)
+            .expect("a single valid entry is within bounds");
+        Some(Supplied {
+            peer: id.clone(),
+            address,
+        })
     }
 }
 
@@ -162,9 +214,14 @@ impl Subject for MdnsSubject {
     /// THE ADAPTER THAT WAS MISSING. This used to be a no-op, so the
     /// provider observed nothing and every conditional assertion in the
     /// suite was vacuous for it.
-    fn observe(&mut self, id: &TransportIdentity, now: u64) -> bool {
+    fn observe(&mut self, id: &TransportIdentity, now: u64) -> Option<Supplied> {
+        let address = format!("/ip4/192.168.1.5/tcp/{}", 4001 + u16::from(id == &peer(P2)));
         self.provider
-            .push_discovered(id.as_str(), "/ip4/192.168.1.5/tcp/4001", now)
+            .push_discovered(id.as_str(), &address, now)
+            .then(|| Supplied {
+                peer: id.clone(),
+                address,
+            })
     }
 }
 
@@ -194,25 +251,24 @@ fn provider_reports_initial_health(s: &mut dyn Subject) {
 }
 
 fn provider_emits_normalized_candidate(s: &mut dyn Subject) {
-    // AN EMISSION IS REQUIRED, not merely validated if it happens. Every
-    // assertion here used to sit inside `for event in drain_events(..)`,
-    // so a provider that emitted nothing satisfied the whole check by
-    // never entering the loop — which is exactly what mDNS did, because
-    // its `observe` was a no-op. "Normalized candidate output" is a
-    // mandatory common guarantee, and a guarantee no run can fail is not
-    // one.
+    // AN EMISSION IS REQUIRED, and it must be ABOUT the observation.
+    // Two defects lived here. Every assertion sat inside `for event in
+    // drain_events(..)`, so a provider emitting nothing satisfied the
+    // check by never entering the loop. And what it did assert was
+    // shape and provenance only — so a provider could turn an
+    // observation of P1 at one address into a valid candidate for P2 at
+    // another and pass.
     s.provider().start(1_000).expect("starts");
     let name = s.name();
     let source = s.provider().descriptor().name;
-    let observed = s.observe(&peer(P1), 1_000);
+    let supplied = s.observe(&peer(P1), 1_000);
     let candidates = candidates_in(s.provider().drain_events(1_000, 32));
 
     assert!(
         !candidates.is_empty(),
         "{name}: no candidate was emitted. A provider that observes on \
          demand must emit for what it observed; one whose candidates \
-         arrive at start must emit them there. Either way this guarantee \
-         is about output that exists (observed-on-demand: {observed})"
+         arrive at start must emit them there"
     );
     for candidate in &candidates {
         candidate
@@ -223,62 +279,94 @@ fn provider_emits_normalized_candidate(s: &mut dyn Subject) {
             "{name}: provenance — the source is the provider's own name"
         );
     }
+    if let Some(supplied) = &supplied {
+        let matching = candidates
+            .iter()
+            .find(|c| c.peer_id == supplied.peer)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{name}: given {} and emitted only {:?}",
+                    supplied.peer.as_str(),
+                    candidates
+                        .iter()
+                        .map(|c| c.peer_id.as_str())
+                        .collect::<Vec<_>>()
+                )
+            });
+        supplied.assert_matches(name, matching);
+    }
 }
 
 fn provider_handles_duplicate_observation(s: &mut dyn Subject) {
     s.provider().start(1_000).expect("starts");
     let name = s.name();
-    let observes = s.observe(&peer(P1), 1_000);
+    let supplied = s.observe(&peer(P1), 1_000);
     let first = candidates_in(s.provider().drain_events(1_000, 32));
-    // THE SETUP MUST HAVE WORKED. Without this the duplicate below is a
-    // duplicate of nothing, and the check passes for a provider that
-    // never observed anything in the first place.
+    // THE SETUP MUST HAVE WORKED, and worked for the right peer —
+    // otherwise the duplicate below is a duplicate of nothing, or of
+    // something else.
     assert!(
         !first.is_empty(),
         "{name}: nothing was emitted for the first observation, so there \
          is no duplicate to handle"
     );
+    if let Some(supplied) = &supplied {
+        let matching = first
+            .iter()
+            .find(|c| c.peer_id == supplied.peer)
+            .unwrap_or_else(|| panic!("{name}: the first observation emitted another peer"));
+        supplied.assert_matches(name, matching);
+    }
 
     // The same observation again: correct, whatever it chooses to emit.
-    let _ = s.observe(&peer(P1), 1_100);
+    let repeated = s.observe(&peer(P1), 1_100);
     let again = candidates_in(s.provider().drain_events(1_100, 32));
     for candidate in &again {
         assert!(
             candidate.validate().is_ok(),
             "{name}: a duplicate must not produce an invalid candidate"
         );
+        if let Some(repeated) = &repeated {
+            assert_eq!(
+                candidate.peer_id, repeated.peer,
+                "{name}: a repeat of one peer emitted another"
+            );
+        }
     }
-    let _ = observes;
 }
 
 fn provider_handles_candidate_update(s: &mut dyn Subject) {
     s.provider().start(1_000).expect("starts");
     let name = s.name();
     let source = s.provider().descriptor().name;
-    let observes = s.observe(&peer(P1), 1_000);
+    let _ = s.observe(&peer(P1), 1_000);
     let _ = s.provider().drain_events(1_000, 32);
 
     let updated = s.observe(&peer(P2), 2_000);
     let events = candidates_in(s.provider().drain_events(2_000, 32));
-    // A PROVIDER THAT CAN OBSERVE ON DEMAND MUST EMIT for the second
-    // peer. One whose candidates arrive at start has nothing to update,
-    // and says so through `observe` returning false — which is a fact
-    // about the provider, not a way out of the assertion.
-    if updated {
-        assert!(
-            !events.is_empty(),
-            "{name}: observed a second peer and emitted nothing"
-        );
-        assert!(
-            events.iter().any(|c| c.peer_id == peer(P2)),
-            "{name}: the update names the peer that was observed"
-        );
-    }
     for candidate in &events {
         assert!(candidate.validate().is_ok(), "{name}");
         assert_eq!(candidate.source, source, "{name}");
     }
-    let _ = observes;
+    // A PROVIDER THAT CAN OBSERVE ON DEMAND MUST EMIT for the second
+    // peer, at the address it was given — checking only that P2 appeared
+    // accepted a candidate carrying the first peer's address.
+    if let Some(updated) = &updated {
+        let matching = events
+            .iter()
+            .find(|c| c.peer_id == updated.peer)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{name}: observed {} and emitted only {:?}",
+                    updated.peer.as_str(),
+                    events
+                        .iter()
+                        .map(|c| c.peer_id.as_str())
+                        .collect::<Vec<_>>()
+                )
+            });
+        updated.assert_matches(name, matching);
+    }
 }
 
 fn provider_expires_when_semantics_support_ttl(s: &mut dyn Subject) {
@@ -286,13 +374,19 @@ fn provider_expires_when_semantics_support_ttl(s: &mut dyn Subject) {
     let name = s.name();
     let source = s.provider().descriptor().name;
     let supports = s.provider().descriptor().supports_expiry;
-    let observed = s.observe(&peer(P1), 1_000);
-    // WHAT WAS EMITTED IS RETAINED, because the retraction has to be
-    // checked against it. Asserting only that some expiry arrived, and
-    // only that its `source` was right, passed a provider that observed
-    // P1 and retracted P2 — which composed into `DiscoveryManager`
-    // leaves the observed candidate live and withdraws an unrelated one.
+    let supplied = s.observe(&peer(P1), 1_000);
+    // WHAT WAS EMITTED IS RETAINED, and checked against the input first:
+    // trusting a possibly fabricated emission and then matching
+    // retractions to it proves only that the provider is
+    // self-consistent.
     let emitted = candidates_in(s.provider().drain_events(1_000, 32));
+    if let Some(supplied) = &supplied {
+        let matching = emitted
+            .iter()
+            .find(|c| c.peer_id == supplied.peer)
+            .unwrap_or_else(|| panic!("{name}: nothing was emitted for the observed peer"));
+        supplied.assert_matches(name, matching);
+    }
 
     // Far in the future. A provider that models expiry must retract what
     // it emitted; one that does not must simply stay correct.
@@ -309,37 +403,39 @@ fn provider_expires_when_semantics_support_ttl(s: &mut dyn Subject) {
         })
         .collect();
 
-    if supports && observed {
-        // REQUIRED, and required to be about the right peer.
+    if supports && supplied.is_some() {
         assert!(
             !expiries.is_empty(),
             "{name}: declares supports_expiry and retracted nothing at the \
              end of time"
         );
+        // EVERY emitted candidate is retracted, and every retraction for
+        // it names only its own addresses — the earlier version checked
+        // the FIRST same-peer retraction and stopped, so a second one
+        // carrying foreign addresses went unexamined.
         for candidate in &emitted {
-            let retraction = expiries
+            let mine: Vec<_> = expiries
                 .iter()
-                .find(|(peer_id, _, _)| *peer_id == candidate.peer_id)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "{name}: emitted a candidate for {} and never retracted \
-                         it; retractions were for {:?}",
-                        candidate.peer_id.as_str(),
-                        expiries
-                            .iter()
-                            .map(|(p, _, _)| p.as_str())
-                            .collect::<Vec<_>>()
-                    )
-                });
-            // AND THE ADDRESSES ARE ITS OWN. A retraction naming another
-            // candidate's addresses withdraws the wrong route.
-            let (_, _, addresses) = retraction;
+                .filter(|(peer_id, _, _)| *peer_id == candidate.peer_id)
+                .collect();
             assert!(
-                addresses.iter().all(|a| candidate.addresses.contains(a)),
-                "{name}: retracted addresses {addresses:?} that are not this \
-                 candidate's {:?}",
-                candidate.addresses
+                !mine.is_empty(),
+                "{name}: emitted a candidate for {} and never retracted it; \
+                 retractions were for {:?}",
+                candidate.peer_id.as_str(),
+                expiries
+                    .iter()
+                    .map(|(p, _, _)| p.as_str())
+                    .collect::<Vec<_>>()
             );
+            for (_, _, addresses) in mine {
+                assert!(
+                    addresses.iter().all(|a| candidate.addresses.contains(a)),
+                    "{name}: retracted addresses {addresses:?} that are not this \
+                     candidate's {:?}",
+                    candidate.addresses
+                );
+            }
         }
     }
     for (peer_id, src, _) in &expiries {
@@ -348,7 +444,6 @@ fn provider_expires_when_semantics_support_ttl(s: &mut dyn Subject) {
             "{name}: a provider that declares no expiry emitted one"
         );
         assert_eq!(src, &source, "{name}");
-        // Never a retraction for something never observed.
         assert!(
             emitted.is_empty() || emitted.iter().any(|c| c.peer_id == *peer_id),
             "{name}: retracted {} which it never emitted",
@@ -375,10 +470,18 @@ fn provider_rejects_or_ignores_invalid_address_safely(s: &mut dyn Subject) {
         "{}: an out-of-bounds address must not be accepted",
         s.name()
     );
-    for event in s.provider().drain_events(1_000, 32) {
-        if let DiscoveryEvent::CandidateObserved { candidate } = event {
-            assert!(candidate.validate().is_ok(), "{}", s.name());
-        }
+    // AND THE REFUSED ADDRESS NEVER APPEARS. "Refused or unsupported,
+    // never accepted-and-emitted" is the guarantee, and only this half
+    // says anything about emission — validating whatever happens to
+    // arrive would pass a provider that emitted the oversized address
+    // inside an otherwise-valid candidate.
+    let name = s.name();
+    for candidate in candidates_in(s.provider().drain_events(1_000, 32)) {
+        assert!(candidate.validate().is_ok(), "{name}");
+        assert!(
+            !candidate.addresses.iter().any(|a| a.len() > 1_024),
+            "{name}: emitted the oversized address it had refused"
+        );
     }
 }
 
@@ -481,11 +584,20 @@ fn provider_does_not_grant_trust(s: &mut dyn Subject) {
     // candidate carries no authorization-shaped field — which the closed
     // schema guarantees, and `validate` enforces.
     s.provider().start(1_000).expect("starts");
-    let _ = s.observe(&peer(P1), 1_000);
-    for event in s.provider().drain_events(1_000, 32) {
-        if let DiscoveryEvent::CandidateObserved { candidate } = event {
-            assert!(candidate.validate().is_ok(), "{}", s.name());
-        }
+    let name = s.name();
+    let supplied = s.observe(&peer(P1), 1_000);
+    let candidates = candidates_in(s.provider().drain_events(1_000, 32));
+    // A PROVIDER THAT WAS GIVEN SOMETHING MUST HAVE EMITTED SOMETHING,
+    // or this check inspects an empty list and concludes nothing carried
+    // authorization — the same vacuity as the candidate checks had.
+    if supplied.is_some() {
+        assert!(
+            !candidates.is_empty(),
+            "{name}: nothing to inspect, so this guarantee was not checked"
+        );
+    }
+    for candidate in &candidates {
+        assert!(candidate.validate().is_ok(), "{name}");
     }
 }
 
@@ -593,12 +705,14 @@ fn the_mdns_observation_path_is_exercised_too() {
     // what it emits is valid and correctly attributed.
     let mut p = MdnsDiscovery::new();
     p.start(0).expect("starts");
-    assert!(p.push_discovered(P1, "/ip4/192.168.1.5/tcp/4001", 0));
+    const PUSHED: &str = "/ip4/192.168.1.5/tcp/4001";
+    assert!(p.push_discovered(P1, PUSHED, 0));
     let source = p.descriptor().name;
     let candidates = candidates_in(p.drain_events(0, 32));
-    // ASSERTED, not iterated. This had the same shape as the checks it
-    // was standing in for: every assertion inside `if let`, so an mDNS
-    // provider that emitted nothing passed it too.
+    // ASSERTED AND BOUND TO THE PUSH. This had the same two defects as
+    // the shared checks: assertions nested inside `if let`, so emitting
+    // nothing passed; and no comparison against what was pushed, so the
+    // ADDRESS went unchecked even once the peer did not.
     assert!(
         !candidates.is_empty(),
         "mdns: a pushed observation must produce a candidate"
@@ -610,6 +724,11 @@ fn the_mdns_observation_path_is_exercised_too() {
             candidate.peer_id,
             peer(P1),
             "the candidate names the peer that was pushed"
+        );
+        assert!(
+            candidate.addresses.contains(PUSHED),
+            "the candidate carries the address that was pushed, got {:?}",
+            candidate.addresses
         );
     }
 }
@@ -646,6 +765,11 @@ enum Violation {
     /// DIFFERENT one — leaving what it observed live and withdrawing a
     /// route it never announced.
     ExpiresTheWrongPeer,
+    /// Emits a VALID candidate that has nothing to do with what it was
+    /// given: another peer, another address. Shape and provenance are
+    /// both correct, which is precisely why a suite checking only those
+    /// accepted it.
+    FabricatesAnUnrelatedCandidate,
 }
 
 impl Misbehaving {
@@ -711,6 +835,20 @@ impl DiscoveryProvider for Misbehaving {
             Violation::ForgesProvenance if self.started && !self.stopped => {
                 vec![self.candidate(now_ms)]
             }
+            Violation::FabricatesAnUnrelatedCandidate if self.started && !self.stopped => {
+                // VALID, correctly attributed, and about nothing it was
+                // given: another peer at another address.
+                vec![DiscoveryEvent::CandidateObserved {
+                    candidate: Box::new(CandidatePeer {
+                        peer_id: peer(P2),
+                        addresses: ["/ip4/203.0.113.9/tcp/9".to_owned()].into_iter().collect(),
+                        source: "misbehaving".to_owned(),
+                        observed_at: now_ms,
+                        expires_at: None,
+                        protocol_observations: BTreeSet::new(),
+                    }),
+                }]
+            }
             Violation::ExpiresTheWrongPeer if self.started && !self.stopped => {
                 // Early: the candidate. Late: a retraction naming the
                 // OTHER peer, which is the defect — the suite must not
@@ -775,8 +913,11 @@ impl Subject for MisbehavingSubject {
     /// must catch. Reporting `false` here would exempt it from the
     /// emission checks — which is precisely the hole that let the real
     /// mDNS subject pass while emitting nothing.
-    fn observe(&mut self, _id: &TransportIdentity, _now: u64) -> bool {
-        true
+    fn observe(&mut self, id: &TransportIdentity, _now: u64) -> Option<Supplied> {
+        Some(Supplied {
+            peer: id.clone(),
+            address: "/ip4/10.0.0.1/tcp/4001".to_owned(),
+        })
     }
 }
 
@@ -822,6 +963,26 @@ fn the_suite_catches_a_provider_that_emits_after_shutdown() {
         Violation::EmitsAfterShutdown,
         "provider_event_stream_closes_after_shutdown"
     ));
+}
+
+#[test]
+fn the_suite_catches_a_provider_that_fabricates_an_unrelated_candidate() {
+    // The whole class the review named: every candidate assertion
+    // verified shape and source and nothing else, so a provider could
+    // turn an observation of P1 at one address into a valid candidate
+    // for P2 at another and pass the entire suite. Each check is bound
+    // to the input now, and each catches it on its own.
+    for check in [
+        "provider_emits_normalized_candidate",
+        "provider_handles_duplicate_observation",
+        "provider_handles_candidate_update",
+        "provider_expires_when_semantics_support_ttl",
+    ] {
+        assert!(
+            suite_catches(Violation::FabricatesAnUnrelatedCandidate, check),
+            "{check} must refuse a candidate unrelated to what was supplied"
+        );
+    }
 }
 
 #[test]

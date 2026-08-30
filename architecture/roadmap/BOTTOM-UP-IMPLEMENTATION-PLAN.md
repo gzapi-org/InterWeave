@@ -986,10 +986,18 @@ its source.
   reached zero times. **An mDNS provider emitting no candidates at all
   passed all fourteen checks**, while "normalized candidate output" is a
   mandatory guarantee. Each subject is now a concrete type behind a
-  `Subject` trait with a working input adapter, and the candidate,
-  duplicate, update and expiry checks assert that the event they are
-  about actually occurred. Restoring the no-op adapter fails three of
-  them.
+  `Subject` trait with a working input adapter — including
+  static-bootstrap, whose reload path through `set_entries` was equally
+  inert — and every check asserts that the event it is about actually
+  occurred **and was about the observation**. `observe` returns the
+  input tuple rather than a bare boolean, because knowing an observation
+  happened proved only that an emission was required, not that it
+  concerned the thing observed: a provider could turn an observation of
+  P1 at one address into a valid, correctly-attributed candidate for P2
+  at another and pass the entire suite.
+  `the_suite_catches_a_provider_that_fabricates_an_unrelated_candidate`
+  and `…that_expires_the_wrong_peer` make both permanent, and restoring
+  the no-op adapter still fails three checks.
 - **Composition merges by PeerId and keeps provenance.**
   `the_three_providers_compose_into_one_candidate_set`;
   `a_candidate_survives_one_providers_retraction_when_another_still_vouches`
