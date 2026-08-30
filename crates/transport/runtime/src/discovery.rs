@@ -769,6 +769,26 @@ impl CandidateSet {
         // refused.
         entry.observations.retain(|_, (_, _, exp)| now_ms < *exp);
 
+        // A SOURCE'S CANDIDATE IS ITS WHOLE STATEMENT ABOUT FACTS. The
+        // providers that emit protocol observations emit full snapshots
+        // — the cache re-emits on any change, including a capability
+        // ageing out of its own-age bound — so a fact THIS source
+        // previously asserted and now omits is WITHDRAWN. Retaining it
+        // until the candidate expiry let a reachability refresh extend
+        // an aged capability's life by a full record lifetime: the
+        // refreshed expiry arrived first, and the empty re-emission
+        // that followed could take nothing back. Other sources' facts
+        // are untouched, because the statement is per source; the
+        // applied-floor survives, so a withdrawn fact still cannot be
+        // re-asserted by delayed older evidence.
+        entry.observations.retain(|(pid, src), _| {
+            *src != candidate.source
+                || candidate
+                    .protocol_observations
+                    .iter()
+                    .any(|o| o.protocol_id == *pid)
+        });
+
         for observation in &candidate.protocol_observations {
             let key = (observation.protocol_id.clone(), candidate.source.clone());
             // STALENESS IS DECIDED BEFORE CAPACITY — the same ordering
@@ -1514,6 +1534,62 @@ mod tests {
             expires_at: exp,
             protocol_observations: BTreeSet::new(),
         }
+    }
+
+    #[test]
+    fn a_same_source_snapshot_withdraws_the_facts_it_omits() {
+        // PR #60: the cache re-emits when a capability ages out — with
+        // an EMPTY observation set. Retention until candidate expiry
+        // made that re-emission unable to take anything back, so a
+        // reachability refresh shortly before the capability's own TTL
+        // kept the positive targetable for another record lifetime.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let p = identity(1);
+        let kad =
+            ProtocolId::parse("/interweave/kad/1.0.0/ssbtblqj7mexczivog5qfbfjvi").expect("valid");
+
+        let mut with_fact = for_id(&p, "peer-cache", "/ip4/10.0.0.1/tcp/1", 200, Some(u64::MAX));
+        with_fact.protocol_observations.insert(ProtocolObservation {
+            protocol_id: kad.clone(),
+            supported: true,
+            observed_at: 200,
+        });
+        set.observe(&with_fact, 200, &trust, true, false);
+        // A DIFFERENT source's fact, which must survive throughout.
+        let mut mdns_fact = for_id(&p, "mdns", "/ip4/10.0.0.2/tcp/2", 210, Some(u64::MAX));
+        mdns_fact.protocol_observations.insert(ProtocolObservation {
+            protocol_id: kad.clone(),
+            supported: false,
+            observed_at: 210,
+        });
+        set.observe(&mdns_fact, 210, &trust, true, false);
+
+        let before = set.candidates(300, &|_| None);
+        let cand = before.iter().find(|c| c.peer_id == p).expect("known");
+        assert!(
+            cand.protocol_observations.iter().any(|o| o.supported),
+            "the control: the fact is held before the withdrawal"
+        );
+
+        // The SAME source re-emits with the fact omitted.
+        set.observe(
+            &for_id(&p, "peer-cache", "/ip4/10.0.0.1/tcp/1", 400, Some(u64::MAX)),
+            400,
+            &trust,
+            true,
+            false,
+        );
+        let after = set.candidates(500, &|_| None);
+        let cand = after.iter().find(|c| c.peer_id == p).expect("known");
+        assert!(
+            !cand.protocol_observations.iter().any(|o| o.supported),
+            "omission by the asserting source is withdrawal, not silence"
+        );
+        assert!(
+            cand.protocol_observations.iter().any(|o| !o.supported),
+            "another source's fact is untouched — the statement is per source"
+        );
     }
 
     fn observed(c: CandidatePeer) -> DiscoveryEvent {
@@ -3179,7 +3255,17 @@ mod tests {
         }
         set.observe(&full, 0, &trust, true, false);
 
+        // A source's candidate is its whole statement of facts, so the
+        // second snapshot RE-ASSERTS all sixteen and adds a seventeenth
+        // — which is exactly the shape the cap exists to refuse.
         let mut extra = for_id(&subject, "mdns", "/ip4/10.0.0.1/tcp/1", 100, Some(u64::MAX));
+        for i in 0..MAX_OBSERVATIONS_PER_PEER {
+            extra.protocol_observations.insert(ProtocolObservation {
+                protocol_id: ProtocolId::parse(format!("/interweave/p{i}/1.0.0")).expect("valid"),
+                supported: true,
+                observed_at: 100,
+            });
+        }
         extra.protocol_observations.insert(ProtocolObservation {
             protocol_id: ProtocolId::parse("/interweave/direct/2.0.0").expect("valid"),
             supported: true,
@@ -3433,13 +3519,14 @@ mod tests {
                 100 + i as u64,
                 Some(u64::MAX),
             );
-            if i == 0 {
-                c.protocol_observations.insert(ProtocolObservation {
-                    protocol_id: protocol.clone(),
-                    supported: true,
-                    observed_at: 100,
-                });
-            }
+            // A fact-asserting source emits its fact with EVERY
+            // candidate — a candidate is that source's whole statement,
+            // and omission would be withdrawal.
+            c.protocol_observations.insert(ProtocolObservation {
+                protocol_id: protocol.clone(),
+                supported: true,
+                observed_at: 100,
+            });
             m.on_event("mdns", observed(c), 100 + i as u64, &trust)
                 .expect("accepted");
         }
