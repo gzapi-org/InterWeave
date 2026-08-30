@@ -7,7 +7,7 @@
 //! spike is that the mapping is checked against the real crate rather
 //! than against the research note that proposed it.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
@@ -39,6 +39,14 @@ pub struct SpikeBehaviour {
     /// is one of the observations, and a disabled behaviour that is
     /// still constructed proves nothing about a build that omits it.
     pub kad: Toggle<kad::Behaviour<MemoryStore>>,
+}
+
+/// The three query classes §9 names, which share the global budgets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum QueryClass {
+    Bootstrap,
+    Targeted,
+    Exploration,
 }
 
 /// What a node is for.
@@ -103,10 +111,14 @@ pub struct Node {
     /// Peers this node trusts, mirrored so `trust` can republish the
     /// whole set — `set_trust` replaces rather than adds.
     trusted: Vec<PeerId>,
-    /// Query ids this node started deliberately. Anything else the
-    /// library ran is unattributed work, which the brief requires be
-    /// counted rather than assumed absent.
-    pub own_queries: HashSet<kad::QueryId>,
+    /// Query ids this node started deliberately, WITH their class.
+    ///
+    /// `SnapshotResult::active_queries_by_class` needs the class, and a
+    /// bare id set cannot supply one. Anything not in this map is
+    /// unattributed library work, which the brief requires be counted
+    /// rather than assumed absent — and which must not be subtracted
+    /// from an explicit query that is still running.
+    pub own_queries: HashMap<kad::QueryId, QueryClass>,
     /// What this node saw, written only by `topology::record`.
     pub observed: crate::topology::Observations,
 }
@@ -171,7 +183,7 @@ impl Node {
             admitted,
             manager,
             trusted: Vec::new(),
-            own_queries: HashSet::new(),
+            own_queries: HashMap::new(),
             observed: crate::topology::Observations::default(),
         }
     }
@@ -215,6 +227,31 @@ impl Node {
             .set_trust(sources, &[]);
     }
 
+    /// Withdraw trust from `peer`, republishing the remaining set.
+    ///
+    /// # Panics
+    /// If a generated `PeerId` is not a canonical identity.
+    pub fn revoke(&mut self, peer: PeerId) {
+        self.trusted.retain(|p| *p != peer);
+        let ids: Vec<interweave_transport_api::TransportIdentity> = self
+            .trusted
+            .iter()
+            .map(|p| {
+                interweave_transport_api::TransportIdentity::parse(p.to_base58())
+                    .expect("a libp2p PeerId is a canonical identity")
+            })
+            .collect();
+        let sources = TrustSources::new(
+            PeerTrustPolicy::new(ids.into_iter()).expect("within bounds"),
+            InfrastructureSet::new(std::iter::empty()).expect("empty"),
+        );
+        let _ = self
+            .manager
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_trust(sources, &[]);
+    }
+
     /// This node's own view of who it trusts.
     #[must_use]
     pub fn trusts(&self) -> Vec<PeerId> {
@@ -235,6 +272,22 @@ impl Node {
             // a later dial that carries no admission.
             self.admitted.forget(libp2p::swarm::ConnectionId::new_unchecked(0));
         }
+    }
+
+    /// Active queries by class: started here, not yet finished.
+    ///
+    /// Queries this node did NOT start are excluded, which is the part a
+    /// set of ids gets wrong — a completed implicit bootstrap would
+    /// otherwise be subtracted from an explicit query still in flight.
+    #[must_use]
+    pub fn active_queries_by_class(&self) -> std::collections::BTreeMap<QueryClass, usize> {
+        let mut out = std::collections::BTreeMap::new();
+        for (id, class) in &self.own_queries {
+            if !self.observed.finished_queries.contains(id) {
+                *out.entry(*class).or_insert(0) += 1;
+            }
+        }
+        out
     }
 
     /// The Kademlia behaviour, when this node has one.

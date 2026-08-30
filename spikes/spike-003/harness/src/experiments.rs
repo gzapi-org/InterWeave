@@ -18,7 +18,7 @@ use interweave_transport_runtime::{DialDenial, DialOrigin, DialRequest};
 use crate::Report;
 use crate::gate::Mode;
 use crate::namespace;
-use crate::node::{KadRole, Node, NodeConfig};
+use crate::node::{KadRole, Node, NodeConfig, QueryClass};
 use crate::topology::{pump, pump_until};
 
 /// K2 — no Kademlia activity when disabled.
@@ -177,7 +177,7 @@ pub async fn k4_client_server_modes(r: &mut Report) {
     if let Some(k) = nodes[1].kad() {
         k.add_address(&s, addr);
         let id = k.get_closest_peers(libp2p::PeerId::random());
-        nodes[1].own_queries.insert(id);
+        nodes[1].own_queries.insert(id, QueryClass::Exploration);
     }
     let answered = pump_until(&mut nodes, Duration::from_secs(15), |n| {
         !n[1].observed.finished_queries.is_empty()
@@ -242,7 +242,7 @@ pub async fn k5_bootstrap_accounting(r: &mut Report) {
     // AND AN EXPLICIT BOOTSTRAP WORKS once a peer is known.
     let started = nodes[1].kad().and_then(|k| k.bootstrap().ok());
     if let Some(id) = started {
-        nodes[1].own_queries.insert(id);
+        nodes[1].own_queries.insert(id, QueryClass::Bootstrap);
     }
     r.check(
         "K5.3",
@@ -306,7 +306,7 @@ pub async fn k6_behaviour_dials_are_gated(r: &mut Report) {
     // The query that makes `a` want to reach `c`.
     if let Some(k) = nodes[0].kad() {
         let id = k.get_closest_peers(c);
-        nodes[0].own_queries.insert(id);
+        nodes[0].own_queries.insert(id, QueryClass::Targeted);
     }
     pump(&mut nodes, Duration::from_secs(12)).await;
 
@@ -393,7 +393,7 @@ pub async fn k7_policy_admits_and_refuses(r: &mut Report) {
     if let Some(k) = nodes[0].kad() {
         k.add_address(&b, b_addr);
         let id = k.get_closest_peers(c);
-        nodes[0].own_queries.insert(id);
+        nodes[0].own_queries.insert(id, QueryClass::Targeted);
     }
     let reached = pump_until(&mut nodes, Duration::from_secs(20), |n| {
         n[0].observed.dialed_out.contains(&c)
@@ -466,7 +466,7 @@ pub async fn k8_untrusted_returned_peer_is_refused(r: &mut Report) {
 
     if let Some(k) = nodes[0].kad() {
         let id = k.get_closest_peers(c);
-        nodes[0].own_queries.insert(id);
+        nodes[0].own_queries.insert(id, QueryClass::Targeted);
     }
     pump(&mut nodes, Duration::from_secs(15)).await;
 
@@ -576,7 +576,7 @@ pub async fn k9_backoff_and_limits_apply(r: &mut Report) {
     if let Some(k) = nodes[0].kad() {
         k.add_address(&b, b_addr);
         let id = k.get_closest_peers(c);
-        nodes[0].own_queries.insert(id);
+        nodes[0].own_queries.insert(id, QueryClass::Targeted);
     }
     pump(&mut nodes, Duration::from_secs(15)).await;
 
@@ -591,6 +591,39 @@ pub async fn k9_backoff_and_limits_apply(r: &mut Report) {
         !nodes[0].observed.dialed_out.contains(&c),
     );
     r.note(format!("K9: refusals {:?}", nodes[0].ledger.refusals()));
+
+    // BACKOFF IS TEMPORARY, and that is the half an immediate-refusal
+    // assertion cannot see. The gate used to timestamp every admission
+    // at zero, so a backoff recorded at 0 with a 30-second delay expired
+    // at a moment the clock never reached — `PeerBackoff` was permanent
+    // and every experiment still passed. Asked of the same policy at a
+    // time past the delay, it must admit again.
+    {
+        let identity = TransportIdentity::parse(c.to_base58()).expect("canonical");
+        let m = nodes[0].manager.lock().expect("manager");
+        let ask = |at: u64| {
+            m.handle().admit(
+                &DialRequest {
+                    peer: Some(identity.clone()),
+                    address: "/ip4/198.51.100.3/tcp/1".to_owned(),
+                    origin: DialOrigin::KademliaQuery,
+                },
+                at,
+            )
+        };
+        r.check(
+            "K9.2b",
+            "the refusal is still in force while the delay is running",
+            matches!(ask(1_000), Err(DialDenial::PeerBackoff)),
+        );
+        // The manager's own base delay is 30s; well past it the peer is
+        // eligible again.
+        r.check(
+            "K9.2c",
+            "and it LAPSES: past the delay the same peer is admitted again",
+            ask(600_000).is_ok(),
+        );
+    }
 
     // SHUTDOWN STATE, the other half: a draining node refuses every
     // behaviour dial regardless of trust.
@@ -607,7 +640,7 @@ pub async fn k9_backoff_and_limits_apply(r: &mut Report) {
     // drain refused it", which is the vacuous arm this shape removes.
     if let Some(k) = nodes[0].kad() {
         let id = k.get_closest_peers(c);
-        nodes[0].own_queries.insert(id);
+        nodes[0].own_queries.insert(id, QueryClass::Targeted);
     }
     pump(&mut nodes, Duration::from_secs(10)).await;
     let refusals = nodes[0].ledger.refusals();
@@ -624,6 +657,23 @@ pub async fn k9_backoff_and_limits_apply(r: &mut Report) {
             && nodes[0].ledger.behaviour_allowed() == 0,
     );
     r.note(format!("K9 drain: {originated} dials, refusals {refusals:?}"));
+
+    // THE GATE'S OWN CLOCK ADVANCES. Everything above asks the manager
+    // with explicit timestamps, so it holds whatever the gate believes
+    // the time is — and the gate used to believe zero, permanently.
+    // Every admission and every settlement was stamped at the same
+    // instant, which made a 30-second backoff expire at a moment the
+    // clock never reached: `PeerBackoff` was permanent and no assertion
+    // could see it. This is the one observation that fails if the clock
+    // freezes again.
+    let t0 = nodes[0].swarm.behaviour().gate.clock_ms();
+    pump(&mut nodes, Duration::from_secs(2)).await;
+    let t1 = nodes[0].swarm.behaviour().gate.clock_ms();
+    r.check(
+        "K9.6",
+        &format!("the gate's clock advances with real time: {t0} -> {t1}"),
+        t1 >= t0 + 1_500,
+    );
 }
 
 /// K10 — record and provider writes are refused, and counted.
@@ -656,7 +706,7 @@ pub async fn k10_records_are_filtered(r: &mut Report) {
         .and_then(|k| k.put_record(record, kad::Quorum::One).ok());
     r.check("K10.1", "the write was actually sent", put.is_some());
     if let Some(id) = put {
-        nodes[1].own_queries.insert(id);
+        nodes[1].own_queries.insert(id, QueryClass::Exploration);
     }
     pump(&mut nodes, Duration::from_secs(8)).await;
 
@@ -695,7 +745,7 @@ pub async fn k10_records_are_filtered(r: &mut Report) {
         provide.is_some(),
     );
     if let Some(id) = provide {
-        nodes[1].own_queries.insert(id);
+        nodes[1].own_queries.insert(id, QueryClass::Exploration);
     }
     pump(&mut nodes, Duration::from_secs(10)).await;
     let arrived = nodes[0]
@@ -779,7 +829,7 @@ pub async fn k11_ten_node_exploration(r: &mut Report) {
                     key.to_vec(),
                     NonZeroUsize::new(10).expect("nonzero"),
                 );
-                nodes[i].own_queries.insert(id);
+                nodes[i].own_queries.insert(id, QueryClass::Exploration);
             }
         }
         pump(&mut nodes, Duration::from_secs(8)).await;
@@ -1125,7 +1175,7 @@ pub async fn k15_snapshot_is_bounded(r: &mut Report) {
         k.add_address(&a, a_addr);
         k.add_address(&third_id, third_addr);
         let id = k.get_closest_peers(libp2p::PeerId::random());
-        nodes[1].own_queries.insert(id);
+        nodes[1].own_queries.insert(id, QueryClass::Exploration);
     }
     // SETTLED, not merely started: K15.5 asserts the live gauge has
     // returned to zero while the cumulative total has not.
@@ -1153,11 +1203,48 @@ pub async fn k15_snapshot_is_bounded(r: &mut Report) {
         &format!("routing_peer_count={routing_peer_count} and nonempty_bucket_count={nonempty_buckets} are counts"),
         routing_peer_count >= 1 && nonempty_buckets >= 1,
     );
-    let active = nodes[1].own_queries.len() - nodes[1].observed.finished_queries.len().min(nodes[1].own_queries.len());
+    // A REAL PER-CLASS SNAPSHOT, asserted. The earlier arithmetic
+    // subtracted `finished_queries.len()` — which counts implicit
+    // library queries too — from a set of ids that carried no class at
+    // all, so a completed implicit bootstrap could cancel out an
+    // explicit query still in flight, and the check was `true` regardless.
+    let settled = nodes[1].active_queries_by_class();
     r.check(
-        "K15.4",
-        &format!("active_queries_by_class is derivable from tracked ids: {active}"),
-        true,
+        "K15.4a",
+        &format!("with every started query finished, no class is active: {settled:?}"),
+        settled.is_empty(),
+    );
+    // START ONE and observe it counted under ITS class while a second
+    // class stays at zero — which is what "by class" has to mean.
+    let live_id = nodes[1]
+        .kad()
+        .map(|k| k.get_closest_peers(libp2p::PeerId::random()));
+    if let Some(q) = live_id {
+        nodes[1].own_queries.insert(q, QueryClass::Exploration);
+    }
+    let during = nodes[1].active_queries_by_class();
+    r.check(
+        "K15.4b",
+        &format!("a started query is active under its own class only: {during:?}"),
+        during.get(&QueryClass::Exploration).copied() == Some(1)
+            && during.get(&QueryClass::Targeted).is_none()
+            && during.get(&QueryClass::Bootstrap).is_none(),
+    );
+    // AND AN IMPLICIT QUERY DOES NOT DECREMENT IT. The library's own
+    // work finishing is exactly what the old arithmetic subtracted.
+    let unattributed_before = nodes[1].observed.unattributed_queries.len();
+    pump_until(&mut nodes, Duration::from_secs(20), |n| {
+        live_id.is_some_and(|q| n[1].observed.finished_queries.contains(&q))
+    })
+    .await;
+    let after = nodes[1].active_queries_by_class();
+    r.check(
+        "K15.4c",
+        &format!(
+            "and once it finishes the class is empty again: {after:?} \
+             (unattributed seen: {unattributed_before})"
+        ),
+        after.get(&QueryClass::Exploration).is_none(),
     );
     // A LIVE COUNT, and asserted. `behaviour_originated()` is a
     // CUMULATIVE total: after this experiment's pump every dial has
@@ -1293,7 +1380,7 @@ pub async fn k16_disjoint_paths(r: &mut Report) {
         .kad()
         .map(|k| k.get_closest_peers(libp2p::PeerId::random()));
     if let Some(q) = id {
-        nodes[0].own_queries.insert(q);
+        nodes[0].own_queries.insert(q, QueryClass::Exploration);
     }
     pump(&mut nodes, Duration::from_secs(12)).await;
 
@@ -1354,7 +1441,7 @@ pub async fn k16_disjoint_paths(r: &mut Report) {
         .kad()
         .map(|k| k.get_closest_peers(libp2p::PeerId::random()));
     if let Some(q) = cid {
-        control[0].own_queries.insert(q);
+        control[0].own_queries.insert(q, QueryClass::Exploration);
     }
     pump(&mut control, Duration::from_secs(12)).await;
     let control_contacted = cid
@@ -1437,7 +1524,7 @@ pub async fn k17_twenty_node_convergence(r: &mut Report) {
             if let Some(k) = nodes[i].kad() {
                 let id =
                     k.get_n_closest_peers(key, NonZeroUsize::new(20).expect("nonzero"));
-                nodes[i].own_queries.insert(id);
+                nodes[i].own_queries.insert(id, QueryClass::Exploration);
             }
         }
         pump(&mut nodes, Duration::from_secs(10)).await;
@@ -1571,7 +1658,7 @@ pub async fn k18_stale_routing_response(r: &mut Report) {
     if let Some(k) = nodes[0].kad() {
         k.add_address(&b, b_addr);
         let id = k.get_closest_peers(c);
-        nodes[0].own_queries.insert(id);
+        nodes[0].own_queries.insert(id, QueryClass::Targeted);
     }
     // SETTLE ON THE OBSERVABLE. A fixed pump made this experiment fail
     // intermittently in a full-suite run and pass alone — the walk needs
@@ -1894,7 +1981,7 @@ pub async fn k14_targeted_lookup(r: &mut Report) {
         // THE LOOKUP KEY IS THE PEER ID, which is what makes this
         // targeted rather than exploratory.
         let id = k.get_closest_peers(c);
-        nodes[0].own_queries.insert(id);
+        nodes[0].own_queries.insert(id, QueryClass::Targeted);
     }
     pump(&mut nodes, Duration::from_secs(15)).await;
 
@@ -1995,7 +2082,7 @@ pub async fn k19_ceilings_apply_to_behaviour_dials(r: &mut Report) {
     if let Some(k) = nodes[0].kad() {
         k.add_address(&b, b_addr);
         let id = k.get_closest_peers(c);
-        nodes[0].own_queries.insert(id);
+        nodes[0].own_queries.insert(id, QueryClass::Targeted);
     }
     pump(&mut nodes, Duration::from_secs(12)).await;
 
@@ -2025,7 +2112,7 @@ pub async fn k19_ceilings_apply_to_behaviour_dials(r: &mut Report) {
     nodes[0].ledger.reset();
     if let Some(k) = nodes[0].kad() {
         let id = k.get_closest_peers(c);
-        nodes[0].own_queries.insert(id);
+        nodes[0].own_queries.insert(id, QueryClass::Targeted);
     }
     let reached = pump_until(&mut nodes, Duration::from_secs(20), |n| {
         n[0].ledger.behaviour_allowed() > 0
@@ -2086,7 +2173,7 @@ pub async fn k19_ceilings_apply_to_behaviour_dials(r: &mut Report) {
     }
     if let Some(k) = fan[0].kad() {
         let id = k.get_closest_peers(libp2p::PeerId::random());
-        fan[0].own_queries.insert(id);
+        fan[0].own_queries.insert(id, QueryClass::Exploration);
     }
     pump(&mut fan, Duration::from_secs(15)).await;
 
@@ -2107,27 +2194,23 @@ pub async fn k19_ceilings_apply_to_behaviour_dials(r: &mut Report) {
         refusals.get("too many pending dials").copied().unwrap_or(0) > 0
             && allowed < originated,
     );
+    // BOTH LIVE COUNTS AT ZERO. `pending_dials() <= 1` is guaranteed by
+    // a ceiling of one even when the single admitted ticket leaks
+    // forever — a gate that never settles its one allowed dial would
+    // pass while permanently exhausted — and the gate's own count was
+    // printed but not asserted.
+    let pending = fan[0]
+        .manager
+        .lock()
+        .expect("manager")
+        .handle()
+        .load()
+        .pending_dials();
+    let held = fan[0].swarm.behaviour().gate.pending_behaviour_dials();
     r.check(
         "K19.8",
-        &format!(
-            "and every slot comes back once the dials settle: {} pending, {} held",
-            fan[0]
-                .manager
-                .lock()
-                .expect("manager")
-                .handle()
-                .load()
-                .pending_dials(),
-            fan[0].swarm.behaviour().gate.pending_behaviour_dials()
-        ),
-        fan[0]
-            .manager
-            .lock()
-            .expect("manager")
-            .handle()
-            .load()
-            .pending_dials()
-            <= 1,
+        &format!("every slot comes back once the dials settle: {pending} pending, {held} held"),
+        pending == 0 && held == 0,
     );
 
     // THE CONNECTION CEILING, which the pending ceiling does not stand
@@ -2170,7 +2253,7 @@ pub async fn k19_ceilings_apply_to_behaviour_dials(r: &mut Report) {
     }
     if let Some(k) = cn[0].kad() {
         let id = k.get_closest_peers(libp2p::PeerId::random());
-        cn[0].own_queries.insert(id);
+        cn[0].own_queries.insert(id, QueryClass::Exploration);
     }
     pump(&mut cn, Duration::from_secs(15)).await;
 
@@ -2200,5 +2283,297 @@ pub async fn k19_ceilings_apply_to_behaviour_dials(r: &mut Report) {
         "K19 connections: {} dials, {} allowed, {established} slots held, refusals {refusals:?}",
         cn[0].ledger.behaviour_originated(),
         cn[0].ledger.behaviour_allowed()
+    ));
+}
+
+/// K20 — trust revoked between admission and the completed handshake.
+///
+/// The gate admits a behaviour dial against the trust policy of the
+/// moment it is asked. The Noise handshake completes later, and trust
+/// can be revised in between — so settling with `record_success`
+/// unconditionally retains a connection under authority that no longer
+/// exists. The production settlement path reclassifies the authenticated
+/// peer for exactly this race and has a distinct method for it,
+/// `record_authorization_withdrawn`.
+pub async fn k20_authority_withdrawn_mid_dial(r: &mut Report) {
+    let cfg = NodeConfig {
+        role: KadRole::Server,
+        gate_mode: Mode::PolicyAdmit,
+        ..NodeConfig::default()
+    };
+    let mut nodes = vec![
+        Node::start(&cfg).await,
+        Node::start(&cfg).await,
+        Node::start(&cfg).await,
+    ];
+    let (a, b, c) = (nodes[0].peer_id, nodes[1].peer_id, nodes[2].peer_id);
+    for i in 0..3 {
+        for p in [a, b, c] {
+            nodes[i].trust(p);
+        }
+    }
+    let (b_addr, c_addr) = (nodes[1].dial_address(), nodes[2].dial_address());
+    nodes[1].dial_admitted(c_addr.clone());
+    pump_until(&mut nodes, Duration::from_secs(10), |n| {
+        n[1].observed.connected.contains(&c)
+    })
+    .await;
+    if let Some(k) = nodes[1].kad() {
+        k.add_address(&c, c_addr);
+    }
+    nodes[0].dial_admitted(b_addr.clone());
+    pump_until(&mut nodes, Duration::from_secs(10), |n| {
+        n[0].observed.connected.contains(&b)
+    })
+    .await;
+
+    // CONTROL FIRST: with trust intact the connection is RETAINED, so
+    // the assertion below is about the revocation and not about the
+    // walk failing for some other reason.
+    nodes[0].ledger.reset();
+    if let Some(k) = nodes[0].kad() {
+        k.add_address(&b, b_addr.clone());
+        let id = k.get_closest_peers(c);
+        nodes[0].own_queries.insert(id, QueryClass::Targeted);
+    }
+    pump_until(&mut nodes, Duration::from_secs(20), |n| {
+        n[0].ledger.retained() > 0
+    })
+    .await;
+    r.check(
+        "K20.1",
+        &format!(
+            "CONTROL: with trust intact a behaviour connection is retained ({} retained, {} withdrawn)",
+            nodes[0].ledger.retained(),
+            nodes[0].ledger.withdrawn()
+        ),
+        nodes[0].ledger.retained() > 0 && nodes[0].ledger.withdrawn() == 0,
+    );
+
+    // WHAT THE SETTLEMENT READS. The branch above asks
+    // `classify(peer) == DataPlaneTrusted` at settlement rather than
+    // trusting the classification admission made. Revocation is what
+    // makes those two answers differ, so this asserts the input
+    // genuinely changes — before revocation the peer classifies as
+    // data-plane trusted, after it does not.
+    let c_identity = interweave_transport_api::TransportIdentity::parse(c.to_base58())
+        .expect("canonical");
+    let before = nodes[0].manager.lock().expect("manager").classify(&c_identity);
+    nodes[0].revoke(c);
+    let after = nodes[0].manager.lock().expect("manager").classify(&c_identity);
+    r.check(
+        "K20.2",
+        &format!("revocation changes what the settlement reads: {before:?} -> {after:?}"),
+        before == interweave_transport_runtime::ConnectionClass::DataPlaneTrusted
+            && after != interweave_transport_runtime::ConnectionClass::DataPlaneTrusted,
+    );
+
+    // AND ADMISSION REFUSES from then on, which is the half that IS
+    // deterministic: a revoked peer gets no new behaviour dial at all.
+    let _ = nodes[0].swarm.disconnect_peer_id(c);
+    pump(&mut nodes, Duration::from_secs(2)).await;
+    nodes[0].ledger.reset();
+    if let Some(k) = nodes[0].kad() {
+        let id = k.get_closest_peers(c);
+        nodes[0].own_queries.insert(id, QueryClass::Targeted);
+    }
+    pump(&mut nodes, Duration::from_secs(12)).await;
+    r.check(
+        "K20.3",
+        &format!(
+            "after revocation nothing is retained for that peer: {} retained, \
+             refusals {:?}",
+            nodes[0].ledger.retained(),
+            nodes[0].ledger.refusals()
+        ),
+        nodes[0].ledger.retained() == 0,
+    );
+
+    // THE LIMIT, stated rather than papered over. The window between an
+    // admission and its completed handshake is milliseconds on
+    // loopback, and this harness cannot open it on demand — so the
+    // reclassification BRANCH is not driven here. What is established:
+    // the branch reads a classification that revocation really changes
+    // (K20.2), the trusted path really retains (K20.1), and no
+    // retention happens for a revoked peer (K20.3). A test that claimed
+    // to have hit the race would be claiming a schedule it does not
+    // control.
+    r.note(
+        "K20 LIMIT: the admit-then-revoke-then-establish window is not driven \
+         deterministically on loopback, so the reclassification branch itself \
+         is unexercised. Stage 10 owns a test that can hold a dial open."
+            .to_owned(),
+    );
+}
+
+/// K21 — a behaviour dial offering several addresses.
+///
+/// This is finding F9's evidence. `handle_pending_outbound_connection`
+/// returns addresses to ADD; it cannot remove the ones the dial already
+/// carries. So a gate that checks only `addresses.first()` leaves libp2p
+/// free to fall back to a second address that never crossed the address
+/// policy — and records the outcome against an address it may not have
+/// used.
+///
+/// Production never has this problem: `AdmittedDial::from_ticket` binds
+/// exactly ONE address into its `DialOpts`. A behaviour dial is
+/// multi-address, which is a shape the admission was not designed for.
+pub async fn k21_multi_address_behaviour_dial(r: &mut Report) {
+    use interweave_transport_api::TransportIdentity;
+
+    let cfg = NodeConfig {
+        role: KadRole::Server,
+        gate_mode: Mode::PolicyAdmit,
+        ..NodeConfig::default()
+    };
+    let mut nodes = vec![
+        Node::start(&cfg).await,
+        Node::start(&cfg).await,
+        Node::start(&cfg).await,
+    ];
+    let (a, b, c) = (nodes[0].peer_id, nodes[1].peer_id, nodes[2].peer_id);
+    for i in 0..3 {
+        for p in [a, b, c] {
+            nodes[i].trust(p);
+        }
+    }
+    let (b_addr, c_addr) = (nodes[1].dial_address(), nodes[2].dial_address());
+    // THE ROUTER HOLDS TWO ADDRESSES FOR `c`: the real one and a second
+    // that `a` will have quarantined. A walk toward `c` then offers both.
+    let second: libp2p::Multiaddr = "/ip4/127.0.0.1/tcp/2".parse().expect("valid");
+    nodes[1].dial_admitted(c_addr.clone());
+    pump_until(&mut nodes, Duration::from_secs(10), |n| {
+        n[1].observed.connected.contains(&c)
+    })
+    .await;
+    if let Some(k) = nodes[1].kad() {
+        k.add_address(&c, c_addr.clone());
+        k.add_address(&c, second.clone());
+    }
+    nodes[0].dial_admitted(b_addr.clone());
+    pump_until(&mut nodes, Duration::from_secs(10), |n| {
+        n[0].observed.connected.contains(&b)
+    })
+    .await;
+
+    // QUARANTINE THE ADDRESS THE WALK WILL RETURN, through the
+    // production path: an address that authenticated the wrong PeerId.
+    // The router holds a second address too, but `FIND_NODE` answers
+    // from what its routing table considers current — see K21.4's note.
+    let c_identity = TransportIdentity::parse(c.to_base58()).expect("canonical");
+    {
+        let mut m = nodes[0].manager.lock().expect("manager");
+        let ticket = m
+            .handle()
+            .admit(
+                &DialRequest {
+                    peer: Some(c_identity.clone()),
+                    address: c_addr.to_string(),
+                    origin: DialOrigin::ConnectionManager,
+                },
+                0,
+            )
+            .expect("admitted before the mismatch");
+        let recorded = m.record_identity_mismatch(ticket, 0);
+        r.check(
+            "K21.1",
+            "the second address is quarantined by an identity mismatch",
+            recorded,
+        );
+    }
+    // The quarantine is real: asked on its own, that address is refused.
+    let quarantined = nodes[0].manager.lock().expect("manager").handle().admit(
+        &DialRequest {
+            peer: Some(c_identity.clone()),
+            address: c_addr.to_string(),
+            origin: DialOrigin::KademliaQuery,
+        },
+        1_000,
+    );
+    r.check(
+        "K21.2",
+        &format!("and refuses that address on its own: {:?}", quarantined.as_ref().err()),
+        matches!(quarantined, Err(DialDenial::AddressQuarantined)),
+    );
+    drop(quarantined);
+    // CONTROL: a DIFFERENT address for the same peer is still
+    // admissible, so the refusal below is about the address and not
+    // about the peer having been suppressed.
+    let other = nodes[0].manager.lock().expect("manager").handle().admit(
+        &DialRequest {
+            peer: Some(c_identity),
+            address: second.to_string(),
+            origin: DialOrigin::KademliaQuery,
+        },
+        1_000,
+    );
+    r.check(
+        "K21.3",
+        &format!("CONTROL: another address for the same peer is admissible: {:?}", other.as_ref().err()),
+        other.is_ok(),
+    );
+    drop(other);
+
+    nodes[0].ledger.reset();
+    if let Some(k) = nodes[0].kad() {
+        k.add_address(&b, b_addr);
+        let id = k.get_closest_peers(c);
+        nodes[0].own_queries.insert(id, QueryClass::Targeted);
+    }
+    pump(&mut nodes, Duration::from_secs(15)).await;
+
+    let refusals = nodes[0].ledger.refusals();
+    let offered = nodes[0]
+        .observed
+        .learned_addresses
+        .get(&c)
+        .map_or(0, std::collections::BTreeSet::len);
+    r.check(
+        "K21.4",
+        &format!(
+            "the walk really tried to reach the target: {} dials, aimed at it: {}",
+            nodes[0].ledger.behaviour_originated(),
+            nodes[0].ledger.behaviour_targets().contains(&c)
+        ),
+        nodes[0].ledger.behaviour_targets().contains(&c),
+    );
+    // THE FINDING. libp2p calls `handle_pending_outbound_connection`
+    // with an EMPTY candidate list for a behaviour dial — the hook is
+    // where behaviours CONTRIBUTE addresses, and the union is dialled
+    // after it returns. So address-scoped policy cannot be decided
+    // there, however carefully the list is walked. Measured rather than
+    // reasoned about, because the whole class of bug here is a check
+    // that runs against nothing.
+    let offered_to_hook = nodes[0].ledger.offered_addresses();
+    r.check(
+        "K21.5",
+        &format!(
+            "the dial hook is given NO candidate addresses for a behaviour \
+             dial: {offered_to_hook:?}"
+        ),
+        !offered_to_hook.is_empty() && offered_to_hook.iter().all(|n| *n == 0),
+    );
+    r.check(
+        "K21.6",
+        &format!(
+            "the connection is refused on the address it actually used, so the \
+             quarantine binds: {} address refusal(s), {refusals:?}",
+            nodes[0].ledger.address_refusals()
+        ),
+        nodes[0].ledger.address_refusals() > 0
+            && refusals.contains_key("address quarantined"),
+    );
+    r.check(
+        "K21.7",
+        "and no connection to that peer survives",
+        !nodes[0].observed.connected.contains(&c),
+    );
+    r.note(format!(
+        "K21: {} dials, {} allowed, refusals {refusals:?}, addresses OFFERED TO \
+         THE HOOK {:?}, addresses learned {:?}",
+        nodes[0].ledger.behaviour_originated(),
+        nodes[0].ledger.behaviour_allowed(),
+        nodes[0].ledger.offered_addresses(),
+        nodes[0].observed.learned_addresses.get(&c)
     ));
 }

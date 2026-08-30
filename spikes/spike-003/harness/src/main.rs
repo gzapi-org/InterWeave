@@ -129,6 +129,14 @@ async fn main() {
         experiments::k19_ceilings_apply_to_behaviour_dials(&mut r).await;
     }
 
+    if want("K21") {
+        println!("\nK21 — a behaviour dial offering several addresses");
+        experiments::k21_multi_address_behaviour_dial(&mut r).await;
+    }
+    if want("K20") {
+        println!("\nK20 — trust revoked between admission and the handshake");
+        experiments::k20_authority_withdrawn_mid_dial(&mut r).await;
+    }
     if want("K15") {
         println!("\nK15 — every SnapshotResult field is computable and bounded");
         experiments::k15_snapshot_is_bounded(&mut r).await;

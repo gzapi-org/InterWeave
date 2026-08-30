@@ -227,7 +227,7 @@ fn record_kad(node: &mut Node, event: kad::Event) {
             // A QUERY THIS NODE DID NOT START is the library's own work,
             // which is precisely what the brief says must be counted
             // rather than assumed absent.
-            if !node.own_queries.contains(&id) {
+            if !node.own_queries.contains_key(&id) {
                 node.observed.unattributed_queries.insert(id);
             }
             let mut learned: Vec<(PeerId, BTreeSet<libp2p::Multiaddr>)> = Vec::new();

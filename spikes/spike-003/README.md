@@ -1,6 +1,6 @@
 # SPIKE-003 — Kademlia integration validation
 
-**Status: PASS**, with seven findings that change how Stage 10 must be written — one of which says Stage 10 cannot begin by enabling the feature.
+**Status: PASS**, with ten findings that change how Stage 10 must be written — one of which says Stage 10 cannot begin by enabling the feature, and three of which say the gate cannot be written the obvious way.
 
 Authoritative objective, evidence requirements, and decision gate live in [`architecture/roadmap/SPIKES.md`](../../architecture/roadmap/SPIKES.md); this file records what was actually observed.
 
@@ -35,11 +35,13 @@ Measuring only the first would say the gate refuses everything; measuring only t
 
 **`PolicyAdmit` asks the `ConnectionManager`, not `ConnectionPolicy`**, and the distinction is finding F7 below rather than an implementation detail.
 
+It uses a **live clock** — finding F8b: `now_ms` was a field pinned at zero, so every admission and settlement carried the same timestamp, a backoff recorded at 0 with a 30-second delay expired at a moment the clock never reached, and `PeerBackoff` was permanent rather than temporary. Every experiment asserting the immediate refusal passed throughout.
+
 It also handles the ticket the way the runtime must, which is finding **F8**: a `DialTicket` reserves a pending-dial slot **and** the connection it may become, and its `Drop` returns both. So the gate holds the ticket while the dial is in flight; on failure it hands it back through `record_failure`, and on success it converts it with `record_success` into a `ConnectionSlot` that it keeps until the connection closes. Dropping the ticket on receipt bounds nothing; dropping it when the dial *establishes* bounds `max_pending_dials` and silently exempts `max_connections`. The second is the subtler of the two and is exactly what the first version of this fix did.
 
 ## What was observed
 
-117 assertions across 19 experiments, consecutive clean runs. The harness exits non-zero when any required observation is false, so `cargo run` cannot report success while its own output disproves the record.
+132 assertions across 21 experiments, consecutive clean runs. The harness exits non-zero when any required observation is false, so `cargo run` cannot report success while its own output disproves the record.
 
 **Namespace (K1).** The published golden vector reproduces exactly: `network_id: example-private-network` → `ssbtblqj7mexczivog5qfbfjvi` → `/interweave/kad/1.0.0/ssbtblqj7mexczivog5qfbfjvi`. The derivation is implemented from the specification text rather than from a shared helper, so a derivation that merely agrees with itself could not pass. The 26-character unpadded base32 tag is a valid `libp2p::StreamProtocol`, and the `^[a-z0-9][a-z0-9._-]{0,63}$` grammar accepts and refuses what the spec says it should.
 
@@ -69,6 +71,10 @@ Each part fails to a different mutation and passes the others', which is the rea
 
 **Capability observation (K13).** A server on *this* `network_id` is observed advertising the exact protocol; a server on a different `network_id` is not — the hash is genuinely part of the evidence. A node dropped to client mode stops advertising the server protocol, and the fresh Identify exchange **replaces** the observation rather than merging it.
 
+**What the dial hook can and cannot decide (K21).** libp2p calls `handle_pending_outbound_connection` with an **empty** candidate list for a behaviour dial — measured, not assumed: the harness records the count it was handed, and it is zero every time. The hook is where behaviours *contribute* addresses, and the union is dialled after it returns. So trust, per-peer backoff, drain and the ceilings can be decided there and **address-scoped policy cannot**, however carefully the list is walked. The address check therefore happens at `handle_established_outbound_connection`, which is handed the address that was actually used: a peer whose address is quarantined is dialled, the connection is refused on that address, and no connection to it survives — against a control showing a different address for the same peer is still admissible.
+
+**Trust withdrawn mid-dial (K20).** The gate admits against the trust of the moment it is asked and settles later, so the settlement reclassifies rather than trusting the admission's answer. With trust intact a behaviour connection is retained; revocation genuinely changes what the settlement reads (`DataPlaneTrusted` → `Unauthorized`); and after revocation nothing is retained for that peer.
+
 **Targeted lookup (K14).** §9.2's eligibility rule is project logic, implemented over the observation the library provides and denied one conjunct at a time: an untrusted target, absent evidence, *negative* evidence, a client-mode observation, evidence from another `network_id`, evidence for another wire major, stale evidence past the TTL, a peer that already has a usable address, an unexpired cooldown, and an exhausted budget each refuse it on their own. Then the lookup itself runs for real — an asker holding **no** address for the target asks the DHT by PeerId and recovers the address a router knows.
 
 **Snapshot (K15).** Every `SnapshotResult` field the driver port specifies is computable from the real API, and every one is a scalar or a fixed-width tag: no routing dump, no peer list, no payload. `pending_behaviour_dials` is the gate's **live** gauge and is asserted against its cumulative total, because reporting the total would show settled dials as in flight — a materially wrong diagnostic rather than an imprecise one. The **asynchronous** half is exercised separately over a real bounded channel and a real deadline: a correlated answer arrives inside the control deadline, a missing one is a bounded timeout rather than a hang, an answer bearing another request id is not accepted as this request's, and the channel refuses when full.
@@ -93,7 +99,15 @@ Each part fails to a different mutation and passes the others', which is the rea
 
 **F7 — `ConnectionPolicy::admit` is not the root admission, and the difference is invisible until it matters.** The policy answers trust, per-peer backoff, address quarantine and drain state. The **pending-dial and connection ceilings are enforced one layer up**, in the manager, which is also what mints the `DialTicket` that reserves them. A Stage 10 gate that consults the policy directly will therefore refuse an untrusted or backed-off peer perfectly — every trust test passes — while `max_pending_dials` and `max_connections` influence no Kademlia dial at all. This spike's first version did exactly that, and its limits experiment passed.
 
+**F8b — a gate needs a real clock, and a frozen one fails open in a way every test agrees with.** `now_ms` pinned at zero stamps every admission and every settlement at the same instant. A backoff recorded at 0 with the manager's 30-second base delay expires at 30_000, which a frozen clock never reaches — so `PeerBackoff` becomes permanent, the peer is never retried, and every assertion about the *immediate* refusal keeps passing. The clock is elapsed real time, and `K9.6` asserts it advances, because that is the only observation a frozen clock fails.
+
 **F8 — a `DialTicket` reserves two things, and settling it wrongly exempts one of them silently.** The ticket holds a pending-dial slot and the connection that dial may become; `Drop` returns both. A gate that drops it on receipt bounds nothing. A gate that drops it when the dial **establishes** — which reads like the obvious cleanup — bounds `max_pending_dials` correctly and exempts `max_connections` entirely, because the connection reservation goes back at the moment the connection starts existing. `record_success` is what converts the ticket into a `ConnectionSlot` that keeps it, and the slot is released with `record_connection_closed`. Both wrong versions were written here before the right one, and each passed every ceiling assertion the other failed.
+
+**F9 — address-scoped policy cannot be enforced at the dial hook, because the address does not exist yet.** For a behaviour-originated dial `handle_pending_outbound_connection` receives **no** candidate addresses: it is the hook where behaviours contribute them. A gate that checks `addresses.first()` is not merely incomplete, it is reading an empty list and admitting every quarantined route while appearing to check. The address is available at `handle_established_outbound_connection` — after TCP connect, before the handler exists — which is later than production's check and the only place a behaviour dial has one at all. Stage 10 must decide whether that lateness is acceptable, and the cost is one TCP connect to a suppressed address.
+
+**F10 — the two halves of the system key the same route differently.** A behaviour dial's address arrives as `/ip4/…/tcp/…/p2p/<peer>`, because a query result carries the peer component. The address book and the quarantine map are keyed by the bare transport address, which is what `AdmittedDial` binds. Passing the suffixed form to the policy looks up an address it has never seen, so **every quarantine silently misses** and the dial is admitted on a route the policy had suppressed. Normalising — stripping the `/p2p` component — is what makes F9's remedy work at all.
+
+**F11 — an address probe must discard the capacity answers.** The check at the established hook asks the same `admit`, which decides policy *and* takes a reservation; the dial being checked already holds one. At a tight ceiling the probe is therefore refused for capacity that this very dial is occupying, and refusing on that denies every behaviour connection. Capacity was decided when the ticket was minted; the late hook is for the address and for authority that can have changed since. This was measured rather than predicted — it broke the connection-ceiling experiment.
 
 ## Stated limits
 
@@ -105,6 +119,7 @@ These are the things this spike did **not** establish, recorded so no future rea
 - **Server-mode reachability evidence is not consumed.** The design requires AutoNAT-verified direct reachability or an active relay reservation as strong evidence before a node advertises server mode. AutoNAT and Relay are absent from the feature list — SPIKE-004 is where they arrive — so this spike **cannot** validate that rule, and Stage 10 must not treat it as validated. A node here advertises server mode because it was configured to.
 - **The exploration rules are validated as logic, not as deployment behaviour.** K12 exercises the state machine over synthetic rounds. Whether three no-progress rounds is the right threshold on a real network is not a question a five-node loopback topology can answer.
 - **`PolicyAdmit` is a prototype.** It demonstrates that the production admission *can* decide a behaviour dial, that its answers reach the library correctly, and that both ceilings bind when the ticket is settled properly. It is not the production gate, has not been reviewed as one, and Stage 10 owns writing it.
+- **The trust-withdrawn race window is not driven.** K20 establishes that the settlement reads a classification revocation really changes, that the trusted path retains, and that nothing is retained for a revoked peer. It does **not** drive the admit-then-revoke-then-establish window itself: that gap is milliseconds on loopback and this harness cannot open it on demand. Removing the reclassification check fails no observation here, which is stated rather than hidden — Stage 10 owns a test that can hold a dial open.
 - **The Snapshot channel is modelled, not driven.** K15 exercises correlation, the deadline, miscorrelation and the bound over a real Tokio channel, but there is no `KadCommand` enum and no driver task here: the Swarm is polled directly. What is established is that the specified semantics are implementable and that each failure mode is detectable — not that any particular driver implements them.
 
 ## Reproducing
@@ -123,4 +138,8 @@ Three mutations confirm the assertions are load-bearing rather than agreeing wit
 - making the gate admit every behaviour dial unconditionally fails K8.3, K8.4, K9.2 and K9.3 — the trust and backoff refusals;
 - setting `StoreInserts::Unfiltered` and `BucketInserts::OnConnected` fails K3.2, K5.1, K10.3, K11.2 and the K18 block;
 - making the gate **drop** its `DialTicket` instead of holding it fails K19.7 — and nothing else, because every other ceiling assertion fills the ceiling with an ordinary dial's ticket;
-- making the gate drop the ticket when a dial **establishes**, instead of converting it with `record_success`, fails K19.9 — and nothing else, including K19.7.
+- making the gate drop the ticket when a dial **establishes**, instead of converting it with `record_success`, fails K19.9 — and nothing else, including K19.7;
+- freezing the gate's clock at zero fails K9.6, and only K9.6 — which is the point of having it, since a frozen clock leaves every backoff-refusal assertion green;
+- removing the address check at the established hook fails K21.6 and K21.7.
+
+One mutation deliberately fails nothing: removing the settlement's reclassification. That is K20's stated limit, confirmed rather than papered over.
