@@ -353,6 +353,15 @@ impl KademliaDiscovery {
         peers.remove(&self.local);
         self.cooldowns.retain(|peer, _| peers.contains(peer));
         self.trusted = peers;
+        // RECONCILED IMMEDIATELY, not on the driver's schedule. The
+        // driver's own revocation path removes the peer and reports
+        // RoutingPeerRemoved, but until that event arrives a view that
+        // still counted a revoked router could report the new effective
+        // target satisfied and rest on a peer that is no longer
+        // authorized. The later removal event finds nothing and changes
+        // nothing.
+        let trusted = &self.trusted;
+        self.routing.retain(|peer| trusted.contains(peer));
         // §9.3: a trust-policy revision invalidates saturation — the set
         // the exploration ran out of is not the set any more.
         self.no_progress_rounds = 0;
@@ -2192,5 +2201,27 @@ mod tests {
             "inside its cooldown the target is not IMMEDIATELY targetable, \
              so the saturated view may rest (§9.3)"
         );
+    }
+
+    #[test]
+    fn a_trust_revision_drops_revoked_routers_from_the_view_at_once() {
+        let mut p = started(KademliaMode::Client);
+        let (a, b) = (synthetic_peer(1), synthetic_peer(2));
+        trust(&mut p, &[&a]);
+        routed(&mut p, &a, 1_000);
+        assert_eq!(p.routing_view().routing_peers, 1);
+
+        // A is replaced by B: the driver's RoutingPeerRemoved has not
+        // arrived yet, and must not be needed for the VIEW to be honest.
+        trust(&mut p, &[&b]);
+        assert_eq!(
+            p.routing_view().routing_peers,
+            0,
+            "a revoked router does not satisfy the new effective target"
+        );
+        // The driver's own removal, arriving later, finds nothing left
+        // to do.
+        p.ingest_driver_event(KademliaEvent::RoutingPeerRemoved { peer: a }, 2_000);
+        assert_eq!(p.routing_view().routing_peers, 0);
     }
 }
