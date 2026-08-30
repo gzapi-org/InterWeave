@@ -1,6 +1,6 @@
 # SPIKE-003 — Kademlia integration validation
 
-**Status: PASS**, with ten findings that change how Stage 10 must be written — one of which says Stage 10 cannot begin by enabling the feature, and three of which say the gate cannot be written the obvious way.
+**Status: PASS**, with eleven findings that change how Stage 10 must be written — one of which says Stage 10 cannot begin by enabling the feature, and three of which say the gate cannot be written the obvious way.
 
 Authoritative objective, evidence requirements, and decision gate live in [`architecture/roadmap/SPIKES.md`](../../architecture/roadmap/SPIKES.md); this file records what was actually observed.
 
@@ -41,7 +41,7 @@ It also handles the ticket the way the runtime must, which is finding **F8**: a 
 
 ## What was observed
 
-132 assertions across 21 experiments, consecutive clean runs. The harness exits non-zero when any required observation is false, so `cargo run` cannot report success while its own output disproves the record.
+145 assertions across 22 experiments, consecutive clean runs. The harness exits non-zero when any required observation is false, so `cargo run` cannot report success while its own output disproves the record.
 
 **Namespace (K1).** The published golden vector reproduces exactly: `network_id: example-private-network` → `ssbtblqj7mexczivog5qfbfjvi` → `/interweave/kad/1.0.0/ssbtblqj7mexczivog5qfbfjvi`. The derivation is implemented from the specification text rather than from a shared helper, so a derivation that merely agrees with itself could not pass. The 26-character unpadded base32 tag is a valid `libp2p::StreamProtocol`, and the `^[a-z0-9][a-z0-9._-]{0,63}$` grammar accepts and refuses what the spec says it should.
 
@@ -72,6 +72,10 @@ Each part fails to a different mutation and passes the others', which is the rea
 **Capability observation (K13).** A server on *this* `network_id` is observed advertising the exact protocol; a server on a different `network_id` is not — the hash is genuinely part of the evidence. A node dropped to client mode stops advertising the server protocol, and the fresh Identify exchange **replaces** the observation rather than merging it.
 
 **What the dial hook can and cannot decide (K21).** libp2p calls `handle_pending_outbound_connection` with an **empty** candidate list for a behaviour dial — measured, not assumed: the harness records the count it was handed, and it is zero every time. The hook is where behaviours *contribute* addresses, and the union is dialled after it returns. So trust, per-peer backoff, drain and the ceilings can be decided there and **address-scoped policy cannot**, however carefully the list is walked. The address check therefore happens at `handle_established_outbound_connection`, which is handed the address that was actually used: a peer whose address is quarantined is dialled, the connection is refused on that address, and no connection to it survives — against a control showing a different address for the same peer is still admissible.
+
+**The bounded query scheduler (K22).** A concurrency ceiling and a rate ceiling, shared across the three query classes. `kad::Config::set_parallelism` is not this: it bounds the peers ONE query contacts at a time and says nothing about how many queries a provider may run or how often it may start them. Modelled here and asserted: the concurrency budget admits exactly its number and refuses the next *for concurrency*; a finished query returns its slot; start-and-finish is bounded by the RATE, which concurrency cannot stand in for since a prompt caller never reaches it; the window slides rather than resetting, so the budget cannot be spent twice across a boundary; and driving real `kad` queries through it, a driver asking for ten starts exactly two and the node really has two in flight.
+
+**The routing bound under pressure (K17.5/K17.6).** `max_routing_peers` is project logic applied before manual insertion, and `kbucket_size` does not stand in for it — a table can hold `kbucket_size` entries in each of many buckets and still exceed the total. It is only testable against a population *larger* than the bound and on a *fresh* node, since a bound stops a table growing and cannot shrink one already full. Two newcomers join the converged twenty-node network from the same seed: the bounded one stops at 5, its twin reaches 20.
 
 **Trust withdrawn mid-dial (K20).** The gate admits against the trust of the moment it is asked and settles later, so the settlement reclassifies rather than trusting the admission's answer. With trust intact a behaviour connection is retained; revocation genuinely changes what the settlement reads (`DataPlaneTrusted` → `Unauthorized`); and after revocation nothing is retained for that peer.
 
@@ -109,6 +113,8 @@ Each part fails to a different mutation and passes the others', which is the rea
 
 **F11 — an address probe must discard the capacity answers.** The check at the established hook asks the same `admit`, which decides policy *and* takes a reservation; the dial being checked already holds one. At a tight ceiling the probe is therefore refused for capacity that this very dial is occupying, and refusing on that denies every behaviour connection. Capacity was decided when the ticket was minted; the late hook is for the address and for authority that can have changed since. This was measured rather than predicted — it broke the connection-ceiling experiment.
 
+**F12 — a `DialTicket` binds its address at admission, which a behaviour dial cannot supply.** F9 says the address does not exist at the dial hook; the consequence is that the ticket carries an empty placeholder, and `record_success` / `record_failure` feed `ticket.address()` to the address policy and the address book. So **every Kademlia route settles against one empty entry**: the address that worked never becomes known-good, the address that failed is never scored, and the address book never learns either. The harness works around it by re-minting the settlement ticket against the address actually used — recovered from the established hook, or from `DialError::Transport` when the dial never established, which is the case the established hook cannot reach. That is a workaround, not a design: Stage 10 needs either a re-bindable ticket or a settlement API that takes the address.
+
 ## Stated limits
 
 These are the things this spike did **not** establish, recorded so no future reader mistakes its silence for a result.
@@ -120,6 +126,7 @@ These are the things this spike did **not** establish, recorded so no future rea
 - **The exploration rules are validated as logic, not as deployment behaviour.** K12 exercises the state machine over synthetic rounds. Whether three no-progress rounds is the right threshold on a real network is not a question a five-node loopback topology can answer.
 - **`PolicyAdmit` is a prototype.** It demonstrates that the production admission *can* decide a behaviour dial, that its answers reach the library correctly, and that both ceilings bind when the ticket is settled properly. It is not the production gate, has not been reviewed as one, and Stage 10 owns writing it.
 - **The trust-withdrawn race window is not driven.** K20 establishes that the settlement reads a classification revocation really changes, that the trusted path retains, and that nothing is retained for a revoked peer. It does **not** drive the admit-then-revoke-then-establish window itself: that gap is milliseconds on loopback and this harness cannot open it on demand. Removing the reclassification check fails no observation here, which is stated rather than hidden — Stage 10 owns a test that can hold a dial open.
+- **The query scheduler is modelled, not wired.** K22 exercises the budgets and drives real queries through them, but every other experiment starts queries directly on the behaviour — so a scheduler that exists in a driver and is never consulted would be invisible to them. What is established is that the specified budgets are implementable and that each refusal is distinguishable.
 - **The Snapshot channel is modelled, not driven.** K15 exercises correlation, the deadline, miscorrelation and the bound over a real Tokio channel, but there is no `KadCommand` enum and no driver task here: the Swarm is polled directly. What is established is that the specified semantics are implementable and that each failure mode is detectable — not that any particular driver implements them.
 
 ## Reproducing
@@ -140,6 +147,8 @@ Three mutations confirm the assertions are load-bearing rather than agreeing wit
 - making the gate **drop** its `DialTicket` instead of holding it fails K19.7 — and nothing else, because every other ceiling assertion fills the ceiling with an ordinary dial's ticket;
 - making the gate drop the ticket when a dial **establishes**, instead of converting it with `record_success`, fails K19.9 — and nothing else, including K19.7;
 - freezing the gate's clock at zero fails K9.6, and only K9.6 — which is the point of having it, since a frozen clock leaves every backoff-refusal assertion green;
-- removing the address check at the established hook fails K21.6 and K21.7.
+- removing the address check at the established hook fails K21.6 and K21.7;
+- settling against the placeholder instead of the address used fails K18.6;
+- ignoring the project routing bound fails K17.5, with its control unaffected.
 
 One mutation deliberately fails nothing: removing the settlement's reclassification. That is K20's stated limit, confirmed rather than papered over.

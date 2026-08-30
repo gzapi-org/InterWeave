@@ -123,6 +123,17 @@ pub async fn pump_until(
 /// more than it looks, because under `BucketInserts::Manual` it is the
 /// only way a seed node learns the peers that dialled it.
 pub fn admit_candidates(node: &mut Node, protocol: &str) -> usize {
+    admit_candidates_bounded(node, protocol, usize::MAX)
+}
+
+/// The same pipeline under a project `max_routing_peers` bound.
+///
+/// The bound is PROJECT logic — `kademlia-integration.md` §11 puts it
+/// "before manual insertion", and rust-libp2p knows nothing about it.
+/// `kbucket_size` is the library's own per-bucket cap and does not stand
+/// in for it: a table can hold `kbucket_size` entries in each of many
+/// buckets and still exceed a total the project meant to enforce.
+pub fn admit_candidates_bounded(node: &mut Node, protocol: &str, max_routing: usize) -> usize {
     let trusted = node.trusts();
     let me = node.peer_id;
     let mut candidates: Vec<(PeerId, libp2p::Multiaddr)> = Vec::new();
@@ -153,6 +164,13 @@ pub fn admit_candidates(node: &mut Node, protocol: &str) -> usize {
     for (peer, addr) in candidates {
         if peer == me || !trusted.contains(&peer) {
             continue;
+        }
+        // THE PROJECT BOUND, checked BEFORE insertion. Reading the live
+        // table each time rather than counting admissions: a candidate
+        // already present is not a new entry, and counting insertions
+        // would refuse re-announcements of peers the table already has.
+        if node.routing_peers() >= max_routing {
+            break;
         }
         if let Some(k) = node.swarm.behaviour_mut().kad.as_mut() {
             k.add_address(&peer, addr);

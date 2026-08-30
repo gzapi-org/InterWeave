@@ -88,6 +88,9 @@ struct LedgerInner {
     offered_addresses: Vec<usize>,
     /// Behaviour connections refused on the address they actually used.
     address_refusals: u64,
+    /// The address each in-flight behaviour dial actually used, learned
+    /// at the established hook — the first moment it exists.
+    used_address: BTreeMap<ConnectionId, String>,
 }
 
 impl DialLedger {
@@ -460,9 +463,20 @@ impl NetworkBehaviour for InstrumentedGate {
         let Ok(identity) = TransportIdentity::parse(peer.to_base58()) else {
             return Ok(dummy::ConnectionHandler);
         };
+        let used = normalize(addr);
+        // REMEMBERED FOR SETTLEMENT. The ticket this dial holds was
+        // minted with an empty placeholder address, because at
+        // admission there was none — see F9. Settling with it records
+        // every Kademlia route against one empty address-policy entry,
+        // so the address that was actually used has to be carried
+        // forward from here, which is the first moment it exists.
+        self.ledger
+            .lock()
+            .used_address
+            .insert(connection_id, used.clone());
         let request = DialRequest {
             peer: Some(identity),
-            address: normalize(addr),
+            address: used,
             origin: DialOrigin::KademliaQuery,
         };
         // A PROBE, and the CAPACITY answers must be discarded from it.
@@ -508,7 +522,25 @@ impl NetworkBehaviour for InstrumentedGate {
         let settled = match event {
             FromSwarm::ConnectionEstablished(e) => Some((e.connection_id, true)),
             FromSwarm::ConnectionClosed(e) => Some((e.connection_id, false)),
-            FromSwarm::DialFailure(e) => Some((e.connection_id, false)),
+            FromSwarm::DialFailure(e) => {
+                // A DIAL THAT NEVER ESTABLISHED still names its
+                // addresses — `DialError::Transport` carries one entry
+                // per address attempted. Without this the failure is
+                // settled against the empty placeholder, so an address
+                // that refused the connection is never scored and never
+                // enters the address book: exactly the case the
+                // established hook cannot reach, because there is no
+                // established connection.
+                if let libp2p::swarm::DialError::Transport(attempts) = e.error
+                    && let Some((addr, _)) = attempts.first()
+                {
+                    self.ledger
+                        .lock()
+                        .used_address
+                        .insert(e.connection_id, normalize(addr));
+                }
+                Some((e.connection_id, false))
+            }
             _ => None,
         };
         match settled {
@@ -525,6 +557,7 @@ impl NetworkBehaviour for InstrumentedGate {
                     .remove(&id)
                 {
                     let now = self.now_ms();
+                    let used = self.ledger.lock().used_address.remove(&id);
                     let mut m = self.manager.lock().unwrap_or_else(|e| e.into_inner());
                     // RECLASSIFIED at settlement, not trusted from
                     // admission. Trust can be revoked between the
@@ -538,13 +571,24 @@ impl NetworkBehaviour for InstrumentedGate {
                         .peer()
                         .is_some_and(|p| m.classify(p) == ConnectionClass::DataPlaneTrusted);
                     if still_authorized {
-                        let slot = m.record_success(ticket, now);
-                        drop(m);
-                        self.connections
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .insert(id, slot);
-                        self.ledger.lock().retained += 1;
+                        // THE ADDRESS THAT WAS USED, not the placeholder.
+                        // `record_success` feeds `ticket.address()` to the
+                        // address policy and the address book, so settling
+                        // the placeholder marks an empty string as the
+                        // peer's known-good route and leaves the real one
+                        // unrecorded. The ticket binds its address at
+                        // admission and a behaviour dial has none then, so
+                        // the settlement re-mints against the real address
+                        // — F12.
+                        if let Some(ticket) = resettle(&m, ticket, used.as_deref(), now) {
+                            let slot = m.record_success(ticket, now);
+                            drop(m);
+                            self.connections
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert(id, slot);
+                            self.ledger.lock().retained += 1;
+                        }
                     } else {
                         m.record_authorization_withdrawn(ticket, now);
                         self.ledger.lock().withdrawn += 1;
@@ -562,10 +606,17 @@ impl NetworkBehaviour for InstrumentedGate {
                     .unwrap_or_else(|e| e.into_inner())
                     .remove(&id)
                 {
-                    self.manager
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .record_failure(ticket, self.now_ms());
+                    let now = self.now_ms();
+                    let used = self.ledger.lock().used_address.remove(&id);
+                    let m = self.manager.lock().unwrap_or_else(|e| e.into_inner());
+                    let fresh = resettle(&m, ticket, used.as_deref(), now);
+                    drop(m);
+                    if let Some(ticket) = fresh {
+                        self.manager
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .record_failure(ticket, now);
+                    }
                 }
                 if let Some(slot) = self
                     .connections
@@ -598,6 +649,56 @@ impl NetworkBehaviour for InstrumentedGate {
     ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
         Poll::Pending
     }
+}
+
+/// Re-mint a settlement ticket against the address the dial USED.
+///
+/// A `DialTicket` binds its address when it is admitted, and a
+/// behaviour dial has no address then (F9) — so the held ticket carries
+/// an empty placeholder, and settling it records every Kademlia route
+/// against one empty address-policy entry: the real address never
+/// becomes known-good, never enters the address book, and a failure on
+/// it is never scored.
+///
+/// Re-admitting against the real address is the workaround available
+/// through the production API as it stands. It briefly takes a second
+/// reservation, which is why the ORIGINAL is dropped first. If the
+/// re-mint is refused — a ceiling, or a policy that changed under it —
+/// the placeholder is settled instead: an imprecise settlement is worse
+/// than none, but losing the accounting entirely is worse still.
+///
+/// F12 records the underlying gap: Stage 10 needs either a re-bindable
+/// ticket or a settlement API that takes the address, because this is a
+/// workaround and not a design.
+fn resettle(
+    manager: &ConnectionManager,
+    ticket: DialTicket,
+    used: Option<&str>,
+    now_ms: u64,
+) -> Option<DialTicket> {
+    let Some(used) = used else {
+        return Some(ticket);
+    };
+    if ticket.address() == used {
+        return Some(ticket);
+    }
+    let Some(peer) = ticket.peer().cloned() else {
+        return Some(ticket);
+    };
+    let request = DialRequest {
+        peer: Some(peer),
+        address: used.to_owned(),
+        origin: DialOrigin::KademliaQuery,
+    };
+    // The original goes back FIRST, so the re-mint is not competing
+    // with the reservation it is replacing.
+    drop(ticket);
+    // `None` when the re-mint is refused — a ceiling, or a policy that
+    // changed under it. The reservation is already released by the drop
+    // above, so nothing leaks; what is lost is this dial's address
+    // accounting, which is better than recording it against an address
+    // the dial did not use.
+    manager.handle().admit(&request, now_ms).ok()
 }
 
 /// Strip the `/p2p/<peer>` component, leaving the transport address.

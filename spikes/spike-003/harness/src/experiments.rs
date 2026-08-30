@@ -1554,13 +1554,18 @@ pub async fn k17_twenty_node_convergence(r: &mut Report) {
         &format!("every node routes every other: {full}/{N} at {} entries", N - 1),
         full == N,
     );
+    // `s < N` was TAUTOLOGICAL: with N nodes a table of unique remote
+    // peers cannot hold more than N - 1, and K17.1 already requires
+    // exactly that. It could not have detected an ignored bound. The
+    // real question needs a population ABOVE a deliberately reduced
+    // bound, which is what K17.5 does.
     r.check(
         "K17.2",
         &format!(
-            "and no routing table exceeds what the bounds allow: max {}",
+            "every table holds exactly the peers it learned: max {}",
             sizes.iter().max().copied().unwrap_or(0)
         ),
-        sizes.iter().all(|&s| s < N),
+        sizes.iter().all(|&s| s == N - 1),
     );
     // EVERY dial ADMITTED, not "at least one seen". `> 0` passed a run
     // in which all 200-plus dials were refused — which would have been
@@ -1585,6 +1590,80 @@ pub async fn k17_twenty_node_convergence(r: &mut Report) {
         "K17: {N} nodes, {rounds} rounds, {:.1}s wall clock, final sizes {sizes:?}",
         elapsed.as_secs_f64()
     ));
+
+    // THE BOUND UNDER PRESSURE, on FRESH nodes. A bound applied before
+    // insertion stops a table GROWING; it cannot shrink one already
+    // full, so re-bounding the converged nodes above would measure
+    // nothing — they hold 19 from rounds that ran before the bound
+    // existed. Two newcomers join the converged network instead, one
+    // bounded and one not, seeded identically.
+    //
+    // `max_routing_peers` is PROJECT logic applied before manual
+    // insertion (§11). rust-libp2p knows nothing about it, and
+    // `kbucket_size` does not stand in for it: a table can hold
+    // `kbucket_size` entries in each of many buckets and still exceed a
+    // total the project meant to enforce. It is only testable against a
+    // population LARGER than the bound.
+    const BOUND: usize = 5;
+    let mut late = vec![Node::start(&cfg).await, Node::start(&cfg).await];
+    let late_ids: Vec<_> = late.iter().map(|n| n.peer_id).collect();
+    for n in &mut late {
+        for id in ids.iter().chain(late_ids.iter()) {
+            n.trust(*id);
+        }
+    }
+    for n in &mut nodes {
+        for id in &late_ids {
+            n.trust(*id);
+        }
+    }
+    late[0].dial_admitted(addrs[0].clone());
+    late[1].dial_admitted(addrs[0].clone());
+    let mut all: Vec<Node> = nodes;
+    all.append(&mut late);
+    pump(&mut all, Duration::from_secs(6)).await;
+    let hub = ids[0];
+    for idx in [N, N + 1] {
+        let addr = addrs[0].clone();
+        if let Some(k) = all[idx].kad() {
+            k.add_address(&hub, addr);
+        }
+    }
+
+    for round in 0..4 {
+        for idx in [N, N + 1] {
+            let key = random_32();
+            if let Some(k) = all[idx].kad() {
+                let q = k.get_n_closest_peers(key, NonZeroUsize::new(20).expect("nonzero"));
+                all[idx].own_queries.insert(q, QueryClass::Exploration);
+            }
+        }
+        pump(&mut all, Duration::from_secs(8)).await;
+        crate::topology::admit_candidates_bounded(&mut all[N], &protocol, BOUND);
+        crate::topology::admit_candidates(&mut all[N + 1], &protocol);
+        pump(&mut all, Duration::from_secs(2)).await;
+        r.note(format!(
+            "K17 bound round {round}: bounded newcomer holds {}, unbounded {}",
+            all[N].routing_peers(),
+            all[N + 1].routing_peers()
+        ));
+    }
+    let bounded = all[N].routing_peers();
+    let unbounded = all[N + 1].routing_peers();
+    r.check(
+        "K17.5",
+        &format!("a node under a reduced bound stops at it: {bounded} <= {BOUND}"),
+        bounded <= BOUND,
+    );
+    r.check(
+        "K17.6",
+        &format!(
+            "CONTROL: its twin, admitting freely from the SAME rounds and the \
+             same seed, holds far more ({unbounded}) — so the bound is what \
+             stopped it, not a shortage of candidates"
+        ),
+        unbounded > BOUND,
+    );
 }
 
 /// K18 — a malicious or stale routing response.
@@ -1758,6 +1837,29 @@ pub async fn k18_stale_routing_response(r: &mut Report) {
     ));
     drop(still_dialable);
     drop(good_slot);
+    // THE SETTLEMENT RECORDED THE ADDRESS THAT WAS USED. A behaviour
+    // dial's ticket is minted with an empty placeholder — there is no
+    // address at admission (F9) — so settling it feeds the empty string
+    // to the address policy and the address book, and every Kademlia
+    // route shares one entry while the real one is never learned. The
+    // address book is the observable: after a failed behaviour dial the
+    // peer's candidates must name the address that failed.
+    let candidates = nodes[0]
+        .manager
+        .lock()
+        .expect("manager")
+        .dial_candidates(&c_identity, 2_000);
+    r.check(
+        "K18.5",
+        &format!("the failed behaviour dial is recorded against the ADDRESS IT USED: {candidates:?}"),
+        candidates.iter().any(|a| a == &dead.to_string()),
+    );
+    r.check(
+        "K18.6",
+        "and never against an empty placeholder",
+        !candidates.iter().any(std::string::String::is_empty),
+    );
+
     r.note(format!(
         "K18 dial errors: {:?}",
         nodes[0]
@@ -2576,4 +2678,206 @@ pub async fn k21_multi_address_behaviour_dial(r: &mut Report) {
         nodes[0].ledger.offered_addresses(),
         nodes[0].observed.learned_addresses.get(&c)
     ));
+}
+
+/// K22 — the bounded query scheduler.
+///
+/// The brief requires "the bounded query scheduler" be exercised and
+/// exploration validated "within the proposed budgets".
+/// `kademlia-integration.md` §15 names them: a concurrency ceiling and a
+/// rate ceiling, shared across the three query classes.
+///
+/// This is PROJECT logic. `kad::Behaviour` has `set_parallelism`, which
+/// bounds the peers ONE query contacts at a time; it has no notion of
+/// how many queries the provider may have running, or how often it may
+/// start them. Starting queries directly on the behaviour — which every
+/// other experiment here does — bypasses a scheduler that does not
+/// exist, so a missing or leaking one would leave every observation
+/// green.
+pub struct QueryScheduler {
+    max_concurrent: usize,
+    max_per_minute: u32,
+    /// Query starts inside the current window, oldest first.
+    starts: std::collections::VecDeque<u64>,
+    active: usize,
+}
+
+/// Why the scheduler refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulerRefusal {
+    Concurrency,
+    Rate,
+}
+
+impl QueryScheduler {
+    const WINDOW_MS: u64 = 60_000;
+
+    #[must_use]
+    pub fn new(max_concurrent: usize, max_per_minute: u32) -> Self {
+        Self {
+            max_concurrent,
+            max_per_minute,
+            starts: std::collections::VecDeque::new(),
+            active: 0,
+        }
+    }
+
+    /// Ask to start one query.
+    ///
+    /// # Errors
+    /// [`SchedulerRefusal`] naming which budget refused. The two are
+    /// distinct because they fail for different reasons and a caller
+    /// that conflates them cannot tell "wait for a slot" from "wait for
+    /// the window".
+    pub fn start(&mut self, now_ms: u64) -> Result<(), SchedulerRefusal> {
+        // THE WINDOW IS PRUNED FIRST, so an old start cannot occupy the
+        // rate budget forever. Deque rather than a counter: a counter
+        // reset on a tick would let a caller spend the whole budget in
+        // the last millisecond of one window and again in the first of
+        // the next.
+        while self
+            .starts
+            .front()
+            .is_some_and(|t| now_ms.saturating_sub(*t) >= Self::WINDOW_MS)
+        {
+            self.starts.pop_front();
+        }
+        if self.active >= self.max_concurrent {
+            return Err(SchedulerRefusal::Concurrency);
+        }
+        if self.starts.len() as u32 >= self.max_per_minute {
+            return Err(SchedulerRefusal::Rate);
+        }
+        self.starts.push_back(now_ms);
+        self.active += 1;
+        Ok(())
+    }
+
+    /// One query finished, whatever its outcome.
+    pub fn finish(&mut self) {
+        self.active = self.active.saturating_sub(1);
+    }
+
+    #[must_use]
+    pub const fn active(&self) -> usize {
+        self.active
+    }
+}
+
+pub async fn k22_bounded_query_scheduler(r: &mut Report) {
+    // §13's proposed defaults.
+    const MAX_CONCURRENT: usize = 2;
+    const MAX_PER_MINUTE: u32 = 6;
+    let mut s = QueryScheduler::new(MAX_CONCURRENT, MAX_PER_MINUTE);
+
+    r.check(
+        "K22.1",
+        "the concurrency ceiling admits exactly its budget",
+        s.start(0).is_ok() && s.start(0).is_ok() && s.active() == MAX_CONCURRENT,
+    );
+    r.check(
+        "K22.2",
+        "and refuses the next for CONCURRENCY, not for rate",
+        s.start(0) == Err(SchedulerRefusal::Concurrency),
+    );
+    s.finish();
+    r.check(
+        "K22.3",
+        "a finished query returns its slot",
+        s.start(0).is_ok(),
+    );
+
+    // THE RATE, which the concurrency ceiling does not stand in for: a
+    // caller that starts and finishes promptly never hits concurrency
+    // and could otherwise start without limit.
+    let mut rate = QueryScheduler::new(MAX_CONCURRENT, MAX_PER_MINUTE);
+    let mut started = 0;
+    for _ in 0..20 {
+        if rate.start(1_000).is_ok() {
+            started += 1;
+            rate.finish();
+        }
+    }
+    r.check(
+        "K22.4",
+        &format!("start-and-finish is bounded by the RATE, not concurrency: {started}"),
+        started == MAX_PER_MINUTE as usize,
+    );
+    r.check(
+        "K22.5",
+        "and the refusal says which budget it was",
+        rate.start(1_000) == Err(SchedulerRefusal::Rate),
+    );
+
+    // THE WINDOW SLIDES. A counter reset on a tick would let the whole
+    // budget be spent in the last millisecond of one window and again in
+    // the first of the next — twice the rate across the boundary.
+    r.check(
+        "K22.6",
+        "the window is still closed just before it lapses",
+        rate.start(1_000 + 59_999) == Err(SchedulerRefusal::Rate),
+    );
+    r.check(
+        "K22.7",
+        "and opens once the oldest start ages out",
+        rate.start(1_000 + 60_000).is_ok(),
+    );
+
+    // AND IT REALLY GATES A REAL QUERY. Everything above is the
+    // scheduler alone; this drives `kad` through it, so a scheduler that
+    // is present but not consulted is visible.
+    let cfg = NodeConfig {
+        role: KadRole::Server,
+        gate_mode: Mode::PolicyAdmit,
+        ..NodeConfig::default()
+    };
+    let mut nodes = vec![Node::start(&cfg).await, Node::start(&cfg).await];
+    let (a, b) = (nodes[0].peer_id, nodes[1].peer_id);
+    nodes[0].trust(a);
+    nodes[0].trust(b);
+    nodes[1].trust(a);
+    nodes[1].trust(b);
+    let b_addr = nodes[1].dial_address();
+    nodes[0].dial_admitted(b_addr.clone());
+    pump_until(&mut nodes, Duration::from_secs(10), |n| {
+        n[0].observed.connected.contains(&b)
+    })
+    .await;
+    if let Some(k) = nodes[0].kad() {
+        k.add_address(&b, b_addr);
+    }
+    pump(&mut nodes, Duration::from_secs(2)).await;
+
+    let mut live = QueryScheduler::new(MAX_CONCURRENT, MAX_PER_MINUTE);
+    let mut issued = 0;
+    let mut refused = 0;
+    for _ in 0..10 {
+        if live.start(0).is_ok() {
+            issued += 1;
+            if let Some(k) = nodes[0].kad() {
+                let q = k.get_n_closest_peers(random_32(), NonZeroUsize::new(4).expect("nonzero"));
+                nodes[0].own_queries.insert(q, QueryClass::Exploration);
+            }
+        } else {
+            refused += 1;
+        }
+    }
+    r.check(
+        "K22.8",
+        &format!("a driver asking for ten queries starts {issued} and is refused {refused}"),
+        issued == MAX_CONCURRENT && refused == 10 - MAX_CONCURRENT,
+    );
+    let active = nodes[0].active_queries_by_class();
+    r.check(
+        "K22.9",
+        &format!("and the node really has exactly that many in flight: {active:?}"),
+        active.get(&QueryClass::Exploration).copied() == Some(MAX_CONCURRENT),
+    );
+    r.note(
+        "K22 LIMIT: the scheduler is project logic modelled here, not a \\
+         component of the harness's Kademlia driver — every other experiment \\
+         starts queries directly on the behaviour, which is why a scheduler \\
+         that exists but is never consulted would be invisible to them."
+            .to_owned(),
+    );
 }
