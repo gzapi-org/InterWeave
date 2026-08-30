@@ -178,12 +178,20 @@ pub fn admit_candidates_bounded(node: &mut Node, protocol: &str, max_routing: us
         if peer == me || !trusted.contains(&peer) {
             continue;
         }
-        // THE PROJECT BOUND, checked BEFORE insertion. Reading the live
-        // table each time rather than counting admissions: a candidate
-        // already present is not a new entry, and counting insertions
-        // would refuse re-announcements of peers the table already has.
-        if node.routing_peers() >= max_routing {
-            break;
+        // THE PROJECT BOUND, checked BEFORE insertion — and only against
+        // candidates that would GROW the table.
+        //
+        // The comment above used to say a re-announcement is not a new
+        // entry while the code broke unconditionally, so once the table
+        // was full an Identify refresh carrying a fresh address for a
+        // peer already routed was dropped: that peer stayed pinned to
+        // whatever address it was admitted with, and a bound meant to
+        // cap the POPULATION silently froze the addresses too. §11 has
+        // address expiry and removal propagate to the driver, which
+        // cannot happen if updates never reach it.
+        let already_routed = node.routes(&peer);
+        if !already_routed && node.routing_peers() >= max_routing {
+            continue;
         }
         if let Some(k) = node.swarm.behaviour_mut().kad.as_mut() {
             k.add_address(&peer, addr);

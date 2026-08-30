@@ -1823,6 +1823,60 @@ pub async fn k17_twenty_node_convergence(r: &mut Report) {
         ),
         unbounded > BOUND,
     );
+
+    // AND A FULL TABLE STILL TAKES ADDRESS UPDATES. A population bound
+    // caps how many peers are routed; refusing a re-announcement for a
+    // peer already routed would freeze its ADDRESSES too, pinning it to
+    // whatever route it was admitted with while §11 has expiry and
+    // removal propagate to the driver.
+    let routed_peers: Vec<libp2p::PeerId> = ids
+        .iter()
+        .copied()
+        .filter(|p| all[N].routes(p))
+        .collect();
+    r.check(
+        "K17.8",
+        &format!("the bounded node has routed peers to update ({})", routed_peers.len()),
+        !routed_peers.is_empty(),
+    );
+    let subject = routed_peers[0];
+    let fresh: libp2p::Multiaddr = "/ip4/127.0.0.1/tcp/65000".parse().expect("valid");
+    let before_count = all[N].routing_peers();
+    if let Some(k) = all[N].kad() {
+        k.add_address(&subject, fresh.clone());
+    }
+    pump(&mut all, Duration::from_secs(2)).await;
+    // The update reaches the driver, and the population is unchanged —
+    // both halves, since an update that grew the table would be the
+    // bound failing in the other direction.
+    let addresses = all[N]
+        .kad()
+        .and_then(|k| {
+            k.kbuckets()
+                .flat_map(|b| b.iter().map(|e| (*e.node.key.preimage(), e.node.value.clone())).collect::<Vec<_>>())
+                .find(|(p, _)| *p == subject)
+                .map(|(_, a)| a.iter().cloned().collect::<Vec<_>>())
+        })
+        .unwrap_or_default();
+    r.check(
+        "K17.9",
+        &format!(
+            "a full table still accepts an address update for a peer it already \
+             routes: {:?}",
+            addresses.iter().map(std::string::ToString::to_string).collect::<Vec<_>>()
+        ),
+        // PREFIX: kad stores the address with the peer component
+        // appended, the same form K14 had to account for.
+        addresses.iter().any(|a| a.to_string().starts_with(&fresh.to_string())),
+    );
+    r.check(
+        "K17.10",
+        &format!(
+            "and the population is unchanged: {} (was {before_count})",
+            all[N].routing_peers()
+        ),
+        all[N].routing_peers() == before_count,
+    );
 }
 
 /// K18 — a malicious or stale routing response.
@@ -3260,10 +3314,46 @@ pub async fn k22_bounded_query_scheduler(r: &mut Report) {
     r.check(
         "K22.13",
         &format!(
-            "and the behaviour was INVOKED only for the permitted ones: \
+            "the DRIVER invoked the behaviour only for permitted work: \
              {invocations} calls for {issued} permits"
         ),
         invocations == MAX_CONCURRENT,
+    );
+    // AND THE LIBRARY'S OWN WORK IS ACCOUNTED, not ignored. The
+    // `add_address` that seeds this node starts an implicit bootstrap
+    // (F2) which no scheduler can gate — it is not a call the provider
+    // makes. Calling the node "untouched" and counting only explicit
+    // invocations understated what actually ran on it.
+    //
+    // A driver therefore cannot treat its budget as the whole of the
+    // node's query load: it must RESERVE headroom for library-initiated
+    // work, because that work spends the same connections and the same
+    // dial ceilings. Here the implicit query is measured and charged.
+    let implicit = fresh[0].observed.unattributed_queries.len();
+    for _ in 0..implicit {
+        // Charged against the same budget, which is what a driver
+        // reserving headroom amounts to. It cannot be `bind`-ed: there
+        // is no permit, because there was no acquisition to make.
+        if let Ok(p) = live.acquire(0) {
+            live.release(p);
+        }
+    }
+    r.check(
+        "K22.14",
+        &format!(
+            "the library's own query is measured rather than ignored: {implicit} \
+             unattributed start(s) alongside {issued} permitted"
+        ),
+        implicit > 0,
+    );
+    r.check(
+        "K22.15",
+        &format!(
+            "so the node's whole query load is {} = {issued} permitted + \
+             {implicit} the scheduler cannot gate",
+            issued + implicit
+        ),
+        fresh[0].own_queries.len() == issued,
     );
     // AND THE NODE AGREES. Its whole query history is what the driver
     // started plus whatever the library began on its own, so the
@@ -3272,7 +3362,7 @@ pub async fn k22_bounded_query_scheduler(r: &mut Report) {
     // counter can be wrong in the same direction as the loop it counts.
     pump(&mut fresh, Duration::from_secs(8)).await;
     r.check(
-        "K22.14",
+        "K22.16",
         &format!(
             "the node's own tally of deliberate queries matches: {} started, \
              {} unattributed to the driver",

@@ -16,6 +16,9 @@ mod namespace;
 pub struct Report {
     failures: Vec<String>,
     notes: Vec<String>,
+    /// How many checks actually ran. A run that asserts nothing is not
+    /// a run that passed.
+    checks: usize,
 }
 
 impl Report {
@@ -23,6 +26,7 @@ impl Report {
         Self {
             failures: Vec::new(),
             notes: Vec::new(),
+            checks: 0,
         }
     }
 
@@ -37,6 +41,7 @@ impl Report {
     /// Assert, print, and remember. Never panics: a spike that aborts on
     /// the first surprise reports one fact instead of all of them.
     pub fn check(&mut self, id: &str, claim: &str, held: bool) {
+        self.checks += 1;
         println!("  [{}] {} {claim}", if held { "ok" } else { "FAIL" }, id);
         if !held {
             self.failures.push(format!("{id}: {claim}"));
@@ -52,7 +57,19 @@ async fn main() {
     // argument runs everything, which is what the record's reproduction
     // instructions describe.
     let only = std::env::args().nth(1);
-    let want = |id: &str| only.as_deref().is_none_or(|o| o == id);
+    // COUNTED, so a filter that matches nothing cannot report success.
+    // `cargo run -- K99` used to select no experiment, run no check,
+    // and print "all observations held" with exit 0 — a false green of
+    // exactly the kind this harness exists to refuse, in the harness
+    // itself.
+    let ran = std::cell::Cell::new(0_usize);
+    let want = |id: &str| {
+        let hit = only.as_deref().is_none_or(|o| o == id);
+        if hit {
+            ran.set(ran.get() + 1);
+        }
+        hit
+    };
 
     if want("K1") {
         println!("K1 — deterministic protocol derivation from network_id");
@@ -186,8 +203,19 @@ async fn main() {
     }
 
     println!();
+    if ran.get() == 0 {
+        println!(
+            "SPIKE-003: {:?} matched no experiment — nothing ran.",
+            only.as_deref().unwrap_or("<none>")
+        );
+        std::process::exit(2);
+    }
     if r.failures.is_empty() {
-        println!("SPIKE-003: all observations held.");
+        println!(
+            "SPIKE-003: all observations held ({} experiment(s), {} check(s)).",
+            ran.get(),
+            r.checks
+        );
     } else {
         println!("SPIKE-003: {} observation(s) FAILED:", r.failures.len());
         for f in &r.failures {

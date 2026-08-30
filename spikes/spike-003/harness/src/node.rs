@@ -325,6 +325,17 @@ impl Node {
         self.swarm.behaviour_mut().kad.as_mut()
     }
 
+    /// Whether this peer is already in the routing table.
+    ///
+    /// A re-announcement for a routed peer is an address UPDATE, not a
+    /// new entry, so a population bound must not refuse it.
+    pub fn routes(&mut self, peer: &PeerId) -> bool {
+        self.swarm.behaviour_mut().kad.as_mut().is_some_and(|k| {
+            k.kbuckets()
+                .any(|b| b.iter().any(|e| e.node.key.preimage() == peer))
+        })
+    }
+
     /// How many peers are in the routing table.
     pub fn routing_peers(&mut self) -> usize {
         self.swarm
