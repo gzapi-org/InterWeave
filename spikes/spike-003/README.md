@@ -54,7 +54,7 @@ It also handles the ticket the way the runtime must, which is finding **F8**: a 
 
 ## What was observed
 
-199 assertions across 28 experiments, consecutive clean runs. The harness exits non-zero when any required observation is false, so `cargo run` cannot report success while its own output disproves the record.
+202 assertions across 29 experiments, consecutive clean runs. The harness exits non-zero when any required observation is false, so `cargo run` cannot report success while its own output disproves the record.
 
 **Namespace (K1).** The published golden vector reproduces exactly: `network_id: example-private-network` → `ssbtblqj7mexczivog5qfbfjvi` → `/interweave/kad/1.0.0/ssbtblqj7mexczivog5qfbfjvi`. The derivation is implemented from the specification text rather than from a shared helper, so a derivation that merely agrees with itself could not pass. The 26-character unpadded base32 tag is a valid `libp2p::StreamProtocol`, and the `^[a-z0-9][a-z0-9._-]{0,63}$` grammar accepts and refuses what the spec says it should.
 
@@ -99,6 +99,8 @@ What rules out the case the zero-refusal assertion was guarding against — a ru
 **A dial where every candidate fails (K25).** K18's topology keeps a good route to the target alive, which suppresses peer backoff — so its multi-address assertion never meets the ordinary case, where the first settlement advances peer backoff and every later `admit` is refused for it. With all candidates dead, a settlement loop that admits as it goes scores the first address and silently drops the rest. Every ticket is therefore minted *before* any is settled, and K25 names both dead addresses in the peer's candidates afterwards. The same dial is then run under a ceiling of one, where pre-minting cannot get a ticket for the second address: one is scored, one is counted as unsettled, and the shortfall is reported rather than silent — F15.
 
 **Revocation propagates (K20, K28).** `set_trust` is given the live peer list, so it can say which connections a revision invalidates, and the `Revoked` it returns is acted on: the peer leaves the Kademlia routing table and its connection is closed, because the connection is multiplexed and every other protocol rides it. An earlier version passed an empty live list, ignored the result, and let the experiments disconnect by hand — under which an implementation that left revoked peers connected and routable would have passed unchanged. K28 now revokes and asserts the connection goes and the routing entry goes, with nobody disconnecting anything.
+
+**Routing removal is unconditional**, and K29 is why: the manager's `Revoked` list names peers it classified from the *live* connection set, which is the question it can answer. §11 asks a different one — removal is immediate, and whether a peer has a socket open right now has no bearing on whether it may be routed. A routed-but-disconnected peer produced no entry and was never removed, going on occupying the bounded table. K29 routes a peer, disconnects it, asserts the routing entry *survives* the disconnection — otherwise there would be nothing for the revocation to remove — and then revokes.
 
 **Trust withdrawn mid-dial (K20, K28).** The gate admits against the trust of the moment it is asked and settles later, so the settlement reclassifies rather than trusting the admission's answer. With trust intact a behaviour connection is retained; revocation genuinely changes what the settlement reads (`DataPlaneTrusted` → `Unauthorized`); and after revocation nothing is retained for that peer.
 

@@ -146,6 +146,10 @@ async fn main() {
         experiments::k19_ceilings_apply_to_behaviour_dials(&mut r).await;
     }
 
+    if want("K29") {
+        println!("\nK29 — a routed peer that is not connected is still revoked");
+        experiments::k29_disconnected_peer_is_still_revoked(&mut r).await;
+    }
     if want("K28") {
         println!("\nK28 — a connection whose authority lapsed does not survive");
         experiments::k28_withdrawn_connection_is_closed(&mut r).await;

@@ -264,11 +264,22 @@ impl Node {
             .unwrap_or_else(|e| e.into_inner())
             .set_trust(sources, &live);
 
-        // ACTED ON, not merely returned. §11: trust revocation removes
-        // the peer from routing state immediately and it must not be
-        // usable for further queries; the connection goes because it is
-        // multiplexed and every other protocol rides it.
+        // ROUTING REMOVAL IS UNCONDITIONAL. §11 requires it immediately,
+        // and `revoked` only names peers the manager classified from the
+        // LIVE connection list — so a peer that is routed but not
+        // currently connected produced no entry, `remove_peer` was never
+        // called, and it went on occupying the bounded table and being
+        // selected for queries. Whether a peer has a socket open right
+        // now is unrelated to whether it may be routed.
         let mut acted = 0;
+        if let Some(k) = self.swarm.behaviour_mut().kad.as_mut() {
+            k.remove_peer(&peer);
+            acted += 1;
+        }
+
+        // The manager's result is still what says which CONNECTIONS the
+        // revision invalidates — that is the question it can answer and
+        // this cannot.
         for r in &revoked {
             let Ok(id) = r.peer.as_str().parse::<PeerId>() else {
                 continue;
@@ -277,8 +288,8 @@ impl Node {
                 k.remove_peer(&id);
             }
             let _ = self.swarm.disconnect_peer_id(id);
-            acted += 1;
         }
+        let _ = self.swarm.disconnect_peer_id(peer);
         acted
     }
 
@@ -296,11 +307,17 @@ impl Node {
     pub fn dial_admitted(&mut self, address: Multiaddr) {
         use libp2p::swarm::dial_opts::DialOpts;
         let opts: DialOpts = address.into();
-        self.admitted.register(opts.connection_id());
+        // SAVED BEFORE `opts` MOVES. The cleanup used to forget a
+        // hardcoded id zero, which is not the id that was registered —
+        // so a synchronously rejected dial left its real announcement in
+        // `AdmittedDials`, where a later dial could consume it and be
+        // classified as ticket-admitted when it was behaviour-
+        // originated. That is a leak in the measurement apparatus, not
+        // only in the cleanup.
+        let id = opts.connection_id();
+        self.admitted.register(id);
         if self.swarm.dial(opts).is_err() {
-            // The id would otherwise stay registered and be reusable by
-            // a later dial that carries no admission.
-            self.admitted.forget(libp2p::swarm::ConnectionId::new_unchecked(0));
+            self.admitted.forget(id);
         }
     }
 

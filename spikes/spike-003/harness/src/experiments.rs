@@ -4502,3 +4502,77 @@ pub async fn k28_withdrawn_connection_is_closed(r: &mut Report) {
         nodes[0].ledger.withdrawn()
     ));
 }
+
+/// K29 — a routed peer that is not connected is still revoked.
+///
+/// The manager's `Revoked` list names peers it classified from the LIVE
+/// connection set, which is the question it can answer. It is not the
+/// question §11 asks: routing removal is immediate, and whether a peer
+/// has a socket open right now is unrelated to whether it may be routed.
+///
+/// A peer routed but disconnected therefore produced no entry, so
+/// `remove_peer` was never called and it went on occupying the bounded
+/// table and being selected for queries.
+pub async fn k29_disconnected_peer_is_still_revoked(r: &mut Report) {
+    let cfg = NodeConfig {
+        role: KadRole::Server,
+        gate_mode: Mode::PolicyAdmit,
+        ..NodeConfig::default()
+    };
+    let protocol = namespace::protocol_name(&cfg.network_id);
+    let mut nodes = vec![Node::start(&cfg).await, Node::start(&cfg).await];
+    let (a, b) = (nodes[0].peer_id, nodes[1].peer_id);
+    nodes[0].trust(a);
+    nodes[0].trust(b);
+    nodes[1].trust(a);
+    nodes[1].trust(b);
+    let b_addr = nodes[1].dial_address();
+
+    nodes[0].dial_admitted(b_addr.clone());
+    pump_until(&mut nodes, Duration::from_secs(12), |n| {
+        n[0].observed.identify_protocols.contains_key(&b)
+    })
+    .await;
+    crate::topology::admit_candidates(&mut nodes[0], &protocol);
+    pump(&mut nodes, Duration::from_secs(2)).await;
+    r.check(
+        "K29.1",
+        &format!("the peer is routed ({} entries)", nodes[0].routing_peers()),
+        nodes[0].routes(&b),
+    );
+
+    // DISCONNECT, and confirm the routing entry SURVIVES the
+    // disconnection — otherwise the revocation below would have nothing
+    // to remove and the experiment would pass for the wrong reason.
+    let _ = nodes[0].swarm.disconnect_peer_id(b);
+    pump(&mut nodes, Duration::from_secs(3)).await;
+    r.check(
+        "K29.2",
+        &format!(
+            "a closed connection does NOT remove the routing entry: connected \\
+             {}, routed {}",
+            nodes[0].swarm.is_connected(&b),
+            nodes[0].routes(&b)
+        ),
+        !nodes[0].swarm.is_connected(&b) && nodes[0].routes(&b),
+    );
+
+    // NOW REVOKE. The manager reports nothing, because it classifies
+    // from live connections and there are none — so routing removal
+    // cannot depend on its answer.
+    let acted = nodes[0].revoke(b);
+    pump(&mut nodes, Duration::from_secs(2)).await;
+    r.check(
+        "K29.3",
+        &format!(
+            "revoking a routed-but-disconnected peer removes it anyway: routed \\
+             {}, acted {acted}",
+            nodes[0].routes(&b)
+        ),
+        !nodes[0].routes(&b),
+    );
+    r.note(format!(
+        "K29: routing entries {} after revocation",
+        nodes[0].routing_peers()
+    ));
+}
