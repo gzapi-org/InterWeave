@@ -27,8 +27,6 @@ use interweave_kademlia_control_api::{
 use interweave_transport_api::TransportIdentity;
 use interweave_transport_runtime::{ConnectionClass, ConnectionManager};
 
-use crate::outbound_gate::strip_peer_suffix;
-
 use super::to_transport_identity;
 
 use libp2p::swarm::SwarmEvent as Libp2pSwarmEvent;
@@ -297,7 +295,7 @@ pub(super) fn handle_command(
                 if stash.len() >= 64 {
                     break;
                 }
-                if let Ok(addr) = strip_peer_suffix_str(offered.as_str()).parse::<Multiaddr>() {
+                if let Some(addr) = suffix_checked_str(offered.as_str(), &pid) {
                     stash.insert(addr);
                 }
             }
@@ -397,7 +395,7 @@ fn try_admit(
     }
     let mut addresses: BTreeSet<Multiaddr> = state.pending_offers.remove(&pid).unwrap_or_default();
     for known in manager.dial_candidates(identity, now_ms) {
-        if let Ok(addr) = strip_peer_suffix_str(&known).parse::<Multiaddr>() {
+        if let Some(addr) = suffix_checked_str(&known, &pid) {
             addresses.insert(addr);
         }
     }
@@ -417,12 +415,30 @@ fn try_admit(
     Vec::new()
 }
 
-/// Strip trailing `/p2p/<peer>` components from an address STRING.
-fn strip_peer_suffix_str(address: &str) -> String {
-    match address.parse::<Multiaddr>() {
-        Ok(addr) => strip_peer_suffix(&addr),
-        Err(_) => address.to_owned(),
+/// Strip trailing `/p2p/…` components, REJECTING a foreign identity.
+///
+/// Every address this driver consumes arrives inside an observation
+/// that names a peer, and a trailing `/p2p/B` on an address offered
+/// for peer A is the observation contradicting itself. Silently
+/// stripping B published the transport route as A's: dial capacity
+/// spent on it, and after Noise refused, the quarantine landed under
+/// the WRONG peer. The contradiction is rejected — `None` drops the
+/// address, never the observation. `a_foreign_peer_suffix_rejects_the_address`
+/// holds it for every caller, because every caller is this function.
+fn suffix_checked(address: &Multiaddr, expected: &PeerId) -> Option<Multiaddr> {
+    let mut parts: Vec<_> = address.iter().collect();
+    while let Some(libp2p::multiaddr::Protocol::P2p(claimed)) = parts.last() {
+        if claimed != expected {
+            return None;
+        }
+        parts.pop();
     }
+    Some(parts.into_iter().collect())
+}
+
+/// [`suffix_checked`] from an offered STRING, whose parse can also fail.
+fn suffix_checked_str(address: &str, expected: &PeerId) -> Option<Multiaddr> {
+    suffix_checked(&address.parse::<Multiaddr>().ok()?, expected)
 }
 
 /// What [`handle_kademlia`] did with an event.
@@ -603,12 +619,7 @@ fn accumulate(
             // §10: discard self.
             continue;
         }
-        let addresses: std::collections::BTreeSet<String> = info
-            .addrs
-            .iter()
-            .map(strip_peer_suffix)
-            .filter(|a| !a.is_empty())
-            .collect();
+        let addresses = candidate_addresses(info);
         found.push(interweave_discovery_api::CandidatePeer {
             peer_id: candidate,
             addresses,
@@ -618,6 +629,16 @@ fn accumulate(
             protocol_observations: std::collections::BTreeSet::new(),
         });
     }
+}
+
+/// A query result's addresses, each held to the identity it claims.
+fn candidate_addresses(info: &kad::PeerInfo) -> std::collections::BTreeSet<String> {
+    info.addrs
+        .iter()
+        .filter_map(|a| suffix_checked(a, &info.peer_id))
+        .map(|a| a.to_string())
+        .filter(|a| !a.is_empty())
+        .collect()
 }
 
 /// One authenticated Identify observation enters the §7 pipeline (F3).
@@ -666,7 +687,7 @@ fn observe_identify(
             if stash.len() >= 64 {
                 break;
             }
-            if let Ok(bare) = strip_peer_suffix(addr).parse::<Multiaddr>() {
+            if let Some(bare) = suffix_checked(addr, &pid) {
                 stash.insert(bare);
             }
         }
@@ -929,5 +950,41 @@ mod tests {
             !state.pending_offers.contains_key(&a),
             "a population bound is not an address freeze (§11)"
         );
+    }
+
+    #[test]
+    fn a_foreign_peer_suffix_rejects_the_address() {
+        let subject = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let other = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let own: Multiaddr = format!("/ip4/192.0.2.1/tcp/1/p2p/{subject}")
+            .parse()
+            .expect("valid");
+        assert_eq!(
+            suffix_checked(&own, &subject).map(|a| a.to_string()),
+            Some("/ip4/192.0.2.1/tcp/1".to_owned()),
+            "the peer's own suffix strips"
+        );
+        let foreign: Multiaddr = format!("/ip4/192.0.2.1/tcp/1/p2p/{other}")
+            .parse()
+            .expect("valid");
+        assert_eq!(
+            suffix_checked(&foreign, &subject),
+            None,
+            "an address claiming another identity is the observation \
+             contradicting itself — rejected, not relabelled"
+        );
+        // And through the query-result path, which every walk feeds.
+        let info = kad::PeerInfo {
+            peer_id: subject,
+            addrs: vec![own, foreign, "/ip4/192.0.2.9/tcp/9".parse().expect("valid")],
+        };
+        let got = candidate_addresses(&info);
+        assert!(got.contains("/ip4/192.0.2.1/tcp/1"));
+        assert!(got.contains("/ip4/192.0.2.9/tcp/9"));
+        assert_eq!(got.len(), 2, "the misattributed route is dropped");
     }
 }

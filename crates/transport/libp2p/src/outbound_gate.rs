@@ -190,6 +190,25 @@ pub fn strip_peer_suffix(address: &Multiaddr) -> String {
     parts.into_iter().collect::<Multiaddr>().to_string()
 }
 
+/// Strip trailing `/p2p/` components ONLY while they name `peer`.
+///
+/// The identity-checked variant for a connection whose peer is already
+/// authenticated: a trailing claim that names someone else is the
+/// address contradicting the connection, and stripping it would launder
+/// the contradiction into the bare route — the policy would then score
+/// and quarantine an address string the observation never honestly
+/// described. The foreign claim stays in the key instead, so whatever
+/// the policy records is recorded against the literal that lied.
+#[must_use]
+pub fn strip_own_suffix(address: &Multiaddr, peer: &PeerId) -> String {
+    let mut parts: Vec<_> = address.iter().collect();
+    while matches!(parts.last(), Some(libp2p::multiaddr::Protocol::P2p(claimed)) if claimed == peer)
+    {
+        parts.pop();
+    }
+    parts.into_iter().collect::<Multiaddr>().to_string()
+}
+
 /// Admits every outbound dial: ticketed dials by their ticket,
 /// behaviour dials through the root policy.
 #[derive(Debug)]
@@ -330,12 +349,12 @@ impl NetworkBehaviour for OutboundAdmission {
     fn handle_established_outbound_connection(
         &mut self,
         connection_id: ConnectionId,
-        _peer: PeerId,
+        peer: PeerId,
         addr: &Multiaddr,
         _role_override: Endpoint,
         _port_use: PortUse,
     ) -> Result<THandler<Self>, ConnectionDenied> {
-        let used = strip_peer_suffix(addr);
+        let used = strip_own_suffix(addr, &peer);
         let Some(peer) = self.in_flight.rebind_placeholder(connection_id, &used) else {
             return Ok(dummy::ConnectionHandler);
         };
@@ -631,6 +650,34 @@ mod tests {
             ticket.address(),
             "/ip4/192.0.2.9/tcp/1",
             "an ordinary ticket's address never moves"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_foreign_suffix_is_not_laundered_at_establishment() {
+        // The established hook's variant of the identity check: the
+        // connection authenticated TRUSTED, and the address claims
+        // someone else. The claim stays in the settlement key — the
+        // policy records the literal that lied, never the bare route it
+        // was lying about.
+        let m = manager(&[TRUSTED]);
+        let (mut g, in_flight) = gate(&m);
+        behaviour_dial(&mut g, 4, TRUSTED).expect("admitted");
+        const OTHER: &str = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
+        let kept = established(
+            &mut g,
+            4,
+            TRUSTED,
+            &format!("/ip4/192.0.2.1/tcp/1/p2p/{OTHER}"),
+        );
+        assert!(kept.is_ok(), "no quarantine exists for that literal");
+        let ticket = in_flight
+            .settle(ConnectionId::new_unchecked(4))
+            .expect("ours");
+        assert_eq!(
+            ticket.address(),
+            format!("/ip4/192.0.2.1/tcp/1/p2p/{OTHER}"),
+            "a claim naming another identity is not stripped into the bare route"
         );
     }
 
