@@ -211,7 +211,15 @@ pub struct KademliaDiscovery {
     trusted: BTreeSet<TransportIdentity>,
     /// Peers currently in the driver's routing table, from its events.
     routing: BTreeSet<TransportIdentity>,
-    recent_queries_succeeded: bool,
+    /// When a query last succeeded, if one has.
+    ///
+    /// A TIMESTAMP, not a boolean: §14's healthy state requires a query
+    /// to have succeeded "within refresh expectations", and a flag set
+    /// once stayed true forever — a stalled driver left a
+    /// target-satisfied provider healthy indefinitely. Aged against
+    /// `bootstrap_refresh_interval`, the widest cadence at which a
+    /// healthy provider provably runs queries.
+    last_query_success_ms: Option<u64>,
     last_reported_health: Option<ProviderHealth>,
     commands: VecDeque<KademliaCommand>,
     tracked: BTreeMap<TransportIdentity, Tracked>,
@@ -317,7 +325,7 @@ impl KademliaDiscovery {
             stopped: false,
             trusted: BTreeSet::new(),
             routing: BTreeSet::new(),
-            recent_queries_succeeded: false,
+            last_query_success_ms: None,
             last_reported_health: None,
             commands: VecDeque::new(),
             tracked: BTreeMap::new(),
@@ -413,7 +421,7 @@ impl KademliaDiscovery {
                         )
                 });
                 self.settle(class, now_ms, true, address_progress);
-                self.recent_queries_succeeded = true;
+                self.last_query_success_ms = Some(now_ms);
                 for candidate in candidates.as_slice() {
                     self.track(candidate, now_ms);
                 }
@@ -444,7 +452,7 @@ impl KademliaDiscovery {
                 self.settle(class, now_ms, false, false);
                 match reason {
                     QueryFailure::TimedOut | QueryFailure::NoRoutingPeers => {
-                        self.recent_queries_succeeded = false;
+                        self.last_query_success_ms = None;
                     }
                     // A refused budget or a shutdown is scheduling, not
                     // the network failing; it says nothing about query
@@ -594,7 +602,7 @@ impl KademliaDiscovery {
     /// exploring — is the safe direction to be wrong in.
     fn saturation_conjuncts_hold(&self) -> bool {
         !self.routing.is_empty()
-            && self.recent_queries_succeeded
+            && self.recent_queries_succeeded()
             && !self.evidence.iter().any(|(peer, e)| {
                 e.supported
                     && e.expires_at > self.clock
@@ -757,6 +765,13 @@ impl KademliaDiscovery {
         self.commands.push_back(command);
     }
 
+    /// Whether a query succeeded within refresh expectations (§14).
+    fn recent_queries_succeeded(&self) -> bool {
+        self.last_query_success_ms.is_some_and(|at| {
+            self.clock.saturating_sub(at) <= self.config.bootstrap_refresh_interval_ms
+        })
+    }
+
     /// The health this provider would report right now.
     fn health_now(&self) -> ProviderHealth {
         health::provider_health(
@@ -764,7 +779,7 @@ impl KademliaDiscovery {
             self.stopped,
             self.config.mode,
             &self.routing_view(),
-            self.recent_queries_succeeded,
+            self.recent_queries_succeeded(),
             self.saturation_conjuncts_hold(),
         )
     }
@@ -2223,5 +2238,34 @@ mod tests {
         // to do.
         p.ingest_driver_event(KademliaEvent::RoutingPeerRemoved { peer: a }, 2_000);
         assert_eq!(p.routing_view().routing_peers, 0);
+    }
+
+    #[test]
+    fn query_success_ages_out_of_health() {
+        let mut p = started(KademliaMode::Client);
+        let (a, b) = (synthetic_peer(1), synthetic_peer(2));
+        trust(&mut p, &[&a, &b]);
+        routed(&mut p, &a, 1_000);
+        p.ingest_driver_event(KademliaEvent::RoutingPeerAdded { peer: b }, 1_000);
+        p.ingest_driver_event(done(QueryClass::Exploration), 1_000);
+        assert_eq!(p.health(), ProviderHealth::Healthy, "satisfied and recent");
+
+        // The driver stalls. Time passes through the whole refresh
+        // window with no query outcome of any kind.
+        let stale = 1_000 + 900_000 + 1;
+        p.drain_events(stale, usize::MAX);
+        assert_eq!(
+            p.health(),
+            ProviderHealth::Degraded,
+            "§14: healthy requires a success WITHIN refresh expectations, \
+             not one success ever"
+        );
+
+        p.ingest_driver_event(done(QueryClass::Bootstrap), stale + 10);
+        assert_eq!(
+            p.health(),
+            ProviderHealth::Healthy,
+            "a fresh success restores it"
+        );
     }
 }
