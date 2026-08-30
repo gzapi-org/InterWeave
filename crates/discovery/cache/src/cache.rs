@@ -520,7 +520,16 @@ impl PeerCache {
                 && o.role == observation.role
         };
         match record.capabilities.iter_mut().find(|o| same(o)) {
-            Some(existing) => *existing = observation,
+            Some(existing) => {
+                // RECENCY DECIDES, NOT ARRIVAL ORDER. Hints can be
+                // delivered out of order, and an older positive landing
+                // after a newer negative must not resurrect server
+                // eligibility in the export — the same supersession rule
+                // the Kademlia provider's evidence store applies.
+                if observation.observed_at_ms >= existing.observed_at_ms {
+                    *existing = observation;
+                }
+            }
             None => record.capabilities.push(observation),
         }
         record
@@ -1063,6 +1072,51 @@ mod publish_tests {
                 .iter()
                 .any(|c| c.peer_id == peer),
             "past the record TTL nothing is exported at all"
+        );
+    }
+
+    #[test]
+    fn an_older_observation_does_not_resurrect_a_newer_negative() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cache =
+            PeerCache::load(&dir.path().join("peers.json"), CacheLimits::default()).expect("loads");
+        let peer = TransportIdentity::parse("12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN")
+            .expect("valid");
+        cache
+            .record_success(&peer, "/ip4/10.0.0.1/tcp/1", 1_000)
+            .expect("recorded");
+        let observed = |supported: bool, at: u64| crate::record::ProtocolCapabilityObservation {
+            protocol_family: crate::record::KAD_PROTOCOL_FAMILY.to_owned(),
+            wire_major: 1,
+            network_hash: "ssbtblqj7mexczivog5qfbfjvi".to_owned(),
+            role: crate::record::KAD_SERVER_ROLE.to_owned(),
+            supported,
+            observed_at_ms: at,
+        };
+        cache
+            .record_capability(&peer, observed(false, 2_000))
+            .expect("recorded");
+        // The DELAYED older positive arrives afterwards.
+        cache
+            .record_capability(&peer, observed(true, 1_500))
+            .expect("recorded");
+        let candidates = cache.candidates(3_000);
+        let exported = candidates
+            .iter()
+            .find(|c| c.peer_id == peer)
+            .expect("the peer is a candidate");
+        let observation = exported
+            .protocol_observations
+            .iter()
+            .next()
+            .expect("the capability is exported");
+        assert!(
+            !observation.supported,
+            "an out-of-order older positive does not outvote the newer negative"
+        );
+        assert_eq!(
+            observation.observed_at, 2_000,
+            "the newer observation stands"
         );
     }
 }
