@@ -574,6 +574,15 @@ impl KademliaDiscovery {
     /// §9.3's extra saturation conjuncts, beyond the round count: a
     /// routing peer to rest on, no fresh targetable server evidence
     /// waiting OUTSIDE the routing set, and recent query health.
+    ///
+    /// The blocking observation must be IMMEDIATELY targetable, so the
+    /// §9.2 conditions this provider can judge from its own state
+    /// apply: trust, fresh positive evidence, a recoverable lookup key,
+    /// and an elapsed cooldown. Two stay out deliberately. The budget
+    /// is momentary — saturation is a resting state, and a full window
+    /// this second says nothing about the next. Address usability is
+    /// the composer's knowledge, and the conservative reading — keep
+    /// exploring — is the safe direction to be wrong in.
     fn saturation_conjuncts_hold(&self) -> bool {
         !self.routing.is_empty()
             && self.recent_queries_succeeded
@@ -582,6 +591,10 @@ impl KademliaDiscovery {
                     && e.expires_at > self.clock
                     && self.trusted.contains(peer)
                     && !self.routing.contains(peer)
+                    && normalize::targeted_lookup_key(peer).is_some()
+                    && self.cooldowns.get(peer).is_none_or(|last| {
+                        last.saturating_add(self.config.targeted_lookup_cooldown_ms) <= self.clock
+                    })
             })
     }
 
@@ -2118,6 +2131,66 @@ mod tests {
         assert_eq!(
             p.no_progress_rounds, 0,
             "a NEW usable address for a routed peer is §9.3 progress"
+        );
+    }
+
+    #[test]
+    fn untargetable_evidence_does_not_block_saturation() {
+        let mut p = started(KademliaMode::Client);
+        let router = synthetic_peer(1);
+        let mut bytes = [0_u8; 34];
+        bytes[..2].copy_from_slice(&[0x12, 0x20]);
+        bytes[2] = 9;
+        let qm = TransportIdentity::parse(bs58::encode(bytes).into_string()).expect("valid Qm id");
+        p.set_remote_trusted(
+            [router.clone(), qm.clone(), synthetic_peer(2)]
+                .into_iter()
+                .collect(),
+        );
+        routed(&mut p, &router, 1_000);
+        // Fresh positive evidence for a trusted, non-routed peer whose
+        // identity no lookup key can ever be recovered from.
+        give_evidence(&mut p, &qm, 1_000);
+        let mut now = 10_000;
+        for _ in 0..3 {
+            assert!(p.tick(now, [0_u8; 32]));
+            p.ingest_driver_event(done(QueryClass::Exploration), now);
+            now += 500_000;
+        }
+        assert_eq!(
+            p.health(),
+            ProviderHealth::Healthy,
+            "evidence no lookup can ever act on does not forbid resting: \
+             request_targeted_lookup would refuse this peer forever"
+        );
+    }
+
+    #[test]
+    fn a_cooling_down_target_does_not_block_saturation() {
+        let mut p = started(KademliaMode::Client);
+        let router = synthetic_peer(1);
+        let c = synthetic_peer(3);
+        trust(&mut p, &[&router, &synthetic_peer(2), &c]);
+        routed(&mut p, &router, 1_000);
+        give_evidence(&mut p, &c, 1_000);
+        let mut now = 10_000;
+        for _ in 0..3 {
+            assert!(p.tick(now, [0_u8; 32]));
+            p.ingest_driver_event(done(QueryClass::Exploration), now);
+            now += 500_000;
+        }
+        assert_eq!(
+            p.health(),
+            ProviderHealth::Degraded,
+            "the control: an immediately targetable peer forbids resting"
+        );
+        p.request_targeted_lookup(&c, now, false)
+            .expect("eligible, and the lookup records its cooldown");
+        assert_eq!(
+            p.health(),
+            ProviderHealth::Healthy,
+            "inside its cooldown the target is not IMMEDIATELY targetable, \
+             so the saturated view may rest (§9.3)"
         );
     }
 }
