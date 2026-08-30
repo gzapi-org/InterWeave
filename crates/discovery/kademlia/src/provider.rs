@@ -929,10 +929,25 @@ impl DiscoveryProvider for KademliaDiscovery {
                 HintDisposition::Accepted
             }
             PeerHint::ObservedReachable {
-                peer_id, address, ..
+                peer_id,
+                address,
+                observed_at,
             } => {
                 if peer_id == self.local {
                     // Advisory no-op: self is never offered to routing.
+                    return HintDisposition::Accepted;
+                }
+                // FRESHNESS BINDS THE OFFER, judged at delivery time
+                // like the evidence paths: a hint whose observation has
+                // outlived the candidate TTL is evidence its source has
+                // stopped vouching for, and offering it would trigger
+                // routing admission and dialling on a route nobody
+                // stands behind.
+                if observed_at
+                    .min(now_ms)
+                    .saturating_add(self.config.candidate_ttl_ms)
+                    <= now_ms
+                {
                     return HintDisposition::Accepted;
                 }
                 let Ok(parsed) = OfferedAddress::parse(&address) else {
@@ -971,6 +986,15 @@ impl DiscoveryProvider for KademliaDiscovery {
                     return HintDisposition::Rejected(err);
                 }
                 if candidate.peer_id == self.local {
+                    return HintDisposition::Accepted;
+                }
+                // A candidate whose own record has lapsed is handled —
+                // by deliberately doing nothing with it. Its addresses
+                // must not reach routing admission, its observations
+                // would arrive pre-expired under the own-age bound, and
+                // a lapsed record is not the "new external seed" that
+                // invalidates saturation.
+                if !candidate.is_fresh_at(now_ms) {
                     return HintDisposition::Accepted;
                 }
                 for observation in &candidate.protocol_observations {
@@ -2299,5 +2323,64 @@ mod tests {
         assert_eq!(p.budgets.held(), 1, "one completion settles ONE charge");
         p.ingest_driver_event(done(QueryClass::Bootstrap), 5_000);
         assert_eq!(p.budgets.held(), 0, "the second settles the other");
+    }
+
+    #[test]
+    fn a_stale_reachable_hint_offers_nothing() {
+        let mut p = started(KademliaMode::Client);
+        p.drain_commands(usize::MAX);
+        let peer = synthetic_peer(3);
+        let disposition = p.add_hint(
+            PeerHint::ObservedReachable {
+                peer_id: peer,
+                address: "/ip4/192.0.2.1/tcp/4001".to_owned(),
+                observed_at: 1_000,
+            },
+            1_000 + TTL_MS + 1,
+        );
+        assert_eq!(
+            disposition,
+            HintDisposition::Accepted,
+            "handled: by refusing to act"
+        );
+        assert!(
+            p.drain_commands(usize::MAX).is_empty(),
+            "an observation its source stopped vouching for is not offered to routing"
+        );
+    }
+
+    #[test]
+    fn a_lapsed_candidate_hint_offers_nothing() {
+        let mut p = started(KademliaMode::Client);
+        p.drain_commands(usize::MAX);
+        let peer = synthetic_peer(3);
+        trust(&mut p, &[&peer]);
+        let candidate = CandidatePeer {
+            peer_id: peer.clone(),
+            addresses: ["/ip4/192.0.2.1/tcp/4001".to_owned()].into_iter().collect(),
+            source: "peer-cache".to_owned(),
+            observed_at: 1_000,
+            expires_at: Some(2_000),
+            protocol_observations: [interweave_discovery_api::ProtocolObservation {
+                protocol_id: expected_id(&p),
+                supported: true,
+                observed_at: 1_000,
+            }]
+            .into_iter()
+            .collect(),
+        };
+        assert_eq!(
+            p.add_hint(PeerHint::CandidateHint(Box::new(candidate)), 2_001),
+            HintDisposition::Accepted
+        );
+        assert!(
+            p.drain_commands(usize::MAX).is_empty(),
+            "a lapsed record's addresses never reach routing admission"
+        );
+        assert_eq!(
+            p.request_targeted_lookup(&peer, 2_002, false),
+            Err(TargetedRefusal::NoServerEvidence),
+            "and its observations do not become eligibility either"
+        );
     }
 }
