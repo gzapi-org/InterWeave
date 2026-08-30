@@ -57,6 +57,12 @@ struct Queued {
 struct EmittedRecord {
     expires_at: Option<u64>,
     addresses: BTreeSet<String>,
+    /// The capability observations last reported. Part of the snapshot
+    /// because they are part of the MESSAGE: a fresh positive or
+    /// negative that changed nothing else was invisible until the next
+    /// reachability update, and a capability ageing out of the export
+    /// could never retract what the consumer was already holding.
+    protocol_observations: BTreeSet<interweave_discovery_api::ProtocolObservation>,
 }
 
 /// The cache, presented as a discovery provider.
@@ -202,6 +208,7 @@ impl PeerCacheDiscovery {
             let record = EmittedRecord {
                 expires_at: candidate.expires_at,
                 addresses: candidate.addresses.iter().cloned().collect(),
+                protocol_observations: candidate.protocol_observations.iter().cloned().collect(),
             };
             let previously = self.emitted.get(&candidate.peer_id).cloned();
             let changed = previously.as_ref() != Some(&record);
@@ -1352,6 +1359,7 @@ mod tests {
             EmittedRecord {
                 expires_at: None,
                 addresses: [kept.to_owned(), removed.to_owned()].into_iter().collect(),
+                protocol_observations: BTreeSet::new(),
             },
         );
         p.refresh(20);
@@ -1431,6 +1439,7 @@ mod tests {
             EmittedRecord {
                 expires_at: None,
                 addresses: [old_address.to_owned()].into_iter().collect(),
+                protocol_observations: BTreeSet::new(),
             },
         );
         // It is gone from the cache, then comes back at a different one.
@@ -1479,6 +1488,82 @@ mod tests {
             retracted,
             "the whole-peer retraction is recreated, so the old address is \
              withdrawn rather than left dialable"
+        );
+    }
+
+    #[test]
+    fn a_capability_change_alone_is_re_emitted() {
+        // Review finding on PR #60: the emitted snapshot compared only
+        // addresses and expiry, so an Identify update that changed
+        // nothing but the Kademlia capability was invisible to the
+        // consumer until the next reachability update moved the expiry.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut p = provider(&dir);
+        let subject = peer(P1);
+        p.cache_mut()
+            .record_success(&subject, "/ip4/10.0.0.1/tcp/1", 1_000)
+            .expect("recorded");
+        let observed = |supported: bool, at: u64| crate::record::ProtocolCapabilityObservation {
+            protocol_family: crate::record::KAD_PROTOCOL_FAMILY.to_owned(),
+            wire_major: 1,
+            network_hash: "ssbtblqj7mexczivog5qfbfjvi".to_owned(),
+            role: crate::record::KAD_SERVER_ROLE.to_owned(),
+            supported,
+            observed_at_ms: at,
+        };
+        p.cache_mut()
+            .record_capability(&subject, observed(true, 1_000))
+            .expect("recorded");
+        p.start(1_000).expect("starts");
+        let first = p.drain_events(1_100, usize::MAX);
+        let positive = first
+            .iter()
+            .find_map(|e| match e {
+                DiscoveryEvent::CandidateObserved { candidate } => {
+                    candidate.protocol_observations.iter().next()
+                }
+                _ => None,
+            })
+            .expect("the capability is exported from the start");
+        assert!(positive.supported);
+
+        // The capability flips NEGATIVE. Addresses and expiry are
+        // untouched — this event is the only thing that changed.
+        p.cache_mut()
+            .record_capability(&subject, observed(false, 2_000))
+            .expect("recorded");
+        let second = p.drain_events(2_100, usize::MAX);
+        let refreshed = second
+            .iter()
+            .find_map(|e| match e {
+                DiscoveryEvent::CandidateObserved { candidate } => Some(candidate),
+                _ => None,
+            })
+            .expect("a fresh negative must not wait for the next reachability update");
+        assert!(
+            refreshed.protocol_observations.iter().all(|o| !o.supported),
+            "the re-emitted candidate carries the withdrawal"
+        );
+
+        // AGEING OUT RETRACTS. The record stays alive (reachability
+        // refreshed just in time), the observation passes its own age,
+        // and the re-emission the expiry change forces must arrive
+        // WITHOUT it — the export's own-age bound reaching the consumer.
+        let almost = 2_000 + crate::limits::DEFAULT_TTL_MS - 100;
+        p.cache_mut()
+            .record_success(&subject, "/ip4/10.0.0.1/tcp/1", almost)
+            .expect("recorded");
+        let third = p.drain_events(2_000 + crate::limits::DEFAULT_TTL_MS + 1, usize::MAX);
+        let aged = third
+            .iter()
+            .find_map(|e| match e {
+                DiscoveryEvent::CandidateObserved { candidate } => Some(candidate),
+                _ => None,
+            })
+            .expect("the refreshed record re-emits");
+        assert!(
+            aged.protocol_observations.is_empty(),
+            "an observation past its own age is withdrawn from the consumer"
         );
     }
 }
