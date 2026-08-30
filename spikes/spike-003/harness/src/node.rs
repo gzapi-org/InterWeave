@@ -74,6 +74,8 @@ pub struct NodeConfig {
     pub max_pending_dials: usize,
     /// The root connection ceiling, likewise.
     pub max_connections: usize,
+    /// The address-state table bound, so an experiment can fill it.
+    pub max_addresses: usize,
 }
 
 impl Default for NodeConfig {
@@ -89,6 +91,7 @@ impl Default for NodeConfig {
             periodic_bootstrap: None,
             max_pending_dials: 64,
             max_connections: 64,
+            max_addresses: 8_192,
         }
     }
 }
@@ -134,10 +137,9 @@ impl Node {
         let peer_id = keypair.public().to_peer_id();
         // THE ONE root admission this node has. Built before the
         // behaviour, because the gate needs its handle.
-        let manager = ConnectionManager::new(
-            ConnectionPolicy::new(config.max_pending_dials, config.max_connections),
-            config.max_pending_dials,
-        );
+        let mut policy = ConnectionPolicy::new(config.max_pending_dials, config.max_connections);
+        policy.max_addresses = config.max_addresses;
+        let manager = ConnectionManager::new(policy, config.max_pending_dials);
         let admission = manager.handle();
         let manager = std::sync::Arc::new(std::sync::Mutex::new(manager));
 

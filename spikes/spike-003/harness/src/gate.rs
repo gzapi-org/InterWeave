@@ -158,6 +158,10 @@ struct LedgerInner {
     /// it had no address to act about. Each is re-asked at the
     /// established hook.
     deferred_address_denials: u64,
+    /// Behaviour dials refused because the RESERVATION could not be
+    /// taken without answering an address question the hook had no
+    /// address for. Fail-closed, and an availability cost.
+    placeholder_blocked: u64,
     /// The OTHER addresses a failed multi-address dial exhausted. The
     /// ticket settles one; these are scored individually.
     also_failed: BTreeMap<ConnectionId, Vec<String>>,
@@ -241,6 +245,13 @@ impl DialLedger {
     #[must_use]
     pub fn deferred_address_denials(&self) -> u64 {
         self.lock().deferred_address_denials
+    }
+
+    /// Behaviour dials refused because the reservation could not be
+    /// separated from an address decision the hook could not make.
+    #[must_use]
+    pub fn placeholder_blocked(&self) -> u64 {
+        self.lock().placeholder_blocked
     }
 
     /// Exhausted addresses that could not be scored for want of a
@@ -543,7 +554,33 @@ impl NetworkBehaviour for InstrumentedGate {
         // reserves them exists. The class is not passed: the manager
         // classifies from its own trust policy, which is the point —
         // a caller cannot assert a class it does not have.
+        //
+        // THE DEFERRAL ABOVE CANNOT EXTEND HERE, and that is a finding
+        // rather than an oversight. `admit` decides policy AND takes the
+        // reservation in one call, so there is no way to obtain a ticket
+        // while declining to answer the address question. Deferring the
+        // denial would mean admitting the dial with no ticket — the
+        // ceilings then bound nothing, which is the failure mode F8 and
+        // F11 exist to prevent — so the only available answer is to
+        // refuse.
+        //
+        // The consequence is worth stating plainly: when the address
+        // table is full of live quarantines, behaviour dials stop
+        // entirely, including ones whose real address is already
+        // known-good. That is fail-CLOSED, so it is the safe direction,
+        // but it is a real availability cost and F16 does not remove it
+        // — it only stops the PROBE from adding a second, unnecessary
+        // refusal on top. Stage 10 needs an admission that can reserve
+        // capacity without deciding an address it has not been given.
         let decision = self.admission.admit(&request, self.now_ms());
+        if placeholder
+            && matches!(
+                decision,
+                Err(DialDenial::AddressQuarantined | DialDenial::PolicyStateFull)
+            )
+        {
+            self.ledger.lock().placeholder_blocked += 1;
+        }
         match decision {
             Ok(ticket) => {
                 self.ledger.lock().behaviour_allowed += 1;
@@ -635,10 +672,16 @@ impl NetworkBehaviour for InstrumentedGate {
                 drop(probe);
                 Ok(dummy::ConnectionHandler)
             }
+            // CAPACITY ONLY. `PolicyStateFull` is NOT capacity in this
+            // sense: here the request carries the REAL address, so it
+            // says the address table cannot take an entry for the route
+            // this connection actually used — which is the fail-closed
+            // address bound, and precisely the address-scoped decision
+            // the dial hook deferred to here. Discarding it would let
+            // the connection through in the one place that can judge it.
             Err(
                 DialDenial::TooManyPendingDials
                 | DialDenial::ConnectionLimitReached
-                | DialDenial::PolicyStateFull
                 | DialDenial::PolicySuperseded,
             ) => Ok(dummy::ConnectionHandler),
             Err(denial) => {

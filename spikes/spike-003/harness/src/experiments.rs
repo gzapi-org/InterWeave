@@ -3665,32 +3665,277 @@ pub async fn k26_capability_aware_admission(r: &mut Report) {
         routed == 1,
     );
 
-    // AND A QUERY RESULT DOES NOT BYPASS IT. The router is asked for the
-    // client peer, so the client arrives as a learned address — the
-    // path that skipped the check before.
+    // A CLIENT-MODE PEER IS NOT RETURNED BY A WALK AT ALL. The router
+    // holds it — asserted above — and a `get_closest_peers` result
+    // still does not contain it, because the walk verifies a peer by
+    // contacting it and a client-mode node does not answer the
+    // protocol. So §9.2's "client nodes are not assumed discoverable by
+    // PeerId through FIND_NODE" is enforced by rust-libp2p itself,
+    // which is finding F17 and is why the query-derived path below uses
+    // a SERVER the asker has no evidence about instead.
+    nodes[1].dial_admitted(c_addr.clone());
+    pump_until(&mut nodes, Duration::from_secs(10), |n| {
+        n[1].observed.connected.contains(&c)
+    })
+    .await;
     if let Some(k) = nodes[1].kad() {
         k.add_address(&c, c_addr);
     }
+    pump(&mut nodes, Duration::from_secs(2)).await;
+    r.check(
+        "K26.4",
+        &format!(
+            "the router holds the client in ITS routing table ({} entries)",
+            nodes[1].routing_peers()
+        ),
+        nodes[1].routing_peers() >= 1,
+    );
+    crate::topology::admit_candidates(&mut nodes[0], &protocol);
+    let _ = nodes[0].swarm.disconnect_peer_id(c);
+    pump(&mut nodes, Duration::from_secs(3)).await;
     if let Some(k) = nodes[0].kad() {
         let id = k.get_closest_peers(c);
         nodes[0].own_queries.insert(id, QueryClass::Targeted);
     }
-    pump(&mut nodes, Duration::from_secs(12)).await;
-    let learned_client = nodes[0].observed.learned_addresses.contains_key(&c);
-    crate::topology::admit_candidates(&mut nodes[0], &protocol);
+    pump(&mut nodes, Duration::from_secs(15)).await;
+    r.check(
+        "K26.5",
+        &format!(
+            "yet a walk toward it never returns it: learned {:?}",
+            nodes[0].observed.learned_addresses.contains_key(&c)
+        ),
+        !nodes[0].observed.learned_addresses.contains_key(&c),
+    );
+
+    // THE QUERY-DERIVED PATH, with a peer that IS returned. A fourth
+    // node, server-mode, known to the router and never connected to the
+    // asker — so the asker holds no capability evidence about it, which
+    // is the ordinary state for anything a query hands back.
+    let mut extra = Node::start(&server).await;
+    let d = extra.peer_id;
+    let d_addr = extra.dial_address();
+    for id in [a, b, c, d] {
+        extra.trust(id);
+    }
+    for n in &mut nodes {
+        n.trust(d);
+    }
+    nodes.push(extra);
+    nodes[1].dial_admitted(d_addr.clone());
+    pump_until(&mut nodes, Duration::from_secs(10), |n| {
+        n[1].observed.connected.contains(&d)
+    })
+    .await;
+    if let Some(k) = nodes[1].kad() {
+        k.add_address(&d, d_addr.clone());
+    }
+    pump(&mut nodes, Duration::from_secs(2)).await;
+
+    let before = nodes[0].routing_peers();
+    if let Some(k) = nodes[0].kad() {
+        let id = k.get_closest_peers(d);
+        nodes[0].own_queries.insert(id, QueryClass::Targeted);
+    }
+    pump(&mut nodes, Duration::from_secs(15)).await;
+    let learned_d = nodes[0].observed.learned_addresses.contains_key(&d);
+    r.check(
+        "K26.6",
+        &format!("the query delivers a server peer as a candidate: {learned_d}"),
+        learned_d,
+    );
+    // THE CAPABILITY CHECK, ISOLATED. Asking for a peer with NO
+    // evidence turned out not to be reachable through a query: a walk
+    // verifies a peer by contacting it, so anything it returns has
+    // already been identified by the time the result arrives, and the
+    // "returned but unidentified" state barely exists (F17). Trying to
+    // assert it produced a check that passed for the wrong reason.
+    //
+    // So the gate is exercised on the evidence itself: the SAME
+    // candidate, the same run, admitted against a protocol it does not
+    // advertise — a different `network_id`'s. If the check is doing
+    // anything, that refuses; if it is not, the candidate goes in.
+    let identified = nodes[0].observed.identify_protocols.contains_key(&d);
+    r.check(
+        "K26.7",
+        &format!("the walk identified the peer it returned: {identified}"),
+        identified,
+    );
+    let foreign = namespace::protocol_name("spike-003-elsewhere");
+    let admitted_foreign = crate::topology::admit_candidates(&mut nodes[0], &foreign);
     pump(&mut nodes, Duration::from_secs(2)).await;
     r.note(format!(
-        "K26: learned the client from a query: {learned_client}; routing table \
-         holds {}",
+        "K26: admitting against a foreign protocol admitted {admitted_foreign}; \
+         routing {} (was {before})",
         nodes[0].routing_peers()
     ));
     r.check(
-        "K26.4",
+        "K26.8",
         &format!(
-            "a client-mode peer stays OUT of the routing table however it was \\
-             learned: {} routed",
+            "a candidate that does not advertise the required protocol is \
+             refused: {admitted_foreign} admitted, routing {} (was {before})",
             nodes[0].routing_peers()
         ),
-        nodes[0].routing_peers() == 1,
+        admitted_foreign == 0 && nodes[0].routing_peers() == before,
+    );
+
+    // AND ADMITTED UNDER THE PROTOCOL IT DOES ADVERTISE. Without this
+    // the assertion above is satisfied by a pipeline that refuses
+    // everything.
+    let admitted_ours = crate::topology::admit_candidates(&mut nodes[0], &protocol);
+    pump(&mut nodes, Duration::from_secs(2)).await;
+    r.check(
+        "K26.9",
+        &format!(
+            "CONTROL: the same candidate IS admitted under the protocol it does \
+             advertise: {admitted_ours} admitted, routing {} (was {before})",
+            nodes[0].routing_peers()
+        ),
+        admitted_ours > 0 && nodes[0].routing_peers() > before,
+    );
+}
+
+/// K27 — behaviour dials under address-table pressure.
+///
+/// Two halves of finding F16, which is about which hook may decide
+/// what.
+///
+/// The dial hook's probe carries the empty placeholder, so an
+/// address-scoped denial there judges an address that does not exist —
+/// deferred. But the RESERVATION cannot be deferred: `admit` decides
+/// policy and takes the reservation in one call, so a dial whose
+/// placeholder request is refused cannot obtain a ticket, and admitting
+/// without one would leave the ceilings bounding nothing. The only
+/// available answer is to refuse, which is fail-closed and an
+/// availability cost.
+///
+/// At the established hook the address is real, and there
+/// `PolicyStateFull` means the table cannot take an entry for the route
+/// this connection actually used — the fail-closed address bound, and
+/// exactly the decision deferred to that point.
+pub async fn k27_address_table_pressure(r: &mut Report) {
+    use interweave_transport_api::TransportIdentity;
+
+    // A TINY ADDRESS TABLE, so filling it is cheap and deterministic.
+    let cfg = NodeConfig {
+        role: KadRole::Server,
+        gate_mode: Mode::PolicyAdmit,
+        max_addresses: 4,
+        ..NodeConfig::default()
+    };
+    let peer_cfg = NodeConfig {
+        max_addresses: 8_192,
+        ..cfg.clone()
+    };
+    let mut nodes = vec![
+        Node::start(&cfg).await,
+        Node::start(&peer_cfg).await,
+        Node::start(&peer_cfg).await,
+    ];
+    let (a, b, c) = (nodes[0].peer_id, nodes[1].peer_id, nodes[2].peer_id);
+    for i in 0..3 {
+        for p in [a, b, c] {
+            nodes[i].trust(p);
+        }
+    }
+    let (b_addr, c_addr) = (nodes[1].dial_address(), nodes[2].dial_address());
+    nodes[1].dial_admitted(c_addr.clone());
+    pump_until(&mut nodes, Duration::from_secs(10), |n| {
+        n[1].observed.connected.contains(&c)
+    })
+    .await;
+    if let Some(k) = nodes[1].kad() {
+        k.add_address(&c, c_addr);
+    }
+    nodes[0].dial_admitted(b_addr.clone());
+    pump_until(&mut nodes, Duration::from_secs(10), |n| {
+        n[0].observed.connected.contains(&b)
+    })
+    .await;
+
+    // FILL THE TABLE WITH LIVE QUARANTINES, through the production
+    // identity-mismatch path. Only a quarantine is non-evictable, which
+    // is what makes the table genuinely full rather than merely large.
+    let b_identity = TransportIdentity::parse(b.to_base58()).expect("canonical");
+    let mut recorded = 0;
+    {
+        let mut m = nodes[0].manager.lock().expect("manager");
+        for i in 0..8 {
+            let addr = format!("/ip4/198.51.100.{i}/tcp/1");
+            let Ok(ticket) = m.handle().admit(
+                &DialRequest {
+                    peer: Some(b_identity.clone()),
+                    address: addr,
+                    origin: DialOrigin::ConnectionManager,
+                },
+                0,
+            ) else {
+                break;
+            };
+            if m.record_identity_mismatch(ticket, 0) {
+                recorded += 1;
+            }
+        }
+    }
+    r.check(
+        "K27.1",
+        &format!("the address table is filled with live quarantines ({recorded})"),
+        recorded >= 2,
+    );
+    // AND IT IS GENUINELY FULL: a fresh address for a fresh peer is
+    // refused with the table's own denial.
+    let stranger = TransportIdentity::parse(c.to_base58()).expect("canonical");
+    let full = nodes[0].manager.lock().expect("manager").handle().admit(
+        &DialRequest {
+            peer: Some(stranger),
+            address: "/ip4/203.0.113.7/tcp/1".to_owned(),
+            origin: DialOrigin::KademliaQuery,
+        },
+        0,
+    );
+    r.check(
+        "K27.2",
+        &format!("and reports itself full: {:?}", full.as_ref().err()),
+        matches!(full, Err(DialDenial::PolicyStateFull)),
+    );
+    drop(full);
+
+    nodes[0].ledger.reset();
+    if let Some(k) = nodes[0].kad() {
+        k.add_address(&b, b_addr);
+        let id = k.get_closest_peers(c);
+        nodes[0].own_queries.insert(id, QueryClass::Targeted);
+    }
+    pump(&mut nodes, Duration::from_secs(15)).await;
+
+    let refusals = nodes[0].ledger.refusals();
+    let deferred = nodes[0].ledger.deferred_address_denials();
+    let blocked = nodes[0].ledger.placeholder_blocked();
+    r.note(format!(
+        "K27: {} dials, {} allowed, refusals {refusals:?}, deferred {deferred}, \
+         placeholder-blocked {blocked}",
+        nodes[0].ledger.behaviour_originated(),
+        nodes[0].ledger.behaviour_allowed()
+    ));
+    // THE PROBE DEFERRED, and the reservation could not. Both halves
+    // are asserted because the pair is the finding: deferring the probe
+    // alone changes nothing, which is what made the first version of
+    // F16's fix ineffective.
+    r.check(
+        "K27.3",
+        &format!("the dial hook's probe deferred its address denial ({deferred})"),
+        deferred > 0,
+    );
+    r.check(
+        "K27.4",
+        &format!(
+            "and the RESERVATION could not be deferred, so the dial is refused \\
+             fail-closed rather than admitted without a ticket: {blocked} blocked"
+        ),
+        blocked > 0 && nodes[0].ledger.behaviour_allowed() == 0,
+    );
+    r.check(
+        "K27.5",
+        "which is reported as the address-table denial it is",
+        refusals.contains_key("policy state full"),
     );
 }

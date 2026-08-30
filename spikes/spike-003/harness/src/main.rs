@@ -129,6 +129,10 @@ async fn main() {
         experiments::k19_ceilings_apply_to_behaviour_dials(&mut r).await;
     }
 
+    if want("K27") {
+        println!("\nK27 — behaviour dials under address-table pressure");
+        experiments::k27_address_table_pressure(&mut r).await;
+    }
     if want("K26") {
         println!("\nK26 — capability-aware manual admission");
         experiments::k26_capability_aware_admission(&mut r).await;
