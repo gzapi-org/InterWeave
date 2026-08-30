@@ -12,6 +12,7 @@
 use libp2p::Multiaddr;
 use tokio::sync::oneshot;
 
+use interweave_kademlia_control_api::{KademliaCommand, KademliaEvent};
 use interweave_transport_api::TransportError as DirectError;
 use interweave_transport_api::{DirectMessageV2, EndpointId, TransportIdentity};
 use interweave_transport_runtime::{DialDenial, TrustSources};
@@ -233,6 +234,16 @@ pub enum SwarmCommand {
         /// Answered once the manager is draining.
         reply: oneshot::Sender<()>,
     },
+    /// Forward one provider command to the Kademlia driver.
+    ///
+    /// FIRE-AND-FORGET, unlike every other command: the port is a pump
+    /// the composition root drives, and the driver's answers travel
+    /// back as [`SwarmEvent::Kademlia`] events rather than replies —
+    /// a reply channel here would be a second event stream.
+    Kademlia {
+        /// The provider's command, from `kademlia-control-api`.
+        command: KademliaCommand,
+    },
     /// Stop, closing listeners and connections.
     Shutdown {
         /// Answered once the Swarm has been dropped.
@@ -299,6 +310,16 @@ pub enum SwarmEvent {
         /// The addresses it claims to listen on. ADVISORY: peer-asserted
         /// and never authorization.
         listen_addresses: Vec<Multiaddr>,
+    },
+    /// The Kademlia driver reported on the provider port.
+    ///
+    /// Carried out of the Swarm task as an ordinary event so the
+    /// composition root can pump it into the provider with everything
+    /// else; the payload is the neutral port type, so nothing libp2p
+    /// crosses here either.
+    Kademlia {
+        /// The driver's event, from `kademlia-control-api`.
+        event: KademliaEvent,
     },
     /// A directed message was admitted onto a local endpoint queue.
     ///

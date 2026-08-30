@@ -7,9 +7,10 @@
 //! protocol that starts doing things on its own — Kademlia dials to fill
 //! buckets, AutoNAT probes, Relay renews reservations — and each of
 //! those is an outbound dial that must already be passing the root
-//! admission gate before it exists (CLAUDE.md §3). Identify does not
-//! originate dials; it answers on connections that already exist, which
-//! is why it is the one that can be here now.
+//! admission gate before it exists (CLAUDE.md §3). Kademlia is here NOW
+//! because Stage 10 satisfied that order: the outbound gate admits
+//! behaviour-originated dials by root policy, and it landed — tested —
+//! before the `kad` feature entered the workspace manifest.
 
 // The `NetworkBehaviour` derive generates `SubstrateBehaviourEvent` as a
 // sibling item, and its variants carry no documentation the derive could
@@ -22,8 +23,11 @@
 use std::time::Duration;
 
 use libp2p::gossipsub;
+use libp2p::kad;
+use libp2p::kad::store::MemoryStore;
 use libp2p::request_response::{self, ProtocolSupport};
 use libp2p::swarm::NetworkBehaviour;
+use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::{identify, identity};
 
 use interweave_transport_api::{MAX_PAYLOAD_BYTES, broadcast_v1};
@@ -167,6 +171,17 @@ pub struct SubstrateBehaviour {
     /// query_endpoints` refuses to call it on an unconnected peer at all,
     /// so the gate is the second line and not the first.
     pub endpoints: request_response::Behaviour<EndpointsCodec>,
+    /// Kademlia peer routing (ADR-0009), present only when configured.
+    ///
+    /// LAST, after both gates, and the strongest instance of the
+    /// ordering rule: this is the first behaviour that dials
+    /// AUTONOMOUSLY — an iterative query asks the Swarm to dial with no
+    /// caller anywhere — so it joins a Swarm whose outbound gate
+    /// already decides such dials by root policy. `Toggle` rather than
+    /// an always-on field because a profile without a kademlia entry
+    /// must not even advertise the protocol (§13: `enabled: false`
+    /// means zero activity).
+    pub kad: Toggle<kad::Behaviour<MemoryStore>>,
 }
 
 // EVERY DATA-PLANE BEHAVIOUR ABOVE IS INSTALLED UNIFORMLY, on every
@@ -215,6 +230,7 @@ impl SubstrateBehaviour {
         keypair: &identity::Keypair,
         preauth: PreAuthLimits,
         outbound: OutboundAdmission,
+        kad: Toggle<kad::Behaviour<MemoryStore>>,
     ) -> Result<Self, &'static str> {
         let broadcast_config = gossipsub::ConfigBuilder::default()
             // STRICT, which is what makes the mesh id computable at all:
@@ -264,6 +280,7 @@ impl SubstrateBehaviour {
                 [(ENDPOINTS_PROTOCOL, ProtocolSupport::Full)],
                 request_response::Config::default().with_request_timeout(ENDPOINTS_TIMEOUT),
             ),
+            kad,
         })
     }
 }

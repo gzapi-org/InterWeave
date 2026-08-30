@@ -51,6 +51,7 @@ pub(super) fn handle_command(
     directory_state: &mut super::endpoints::DirectoryState,
     broadcast_state: &mut super::broadcast::BroadcastState,
     in_flight: &InFlightTickets,
+    kademlia: Option<&mut super::kademlia_driver::KademliaState>,
     max_pending_listens: usize,
     max_active_listeners: usize,
     effective_payload: usize,
@@ -468,6 +469,22 @@ pub(super) fn handle_command(
             // connection is named at most once however many revoked
             // entries match it, so the number reported is the number of
             // connections actually closed.
+            // AND THE ROUTING TABLE MOVES WITH IT (§11): a revoked
+            // peer leaves the DHT immediately, not when the next event
+            // happens to notice.
+            if let Some(state) = kademlia {
+                let mut events = Vec::new();
+                super::kademlia_driver::apply_revocations(
+                    state,
+                    swarm,
+                    manager,
+                    &revoked,
+                    &mut events,
+                );
+                for event in events {
+                    outbox.push_back(SwarmEvent::Kademlia { event });
+                }
+            }
             let closing = connections_to_close(
                 manager,
                 &revoked,
@@ -727,6 +744,21 @@ pub(super) fn handle_command(
             // that took its snapshot a moment ago is draining too.
             manager.begin_shutdown();
             let _ = reply.send(());
+        }
+        SwarmCommand::Kademlia { command } => {
+            // Fire-and-forget: the driver's answers ride the event
+            // stream. A profile with no kademlia entry has no state and
+            // no behaviour, and the command is dropped — §13's
+            // `enabled: false` means zero activity, commands included.
+            if let Some(state) = kademlia
+                && let Some(behaviour) = swarm.kademlia_mut()
+            {
+                for event in super::kademlia_driver::handle_command(
+                    state, behaviour, manager, command, now_ms,
+                ) {
+                    outbox.push_back(SwarmEvent::Kademlia { event });
+                }
+            }
         }
         SwarmCommand::Shutdown { reply } => {
             let _ = reply.send(());

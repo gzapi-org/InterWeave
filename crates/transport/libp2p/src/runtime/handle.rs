@@ -26,6 +26,23 @@ use super::direct::DirectEndpoints;
 use super::messages::{DialRefusal, SwarmCommand, SwarmEvent};
 
 impl SwarmRuntime {
+    /// Forward one provider command to the Kademlia driver.
+    ///
+    /// Fire-and-forget by design: the port is a pump, and the driver's
+    /// answers arrive as [`SwarmEvent::Kademlia`] events.
+    ///
+    /// # Errors
+    /// Returns [`SubstrateError::Stopped`] if the task is gone.
+    pub async fn kademlia(
+        &self,
+        command: interweave_kademlia_control_api::KademliaCommand,
+    ) -> Result<(), SubstrateError> {
+        self.commands
+            .send(SwarmCommand::Kademlia { command })
+            .await
+            .map_err(|_| SubstrateError::Stopped)
+    }
+
     /// Start listening, returning the address that was actually bound.
     ///
     /// With port 0 the assigned port is only knowable from this answer,

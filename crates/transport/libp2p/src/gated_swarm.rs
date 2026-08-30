@@ -407,6 +407,17 @@ impl GatedSwarm {
         }
     }
 
+    /// The Kademlia behaviour, when one is configured.
+    ///
+    /// `pub(crate)` for the driver module alone: every routing mutation
+    /// stays inside the Swarm task, which is what §20 means by
+    /// "Swarm-owned".
+    pub(crate) fn kademlia_mut(
+        &mut self,
+    ) -> Option<&mut libp2p::kad::Behaviour<libp2p::kad::store::MemoryStore>> {
+        self.inner.behaviour_mut().kad.as_mut()
+    }
+
     /// Close one connection by id.
     ///
     /// Returns whether the Swarm knew it. A connection this profile has

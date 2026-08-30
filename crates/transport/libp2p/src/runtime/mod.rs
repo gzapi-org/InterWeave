@@ -59,6 +59,7 @@ mod dialing;
 mod direct;
 mod endpoints;
 mod handle;
+pub mod kademlia_driver;
 mod messages;
 
 // Re-exported so `lib.rs` and every call site keep the paths they had:
@@ -403,6 +404,22 @@ impl SwarmRuntime {
         let in_flight = InFlightTickets::default();
         let outbound = OutboundAdmission::new(manager.handle(), in_flight.clone(), started);
 
+        // The Kademlia behaviour exists only when configured: a profile
+        // with no enabled kademlia entry advertises nothing, answers
+        // nothing, and dials nothing (§13). Validated by
+        // `SubstrateConfig::validate` before anything was built.
+        let local_pid = libp2p::PeerId::from_public_key(&keypair.public());
+        let (kad_toggle, mut kademlia_state) = match &config.kademlia {
+            Some(settings) => (
+                libp2p::swarm::behaviour::toggle::Toggle::from(Some(
+                    kademlia_driver::build_behaviour(settings, local_pid)
+                        .map_err(SubstrateError::Kademlia)?,
+                )),
+                Some(kademlia_driver::KademliaState::new(settings)),
+            ),
+            None => (libp2p::swarm::behaviour::toggle::Toggle::from(None), None),
+        };
+
         let swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
             .with_tcp(
@@ -418,7 +435,7 @@ impl SwarmRuntime {
             // should stop the runtime starting rather than panic inside
             // the task that would have driven it.
             .with_behaviour(|key| {
-                SubstrateBehaviour::new(key, config.preauth, outbound)
+                SubstrateBehaviour::new(key, config.preauth, outbound, kad_toggle)
                     .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
             })
             .map_err(|e| SubstrateError::Transport(e.to_string()))?
@@ -823,6 +840,7 @@ impl SwarmRuntime {
                                     &mut directory_state,
                                     &mut broadcast_state,
                                     &in_flight,
+                                    kademlia_state.as_mut(),
                                     config.max_pending_listens,
                                     config.max_active_listeners,
                                     config.max_payload_bytes,
@@ -935,6 +953,31 @@ impl SwarmRuntime {
                         ) {
                             endpoints::Handled::Consumed => continue,
                             endpoints::Handled::Passed(event) => *event,
+                        };
+
+                        // THE DRIVER SEES IT FIRST: kad events fold
+                        // onto the port and stop here; Identify is
+                        // peeked (F3) and passes on to the settlement
+                        // and translation below.
+                        let event = if let Some(state) = kademlia_state.as_mut() {
+                            let mut kad_events = Vec::new();
+                            let handled = kademlia_driver::handle_kademlia(
+                                event,
+                                &mut swarm,
+                                state,
+                                &manager,
+                                now_ms(started),
+                                &mut kad_events,
+                            );
+                            for event in kad_events {
+                                outbox.push_back(SwarmEvent::Kademlia { event });
+                            }
+                            match handled {
+                                kademlia_driver::KadHandled::Consumed => continue,
+                                kademlia_driver::KadHandled::Passed(event) => *event,
+                            }
+                        } else {
+                            event
                         };
 
                         let mut refuse = Vec::new();

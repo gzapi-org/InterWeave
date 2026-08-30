@@ -40,6 +40,15 @@ interweave-transport-runtime = { path = "../runtime" }
 interweave-profile-config = { path = "../../config/profile-config" }
 interweave-local-client-api = { path = "../../api/local-client-api" }
 interweave-trust-api = { path = "../../api/trust-api" }
+# The neutral command/event port between the Kademlia provider and this
+# crate's driver. Both concrete sides depend on it; neither depends on
+# the other (kademlia-integration.md §20).
+interweave-kademlia-control-api = { path = "../../api/kademlia-control-api" }
+# The candidate shape the port's query results carry.
+interweave-discovery-api = { path = "../../api/discovery-api" }
+# SHA-256 for the network-namespace derivation (§4), checked against the
+# frozen vectors in fixtures/kademlia/.
+sha2 = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
 libp2p = { workspace = true }
