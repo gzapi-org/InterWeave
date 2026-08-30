@@ -233,7 +233,7 @@ impl Node {
     ///
     /// # Panics
     /// If a generated `PeerId` is not a canonical identity.
-    pub fn revoke(&mut self, peer: PeerId) {
+    pub fn revoke(&mut self, peer: PeerId) -> usize {
         self.trusted.retain(|p| *p != peer);
         let ids: Vec<interweave_transport_api::TransportIdentity> = self
             .trusted
@@ -247,11 +247,39 @@ impl Node {
             PeerTrustPolicy::new(ids.into_iter()).expect("within bounds"),
             InfrastructureSet::new(std::iter::empty()).expect("empty"),
         );
-        let _ = self
+        // THE LIVE PEERS, so the manager can say which connections a
+        // revision invalidates. Passing an empty slice asked "what
+        // changed?" while withholding the only input that answers it —
+        // and the experiments then disconnected by hand, which meant a
+        // Stage 10 implementation that left revoked peers connected and
+        // routable would have passed unchanged.
+        let live: Vec<interweave_transport_api::TransportIdentity> = self
+            .swarm
+            .connected_peers()
+            .filter_map(|p| interweave_transport_api::TransportIdentity::parse(p.to_base58()).ok())
+            .collect();
+        let revoked = self
             .manager
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .set_trust(sources, &[]);
+            .set_trust(sources, &live);
+
+        // ACTED ON, not merely returned. §11: trust revocation removes
+        // the peer from routing state immediately and it must not be
+        // usable for further queries; the connection goes because it is
+        // multiplexed and every other protocol rides it.
+        let mut acted = 0;
+        for r in &revoked {
+            let Ok(id) = r.peer.as_str().parse::<PeerId>() else {
+                continue;
+            };
+            if let Some(k) = self.swarm.behaviour_mut().kad.as_mut() {
+                k.remove_peer(&id);
+            }
+            let _ = self.swarm.disconnect_peer_id(id);
+            acted += 1;
+        }
+        acted
     }
 
     /// This node's own view of who it trusts.

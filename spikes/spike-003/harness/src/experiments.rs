@@ -820,19 +820,49 @@ pub async fn k11_ten_node_exploration(r: &mut Report) {
     );
 
     // RANDOM EXPLORATION, the design's §9.3 query: 32 random bytes, not
-    // a hash of anything.
+    // a hash of anything — and THROUGH THE BOUNDED SCHEDULER, one per
+    // node, so the convergence reported here is convergence within the
+    // budgets rather than convergence with the budgets bypassed. Every
+    // experiment used to call the behaviour directly, which meant a
+    // scheduler that existed and was never consulted would have been
+    // invisible to exactly the runs the roadmap quotes.
+    let mut sched: Vec<QueryScheduler> = (0..N)
+        .map(|_| QueryScheduler::new(2, 6))
+        .collect();
+    let mut refused_by_budget = 0_usize;
+    let mut permits_granted = 0_usize;
     for round in 0..4 {
         for i in 0..N {
+            // The permit comes FIRST; the behaviour is not called
+            // without one (F14).
+            let Ok(permit) = sched[i].acquire(round * 1_000) else {
+                refused_by_budget += 1;
+                continue;
+            };
             let key = libp2p::kad::RecordKey::new(&random_32());
-            if let Some(k) = nodes[i].kad() {
-                let id = k.get_n_closest_peers(
-                    key.to_vec(),
-                    NonZeroUsize::new(10).expect("nonzero"),
-                );
-                nodes[i].own_queries.insert(id, QueryClass::Exploration);
+            let started = nodes[i].kad().map(|k| {
+                k.get_n_closest_peers(key.to_vec(), NonZeroUsize::new(10).expect("nonzero"))
+            });
+            match started {
+                Some(id) => {
+                    sched[i].bind(permit, id);
+                    nodes[i].own_queries.insert(id, QueryClass::Exploration);
+                    permits_granted += 1;
+                }
+                None => sched[i].release(permit),
             }
         }
         pump(&mut nodes, Duration::from_secs(8)).await;
+        // Completions release their own slots, so the next round has
+        // capacity — without this the concurrency ceiling would stall
+        // exploration after two rounds and the convergence below would
+        // measure the scheduler leaking rather than the network.
+        for i in 0..N {
+            let finished: Vec<_> = nodes[i].observed.finished_queries.clone();
+            for id in finished {
+                sched[i].finish(id);
+            }
+        }
 
         // THE ADMISSION PIPELINE, which is the half `BucketInserts::
         // Manual` exists to force. A query result is a CANDIDATE: the
@@ -873,6 +903,37 @@ pub async fn k11_ten_node_exploration(r: &mut Report) {
         "K11.3",
         "and every seeded node gained on its single seed",
         (1..N).all(|i| after[i] > seeded[i]),
+    );
+    r.note(format!(
+        "K11: exploration ran through the bounded scheduler; {refused_by_budget} \
+         start(s) refused by budget"
+    ));
+    // AND EVERY QUERY WAS PERMITTED. This is the structural claim the
+    // convergence rests on: no exploration query reached the behaviour
+    // without a permit. It is falsifiable — calling `kad` outside the
+    // permit branch makes the started count exceed the granted one —
+    // whereas asserting that the budget REFUSED something would only
+    // say this particular topology asks for more than 2 concurrent
+    // queries per node, which it does not.
+    //
+    // That the budgets bind at all is K22's job, on a scheduler driven
+    // past them deliberately.
+    let started_total: usize = (0..N)
+        .map(|i| {
+            nodes[i]
+                .own_queries
+                .values()
+                .filter(|c| **c == QueryClass::Exploration)
+                .count()
+        })
+        .sum();
+    r.check(
+        "K11.4",
+        &format!(
+            "every exploration query was permitted first: {started_total} started, \
+             {permits_granted} permits granted, {refused_by_budget} refused"
+        ),
+        started_total == permits_granted,
     );
 }
 
@@ -1547,17 +1608,37 @@ pub async fn k17_twenty_node_convergence(r: &mut Report) {
     let start = std::time::Instant::now();
     let mut rounds = 0;
     let mut totals = Vec::new();
+    // THROUGH THE BOUNDED SCHEDULER, as K11 does — the twenty-node
+    // convergence is the figure the roadmap quotes, so it must be
+    // convergence within the budgets rather than with them bypassed.
+    let mut sched: Vec<QueryScheduler> = (0..N).map(|_| QueryScheduler::new(2, 6)).collect();
+    let mut permits_granted = 0_usize;
     for _ in 0..5 {
         rounds += 1;
         for i in 0..N {
+            let Ok(permit) = sched[i].acquire(rounds * 1_000) else {
+                continue;
+            };
             let key = random_32();
-            if let Some(k) = nodes[i].kad() {
-                let id =
-                    k.get_n_closest_peers(key, NonZeroUsize::new(20).expect("nonzero"));
-                nodes[i].own_queries.insert(id, QueryClass::Exploration);
+            let started = nodes[i]
+                .kad()
+                .map(|k| k.get_n_closest_peers(key, NonZeroUsize::new(20).expect("nonzero")));
+            match started {
+                Some(id) => {
+                    sched[i].bind(permit, id);
+                    nodes[i].own_queries.insert(id, QueryClass::Exploration);
+                    permits_granted += 1;
+                }
+                None => sched[i].release(permit),
             }
         }
         pump(&mut nodes, Duration::from_secs(10)).await;
+        for i in 0..N {
+            let finished: Vec<_> = nodes[i].observed.finished_queries.clone();
+            for id in finished {
+                sched[i].finish(id);
+            }
+        }
         for node in &mut nodes {
             crate::topology::admit_candidates(node, &protocol);
         }
@@ -1600,6 +1681,23 @@ pub async fn k17_twenty_node_convergence(r: &mut Report) {
     // EVERY dial ADMITTED, not "at least one seen". `> 0` passed a run
     // in which all 200-plus dials were refused — which would have been
     // the opposite of the recorded evidence.
+    let started_total: usize = (0..N)
+        .map(|i| {
+            nodes[i]
+                .own_queries
+                .values()
+                .filter(|c| **c == QueryClass::Exploration)
+                .count()
+        })
+        .sum();
+    r.check(
+        "K17.0",
+        &format!(
+            "the convergence ran through the bounded scheduler: {started_total} \
+             exploration queries started, {permits_granted} permitted"
+        ),
+        started_total == permits_granted && permits_granted > 0,
+    );
     let originated: u64 = (0..N).map(|i| nodes[i].ledger.behaviour_originated()).sum();
     let allowed: u64 = (0..N).map(|i| nodes[i].ledger.behaviour_allowed()).sum();
     let refused: Vec<_> = (0..N)
@@ -2570,8 +2668,9 @@ pub async fn k20_authority_withdrawn_mid_dial(r: &mut Report) {
     let c_identity = interweave_transport_api::TransportIdentity::parse(c.to_base58())
         .expect("canonical");
     let before = nodes[0].manager.lock().expect("manager").classify(&c_identity);
-    nodes[0].revoke(c);
+    let acted = nodes[0].revoke(c);
     let after = nodes[0].manager.lock().expect("manager").classify(&c_identity);
+    r.note(format!("K20: revocation acted on {acted} peer(s)"));
     r.check(
         "K20.2",
         &format!("revocation changes what the settlement reads: {before:?} -> {after:?}"),
@@ -2581,7 +2680,8 @@ pub async fn k20_authority_withdrawn_mid_dial(r: &mut Report) {
 
     // AND ADMISSION REFUSES from then on, which is the half that IS
     // deterministic: a revoked peer gets no new behaviour dial at all.
-    let _ = nodes[0].swarm.disconnect_peer_id(c);
+    // Revocation has already taken the connection down — no manual
+    // disconnect here either.
     pump(&mut nodes, Duration::from_secs(2)).await;
     nodes[0].ledger.reset();
     if let Some(k) = nodes[0].kad() {
@@ -2812,9 +2912,9 @@ pub struct QueryScheduler {
     /// rather than a count so one completion releases one slot, and the
     /// slot it releases is its own.
     running: std::collections::HashSet<kad::QueryId>,
-    /// Slots taken but not yet bound to a query id — the window between
-    /// acquiring a permit and calling the behaviour.
-    unbound: std::collections::HashSet<u64>,
+    /// Slots taken but not yet bound to a query id, with the timestamp
+    /// each one spent — so releasing gives back both.
+    unbound: std::collections::HashMap<u64, u64>,
     next_permit: u64,
 }
 
@@ -2843,7 +2943,7 @@ impl QueryScheduler {
             max_per_minute,
             starts: std::collections::VecDeque::new(),
             running: std::collections::HashSet::new(),
-            unbound: std::collections::HashSet::new(),
+            unbound: std::collections::HashMap::new(),
             next_permit: 0,
         }
     }
@@ -2884,7 +2984,7 @@ impl QueryScheduler {
         }
         self.starts.push_back(now_ms);
         self.next_permit += 1;
-        self.unbound.insert(self.next_permit);
+        self.unbound.insert(self.next_permit, now_ms);
         Ok(Permit(self.next_permit))
     }
 
@@ -2894,14 +2994,26 @@ impl QueryScheduler {
     /// is dropped without binding — the caller took a slot and then
     /// failed to start anything — is released by [`Self::release`].
     pub fn bind(&mut self, permit: Permit, id: kad::QueryId) {
-        if self.unbound.remove(&permit.0) {
+        if self.unbound.remove(&permit.0).is_some() {
             self.running.insert(id);
         }
     }
 
     /// Give back a permit that was never bound to a query.
+    ///
+    /// The RATE is refunded too, not only the concurrency slot. An
+    /// acquisition that never became a query spent nothing, and leaving
+    /// its timestamp in the window let a caller that acquires and then
+    /// fails — a recovery path, repeated — exhaust `max_per_minute` with
+    /// zero queries started and suppress exploration for the rest of the
+    /// window. The timestamp is therefore carried by the permit and
+    /// removed with it.
     pub fn release(&mut self, permit: Permit) {
-        self.unbound.remove(&permit.0);
+        if let Some(at) = self.unbound.remove(&permit.0)
+            && let Some(i) = self.starts.iter().position(|t| *t == at)
+        {
+            self.starts.remove(i);
+        }
     }
 
     /// Slots held: bound to a query, or taken and not yet bound.
@@ -3024,6 +3136,36 @@ pub async fn k22_bounded_query_scheduler(r: &mut Report) {
         "a permit released without starting anything returns its slot",
         s.held() == MAX_CONCURRENT - 1,
     );
+    // AND ITS RATE. An acquisition that never became a query spent
+    // nothing, so leaving its timestamp in the window would let a
+    // recovery path — acquire, fail, release, retry — exhaust
+    // `max_per_minute` with zero queries started and suppress
+    // exploration for the rest of the window.
+    let mut refund = QueryScheduler::new(MAX_CONCURRENT, MAX_PER_MINUTE);
+    for _ in 0..(MAX_PER_MINUTE as usize * 3) {
+        let p = refund.acquire(5_000).expect("a released permit costs nothing");
+        refund.release(p);
+    }
+    r.check(
+        "K22.7b",
+        "and its RATE: acquire-then-release, repeated past the budget, spends nothing",
+        refund.acquire(5_000).is_ok(),
+    );
+    // CONTROL: the same count of acquisitions that DO become queries
+    // does exhaust the window, so the refund is not simply disabling
+    // the rate.
+    // Concurrency deliberately ABOVE the rate, so the rate is what
+    // refuses rather than the concurrency ceiling getting there first.
+    let mut spent = QueryScheduler::new(MAX_PER_MINUTE as usize + 1, MAX_PER_MINUTE);
+    for id in ids.iter().take(MAX_PER_MINUTE as usize) {
+        let p = spent.acquire(5_000).expect("within budget");
+        spent.bind(p, *id);
+    }
+    r.check(
+        "K22.7c",
+        "CONTROL: permits that BECOME queries do spend the window",
+        matches!(spent.acquire(5_000), Err(SchedulerRefusal::Rate)),
+    );
 
     // THE RATE, which the concurrency ceiling does not stand in for: a
     // caller that starts and finishes promptly never hits concurrency
@@ -3141,9 +3283,14 @@ pub async fn k22_bounded_query_scheduler(r: &mut Report) {
     );
     r.note(
         "K22 LIMIT: the scheduler is project logic modelled here, not a \
-         component of the harness's Kademlia driver — every other experiment \
-         starts queries directly on the behaviour, which is why a scheduler \
-         that exists but is never consulted would be invisible to them."
+         component of a Kademlia driver this harness has. What it now also \
+         drives is the CONVERGENCE path: K11 and K17 acquire a permit before \
+         every exploration query and assert that as many were started as were \
+         permitted, so the reported ten- and twenty-node convergence is \
+         convergence within the budgets rather than with them bypassed. The \
+         remaining experiments still call the behaviour directly, which is \
+         appropriate — they are about the gate and the policy, not the \
+         scheduler."
             .to_owned(),
     );
 }
@@ -4013,17 +4160,43 @@ pub async fn k28_withdrawn_connection_is_closed(r: &mut Report) {
     // peer — the connection is dropped and re-established under the
     // revoked policy — which is the observable version of a race the
     // harness cannot open on demand (K20's stated limit).
-    nodes[0].revoke(c);
+    // THE PEER MUST BE ROUTED FOR ITS REMOVAL TO MEAN ANYTHING. The
+    // walk connected to it; §7's pipeline is what puts it in the table.
+    crate::topology::admit_candidates(&mut nodes[0], &namespace::protocol_name(&cfg.network_id));
+    pump(&mut nodes, Duration::from_secs(2)).await;
+    let routed_before = nodes[0].routing_peers();
+    r.check(
+        "K28.1b",
+        &format!("the peer is in the routing table before revocation ({routed_before})"),
+        routed_before >= 2,
+    );
     let before_withdrawn = nodes[0].ledger.withdrawn();
-    let _ = nodes[0].swarm.disconnect_peer_id(c);
+    // REVOCATION ALONE. No manual disconnect: the earlier version of
+    // this experiment disconnected by hand, which meant an
+    // implementation that left a revoked peer connected and routable
+    // would have passed unchanged.
+    let acted = nodes[0].revoke(c);
     pump(&mut nodes, Duration::from_secs(3)).await;
     r.check(
         "K28.2",
+        &format!("revocation reported the peer as revoked and acted on it ({acted})"),
+        acted > 0,
+    );
+    r.check(
+        "K28.3",
         &format!(
-            "after revocation the node holds no connection to that peer: {}",
+            "and the connection is gone without anyone disconnecting by hand: {}",
             nodes[0].swarm.is_connected(&c)
         ),
         !nodes[0].swarm.is_connected(&c),
+    );
+    r.check(
+        "K28.4",
+        &format!(
+            "and it is out of the routing table: {} routed (was {routed_before})",
+            nodes[0].routing_peers()
+        ),
+        nodes[0].routing_peers() < routed_before,
     );
     // AND CANNOT MAKE ONE. Admission refuses first, which is K8's
     // property reached from here — the point being that no path leads
@@ -4035,7 +4208,7 @@ pub async fn k28_withdrawn_connection_is_closed(r: &mut Report) {
     }
     pump(&mut nodes, Duration::from_secs(12)).await;
     r.check(
-        "K28.3",
+        "K28.5",
         &format!(
             "and no new one is admitted: {} allowed, refusals {:?}, retained {}",
             nodes[0].ledger.behaviour_allowed(),
