@@ -21,7 +21,7 @@
   },
   "x-contract": {
     "name": "discovery.provider-descriptor",
-    "status": "approved",
+    "status": "active",
     "version": "1.0.0",
     "adr": ["0006", "0022"],
     "specification": "architecture/contracts/DISCOVERY.md"

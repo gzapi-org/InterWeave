@@ -75,7 +75,7 @@
   },
   "x-contract": {
     "name": "discovery.candidate-peer",
-    "status": "approved",
+    "status": "active",
     "version": "1.0.0",
     "adr": [
       "0006",
