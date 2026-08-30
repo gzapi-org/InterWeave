@@ -129,6 +129,10 @@ async fn main() {
         experiments::k19_ceilings_apply_to_behaviour_dials(&mut r).await;
     }
 
+    if want("K23") {
+        println!("\nK23 — behaviour dial volume, by query class");
+        experiments::k23_dial_volume_by_class(&mut r).await;
+    }
     if want("K22") {
         println!("\nK22 — the bounded query scheduler");
         experiments::k22_bounded_query_scheduler(&mut r).await;

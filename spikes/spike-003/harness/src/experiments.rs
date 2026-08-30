@@ -1650,10 +1650,15 @@ pub async fn k17_twenty_node_convergence(r: &mut Report) {
     }
     let bounded = all[N].routing_peers();
     let unbounded = all[N + 1].routing_peers();
+    // AT the bound, not merely within it. `<= BOUND` is satisfied by a
+    // bounded pipeline that admits NOTHING — 0 through 5 all pass — so
+    // a completely broken admission would have been reported as "stops
+    // at 5". The twin exceeding the bound proves candidates existed for
+    // the twin, not that this node saw any.
     r.check(
         "K17.5",
-        &format!("a node under a reduced bound stops at it: {bounded} <= {BOUND}"),
-        bounded <= BOUND,
+        &format!("a node under a reduced bound fills it and stops: {bounded} == {BOUND}"),
+        bounded == BOUND,
     );
     r.check(
         "K17.6",
@@ -1858,6 +1863,40 @@ pub async fn k18_stale_routing_response(r: &mut Report) {
         "K18.6",
         "and never against an empty placeholder",
         !candidates.iter().any(std::string::String::is_empty),
+    );
+    // EVERY address a multi-address dial exhausted, not just the first.
+    // `DialError::Transport` carries one entry per attempt, and scoring
+    // only the first leaves the rest unscored and immediately
+    // retryable — the same "looks checked, checks nothing" shape as F9.
+    // A second dead address is added for the router to hand over.
+    let second_dead: libp2p::Multiaddr = "/ip4/127.0.0.1/tcp/3".parse().expect("valid");
+    if let Some(k) = nodes[1].kad() {
+        k.add_address(&c, second_dead.clone());
+    }
+    nodes[0].ledger.reset();
+    if let Some(k) = nodes[0].kad() {
+        let id = k.get_closest_peers(c);
+        nodes[0].own_queries.insert(id, QueryClass::Targeted);
+    }
+    pump(&mut nodes, Duration::from_secs(15)).await;
+    let after = nodes[0]
+        .manager
+        .lock()
+        .expect("manager")
+        .dial_candidates(&c_identity, 4_000);
+    r.note(format!("K18 candidates after a multi-address failure: {after:?}"));
+    // BOTH dead addresses by name. `!after.is_empty()` was satisfied by
+    // scoring only the first — the exact mutation this is here to
+    // catch — so the assertion names the addresses the dial exhausted.
+    r.check(
+        "K18.7",
+        &format!(
+            "EVERY address the dial exhausted is scored, not just the first: \
+             {after:?}"
+        ),
+        after.iter().any(|a| a == &dead.to_string())
+            && after.iter().any(|a| a == &second_dead.to_string())
+            && !after.iter().any(std::string::String::is_empty),
     );
 
     r.note(format!(
@@ -2314,6 +2353,20 @@ pub async fn k19_ceilings_apply_to_behaviour_dials(r: &mut Report) {
         &format!("every slot comes back once the dials settle: {pending} pending, {held} held"),
         pending == 0 && held == 0,
     );
+    // AND NOTHING WAS LEFT OUTSIDE THE ACCOUNTING. A settlement that
+    // cannot re-mint its ticket drops the reservation, so the
+    // established connection it belonged to would survive outside
+    // `max_connections` with no address accounting — the ceiling
+    // failing open. The gate closes such a connection; this asserts the
+    // ordinary path never needed to.
+    r.check(
+        "K19.11",
+        &format!(
+            "no connection had to be closed for want of accounting: {}",
+            fan[0].ledger.unaccounted_closed()
+        ),
+        fan[0].ledger.unaccounted_closed() == 0,
+    );
 
     // THE CONNECTION CEILING, which the pending ceiling does not stand
     // in for. A `DialTicket` reserves BOTH, and its `Drop` returns both
@@ -2625,7 +2678,7 @@ pub async fn k21_multi_address_behaviour_dial(r: &mut Report) {
     pump(&mut nodes, Duration::from_secs(15)).await;
 
     let refusals = nodes[0].ledger.refusals();
-    let offered = nodes[0]
+    let _offered = nodes[0]
         .observed
         .learned_addresses
         .get(&c)
@@ -2699,7 +2752,10 @@ pub struct QueryScheduler {
     max_per_minute: u32,
     /// Query starts inside the current window, oldest first.
     starts: std::collections::VecDeque<u64>,
-    active: usize,
+    /// The queries currently holding a concurrency slot, by id. A set
+    /// rather than a count so one completion releases one slot, and the
+    /// slot it releases is its own.
+    running: std::collections::HashSet<kad::QueryId>,
 }
 
 /// Why the scheduler refused.
@@ -2718,7 +2774,7 @@ impl QueryScheduler {
             max_concurrent,
             max_per_minute,
             starts: std::collections::VecDeque::new(),
-            active: 0,
+            running: std::collections::HashSet::new(),
         }
     }
 
@@ -2729,7 +2785,7 @@ impl QueryScheduler {
     /// distinct because they fail for different reasons and a caller
     /// that conflates them cannot tell "wait for a slot" from "wait for
     /// the window".
-    pub fn start(&mut self, now_ms: u64) -> Result<(), SchedulerRefusal> {
+    pub fn start(&mut self, id: kad::QueryId, now_ms: u64) -> Result<(), SchedulerRefusal> {
         // THE WINDOW IS PRUNED FIRST, so an old start cannot occupy the
         // rate budget forever. Deque rather than a counter: a counter
         // reset on a tick would let a caller spend the whole budget in
@@ -2742,90 +2798,48 @@ impl QueryScheduler {
         {
             self.starts.pop_front();
         }
-        if self.active >= self.max_concurrent {
+        if self.running.len() >= self.max_concurrent {
             return Err(SchedulerRefusal::Concurrency);
         }
         if self.starts.len() as u32 >= self.max_per_minute {
             return Err(SchedulerRefusal::Rate);
         }
         self.starts.push_back(now_ms);
-        self.active += 1;
+        self.running.insert(id);
         Ok(())
     }
 
-    /// One query finished, whatever its outcome.
-    pub fn finish(&mut self) {
-        self.active = self.active.saturating_sub(1);
+    /// One SPECIFIC query finished.
+    ///
+    /// Keyed, not counted. A bare `finish()` that decremented a counter
+    /// could be called twice for one query — or once for the implicit
+    /// bootstrap the library starts on a routing insertion, which the
+    /// provider never scheduled — and the ceiling would then admit more
+    /// than its budget. `saturating_sub` hid it: the counter simply
+    /// floored at zero and the over-admission looked like normal
+    /// operation.
+    ///
+    /// Returns whether this id was actually holding a slot, so a
+    /// duplicate or foreign completion is visible rather than silent.
+    pub fn finish(&mut self, id: kad::QueryId) -> bool {
+        self.running.remove(&id)
     }
 
+    /// Ids currently holding a slot.
     #[must_use]
-    pub const fn active(&self) -> usize {
-        self.active
+    pub fn running(&self) -> usize {
+        self.running.len()
     }
+
 }
 
 pub async fn k22_bounded_query_scheduler(r: &mut Report) {
     // §13's proposed defaults.
     const MAX_CONCURRENT: usize = 2;
     const MAX_PER_MINUTE: u32 = 6;
-    let mut s = QueryScheduler::new(MAX_CONCURRENT, MAX_PER_MINUTE);
 
-    r.check(
-        "K22.1",
-        "the concurrency ceiling admits exactly its budget",
-        s.start(0).is_ok() && s.start(0).is_ok() && s.active() == MAX_CONCURRENT,
-    );
-    r.check(
-        "K22.2",
-        "and refuses the next for CONCURRENCY, not for rate",
-        s.start(0) == Err(SchedulerRefusal::Concurrency),
-    );
-    s.finish();
-    r.check(
-        "K22.3",
-        "a finished query returns its slot",
-        s.start(0).is_ok(),
-    );
-
-    // THE RATE, which the concurrency ceiling does not stand in for: a
-    // caller that starts and finishes promptly never hits concurrency
-    // and could otherwise start without limit.
-    let mut rate = QueryScheduler::new(MAX_CONCURRENT, MAX_PER_MINUTE);
-    let mut started = 0;
-    for _ in 0..20 {
-        if rate.start(1_000).is_ok() {
-            started += 1;
-            rate.finish();
-        }
-    }
-    r.check(
-        "K22.4",
-        &format!("start-and-finish is bounded by the RATE, not concurrency: {started}"),
-        started == MAX_PER_MINUTE as usize,
-    );
-    r.check(
-        "K22.5",
-        "and the refusal says which budget it was",
-        rate.start(1_000) == Err(SchedulerRefusal::Rate),
-    );
-
-    // THE WINDOW SLIDES. A counter reset on a tick would let the whole
-    // budget be spent in the last millisecond of one window and again in
-    // the first of the next — twice the rate across the boundary.
-    r.check(
-        "K22.6",
-        "the window is still closed just before it lapses",
-        rate.start(1_000 + 59_999) == Err(SchedulerRefusal::Rate),
-    );
-    r.check(
-        "K22.7",
-        "and opens once the oldest start ages out",
-        rate.start(1_000 + 60_000).is_ok(),
-    );
-
-    // AND IT REALLY GATES A REAL QUERY. Everything above is the
-    // scheduler alone; this drives `kad` through it, so a scheduler that
-    // is present but not consulted is visible.
+    // Real `QueryId`s, minted from a real behaviour, because the
+    // scheduler is keyed by them.
     let cfg = NodeConfig {
         role: KadRole::Server,
         gate_mode: Mode::PolicyAdmit,
@@ -2833,10 +2847,10 @@ pub async fn k22_bounded_query_scheduler(r: &mut Report) {
     };
     let mut nodes = vec![Node::start(&cfg).await, Node::start(&cfg).await];
     let (a, b) = (nodes[0].peer_id, nodes[1].peer_id);
-    nodes[0].trust(a);
-    nodes[0].trust(b);
-    nodes[1].trust(a);
-    nodes[1].trust(b);
+    for i in 0..2 {
+        nodes[i].trust(a);
+        nodes[i].trust(b);
+    }
     let b_addr = nodes[1].dial_address();
     nodes[0].dial_admitted(b_addr.clone());
     pump_until(&mut nodes, Duration::from_secs(10), |n| {
@@ -2848,36 +2862,247 @@ pub async fn k22_bounded_query_scheduler(r: &mut Report) {
     }
     pump(&mut nodes, Duration::from_secs(2)).await;
 
+    let mut ids = Vec::new();
+    for _ in 0..12 {
+        if let Some(k) = nodes[0].kad() {
+            ids.push(k.get_n_closest_peers(random_32(), NonZeroUsize::new(4).expect("nonzero")));
+        }
+    }
+
+    let mut s = QueryScheduler::new(MAX_CONCURRENT, MAX_PER_MINUTE);
+    r.check(
+        "K22.1",
+        "the concurrency ceiling admits exactly its budget",
+        s.start(ids[0], 0).is_ok() && s.start(ids[1], 0).is_ok() && s.running() == MAX_CONCURRENT,
+    );
+    r.check(
+        "K22.2",
+        "and refuses the next for CONCURRENCY, not for rate",
+        s.start(ids[2], 0) == Err(SchedulerRefusal::Concurrency),
+    );
+
+    // A COMPLETION RELEASES ITS OWN SLOT, and only its own. A counter
+    // would let two calls for one query — or one call for the implicit
+    // bootstrap the library starts on a routing insertion, which the
+    // provider never scheduled — drop `active` to zero and admit two
+    // more, exceeding the ceiling while looking healthy.
+    r.check(
+        "K22.3",
+        "a duplicate completion releases nothing the second time",
+        s.finish(ids[0]) && !s.finish(ids[0]) && s.running() == MAX_CONCURRENT - 1,
+    );
+    r.check(
+        "K22.4",
+        "and a completion for a query the scheduler never started releases nothing",
+        !s.finish(ids[9]) && s.running() == MAX_CONCURRENT - 1,
+    );
+    r.check(
+        "K22.5",
+        "the freed slot — exactly one — is available again",
+        s.start(ids[3], 0).is_ok() && s.start(ids[4], 0) == Err(SchedulerRefusal::Concurrency),
+    );
+
+    // THE RATE, which the concurrency ceiling does not stand in for: a
+    // caller that starts and finishes promptly never hits concurrency
+    // and could otherwise start without limit.
+    let mut rate = QueryScheduler::new(MAX_CONCURRENT, MAX_PER_MINUTE);
+    let mut started = 0;
+    for id in ids.iter().take(12) {
+        if rate.start(*id, 1_000).is_ok() {
+            started += 1;
+            rate.finish(*id);
+        }
+    }
+    r.check(
+        "K22.6",
+        &format!("start-and-finish is bounded by the RATE, not concurrency: {started}"),
+        started == MAX_PER_MINUTE as usize,
+    );
+    r.check(
+        "K22.7",
+        "and the refusal says which budget it was",
+        rate.start(ids[11], 1_000) == Err(SchedulerRefusal::Rate),
+    );
+
+    // THE WINDOW SLIDES. A counter reset on a tick would let the whole
+    // budget be spent in the last millisecond of one window and again in
+    // the first of the next — twice the rate across the boundary.
+    r.check(
+        "K22.8",
+        "the window is still closed just before it lapses",
+        rate.start(ids[11], 1_000 + 59_999) == Err(SchedulerRefusal::Rate),
+    );
+    r.check(
+        "K22.9",
+        "and opens once the oldest start ages out",
+        rate.start(ids[11], 1_000 + 60_000).is_ok(),
+    );
+
+    // AND IT REALLY GATES REAL QUERIES: exactly the scheduled ones are
+    // in flight, which the scheduler's own bookkeeping cannot show.
     let mut live = QueryScheduler::new(MAX_CONCURRENT, MAX_PER_MINUTE);
     let mut issued = 0;
     let mut refused = 0;
     for _ in 0..10 {
-        if live.start(0).is_ok() {
+        let Some(k) = nodes[0].kad() else { break };
+        let q = k.get_n_closest_peers(random_32(), NonZeroUsize::new(4).expect("nonzero"));
+        if live.start(q, 0).is_ok() {
             issued += 1;
-            if let Some(k) = nodes[0].kad() {
-                let q = k.get_n_closest_peers(random_32(), NonZeroUsize::new(4).expect("nonzero"));
-                nodes[0].own_queries.insert(q, QueryClass::Exploration);
-            }
+            nodes[0].own_queries.insert(q, QueryClass::Exploration);
         } else {
             refused += 1;
         }
     }
     r.check(
-        "K22.8",
+        "K22.10",
         &format!("a driver asking for ten queries starts {issued} and is refused {refused}"),
         issued == MAX_CONCURRENT && refused == 10 - MAX_CONCURRENT,
     );
     let active = nodes[0].active_queries_by_class();
     r.check(
-        "K22.9",
-        &format!("and the node really has exactly that many in flight: {active:?}"),
+        "K22.11",
+        &format!("and the node really has exactly that many tracked in flight: {active:?}"),
         active.get(&QueryClass::Exploration).copied() == Some(MAX_CONCURRENT),
     );
     r.note(
-        "K22 LIMIT: the scheduler is project logic modelled here, not a \\
-         component of the harness's Kademlia driver — every other experiment \\
-         starts queries directly on the behaviour, which is why a scheduler \\
+        "K22 LIMIT: the scheduler is project logic modelled here, not a \
+         component of the harness's Kademlia driver — every other experiment \
+         starts queries directly on the behaviour, which is why a scheduler \
          that exists but is never consulted would be invisible to them."
+            .to_owned(),
+    );
+}
+
+/// K23 — behaviour-originated dial volume, BY QUERY CLASS.
+///
+/// The release criterion asks for volume "measured by query class". The
+/// gate cannot read the class off a dial: libp2p hands
+/// `handle_pending_outbound_connection` a connection id and a peer, and
+/// for a behaviour dial nothing else — no query id, no originating
+/// behaviour. So attribution has to come from the provider, which knows
+/// what it started.
+///
+/// That makes it exact when one class is in flight and a SET when
+/// several are. Both cases are measured here, because the second is a
+/// real limit on what any Stage 10 implementation can report, not a
+/// shortcut taken by this harness.
+pub async fn k23_dial_volume_by_class(r: &mut Report) {
+    let cfg = NodeConfig {
+        role: KadRole::Server,
+        gate_mode: Mode::PolicyAdmit,
+        ..NodeConfig::default()
+    };
+    let mut nodes = vec![
+        Node::start(&cfg).await,
+        Node::start(&cfg).await,
+        Node::start(&cfg).await,
+    ];
+    let (a, b, c) = (nodes[0].peer_id, nodes[1].peer_id, nodes[2].peer_id);
+    for i in 0..3 {
+        for p in [a, b, c] {
+            nodes[i].trust(p);
+        }
+    }
+    let (b_addr, c_addr) = (nodes[1].dial_address(), nodes[2].dial_address());
+    nodes[1].dial_admitted(c_addr.clone());
+    pump_until(&mut nodes, Duration::from_secs(10), |n| {
+        n[1].observed.connected.contains(&c)
+    })
+    .await;
+    if let Some(k) = nodes[1].kad() {
+        k.add_address(&c, c_addr);
+    }
+    nodes[0].dial_admitted(b_addr.clone());
+    pump_until(&mut nodes, Duration::from_secs(10), |n| {
+        n[0].observed.connected.contains(&b)
+    })
+    .await;
+
+    let classes = nodes[0].swarm.behaviour().gate.classes();
+
+    // THE LIBRARY'S OWN WORK FIRST, with nothing declared. A routing
+    // insertion starts a bootstrap the provider never asked for (F2),
+    // and its dials must be visible as unattributed rather than
+    // silently folded into whatever ran next.
+    nodes[0].ledger.reset();
+    if let Some(k) = nodes[0].kad() {
+        k.add_address(&b, b_addr);
+    }
+    pump(&mut nodes, Duration::from_secs(6)).await;
+    let implicit = nodes[0].ledger.by_class();
+    r.check(
+        "K23.1",
+        &format!("dials from work the provider never started are attributed to none: {implicit:?}"),
+        implicit.keys().all(|k| k == "none"),
+    );
+
+    // ONE CLASS IN FLIGHT: attribution is exact. The connection the
+    // implicit bootstrap just made is dropped first, or the targeted
+    // query has nothing to dial and the window measures nothing — which
+    // is what the first run of this experiment reported.
+    let _ = nodes[0].swarm.disconnect_peer_id(c);
+    pump(&mut nodes, Duration::from_secs(2)).await;
+    nodes[0].ledger.reset();
+    classes.started("targeted");
+    if let Some(k) = nodes[0].kad() {
+        let id = k.get_closest_peers(c);
+        nodes[0].own_queries.insert(id, QueryClass::Targeted);
+    }
+    pump(&mut nodes, Duration::from_secs(12)).await;
+    classes.finished("targeted");
+    let single = nodes[0].ledger.by_class();
+    let targeted = single.get("targeted").copied().unwrap_or(0);
+    r.check(
+        "K23.2",
+        &format!("with one class in flight every dial is attributed to it: {single:?}"),
+        targeted > 0 && single.keys().all(|k| k == "targeted"),
+    );
+    r.check(
+        "K23.3",
+        &format!(
+            "and the per-class total accounts for every behaviour dial: {} == {}",
+            single.values().sum::<u64>(),
+            nodes[0].ledger.behaviour_originated()
+        ),
+        single.values().sum::<u64>() == nodes[0].ledger.behaviour_originated(),
+    );
+
+    // TWO CLASSES AT ONCE: attribution degrades to a SET, and says so
+    // rather than picking one.
+    let _ = nodes[0].swarm.disconnect_peer_id(c);
+    pump(&mut nodes, Duration::from_secs(2)).await;
+    nodes[0].ledger.reset();
+    classes.started("targeted");
+    classes.started("exploration");
+    let started = nodes[0].kad().map(|k| {
+        (
+            k.get_closest_peers(c),
+            k.get_n_closest_peers(random_32(), NonZeroUsize::new(4).expect("nonzero")),
+        )
+    });
+    if let Some((t, e)) = started {
+        nodes[0].own_queries.insert(t, QueryClass::Targeted);
+        nodes[0].own_queries.insert(e, QueryClass::Exploration);
+    }
+    pump(&mut nodes, Duration::from_secs(12)).await;
+    classes.finished("targeted");
+    classes.finished("exploration");
+    let mixed = nodes[0].ledger.by_class();
+    r.check(
+        "K23.4",
+        &format!(
+            "with two classes in flight the attribution is the SET, not a guess \\
+             at one of them: {mixed:?}"
+        ),
+        mixed.keys().all(|k| k.contains('+') || k == "none"),
+    );
+    r.note(
+        "K23 LIMIT: libp2p does not tell a behaviour which query caused a dial \\
+         — the hook receives a connection id and a peer and nothing else. So \\
+         attribution comes from what the PROVIDER declares it is running, and \\
+         is exact only while one class is in flight. Stage 10 can narrow this \\
+         by serialising classes or by widening the driver port; it cannot \\
+         read it off the dial."
             .to_owned(),
     );
 }

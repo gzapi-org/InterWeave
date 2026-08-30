@@ -51,6 +51,57 @@ use libp2p::swarm::{
     THandlerOutEvent, ToSwarm, dummy,
 };
 
+/// What the gate believes is driving dials right now.
+///
+/// libp2p does NOT tell a behaviour which query caused a dial: the hook
+/// receives a connection id, a peer and (for a behaviour dial) nothing
+/// else. So per-class attribution — which the release criterion requires
+/// — cannot be read off the dial. It has to come from the provider,
+/// which knows what it started, and the gate attributes each dial to the
+/// classes that were in flight when it happened.
+///
+/// That is exact when one class is active and a SET when several are,
+/// which is a real limit rather than a modelling choice; K23 measures
+/// both cases and the record states it.
+#[derive(Debug, Clone, Default)]
+pub struct ActiveClasses {
+    inner: Arc<Mutex<BTreeMap<&'static str, usize>>>,
+}
+
+impl ActiveClasses {
+    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<&'static str, usize>> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The provider started a query of this class.
+    pub fn started(&self, class: &'static str) {
+        *self.lock().entry(class).or_insert(0) += 1;
+    }
+
+    /// One finished.
+    pub fn finished(&self, class: &'static str) {
+        if let Some(n) = self.lock().get_mut(class) {
+            *n = n.saturating_sub(1);
+        }
+    }
+
+    /// The classes in flight, as a stable label.
+    #[must_use]
+    pub fn label(&self) -> String {
+        let live: Vec<&str> = self
+            .lock()
+            .iter()
+            .filter(|(_, n)| **n > 0)
+            .map(|(c, _)| *c)
+            .collect();
+        if live.is_empty() {
+            "none".to_owned()
+        } else {
+            live.join("+")
+        }
+    }
+}
+
 /// How the gate answers a dial carrying no root admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -78,6 +129,12 @@ struct LedgerInner {
     refusals: BTreeMap<String, u64>,
     /// The peers behaviour-originated dials were aimed at.
     behaviour_targets: Vec<PeerId>,
+    /// Behaviour dials by the query class(es) in flight when each
+    /// happened. `none` means no query the provider told us about was
+    /// running, which is itself evidence — that is the library's own
+    /// work, and the brief requires it be counted rather than assumed
+    /// absent.
+    by_class: BTreeMap<String, u64>,
     /// Behaviour connections retained after reclassification.
     retained: u64,
     /// Behaviour connections dropped because authority had been
@@ -91,6 +148,12 @@ struct LedgerInner {
     /// The address each in-flight behaviour dial actually used, learned
     /// at the established hook — the first moment it exists.
     used_address: BTreeMap<ConnectionId, String>,
+    /// Established connections closed because they could not be
+    /// accounted for.
+    unaccounted_closed: u64,
+    /// The OTHER addresses a failed multi-address dial exhausted. The
+    /// ticket settles one; these are scored individually.
+    also_failed: BTreeMap<ConnectionId, Vec<String>>,
 }
 
 impl DialLedger {
@@ -128,6 +191,12 @@ impl DialLedger {
         self.lock().behaviour_targets.clone()
     }
 
+    /// Behaviour-originated dial volume BY QUERY CLASS.
+    #[must_use]
+    pub fn by_class(&self) -> BTreeMap<String, u64> {
+        self.lock().by_class.clone()
+    }
+
     /// Behaviour connections kept after reclassification at settlement.
     #[must_use]
     pub fn retained(&self) -> u64 {
@@ -151,6 +220,13 @@ impl DialLedger {
     #[must_use]
     pub fn address_refusals(&self) -> u64 {
         self.lock().address_refusals
+    }
+
+    /// Established connections closed because settlement could not
+    /// account for them.
+    #[must_use]
+    pub fn unaccounted_closed(&self) -> u64 {
+        self.lock().unaccounted_closed
     }
 
     /// Forget everything, so one experiment cannot read another's count.
@@ -204,6 +280,12 @@ pub struct InstrumentedGate {
     /// reports an outcome that has already happened, and recording it is
     /// what the manager's own API requires `&mut` for.
     manager: Arc<Mutex<ConnectionManager>>,
+    /// What the provider says it is running, for attributing dials.
+    classes: ActiveClasses,
+    /// Connections that must be closed because they could not be
+    /// accounted for. Drained by `poll`, which is the only place a
+    /// `NetworkBehaviour` may ask the Swarm to do anything.
+    close: Arc<Mutex<Vec<(PeerId, ConnectionId)>>>,
     /// The gate's clock origin.
     ///
     /// `now_ms` used to be a field pinned at zero, so every admission
@@ -232,8 +314,16 @@ impl InstrumentedGate {
             held: Arc::new(Mutex::new(BTreeMap::new())),
             connections: Arc::new(Mutex::new(BTreeMap::new())),
             manager,
+            classes: ActiveClasses::default(),
+            close: Arc::new(Mutex::new(Vec::new())),
             started: Instant::now(),
         }
+    }
+
+    /// The provider's declaration of what it is running.
+    #[must_use]
+    pub fn classes(&self) -> ActiveClasses {
+        self.classes.clone()
     }
 
     /// The gate's current clock reading, for an experiment that needs
@@ -310,8 +400,10 @@ impl NetworkBehaviour for InstrumentedGate {
         // the definition of behaviour-originated. Counted before any
         // decision, so a refusal is still a measured dial.
         {
+            let label = self.classes.label();
             let mut l = self.ledger.lock();
             l.behaviour_originated += 1;
+            *l.by_class.entry(label).or_insert(0) += 1;
             if let Some(p) = peer {
                 l.behaviour_targets.push(p);
             }
@@ -532,12 +624,21 @@ impl NetworkBehaviour for InstrumentedGate {
                 // established hook cannot reach, because there is no
                 // established connection.
                 if let libp2p::swarm::DialError::Transport(attempts) = e.error
-                    && let Some((addr, _)) = attempts.first()
+                    && !attempts.is_empty()
                 {
-                    self.ledger
-                        .lock()
-                        .used_address
-                        .insert(e.connection_id, normalize(addr));
+                    // EVERY attempted address, not just the first. A
+                    // multi-address dial exhausts them in turn and
+                    // `DialError::Transport` carries one entry each;
+                    // recording only the first leaves the rest unscored
+                    // and immediately retryable, which is the same
+                    // "looks checked, checks nothing" shape as F9.
+                    let mut l = self.ledger.lock();
+                    l.used_address
+                        .insert(e.connection_id, normalize(&attempts[0].0));
+                    l.also_failed.insert(
+                        e.connection_id,
+                        attempts[1..].iter().map(|(a, _)| normalize(a)).collect(),
+                    );
                 }
                 Some((e.connection_id, false))
             }
@@ -580,6 +681,7 @@ impl NetworkBehaviour for InstrumentedGate {
                         // admission and a behaviour dial has none then, so
                         // the settlement re-mints against the real address
                         // — F12.
+                        let peer = ticket.peer().cloned();
                         if let Some(ticket) = resettle(&m, ticket, used.as_deref(), now) {
                             let slot = m.record_success(ticket, now);
                             drop(m);
@@ -588,6 +690,24 @@ impl NetworkBehaviour for InstrumentedGate {
                                 .unwrap_or_else(|e| e.into_inner())
                                 .insert(id, slot);
                             self.ledger.lock().retained += 1;
+                        } else {
+                            // NOTHING TO SETTLE, so nothing holds this
+                            // connection's slot — and the connection is
+                            // already established. Leaving it open means
+                            // a live connection outside `max_connections`
+                            // and with no address accounting, which is
+                            // the ceiling failing open. Closing it is the
+                            // only answer available: the alternative,
+                            // keeping an unsettleable ticket, would
+                            // reserve capacity nothing can release.
+                            drop(m);
+                            self.ledger.lock().unaccounted_closed += 1;
+                            if let Some(p) = peer.and_then(|p| p.as_str().parse::<PeerId>().ok()) {
+                                self.close
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .push((p, id));
+                            }
                         }
                     } else {
                         m.record_authorization_withdrawn(ticket, now);
@@ -607,7 +727,14 @@ impl NetworkBehaviour for InstrumentedGate {
                     .remove(&id)
                 {
                     let now = self.now_ms();
-                    let used = self.ledger.lock().used_address.remove(&id);
+                    let (used, others) = {
+                        let mut l = self.ledger.lock();
+                        (
+                            l.used_address.remove(&id),
+                            l.also_failed.remove(&id).unwrap_or_default(),
+                        )
+                    };
+                    let peer = ticket.peer().cloned();
                     let m = self.manager.lock().unwrap_or_else(|e| e.into_inner());
                     let fresh = resettle(&m, ticket, used.as_deref(), now);
                     drop(m);
@@ -616,6 +743,25 @@ impl NetworkBehaviour for InstrumentedGate {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .record_failure(ticket, now);
+                    }
+                    // THE REMAINING ADDRESSES, each scored on its own.
+                    // One ticket settles one address, so a dial that
+                    // exhausted several needs one settlement each — and
+                    // each is minted and released in turn rather than
+                    // held, so the ceiling sees one at a time.
+                    if let Some(peer) = peer {
+                        for other in others {
+                            let mut m =
+                                self.manager.lock().unwrap_or_else(|e| e.into_inner());
+                            let request = DialRequest {
+                                peer: Some(peer.clone()),
+                                address: other,
+                                origin: DialOrigin::KademliaQuery,
+                            };
+                            if let Ok(t) = m.handle().admit(&request, now) {
+                                m.record_failure(t, now);
+                            }
+                        }
                     }
                 }
                 if let Some(slot) = self
@@ -647,6 +793,20 @@ impl NetworkBehaviour for InstrumentedGate {
         &mut self,
         _cx: &mut Context<'_>,
     ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
+        // The only place a behaviour may act on the Swarm. A connection
+        // that could not be accounted for is closed here rather than
+        // left open outside the ceiling.
+        if let Some((peer_id, connection)) = self
+            .close
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop()
+        {
+            return Poll::Ready(ToSwarm::CloseConnection {
+                peer_id,
+                connection: libp2p::swarm::CloseConnection::One(connection),
+            });
+        }
         Poll::Pending
     }
 }
