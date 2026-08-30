@@ -854,4 +854,80 @@ mod tests {
         );
         assert!(out.is_empty(), "counting is not a port event");
     }
+
+    #[test]
+    fn the_population_bound_is_not_an_address_freeze() {
+        // §11: max_routing_peers binds the POPULATION before manual
+        // insertion; a peer already routed may always refresh its
+        // addresses. Driven through try_admit with a real behaviour and
+        // a ceiling of one.
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 1,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+        };
+        let mut state = KademliaState::new(&settings);
+        let local = PeerId::random();
+        let mut behaviour = build_behaviour(&settings, local).expect("buildable");
+        let mut manager = interweave_transport_runtime::ConnectionManager::new(
+            interweave_transport_runtime::ConnectionPolicy::default(),
+            8,
+        );
+        // Real Ed25519 identities: PeerId::random() mints a digest-form
+        // id the neutral grammar refuses.
+        let a = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let b = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let a_id = to_transport_identity(&a).expect("canonical");
+        let b_id = to_transport_identity(&b).expect("canonical");
+        let _ = manager.set_trust(
+            interweave_transport_runtime::TrustSources::new(
+                interweave_trust_api::PeerTrustPolicy::new([a_id.clone(), b_id.clone()])
+                    .expect("small"),
+                interweave_trust_api::InfrastructureSet::default(),
+            ),
+            &[],
+        );
+        for peer in [a, b] {
+            state.advertises.insert(peer, true);
+            state
+                .pending_offers
+                .entry(peer)
+                .or_default()
+                .insert("/ip4/127.0.0.1/tcp/1".parse().expect("valid"));
+        }
+
+        let _ = try_admit(&mut state, &mut behaviour, &manager, a, &a_id, 0);
+        assert!(state.routed.contains(&a), "the first peer takes the seat");
+        let _ = try_admit(&mut state, &mut behaviour, &manager, b, &b_id, 0);
+        assert!(
+            !state.routed.contains(&b),
+            "the ceiling binds BEFORE insertion: no second seat exists"
+        );
+        assert!(
+            state.pending_offers.contains_key(&b),
+            "the refused offer stays stashed rather than being consumed"
+        );
+
+        // The routed peer's ADDRESS UPDATE still passes: a new offer for
+        // it is consumed, not frozen out by the full table.
+        state
+            .pending_offers
+            .entry(a)
+            .or_default()
+            .insert("/ip4/127.0.0.1/tcp/2".parse().expect("valid"));
+        let _ = try_admit(&mut state, &mut behaviour, &manager, a, &a_id, 1);
+        assert!(
+            !state.pending_offers.contains_key(&a),
+            "a population bound is not an address freeze (§11)"
+        );
+    }
 }
