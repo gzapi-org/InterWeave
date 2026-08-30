@@ -142,11 +142,11 @@ CandidateSet::len                                stage-12  reached through Disco
 CandidateSet::is_empty                           stage-12  candidate-set introspection, first read at runtime composition
 
 # --- stage-10 ----------------------------------------------------
-ObservedCandidates                               stage-10  Kademlia control port, inert until the DHT is activated
-OfferedAddress                                   stage-10  Kademlia control port, inert until the DHT is activated
-OfferedAddresses                                 stage-10  Kademlia control port, inert until the DHT is activated
-RoutingView                                      stage-10  Kademlia control port, inert until the DHT is activated
-validate_limits                                  stage-10  Kademlia control port, inert until the DHT is activated
+# The provider crate consumes the port now; what remains exempt is the
+# slice of it only the Swarm driver or the config layer can reach.
+ObservedCandidates                               stage-10  Kademlia control port; the driver mints these from query results
+validate_limits                                  stage-10  profile-config calls it when the enabled-entry gate flips this stage
+RoutingView::effective_target                    stage-12  consumed inside the port's own health today; the composed daemon's §16 diagnostics surface the trust-capped target directly
 
 # --- stage-11 ----------------------------------------------------
 AddressState::is_dialable_at                     stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection

@@ -14,6 +14,8 @@ use interweave_kademlia_control_api::{
 use interweave_transport_api::TransportIdentity;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use crate::budgets::{Permit, QueryBudgets};
+use crate::scheduler::Pacing;
 use crate::{health, normalize};
 
 /// The provider name, and the `source` on every candidate it emits.
@@ -43,12 +45,14 @@ pub const MAX_TRACKED_CANDIDATES: usize = MAX_ROUTING_PEERS;
 /// evidence with old.
 pub const MAX_CAPABILITY_EVIDENCE: usize = MAX_ROUTING_PEERS;
 
-/// Ceiling on advisory commands waiting for the driver.
+/// Ceiling on routing OFFERS waiting for the driver.
 ///
-/// `SetMode` and `Shutdown` are control commands and never dropped; when
-/// the queue is full an incoming offer or query displaces the OLDEST
-/// advisory command, so a stalled driver bounds memory at the cost of the
-/// stalest advice — which the next observation regenerates.
+/// When it is reached an incoming offer displaces the OLDEST offer, so a
+/// stalled driver bounds memory at the cost of the stalest advice — which
+/// the next observation regenerates. Control commands (`SetMode`,
+/// `Shutdown`) and queries are never displaced: dropping a `StartQuery`
+/// would leak the budget slot bound to it, and the budgets already cap
+/// how many can be outstanding.
 pub const MAX_PENDING_COMMANDS: usize = 256;
 
 /// The base-32 alphabet of a network hash: lowercase RFC 4648, unpadded.
@@ -76,6 +80,18 @@ pub struct KademliaProviderConfig {
     pub target_routing_peers: u32,
     /// Configured routing-table ceiling.
     pub max_routing_peers: u32,
+    /// Base interval between exploration rounds (`exploration_interval`).
+    pub exploration_interval_ms: u64,
+    /// Jitter applied to that interval, in percent (`exploration_jitter_percent`).
+    pub exploration_jitter_percent: u32,
+    /// Concurrent query ceiling across all classes (`max_concurrent_queries`).
+    pub max_concurrent_queries: u32,
+    /// Query-rate ceiling across all classes (`max_queries_per_minute`).
+    pub max_queries_per_minute: u32,
+    /// Floor on bootstrap frequency (`bootstrap_min_interval`).
+    pub bootstrap_min_interval_ms: u64,
+    /// Routine bootstrap refresh interval (`bootstrap_refresh_interval`).
+    pub bootstrap_refresh_interval_ms: u64,
 }
 
 /// Why a [`KademliaProviderConfig`] was refused.
@@ -94,6 +110,31 @@ pub enum ProviderConfigError {
         /// The configured value.
         got: u32,
     },
+    /// A zero exploration interval would busy-loop the scheduler.
+    ZeroExplorationInterval,
+    /// Jitter above 100 percent could schedule into the past.
+    JitterAboveHundred,
+    /// A zero concurrency ceiling could never run a query.
+    ZeroConcurrency,
+    /// A zero rate ceiling could never run a query.
+    ZeroRate,
+    /// `bootstrap_refresh_interval` below `bootstrap_min_interval` asks
+    /// for a refresh the floor forbids (§13 rule 2).
+    RefreshBelowMinimum,
+}
+
+/// Why a bootstrap request was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootstrapRefusal {
+    /// The provider is not running.
+    NotRunning,
+    /// `bootstrap_min_interval` has not elapsed since the last one.
+    TooSoon,
+    /// The global query budget refused the work.
+    BudgetExhausted,
+    /// The local identity is not an Ed25519 PeerId, so no self-lookup
+    /// key can be recovered.
+    UntargetableSelf,
 }
 
 /// Why a targeted lookup was refused (§9.2, one conjunct at a time).
@@ -179,6 +220,35 @@ pub struct KademliaDiscovery {
     /// Last targeted-lookup issue time per peer. Pruned to the trust
     /// snapshot, so it is bounded by the trust policy's own size.
     cooldowns: BTreeMap<TransportIdentity, u64>,
+    /// The global query budgets (§15), shared across all three classes.
+    budgets: QueryBudgets,
+    /// Exploration due-times and bootstrap spacing.
+    pacing: Pacing,
+    /// Consecutive successful exploration rounds that admitted nothing
+    /// (§9.3). Reset by every saturation-invalidating event: progress,
+    /// trust revision, a new seed or capability observation, routing
+    /// loss.
+    no_progress_rounds: u32,
+    /// Total routing admissions ever, so an exploration round can tell
+    /// whether anything was admitted while it ran even if something was
+    /// also removed.
+    admissions: u64,
+    /// The admission count when the in-flight exploration was issued;
+    /// `Some` means one exploration is running and `tick` starts no
+    /// second one.
+    exploration_snapshot: Option<u64>,
+    /// The slot held for the library's implicit bootstrap (F2): a
+    /// routing insertion on an empty table starts one query nobody
+    /// requested, and it dials, so it is charged like the work it is.
+    implicit_charge: Option<Permit>,
+    /// The local self-lookup key, if the local identity is Ed25519.
+    local_key: Option<[u8; 32]>,
+    /// The latest instant any timed call has seen; what `health()` —
+    /// which the trait gives no clock — judges evidence freshness at.
+    clock: u64,
+    /// Jitter entropy from the in-flight exploration's key, used when
+    /// its completion schedules the next round.
+    exploration_entropy: u64,
 }
 
 impl KademliaDiscovery {
@@ -213,12 +283,32 @@ impl KademliaDiscovery {
                 got: config.max_routing_peers,
             });
         }
+        if config.exploration_interval_ms == 0 {
+            return Err(ProviderConfigError::ZeroExplorationInterval);
+        }
+        if config.exploration_jitter_percent > 100 {
+            return Err(ProviderConfigError::JitterAboveHundred);
+        }
+        if config.max_concurrent_queries == 0 {
+            return Err(ProviderConfigError::ZeroConcurrency);
+        }
+        if config.max_queries_per_minute == 0 {
+            return Err(ProviderConfigError::ZeroRate);
+        }
+        if config.bootstrap_refresh_interval_ms < config.bootstrap_min_interval_ms {
+            return Err(ProviderConfigError::RefreshBelowMinimum);
+        }
         let rendered = format!(
             "/interweave/kad/{}.0.0/{}",
             config.wire_major, config.network_hash
         );
         let expected_protocol =
             ProtocolId::parse(rendered).map_err(|_| ProviderConfigError::MalformedNetworkHash)?;
+        let budgets = QueryBudgets::new(
+            config.max_concurrent_queries as usize,
+            config.max_queries_per_minute,
+        );
+        let local_key = normalize::targeted_lookup_key(&local);
         Ok(Self {
             config,
             local,
@@ -234,6 +324,15 @@ impl KademliaDiscovery {
             emitted: BTreeMap::new(),
             evidence: BTreeMap::new(),
             cooldowns: BTreeMap::new(),
+            budgets,
+            pacing: Pacing::default(),
+            no_progress_rounds: 0,
+            admissions: 0,
+            exploration_snapshot: None,
+            implicit_charge: None,
+            local_key,
+            clock: 0,
+            exploration_entropy: 0,
         })
     }
 
@@ -254,6 +353,9 @@ impl KademliaDiscovery {
         peers.remove(&self.local);
         self.cooldowns.retain(|peer, _| peers.contains(peer));
         self.trusted = peers;
+        // §9.3: a trust-policy revision invalidates saturation — the set
+        // the exploration ran out of is not the set any more.
+        self.no_progress_rounds = 0;
     }
 
     /// The routing view the health model consumes.
@@ -264,9 +366,7 @@ impl KademliaDiscovery {
             target_routing_peers: self.config.target_routing_peers,
             max_routing_peers: self.config.max_routing_peers,
             remote_trusted_population: u32::try_from(self.trusted.len()).unwrap_or(u32::MAX),
-            // The scheduler owns exploration progress; until it lands this
-            // provider has run no exploration rounds to count.
-            no_progress_rounds: 0,
+            no_progress_rounds: self.no_progress_rounds,
         }
     }
 
@@ -284,36 +384,192 @@ impl KademliaDiscovery {
         if !self.started || self.stopped {
             return;
         }
+        self.clock = self.clock.max(now_ms);
         match event {
-            KademliaEvent::QueryResults { candidates, .. } => {
+            KademliaEvent::QueryResults { candidates, class } => {
+                self.settle(class, now_ms, true);
                 self.recent_queries_succeeded = true;
                 for candidate in candidates.as_slice() {
                     self.track(candidate, now_ms);
                 }
             }
             KademliaEvent::RoutingPeerAdded { peer } => {
+                // F2: an insertion on an EMPTY table starts one bootstrap
+                // the provider never scheduled, and it dials — so it is
+                // charged like the work it is, past the ceilings if it
+                // must be, and the slot is settled by the bootstrap-class
+                // completion the driver reports for it.
+                if self.routing.is_empty() && self.implicit_charge.is_none() {
+                    self.implicit_charge = Some(self.budgets.charge_unscheduled(now_ms));
+                }
                 self.routing.insert(peer);
+                self.admissions += 1;
+                // Progress: the backed-off pace no longer describes the
+                // situation, and neither does any saturation.
+                self.no_progress_rounds = 0;
+                self.pacing.reset_exploration();
             }
             KademliaEvent::RoutingPeerRemoved { peer } => {
-                self.routing.remove(&peer);
-            }
-            KademliaEvent::QueryFailed { reason, .. } => match reason {
-                QueryFailure::TimedOut | QueryFailure::NoRoutingPeers => {
-                    self.recent_queries_succeeded = false;
+                if self.routing.remove(&peer) {
+                    // §9.3: routing loss invalidates saturation.
+                    self.no_progress_rounds = 0;
                 }
-                // A refused budget or a shutdown is scheduling, not the
-                // network failing; it says nothing about query health.
-                QueryFailure::BudgetExhausted | QueryFailure::ShuttingDown => {}
-            },
+            }
+            KademliaEvent::QueryFailed { reason, class } => {
+                self.settle(class, now_ms, false);
+                match reason {
+                    QueryFailure::TimedOut | QueryFailure::NoRoutingPeers => {
+                        self.recent_queries_succeeded = false;
+                    }
+                    // A refused budget or a shutdown is scheduling, not
+                    // the network failing; it says nothing about query
+                    // health.
+                    QueryFailure::BudgetExhausted | QueryFailure::ShuttingDown => {}
+                }
+            }
         }
+    }
+
+    /// Settle the budget slot and pacing for one completed query.
+    fn settle(&mut self, class: QueryClass, now_ms: u64, succeeded: bool) {
+        let was_commanded = self.budgets.finish_oldest(class);
+        if class == QueryClass::Bootstrap
+            && !was_commanded
+            && let Some(charge) = self.implicit_charge.take()
+        {
+            // The implicit bootstrap finished: its slot comes back, its
+            // rate charge stays spent — the window really was used.
+            self.budgets.consume(charge);
+        }
+        if class == QueryClass::Exploration
+            && let Some(snapshot) = self.exploration_snapshot.take()
+        {
+            // §9.3: only a SUCCESSFUL round that admitted nothing counts
+            // toward saturation; a failed round proves nothing about the
+            // network being exhausted.
+            if succeeded && self.admissions == snapshot {
+                self.no_progress_rounds = self.no_progress_rounds.saturating_add(1);
+            }
+            // Schedule the next round from the count as it now stands,
+            // so a no-progress increment lengthens the very next wait.
+            self.pacing.schedule_exploration(
+                now_ms,
+                &self.routing_view(),
+                self.config.exploration_interval_ms,
+                self.config.exploration_jitter_percent,
+                self.exploration_entropy,
+            );
+        }
+    }
+
+    /// Start one exploration round if the view warrants one (§9.3).
+    ///
+    /// `entropy` must be fresh cryptographic randomness from the caller:
+    /// it becomes the 32-byte lookup key — independent per query, never
+    /// derived from any application identity, never persisted — and its
+    /// first bytes drive the jitter. Returns whether a query was issued.
+    pub fn tick(&mut self, now_ms: u64, entropy: [u8; 32]) -> bool {
+        if !self.started || self.stopped {
+            return false;
+        }
+        self.clock = self.clock.max(now_ms);
+        if self.exploration_snapshot.is_some() {
+            return false;
+        }
+        let view = self.routing_view();
+        // While the view is neither target-satisfied nor validly
+        // saturated, explore; otherwise rest.
+        if view.is_target_satisfied() || (view.is_saturated() && self.saturation_conjuncts_hold()) {
+            return false;
+        }
+        if self.routing.is_empty() {
+            // Nothing to query through; bootstrap and seeding come first.
+            return false;
+        }
+        if !self.pacing.exploration_due(now_ms) {
+            return false;
+        }
+        let Ok(permit) = self.budgets.acquire(now_ms) else {
+            return false;
+        };
+        let mut jitter_bytes = [0_u8; 8];
+        jitter_bytes.copy_from_slice(&entropy[..8]);
+        self.exploration_entropy = u64::from_le_bytes(jitter_bytes);
+        self.queue_command(KademliaCommand::StartQuery {
+            class: QueryClass::Exploration,
+            key: entropy,
+        });
+        self.budgets.bind(permit, QueryClass::Exploration);
+        self.exploration_snapshot = Some(self.admissions);
+        true
+    }
+
+    /// Request one bootstrap (§9.1), spaced by `bootstrap_min_interval`.
+    ///
+    /// # Errors
+    /// [`BootstrapRefusal`] naming what refused.
+    pub fn request_bootstrap(&mut self, now_ms: u64) -> Result<(), BootstrapRefusal> {
+        if !self.started || self.stopped {
+            return Err(BootstrapRefusal::NotRunning);
+        }
+        self.clock = self.clock.max(now_ms);
+        let Some(key) = self.local_key else {
+            return Err(BootstrapRefusal::UntargetableSelf);
+        };
+        if !self
+            .pacing
+            .bootstrap_allowed(now_ms, self.config.bootstrap_min_interval_ms)
+        {
+            return Err(BootstrapRefusal::TooSoon);
+        }
+        let Ok(permit) = self.budgets.acquire(now_ms) else {
+            return Err(BootstrapRefusal::BudgetExhausted);
+        };
+        self.queue_command(KademliaCommand::StartQuery {
+            class: QueryClass::Bootstrap,
+            key,
+        });
+        self.budgets.bind(permit, QueryClass::Bootstrap);
+        self.pacing.record_bootstrap(now_ms);
+        Ok(())
+    }
+
+    /// When the next exploration round is due, if one is scheduled.
+    ///
+    /// For the composition root's own scheduling: `None` means the next
+    /// eligible [`Self::tick`] may explore immediately.
+    #[must_use]
+    pub fn next_exploration_due_ms(&self) -> Option<u64> {
+        self.pacing.next_exploration_due_ms()
+    }
+
+    /// Whether the periodic bootstrap refresh is due (§9.1).
+    #[must_use]
+    pub fn bootstrap_refresh_due(&self, now_ms: u64) -> bool {
+        self.pacing
+            .bootstrap_refresh_due(now_ms, self.config.bootstrap_refresh_interval_ms)
+    }
+
+    /// §9.3's extra saturation conjuncts, beyond the round count: a
+    /// routing peer to rest on, no fresh targetable server evidence
+    /// waiting OUTSIDE the routing set, and recent query health.
+    fn saturation_conjuncts_hold(&self) -> bool {
+        !self.routing.is_empty()
+            && self.recent_queries_succeeded
+            && !self.evidence.iter().any(|(peer, e)| {
+                e.supported
+                    && e.expires_at > self.clock
+                    && self.trusted.contains(peer)
+                    && !self.routing.contains(peer)
+            })
     }
 
     /// Request one targeted lookup of `target` (§9.2).
     ///
-    /// The two conjuncts the provider cannot judge arrive as arguments:
-    /// whether a usable address already exists is the aggregate manager's
-    /// knowledge (backoff lives with dial policy, not here), and the
-    /// global budget is the scheduler's. Everything else is checked
+    /// The one conjunct the provider cannot judge arrives as an
+    /// argument: whether a usable address already exists is the
+    /// aggregate manager's knowledge (backoff lives with dial policy,
+    /// not here). Everything else — the budget included — is checked
     /// against this provider's own state, one conjunct at a time, so a
     /// refusal names exactly what was missing.
     ///
@@ -324,11 +580,11 @@ impl KademliaDiscovery {
         target: &TransportIdentity,
         now_ms: u64,
         usable_address_exists: bool,
-        budget_permits: bool,
     ) -> Result<(), TargetedRefusal> {
         if !self.started || self.stopped {
             return Err(TargetedRefusal::NotRunning);
         }
+        self.clock = self.clock.max(now_ms);
         if *target == self.local {
             return Err(TargetedRefusal::SelfTarget);
         }
@@ -353,15 +609,23 @@ impl KademliaDiscovery {
         {
             return Err(TargetedRefusal::CooldownActive);
         }
-        if !budget_permits {
+        // The permit comes BEFORE the command exists: a budget consulted
+        // afterwards records a decision that has already been made.
+        let Ok(permit) = self.budgets.acquire(now_ms) else {
             return Err(TargetedRefusal::BudgetExhausted);
-        }
-        let key =
-            normalize::targeted_lookup_key(target).ok_or(TargetedRefusal::NotTargetableIdentity)?;
-        self.queue_advisory(KademliaCommand::StartQuery {
+        };
+        let Some(key) = normalize::targeted_lookup_key(target) else {
+            // Nothing was started, so nothing was spent: the refund is
+            // what keeps a retried untargetable identity from exhausting
+            // the rate window with zero queries run.
+            self.budgets.release(permit);
+            return Err(TargetedRefusal::NotTargetableIdentity);
+        };
+        self.queue_command(KademliaCommand::StartQuery {
             class: QueryClass::Targeted,
             key,
         });
+        self.budgets.bind(permit, QueryClass::Targeted);
         self.cooldowns.insert(target.clone(), now_ms);
         Ok(())
     }
@@ -429,21 +693,23 @@ impl KademliaDiscovery {
         self.evidence.insert(peer.clone(), incoming);
     }
 
-    /// Queue an advisory command, displacing the oldest advisory at the
-    /// bound. Control commands (`SetMode`, `Shutdown`) never displace and
-    /// are never displaced.
-    fn queue_advisory(&mut self, command: KademliaCommand) {
-        let advisory = |c: &KademliaCommand| {
-            matches!(
-                c,
-                KademliaCommand::OfferRoutingPeer { .. } | KademliaCommand::StartQuery { .. }
-            )
-        };
-        let advisories = self.commands.iter().filter(|c| advisory(c)).count();
-        if advisories >= MAX_PENDING_COMMANDS
-            && let Some(idx) = self.commands.iter().position(advisory)
-        {
-            self.commands.remove(idx);
+    /// Queue a command. Offers past the bound displace the OLDEST offer;
+    /// everything else is appended untouched.
+    ///
+    /// Only offers are displaceable. `SetMode` and `Shutdown` are
+    /// control commands; a `StartQuery` carries a budget slot bound to
+    /// it, and silently dropping one would leave that slot held for a
+    /// completion that can never arrive. Queries need no displacement
+    /// bound of their own — the budgets cap how many can be outstanding.
+    fn queue_command(&mut self, command: KademliaCommand) {
+        let offer = |c: &KademliaCommand| matches!(c, KademliaCommand::OfferRoutingPeer { .. });
+        if matches!(command, KademliaCommand::OfferRoutingPeer { .. }) {
+            let offers = self.commands.iter().filter(|c| offer(c)).count();
+            if offers >= MAX_PENDING_COMMANDS
+                && let Some(idx) = self.commands.iter().position(offer)
+            {
+                self.commands.remove(idx);
+            }
         }
         self.commands.push_back(command);
     }
@@ -456,6 +722,7 @@ impl KademliaDiscovery {
             self.config.mode,
             &self.routing_view(),
             self.recent_queries_succeeded,
+            self.saturation_conjuncts_hold(),
         )
     }
 }
@@ -490,6 +757,7 @@ impl DiscoveryProvider for KademliaDiscovery {
         if !self.started || self.stopped {
             return Vec::new();
         }
+        self.clock = self.clock.max(now_ms);
         let mut out = Vec::new();
 
         // Health first: the manager learns health only from this event.
@@ -584,6 +852,9 @@ impl DiscoveryProvider for KademliaDiscovery {
                         expires_at: observed_at.saturating_add(self.config.candidate_ttl_ms),
                     },
                 );
+                // §9.3: a new capability observation invalidates
+                // saturation — there may be someone new to find.
+                self.no_progress_rounds = 0;
                 HintDisposition::Accepted
             }
             PeerHint::ObservedReachable {
@@ -610,10 +881,12 @@ impl DiscoveryProvider for KademliaDiscovery {
                         });
                     }
                 };
-                self.queue_advisory(KademliaCommand::OfferRoutingPeer {
+                self.queue_command(KademliaCommand::OfferRoutingPeer {
                     addresses,
                     peer: peer_id,
                 });
+                // §9.3: a new external seed invalidates saturation.
+                self.no_progress_rounds = 0;
                 HintDisposition::Accepted
             }
             PeerHint::CandidateHint(candidate) => {
@@ -647,32 +920,26 @@ impl DiscoveryProvider for KademliaDiscovery {
                         );
                     }
                 }
-                let mut parsed = Vec::new();
-                for address in &candidate.addresses {
-                    match OfferedAddress::parse(address) {
-                        Ok(a) => parsed.push(a),
-                        Err(_) => {
-                            return HintDisposition::Rejected(DiscoveryError::InvalidLength {
-                                field: "address",
-                                got: address.len(),
-                                max: MAX_ADDRESS_BYTES,
-                            });
-                        }
-                    }
-                }
-                if !parsed.is_empty() {
-                    let Ok(addresses) = OfferedAddresses::new(parsed) else {
+                if !candidate.addresses.is_empty() {
+                    // The port's own bounded parse — `parse_all` exists
+                    // for exactly this caller, and keeps the length
+                    // check ahead of the copy.
+                    let Ok(addresses) =
+                        OfferedAddresses::parse_all(candidate.addresses.iter().map(String::as_str))
+                    else {
                         return HintDisposition::Rejected(DiscoveryError::TooManyItems {
                             field: "addresses",
                             got: candidate.addresses.len(),
                             max: interweave_discovery_api::MAX_ADDRESSES,
                         });
                     };
-                    self.queue_advisory(KademliaCommand::OfferRoutingPeer {
+                    self.queue_command(KademliaCommand::OfferRoutingPeer {
                         addresses,
                         peer: candidate.peer_id.clone(),
                     });
                 }
+                // §9.3: a new external seed invalidates saturation.
+                self.no_progress_rounds = 0;
                 HintDisposition::Accepted
             }
         }
@@ -696,6 +963,10 @@ impl DiscoveryProvider for KademliaDiscovery {
         self.evidence.clear();
         self.cooldowns.clear();
         self.routing.clear();
+        self.exploration_snapshot = None;
+        if let Some(charge) = self.implicit_charge.take() {
+            self.budgets.consume(charge);
+        }
     }
 }
 
@@ -729,7 +1000,32 @@ mod tests {
             targeted_lookup_cooldown_ms: COOLDOWN_MS,
             target_routing_peers: 64,
             max_routing_peers: 256,
+            exploration_interval_ms: 60_000,
+            exploration_jitter_percent: 0,
+            max_concurrent_queries: 2,
+            max_queries_per_minute: 6,
+            bootstrap_min_interval_ms: 300_000,
+            bootstrap_refresh_interval_ms: 900_000,
         }
+    }
+
+    /// A completion event of `class` carrying no candidates.
+    fn done(class: QueryClass) -> KademliaEvent {
+        KademliaEvent::QueryResults {
+            candidates: interweave_kademlia_control_api::ObservedCandidates::new([])
+                .expect("empty is bounded"),
+            class,
+        }
+    }
+
+    /// A provider with one routed peer and its F2 charge already
+    /// settled, so budget tests start from a clean slate.
+    fn routed(p: &mut KademliaDiscovery, peer: &TransportIdentity, now_ms: u64) {
+        p.ingest_driver_event(
+            KademliaEvent::RoutingPeerAdded { peer: peer.clone() },
+            now_ms,
+        );
+        p.ingest_driver_event(done(QueryClass::Bootstrap), now_ms);
     }
 
     fn local() -> TransportIdentity {
@@ -1056,7 +1352,7 @@ mod tests {
         trust(&mut p, &[&target]);
         give_evidence(&mut p, &target, 1_000);
         p.drain_commands(usize::MAX);
-        p.request_targeted_lookup(&target, 2_000, false, true)
+        p.request_targeted_lookup(&target, 2_000, false)
             .expect("all five conjuncts hold");
         let commands = p.drain_commands(usize::MAX);
         let mut want_key = [0_u8; 32];
@@ -1070,7 +1366,7 @@ mod tests {
             "the key is the target's Ed25519 public key"
         );
         assert_eq!(
-            p.request_targeted_lookup(&target, 2_001, false, true),
+            p.request_targeted_lookup(&target, 2_001, false),
             Err(TargetedRefusal::CooldownActive),
             "issuing records the cooldown"
         );
@@ -1082,37 +1378,41 @@ mod tests {
         let target = synthetic_peer(7);
 
         assert_eq!(
-            p.request_targeted_lookup(&target, 1_000, false, true),
+            p.request_targeted_lookup(&target, 1_000, false),
             Err(TargetedRefusal::NotTrusted),
             "conjunct 1: trust"
         );
         trust(&mut p, &[&target]);
         assert_eq!(
-            p.request_targeted_lookup(&target, 1_000, false, true),
+            p.request_targeted_lookup(&target, 1_000, false),
             Err(TargetedRefusal::NoServerEvidence),
             "conjunct 2: evidence must exist"
         );
         give_evidence(&mut p, &target, 1_000);
         assert_eq!(
-            p.request_targeted_lookup(&target, 1_000 + TTL_MS, false, true),
+            p.request_targeted_lookup(&target, 1_000 + TTL_MS, false),
             Err(TargetedRefusal::StaleServerEvidence),
             "conjunct 2: evidence must be fresh"
         );
         assert_eq!(
-            p.request_targeted_lookup(&target, 2_000, true, true),
+            p.request_targeted_lookup(&target, 2_000, true),
             Err(TargetedRefusal::UsableAddressExists),
             "conjunct 3: a usable address makes the lookup unnecessary"
         );
+        let held_a = p.budgets.acquire(2_000).expect("slot");
+        let held_b = p.budgets.acquire(2_000).expect("slot");
         assert_eq!(
-            p.request_targeted_lookup(&target, 2_000, false, false),
+            p.request_targeted_lookup(&target, 2_000, false),
             Err(TargetedRefusal::BudgetExhausted),
             "conjunct 5: the global budget"
         );
+        p.budgets.release(held_a);
+        p.budgets.release(held_b);
         assert_eq!(
-            p.request_targeted_lookup(&local(), 2_000, false, true),
+            p.request_targeted_lookup(&local(), 2_000, false),
             Err(TargetedRefusal::SelfTarget)
         );
-        p.request_targeted_lookup(&target, 2_000, false, true)
+        p.request_targeted_lookup(&target, 2_000, false)
             .expect("the control: with every conjunct held, the lookup runs");
     }
 
@@ -1133,7 +1433,7 @@ mod tests {
         );
         assert_eq!(disposition, HintDisposition::Accepted);
         assert_eq!(
-            p.request_targeted_lookup(&target, 2_000, false, true),
+            p.request_targeted_lookup(&target, 2_000, false),
             Err(TargetedRefusal::NegativeServerEvidence),
             "recency decides, not sign: withdrawn server mode sticks"
         );
@@ -1150,7 +1450,7 @@ mod tests {
         );
         assert_eq!(replay, HintDisposition::Accepted);
         assert_eq!(
-            p.request_targeted_lookup(&target, 2_200, false, true),
+            p.request_targeted_lookup(&target, 2_200, false),
             Err(TargetedRefusal::NegativeServerEvidence),
             "stale optimism does not outvote fresher withdrawal"
         );
@@ -1184,7 +1484,7 @@ mod tests {
             );
         }
         assert_eq!(
-            p.request_targeted_lookup(&target, 1_500, false, true),
+            p.request_targeted_lookup(&target, 1_500, false),
             Err(TargetedRefusal::NoServerEvidence),
             "neither hint became eligibility"
         );
@@ -1201,7 +1501,7 @@ mod tests {
         trust(&mut p, &[&target]);
         give_evidence(&mut p, &target, 1_000);
         assert_eq!(
-            p.request_targeted_lookup(&target, 2_000, false, true),
+            p.request_targeted_lookup(&target, 2_000, false),
             Err(TargetedRefusal::NotTargetableIdentity),
             "no recoverable key means refusing, not querying the wrong point"
         );
@@ -1265,7 +1565,7 @@ mod tests {
             matches!(&commands[..], [KademliaCommand::OfferRoutingPeer { peer: offered, .. }] if *offered == peer),
             "the seed became an offer"
         );
-        p.request_targeted_lookup(&peer, 2_000, false, true)
+        p.request_targeted_lookup(&peer, 2_000, false)
             .expect("the carried observation is eligibility evidence");
     }
 
@@ -1451,6 +1751,232 @@ mod tests {
         assert!(
             observations(&p.drain_events(1_000, usize::MAX)).is_empty(),
             "a candidate whose every address was rejected observes nothing"
+        );
+    }
+
+    #[test]
+    fn a_permit_is_taken_before_the_command_is_queued() {
+        let mut p = started(KademliaMode::Client);
+        p.drain_commands(usize::MAX);
+        let target = synthetic_peer(7);
+        trust(&mut p, &[&target]);
+        give_evidence(&mut p, &target, 1_000);
+        let held_a = p.budgets.acquire(2_000).expect("slot");
+        let held_b = p.budgets.acquire(2_000).expect("slot");
+        assert_eq!(
+            p.request_targeted_lookup(&target, 2_000, false),
+            Err(TargetedRefusal::BudgetExhausted)
+        );
+        assert!(
+            p.drain_commands(usize::MAX).is_empty(),
+            "a refused request queues NOTHING: the permit comes before the \
+             command, or the ceiling is bookkeeping"
+        );
+        p.budgets.release(held_a);
+        p.budgets.release(held_b);
+    }
+
+    #[test]
+    fn the_implicit_bootstrap_is_charged_and_settles_on_completion() {
+        let mut p = KademliaDiscovery::new(
+            KademliaProviderConfig {
+                max_queries_per_minute: 3,
+                ..config(KademliaMode::Client)
+            },
+            local(),
+        )
+        .expect("valid config");
+        p.start(0).expect("starts");
+        let router = synthetic_peer(1);
+        let (t1, t2, t3) = (synthetic_peer(2), synthetic_peer(3), synthetic_peer(4));
+        trust(&mut p, &[&router, &t1, &t2, &t3]);
+        for t in [&t1, &t2, &t3] {
+            give_evidence(&mut p, t, 1_000);
+        }
+
+        // F2: the first insertion on an empty table charges the implicit
+        // bootstrap — one slot held, one rate charge spent.
+        p.ingest_driver_event(
+            KademliaEvent::RoutingPeerAdded {
+                peer: router.clone(),
+            },
+            1_000,
+        );
+        assert_eq!(p.budgets.held(), 1, "the uncommanded query holds a slot");
+        p.request_targeted_lookup(&t1, 2_000, false)
+            .expect("the second slot is free");
+        assert_eq!(
+            p.request_targeted_lookup(&t2, 2_000, false),
+            Err(TargetedRefusal::BudgetExhausted),
+            "the implicit bootstrap occupies real concurrency"
+        );
+
+        // The driver reports the bootstrap it ran; the slot comes back.
+        p.ingest_driver_event(done(QueryClass::Bootstrap), 3_000);
+        p.request_targeted_lookup(&t2, 3_000, false)
+            .expect("the settled slot is free again");
+
+        // But its RATE charge stays spent: three starts are on the
+        // window (implicit + t1 + t2), and the ceiling is three.
+        p.ingest_driver_event(done(QueryClass::Targeted), 4_000);
+        p.ingest_driver_event(done(QueryClass::Targeted), 4_000);
+        assert_eq!(
+            p.request_targeted_lookup(&t3, 4_000, false),
+            Err(TargetedRefusal::BudgetExhausted),
+            "consume keeps the rate charge; the window really was used"
+        );
+        p.request_targeted_lookup(&t3, 1_000 + 60_000, false)
+            .expect("one window after the charge, the rate recovers");
+    }
+
+    #[test]
+    fn saturation_requires_no_targetable_evidence_outside_the_routing_set() {
+        let mut p = started(KademliaMode::Client);
+        let router = synthetic_peer(1);
+        let (b, c) = (synthetic_peer(2), synthetic_peer(3));
+        trust(&mut p, &[&router, &b, &c]);
+        routed(&mut p, &router, 1_000);
+        // Fresh positive evidence for a trusted peer NOT in the routing
+        // set: exactly what §9.3 says forbids resting.
+        give_evidence(&mut p, &c, 1_000);
+
+        // Three successful no-progress exploration rounds.
+        let mut now = 10_000;
+        for round in 0..3 {
+            assert!(p.tick(now, [0_u8; 32]), "round {round} issues");
+            p.ingest_driver_event(done(QueryClass::Exploration), now + 1);
+            now += 500_000;
+        }
+        assert_eq!(p.no_progress_rounds, 3);
+        assert!(p.routing_view().is_saturated());
+        assert_eq!(
+            p.health(),
+            ProviderHealth::Degraded,
+            "a targetable peer waits outside the routing set, so the \
+             saturated-looking view may not rest"
+        );
+
+        // Once that evidence lapses, the same rounds ARE a resting state.
+        p.drain_events(1_000 + TTL_MS + 1, usize::MAX);
+        assert_eq!(
+            p.health(),
+            ProviderHealth::Healthy,
+            "with the conjunct released, saturation stands and health rests"
+        );
+        assert!(
+            !p.tick(1_000 + TTL_MS + 2, [0_u8; 32]),
+            "a validly saturated view does not explore"
+        );
+    }
+
+    #[test]
+    fn a_small_overlay_backs_off_to_the_cap() {
+        let mut p = KademliaDiscovery::new(
+            KademliaProviderConfig {
+                // Evidence that stays fresh for the whole climb, so the
+                // outside-evidence conjunct keeps saturation invalid and
+                // rounds keep accruing past three.
+                candidate_ttl_ms: 100_000_000,
+                ..config(KademliaMode::Client)
+            },
+            local(),
+        )
+        .expect("valid config");
+        p.start(0).expect("starts");
+        let router = synthetic_peer(1);
+        let c = synthetic_peer(3);
+        trust(&mut p, &[&router, &synthetic_peer(2), &c]);
+        routed(&mut p, &router, 1_000);
+        give_evidence(&mut p, &c, 1_000);
+
+        let mut now = 10_000;
+        for _ in 0..6 {
+            assert!(p.tick(now, [0_u8; 32]));
+            p.ingest_driver_event(done(QueryClass::Exploration), now);
+            let due = p.pacing.next_exploration_due_ms().expect("scheduled");
+            assert!(!p.tick(due - 1, [0_u8; 32]), "not before it is due");
+            now = due;
+        }
+        assert_eq!(
+            p.pacing.next_exploration_due_ms(),
+            Some(now),
+            "the loop advanced exactly to each due time"
+        );
+        // Six no-progress rounds: 60s doubled past 960s rests at the cap.
+        p.ingest_driver_event(done(QueryClass::Exploration), now);
+        let before = now;
+        assert!(p.tick(now, [0_u8; 32]));
+        p.ingest_driver_event(done(QueryClass::Exploration), now);
+        assert_eq!(
+            p.pacing.next_exploration_due_ms(),
+            Some(before + interweave_kademlia_control_api::MAX_EXPLORATION_INTERVAL_MS),
+            "a two-peer overlay does not run a 60-second loop forever"
+        );
+    }
+
+    #[test]
+    fn exploration_rests_at_the_effective_target() {
+        let mut p = started(KademliaMode::Client);
+        let (a, b) = (synthetic_peer(1), synthetic_peer(2));
+        trust(&mut p, &[&a, &b]);
+        routed(&mut p, &a, 1_000);
+        p.ingest_driver_event(KademliaEvent::RoutingPeerAdded { peer: b.clone() }, 1_000);
+        p.drain_commands(usize::MAX);
+        assert!(
+            !p.tick(10_000, [0_u8; 32]),
+            "two routed of two trusted is the effective target; resting"
+        );
+        assert!(p.drain_commands(usize::MAX).is_empty());
+    }
+
+    #[test]
+    fn bootstrap_is_spaced_and_keyed_to_self() {
+        let mut p = started(KademliaMode::Client);
+        p.drain_commands(usize::MAX);
+        p.request_bootstrap(1_000).expect("the first is free");
+        let want_key = normalize::targeted_lookup_key(&local()).expect("ed25519 local");
+        assert_eq!(
+            p.drain_commands(usize::MAX),
+            vec![KademliaCommand::StartQuery {
+                class: QueryClass::Bootstrap,
+                key: want_key,
+            }],
+            "bootstrap is a self lookup"
+        );
+        assert_eq!(
+            p.request_bootstrap(1_001),
+            Err(BootstrapRefusal::TooSoon),
+            "bootstrap_min_interval is a floor, not a suggestion"
+        );
+        p.request_bootstrap(1_000 + 300_000)
+            .expect("the floor elapsed");
+        assert!(!p.bootstrap_refresh_due(1_000 + 300_000 + 899_999));
+        assert!(p.bootstrap_refresh_due(1_000 + 300_000 + 900_000));
+    }
+
+    #[test]
+    fn a_trust_revision_invalidates_saturation() {
+        let mut p = started(KademliaMode::Client);
+        let router = synthetic_peer(1);
+        let others: BTreeSet<TransportIdentity> =
+            [router.clone(), synthetic_peer(2), synthetic_peer(3)]
+                .into_iter()
+                .collect();
+        p.set_remote_trusted(others.clone());
+        routed(&mut p, &router, 1_000);
+        let mut now = 10_000;
+        for _ in 0..3 {
+            assert!(p.tick(now, [0_u8; 32]));
+            p.ingest_driver_event(done(QueryClass::Exploration), now);
+            now += 500_000;
+        }
+        assert_eq!(p.health(), ProviderHealth::Healthy, "validly saturated");
+        p.set_remote_trusted(others);
+        assert_eq!(
+            p.health(),
+            ProviderHealth::Degraded,
+            "a trust revision means the set explored is not the set any \
+             more; saturation is invalidated (§9.3)"
         );
     }
 }
