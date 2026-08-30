@@ -38,7 +38,8 @@ use std::task::{Context, Poll};
 
 use interweave_transport_api::TransportIdentity;
 use interweave_transport_runtime::{
-    DialDenial, DialOrigin, DialRequest, DialTicket, SnapshotHandle,
+    ConnectionManager, ConnectionSlot, DialDenial, DialOrigin, DialRequest, DialTicket,
+    SnapshotHandle,
 };
 use interweave_transport_libp2p::outbound_gate::AdmittedDials;
 use libp2p::PeerId;
@@ -144,31 +145,67 @@ pub struct InstrumentedGate {
     /// reserved are released when the dial settles rather than leaking
     /// one ceiling slot per query.
     held: Arc<Mutex<BTreeMap<ConnectionId, DialTicket>>>,
+    /// Connection slots held for behaviour dials that ESTABLISHED, until
+    /// the connection closes.
+    ///
+    /// A `DialTicket` reserves a pending slot AND the connection it may
+    /// become; its `Drop` releases both. So dropping the ticket when a
+    /// dial succeeds returns the connection reservation immediately, and
+    /// `max_connections` then counts no behaviour-originated connection
+    /// at all — the ceiling exists and bounds nothing. `record_success`
+    /// converts the ticket into a `ConnectionSlot` that keeps the
+    /// reservation, which is why the manager is here as well as the
+    /// handle.
+    connections: Arc<Mutex<BTreeMap<ConnectionId, ConnectionSlot>>>,
+    /// The manager, for the SETTLE path only.
+    ///
+    /// The dial DECISION never takes this lock — ADR-0011 forbids the
+    /// gate blocking on the policy inside the Swarm poll, and that is
+    /// what `admission` is for. `on_swarm_event` is not that path: it
+    /// reports an outcome that has already happened, and recording it is
+    /// what the manager's own API requires `&mut` for.
+    manager: Arc<Mutex<ConnectionManager>>,
     now_ms: u64,
 }
 
 impl InstrumentedGate {
-    /// Build a gate in `mode` over one manager's admission handle.
+    /// Build a gate in `mode` over one manager.
     #[must_use]
-    pub fn new(mode: Mode, admission: SnapshotHandle) -> Self {
+    pub fn new(
+        mode: Mode,
+        admission: SnapshotHandle,
+        manager: Arc<Mutex<ConnectionManager>>,
+    ) -> Self {
         Self {
             admitted: AdmittedDials::default(),
             ledger: DialLedger::default(),
             mode,
             admission,
             held: Arc::new(Mutex::new(BTreeMap::new())),
+            connections: Arc::new(Mutex::new(BTreeMap::new())),
+            manager,
             now_ms: 0,
         }
     }
 
-    /// Tickets this gate is holding for in-flight behaviour dials.
+    /// Behaviour dials currently IN FLIGHT — the live count, not a total.
     ///
-    /// Each one is reserving a pending-dial slot and a connection slot,
-    /// so an experiment that wants to know whether a ceiling is actually
-    /// consumed can ask.
+    /// This is `SnapshotResult::pending_behaviour_dials`. The ledger's
+    /// `behaviour_originated` is cumulative and would report settled
+    /// dials as pending, which is a materially wrong diagnostic rather
+    /// than an imprecise one.
     #[must_use]
-    pub fn held_tickets(&self) -> usize {
+    pub fn pending_behaviour_dials(&self) -> usize {
         self.held.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// Connections this gate holds a reservation for.
+    #[must_use]
+    pub fn held_connections(&self) -> usize {
+        self.connections
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
     }
 
     /// The counters this gate writes.
@@ -305,21 +342,59 @@ impl NetworkBehaviour for InstrumentedGate {
             FromSwarm::DialFailure(e) => Some((e.connection_id, false)),
             _ => None,
         };
-        if let Some((id, _connected)) = settled {
-            // DROPPED, which is what releases the reservation: an
-            // unsettled `DialTicket` returns its pending slot and its
-            // connection slot in `Drop`. The manager's `record_*`
-            // methods need `&mut`, which a `NetworkBehaviour` hook does
-            // not have — and they exist to update backoff and the
-            // reconnect schedule, neither of which this gate is
-            // measuring. What it measures is the CEILING, and the
-            // ceiling is exactly what the drop restores.
-            drop(
-                self.held
+        match settled {
+            Some((id, true)) => {
+                // ESTABLISHED: the ticket becomes a `ConnectionSlot`,
+                // which KEEPS the connection reservation. Dropping the
+                // ticket here instead would return it, and
+                // `max_connections` would count no behaviour-originated
+                // connection at all.
+                if let Some(ticket) = self
+                    .held
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .remove(&id),
-            );
+                    .remove(&id)
+                {
+                    let slot = self
+                        .manager
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .record_success(ticket, self.now_ms);
+                    self.connections
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(id, slot);
+                }
+            }
+            Some((id, false)) => {
+                // FAILED, or a connection this gate held closing. A
+                // failed dial goes back through the manager so backoff
+                // and the reconnect schedule see it; a closing
+                // connection returns its slot.
+                if let Some(ticket) = self
+                    .held
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&id)
+                {
+                    self.manager
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .record_failure(ticket, self.now_ms);
+                }
+                if let Some(slot) = self
+                    .connections
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&id)
+                {
+                    self.manager
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .record_connection_closed(slot);
+                }
+            }
+            None => {}
         }
     }
 

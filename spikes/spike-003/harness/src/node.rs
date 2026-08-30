@@ -131,6 +131,7 @@ impl Node {
 
         let cfg = config.clone();
         let gate_admission = admission.clone();
+        let gate_manager = std::sync::Arc::clone(&manager);
         let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
             .with_tcp(
@@ -139,7 +140,7 @@ impl Node {
                 yamux::Config::default,
             )
             .expect("tcp transport")
-            .with_behaviour(move |key| build_behaviour(key, &cfg, gate_admission))
+            .with_behaviour(move |key| build_behaviour(key, &cfg, gate_admission, gate_manager))
             .expect("behaviour")
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(30)))
             .build();
@@ -255,6 +256,7 @@ fn build_behaviour(
     key: &Keypair,
     config: &NodeConfig,
     admission: SnapshotHandle,
+    manager: std::sync::Arc<std::sync::Mutex<ConnectionManager>>,
 ) -> SpikeBehaviour {
     let identify = identify::Behaviour::new(identify::Config::new(
         IDENTIFY_PROTOCOL.to_owned(),
@@ -297,7 +299,7 @@ fn build_behaviour(
     };
 
     SpikeBehaviour {
-        gate: InstrumentedGate::new(config.gate_mode, admission),
+        gate: InstrumentedGate::new(config.gate_mode, admission, manager),
         identify,
         kad,
     }

@@ -732,6 +732,7 @@ pub async fn k11_ten_node_exploration(r: &mut Report) {
         gate_mode: Mode::PolicyAdmit,
         ..NodeConfig::default()
     };
+    let protocol = namespace::protocol_name(&cfg.network_id);
     let mut nodes = Vec::with_capacity(N);
     for _ in 0..N {
         nodes.push(Node::start(&cfg).await);
@@ -789,23 +790,15 @@ pub async fn k11_ten_node_exploration(r: &mut Report) {
         // it does. Without this step exploration discovers peers and
         // routes to none of them, which is what the first run of this
         // experiment measured.
-        for i in 0..N {
-            let learned: Vec<_> = nodes[i]
-                .observed
-                .learned_addresses
-                .iter()
-                .filter(|(peer, addrs)| **peer != ids[i] && !addrs.is_empty())
-                .map(|(peer, addrs)| (*peer, addrs.iter().next().cloned().expect("nonempty")))
-                .collect();
-            let trusted = nodes[i].trusts();
-            for (peer, addr) in learned {
-                if !trusted.contains(&peer) {
-                    continue;
-                }
-                if let Some(k) = nodes[i].kad() {
-                    k.add_address(&peer, addr);
-                }
-            }
+        //
+        // The SAME pipeline K17 uses, including INBOUND candidates. An
+        // earlier version admitted only what queries returned, and the
+        // line converged to a staircase — node `i` holding `i` peers —
+        // because a node never learned the neighbour that dialled IT.
+        // That produced a run this experiment called full coverage while
+        // measuring a partition.
+        for node in &mut nodes {
+            crate::topology::admit_candidates(node, &protocol);
         }
         pump(&mut nodes, Duration::from_secs(2)).await;
 
@@ -816,17 +809,20 @@ pub async fn k11_ten_node_exploration(r: &mut Report) {
     }
 
     let after: Vec<usize> = (0..N).map(|i| nodes[i].routing_peers()).collect();
-    let grew = (1..N).filter(|&i| after[i] > seeded[i]).count();
+    // EVERY node routes every other. `grew > 0` passed when a single
+    // node gained a single entry — a largely partitioned run — while the
+    // record claimed full coverage. The line is seeded one-deep and the
+    // rounds above are what has to close it.
+    let full = after.iter().filter(|&&c| c == N - 1).count();
     r.check(
         "K11.2",
-        &format!("exploration expanded routing on {grew} of {} seeded nodes: {after:?}", N - 1),
-        grew > 0,
+        &format!("exploration closes the line: {full}/{N} nodes at {} entries — {after:?}", N - 1),
+        full == N,
     );
-    let reached: usize = after.iter().copied().max().unwrap_or(0);
     r.check(
         "K11.3",
-        &format!("at least one node learned more than its seed: max {reached}"),
-        reached > 1,
+        "and every seeded node gained on its single seed",
+        (1..N).all(|i| after[i] > seeded[i]),
     );
 }
 
@@ -1112,12 +1108,32 @@ pub async fn k15_snapshot_is_bounded(r: &mut Report) {
         n[1].observed.connected.contains(&a)
     })
     .await;
+    // A THIRD NODE this one is NOT connected to, so the query below
+    // originates a behaviour dial that then settles. Without one the
+    // cumulative and live counts are both zero and the K15.5 comparison
+    // below would hold for the wrong reason.
+    let mut third = Node::start(&cfg).await;
+    let third_id = third.peer_id;
+    let third_addr = third.dial_address();
+    third.trust(a);
+    third.trust(b);
+    third.trust(third_id);
+    nodes[0].trust(third_id);
+    nodes[1].trust(third_id);
+    nodes.push(third);
     if let Some(k) = nodes[1].kad() {
         k.add_address(&a, a_addr);
+        k.add_address(&third_id, third_addr);
         let id = k.get_closest_peers(libp2p::PeerId::random());
         nodes[1].own_queries.insert(id);
     }
-    pump(&mut nodes, Duration::from_secs(3)).await;
+    // SETTLED, not merely started: K15.5 asserts the live gauge has
+    // returned to zero while the cumulative total has not.
+    pump_until(&mut nodes, Duration::from_secs(20), |n| {
+        n[1].ledger.behaviour_originated() > 0
+            && n[1].swarm.behaviour().gate.pending_behaviour_dials() == 0
+    })
+    .await;
 
     // EVERY FIELD the driver port specifies, taken from the real API.
     let mode = nodes[1].kad().map(|k| k.mode());
@@ -1143,11 +1159,22 @@ pub async fn k15_snapshot_is_bounded(r: &mut Report) {
         &format!("active_queries_by_class is derivable from tracked ids: {active}"),
         true,
     );
-    let pending = nodes[1].ledger.behaviour_originated();
+    // A LIVE COUNT, and asserted. `behaviour_originated()` is a
+    // CUMULATIVE total: after this experiment's pump every dial has
+    // settled, so reporting it as `pending_behaviour_dials` would show
+    // completed dials as in flight — a materially wrong diagnostic, not
+    // an imprecise one. The gate's `pending_behaviour_dials()` is the
+    // live gauge, and the two are compared here so the wrong mapping
+    // cannot be chosen silently.
+    let cumulative = nodes[1].ledger.behaviour_originated();
+    let live = nodes[1].swarm.behaviour().gate.pending_behaviour_dials();
     r.check(
         "K15.5",
-        &format!("pending_behaviour_dials comes from the gate, not from libp2p: {pending}"),
-        true,
+        &format!(
+            "pending_behaviour_dials is the gate's LIVE count ({live}), not its \
+             cumulative total ({cumulative}) — every dial here has settled"
+        ),
+        live == 0 && cumulative > 0,
     );
     r.check(
         "K15.6",
@@ -1161,8 +1188,69 @@ pub async fn k15_snapshot_is_bounded(r: &mut Report) {
         protocol_hash.len() == 26,
     );
     r.note(format!(
-        "K15 snapshot: mode={mode:?} hash={protocol_hash} routing={routing_peer_count} buckets={nonempty_buckets} behaviour_dials={pending}"
+        "K15 snapshot: mode={mode:?} hash={protocol_hash} routing={routing_peer_count} buckets={nonempty_buckets} behaviour_dials_live={live} cumulative={cumulative}"
     ));
+
+    // THE ASYNCHRONOUS PATH, which reading the fields directly does not
+    // exercise. §3 of `kademlia-integration.md` specifies `Snapshot {
+    // request_id }` answered by `SnapshotResult { request_id, .. }` over
+    // bounded channels, and says a response missing before the local
+    // control deadline is a DRIVER-HEALTH FAILURE. A driver that dropped
+    // a response, answered late, or correlated it to the wrong request
+    // would pass a field-reading experiment unchanged.
+    //
+    // The channel and the deadline are project logic, so they are
+    // modelled here over a real Tokio bounded channel and a real
+    // timeout, and the three ways they can go wrong are each provoked.
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<(u64, usize)>(4);
+    let deadline = Duration::from_millis(200);
+
+    // 1. CORRELATED: the answer carries the id that was asked.
+    let asked = 7_u64;
+    tx.send((asked, routing_peer_count)).await.expect("bounded channel");
+    let answered = tokio::time::timeout(deadline, rx.recv()).await;
+    r.check(
+        "K15.8",
+        "a Snapshot request is answered within the control deadline, correlated by id",
+        matches!(answered, Ok(Some((id, _))) if id == asked),
+    );
+
+    // 2. DROPPED: no answer at all is a health failure, not a hang.
+    let missing = tokio::time::timeout(deadline, rx.recv()).await;
+    r.check(
+        "K15.9",
+        "a missing SnapshotResult is a bounded timeout, not an unbounded wait",
+        missing.is_err(),
+    );
+
+    // 3. MISCORRELATED: an answer to a DIFFERENT request must not be
+    // accepted as this one's. A reader matching on arrival order rather
+    // than on the id cannot tell these apart, which is the whole reason
+    // the field exists.
+    tx.send((asked + 1, 99)).await.expect("bounded channel");
+    let other = tokio::time::timeout(deadline, rx.recv())
+        .await
+        .expect("arrived")
+        .expect("a value");
+    r.check(
+        "K15.10",
+        "an answer bearing another request id is not this request's answer",
+        other.0 != asked,
+    );
+
+    // 4. BOUNDED: the channel refuses rather than growing. A driver
+    // whose control channel is unbounded turns a stalled reader into a
+    // memory-exhaustion path, which §6 forbids.
+    let mut accepted = 0;
+    while tx.try_send((0, 0)).is_ok() {
+        accepted += 1;
+        assert!(accepted < 1_000, "the control channel must be finite");
+    }
+    r.check(
+        "K15.11",
+        &format!("the control channel is bounded and refuses when full ({accepted} queued)"),
+        accepted > 0 && tx.try_send((0, 0)).is_err(),
+    );
 }
 
 /// K16 — disjoint query paths, and what the spike can honestly claim.
@@ -1204,21 +1292,21 @@ pub async fn k16_disjoint_paths(r: &mut Report) {
     let id = nodes[0]
         .kad()
         .map(|k| k.get_closest_peers(libp2p::PeerId::random()));
-    if let Some(id) = id {
-        nodes[0].own_queries.insert(id);
+    if let Some(q) = id {
+        nodes[0].own_queries.insert(q);
     }
     pump(&mut nodes, Duration::from_secs(12)).await;
 
-    let contacted = nodes[0]
-        .observed
-        .query_requests
-        .values()
-        .map(|(requests, _)| *requests)
-        .max()
-        .unwrap_or(0);
+    // THE EXPLICIT QUERY ONLY. Taking the maximum across every query
+    // included the implicit bootstrap a routing insertion starts (F2),
+    // so the number measured library housekeeping as readily as the
+    // query under test.
+    let contacted = id
+        .and_then(|q| nodes[0].observed.query_requests.get(&q).copied())
+        .map_or(0, |(requests, _)| requests);
     r.check(
         "K16.1",
-        &format!("a query contacts several routers rather than one: {contacted} requests"),
+        &format!("the explicit query contacts several routers: {contacted} requests"),
         contacted > 1,
     );
     r.check(
@@ -1227,14 +1315,78 @@ pub async fn k16_disjoint_paths(r: &mut Report) {
         !nodes[0].observed.finished_queries.is_empty(),
     );
     r.note(format!(
-        "K16: query stats (requests, successes) = {:?}",
-        nodes[0].observed.query_requests.values().collect::<Vec<_>>()
+        "K16 disjoint=true: explicit query made {contacted} requests"
+    ));
+    drop(nodes);
+
+    // THE CONTROL. Everything above is satisfied by `parallelism = 3`
+    // alone, so it stays green whether `disjoint_query_paths` is honoured,
+    // ignored or off — which means it says nothing about the option. The
+    // same topology and the same parallelism with the flag DISABLED is
+    // the only thing that can.
+    let control_cfg = NodeConfig {
+        disjoint_paths: false,
+        ..cfg.clone()
+    };
+    let mut control = Vec::new();
+    for _ in 0..=ROUTERS {
+        control.push(Node::start(&control_cfg).await);
+    }
+    let cids: Vec<_> = control.iter().map(|n| n.peer_id).collect();
+    let caddrs: Vec<_> = control.iter().map(Node::dial_address).collect();
+    for n in &mut control {
+        for x in &cids {
+            n.trust(*x);
+        }
+    }
+    for i in 1..=ROUTERS {
+        control[0].dial_admitted(caddrs[i].clone());
+    }
+    pump(&mut control, Duration::from_secs(6)).await;
+    control[0].ledger.reset();
+    for i in 1..=ROUTERS {
+        let (peer, addr) = (cids[i], caddrs[i].clone());
+        if let Some(k) = control[0].kad() {
+            k.add_address(&peer, addr);
+        }
+    }
+    let cid = control[0]
+        .kad()
+        .map(|k| k.get_closest_peers(libp2p::PeerId::random()));
+    if let Some(q) = cid {
+        control[0].own_queries.insert(q);
+    }
+    pump(&mut control, Duration::from_secs(12)).await;
+    let control_contacted = cid
+        .and_then(|q| control[0].observed.query_requests.get(&q).copied())
+        .map_or(0, |(requests, _)| requests);
+
+    r.check(
+        "K16.3",
+        &format!(
+            "the control with disjoint_paths=false also completes its query \
+             ({control_contacted} requests), so the comparison is between two \
+             working configurations"
+        ),
+        control_contacted > 0,
+    );
+    // MEASURED, then reported truthfully. At six nodes on loopback the
+    // two configurations contact the same routers, because the whole
+    // network fits inside one round of `parallelism = 3` twice over —
+    // there is no second path for the option to make disjoint. Claiming
+    // a width difference here would be claiming a result this topology
+    // cannot produce.
+    r.note(format!(
+        "K16: disjoint=true made {contacted} requests, disjoint=false made \
+         {control_contacted} — at this scale the option changes nothing \
+         measurable, which is a fact about the topology, not about the option"
     ));
     r.note(
-        "K16 LIMIT: this measures path WIDTH, not Byzantine resistance. \
-         Reduced single-path capture is a claim about an adversary that \
-         controls a subset of routers, and this harness has no such \
-         adversary — see the record's stated limits."
+        "K16 LIMIT: this measures path WIDTH against a control, and finds no \
+         difference at six nodes on loopback. It says NOTHING about Byzantine \
+         resistance: reduced single-path capture is a claim about an adversary \
+         controlling a subset of routers, and this harness has no adversary. \
+         Both limits are in the record."
             .to_owned(),
     );
 }
@@ -1966,7 +2118,7 @@ pub async fn k19_ceilings_apply_to_behaviour_dials(r: &mut Report) {
                 .handle()
                 .load()
                 .pending_dials(),
-            fan[0].swarm.behaviour().gate.held_tickets()
+            fan[0].swarm.behaviour().gate.pending_behaviour_dials()
         ),
         fan[0]
             .manager
@@ -1977,4 +2129,76 @@ pub async fn k19_ceilings_apply_to_behaviour_dials(r: &mut Report) {
             .pending_dials()
             <= 1,
     );
+
+    // THE CONNECTION CEILING, which the pending ceiling does not stand
+    // in for. A `DialTicket` reserves BOTH, and its `Drop` returns both
+    // — so a gate that dropped the ticket when a dial ESTABLISHED would
+    // pass everything above while `max_connections` counted no
+    // behaviour-originated connection at all. `record_success` converts
+    // the ticket into a `ConnectionSlot` that keeps the reservation, and
+    // this is what asserts it does.
+    let conn_cfg = NodeConfig {
+        role: KadRole::Server,
+        gate_mode: Mode::PolicyAdmit,
+        max_pending_dials: 8,
+        // ONE. The routers below are reachable, so a successful
+        // behaviour dial must consume it.
+        max_connections: 1,
+        ..NodeConfig::default()
+    };
+    let peer_cfg = NodeConfig {
+        max_connections: 16,
+        ..conn_cfg.clone()
+    };
+    let mut cn = vec![Node::start(&conn_cfg).await];
+    for _ in 0..3 {
+        cn.push(Node::start(&peer_cfg).await);
+    }
+    let cn_ids: Vec<_> = cn.iter().map(|n| n.peer_id).collect();
+    let cn_addrs: Vec<_> = cn.iter().map(Node::dial_address).collect();
+    for n in &mut cn {
+        for id in &cn_ids {
+            n.trust(*id);
+        }
+    }
+    cn[0].ledger.reset();
+    for i in 1..4 {
+        let (peer, addr) = (cn_ids[i], cn_addrs[i].clone());
+        if let Some(k) = cn[0].kad() {
+            k.add_address(&peer, addr);
+        }
+    }
+    if let Some(k) = cn[0].kad() {
+        let id = k.get_closest_peers(libp2p::PeerId::random());
+        cn[0].own_queries.insert(id);
+    }
+    pump(&mut cn, Duration::from_secs(15)).await;
+
+    let established = cn[0].swarm.behaviour().gate.held_connections();
+    let live = cn[0]
+        .manager
+        .lock()
+        .expect("manager")
+        .handle()
+        .load()
+        .connections();
+    r.check(
+        "K19.9",
+        &format!("a behaviour dial that ESTABLISHES keeps its connection slot: {established} held, manager counts {live}"),
+        established >= 1 && live >= 1,
+    );
+    let refusals = cn[0].ledger.refusals();
+    r.check(
+        "K19.10",
+        &format!(
+            "and with the ceiling at one, further behaviour dials are refused \
+             for the CONNECTION limit: {refusals:?}"
+        ),
+        refusals.contains_key("connection limit reached"),
+    );
+    r.note(format!(
+        "K19 connections: {} dials, {} allowed, {established} slots held, refusals {refusals:?}",
+        cn[0].ledger.behaviour_originated(),
+        cn[0].ledger.behaviour_allowed()
+    ));
 }
