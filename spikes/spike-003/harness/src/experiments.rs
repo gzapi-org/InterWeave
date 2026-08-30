@@ -2756,7 +2756,19 @@ pub struct QueryScheduler {
     /// rather than a count so one completion releases one slot, and the
     /// slot it releases is its own.
     running: std::collections::HashSet<kad::QueryId>,
+    /// Slots taken but not yet bound to a query id — the window between
+    /// acquiring a permit and calling the behaviour.
+    unbound: std::collections::HashSet<u64>,
+    next_permit: u64,
 }
+
+/// Permission to start exactly one query.
+///
+/// Not `Copy` and not `Clone`: a permit is one slot, and duplicating it
+/// would let one acquisition start two queries — which is the ceiling
+/// failing in the same direction as an unkeyed completion.
+#[derive(Debug)]
+pub struct Permit(u64);
 
 /// Why the scheduler refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2775,17 +2787,27 @@ impl QueryScheduler {
             max_per_minute,
             starts: std::collections::VecDeque::new(),
             running: std::collections::HashSet::new(),
+            unbound: std::collections::HashSet::new(),
+            next_permit: 0,
         }
     }
 
-    /// Ask to start one query.
+    /// Acquire a slot BEFORE the query exists.
+    ///
+    /// The ordering is the whole point. `kad::Behaviour::get_*` creates
+    /// the query the moment it is called, so a scheduler consulted
+    /// afterwards records a decision that has already been made: ten
+    /// calls run ten queries however many the budget allowed, and the
+    /// ceiling becomes bookkeeping. The permit is therefore taken first
+    /// and bound to the query id afterwards — and a caller that cannot
+    /// get one must not call the behaviour at all.
     ///
     /// # Errors
     /// [`SchedulerRefusal`] naming which budget refused. The two are
     /// distinct because they fail for different reasons and a caller
     /// that conflates them cannot tell "wait for a slot" from "wait for
     /// the window".
-    pub fn start(&mut self, id: kad::QueryId, now_ms: u64) -> Result<(), SchedulerRefusal> {
+    pub fn acquire(&mut self, now_ms: u64) -> Result<Permit, SchedulerRefusal> {
         // THE WINDOW IS PRUNED FIRST, so an old start cannot occupy the
         // rate budget forever. Deque rather than a counter: a counter
         // reset on a tick would let a caller spend the whole budget in
@@ -2798,15 +2820,38 @@ impl QueryScheduler {
         {
             self.starts.pop_front();
         }
-        if self.running.len() >= self.max_concurrent {
+        if self.running.len() + self.unbound.len() >= self.max_concurrent {
             return Err(SchedulerRefusal::Concurrency);
         }
         if self.starts.len() as u32 >= self.max_per_minute {
             return Err(SchedulerRefusal::Rate);
         }
         self.starts.push_back(now_ms);
-        self.running.insert(id);
-        Ok(())
+        self.next_permit += 1;
+        self.unbound.insert(self.next_permit);
+        Ok(Permit(self.next_permit))
+    }
+
+    /// Bind a permit to the query it was taken for.
+    ///
+    /// Consumes the permit, so it cannot be bound twice. A permit that
+    /// is dropped without binding — the caller took a slot and then
+    /// failed to start anything — is released by [`Self::release`].
+    pub fn bind(&mut self, permit: Permit, id: kad::QueryId) {
+        if self.unbound.remove(&permit.0) {
+            self.running.insert(id);
+        }
+    }
+
+    /// Give back a permit that was never bound to a query.
+    pub fn release(&mut self, permit: Permit) {
+        self.unbound.remove(&permit.0);
+    }
+
+    /// Slots held: bound to a query, or taken and not yet bound.
+    #[must_use]
+    pub fn held(&self) -> usize {
+        self.running.len() + self.unbound.len()
     }
 
     /// One SPECIFIC query finished.
@@ -2862,6 +2907,7 @@ pub async fn k22_bounded_query_scheduler(r: &mut Report) {
     }
     pump(&mut nodes, Duration::from_secs(2)).await;
 
+    // Real `QueryId`s for the bookkeeping assertions, minted once.
     let mut ids = Vec::new();
     for _ in 0..12 {
         if let Some(k) = nodes[0].kad() {
@@ -2870,36 +2916,52 @@ pub async fn k22_bounded_query_scheduler(r: &mut Report) {
     }
 
     let mut s = QueryScheduler::new(MAX_CONCURRENT, MAX_PER_MINUTE);
+    let p0 = s.acquire(0).expect("first fits");
+    let p1 = s.acquire(0).expect("second fits");
     r.check(
         "K22.1",
         "the concurrency ceiling admits exactly its budget",
-        s.start(ids[0], 0).is_ok() && s.start(ids[1], 0).is_ok() && s.running() == MAX_CONCURRENT,
+        s.held() == MAX_CONCURRENT,
     );
     r.check(
         "K22.2",
         "and refuses the next for CONCURRENCY, not for rate",
-        s.start(ids[2], 0) == Err(SchedulerRefusal::Concurrency),
+        matches!(s.acquire(0), Err(SchedulerRefusal::Concurrency)),
     );
-
-    // A COMPLETION RELEASES ITS OWN SLOT, and only its own. A counter
-    // would let two calls for one query — or one call for the implicit
-    // bootstrap the library starts on a routing insertion, which the
-    // provider never scheduled — drop `active` to zero and admit two
-    // more, exceeding the ceiling while looking healthy.
+    // A PERMIT HELD BUT NOT YET BOUND still occupies its slot: the
+    // window between taking one and calling the behaviour is exactly
+    // when a second caller must be refused.
+    s.bind(p0, ids[0]);
+    s.bind(p1, ids[1]);
     r.check(
         "K22.3",
-        "a duplicate completion releases nothing the second time",
-        s.finish(ids[0]) && !s.finish(ids[0]) && s.running() == MAX_CONCURRENT - 1,
+        "binding does not change how many slots are held",
+        s.held() == MAX_CONCURRENT,
     );
+
+    // A COMPLETION RELEASES ITS OWN SLOT, and only its own.
     r.check(
         "K22.4",
-        "and a completion for a query the scheduler never started releases nothing",
-        !s.finish(ids[9]) && s.running() == MAX_CONCURRENT - 1,
+        "a duplicate completion releases nothing the second time",
+        s.finish(ids[0]) && !s.finish(ids[0]) && s.held() == MAX_CONCURRENT - 1,
     );
     r.check(
         "K22.5",
+        "and a completion for a query the scheduler never started releases nothing",
+        !s.finish(ids[9]) && s.held() == MAX_CONCURRENT - 1,
+    );
+    let p2 = s.acquire(0).expect("the freed slot");
+    r.check(
+        "K22.6",
         "the freed slot — exactly one — is available again",
-        s.start(ids[3], 0).is_ok() && s.start(ids[4], 0) == Err(SchedulerRefusal::Concurrency),
+        matches!(s.acquire(0), Err(SchedulerRefusal::Concurrency)),
+    );
+    // A PERMIT THAT NEVER BECAME A QUERY comes back.
+    s.release(p2);
+    r.check(
+        "K22.7",
+        "a permit released without starting anything returns its slot",
+        s.held() == MAX_CONCURRENT - 1,
     );
 
     // THE RATE, which the concurrency ceiling does not stand in for: a
@@ -2908,61 +2970,77 @@ pub async fn k22_bounded_query_scheduler(r: &mut Report) {
     let mut rate = QueryScheduler::new(MAX_CONCURRENT, MAX_PER_MINUTE);
     let mut started = 0;
     for id in ids.iter().take(12) {
-        if rate.start(*id, 1_000).is_ok() {
+        if let Ok(p) = rate.acquire(1_000) {
             started += 1;
+            rate.bind(p, *id);
             rate.finish(*id);
         }
     }
     r.check(
-        "K22.6",
+        "K22.8",
         &format!("start-and-finish is bounded by the RATE, not concurrency: {started}"),
         started == MAX_PER_MINUTE as usize,
     );
     r.check(
-        "K22.7",
+        "K22.9",
         "and the refusal says which budget it was",
-        rate.start(ids[11], 1_000) == Err(SchedulerRefusal::Rate),
+        matches!(rate.acquire(1_000), Err(SchedulerRefusal::Rate)),
     );
 
     // THE WINDOW SLIDES. A counter reset on a tick would let the whole
     // budget be spent in the last millisecond of one window and again in
     // the first of the next — twice the rate across the boundary.
     r.check(
-        "K22.8",
+        "K22.10",
         "the window is still closed just before it lapses",
-        rate.start(ids[11], 1_000 + 59_999) == Err(SchedulerRefusal::Rate),
+        matches!(rate.acquire(1_000 + 59_999), Err(SchedulerRefusal::Rate)),
     );
     r.check(
-        "K22.9",
+        "K22.11",
         "and opens once the oldest start ages out",
-        rate.start(ids[11], 1_000 + 60_000).is_ok(),
+        rate.acquire(1_000 + 60_000).is_ok(),
     );
 
-    // AND IT REALLY GATES REAL QUERIES: exactly the scheduled ones are
-    // in flight, which the scheduler's own bookkeeping cannot show.
+    // AND IT REALLY GATES THE BEHAVIOUR. The permit is taken BEFORE
+    // `get_n_closest_peers`, and the behaviour is not called at all when
+    // there is no permit — `kad` creates the query the moment it is
+    // called, so a scheduler consulted afterwards records a decision
+    // already made and ten calls run ten queries whatever the budget
+    // said.
     let mut live = QueryScheduler::new(MAX_CONCURRENT, MAX_PER_MINUTE);
     let mut issued = 0;
     let mut refused = 0;
+    // HOW MANY TIMES THE BEHAVIOUR WAS INVOKED. That is the enforcement
+    // question — `kad` creates a query the moment it is called, so a
+    // scheduler consulted afterwards leaves ten queries running while
+    // reporting two. Counting invocations is what distinguishes the two
+    // orderings; counting the scheduler's own totals cannot.
+    let mut invocations = 0;
     for _ in 0..10 {
-        let Some(k) = nodes[0].kad() else { break };
-        let q = k.get_n_closest_peers(random_32(), NonZeroUsize::new(4).expect("nonzero"));
-        if live.start(q, 0).is_ok() {
-            issued += 1;
-            nodes[0].own_queries.insert(q, QueryClass::Exploration);
-        } else {
-            refused += 1;
+        match live.acquire(0) {
+            Ok(permit) => {
+                let Some(k) = nodes[0].kad() else { break };
+                invocations += 1;
+                let q = k.get_n_closest_peers(random_32(), NonZeroUsize::new(4).expect("nonzero"));
+                live.bind(permit, q);
+                nodes[0].own_queries.insert(q, QueryClass::Exploration);
+                issued += 1;
+            }
+            Err(_) => refused += 1,
         }
     }
     r.check(
-        "K22.10",
+        "K22.12",
         &format!("a driver asking for ten queries starts {issued} and is refused {refused}"),
         issued == MAX_CONCURRENT && refused == 10 - MAX_CONCURRENT,
     );
-    let active = nodes[0].active_queries_by_class();
     r.check(
-        "K22.11",
-        &format!("and the node really has exactly that many tracked in flight: {active:?}"),
-        active.get(&QueryClass::Exploration).copied() == Some(MAX_CONCURRENT),
+        "K22.13",
+        &format!(
+            "and the behaviour was INVOKED only for the permitted ones: \
+             {invocations} calls for {issued} permits"
+        ),
+        invocations == MAX_CONCURRENT,
     );
     r.note(
         "K22 LIMIT: the scheduler is project logic modelled here, not a \
@@ -3253,4 +3331,96 @@ pub async fn k24_single_path_capture(r: &mut Report) {
          rather than treating the absence of a difference as a pass."
             .to_owned()
     });
+}
+
+/// K25 — a multi-address dial where EVERY candidate fails.
+///
+/// K18 keeps a known-good route to the target alive, which suppresses
+/// peer backoff — so its multi-address assertion never meets the
+/// ordinary case. Here every candidate is dead, so the first settlement
+/// advances peer backoff, and any later `admit` for the remaining
+/// addresses is refused for it. A settlement loop that admits as it goes
+/// therefore scores the first address and silently drops the rest, which
+/// is precisely the outcome the multi-address fix exists to prevent.
+pub async fn k25_every_candidate_fails(r: &mut Report) {
+    use interweave_transport_api::TransportIdentity;
+
+    let cfg = NodeConfig {
+        role: KadRole::Server,
+        gate_mode: Mode::PolicyAdmit,
+        ..NodeConfig::default()
+    };
+    let mut nodes = vec![
+        Node::start(&cfg).await,
+        Node::start(&cfg).await,
+        Node::start(&cfg).await,
+    ];
+    let (a, b, c) = (nodes[0].peer_id, nodes[1].peer_id, nodes[2].peer_id);
+    for i in 0..3 {
+        for p in [a, b, c] {
+            nodes[i].trust(p);
+        }
+    }
+    let (b_addr, c_addr) = (nodes[1].dial_address(), nodes[2].dial_address());
+    // THE ROUTER KNOWS `c` ONLY AT DEAD ADDRESSES. It reaches `c` once
+    // to learn it exists, then holds two addresses that refuse.
+    let dead_a: libp2p::Multiaddr = "/ip4/127.0.0.1/tcp/4".parse().expect("valid");
+    let dead_b: libp2p::Multiaddr = "/ip4/127.0.0.1/tcp/5".parse().expect("valid");
+    nodes[1].dial_admitted(c_addr);
+    pump_until(&mut nodes, Duration::from_secs(10), |n| {
+        n[1].observed.connected.contains(&c)
+    })
+    .await;
+    if let Some(k) = nodes[1].kad() {
+        k.add_address(&c, dead_a.clone());
+        k.add_address(&c, dead_b.clone());
+    }
+    nodes[0].dial_admitted(b_addr.clone());
+    pump_until(&mut nodes, Duration::from_secs(10), |n| {
+        n[0].observed.connected.contains(&b)
+    })
+    .await;
+
+    // NO GOOD ROUTE TO `c` IS EVER RECORDED, which is what lets the
+    // first failure advance peer backoff — the condition K18 avoids.
+    let c_identity = TransportIdentity::parse(c.to_base58()).expect("canonical");
+    nodes[0].ledger.reset();
+    if let Some(k) = nodes[0].kad() {
+        k.add_address(&b, b_addr);
+        let id = k.get_closest_peers(c);
+        nodes[0].own_queries.insert(id, QueryClass::Targeted);
+    }
+    pump(&mut nodes, Duration::from_secs(18)).await;
+
+    let candidates = nodes[0]
+        .manager
+        .lock()
+        .expect("manager")
+        .dial_candidates(&c_identity, 60_000);
+    let known = nodes[0]
+        .manager
+        .lock()
+        .expect("manager")
+        .known_addresses(&c_identity);
+    r.note(format!(
+        "K25: candidates {candidates:?}, known {known}, dial errors {}",
+        nodes[0].observed.dial_errors.len()
+    ));
+    r.check(
+        "K25.1",
+        &format!("the dial really exhausted several addresses ({known} known)"),
+        known >= 2,
+    );
+    // BOTH, by name. A settlement loop that admits as it goes scores the
+    // first and is refused `PeerBackoff` for the rest — one address
+    // recorded, the other silently dropped.
+    r.check(
+        "K25.2",
+        &format!(
+            "EVERY exhausted address is scored even though the first failure \\
+             put the peer into backoff: {candidates:?}"
+        ),
+        candidates.iter().any(|x| x == &dead_a.to_string())
+            && candidates.iter().any(|x| x == &dead_b.to_string()),
+    );
 }

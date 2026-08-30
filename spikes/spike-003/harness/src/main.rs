@@ -129,6 +129,10 @@ async fn main() {
         experiments::k19_ceilings_apply_to_behaviour_dials(&mut r).await;
     }
 
+    if want("K25") {
+        println!("\nK25 — a multi-address dial where every candidate fails");
+        experiments::k25_every_candidate_fails(&mut r).await;
+    }
     if want("K24") {
         println!("\nK24 — single-path capture, measured against controls");
         experiments::k24_single_path_capture(&mut r).await;

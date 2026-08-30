@@ -54,7 +54,7 @@ It also handles the ticket the way the runtime must, which is finding **F8**: a 
 
 ## What was observed
 
-155 assertions across 24 experiments, consecutive clean runs. The harness exits non-zero when any required observation is false, so `cargo run` cannot report success while its own output disproves the record.
+159 assertions across 25 experiments, consecutive clean runs. The harness exits non-zero when any required observation is false, so `cargo run` cannot report success while its own output disproves the record.
 
 **Namespace (K1).** The published golden vector reproduces exactly: `network_id: example-private-network` → `ssbtblqj7mexczivog5qfbfjvi` → `/interweave/kad/1.0.0/ssbtblqj7mexczivog5qfbfjvi`. The derivation is implemented from the specification text rather than from a shared helper, so a derivation that merely agrees with itself could not pass. The 26-character unpadded base32 tag is a valid `libp2p::StreamProtocol`, and the `^[a-z0-9][a-z0-9._-]{0,63}$` grammar accepts and refuses what the spec says it should.
 
@@ -91,6 +91,8 @@ Each part fails to a different mutation and passes the others', which is the rea
 **The bounded query scheduler (K22).** A concurrency ceiling and a rate ceiling, shared across the three query classes. `kad::Config::set_parallelism` is not this: it bounds the peers ONE query contacts at a time and says nothing about how many queries a provider may run or how often it may start them. Modelled here and asserted: the concurrency budget admits exactly its number and refuses the next *for concurrency*; a finished query returns its slot; start-and-finish is bounded by the RATE, which concurrency cannot stand in for since a prompt caller never reaches it; the window slides rather than resetting, so the budget cannot be spent twice across a boundary; and driving real `kad` queries through it, a driver asking for ten starts exactly two and the node really has two in flight.
 
 **The routing bound under pressure (K17.5/K17.6).** `max_routing_peers` is project logic applied before manual insertion, and `kbucket_size` does not stand in for it — a table can hold `kbucket_size` entries in each of many buckets and still exceed the total. It is only testable against a population *larger* than the bound and on a *fresh* node, since a bound stops a table growing and cannot shrink one already full. Two newcomers join the converged twenty-node network from the same seed: the bounded one stops at 5, its twin reaches 20.
+
+**A dial where every candidate fails (K25).** K18's topology keeps a good route to the target alive, which suppresses peer backoff — so its multi-address assertion never meets the ordinary case, where the first settlement advances peer backoff and every later `admit` is refused for it. With all candidates dead, a settlement loop that admits as it goes scores the first address and silently drops the rest. Every ticket is therefore minted *before* any is settled, and K25 names both dead addresses in the peer's candidates afterwards.
 
 **Trust withdrawn mid-dial (K20).** The gate admits against the trust of the moment it is asked and settles later, so the settlement reclassifies rather than trusting the admission's answer. With trust intact a behaviour connection is retained; revocation genuinely changes what the settlement reads (`DataPlaneTrusted` → `Unauthorized`); and after revocation nothing is retained for that peer.
 
@@ -170,6 +172,8 @@ Three mutations confirm the assertions are load-bearing rather than agreeing wit
 - ignoring the project routing bound fails K17.5, with its control unaffected;
 - making the scheduler's completion release any slot rather than its own fails K22.3, K22.4 and K22.5;
 - scoring only the first of a multi-address dial's failed addresses fails K18.7;
-- attributing every dial to `none` regardless of what is running fails K23.2.
+- attributing every dial to `none` regardless of what is running fails K23.2;
+- invoking the behaviour before acquiring a permit fails K22.13 at ten calls for two permits;
+- settling only the first of a fully-failed dial's addresses fails K25.1 and K25.2.
 
 One mutation deliberately fails nothing: removing the settlement's reclassification. That is K20's stated limit, confirmed rather than papered over.

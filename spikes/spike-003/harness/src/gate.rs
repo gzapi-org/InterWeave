@@ -735,33 +735,45 @@ impl NetworkBehaviour for InstrumentedGate {
                         )
                     };
                     let peer = ticket.peer().cloned();
+                    // EVERY TICKET MINTED BEFORE ANY IS SETTLED.
+                    //
+                    // The ordering is load-bearing and was wrong. The
+                    // first `record_failure` advances PEER backoff when
+                    // no known-good alternative remains — which is the
+                    // ordinary case, since every candidate of this dial
+                    // just failed. Every subsequent `admit` then returns
+                    // `PeerBackoff`, so the remaining addresses were
+                    // never settled and stayed unscored: the exact
+                    // outcome the multi-address fix was written to
+                    // prevent. K18.7 could not see it because its
+                    // topology keeps a good route alive, which suppresses
+                    // peer backoff.
+                    //
+                    // Admitting first takes one reservation per address
+                    // of a single dial — bounded by that dial's candidate
+                    // list — and holds them only for as long as the
+                    // settlement loop below.
                     let m = self.manager.lock().unwrap_or_else(|e| e.into_inner());
-                    let fresh = resettle(&m, ticket, used.as_deref(), now);
-                    drop(m);
-                    if let Some(ticket) = fresh {
-                        self.manager
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .record_failure(ticket, now);
+                    let mut tickets: Vec<DialTicket> = Vec::new();
+                    if let Some(fresh) = resettle(&m, ticket, used.as_deref(), now) {
+                        tickets.push(fresh);
                     }
-                    // THE REMAINING ADDRESSES, each scored on its own.
-                    // One ticket settles one address, so a dial that
-                    // exhausted several needs one settlement each — and
-                    // each is minted and released in turn rather than
-                    // held, so the ceiling sees one at a time.
                     if let Some(peer) = peer {
                         for other in others {
-                            let mut m =
-                                self.manager.lock().unwrap_or_else(|e| e.into_inner());
                             let request = DialRequest {
                                 peer: Some(peer.clone()),
                                 address: other,
                                 origin: DialOrigin::KademliaQuery,
                             };
                             if let Ok(t) = m.handle().admit(&request, now) {
-                                m.record_failure(t, now);
+                                tickets.push(t);
                             }
                         }
+                    }
+                    drop(m);
+                    let mut m = self.manager.lock().unwrap_or_else(|e| e.into_inner());
+                    for t in tickets {
+                        m.record_failure(t, now);
                     }
                 }
                 if let Some(slot) = self
