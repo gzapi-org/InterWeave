@@ -43,12 +43,14 @@ run_against() {
     SANDBOX="$(mktemp -d)"
     mkdir -p "$SANDBOX/tools/checks" \
              "$SANDBOX/crates/transport/runtime/src" \
-             "$SANDBOX/crates/transport/libp2p/src"
+             "$SANDBOX/crates/transport/libp2p/src" \
+             "$SANDBOX/spikes/spike-000/harness/src"
     cp "$UNDER_TEST" "$SANDBOX/tools/checks/"
     printf '%s\n' "$1" > "$SANDBOX/crates/transport/runtime/src/lib.rs"
     printf '%s\n' "$2" > "$SANDBOX/crates/transport/libp2p/src/lib.rs"
     printf '%s\n' "$3" > "$SANDBOX/tools/checks/domain_fn_exempt.txt"
     printf 'status = "%s"\n' "${4:-stage-6-direct-v2}" > "$SANDBOX/Cargo.toml"
+    printf '%s\n' "${5:-}" > "$SANDBOX/spikes/spike-000/harness/src/main.rs"
     git -C "$SANDBOX" init -q
     git -C "$SANDBOX" add -A
     RUN_OUT="$(cd "$SANDBOX" && bash tools/checks/check_domain_fns_are_called.sh 2>&1)"
@@ -281,6 +283,21 @@ assert_rc   "an exemption with a deadline but no reason is exit 2" 2
 
 run_against "$UNCALLED" "$BACKEND_IDLE" '' 'no-stage-here'
 assert_rc   "an unreadable open stage is exit 2" 2
+
+# --- a spike is not a caller ------------------------------------------
+#
+# The SPIKE-003 harness depends on the production crates by path, which
+# CLAUDE.md §4 permits. It then called a domain function and this guard
+# reported it as called — a spike vouching for a rule nothing in
+# production applies is the same false green a unit test would give.
+run_against "$UNCALLED" "$BACKEND_IDLE" "" "" \
+    'fn evidence() { let _ = authorize_outbound(1); }'
+assert_rc   "a spike harness is not a production caller" 1
+assert_says "  and the function is still reported" 'authorize_outbound'
+
+run_against "$UNCALLED" 'fn go() { let _ = authorize_outbound(1); }' "" "" \
+    'fn evidence() { let _ = authorize_outbound(1); }'
+assert_rc   "CONTROL: a real production caller in the same shape passes" 0
 
 # --- comments and blank lines are not entries -------------------------
 run_against "$UNCALLED" "$BACKEND_IDLE" \

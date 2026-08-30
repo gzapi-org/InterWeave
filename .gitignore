@@ -137,6 +137,14 @@ spikes/**/Cargo.lock
 # are exactly the kind of behaviour a patch release may change, so its
 # lock is committed and its direct requirements are pinned with `=`.
 !spikes/spike-002/harness/Cargo.lock
+# SPIKE-003 for the same reason, and a sharper one: half of what it
+# records is the LIBRARY's own behaviour — that a routing insertion
+# starts one bootstrap query nobody asked for, that a mode change
+# withdraws the advertised protocol, that `BucketInserts::Manual` means
+# an authenticated connection routes nobody. Every one of those is a
+# patch-release-visible detail of `libp2p-kad`, and Stage 10 is built on
+# them.
+!spikes/spike-003/harness/Cargo.lock
 
 # cargo-mutants writes its report tree into the working directory when
 # `--output` is not given. It is build output, and a `git add -A` swept
