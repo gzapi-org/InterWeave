@@ -3507,11 +3507,29 @@ pub async fn k22_bounded_query_scheduler(r: &mut Report) {
     r.check(
         "K22.16b",
         &format!(
-            "held headroom is returned as the library's work finishes: {} still held",
-            live.held() - issued
+            "every completed implicit query returned its headroom: {} still \
+             reserved, {} held, {issued} explicit",
+            reserved.len(),
+            live.held()
         ),
-        live.held() >= issued,
+        // ZERO RESIDUAL, not "at least the explicit ones". `held() >=
+        // issued` is true while ANY implicit permit is still reserved,
+        // because the explicit queries already contribute `issued` — so
+        // deleting the release logic entirely passed it. The claim is
+        // that completed implicit work returned its slot, and only an
+        // exact count says that.
+        reserved.is_empty() && live.held() == issued,
     );
+    r.note(format!(
+        "K22 LIMIT: the release loop over real implicit queries is a NO-OP in \
+         this run — the bootstrap finishes before the driver spends, so \
+         {} were active and nothing was held to return. Removing that loop \
+         therefore fails nothing here, and K22.16b's zero-residual check \
+         cannot see it. The MECHANISM is covered by K22.15b/K22.15c, which \
+         hold a slot deliberately and show it costing the driver one and \
+         coming back on completion.",
+        implicit_active.len()
+    ));
     r.check(
         "K22.17",
         &format!(
@@ -3651,13 +3669,24 @@ pub async fn k23_dial_volume_by_class(r: &mut Report) {
     classes.finished("targeted");
     classes.finished("exploration");
     let mixed = nodes[0].ledger.by_class();
+    let mixed_total: u64 = mixed.values().sum();
+    let mixed_labels = mixed.keys().filter(|k| k.contains('+')).count();
     r.check(
         "K23.4",
         &format!(
-            "with two classes in flight the attribution is the SET, not a guess \\
-             at one of them: {mixed:?}"
+            "with two classes in flight the attribution is the SET, not a guess \
+             at one of them: {mixed_total} dial(s), {mixed_labels} mixed \
+             label(s), {mixed:?}"
         ),
-        mixed.keys().all(|k| k.contains('+') || k == "none"),
+        // AT LEAST ONE DIAL, AND AT LEAST ONE MIXED LABEL. The old
+        // predicate accepted an empty ledger and accepted every dial
+        // labelled `none`, so a regression that lost attribution exactly
+        // when several classes overlap would pass while K23.2's
+        // single-class control stayed green — the one case this
+        // experiment exists for.
+        mixed_total > 0
+            && mixed_labels > 0
+            && mixed.keys().all(|k| k.contains('+') || k == "none"),
     );
     r.note(
         "K23 LIMIT: libp2p does not tell a behaviour which query caused a dial \\
