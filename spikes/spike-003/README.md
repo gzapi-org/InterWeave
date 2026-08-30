@@ -54,7 +54,7 @@ It also handles the ticket the way the runtime must, which is finding **F8**: a 
 
 ## What was observed
 
-162 assertions across 25 experiments, consecutive clean runs. The harness exits non-zero when any required observation is false, so `cargo run` cannot report success while its own output disproves the record.
+168 assertions across 26 experiments, consecutive clean runs. The harness exits non-zero when any required observation is false, so `cargo run` cannot report success while its own output disproves the record.
 
 **Namespace (K1).** The published golden vector reproduces exactly: `network_id: example-private-network` → `ssbtblqj7mexczivog5qfbfjvi` → `/interweave/kad/1.0.0/ssbtblqj7mexczivog5qfbfjvi`. The derivation is implemented from the specification text rather than from a shared helper, so a derivation that merely agrees with itself could not pass. The 26-character unpadded base32 tag is a valid `libp2p::StreamProtocol`, and the `^[a-z0-9][a-z0-9._-]{0,63}$` grammar accepts and refuses what the spec says it should.
 
@@ -98,7 +98,9 @@ Each part fails to a different mutation and passes the others', which is the rea
 
 **Targeted lookup (K14).** §9.2's eligibility rule is project logic, implemented over the observation the library provides and denied one conjunct at a time: an untrusted target, absent evidence, *negative* evidence, a client-mode observation, evidence from another `network_id`, evidence for another wire major, stale evidence past the TTL, a peer that already has a usable address, an unexpired cooldown, and an exhausted budget each refuse it on their own. Then the lookup itself runs for real — an asker holding **no** address for the target asks the DHT by PeerId and recovers the address a router knows.
 
-**Snapshot (K15).** Every `SnapshotResult` field the driver port specifies is computable from the real API, and every one is a scalar or a fixed-width tag: no routing dump, no peer list, no payload. `pending_behaviour_dials` is the gate's **live** gauge and is asserted against its cumulative total, because reporting the total would show settled dials as in flight — a materially wrong diagnostic rather than an imprecise one. The **asynchronous** half is exercised separately over a real bounded channel and a real deadline: a correlated answer arrives inside the control deadline, a missing one is a bounded timeout rather than a hang, an answer bearing another request id is not accepted as this request's, and the channel refuses when full.
+**Capability-aware admission (K26).** §7's pipeline ends in "exact current Kademlia server protocol advertised" and does not exempt the source of a candidate — a query result is *advisory*, saying a peer exists at an address, not that it serves this DHT. The distinction is only visible with a peer that is trusted, reachable, identified and NOT a server: a client-mode node, which §9.2 says must not be misrepresented as discoverable. It is connected and identified alongside a server, both are candidates by every other measure, and only the server enters the routing table — however the client was learned.
+
+**Snapshot (K15).** Every `SnapshotResult` field the driver port specifies is computable from the real API, and every one is a scalar or a fixed-width tag: no routing dump, no peer list, no payload. `pending_behaviour_dials` is the gate's **live** gauge and is asserted against its cumulative total, because reporting the total would show settled dials as in flight — a materially wrong diagnostic rather than an imprecise one. The **asynchronous** half is exercised over a real bounded channel and a real deadline, through an actual consumer rather than by comparing numbers: a correlated answer arrives inside the deadline; a missing one is a bounded timeout rather than a hang; a consumer waiting for its request id *refuses another request's answer and keeps waiting*, then returns the matching one that follows — the pair that distinguishes correlating from both accepting-by-arrival-order and refusing-everything; and the channel refuses when full.
 
 **Disjoint paths (K16).** With `parallelism = 3` and disjoint paths enabled, the explicit query contacts five routers rather than one — counted for that query alone, since taking the maximum across all queries would have measured the implicit bootstrap of F2 as readily as the query under test. Against an otherwise-identical `disjoint_paths = false` control the count is **also five**: at six nodes on loopback the option changes nothing measurable, because the whole network fits inside one round of `parallelism = 3` twice over and there is no second path to make disjoint. That is a fact about the topology rather than about the option, and it is recorded as a result rather than dressed up as one.
 
@@ -135,6 +137,8 @@ Each part fails to a different mutation and passes the others', which is the rea
 **F13 — the dial hook cannot attribute a dial to a query.** libp2p hands `handle_pending_outbound_connection` a connection id and a peer; for a behaviour dial there is no query id and no originating behaviour. Per-class dial volume therefore cannot be read off the dial and must come from the provider declaring what it is running — which is exact while one class is in flight and a set when several are. Stage 10 can narrow that by serialising classes or widening the driver port; it cannot recover it from libp2p.
 
 **F15 — an address failure cannot be recorded without passing the policy that failure just changed.** `record_failure` takes a `DialTicket`, and a ticket comes only from `admit`. Settling a fully-failed multi-address dial therefore has no correct ordering inside the current API: settle as you go and the first failure's peer backoff refuses the rest; mint every ticket first and settlement depends on one spare pending-dial and connection slot per address, which a tight ceiling does not have. The harness pre-mints, which is the better of the two, and **counts** what it could not settle. Stage 10 needs an address-scoped failure API that requires no admission.
+
+**F16 — the dial hook must not act on address-scoped denials it cannot evaluate.** Its probe carries the empty placeholder (F9), so `AddressQuarantined` is a verdict about an address that does not exist and `PolicyStateFull` reports that the address *table* has no room — which under address-state pressure refuses every Kademlia dial, including ones whose real address is already known-good and needs no new entry. Both are evaluable at the established hook, where the address is real, so the dial hook defers them and decides only what it can: trust, backoff, drain, the ceilings.
 
 ## Stated limits
 
@@ -176,7 +180,9 @@ Three mutations confirm the assertions are load-bearing rather than agreeing wit
 - scoring only the first of a multi-address dial's failed addresses fails K18.7;
 - attributing every dial to `none` regardless of what is running fails K23.2;
 - invoking the behaviour before acquiring a permit fails K22.13 at ten calls for two permits;
-- settling only the first of a fully-failed dial's addresses fails K25.1 and K25.2.
+- settling only the first of a fully-failed dial's addresses fails K25.1 and K25.2;
+- a Snapshot consumer that accepts the first arrival by order fails K15.10 and K15.11;
+- admitting a candidate without the exact server protocol fails K26.3 and K26.4.
 
 One measurement is reported rather than asserted, because both outcomes are legitimate: K25.4 accepts either a complete settlement or a counted shortfall, and refuses only the third case — addresses vanishing while the ledger reads zero.
 

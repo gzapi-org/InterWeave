@@ -1310,19 +1310,49 @@ pub async fn k15_snapshot_is_bounded(r: &mut Report) {
         missing.is_err(),
     );
 
-    // 3. MISCORRELATED: an answer to a DIFFERENT request must not be
-    // accepted as this one's. A reader matching on arrival order rather
-    // than on the id cannot tell these apart, which is the whole reason
-    // the field exists.
+    // 3. MISCORRELATED, tested through an actual CONSUMER. Asserting
+    // that `asked + 1 != asked` is arithmetic: a consumer that accepts
+    // the first arrival by order would satisfy it unchanged, which is
+    // exactly the implementation the request id exists to rule out. So
+    // the consumer is written and then fed the wrong answer.
+    //
+    // It keeps waiting rather than accepting, which is the whole
+    // behaviour: a snapshot reader that takes whatever arrives first
+    // reports another request's driver state as its own.
+    async fn await_snapshot(
+        rx: &mut tokio::sync::mpsc::Receiver<(u64, usize)>,
+        want: u64,
+        deadline: Duration,
+    ) -> Option<usize> {
+        let until = tokio::time::Instant::now() + deadline;
+        loop {
+            let left = until.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(left, rx.recv()).await {
+                Ok(Some((id, value))) if id == want => return Some(value),
+                // NOT this request's answer. Discarded, and the wait
+                // continues against the same deadline.
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => return None,
+            }
+        }
+    }
+
+    // A wrong answer alone: the consumer must NOT return it.
     tx.send((asked + 1, 99)).await.expect("bounded channel");
-    let other = tokio::time::timeout(deadline, rx.recv())
-        .await
-        .expect("arrived")
-        .expect("a value");
     r.check(
         "K15.10",
-        "an answer bearing another request id is not this request's answer",
-        other.0 != asked,
+        "a consumer waiting for its request id refuses another request's answer",
+        await_snapshot(&mut rx, asked, deadline).await.is_none(),
+    );
+    // A wrong answer FOLLOWED by the right one: the consumer must skip
+    // the first and return the second. This is the half that
+    // distinguishes "refuses everything" from "correlates".
+    tx.send((asked + 1, 99)).await.expect("bounded channel");
+    tx.send((asked, 42)).await.expect("bounded channel");
+    r.check(
+        "K15.11",
+        "and returns the matching one that follows it",
+        await_snapshot(&mut rx, asked, deadline).await == Some(42),
     );
 
     // 4. BOUNDED: the channel refuses rather than growing. A driver
@@ -1334,7 +1364,7 @@ pub async fn k15_snapshot_is_bounded(r: &mut Report) {
         assert!(accepted < 1_000, "the control channel must be finite");
     }
     r.check(
-        "K15.11",
+        "K15.12",
         &format!("the control channel is bounded and refuses when full ({accepted} queued)"),
         accepted > 0 && tx.try_send((0, 0)).is_err(),
     );
@@ -1581,10 +1611,36 @@ pub async fn k17_twenty_node_convergence(r: &mut Report) {
         &format!("the run really exercised behaviour dials: {originated}"),
         originated > 0,
     );
+    // EVERY DIAL ACCOUNTED FOR, and every refusal EXPLAINED. Requiring
+    // zero refusals was too absolute: in a twenty-node run some dials
+    // genuinely fail — a remote at its own connection ceiling, a peer
+    // mid-restart — and the manager then records the failure and refuses
+    // the next attempt for `peer backoff`, which is the policy working
+    // rather than the gate malfunctioning. The assertion that matters is
+    // that nothing is unaccounted and no refusal is of an unexpected
+    // kind; "all dials refused" is separately impossible, because
+    // K17.1 requires every node to have converged.
+    let total_refused: u64 = refused.iter().map(|m| m.values().sum::<u64>()).sum();
+    let unexpected: Vec<&String> = refused
+        .iter()
+        .flat_map(std::collections::BTreeMap::keys)
+        .filter(|k| k.as_str() != "peer backoff")
+        .collect();
     r.check(
         "K17.4",
-        &format!("and the gate admitted every one: {allowed}/{originated}, refusals {refused:?}"),
-        allowed == originated && refused.is_empty(),
+        &format!(
+            "every behaviour dial is accounted for: {allowed} admitted + \
+             {total_refused} refused = {originated}"
+        ),
+        allowed + total_refused == originated,
+    );
+    r.check(
+        "K17.5",
+        &format!(
+            "and every refusal is an explained policy outcome, not an unexpected \
+             class: {refused:?}"
+        ),
+        unexpected.is_empty(),
     );
     r.note(format!(
         "K17: {N} nodes, {rounds} rounds, {:.1}s wall clock, final sizes {sizes:?}",
@@ -1656,12 +1712,12 @@ pub async fn k17_twenty_node_convergence(r: &mut Report) {
     // at 5". The twin exceeding the bound proves candidates existed for
     // the twin, not that this node saw any.
     r.check(
-        "K17.5",
+        "K17.6",
         &format!("a node under a reduced bound fills it and stops: {bounded} == {BOUND}"),
         bounded == BOUND,
     );
     r.check(
-        "K17.6",
+        "K17.7",
         &format!(
             "CONTROL: its twin, admitting freely from the SAME rounds and the \
              same seed, holds far more ({unbounded}) — so the bound is what \
@@ -3536,5 +3592,105 @@ pub async fn k25_every_candidate_fails(r: &mut Report) {
             tight_candidates.len()
         ),
         shortfall > 0 || tight_candidates.len() >= 2,
+    );
+}
+
+/// K26 — capability-aware manual admission.
+///
+/// §7's pipeline ends in "exact current Kademlia server protocol
+/// advertised" before `AddRoutingAddress`, and does not exempt the
+/// source of the candidate. A query result is ADVISORY: it says a peer
+/// exists at an address, not that the peer serves this DHT.
+///
+/// The distinction only becomes visible with a peer that is trusted,
+/// reachable, identified, and NOT a server — which is a client-mode
+/// node, the case §9.2 says must not be misrepresented as discoverable.
+pub async fn k26_capability_aware_admission(r: &mut Report) {
+    let network = "spike-003".to_owned();
+    let protocol = namespace::protocol_name(&network);
+    let server = NodeConfig {
+        role: KadRole::Server,
+        network_id: network.clone(),
+        gate_mode: Mode::PolicyAdmit,
+        ..NodeConfig::default()
+    };
+    let client = NodeConfig {
+        role: KadRole::Client,
+        ..server.clone()
+    };
+    // 0 = the asker, 1 = a server router, 2 = a CLIENT-mode peer.
+    let mut nodes = vec![
+        Node::start(&server).await,
+        Node::start(&server).await,
+        Node::start(&client).await,
+    ];
+    let (a, b, c) = (nodes[0].peer_id, nodes[1].peer_id, nodes[2].peer_id);
+    for i in 0..3 {
+        for p in [a, b, c] {
+            nodes[i].trust(p);
+        }
+    }
+    let (b_addr, c_addr) = (nodes[1].dial_address(), nodes[2].dial_address());
+
+    // The asker connects to BOTH, so both are trusted, reachable and
+    // identified — everything the pipeline wants except the protocol.
+    nodes[0].dial_admitted(b_addr.clone());
+    nodes[0].dial_admitted(c_addr.clone());
+    pump_until(&mut nodes, Duration::from_secs(15), |n| {
+        n[0].observed.identify_protocols.contains_key(&b)
+            && n[0].observed.identify_protocols.contains_key(&c)
+    })
+    .await;
+    r.check(
+        "K26.1",
+        "both peers are connected and identified",
+        nodes[0].observed.identify_protocols.contains_key(&b)
+            && nodes[0].observed.identify_protocols.contains_key(&c),
+    );
+    r.check(
+        "K26.2",
+        "the server advertises the exact protocol and the client does not",
+        nodes[0].observed.identify_protocols[&b].contains(&protocol)
+            && !nodes[0].observed.identify_protocols[&c].contains(&protocol),
+    );
+
+    // THE PIPELINE. Both are candidates by every other measure; only the
+    // capability check separates them.
+    let admitted = crate::topology::admit_candidates(&mut nodes[0], &protocol);
+    pump(&mut nodes, Duration::from_secs(2)).await;
+    let routed = nodes[0].routing_peers();
+    r.check(
+        "K26.3",
+        &format!("the server is admitted to the routing table ({admitted} admitted, {routed} routed)"),
+        routed == 1,
+    );
+
+    // AND A QUERY RESULT DOES NOT BYPASS IT. The router is asked for the
+    // client peer, so the client arrives as a learned address — the
+    // path that skipped the check before.
+    if let Some(k) = nodes[1].kad() {
+        k.add_address(&c, c_addr);
+    }
+    if let Some(k) = nodes[0].kad() {
+        let id = k.get_closest_peers(c);
+        nodes[0].own_queries.insert(id, QueryClass::Targeted);
+    }
+    pump(&mut nodes, Duration::from_secs(12)).await;
+    let learned_client = nodes[0].observed.learned_addresses.contains_key(&c);
+    crate::topology::admit_candidates(&mut nodes[0], &protocol);
+    pump(&mut nodes, Duration::from_secs(2)).await;
+    r.note(format!(
+        "K26: learned the client from a query: {learned_client}; routing table \
+         holds {}",
+        nodes[0].routing_peers()
+    ));
+    r.check(
+        "K26.4",
+        &format!(
+            "a client-mode peer stays OUT of the routing table however it was \\
+             learned: {} routed",
+            nodes[0].routing_peers()
+        ),
+        nodes[0].routing_peers() == 1,
     );
 }

@@ -154,6 +154,10 @@ struct LedgerInner {
     /// Addresses a failed dial exhausted that could NOT be scored,
     /// because settling one needs a ticket and a ticket needs capacity.
     unsettled_addresses: u64,
+    /// Address-scoped denials the dial hook declined to act on because
+    /// it had no address to act about. Each is re-asked at the
+    /// established hook.
+    deferred_address_denials: u64,
     /// The OTHER addresses a failed multi-address dial exhausted. The
     /// ticket settles one; these are scored individually.
     also_failed: BTreeMap<ConnectionId, Vec<String>>,
@@ -230,6 +234,13 @@ impl DialLedger {
     #[must_use]
     pub fn unaccounted_closed(&self) -> u64 {
         self.lock().unaccounted_closed
+    }
+
+    /// Address-scoped denials deferred from the dial hook to the
+    /// established hook, where the address exists.
+    #[must_use]
+    pub fn deferred_address_denials(&self) -> u64 {
+        self.lock().deferred_address_denials
     }
 
     /// Exhausted addresses that could not be scored for want of a
@@ -479,6 +490,21 @@ impl NetworkBehaviour for InstrumentedGate {
         } else {
             addresses.iter().map(|a| normalize(a)).collect()
         };
+        // WHICH DENIALS THIS HOOK MAY ACT ON depends on whether it has a
+        // real address. With none — the ordinary behaviour-dial shape —
+        // the probe carries `""`, and an ADDRESS-SCOPED denial about a
+        // placeholder is a denial about nothing: `AddressQuarantined`
+        // cannot apply to an address that does not exist, and
+        // `PolicyStateFull` reports that the address TABLE has no room
+        // for a new entry, which under address-state pressure would
+        // refuse every Kademlia dial including ones whose real address
+        // is already known-good and needs no new entry.
+        //
+        // Both are evaluable at the established hook, where the address
+        // is real. Peer-scoped and global denials — trust, backoff,
+        // drain, the ceilings — are exactly the ones this hook CAN
+        // decide, and it decides them.
+        let placeholder = addresses.is_empty();
         for candidate in &candidates {
             let probe = DialRequest {
                 peer: Some(identity.clone()),
@@ -486,13 +512,23 @@ impl NetworkBehaviour for InstrumentedGate {
                 origin: DialOrigin::KademliaQuery,
             };
             // The probe's ticket is dropped immediately: this asks
-            // whether the ADDRESS is admissible, and the reservation for
+            // whether the dial is admissible, and the reservation for
             // the dial itself is taken once, below.
-            if let Err(denial) = self.admission.admit(&probe, now) {
-                self.record_refusal(&denial_name(denial));
-                return Err(ConnectionDenied::new(std::io::Error::other(format!(
-                    "kademlia dial refused: {denial:?} for {candidate}"
-                ))));
+            match self.admission.admit(&probe, now) {
+                Ok(_) => {}
+                Err(
+                    DialDenial::AddressQuarantined | DialDenial::PolicyStateFull,
+                ) if placeholder => {
+                    // Deferred to the established hook, which will have
+                    // the address this is pretending to be about.
+                    self.ledger.lock().deferred_address_denials += 1;
+                }
+                Err(denial) => {
+                    self.record_refusal(&denial_name(denial));
+                    return Err(ConnectionDenied::new(std::io::Error::other(format!(
+                        "kademlia dial refused: {denial:?} for {candidate}"
+                    ))));
+                }
             }
         }
         let request = DialRequest {

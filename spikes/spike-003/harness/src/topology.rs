@@ -138,21 +138,34 @@ pub fn admit_candidates_bounded(node: &mut Node, protocol: &str, max_routing: us
     let me = node.peer_id;
     let mut candidates: Vec<(PeerId, libp2p::Multiaddr)> = Vec::new();
 
+    // THE EXACT SERVER PROTOCOL, for EVERY candidate — §7's pipeline
+    // ends in "exact current Kademlia server protocol advertised" and
+    // does not exempt the source. An earlier version applied it only to
+    // peers learned through Identify, so anything a QUERY returned was
+    // inserted on the strength of being trusted and reachable: a peer
+    // with absent, stale, negative or client-mode capability evidence
+    // entered the routing table, and the convergence experiments
+    // "converged" by admitting peers the documented pipeline refuses.
+    //
+    // A query result is advisory. It says a peer exists at an address,
+    // not that the peer serves this DHT — that is what the authenticated
+    // Identify observation says, and only for the exact protocol.
+    let serves = |peer: &PeerId| {
+        node.observed
+            .identify_protocols
+            .get(peer)
+            .is_some_and(|p| p.contains(protocol))
+    };
     for (peer, addrs) in &node.observed.learned_addresses {
+        if !serves(peer) {
+            continue;
+        }
         if let Some(a) = addrs.iter().next() {
             candidates.push((*peer, a.clone()));
         }
     }
     for (peer, addrs) in &node.observed.identify_listen_addrs {
-        // THE EXACT PROTOCOL, not merely "we are connected". A peer that
-        // does not advertise this network's server protocol is not a
-        // routing candidate however reachable it is.
-        let serves = node
-            .observed
-            .identify_protocols
-            .get(peer)
-            .is_some_and(|p| p.contains(protocol));
-        if !serves {
+        if !serves(peer) {
             continue;
         }
         if let Some(a) = addrs.iter().next() {
