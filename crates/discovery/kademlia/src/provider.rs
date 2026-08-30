@@ -245,10 +245,15 @@ pub struct KademliaDiscovery {
     /// `Some` means one exploration is running and `tick` starts no
     /// second one.
     exploration_snapshot: Option<u64>,
-    /// The slot held for the library's implicit bootstrap (F2): a
-    /// routing insertion on an empty table starts one query nobody
-    /// requested, and it dials, so it is charged like the work it is.
-    implicit_charge: Option<Permit>,
+    /// Slots held for the library's implicit bootstraps (F2): a
+    /// routing insertion on an EMPTY table starts one query nobody
+    /// requested, and it dials, so each is charged like the work it is.
+    /// A VEC, not an option: every empty-to-nonempty transition starts
+    /// one, and a table that empties and refills before the first
+    /// completes has two real queries running — an optional charge
+    /// accounted for one and let the rest run outside both budgets.
+    /// Bounded by the pending-dial ceiling the charges occupy.
+    implicit_charges: Vec<Permit>,
     /// The local self-lookup key, if the local identity is Ed25519.
     local_key: Option<[u8; 32]>,
     /// The latest instant any timed call has seen; what `health()` —
@@ -337,7 +342,7 @@ impl KademliaDiscovery {
             no_progress_rounds: 0,
             admissions: 0,
             exploration_snapshot: None,
-            implicit_charge: None,
+            implicit_charges: Vec::new(),
             local_key,
             clock: 0,
             exploration_entropy: 0,
@@ -432,8 +437,9 @@ impl KademliaDiscovery {
                 // charged like the work it is, past the ceilings if it
                 // must be, and the slot is settled by the bootstrap-class
                 // completion the driver reports for it.
-                if self.routing.is_empty() && self.implicit_charge.is_none() {
-                    self.implicit_charge = Some(self.budgets.charge_unscheduled(now_ms));
+                if self.routing.is_empty() {
+                    self.implicit_charges
+                        .push(self.budgets.charge_unscheduled(now_ms));
                 }
                 self.routing.insert(peer);
                 self.admissions += 1;
@@ -466,12 +472,12 @@ impl KademliaDiscovery {
     /// Settle the budget slot and pacing for one completed query.
     fn settle(&mut self, class: QueryClass, now_ms: u64, succeeded: bool, address_progress: bool) {
         let was_commanded = self.budgets.finish_oldest(class);
-        if class == QueryClass::Bootstrap
-            && !was_commanded
-            && let Some(charge) = self.implicit_charge.take()
-        {
-            // The implicit bootstrap finished: its slot comes back, its
-            // rate charge stays spent — the window really was used.
+        if class == QueryClass::Bootstrap && !was_commanded && !self.implicit_charges.is_empty() {
+            // One implicit bootstrap finished: ITS slot comes back, its
+            // rate charge stays spent — the window really was used. One
+            // completion settles one charge; the others stay held for
+            // the queries still running.
+            let charge = self.implicit_charges.remove(0);
             self.budgets.consume(charge);
         }
         if class == QueryClass::Exploration
@@ -1032,7 +1038,7 @@ impl DiscoveryProvider for KademliaDiscovery {
         self.cooldowns.clear();
         self.routing.clear();
         self.exploration_snapshot = None;
-        if let Some(charge) = self.implicit_charge.take() {
+        for charge in self.implicit_charges.drain(..) {
             self.budgets.consume(charge);
         }
     }
@@ -2267,5 +2273,31 @@ mod tests {
             ProviderHealth::Healthy,
             "a fresh success restores it"
         );
+    }
+
+    #[test]
+    fn every_empty_to_refill_transition_is_charged() {
+        // Review finding on PR #60 (P1): SPIKE-003's F2 fires on EACH
+        // empty-to-nonempty transition, and a single optional charge
+        // let every implicit query after the first run outside both
+        // budgets.
+        let mut p = started(KademliaMode::Client);
+        let (a, b) = (synthetic_peer(1), synthetic_peer(2));
+        trust(&mut p, &[&a, &b]);
+        p.ingest_driver_event(KademliaEvent::RoutingPeerAdded { peer: a.clone() }, 1_000);
+        assert_eq!(p.budgets.held(), 1, "the first transition is charged");
+        // The table empties and refills BEFORE the first implicit
+        // bootstrap reports: a second real query starts.
+        p.ingest_driver_event(KademliaEvent::RoutingPeerRemoved { peer: a }, 2_000);
+        p.ingest_driver_event(KademliaEvent::RoutingPeerAdded { peer: b }, 3_000);
+        assert_eq!(
+            p.budgets.held(),
+            2,
+            "two implicit queries are running; two slots are held"
+        );
+        p.ingest_driver_event(done(QueryClass::Bootstrap), 4_000);
+        assert_eq!(p.budgets.held(), 1, "one completion settles ONE charge");
+        p.ingest_driver_event(done(QueryClass::Bootstrap), 5_000);
+        assert_eq!(p.budgets.held(), 0, "the second settles the other");
     }
 }
