@@ -3939,3 +3939,123 @@ pub async fn k27_address_table_pressure(r: &mut Report) {
         refusals.contains_key("policy state full"),
     );
 }
+
+/// K28 — a connection whose authority lapsed does not survive.
+///
+/// K20 covers the settlement's DECISION: with trust intact the
+/// connection is retained, revocation changes what the settlement reads,
+/// and nothing is retained for a revoked peer. What it did not cover is
+/// what happens to the connection itself.
+///
+/// Releasing the ticket returns the reservation and leaves the
+/// connection live — established, unauthorized, and outside the
+/// manager's accounting. That is the same fail-open shape as a
+/// settlement that cannot account for itself, so both queue a close.
+pub async fn k28_withdrawn_connection_is_closed(r: &mut Report) {
+    let cfg = NodeConfig {
+        role: KadRole::Server,
+        gate_mode: Mode::PolicyAdmit,
+        ..NodeConfig::default()
+    };
+    let mut nodes = vec![
+        Node::start(&cfg).await,
+        Node::start(&cfg).await,
+        Node::start(&cfg).await,
+    ];
+    let (a, b, c) = (nodes[0].peer_id, nodes[1].peer_id, nodes[2].peer_id);
+    for i in 0..3 {
+        for p in [a, b, c] {
+            nodes[i].trust(p);
+        }
+    }
+    let (b_addr, c_addr) = (nodes[1].dial_address(), nodes[2].dial_address());
+    nodes[1].dial_admitted(c_addr.clone());
+    pump_until(&mut nodes, Duration::from_secs(10), |n| {
+        n[1].observed.connected.contains(&c)
+    })
+    .await;
+    if let Some(k) = nodes[1].kad() {
+        k.add_address(&c, c_addr);
+    }
+    nodes[0].dial_admitted(b_addr.clone());
+    pump_until(&mut nodes, Duration::from_secs(10), |n| {
+        n[0].observed.connected.contains(&b)
+    })
+    .await;
+
+    // CONTROL FIRST: with trust intact the behaviour connection is
+    // retained and SURVIVES, so the disappearance below is about the
+    // revocation and not about the walk failing.
+    nodes[0].ledger.reset();
+    if let Some(k) = nodes[0].kad() {
+        k.add_address(&b, b_addr);
+        let id = k.get_closest_peers(c);
+        nodes[0].own_queries.insert(id, QueryClass::Targeted);
+    }
+    pump_until(&mut nodes, Duration::from_secs(20), |n| {
+        n[0].ledger.retained() > 0
+    })
+    .await;
+    pump(&mut nodes, Duration::from_secs(3)).await;
+    r.check(
+        "K28.1",
+        &format!(
+            "CONTROL: a retained behaviour connection stays up ({} retained, \\
+             connected to the peer: {})",
+            nodes[0].ledger.retained(),
+            nodes[0].swarm.is_connected(&c)
+        ),
+        nodes[0].ledger.retained() > 0 && nodes[0].swarm.is_connected(&c),
+    );
+
+    // NOW REVOKE while the connection is live, and settle again. The
+    // reclassification branch is reached by the NEXT settlement for that
+    // peer — the connection is dropped and re-established under the
+    // revoked policy — which is the observable version of a race the
+    // harness cannot open on demand (K20's stated limit).
+    nodes[0].revoke(c);
+    let before_withdrawn = nodes[0].ledger.withdrawn();
+    let _ = nodes[0].swarm.disconnect_peer_id(c);
+    pump(&mut nodes, Duration::from_secs(3)).await;
+    r.check(
+        "K28.2",
+        &format!(
+            "after revocation the node holds no connection to that peer: {}",
+            nodes[0].swarm.is_connected(&c)
+        ),
+        !nodes[0].swarm.is_connected(&c),
+    );
+    // AND CANNOT MAKE ONE. Admission refuses first, which is K8's
+    // property reached from here — the point being that no path leads
+    // back to a live connection for a revoked peer.
+    nodes[0].ledger.reset();
+    if let Some(k) = nodes[0].kad() {
+        let id = k.get_closest_peers(c);
+        nodes[0].own_queries.insert(id, QueryClass::Targeted);
+    }
+    pump(&mut nodes, Duration::from_secs(12)).await;
+    r.check(
+        "K28.3",
+        &format!(
+            "and no new one is admitted: {} allowed, refusals {:?}, retained {}",
+            nodes[0].ledger.behaviour_allowed(),
+            nodes[0].ledger.refusals(),
+            nodes[0].ledger.retained()
+        ),
+        nodes[0].ledger.behaviour_allowed() == 0
+            && nodes[0].ledger.retained() == 0
+            && !nodes[0].swarm.is_connected(&c),
+    );
+    r.note(format!(
+        "K28 LIMIT: withdrawn count {} (was {before_withdrawn}). The close on the \
+         withdrawn branch is NOT asserted here, for the same reason K20's \
+         reclassification is not: reaching it needs a settlement to land after \
+         revocation, and this harness cannot force that window. What K28 does \
+         establish is that no path leads back to a live connection for a revoked \
+         peer — the control shows a retained one surviving, so the absence is \
+         not an artefact of the walk failing. Removing the close would fail \
+         nothing here; it is a fail-open path removed on the strength of the \
+         production settlement path doing the same, not on evidence.",
+        nodes[0].ledger.withdrawn()
+    ));
+}

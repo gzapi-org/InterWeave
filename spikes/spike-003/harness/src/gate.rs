@@ -800,8 +800,24 @@ impl NetworkBehaviour for InstrumentedGate {
                             }
                         }
                     } else {
+                        // AND THE CONNECTION GOES. Releasing the ticket
+                        // returns the reservation but leaves the
+                        // connection live — established, unauthorized,
+                        // and outside the manager's accounting, which is
+                        // the same fail-open shape as an unsettleable
+                        // settlement. The peer's authority was withdrawn
+                        // between admission and the completed handshake;
+                        // there is nothing to keep it for.
+                        let peer = ticket.peer().cloned();
                         m.record_authorization_withdrawn(ticket, now);
+                        drop(m);
                         self.ledger.lock().withdrawn += 1;
+                        if let Some(p) = peer.and_then(|p| p.as_str().parse::<PeerId>().ok()) {
+                            self.close
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .push((p, id));
+                        }
                     }
                 }
             }

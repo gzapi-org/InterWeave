@@ -129,6 +129,10 @@ async fn main() {
         experiments::k19_ceilings_apply_to_behaviour_dials(&mut r).await;
     }
 
+    if want("K28") {
+        println!("\nK28 — a connection whose authority lapsed does not survive");
+        experiments::k28_withdrawn_connection_is_closed(&mut r).await;
+    }
     if want("K27") {
         println!("\nK27 — behaviour dials under address-table pressure");
         experiments::k27_address_table_pressure(&mut r).await;
