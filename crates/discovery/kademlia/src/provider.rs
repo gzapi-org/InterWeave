@@ -506,8 +506,11 @@ impl KademliaDiscovery {
                 // The work is real whether or not the budget had room,
                 // so the charge is unconditional and may exceed the
                 // ceilings — refusing the accounting would under-count.
-                // Bound is the driver's concurrency ceiling, which is
-                // what limits how many can be announced at once.
+                // What bounds it is the DRIVER's cap on how many
+                // library-started queries it tracks at once. The
+                // concurrency ceiling governs commanded work and never
+                // sees these — which an earlier version of this comment
+                // claimed it did, and a review caught.
                 if origin == interweave_kademlia_control_api::QueryOrigin::Implicit {
                     let permit = self.budgets.charge_unscheduled(now_ms);
                     self.budgets.bind(permit, handle);

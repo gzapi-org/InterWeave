@@ -48,6 +48,16 @@ const BASE32: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
 /// about four times that is already more than admission can ever use.
 const MAX_OBSERVED_PEERS: usize = 1024;
 
+/// Library-started queries tracked at once, at most.
+///
+/// The bound this repository owns. `max_concurrent_queries` governs
+/// COMMANDED work and an implicit query never enters that map, so
+/// without this the only thing limiting them is `bootstrap::Status`
+/// declining a second automatic bootstrap while one runs — true of the
+/// pinned libp2p, and not a property of this code. Generous relative to
+/// what the library actually starts: this is a ceiling, not a budget.
+const MAX_IMPLICIT_QUERIES: usize = 16;
+
 /// Offers waiting for Identify evidence, at most.
 const MAX_PENDING_OFFERS: usize = 256;
 
@@ -352,8 +362,17 @@ impl KademliaState {
 /// one that has vanished is settled, because a query that ended without
 /// a completion still holds a permit.
 ///
-/// Called on every Swarm event the driver sees, which is as often as
-/// the library can start one.
+/// Called from the Kademlia behaviour-event arm and from `Shutdown` —
+/// NOT from every Swarm event, and the library does not start a query
+/// at an event anyway: `Behaviour::poll` triggers its automatic
+/// bootstrap silently, behind a throttle. So this catches a
+/// library-started query only while one is still in the pool when some
+/// Kademlia event arrives. The query that produces no event but its own
+/// completion is caught there instead, in the Bootstrap arm, which
+/// announces an unknown completion before settling it.
+///
+/// Two paths for one obligation, because the library gives no single
+/// moment that covers both.
 fn reconcile_implicit(
     state: &mut KademliaState,
     behaviour: &kad::Behaviour<MemoryStore>,
@@ -362,6 +381,26 @@ fn reconcile_implicit(
     let live: HashSet<kad::QueryId> = behaviour.iter_queries().map(|q| q.id()).collect();
     for id in &live {
         if state.queries.contains_key(id) || state.implicit.contains_key(id) {
+            continue;
+        }
+        // A STOPPING DRIVER ANNOUNCES NOTHING. Review finding on PR
+        // #64: `QueryMut::finish` does not cancel a bootstrap — the
+        // pool calls `continue_iter_closest`, which re-inserts the SAME
+        // `QueryId` for the next bucket. The re-entered query then
+        // reached here, matched neither map, and was announced again
+        // under a fresh handle: a `QueryStarted` for a query already
+        // reported as shut down.
+        if state.stopping {
+            continue;
+        }
+        // AND THE POPULATION IS BOUNDED. `max_concurrent_queries` is
+        // tested against `queries` — commanded work — and an implicit
+        // query never enters that map, so before this nothing in THIS
+        // repository bounded them. What did was `bootstrap::Status`
+        // refusing a second automatic bootstrap while one is
+        // outstanding, which is a pinned dependency's private state
+        // machine rather than a property of this code.
+        if state.implicit.len() >= MAX_IMPLICIT_QUERIES {
             continue;
         }
         state.next_implicit = state.next_implicit.wrapping_add(1);
@@ -554,7 +593,37 @@ pub(super) fn handle_command(
             //
             // Collected before finishing, because `iter_queries` borrows
             // the behaviour that `query_mut` needs.
-            reconcile_implicit(state, behaviour, &mut out);
+            // DISCOVERY, NOT ANNOUNCEMENT. The sweep used to call
+            // `reconcile_implicit` to find library-started queries so it
+            // could settle them, and that stopped working the moment
+            // reconcile learned to stay silent while stopping — a guard
+            // added because `QueryMut::finish` does not cancel a
+            // bootstrap (the pool re-inserts the same id for the next
+            // bucket) and the re-entered query was being announced
+            // again after shutdown.
+            //
+            // The two needs are different: reconcile must not announce
+            // NEW work during a drain, and the sweep must still
+            // enumerate what is live in order to settle it. So the
+            // sweep enumerates for itself, and a query it has never
+            // announced is announced and settled in the same pass — the
+            // charge and its release still one object, as everywhere
+            // else.
+            let unknown: Vec<kad::QueryId> = behaviour
+                .iter_queries()
+                .map(|q| q.id())
+                .filter(|id| !state.queries.contains_key(id) && !state.implicit.contains_key(id))
+                .collect();
+            for id in unknown {
+                state.next_implicit = state.next_implicit.wrapping_add(1);
+                let handle = QueryHandle::implicit(state.next_implicit);
+                state.implicit.insert(id, handle);
+                out.push(KademliaEvent::QueryStarted {
+                    handle,
+                    class: QueryClass::Bootstrap,
+                    origin: QueryOrigin::Implicit,
+                });
+            }
             let settling: Vec<(kad::QueryId, QueryClass, QueryHandle)> = state
                 .queries
                 .drain()
@@ -941,12 +1010,15 @@ fn handle_kad_event(
                     // running that the provider had never charged. Both
                     // were consequences of not being able to name it.
                     //
-                    // `reconcile_implicit` runs on every Swarm event, so
-                    // whatever this insertion started is noticed,
-                    // announced, and charged like any other implicit
-                    // query — and settles on its own completion, or with
-                    // the rest on shutdown. There is no case left to
-                    // special-case.
+                    // Whatever this insertion started is charged like
+                    // any other library query: announced by
+                    // `reconcile_implicit` if a Kademlia event finds it
+                    // still in the pool, and otherwise by its own
+                    // completion in the Bootstrap arm, which names an
+                    // unknown query before settling it. Either way the
+                    // charge and its release are the same object, so
+                    // there is no cancellation decision left here to get
+                    // wrong.
                 }
             }
             if let Some(evicted) = old_peer
@@ -1014,15 +1086,48 @@ fn handle_kad_event(
                     // this query a handle and told the provider to
                     // charge it, so the completion names the same query
                     // and settles that charge and no other.
-                    let Some((class, handle)) = state.queries.remove(&id).or_else(|| {
+                    // A COMPLETION IS ALSO A BEGINNING, when it is the
+                    // first this driver has heard of the query. Review
+                    // finding on PR #64: the library starts its
+                    // automatic bootstrap inside `Behaviour::poll` and
+                    // emits NOTHING (`behaviour.rs`
+                    // `poll_next_bootstrap`), 500ms behind
+                    // `DEFAULT_AUTOMATIC_THROTTLE`, which this driver
+                    // does not configure. Under `BucketInserts::Manual`
+                    // discovered peers never enter the buckets, so
+                    // `remaining` is empty, `step.last` is set on the
+                    // first completion, and that completion is the ONLY
+                    // Kademlia event the query produces in its life.
+                    //
+                    // `reconcile_implicit` cannot see such a query: by
+                    // the time anything wakes it, the query is already
+                    // gone from the pool. Returning here left the work
+                    // uncharged — which the inference this PR replaced
+                    // did charge, so it was a regression rather than an
+                    // unimproved case.
+                    //
+                    // So an unknown completion is announced and settled
+                    // in one pass. The charge and its release are still
+                    // the same object, which is the property this design
+                    // exists for; they simply arrive together.
+                    let known = state.queries.remove(&id).or_else(|| {
                         state
                             .implicit
                             .remove(&id)
                             .map(|h| (QueryClass::Bootstrap, h))
-                    }) else {
-                        // Never announced, so nothing is holding a
-                        // permit for it and there is nothing to settle.
-                        return;
+                    });
+                    let (class, handle) = match known {
+                        Some(pair) => pair,
+                        None => {
+                            state.next_implicit = state.next_implicit.wrapping_add(1);
+                            let handle = QueryHandle::implicit(state.next_implicit);
+                            out.push(KademliaEvent::QueryStarted {
+                                handle,
+                                class: QueryClass::Bootstrap,
+                                origin: QueryOrigin::Implicit,
+                            });
+                            (QueryClass::Bootstrap, handle)
+                        }
                     };
                     match outcome {
                         // Empty is always within the bound; a bootstrap
@@ -2210,6 +2315,147 @@ mod tests {
         assert!(
             state.routed.contains(&held),
             "a peer already routed is refreshing, not taking a new seat"
+        );
+    }
+
+    #[test]
+    fn a_query_whose_only_event_is_its_completion_is_still_charged() {
+        // Review finding on PR #64 (P1). The library starts its
+        // automatic bootstrap inside `Behaviour::poll` and emits
+        // nothing, behind a throttle this driver does not configure;
+        // under `BucketInserts::Manual` its `remaining` set is empty, so
+        // `step.last` is set on the first completion and that
+        // completion is the ONLY Kademlia event the query ever
+        // produces. `reconcile_implicit` cannot see such a query — by
+        // the time anything wakes it, the query has left the pool — and
+        // returning here left the work uncharged, which the inference
+        // this design replaced DID charge.
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let mut state = KademliaState::new(&settings);
+        let mut behaviour = build_behaviour(&settings, PeerId::random()).expect("buildable");
+        let manager = interweave_transport_runtime::ConnectionManager::new(
+            interweave_transport_runtime::ConnectionPolicy::default(),
+            8,
+        );
+        // A completion for a query this driver never saw begin: no
+        // entry in either map, which is the shape of the F2 bootstrap.
+        let unseen = behaviour.get_closest_peers(PeerId::random());
+        state.queries.remove(&unseen);
+        state.implicit.remove(&unseen);
+
+        let mut out = Vec::new();
+        handle_kad_event(
+            &mut state,
+            Some(&mut behaviour),
+            &manager,
+            kad::Event::OutboundQueryProgressed {
+                id: unseen,
+                result: kad::QueryResult::Bootstrap(Ok(kad::BootstrapOk {
+                    peer: PeerId::random(),
+                    num_remaining: 0,
+                })),
+                stats: kad::QueryStats::empty(),
+                step: kad::ProgressStep {
+                    count: NonZeroUsize::new(1).expect("nonzero"),
+                    last: true,
+                },
+            },
+            0,
+            &mut out,
+        );
+
+        let started: Vec<QueryHandle> = out
+            .iter()
+            .filter_map(|e| match e {
+                KademliaEvent::QueryStarted { handle, origin, .. } => {
+                    assert_eq!(*origin, QueryOrigin::Implicit);
+                    Some(*handle)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            started.len(),
+            1,
+            "a query the driver never saw begin is announced by its completion, \
+             or the work it did goes uncharged: {out:?}"
+        );
+        let settled: Vec<QueryHandle> = out
+            .iter()
+            .filter_map(|e| match e {
+                KademliaEvent::QueryResults { handle, .. }
+                | KademliaEvent::QueryFailed { handle, .. } => Some(*handle),
+                KademliaEvent::QueryStarted { .. } => None,
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            settled, started,
+            "and the charge and its release name the SAME query — arriving together \
+             is not the same as being unrelated"
+        );
+    }
+
+    #[test]
+    fn a_stopping_driver_announces_no_query_and_the_population_is_bounded() {
+        // Two review findings on PR #64, one guard each.
+        //
+        // `QueryMut::finish` does not cancel a bootstrap: the pool calls
+        // `continue_iter_closest`, which re-inserts the SAME id for the
+        // next bucket, and the re-entered query was then announced again
+        // under a fresh handle — a `QueryStarted` for a query already
+        // reported as shut down.
+        //
+        // And the claimed bound was not this repository's. Implicit
+        // queries never enter `queries`, so `max_concurrent_queries`
+        // never saw them; what limited them was a pinned dependency's
+        // private state machine.
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let mut state = KademliaState::new(&settings);
+        let mut behaviour = build_behaviour(&settings, PeerId::random()).expect("buildable");
+
+        // STOPPING: nothing is announced, however many are live.
+        let _ = behaviour.get_closest_peers(PeerId::random());
+        state.stopping = true;
+        let mut out = Vec::new();
+        reconcile_implicit(&mut state, &behaviour, &mut out);
+        assert!(
+            out.is_empty(),
+            "a drained driver does not announce the query its own `finish` re-entered"
+        );
+        assert!(state.implicit.is_empty());
+
+        // RUNNING: the population has a ceiling this crate owns.
+        state.stopping = false;
+        for _ in 0..(MAX_IMPLICIT_QUERIES + 4) {
+            let _ = behaviour.get_closest_peers(PeerId::random());
+        }
+        let mut running = Vec::new();
+        reconcile_implicit(&mut state, &behaviour, &mut running);
+        assert_eq!(
+            state.implicit.len(),
+            MAX_IMPLICIT_QUERIES,
+            "the bound is this repository's, not a dependency's internal throttle"
         );
     }
 
