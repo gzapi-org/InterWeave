@@ -791,6 +791,37 @@ impl SwarmRuntime {
                             // spin forever.
                             None => break,
                             Some(SwarmCommand::Shutdown { reply }) => {
+                                // THE DRIVER STOPS ON THIS PATH TOO.
+                                // Review finding on PR #61: the drain
+                                // arm told the driver to shut down, but
+                                // `SwarmRuntime::shutdown` sends
+                                // `Shutdown`, which is intercepted here
+                                // and never reaches `handle_command`.
+                                // So an ordinary shutdown dropped every
+                                // outstanding Kademlia query without a
+                                // `QueryFailed`, and the provider's
+                                // budget permits — settled only by a
+                                // completion — leaked for good; and
+                                // through the grace below the behaviour
+                                // went on serving and querying while the
+                                // rest of the runtime wound down.
+                                //
+                                // Before the early break, so the
+                                // common case is covered rather than
+                                // only the graceful one.
+                                if let Some(state) = kademlia_state.as_mut()
+                                    && let Some(behaviour) = swarm.kademlia_mut()
+                                {
+                                    for event in kademlia_driver::handle_command(
+                                        state,
+                                        behaviour,
+                                        &manager,
+                                        interweave_kademlia_control_api::KademliaCommand::Shutdown,
+                                        now_ms(started),
+                                    ) {
+                                        outbox.push_back(SwarmEvent::Kademlia { event });
+                                    }
+                                }
                                 // NOTHING IN FLIGHT IS THE COMMON CASE,
                                 // and it still stops immediately.
                                 if shutdown_settled(
