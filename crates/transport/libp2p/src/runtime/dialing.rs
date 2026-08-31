@@ -256,7 +256,18 @@ pub(super) fn settle_failed_dial(
         }
         other => is_permanent_dial_error(other),
     };
-    if matches!(error, DialError::WrongPeerId { .. }) {
+    if matches!(error, DialError::Denied { .. }) {
+        // THIS NODE REFUSED IT, so this node's policy is not evidence
+        // about the network. `DialError::Denied` is what a behaviour's
+        // `ConnectionDenied` comes back as, and the one that reaches a
+        // ticket is the outbound gate's established hook rejecting an
+        // address the quarantine suppresses. Scored as an ordinary
+        // failure it extended that quarantine — a suppression this node
+        // keeps re-testing could then never lapse — and advanced a
+        // trusted peer toward punitive backoff over one address this
+        // node declined to use.
+        manager.record_locally_refused(ticket, now_ms);
+    } else if matches!(error, DialError::WrongPeerId { .. }) {
         let _ = manager.record_identity_mismatch(ticket, now_ms);
     } else if ticket_is_permanent {
         // STRUCTURAL, not transient. The same address fails the same
@@ -929,6 +940,64 @@ mod tests {
                 .address_dialable(&peer, "/ip4/192.0.2.9/tcp/1", 0),
             "and to nothing else"
         );
+    }
+
+    #[test]
+    fn our_own_gate_refusal_does_not_deepen_the_quarantine_that_caused_it() {
+        // The outbound gate's established hook rejects an address the
+        // quarantine suppresses, and libp2p reports that back as
+        // `DialError::Denied`. Settled as an ordinary failure, the
+        // address score extended the very suppression that produced the
+        // refusal — so a route this node keeps re-testing could never
+        // lapse out of quarantine — and the peer backoff riding with it
+        // advanced a trusted peer over one address this node declined
+        // to use.
+        let mut m = admitting_manager();
+        let peer = ident(RELAY);
+        let refused = "/ip4/192.0.2.4/tcp/1";
+
+        let ticket = m
+            .handle()
+            .admit(
+                &DialRequest {
+                    peer: Some(peer.clone()),
+                    address: refused.to_owned(),
+                    origin: DialOrigin::KademliaQuery,
+                },
+                0,
+            )
+            .expect("admitted");
+        settle_failed_dial(
+            &mut m,
+            ticket,
+            &DialError::Denied {
+                cause: libp2p::swarm::ConnectionDenied::new(std::io::Error::other("quarantined")),
+            },
+            0,
+        );
+
+        assert_eq!(
+            m.scheduled_retries(),
+            0,
+            "this node's own refusal is not a reason to retry"
+        );
+        assert_eq!(
+            m.handle().load().pending_dials(),
+            0,
+            "but the slot is settled"
+        );
+        let again = m
+            .handle()
+            .admit(
+                &DialRequest {
+                    peer: Some(peer.clone()),
+                    address: "/ip4/192.0.2.5/tcp/1".to_owned(),
+                    origin: DialOrigin::KademliaQuery,
+                },
+                1,
+            )
+            .expect("a known-good route is not suppressed by our refusal of another");
+        drop(again);
     }
 
     #[test]
