@@ -41,6 +41,10 @@ members = [
     # Stage 7: signed GossipSub broadcast, which must stay independently
     # functional from direct and must not substitute for it.
     "tests/pubsub",
+    # Stage 10: the opt-out exit gate. Only observable end-to-end — a
+    # peer that would have routed this one, and a command channel that
+    # answers nothing.
+    "tests/kademlia",
     # Stage 9: DiscoveryProvider conformance and the composition proof
     # that discovery cannot bypass trust or ConnectionManager.
     "tests/discovery-conformance",
@@ -278,7 +282,6 @@ planned_test_packages = [
   "tests/ipc-v2",
   "tests/direct-v2",
   "tests/pubsub",
-  "tests/kademlia",
   "tests/endpoint-routing",
   "tests/human-chat",
   "tests/human-retention",

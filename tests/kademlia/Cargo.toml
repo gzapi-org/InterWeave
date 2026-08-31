@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# The Stage 10 exit gate that only exists end-to-end: an operator's
+# `enabled: false` producing ZERO Kademlia protocol and query activity.
+#
+# It lives here rather than beside the driver because it is not a
+# statement about one crate's surface. "Zero activity" is only
+# observable from outside — by another peer that would have routed this
+# one had it advertised the DHT protocol, and by a command channel that
+# answers nothing. Both need two real runtimes over real sockets.
+[package]
+name = "interweave-kademlia-tests"
+version = "0.0.0"
+publish = false
+description = "Stage 10 Kademlia exit-gate tests for InterWeave."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+interweave-kademlia-control-api = { path = "../../crates/api/kademlia-control-api" }
+interweave-profile-identity = { path = "../../crates/identity/profile-identity" }
+interweave-transport-api = { path = "../../crates/api/transport-api" }
+interweave-transport-libp2p = { path = "../../crates/transport/libp2p" }
+interweave-transport-runtime = { path = "../../crates/transport/runtime" }
+interweave-trust-api = { path = "../../crates/api/trust-api" }
+libp2p = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
