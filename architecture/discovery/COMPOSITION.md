@@ -18,6 +18,12 @@ Expiry removes a source observation. An address disappears only when no active s
 
 Bounded `protocol_observations` are merged separately by `(peer_id, protocol_id, source)` with their own observation timestamp/freshness inherited from the source. A fresh authenticated observation supersedes an older positive/negative observation from the same source. Protocol observations never change trust and do not keep an otherwise expired peer candidate alive beyond the source's TTL.
 
+**A candidate is its source's WHOLE statement of protocol facts, so omission is withdrawal.** When a source emits a candidate for a peer, the observations it carries replace every observation that source held for that peer: a fact previously asserted and now absent is retracted at once, and is not kept alive until the candidate expires. Other sources' facts for the same peer are untouched, because the statement is per source.
+
+The rule exists because a source's own freshness bound is finer than the candidate's. A peer-cache record kept alive by a reachability refresh outlives the capability observation attached to it, and without withdrawal-by-omission the empty re-emission that follows the observation ageing out could take nothing back — the refreshed expiry arrived first, so a lapsed positive stayed eligible for another full record lifetime. Withdrawal does not lower the applied-freshness floor, so a retracted fact still cannot be re-asserted by delayed older evidence.
+
+**The obligation this places on a provider:** a source that asserts protocol facts must re-assert them on every candidate it emits for that peer. Emitting a candidate with the facts omitted is a retraction and is read as one. A provider that never asserts protocol facts retracts nothing and is unaffected.
+
 ## Priority
 
 Providers can have an integer priority/cost hint used when selecting among candidate addresses. Priority does not suppress concurrent providers and is not trust.
