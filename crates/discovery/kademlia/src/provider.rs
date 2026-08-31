@@ -118,19 +118,22 @@ pub enum ProviderConfigError {
     ZeroCandidateTtl,
     /// `target_routing_peers` exceeded `max_routing_peers`.
     TargetAboveMax,
-    /// `max_routing_peers` exceeded the port ceiling.
-    MaxAboveCeiling {
+    /// A field fell outside the canonical range §13 gives it.
+    ///
+    /// One variant rather than one per field, because the ranges are a
+    /// TABLE — `profile-config`'s `InvalidKademliaSetting` says
+    /// `must be {lo}..={hi}, got {value}` from the same shape — and a
+    /// per-field variant is a place for the two to disagree silently.
+    OutOfRange {
+        /// Which setting.
+        field: &'static str,
         /// The configured value.
-        got: u32,
+        got: u64,
+        /// Lowest permitted.
+        lo: u64,
+        /// Highest permitted.
+        hi: u64,
     },
-    /// A zero exploration interval would busy-loop the scheduler.
-    ZeroExplorationInterval,
-    /// Jitter above 100 percent could schedule into the past.
-    JitterAboveHundred,
-    /// A zero concurrency ceiling could never run a query.
-    ZeroConcurrency,
-    /// A zero rate ceiling could never run a query.
-    ZeroRate,
     /// `bootstrap_refresh_interval` below `bootstrap_min_interval` asks
     /// for a refresh the floor forbids (§13 rule 2).
     RefreshBelowMinimum,
@@ -310,22 +313,75 @@ impl KademliaDiscovery {
         if config.target_routing_peers > config.max_routing_peers {
             return Err(ProviderConfigError::TargetAboveMax);
         }
-        if config.max_routing_peers as usize > MAX_ROUTING_PEERS {
-            return Err(ProviderConfigError::MaxAboveCeiling {
-                got: config.max_routing_peers,
-            });
-        }
-        if config.exploration_interval_ms == 0 {
-            return Err(ProviderConfigError::ZeroExplorationInterval);
-        }
-        if config.exploration_jitter_percent > 100 {
-            return Err(ProviderConfigError::JitterAboveHundred);
-        }
-        if config.max_concurrent_queries == 0 {
-            return Err(ProviderConfigError::ZeroConcurrency);
-        }
-        if config.max_queries_per_minute == 0 {
-            return Err(ProviderConfigError::ZeroRate);
+        // THE CANONICAL RANGES, ENFORCED HERE TOO (§13, and
+        // `profile-config`'s per-field table). This constructor is
+        // public and `KademliaProviderConfig` is a plain struct, so a
+        // composition root that bypassed profile validation could
+        // otherwise install a query rate an order of magnitude past the
+        // documented ceiling, or jitter wide enough to schedule a round
+        // into the past — the same hole the driver's
+        // `KademliaSettings::validate` closes on its own public
+        // boundary. Refused, never clamped: a caller learns its
+        // configuration was wrong instead of quietly getting another.
+        for (field, got, lo, hi) in [
+            (
+                "max_routing_peers",
+                u64::from(config.max_routing_peers),
+                20,
+                MAX_ROUTING_PEERS as u64,
+            ),
+            (
+                "target_routing_peers",
+                u64::from(config.target_routing_peers),
+                8,
+                256,
+            ),
+            (
+                "max_concurrent_queries",
+                u64::from(config.max_concurrent_queries),
+                1,
+                8,
+            ),
+            (
+                "max_queries_per_minute",
+                u64::from(config.max_queries_per_minute),
+                1,
+                60,
+            ),
+            (
+                "exploration_jitter_percent",
+                u64::from(config.exploration_jitter_percent),
+                0,
+                50,
+            ),
+            (
+                "exploration_interval",
+                config.exploration_interval_ms,
+                30_000,
+                3_600_000,
+            ),
+            (
+                "targeted_lookup_cooldown",
+                config.targeted_lookup_cooldown_ms,
+                30_000,
+                3_600_000,
+            ),
+            (
+                "bootstrap_min_interval",
+                config.bootstrap_min_interval_ms,
+                60_000,
+                3_600_000,
+            ),
+            (
+                "bootstrap_refresh_interval",
+                config.bootstrap_refresh_interval_ms,
+                300_000,
+                86_400_000,
+            ),
+        ] {
+            if got < lo || got > hi {
+                return Err(ProviderConfigError::OutOfRange { field, got, lo, hi });
+            }
         }
         if config.bootstrap_refresh_interval_ms < config.bootstrap_min_interval_ms {
             return Err(ProviderConfigError::RefreshBelowMinimum);
@@ -1309,7 +1365,115 @@ mod tests {
                     max_routing_peers: 2000,
                     ..base.clone()
                 },
-                ProviderConfigError::MaxAboveCeiling { got: 2000 },
+                ProviderConfigError::OutOfRange {
+                    field: "max_routing_peers",
+                    got: 2000,
+                    lo: 20,
+                    hi: 1024,
+                },
+            ),
+            // THE CANONICAL RANGES, one row each. Every one of these was
+            // ACCEPTED before: the constructor asked only "is it
+            // non-zero", so a composition root that skipped profile
+            // validation could install a rate an order of magnitude past
+            // the ceiling, or jitter wide enough to schedule a round
+            // into the past. The values are one step outside the range
+            // `profile-config` enforces for the same field.
+            (
+                KademliaProviderConfig {
+                    max_concurrent_queries: 9,
+                    ..base.clone()
+                },
+                ProviderConfigError::OutOfRange {
+                    field: "max_concurrent_queries",
+                    got: 9,
+                    lo: 1,
+                    hi: 8,
+                },
+            ),
+            (
+                KademliaProviderConfig {
+                    max_queries_per_minute: 61,
+                    ..base.clone()
+                },
+                ProviderConfigError::OutOfRange {
+                    field: "max_queries_per_minute",
+                    got: 61,
+                    lo: 1,
+                    hi: 60,
+                },
+            ),
+            (
+                KademliaProviderConfig {
+                    exploration_jitter_percent: 51,
+                    ..base.clone()
+                },
+                ProviderConfigError::OutOfRange {
+                    field: "exploration_jitter_percent",
+                    got: 51,
+                    lo: 0,
+                    hi: 50,
+                },
+            ),
+            (
+                KademliaProviderConfig {
+                    exploration_interval_ms: 29_999,
+                    ..base.clone()
+                },
+                ProviderConfigError::OutOfRange {
+                    field: "exploration_interval",
+                    got: 29_999,
+                    lo: 30_000,
+                    hi: 3_600_000,
+                },
+            ),
+            (
+                KademliaProviderConfig {
+                    targeted_lookup_cooldown_ms: 3_600_001,
+                    ..base.clone()
+                },
+                ProviderConfigError::OutOfRange {
+                    field: "targeted_lookup_cooldown",
+                    got: 3_600_001,
+                    lo: 30_000,
+                    hi: 3_600_000,
+                },
+            ),
+            (
+                KademliaProviderConfig {
+                    bootstrap_min_interval_ms: 59_999,
+                    ..base.clone()
+                },
+                ProviderConfigError::OutOfRange {
+                    field: "bootstrap_min_interval",
+                    got: 59_999,
+                    lo: 60_000,
+                    hi: 3_600_000,
+                },
+            ),
+            (
+                KademliaProviderConfig {
+                    bootstrap_refresh_interval_ms: 86_400_001,
+                    ..base.clone()
+                },
+                ProviderConfigError::OutOfRange {
+                    field: "bootstrap_refresh_interval",
+                    got: 86_400_001,
+                    lo: 300_000,
+                    hi: 86_400_000,
+                },
+            ),
+            (
+                KademliaProviderConfig {
+                    target_routing_peers: 7,
+                    ..base.clone()
+                },
+                ProviderConfigError::OutOfRange {
+                    field: "target_routing_peers",
+                    got: 7,
+                    lo: 8,
+                    hi: 256,
+                },
             ),
         ];
         for (bad, want) in cases {
