@@ -797,23 +797,39 @@ fn handle_kad_event(
                     // prevent. Refusing the bookkeeping is not refusing
                     // the seat.
                     behaviour.remove_peer(&peer);
-                    // And any query that insertion just started: an
-                    // implicit bootstrap is absent from `queries` by
-                    // construction, so the shutdown sweep — which may
-                    // already have run — would never see it.
-                    let started: Vec<kad::QueryId> = behaviour
-                        .iter_queries()
-                        .map(|q| q.id())
-                        .filter(|id| !state.queries.contains_key(id))
-                        .collect();
-                    for id in started {
-                        if let Some(mut running) = behaviour.query_mut(&id) {
-                            running.finish();
+                    // ONLY WHILE STOPPING, and the previous version of
+                    // this sweep was not so restricted. An implicit
+                    // bootstrap is absent from `queries` by
+                    // construction, so "every query not in `queries`"
+                    // cannot distinguish one THIS insertion started from
+                    // one an earlier, perfectly eligible insertion did —
+                    // and on a running driver it cancelled the latter
+                    // and settled it falsely, releasing a charge for
+                    // work that was still needed.
+                    //
+                    // The distinction cannot be made here: the insertion
+                    // already happened before this event was emitted, so
+                    // any query it started is indistinguishable by id.
+                    // What CAN be said is when cancelling is right at
+                    // all — during a drain, where the shutdown sweep may
+                    // already have run and every uncommanded query is
+                    // work the drain exists to stop. On a running driver
+                    // a stray bootstrap completes and settles itself.
+                    if state.stopping {
+                        let started: Vec<kad::QueryId> = behaviour
+                            .iter_queries()
+                            .map(|q| q.id())
+                            .filter(|id| !state.queries.contains_key(id))
+                            .collect();
+                        for id in started {
+                            if let Some(mut running) = behaviour.query_mut(&id) {
+                                running.finish();
+                            }
+                            out.push(KademliaEvent::QueryFailed {
+                                class: QueryClass::Bootstrap,
+                                reason: QueryFailure::ShuttingDown,
+                            });
                         }
-                        out.push(KademliaEvent::QueryFailed {
-                            class: QueryClass::Bootstrap,
-                            reason: QueryFailure::ShuttingDown,
-                        });
                     }
                 }
             }
@@ -2112,6 +2128,9 @@ mod tests {
         // Both advertise; only one is still trusted.
         state.advertises.insert(revoked, (true, 0));
         state.advertises.insert(trusted, (true, 0));
+        // An implicit bootstrap already running, started by earlier
+        // eligible work — the query the sweep must not touch.
+        let unrelated = behaviour.get_closest_peers(PeerId::random());
 
         let mut out = Vec::new();
         handle_kad_event(
@@ -2134,6 +2153,26 @@ mod tests {
         assert!(
             !state.routed.contains(&revoked),
             "a seat queued before the revocation is not granted after it"
+        );
+        // AND AN UNRELATED BOOTSTRAP IS LEFT ALONE. An implicit query
+        // is absent from `queries` by construction, so "every query not
+        // in `queries`" cannot tell one THIS insertion started from one
+        // an earlier eligible insertion did. On a running driver the
+        // earlier one is still needed; cancelling it settled a charge
+        // for work that had not finished.
+        assert!(
+            !out.iter().any(|e| matches!(
+                e,
+                KademliaEvent::QueryFailed {
+                    reason: QueryFailure::ShuttingDown,
+                    ..
+                }
+            )),
+            "a running driver cancels no query when it declines a seat"
+        );
+        assert!(
+            behaviour.iter_queries().any(|q| q.id() == unrelated),
+            "and the unrelated bootstrap is still running"
         );
         assert!(out.is_empty(), "and no addition is announced");
 
