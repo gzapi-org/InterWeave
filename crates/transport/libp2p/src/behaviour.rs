@@ -197,12 +197,22 @@ pub struct SubstrateBehaviour {
 //
 // Stage 11 produces the first one, and then this shape is a gap. Each
 // entry point classifies its caller — direct ingress, the GossipSub
-// publisher check, `endpoints::build_answer` — so an infrastructure-only
-// peer gains no AUTHORITY. What it gains is EXPOSURE: the three
-// protocols are advertised to it and it can open their substreams, so a
-// refusal costs a parse and an accounting charge rather than a closed
-// stream. `build_answer`'s pre-trust rate budget exists precisely
-// because that is where the exposure lands today.
+// publisher check, `endpoints::build_answer`, and the Kademlia driver's
+// `try_admit` — so an infrastructure-only peer gains no AUTHORITY. What
+// it gains is EXPOSURE: the protocols are advertised to it and it can
+// open their substreams, so a refusal costs a parse and an accounting
+// charge rather than a closed stream. `build_answer`'s pre-trust rate
+// budget exists precisely because that is where the exposure lands
+// today.
+//
+// STAGE 10 ADDED A FOURTH, and it is named here rather than left to be
+// counted: `kad` joins `direct`, `broadcast` and `endpoints` in the set
+// installed uniformly. Its authority check is `try_admit`'s data-plane
+// trust requirement, so an infrastructure-only peer holds no routing
+// seat — but it can still open the DHT substream and be answered, which
+// is the same exposure the other three have. An implementer working the
+// Stage 11 correction from a list of three would restrict three and
+// leave this one.
 //
 // The Stage 11 correction is to restrict the protocol set offered on an
 // infrastructure-only connection, at the connection rather than at the
