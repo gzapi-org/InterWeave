@@ -197,6 +197,29 @@ const fn shutdown_settled(
             && answering_directory == 0)
 }
 
+/// Hand the consumer what is already queued, before the loop ends.
+///
+/// SHUTDOWN SETTLEMENTS ARE IN HERE. The Kademlia driver answers a
+/// shutdown with one `QueryFailed { ShuttingDown }` per outstanding
+/// query, and the provider's budget releases a permit only on a
+/// completion — so a `break` that dropped the outbox discarded the very
+/// events the shutdown path exists to produce, and queued them for
+/// nobody. Review finding on PR #61: invoking the driver is not the
+/// same as delivering what it returned.
+///
+/// BEST EFFORT, and the limit is stated rather than hidden: `try_send`
+/// never blocks, so a consumer that has stopped reading gets what its
+/// channel can still hold and no more. Awaiting room instead would let
+/// a consumer that is not reading hang the shutdown it was asked to
+/// perform, which is worse than an undelivered notification.
+fn flush_outbox(outbox: &mut VecDeque<SwarmEvent>, tx: &mpsc::Sender<SwarmEvent>) {
+    while let Some(event) = outbox.pop_front() {
+        if tx.try_send(event).is_err() {
+            return;
+        }
+    }
+}
+
 /// Whether the Swarm may be polled.
 ///
 /// The outbox is bounded so a stalled consumer cannot make this process
@@ -592,6 +615,7 @@ impl SwarmRuntime {
                         tokio::time::Instant::now() >= *deadline,
                     )
                 {
+                    flush_outbox(&mut outbox, &event_tx);
                     if let Some((_, reply)) = stopping.take() {
                         let _ = reply.send(());
                     }
@@ -832,6 +856,7 @@ impl SwarmRuntime {
                                     false,
                                 ) || stopping.is_some()
                                 {
+                                    flush_outbox(&mut outbox, &event_tx);
                                     let _ = reply.send(());
                                     break;
                                 }
@@ -1157,6 +1182,64 @@ impl SwarmRuntime {
     #[must_use]
     pub const fn local_peer(&self) -> &TransportIdentity {
         &self.local_peer
+    }
+}
+
+#[cfg(test)]
+mod flush_tests {
+    #![allow(clippy::expect_used)]
+    use super::{SwarmEvent, flush_outbox};
+    use std::collections::VecDeque;
+    use tokio::sync::mpsc;
+
+    fn kad_settlement() -> SwarmEvent {
+        SwarmEvent::Kademlia {
+            event: interweave_kademlia_control_api::KademliaEvent::QueryFailed {
+                class: interweave_kademlia_control_api::QueryClass::Exploration,
+                reason: interweave_kademlia_control_api::QueryFailure::ShuttingDown,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn a_shutdown_delivers_the_settlements_it_queued() {
+        // Review finding on PR #61: the shutdown path invoked the driver
+        // and pushed its `QueryFailed` events into the outbox, and the
+        // `break` on the very next line dropped the queue. A query permit
+        // is released only by a completion, so the settlement the
+        // shutdown exists to produce reached nobody.
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
+        outbox.push_back(kad_settlement());
+        outbox.push_back(kad_settlement());
+
+        flush_outbox(&mut outbox, &tx);
+        assert!(outbox.is_empty(), "everything the channel could take went");
+        assert!(
+            matches!(rx.try_recv(), Ok(SwarmEvent::Kademlia { .. })),
+            "and the consumer actually receives it"
+        );
+        assert!(matches!(rx.try_recv(), Ok(SwarmEvent::Kademlia { .. })));
+    }
+
+    #[tokio::test]
+    async fn a_full_channel_ends_the_flush_rather_than_blocking_it() {
+        // BEST EFFORT is the contract, not an accident: awaiting room
+        // would let a consumer that stopped reading hang the shutdown it
+        // was asked to perform.
+        let (tx, _rx) = mpsc::channel(1);
+        let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
+        outbox.push_back(kad_settlement());
+        outbox.push_back(kad_settlement());
+        outbox.push_back(kad_settlement());
+
+        flush_outbox(&mut outbox, &tx);
+        assert_eq!(
+            outbox.len(),
+            1,
+            "one delivered, one consumed by the failed send, and the rest left \
+             rather than the loop spinning or awaiting"
+        );
     }
 }
 
