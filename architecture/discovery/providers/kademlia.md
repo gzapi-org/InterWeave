@@ -64,7 +64,7 @@ The provider does not infer remote server mode from trust or from the mere prese
 /interweave/kad/1.0.0/<current-network-hash>
 ```
 
-The observation may be persisted by `PeerCacheDiscovery` with its timestamp and positive/negative support state. It is advisory, expires with the peer-cache record, and is superseded by fresh Identify evidence. On the candidate/hint path it travels as the exact derived protocol string `/interweave/kad/<wire_major>.0.0/<network_hash>` — `role = server` implied by presence, per the mapping in `kademlia-integration.md` §7 — so eligibility compares the full string, never a prefix.
+The observation may be persisted by `PeerCacheDiscovery` with its timestamp and positive/negative support state. It is advisory, expires with the peer-cache record OR on its own age under the same TTL — whichever comes first, so a record kept alive by a reachability refresh does not extend it — and is superseded by fresh Identify evidence. On the candidate/hint path it travels as the exact derived protocol string `/interweave/kad/<wire_major>.0.0/<network_hash>` — `role = server` implied by presence, per the mapping in `kademlia-integration.md` §7 — so eligibility compares the full string, never a prefix.
 
 ## Routing eligibility
 

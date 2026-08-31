@@ -238,7 +238,7 @@ Rules:
 
 - the observation is advisory and never grants trust;
 - positive evidence is valid only for the exact wire major + `network_hash`;
-- freshness cannot exceed the enclosing peer-cache TTL;
+- freshness cannot exceed the enclosing peer-cache TTL, and cannot exceed the observation's OWN age under that TTL either; a record kept fresh by a reachability refresh does not refresh the capability attached to it;
 - a fresh Identify response supersedes cached evidence;
 - if a peer no longer advertises the exact server protocol, stale positive evidence is removed/replaced;
 - deleting the peer cache merely disables cold-start targeted eligibility until evidence is learned again.
