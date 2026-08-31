@@ -911,6 +911,52 @@ pub(super) fn handle_kademlia(
     now_ms: u64,
     out: &mut Vec<KademliaEvent>,
 ) -> KadHandled {
+    let handled = classify_swarm_event(event, swarm, state, manager, now_ms, out);
+    // AFTER EVERY EVENT, not only a Kademlia one. Review finding on PR
+    // #64: the library starts its automatic bootstrap inside
+    // `Behaviour::poll` and emits no Kademlia event for it, so under
+    // `BucketInserts::Manual` its FIRST and only Kademlia event is the
+    // final completion. Reconciling only on Kademlia events therefore
+    // never met such a query while it was running: the completion arm
+    // announced and settled it in one pass, and for the whole time it
+    // was dialling or waiting out its timeout the provider held no
+    // charge against it — so commanded queries could spend the entire
+    // concurrency and rate budget beside work nobody was counting.
+    //
+    // That query DIALS, and a dial produces `Dialing`,
+    // `ConnectionEstablished` or `OutgoingConnectionError` — none of
+    // them Kademlia events, all of them arriving before the
+    // completion. Reconciling here narrows the unaccounted window from
+    // the query's whole lifetime to a single event.
+    //
+    // It cannot be closed entirely: the dial is issued from inside the
+    // same `Behaviour::poll` that starts the query, so no observer in
+    // this process can announce it beforehand. What is achievable is
+    // that the charge is held while the network work happens, and that
+    // is what this does.
+    if let Some(behaviour) = swarm.kademlia_mut() {
+        if state.stopping {
+            // The sweep's single `finish` only advanced each bootstrap;
+            // this is what ends them.
+            finish_all_while_stopping(behaviour);
+        }
+        reconcile_implicit(state, behaviour, out);
+    }
+    handled
+}
+
+/// Fold one Swarm event onto the port, without reconciliation.
+///
+/// Split out so [`handle_kademlia`] can reconcile on the way out of
+/// every path, including the two that pass an event on early.
+fn classify_swarm_event(
+    event: Libp2pSwarmEvent<crate::behaviour::SubstrateBehaviourEvent>,
+    swarm: &mut crate::gated_swarm::GatedSwarm,
+    state: &mut KademliaState,
+    manager: &ConnectionManager,
+    now_ms: u64,
+    out: &mut Vec<KademliaEvent>,
+) -> KadHandled {
     use crate::behaviour::SubstrateBehaviourEvent;
 
     // PEEKED BY REFERENCE, passed on whole: Identify feeds three
@@ -951,20 +997,12 @@ pub(super) fn handle_kademlia(
     match event {
         Libp2pSwarmEvent::Behaviour(SubstrateBehaviourEvent::Kad(kad_event)) => {
             handle_kad_event(state, swarm.kademlia_mut(), manager, kad_event, now_ms, out);
-            // AFTER the event, so a query the event's own insertion
-            // started is noticed on the same pass that caused it. This
-            // is the single place "which implicit queries are new" is
-            // decided, and having one place is the whole point: four
-            // review rounds on PR #61 each answered it differently at a
-            // different call site.
-            if let Some(behaviour) = swarm.kademlia_mut() {
-                if state.stopping {
-                    // The sweep's single `finish` only advanced each
-                    // bootstrap; this is what ends them.
-                    finish_all_while_stopping(behaviour);
-                }
-                reconcile_implicit(state, behaviour, out);
-            }
+            // The reconciliation that used to live here now runs in
+            // `handle_kademlia`, after EVERY event. It is still the
+            // single place "which implicit queries are new" is decided,
+            // which is the whole point — four review rounds on PR #61
+            // each answered that question differently at a different
+            // call site.
             KadHandled::Consumed
         }
         other => KadHandled::Passed(Box::new(other)),
@@ -2320,6 +2358,112 @@ mod tests {
         apply_revocations(&mut state, Some(&mut behaviour), &manager, &mut second);
         assert!(state.routed.contains(&kept), "trust intact, seat intact");
         assert!(second.is_empty(), "and nothing is reported");
+    }
+
+    /// A `GatedSwarm` with Kademlia enabled, for the one test that must
+    /// drive `handle_kademlia` rather than its parts.
+    fn gated_swarm_with_kad(settings: &KademliaSettings) -> crate::gated_swarm::GatedSwarm {
+        let keypair = libp2p::identity::Keypair::generate_ed25519();
+        let local_pid = PeerId::from_public_key(&keypair.public());
+        let manager = interweave_transport_runtime::ConnectionManager::new(
+            interweave_transport_runtime::ConnectionPolicy::default(),
+            8,
+        );
+        let outbound = crate::outbound_gate::OutboundAdmission::new(
+            manager.handle(),
+            crate::outbound_gate::InFlightTickets::default(),
+            tokio::time::Instant::now(),
+        );
+        let kad = libp2p::swarm::behaviour::toggle::Toggle::from(Some(
+            build_behaviour(settings, local_pid).expect("buildable"),
+        ));
+        let swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
+            .with_tokio()
+            .with_tcp(
+                libp2p::tcp::Config::default(),
+                libp2p::noise::Config::new,
+                libp2p::yamux::Config::default,
+            )
+            .expect("tcp")
+            .with_behaviour(|key| {
+                crate::behaviour::SubstrateBehaviour::new(
+                    key,
+                    interweave_transport_runtime::preauth::PreAuthLimits::default(),
+                    outbound,
+                    kad,
+                )
+                .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
+            })
+            .expect("behaviour")
+            .build();
+        crate::gated_swarm::GatedSwarm::new(swarm)
+    }
+
+    #[tokio::test]
+    async fn a_non_kademlia_event_still_announces_a_silent_query() {
+        // Review finding on PR #64. The library starts its automatic
+        // bootstrap inside `Behaviour::poll` and emits no Kademlia
+        // event for it, so under `BucketInserts::Manual` its first and
+        // only Kademlia event is the final completion. Reconciling only
+        // on Kademlia events therefore never met such a query while it
+        // ran, and the provider held no charge for the whole time it
+        // was dialling — while commanded queries could spend the entire
+        // budget beside it.
+        //
+        // The query dials, and a dial produces non-Kademlia events. One
+        // of those must be enough to announce it.
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let mut swarm = gated_swarm_with_kad(&settings);
+        let mut state = KademliaState::new(&settings);
+        let manager = interweave_transport_runtime::ConnectionManager::new(
+            interweave_transport_runtime::ConnectionPolicy::default(),
+            8,
+        );
+
+        // A query nobody commanded, live in the pool — what a silent
+        // automatic bootstrap leaves behind.
+        let _ = swarm
+            .kademlia_mut()
+            .expect("kad enabled")
+            .get_closest_peers(PeerId::random());
+
+        let mut out = Vec::new();
+        let handled = handle_kademlia(
+            Libp2pSwarmEvent::Dialing {
+                peer_id: None,
+                connection_id: libp2p::swarm::ConnectionId::new_unchecked(0),
+            },
+            &mut swarm,
+            &mut state,
+            &manager,
+            0,
+            &mut out,
+        );
+        assert!(
+            matches!(handled, KadHandled::Passed(_)),
+            "a dial event is not the driver\u{2019}s to consume"
+        );
+        assert!(
+            out.iter().any(|e| matches!(
+                e,
+                KademliaEvent::QueryStarted {
+                    origin: interweave_kademlia_control_api::QueryOrigin::Implicit,
+                    ..
+                }
+            )),
+            "the query is announced on a non-Kademlia event, while it is still running"
+        );
+        assert_eq!(state.implicit.len(), 1, "and tracked exactly once");
     }
 
     #[test]
