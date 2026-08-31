@@ -179,7 +179,13 @@ impl Subject for StaticSubject {
     /// assertions entirely and the duplicate check merely re-drained
     /// what `start` had emitted.
     fn observe(&mut self, id: &TransportIdentity, now: u64) -> Option<Supplied> {
-        let address = format!("/ip4/10.0.0.1/tcp/{}", 4001 + u16::from(id == &peer(P2)));
+        // DIFFERENT FROM THE SEED, deliberately. At 4001 this returned
+        // the address `new()` already seeded and `start()` had already
+        // emitted, so `set_entries` diffed to empty and queued nothing —
+        // and the checks were then satisfied by the leftover start
+        // event. Restoring the inert adapter failed ONE of the fourteen
+        // checks; at 4002 it fails four.
+        let address = format!("/ip4/10.0.0.1/tcp/{}", 4002 + u16::from(id == &peer(P2)));
         let entry = StaticEntry::new(id.clone(), &address).expect("within bounds");
         self.provider
             .set_entries(vec![entry], now)
@@ -280,16 +286,23 @@ fn provider_emits_normalized_candidate(s: &mut dyn Subject) {
         );
     }
     if let Some(supplied) = &supplied {
+        // MATCHED ON PEER AND ADDRESS. Searching by peer alone let a
+        // STALE candidate for the same peer satisfy the check — a
+        // provider whose earlier emission is still undrained passes
+        // while saying nothing about the observation just made. That is
+        // the same vacuity the loop-based version had, wearing a
+        // different shape.
         let matching = candidates
             .iter()
-            .find(|c| c.peer_id == supplied.peer)
+            .find(|c| c.peer_id == supplied.peer && c.addresses.contains(&supplied.address))
             .unwrap_or_else(|| {
                 panic!(
-                    "{name}: given {} and emitted only {:?}",
+                    "{name}: given {} at {} and emitted only {:?}",
                     supplied.peer.as_str(),
+                    supplied.address,
                     candidates
                         .iter()
-                        .map(|c| c.peer_id.as_str())
+                        .map(|c| (c.peer_id.as_str(), &c.addresses))
                         .collect::<Vec<_>>()
                 )
             });
@@ -313,7 +326,7 @@ fn provider_handles_duplicate_observation(s: &mut dyn Subject) {
     if let Some(supplied) = &supplied {
         let matching = first
             .iter()
-            .find(|c| c.peer_id == supplied.peer)
+            .find(|c| c.peer_id == supplied.peer && c.addresses.contains(&supplied.address))
             .unwrap_or_else(|| panic!("{name}: the first observation emitted another peer"));
         supplied.assert_matches(name, matching);
     }
@@ -383,7 +396,7 @@ fn provider_expires_when_semantics_support_ttl(s: &mut dyn Subject) {
     if let Some(supplied) = &supplied {
         let matching = emitted
             .iter()
-            .find(|c| c.peer_id == supplied.peer)
+            .find(|c| c.peer_id == supplied.peer && c.addresses.contains(&supplied.address))
             .unwrap_or_else(|| panic!("{name}: nothing was emitted for the observed peer"));
         supplied.assert_matches(name, matching);
     }
@@ -477,11 +490,13 @@ fn provider_rejects_or_ignores_invalid_address_safely(s: &mut dyn Subject) {
     // inside an otherwise-valid candidate.
     let name = s.name();
     for candidate in candidates_in(s.provider().drain_events(1_000, 32)) {
+        // `validate` already caps every address at MAX_ADDRESS_BYTES
+        // (256), so it is what catches an oversized address escaping.
+        // A second assertion at 1_024 was unreachable by construction —
+        // it ran only on candidates that had just been proved valid,
+        // and 1_024 matches no constant in the tree. A check that
+        // cannot fail is not coverage, and reads as though it were.
         assert!(candidate.validate().is_ok(), "{name}");
-        assert!(
-            !candidate.addresses.iter().any(|a| a.len() > 1_024),
-            "{name}: emitted the oversized address it had refused"
-        );
     }
 }
 
