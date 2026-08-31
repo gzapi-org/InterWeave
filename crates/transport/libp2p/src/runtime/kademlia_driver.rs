@@ -761,8 +761,19 @@ fn handle_kad_event(
                 // check, one layer down: admission answered once, at
                 // queue time, and the state it depended on can move
                 // before the answer is used.
+                // AND THE DRIVER MUST STILL BE RUNNING. Review finding
+                // on PR #61, against the revalidation itself: a
+                // `Pending` insertion can land after `Drain` has shut
+                // the driver down, and checking only trust and the
+                // advertisement accepted it — recreating a routing seat
+                // after shutdown and, when it is an empty-to-nonempty
+                // transition, letting libp2p start a fresh implicit
+                // bootstrap AFTER the shutdown sweep already ran. Query
+                // dials during a drained lifetime is the one thing the
+                // drain exists to stop.
                 let eligible = to_transport_identity(&peer).ok().filter(|identity| {
-                    may_hold_a_seat(manager, identity)
+                    !state.stopping
+                        && may_hold_a_seat(manager, identity)
                         && matches!(state.advertises.get(&peer), Some((true, _)))
                 });
                 // The claim is settled either way; only an ELIGIBLE
@@ -2113,6 +2124,36 @@ mod tests {
         );
         assert!(state.routed.contains(&trusted));
         assert_eq!(out.len(), 1, "the eligible peer is announced");
+
+        // AND A STOPPING DRIVER ACCEPTS NEITHER. A `Pending` insertion
+        // can land after `Drain` shut the driver down; recreating the
+        // seat there would also let an empty-to-nonempty transition
+        // start a fresh implicit bootstrap after the shutdown sweep had
+        // already run — query dials during a drained lifetime.
+        state.stopping = true;
+        state.routed.remove(&trusted);
+        let mut after = Vec::new();
+        handle_kad_event(
+            &mut state,
+            &manager,
+            kad::Event::RoutingUpdated {
+                peer: trusted,
+                is_new_peer: true,
+                addresses: kad::Addresses::new("/ip4/127.0.0.1/tcp/3".parse().expect("valid")),
+                bucket_range: (
+                    kad::KBucketDistance::default(),
+                    kad::KBucketDistance::default(),
+                ),
+                old_peer: None,
+            },
+            0,
+            &mut after,
+        );
+        assert!(
+            !state.routed.contains(&trusted),
+            "a seat queued before the drain is not granted after it"
+        );
+        assert!(after.is_empty(), "and nothing is announced");
     }
 
     #[test]
