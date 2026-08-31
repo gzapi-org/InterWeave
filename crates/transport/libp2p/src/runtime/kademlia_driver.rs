@@ -592,7 +592,7 @@ pub(super) fn handle_kademlia(
     {
         observe_identify(
             state,
-            swarm,
+            swarm.kademlia_mut(),
             manager,
             *peer_id,
             &info.protocols,
@@ -862,7 +862,7 @@ fn remember_advertisement(
 #[allow(clippy::too_many_arguments)]
 fn observe_identify(
     state: &mut KademliaState,
-    swarm: &mut crate::gated_swarm::GatedSwarm,
+    behaviour: Option<&mut kad::Behaviour<MemoryStore>>,
     manager: &ConnectionManager,
     pid: PeerId,
     protocols: &[StreamProtocol],
@@ -876,7 +876,7 @@ fn observe_identify(
             // Fresh evidence supersedes: a routed peer that stopped
             // advertising the exact server protocol leaves the table.
             if state.routed.remove(&pid) {
-                if let Some(behaviour) = swarm.kademlia_mut() {
+                if let Some(behaviour) = behaviour {
                     behaviour.remove_peer(&pid);
                 }
                 if let Ok(departed) = to_transport_identity(&pid) {
@@ -885,7 +885,7 @@ fn observe_identify(
             }
         }
         Advertisement::Serving(identity) => {
-            if let Some(behaviour) = swarm.kademlia_mut() {
+            if let Some(behaviour) = behaviour {
                 out.extend(try_admit(state, behaviour, manager, pid, &identity, now_ms));
             }
         }
@@ -1411,19 +1411,40 @@ mod tests {
         // THE MODE CHANGE: a fresh Identify, same peer, without the
         // server protocol. Another protocol is present, so this is a
         // real advertisement rather than an empty one.
+        //
+        // DRIVEN THROUGH `observe_identify`, not `remember_advertisement`
+        // alone. Review finding on the first version of this test:
+        // asserting the returned value and the stored flag covers
+        // replacement-versus-merge and nothing else, so deleting the
+        // `Withdrawn` arm's seat removal — the consequence that actually
+        // matters — still left it green.
         let other =
             StreamProtocol::try_from_owned("/interweave/direct/2.0.0".to_owned()).expect("legal");
-        assert!(
-            matches!(
-                remember_advertisement(&mut state, &manager, server, &[other], &[], 1_000),
-                Advertisement::Withdrawn
-            ),
-            "a union would still report Serving here, which is the regression"
+        let mut behaviour = build_behaviour(&settings, PeerId::random()).expect("buildable");
+        let mut out = Vec::new();
+        observe_identify(
+            &mut state,
+            Some(&mut behaviour),
+            &manager,
+            server,
+            &[other],
+            &[],
+            1_000,
+            &mut out,
         );
         assert_eq!(
             state.advertises.get(&server).map(|(a, _)| *a),
             Some(false),
             "the stored advertisement is REPLACED, not merged"
+        );
+        assert!(
+            !state.routed.contains(&server),
+            "and the seat goes with it: a peer that stopped serving is a route \
+             queries would otherwise keep targeting"
+        );
+        assert!(
+            matches!(out.as_slice(), [KademliaEvent::RoutingPeerRemoved { .. }]),
+            "the withdrawal is reported, not merely performed"
         );
     }
 
