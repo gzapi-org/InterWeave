@@ -185,7 +185,14 @@ two requirements are not restated here. **A dispatch whose `description`
 names it a review is exempt from both the isolation requirement and the
 premium-model prompt** — a review writes nothing, so it reads the session
 tree with no worktree, and `opus` is standing for it (`CLAUDE.md` §9).
-That exemption keys on the description, so a review must say so there.
+That exemption is narrow on purpose, and a review must be NAMED to get
+it: the description has to BEGIN with `review` or `re-review`, and the
+model has to be `opus`. Both halves earn their place — matching
+`review` anywhere let `Address review feedback` through, which is a
+WRITING dispatch that would then have run with no worktree in the
+session clone; and without the model condition a `sonnet` or `fable`
+dispatch could take the exemption and evade the very rules it sits
+beside.
 
 **Which model, though, is a decision the hook cannot make for you.** It
 denies a *missing* `model`; on `opus` or `fable` it only **asks**, and an
@@ -203,8 +210,11 @@ ask is answered by the user, not by the rule. So:
   green PR that merges.
 - **Choose the cheapest tier that can do the job**: `haiku` for mechanical,
   well-specified work (extraction, pattern-following edits, structured
-  search); `sonnet` for judgement work (multi-file reasoning, reviews,
-  convention-holding prose).
+  search); `sonnet` for judgement work (multi-file reasoning,
+  convention-holding prose). NOT reviews — those are `opus` by the
+  standing rule above, and this sentence listing them as `sonnet` work
+  is what invited a hook exemption wide enough to let a `sonnet` review
+  through it.
 - **Fan-out multiplies cost by the agent count**, so a large wave is a
   reason to drop a tier, not to keep the session's.
 

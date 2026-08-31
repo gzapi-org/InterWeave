@@ -494,6 +494,13 @@ relaxed here, deliberately, and only here:
   Omit `isolation`, give the agent the repository path, and tell it the
   tree is read-only — the instruction is what holds, as it already does
   for "run no git" and "never commit".
+- **Name it, or it gets neither exemption.** The hook exempts a dispatch
+  whose `description` BEGINS with `review` or `re-review` AND whose
+  model is `opus`. Both halves are load-bearing, and a review found that
+  out: matching `review` anywhere let `Address review feedback` through
+  — a WRITING dispatch that would then have run unisolated in the
+  session clone — and without the model condition a `sonnet` or `fable`
+  dispatch could take the exemption and evade the rules beside it.
 - **The review goes ON THE PR, not into the transcript.** The agent's
   report is not the deliverable — post the findings to the pull request,
   fix them, and answer there. A finding that lives only in a session is
