@@ -893,31 +893,56 @@ fn observe_identify(
 }
 
 /// Trust left some peers: routing follows it, immediately (§11).
+/// Trust left some peers: routing follows it, immediately (§11).
+///
+/// SCANNED FROM THE ROUTING TABLE, not from the revocation list.
+/// Review finding on PR #61: `revoked` is computed against the set of
+/// peers with LIVE CONNECTIONS, and a Kademlia routing entry outlives
+/// the connection that produced it. So a peer that was routed and had
+/// since disconnected was named by no revocation entry, kept its seat
+/// in both this table and the behaviour's, and went on consuming
+/// `max_routing_peers` with no authority behind it — the one direction
+/// §11 exists to close.
+///
+/// Every routed peer is therefore re-classified against the policy the
+/// manager has just published. That subsumes the revocation list rather
+/// than complementing it: a revoked peer that is still routed fails the
+/// same check, and a peer whose trust never changed passes it, so the
+/// list is not needed to know who must go. `advertises` and
+/// `pending_offers` are swept the same way, because a stash that can
+/// never be admitted is the pin `make_room` exists to prevent.
 pub(super) fn apply_revocations(
     state: &mut KademliaState,
-    swarm: &mut crate::gated_swarm::GatedSwarm,
+    behaviour: Option<&mut kad::Behaviour<MemoryStore>>,
     manager: &ConnectionManager,
-    revoked: &[interweave_transport_runtime::Revoked],
     out: &mut Vec<KademliaEvent>,
 ) {
-    for entry in revoked {
+    let mut behaviour = behaviour;
+    let holders: Vec<PeerId> = state
+        .routed
+        .iter()
+        .chain(state.advertises.keys())
+        .chain(state.pending_offers.keys())
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    for pid in holders {
+        let Ok(identity) = to_transport_identity(&pid) else {
+            continue;
+        };
         // A routing peer is held to DATA-PLANE trust (§13); a peer
         // demoted to infrastructure-only keeps its reachability role
         // and loses its routing seat.
-        if manager.classify(&entry.peer) == ConnectionClass::DataPlaneTrusted {
+        if may_hold_a_seat(manager, &identity) {
             continue;
         }
-        let Ok(pid) = entry.peer.as_str().parse::<PeerId>() else {
-            continue;
-        };
         forget_disconnected(state, &pid);
         if state.routed.remove(&pid) {
-            if let Some(behaviour) = swarm.kademlia_mut() {
+            if let Some(behaviour) = behaviour.as_deref_mut() {
                 behaviour.remove_peer(&pid);
             }
-            out.push(KademliaEvent::RoutingPeerRemoved {
-                peer: entry.peer.clone(),
-            });
+            out.push(KademliaEvent::RoutingPeerRemoved { peer: identity });
         }
     }
 }
@@ -1469,6 +1494,96 @@ mod tests {
             state.routed.is_empty(),
             "so the population count still describes the table"
         );
+    }
+
+    #[test]
+    fn revocation_reaches_a_routed_peer_that_is_no_longer_connected() {
+        // Review finding on PR #61. The revocation list is computed
+        // against peers with LIVE CONNECTIONS, and a Kademlia routing
+        // entry outlives the connection that produced it. So a peer
+        // that was routed and had since disconnected was named by no
+        // revocation entry, kept its seat in this table and the
+        // behaviour's, and went on consuming `max_routing_peers` with
+        // no authority behind it.
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let mut state = KademliaState::new(&settings);
+        let local = PeerId::random();
+        let mut behaviour = build_behaviour(&settings, local).expect("buildable");
+        let mut manager = interweave_transport_runtime::ConnectionManager::new(
+            interweave_transport_runtime::ConnectionPolicy::default(),
+            8,
+        );
+        let departed = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let departed_id = to_transport_identity(&departed).expect("canonical");
+
+        // It held a seat while trusted, and it is NOT connected now.
+        // `advertises` is deliberately EMPTY: the disconnect reclaimed
+        // its advertisement, and the routing seat is what outlived the
+        // connection. So `routed` is the only place this peer appears,
+        // which is exactly why scanning the revocation list — or any
+        // other table — could not reach it.
+        state.routed.insert(departed);
+        // Trust is set to a policy that does NOT contain it, and the
+        // revocation list this call used to take is empty, because
+        // nothing about it is live.
+        let other = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let _ = manager.set_trust(
+            interweave_transport_runtime::TrustSources::new(
+                interweave_trust_api::PeerTrustPolicy::new([
+                    to_transport_identity(&other).expect("canonical")
+                ])
+                .expect("small"),
+                interweave_trust_api::InfrastructureSet::default(),
+            ),
+            &[],
+        );
+        assert_ne!(
+            manager.classify(&departed_id),
+            ConnectionClass::DataPlaneTrusted,
+            "the control: it really is unauthorized now"
+        );
+
+        let mut out = Vec::new();
+        apply_revocations(&mut state, Some(&mut behaviour), &manager, &mut out);
+        assert!(
+            !state.routed.contains(&departed),
+            "an unauthorized peer does not keep a routing seat because it happened \
+             to be offline when trust changed"
+        );
+        assert_eq!(out.len(), 1, "the withdrawal is reported once");
+
+        // A STILL-TRUSTED routed peer is untouched, or this test would
+        // pass for a build that revokes everything.
+        let kept = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let kept_id = to_transport_identity(&kept).expect("canonical");
+        let _ = manager.set_trust(
+            interweave_transport_runtime::TrustSources::new(
+                interweave_trust_api::PeerTrustPolicy::new([kept_id]).expect("small"),
+                interweave_trust_api::InfrastructureSet::default(),
+            ),
+            &[],
+        );
+        state.routed.insert(kept);
+        let mut second = Vec::new();
+        apply_revocations(&mut state, Some(&mut behaviour), &manager, &mut second);
+        assert!(state.routed.contains(&kept), "trust intact, seat intact");
+        assert!(second.is_empty(), "and nothing is reported");
     }
 
     #[test]

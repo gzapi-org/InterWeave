@@ -476,9 +476,8 @@ pub(super) fn handle_command(
                 let mut events = Vec::new();
                 super::kademlia_driver::apply_revocations(
                     state,
-                    swarm,
+                    swarm.kademlia_mut(),
                     manager,
-                    &revoked,
                     &mut events,
                 );
                 buffer_revocation_events(outbox, event_capacity, events);
