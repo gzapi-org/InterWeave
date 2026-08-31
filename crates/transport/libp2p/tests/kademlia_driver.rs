@@ -365,7 +365,7 @@ async fn explore(asker: &mut SwarmRuntime) {
         .kademlia(KademliaCommand::StartQuery {
             handle: QueryHandle::commanded(1),
             class: QueryClass::Exploration,
-            key: [0x42; 32],
+            key: interweave_kademlia_control_api::LookupKey::KeySpacePoint { point: [0x42; 32] },
         })
         .await
         .expect("command delivered");
@@ -460,7 +460,7 @@ async fn a_draining_runtime_refuses_new_queries_and_settles_them() {
     a.kademlia(KademliaCommand::StartQuery {
         handle: QueryHandle::commanded(1),
         class: QueryClass::Exploration,
-        key: [7; 32],
+        key: interweave_kademlia_control_api::LookupKey::KeySpacePoint { point: [7; 32] },
     })
     .await
     .expect("command delivered");

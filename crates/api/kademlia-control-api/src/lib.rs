@@ -160,6 +160,68 @@ pub enum QueryOrigin {
     Implicit,
 }
 
+/// What the 32 bytes of a lookup key MEAN.
+///
+/// **A width is not a meaning.** The key was a bare `[u8; 32]`, which
+/// says how many bytes there are and nothing about what they are — so
+/// the driver applied one interpretation to all of them, wrapping any
+/// key in the Ed25519 identity envelope to rebuild a `PeerId`. For an
+/// exploration key, or for a digest-form identity's bytes, the `PeerId`
+/// that comes back names a different peer, and nothing local could
+/// detect it: any 32 bytes make a syntactically valid Ed25519 PeerId.
+/// No test could hold that shut, because there was nothing to check.
+///
+/// So the meaning travels with the bytes. A digest-form (`Qm…`)
+/// identity has no recoverable public key and therefore cannot be
+/// encoded as [`Self::Ed25519PublicKey`] at all — the case
+/// `kademlia-integration.md` §9.2 refuses is now unrepresentable rather
+/// than merely refused upstream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LookupKey {
+    /// The target's Ed25519 public key.
+    ///
+    /// A `12D3KooW…` PeerId is a constant six-byte identity-multihash
+    /// envelope around exactly these bytes, so the driver reconstructs
+    /// the full PeerId and asks the DHT for that peer's true location.
+    Ed25519PublicKey {
+        /// The key bytes.
+        key: [u8; 32],
+    },
+    /// A point in the key space that belongs to no identity.
+    ///
+    /// An exploration walk's random target. Reconstructing a `PeerId`
+    /// from it would name a peer that does not exist, which is what
+    /// the untyped version could not stop.
+    KeySpacePoint {
+        /// The raw point.
+        point: [u8; 32],
+    },
+}
+
+impl LookupKey {
+    /// The bytes, for a driver that needs them as a DHT key.
+    #[must_use]
+    pub const fn bytes(&self) -> &[u8; 32] {
+        match self {
+            Self::Ed25519PublicKey { key } => key,
+            Self::KeySpacePoint { point } => point,
+        }
+    }
+
+    /// The public key, when these bytes ARE one.
+    ///
+    /// `None` for a key-space point, which is the whole distinction:
+    /// only an identity's key may be turned back into an identity.
+    #[must_use]
+    pub const fn as_public_key(&self) -> Option<&[u8; 32]> {
+        match self {
+            Self::Ed25519PublicKey { key } => Some(key),
+            Self::KeySpacePoint { .. } => None,
+        }
+    }
+}
+
 /// Read a bounded sequence without materializing it first.
 ///
 /// `Vec::deserialize` parses and allocates the whole array before a
@@ -515,12 +577,12 @@ pub enum KademliaCommand {
         handle: QueryHandle,
         /// Which class, for budget and cooldown accounting.
         class: QueryClass,
-        /// The 32-byte lookup key.
+        /// The 32-byte lookup key, and what those bytes mean.
         ///
-        /// A fixed array, so an exploration key cannot be the wrong width
-        /// and a "key" cannot smuggle a payload — this is peer routing,
-        /// and the key space is the identifier space.
-        key: [u8; 32],
+        /// Fixed width, so a key cannot smuggle a payload — this is peer
+        /// routing, and the key space is the identifier space. Typed, so
+        /// an exploration point cannot be read back as an identity.
+        key: LookupKey,
     },
     /// Stop new queries and settle in-flight work.
     Shutdown,
@@ -1017,7 +1079,7 @@ mod tests {
             KademliaCommand::StartQuery {
                 handle: QueryHandle::commanded(3),
                 class: QueryClass::Exploration,
-                key: [0u8; 32],
+                key: LookupKey::KeySpacePoint { point: [0u8; 32] },
             },
             KademliaCommand::Shutdown,
         ];
@@ -1037,7 +1099,7 @@ mod tests {
         let c = KademliaCommand::StartQuery {
             handle: QueryHandle::commanded(5),
             class: QueryClass::Bootstrap,
-            key: [1u8; 32],
+            key: LookupKey::Ed25519PublicKey { key: [1u8; 32] },
         };
         let json = serde_json::to_value(&c).expect("ser");
         assert_eq!(json["command"], "start_query");
@@ -1098,6 +1160,33 @@ mod tests {
             QueryHandle::commanded(1),
             QueryHandle::implicit(1),
             "the same sequence from the two minters is two different queries"
+        );
+    }
+
+    #[test]
+    fn a_key_says_what_it_is_and_only_an_identity_becomes_one() {
+        // A WIDTH IS NOT A MEANING. As a bare `[u8; 32]` the driver had
+        // to guess, and it guessed the same way for every key: wrap the
+        // bytes in the Ed25519 envelope and rebuild a `PeerId`. Any 32
+        // bytes make a syntactically valid one, so an exploration point
+        // came back as a peer that does not exist and nothing local
+        // could tell. There was no check to write.
+        let identity = LookupKey::Ed25519PublicKey { key: [7u8; 32] };
+        let point = LookupKey::KeySpacePoint { point: [7u8; 32] };
+        assert_eq!(identity.bytes(), point.bytes(), "the same bytes");
+        assert_ne!(identity, point, "and not the same thing");
+        assert_eq!(identity.as_public_key(), Some(&[7u8; 32]));
+        assert_eq!(
+            point.as_public_key(),
+            None,
+            "only an identity's key may be turned back into an identity"
+        );
+        let json = serde_json::to_value(point).expect("ser");
+        assert_eq!(json["kind"], "key_space_point");
+        assert_eq!(
+            serde_json::from_value::<LookupKey>(json).expect("de"),
+            point,
+            "and the meaning crosses the wire with the bytes"
         );
     }
 

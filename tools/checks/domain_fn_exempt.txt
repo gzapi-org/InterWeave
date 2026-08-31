@@ -142,6 +142,12 @@ CandidateSet::sweep                              stage-12  reached through Disco
 CandidateSet::len                                stage-12  reached through DiscoveryManager::candidate_count until composition
 CandidateSet::is_empty                           stage-12  candidate-set introspection, first read at runtime composition
 
+# Method position, so recorded as a call entry: the driver's targeted
+# arm asks the key whether it IS a public key before rebuilding a
+# PeerId from it, which is the check that makes an exploration point
+# unable to name a peer that does not exist.
+LookupKey::as_public_key                         call  key.as_public_key(
+
 # --- stage-10 ----------------------------------------------------
 # BOTH Stage 10 halves are in: the provider consumes
 # OfferedAddress/OfferedAddresses/RoutingView, and the driver mints

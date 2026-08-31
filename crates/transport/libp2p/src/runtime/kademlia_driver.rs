@@ -108,6 +108,12 @@ pub fn kad_protocol(network_id: &str) -> String {
 /// The port's key space is the identifier space: for InterWeave
 /// identities that is the Ed25519 public key, and the rest of the
 /// PeerId is this constant envelope.
+///
+/// Takes bytes that are KNOWN to be a public key. Only
+/// [`interweave_kademlia_control_api::LookupKey::Ed25519PublicKey`]
+/// yields them, so an exploration point cannot arrive here: any 32
+/// bytes make a syntactically valid PeerId, and one built from a
+/// key-space point names a peer that does not exist.
 #[must_use]
 pub fn peer_from_lookup_key(key: [u8; 32]) -> Option<PeerId> {
     let mut bytes = [0_u8; 38];
@@ -482,27 +488,35 @@ pub(super) fn handle_command(
                         reason: QueryFailure::NoRoutingPeers,
                     }),
                 },
-                QueryClass::Targeted => match peer_from_lookup_key(key) {
-                    Some(target) => {
-                        let id = behaviour.get_closest_peers(target);
-                        state.queries.insert(id, (class, handle));
+                // ONLY AN IDENTITY'S KEY REBUILDS AN IDENTITY. The
+                // key used to be a bare `[u8; 32]` and this wrapped
+                // whatever arrived in the Ed25519 envelope — any 32
+                // bytes make a syntactically valid PeerId, so a key
+                // that was not one named a peer that does not exist and
+                // nothing here could tell. The type answers it now.
+                QueryClass::Targeted => {
+                    match key.as_public_key().copied().and_then(peer_from_lookup_key) {
+                        Some(target) => {
+                            let id = behaviour.get_closest_peers(target);
+                            state.queries.insert(id, (class, handle));
+                        }
+                        // The provider refuses untargetable identities
+                        // upstream; a key that decodes to no PeerId here is
+                        // defence in depth, and the settlement must still
+                        // arrive or the budget slot waits forever. "No
+                        // routing peers" is the nearest bounded truth: there
+                        // is nothing at that key to route toward.
+                        None => out.push(KademliaEvent::QueryFailed {
+                            handle,
+                            class,
+                            reason: QueryFailure::NoRoutingPeers,
+                        }),
                     }
-                    // The provider refuses untargetable identities
-                    // upstream; a key that decodes to no PeerId here is
-                    // defence in depth, and the settlement must still
-                    // arrive or the budget slot waits forever. "No
-                    // routing peers" is the nearest bounded truth: there
-                    // is nothing at that key to route toward.
-                    None => out.push(KademliaEvent::QueryFailed {
-                        handle,
-                        class,
-                        reason: QueryFailure::NoRoutingPeers,
-                    }),
-                },
+                }
                 QueryClass::Exploration => {
                     let results =
                         NonZeroUsize::new(state.max_results_per_query).unwrap_or(NonZeroUsize::MIN);
-                    let id = behaviour.get_n_closest_peers(key.to_vec(), results);
+                    let id = behaviour.get_n_closest_peers(key.bytes().to_vec(), results);
                     state.queries.insert(id, (class, handle));
                 }
             }
@@ -1260,6 +1274,7 @@ mod tests {
     #![allow(clippy::expect_used, clippy::panic)]
 
     use super::*;
+    use interweave_kademlia_control_api::LookupKey;
 
     #[test]
     fn the_namespace_matches_every_frozen_vector() {
@@ -2752,7 +2767,7 @@ mod tests {
                 KademliaCommand::StartQuery {
                     handle: QueryHandle::commanded(1),
                     class: QueryClass::Exploration,
-                    key: [i; 32],
+                    key: LookupKey::KeySpacePoint { point: [i; 32] },
                 },
                 0,
             );
@@ -2765,7 +2780,7 @@ mod tests {
             KademliaCommand::StartQuery {
                 handle: QueryHandle::commanded(1),
                 class: QueryClass::Exploration,
-                key: [9; 32],
+                key: LookupKey::KeySpacePoint { point: [9; 32] },
             },
             0,
         );
@@ -2835,7 +2850,7 @@ mod tests {
             KademliaCommand::StartQuery {
                 handle: QueryHandle::commanded(1),
                 class: QueryClass::Exploration,
-                key: [1; 32],
+                key: LookupKey::KeySpacePoint { point: [1; 32] },
             },
             2,
         );

@@ -627,7 +627,10 @@ impl KademliaDiscovery {
         self.queue_command(KademliaCommand::StartQuery {
             handle,
             class: QueryClass::Exploration,
-            key: entropy,
+            // A RANDOM POINT, not an identity. Typed so the driver
+            // cannot rebuild a `PeerId` from it and query a peer that
+            // does not exist.
+            key: interweave_kademlia_control_api::LookupKey::KeySpacePoint { point: entropy },
         });
         self.budgets.bind(permit, handle);
         self.exploration_snapshot = Some(self.admissions);
@@ -659,7 +662,7 @@ impl KademliaDiscovery {
         self.queue_command(KademliaCommand::StartQuery {
             handle,
             class: QueryClass::Bootstrap,
-            key,
+            key: interweave_kademlia_control_api::LookupKey::Ed25519PublicKey { key },
         });
         self.budgets.bind(permit, handle);
         self.pacing.record_bootstrap(now_ms);
@@ -769,8 +772,12 @@ impl KademliaDiscovery {
         let handle = self.mint_handle();
         self.queue_command(KademliaCommand::StartQuery {
             handle,
+            // THE TARGET'S OWN KEY. `targeted_lookup_key` is the only
+            // constructor of this variant, and it answers `None` for a
+            // digest-form identity — so §9.2's "untargetable" case is
+            // now unrepresentable rather than merely refused.
             class: QueryClass::Targeted,
-            key,
+            key: interweave_kademlia_control_api::LookupKey::Ed25519PublicKey { key },
         });
         self.budgets.bind(permit, handle);
         self.cooldowns.insert(target.clone(), now_ms);
@@ -1767,7 +1774,7 @@ mod tests {
             vec![KademliaCommand::StartQuery {
                 handle: QueryHandle::commanded(1),
                 class: QueryClass::Targeted,
-                key: want_key,
+                key: interweave_kademlia_control_api::LookupKey::Ed25519PublicKey { key: want_key },
             }],
             "the key is the target's Ed25519 public key"
         );
@@ -2358,7 +2365,7 @@ mod tests {
             vec![KademliaCommand::StartQuery {
                 handle: QueryHandle::commanded(1),
                 class: QueryClass::Bootstrap,
-                key: want_key,
+                key: interweave_kademlia_control_api::LookupKey::Ed25519PublicKey { key: want_key },
             }],
             "bootstrap is a self lookup"
         );
