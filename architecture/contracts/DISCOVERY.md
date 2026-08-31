@@ -64,7 +64,7 @@ ProtocolObservation {
 
 Candidate quality is derived from explicit provenance, freshness/expiry, address observations, and configured provider priority/cost. v1 deliberately has no generic `confidence` field because a mixed `low | normal | configured` scale duplicates provenance and can be misread as trust.
 
-`protocol_observations` are bounded advisory transport facts learned on authenticated connections (for example, an exact Identify protocol string seen on a peer). They are **not** trust, application roles, or capability authorization. A provider may omit them. The global initial cap is **16 observations per peer** and each opaque protocol identifier is capped at **256 ASCII bytes**; freshness must not outlive the candidate/cache source that supplied them.
+`protocol_observations` are bounded advisory transport facts learned on authenticated connections (for example, an exact Identify protocol string seen on a peer). They are **not** trust, application roles, or capability authorization. A provider that never learns such facts omits the field entirely; a provider that DOES assert them must re-assert them on every candidate it emits for that peer, because a candidate is that source's whole statement of protocol facts and an omitted fact is retracted — by a current snapshot; one older than what that source has already had applied is too stale to withdraw — see `../discovery/COMPOSITION.md` for the merge rule and why the retraction is needed. The global initial cap is **16 observations per peer** and each opaque protocol identifier is capped at **256 ASCII bytes**; freshness must not outlive the candidate/cache source that supplied them.
 
 ## Events
 

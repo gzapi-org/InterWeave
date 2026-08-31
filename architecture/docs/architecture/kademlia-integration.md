@@ -238,12 +238,20 @@ Rules:
 
 - the observation is advisory and never grants trust;
 - positive evidence is valid only for the exact wire major + `network_hash`;
-- freshness cannot exceed the enclosing peer-cache TTL;
+- freshness cannot exceed the enclosing peer-cache TTL, and cannot exceed the observation's OWN age under that TTL either; a record kept fresh by a reachability refresh does not refresh the capability attached to it;
 - a fresh Identify response supersedes cached evidence;
 - if a peer no longer advertises the exact server protocol, stale positive evidence is removed/replaced;
 - deleting the peer cache merely disables cold-start targeted eligibility until evidence is learned again.
 
 This capability field belongs to `PeerCacheDiscovery` because it is historical transport observation, not Kademlia authoritative state.
+
+**The wire mapping (decided 2026-08-30; the Stage 10 prerequisite).** A `CandidatePeer.protocol_observations` entry carries one `protocol_id` string, and the four-field observation above is encoded AS the derived server protocol name:
+
+```text
+protocol_id = /interweave/kad/<wire_major>.0.0/<network_hash>
+```
+
+`role = server` is implied by presence — only a server advertises this protocol, and rust-libp2p never returns a client-mode peer from a walk (SPIKE-003 F17) — and `<wire_major>.0.0` is the explicit generalisation of ADR-0047's `1.0.0`: the minor and patch of a derived protocol name are always zero, because compatibility is decided on the wire major alone. The reverse direction parses the exact grammar (family, `<digits>.0.0`, then a 26-character lowercase base32 hash); it is never a prefix match, so evidence for another network or another major cannot carry over. Families and roles other than `interweave/kad` + `server` have no wire form and are not exported.
 
 ## 8. Seeding
 
@@ -285,7 +293,7 @@ A targeted lookup is eligible only when **all** are true:
 4. the per-target targeted-lookup cooldown has elapsed;
 5. global Kademlia query budget permits work.
 
-The provider may then issue a lookup using the PeerId bytes as the Kademlia lookup key. Results are advisory `PeerInfo` observations. The cached server-capability observation only answers "was this peer recently observed serving this DHT namespace?"; it does not prove current reachability, trust, or continued server mode.
+The provider may then issue a lookup keyed by the target's identity. On the driver port the 32-byte lookup key is the target's **Ed25519 public key** — a `12D3KooW…` PeerId is a constant six-byte identity-multihash envelope around exactly those 32 bytes, so the driver reconstructs the full PeerId from the key and queries the peer's true DHT location. An identity in the digest (`Qm…`) form has no recoverable key; the provider refuses it as untargetable rather than querying a point that is not the peer's — consistent with the paragraph below: client nodes are not promised discoverable by PeerId anyway. Results are advisory `PeerInfo` observations. The cached server-capability observation only answers "was this peer recently observed serving this DHT namespace?"; it does not prove current reachability, trust, or continued server mode.
 
 This is not a general directory for client-mode nodes. Client nodes are not assumed discoverable by PeerId through `FIND_NODE`; other discovery providers/configured hints remain necessary.
 
@@ -411,7 +419,7 @@ These are **implementation defaults, not protocol guarantees**. They remain boun
 
 | Setting | Initial default | Rationale |
 |---|---:|---|
-| `enabled` | `false` | opt-in rollout |
+| `enabled` | `true` for a configured entry | ADR-0034: the standard build defaults a configured `type: kademlia` entry on; opting out stays explicit (`enabled: false`), and an absent entry configures nothing |
 | `mode` | `client` | no accidental DHT server |
 | `routing_peer_policy` | `data-plane-trusted` | preserve established trust boundary |
 | `kbucket_size` | `20` | initial K value/profile bound |

@@ -127,13 +127,12 @@ DiscoveryManager::provider_health                stage-12  composition answers p
 DiscoveryManager::provider_priority              stage-12  composition orders candidate application by it
 DiscoveryManager::aggregate_health               stage-12  composition answers discovery health from it
 DiscoveryManager::descriptor                     stage-12  composition names the source of each event it forwards
-# ONE STAGE, not one release. SPIKE-003 made the first production parse
-# concrete: a Kademlia capability observation is keyed to the exact
-# advertised protocol string, and the spike measured that string being
-# WITHDRAWN on a mode change (finding F5), so the Stage 10 driver
-# normalizes an Identify protocol into a `ProtocolId` before the cache
-# can supersede on it.
-ProtocolId::parse                                stage-10  the Kademlia driver parses an advertised protocol into a capability observation
+# The Stage 10 capability mapping gave this its production caller: the
+# cache renders a stored server capability as the derived protocol
+# string and parses it into a ProtocolId on export
+# (crates/discovery/cache/src/cache.rs), exactly as SPIKE-003 F5
+# anticipated. Method position, so recorded as a call entry.
+ProtocolId::parse                                call  ProtocolId::parse(id)
 CandidateSet::new                                stage-12  the manager owns one; TransportRuntime composition is the first outside holder
 CandidateSet::candidates                         stage-12  reached through DiscoveryManager::candidates until composition
 CandidateSet::overflow_stats                     stage-12  reached through DiscoveryManager::overflow_stats until composition
@@ -143,11 +142,11 @@ CandidateSet::len                                stage-12  reached through Disco
 CandidateSet::is_empty                           stage-12  candidate-set introspection, first read at runtime composition
 
 # --- stage-10 ----------------------------------------------------
-ObservedCandidates                               stage-10  Kademlia control port, inert until the DHT is activated
-OfferedAddress                                   stage-10  Kademlia control port, inert until the DHT is activated
-OfferedAddresses                                 stage-10  Kademlia control port, inert until the DHT is activated
-RoutingView                                      stage-10  Kademlia control port, inert until the DHT is activated
-validate_limits                                  stage-10  Kademlia control port, inert until the DHT is activated
+# The provider crate consumes the port now; what remains exempt is the
+# slice of it only the Swarm driver or the config layer can reach.
+ObservedCandidates                               stage-10  Kademlia control port; the driver mints these from query results
+validate_limits                                  stage-10  profile-config calls it when the enabled-entry gate flips this stage
+RoutingView::effective_target                    stage-12  consumed inside the port's own health today; the composed daemon's §16 diagnostics surface the trust-capped target directly
 
 # --- stage-11 ----------------------------------------------------
 AddressState::is_dialable_at                     stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection

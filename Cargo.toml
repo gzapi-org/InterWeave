@@ -20,6 +20,9 @@ members = [
     # Stage 9: LAN candidate normalization. The multicast mechanism
     # lives in transport/libp2p; this crate owns no socket.
     "crates/discovery/mdns",
+    # Stage 10: the Kademlia provider core. Peer routing only (ADR-0009);
+    # the Swarm-owned driver lives in transport/libp2p.
+    "crates/discovery/kademlia",
     "crates/identity/profile-identity",
     "crates/transport/libp2p",
     "crates/human/chat-protocol",

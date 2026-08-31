@@ -1597,6 +1597,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "interweave-discovery-kademlia"
+version = "0.0.0"
+dependencies = [
+ "bs58",
+ "interweave-discovery-api",
+ "interweave-kademlia-control-api",
+ "interweave-transport-api",
+ "serde_json",
+]
+
+[[package]]
 name = "interweave-discovery-mdns"
 version = "0.0.0"
 dependencies = [

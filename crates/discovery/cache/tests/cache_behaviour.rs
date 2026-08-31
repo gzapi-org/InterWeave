@@ -301,14 +301,48 @@ fn capability_freshness_never_outlives_the_enclosing_record() {
     assert_eq!(
         record
             .fresh_capabilities(expired_at - 1, DEFAULT_TTL_MS)
-            .len(),
+            .count(),
         1
     );
     assert!(
         record
             .fresh_capabilities(expired_at, DEFAULT_TTL_MS)
-            .is_empty(),
-        "the capability expires with its record, not on its own schedule"
+            .next()
+            .is_none(),
+        "the record's expiry withdraws its capabilities"
+    );
+}
+
+#[test]
+fn a_refreshed_record_does_not_revive_an_aged_capability() {
+    // Reviewer finding on PR #60: refreshing reachability just before
+    // the record TTL elapsed extended the record, and the export then
+    // republished an arbitrarily old server observation — which the
+    // Kademlia provider would treat as eligible for another full TTL.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut cache = empty(&dir.path().join("peers.json"));
+    let p = peer(PEER_A);
+    cache
+        .record_success(&p, "/ip4/10.0.0.1/tcp/4001", 1_000)
+        .expect("within the bounded format");
+    cache
+        .record_capability(&p, capability("interweave/kad", true, 1_000))
+        .expect("within the bounded format");
+
+    // Reachability refreshed at the last moment: the record lives on.
+    let almost = 1_000 + DEFAULT_TTL_MS - 1;
+    cache
+        .record_success(&p, "/ip4/10.0.0.1/tcp/4001", almost)
+        .expect("within the bounded format");
+    let record = cache
+        .peer(&p, almost + 2)
+        .expect("the record was refreshed");
+    assert!(
+        record
+            .fresh_capabilities(almost + 2, DEFAULT_TTL_MS)
+            .next()
+            .is_none(),
+        "refreshing an address says nothing about what the peer still serves"
     );
 }
 

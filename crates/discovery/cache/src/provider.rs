@@ -57,6 +57,12 @@ struct Queued {
 struct EmittedRecord {
     expires_at: Option<u64>,
     addresses: BTreeSet<String>,
+    /// The capability observations last reported. Part of the snapshot
+    /// because they are part of the MESSAGE: a fresh positive or
+    /// negative that changed nothing else was invisible until the next
+    /// reachability update, and a capability ageing out of the export
+    /// could never retract what the consumer was already holding.
+    protocol_observations: BTreeSet<interweave_discovery_api::ProtocolObservation>,
 }
 
 /// The cache, presented as a discovery provider.
@@ -202,6 +208,7 @@ impl PeerCacheDiscovery {
             let record = EmittedRecord {
                 expires_at: candidate.expires_at,
                 addresses: candidate.addresses.iter().cloned().collect(),
+                protocol_observations: candidate.protocol_observations.iter().cloned().collect(),
             };
             let previously = self.emitted.get(&candidate.peer_id).cloned();
             let changed = previously.as_ref() != Some(&record);
@@ -389,16 +396,78 @@ impl DiscoveryProvider for PeerCacheDiscovery {
                     ),
                 }
             }
-            // NOT ACCEPTED, and the reason is a deferral rather than a
-            // policy: the cache's capability record carries a protocol
-            // FAMILY, wire major, network hash and role, and a
-            // `ProtocolId` is one opaque string. Inventing a mapping here
-            // would decide, silently, what Stage 10 is required to decide
-            // in the architecture first — the plan's §13 prerequisite
-            // ("decide the capability-observation mapping in the
-            // architecture before writing code"). Until then this class is
-            // honestly unsupported rather than quietly mis-stored.
-            PeerHint::ObservedProtocol { .. } => HintDisposition::Unsupported,
+            // ACCEPTED for exactly one grammar: the Kademlia server
+            // protocol, `/interweave/kad/<major>.0.0/<hash>`, per the
+            // Stage 10 mapping decided in the architecture first
+            // (`kademlia-integration.md` §7). The string IS the
+            // (family, wire_major, network_hash, role=server) tuple, so
+            // parsing it is the reverse of what `candidates()` renders.
+            // Any other protocol id has no capability form here and
+            // stays honestly unsupported — an exact parse, not a prefix
+            // match, so another network's or another version's evidence
+            // cannot carry over.
+            PeerHint::ObservedProtocol {
+                peer_id,
+                protocol_id,
+                supported,
+                observed_at,
+            } => {
+                let Some((wire_major, network_hash)) =
+                    crate::record::parse_kad_server_protocol_id(protocol_id.as_str())
+                else {
+                    return HintDisposition::Unsupported;
+                };
+                // As with reachability: the observation's own time, never
+                // delivery time, and never the future.
+                let observed_at_ms = observed_at.min(now_ms);
+                let observation = crate::record::ProtocolCapabilityObservation {
+                    protocol_family: crate::record::KAD_PROTOCOL_FAMILY.to_owned(),
+                    wire_major,
+                    network_hash: network_hash.to_owned(),
+                    role: crate::record::KAD_SERVER_ROLE.to_owned(),
+                    supported,
+                    observed_at_ms,
+                };
+                match self.cache.record_capability(&peer_id, observation) {
+                    // Accepted even when the peer has no cache record to
+                    // hang it off: `record_capability` deliberately
+                    // refuses to mint a reachability record out of a
+                    // protocol fact, and the hint CLASS is supported —
+                    // the advisory no-op is the cache's policy, not a
+                    // refusal of the class.
+                    Ok(()) => HintDisposition::Accepted,
+                    // THE BOUND THAT ACTUALLY REFUSED, carried through
+                    // rather than guessed. This arm is unreachable
+                    // today — every field `record_capability` bounds is
+                    // either a constant well under the cap or the
+                    // 26-byte hash the parser just produced — and that
+                    // is precisely why it must not invent one: it named
+                    // `protocol_id` and `MAX_LABEL_BYTES`, neither of
+                    // which is a thing that function checks, and an
+                    // unreachable arm that lies is a lie nothing will
+                    // ever correct.
+                    Err(crate::CacheError::OutOfBounds { field, got, max }) => {
+                        HintDisposition::Rejected(
+                            interweave_discovery_api::DiscoveryError::InvalidLength {
+                                field,
+                                got,
+                                max,
+                            },
+                        )
+                    }
+                    // The remaining variants are I/O and serialization,
+                    // which `record_capability` cannot reach: it mutates
+                    // the in-memory record and marks it dirty. Reported
+                    // against the field the caller actually supplied.
+                    Err(_) => HintDisposition::Rejected(
+                        interweave_discovery_api::DiscoveryError::InvalidLength {
+                            field: "network_hash",
+                            got: network_hash.len(),
+                            max: crate::limits::MAX_LABEL_BYTES,
+                        },
+                    ),
+                }
+            }
             // The cache persists what THIS node observed. A third party's
             // candidate is someone else's observation, and storing it here
             // would make the cache a relay for claims it cannot check.
@@ -559,11 +628,16 @@ mod tests {
     fn the_protocol_and_candidate_hint_classes_are_refused_explicitly() {
         // Not silence: DISCOVERY.md requires an explicit refusal, because
         // a provider that quietly accepts is one taking ownership of
-        // something it does not handle.
+        // something it does not handle. Since Stage 10 the KADEMLIA
+        // SERVER grammar is the one ObservedProtocol form that IS
+        // handled; everything else still refuses explicitly.
         let dir = tempfile::tempdir().expect("tempdir");
         let mut p = provider(&dir);
         p.start(1_000).expect("starts");
 
+        // A protocol that is not the Kademlia server grammar — here the
+        // family-and-version prefix WITHOUT a network hash, which is
+        // exactly what a prefix match would wrongly accept.
         assert_eq!(
             p.add_hint(
                 PeerHint::ObservedProtocol {
@@ -578,7 +652,7 @@ mod tests {
                 1_000
             ),
             HintDisposition::Unsupported,
-            "the capability mapping is Stage 10's to decide in the architecture"
+            "only the exact server grammar has a capability form"
         );
         assert_eq!(
             p.add_hint(
@@ -597,6 +671,95 @@ mod tests {
         );
         // And neither was stored.
         assert!(candidate_events(&p.drain_events(1_000, 8)).is_empty());
+    }
+
+    #[test]
+    fn a_kad_server_protocol_hint_round_trips_into_the_candidate_export() {
+        // The whole mapping, through the provider: an ObservedProtocol
+        // hint carrying the exact server grammar is parsed, stored, and
+        // comes back out of `candidates()` as the same string — the
+        // reverse and forward directions agreeing on a value neither
+        // invented, because the string is the frozen fixture's.
+        let frozen = "/interweave/kad/1.0.0/ssbtblqj7mexczivog5qfbfjvi";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut p = provider(&dir);
+        p.start(1_000).expect("starts");
+
+        // The peer must be reachability-known first: a protocol fact
+        // does not mint a record (`record_capability`'s own rule).
+        assert_eq!(
+            p.add_hint(
+                PeerHint::ObservedReachable {
+                    peer_id: peer(P1),
+                    address: "/ip4/10.0.0.1/tcp/4001".to_owned(),
+                    observed_at: 1_000,
+                },
+                1_000
+            ),
+            HintDisposition::Accepted,
+        );
+        assert_eq!(
+            p.add_hint(
+                PeerHint::ObservedProtocol {
+                    peer_id: peer(P1),
+                    protocol_id: interweave_discovery_api::ProtocolId::parse(frozen)
+                        .expect("valid"),
+                    supported: true,
+                    observed_at: 1_500,
+                },
+                1_500
+            ),
+            HintDisposition::Accepted,
+            "the exact server grammar is the supported form"
+        );
+
+        let _ = p.drain_events(1_500, 16);
+        let candidate = p
+            .cache
+            .candidates(2_000)
+            .into_iter()
+            .find(|c| c.peer_id == peer(P1))
+            .expect("the peer is a candidate");
+        let observation = candidate
+            .protocol_observations
+            .iter()
+            .next()
+            .expect("the capability came back out");
+        assert_eq!(observation.protocol_id.as_str(), frozen);
+        assert!(observation.supported);
+        assert_eq!(
+            observation.observed_at, 1_500,
+            "the observation keeps its own time"
+        );
+    }
+
+    #[test]
+    fn a_protocol_hint_for_an_unknown_peer_is_an_advisory_no_op() {
+        // `record_capability` refuses to mint a reachability record out
+        // of a protocol fact; the hint CLASS is still supported, so the
+        // disposition is Accepted and nothing is stored. This test is
+        // the record of that choice.
+        let frozen = "/interweave/kad/1.0.0/ssbtblqj7mexczivog5qfbfjvi";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut p = provider(&dir);
+        p.start(1_000).expect("starts");
+        assert_eq!(
+            p.add_hint(
+                PeerHint::ObservedProtocol {
+                    peer_id: peer(P1),
+                    protocol_id: interweave_discovery_api::ProtocolId::parse(frozen)
+                        .expect("valid"),
+                    supported: true,
+                    observed_at: 1_000,
+                },
+                1_000
+            ),
+            HintDisposition::Accepted,
+        );
+        assert!(
+            p.cache.candidates(2_000).is_empty(),
+            "no reachability record was minted from a protocol fact"
+        );
     }
 
     #[test]
@@ -1219,6 +1382,7 @@ mod tests {
             EmittedRecord {
                 expires_at: None,
                 addresses: [kept.to_owned(), removed.to_owned()].into_iter().collect(),
+                protocol_observations: BTreeSet::new(),
             },
         );
         p.refresh(20);
@@ -1298,6 +1462,7 @@ mod tests {
             EmittedRecord {
                 expires_at: None,
                 addresses: [old_address.to_owned()].into_iter().collect(),
+                protocol_observations: BTreeSet::new(),
             },
         );
         // It is gone from the cache, then comes back at a different one.
@@ -1346,6 +1511,82 @@ mod tests {
             retracted,
             "the whole-peer retraction is recreated, so the old address is \
              withdrawn rather than left dialable"
+        );
+    }
+
+    #[test]
+    fn a_capability_change_alone_is_re_emitted() {
+        // Review finding on PR #60: the emitted snapshot compared only
+        // addresses and expiry, so an Identify update that changed
+        // nothing but the Kademlia capability was invisible to the
+        // consumer until the next reachability update moved the expiry.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut p = provider(&dir);
+        let subject = peer(P1);
+        p.cache_mut()
+            .record_success(&subject, "/ip4/10.0.0.1/tcp/1", 1_000)
+            .expect("recorded");
+        let observed = |supported: bool, at: u64| crate::record::ProtocolCapabilityObservation {
+            protocol_family: crate::record::KAD_PROTOCOL_FAMILY.to_owned(),
+            wire_major: 1,
+            network_hash: "ssbtblqj7mexczivog5qfbfjvi".to_owned(),
+            role: crate::record::KAD_SERVER_ROLE.to_owned(),
+            supported,
+            observed_at_ms: at,
+        };
+        p.cache_mut()
+            .record_capability(&subject, observed(true, 1_000))
+            .expect("recorded");
+        p.start(1_000).expect("starts");
+        let first = p.drain_events(1_100, usize::MAX);
+        let positive = first
+            .iter()
+            .find_map(|e| match e {
+                DiscoveryEvent::CandidateObserved { candidate } => {
+                    candidate.protocol_observations.iter().next()
+                }
+                _ => None,
+            })
+            .expect("the capability is exported from the start");
+        assert!(positive.supported);
+
+        // The capability flips NEGATIVE. Addresses and expiry are
+        // untouched — this event is the only thing that changed.
+        p.cache_mut()
+            .record_capability(&subject, observed(false, 2_000))
+            .expect("recorded");
+        let second = p.drain_events(2_100, usize::MAX);
+        let refreshed = second
+            .iter()
+            .find_map(|e| match e {
+                DiscoveryEvent::CandidateObserved { candidate } => Some(candidate),
+                _ => None,
+            })
+            .expect("a fresh negative must not wait for the next reachability update");
+        assert!(
+            refreshed.protocol_observations.iter().all(|o| !o.supported),
+            "the re-emitted candidate carries the withdrawal"
+        );
+
+        // AGEING OUT RETRACTS. The record stays alive (reachability
+        // refreshed just in time), the observation passes its own age,
+        // and the re-emission the expiry change forces must arrive
+        // WITHOUT it — the export's own-age bound reaching the consumer.
+        let almost = 2_000 + crate::limits::DEFAULT_TTL_MS - 100;
+        p.cache_mut()
+            .record_success(&subject, "/ip4/10.0.0.1/tcp/1", almost)
+            .expect("recorded");
+        let third = p.drain_events(2_000 + crate::limits::DEFAULT_TTL_MS + 1, usize::MAX);
+        let aged = third
+            .iter()
+            .find_map(|e| match e {
+                DiscoveryEvent::CandidateObserved { candidate } => Some(candidate),
+                _ => None,
+            })
+            .expect("the refreshed record re-emits");
+        assert!(
+            aged.protocol_observations.is_empty(),
+            "an observation past its own age is withdrawn from the consumer"
         );
     }
 }
