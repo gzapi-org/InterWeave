@@ -859,10 +859,27 @@ fn handle_kad_event(
                 // bootstrap AFTER the shutdown sweep already ran. Query
                 // dials during a drained lifetime is the one thing the
                 // drain exists to stop.
+                // EVERY CONDITION `try_admit` REQUIRED, asked again.
+                // Issue #63 item 2: this rechecked trust, the
+                // advertisement and the lifecycle, and not the
+                // POPULATION — so if a pending peer lost its optimistic
+                // seat on disconnect and another filled the table
+                // before the queued update landed, a reconnect that
+                // re-advertised first was declared eligible and the
+                // insertion below grew `routed` past
+                // `max_routing_peers`. A ceiling is not a conjunct you
+                // can leave out of a revalidation that exists because
+                // the state moved.
+                //
+                // `contains` first, because a peer already holding its
+                // seat is refreshing rather than taking a new one —
+                // §11's population bound is not an address freeze.
                 let eligible = to_transport_identity(&peer).ok().filter(|identity| {
                     !state.stopping
                         && may_hold_a_seat(manager, identity)
                         && matches!(state.advertises.get(&peer), Some((true, _)))
+                        && (state.routed.contains(&peer)
+                            || state.routed.len() < state.max_routing_peers)
                 });
                 // The claim is settled either way; only an ELIGIBLE
                 // peer keeps the seat. Not an early return: the
@@ -2066,6 +2083,119 @@ mod tests {
         apply_revocations(&mut state, Some(&mut behaviour), &manager, &mut second);
         assert!(state.routed.contains(&kept), "trust intact, seat intact");
         assert!(second.is_empty(), "and nothing is reported");
+    }
+
+    #[test]
+    fn a_queued_update_cannot_grow_the_table_past_its_ceiling() {
+        // Issue #63 item 2. The revalidation rechecked trust, the
+        // advertisement and the lifecycle — and not the POPULATION. So
+        // a pending peer that lost its optimistic seat on disconnect,
+        // while another peer filled the table, was declared eligible on
+        // reconnect and the insertion grew `routed` past
+        // `max_routing_peers`. A ceiling is not a conjunct you may omit
+        // from a revalidation that exists because the state moved.
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let mut state = KademliaState::new(&settings);
+        // The table is exactly full of peers that are not the subject.
+        // Real Ed25519 identities: `PeerId::random()` is digest-form,
+        // which the neutral grammar refuses.
+        for _ in 0..settings.max_routing_peers {
+            state.routed.insert(
+                libp2p::identity::Keypair::generate_ed25519()
+                    .public()
+                    .to_peer_id(),
+            );
+        }
+        let mut behaviour = build_behaviour(&settings, PeerId::random()).expect("buildable");
+        let mut manager = interweave_transport_runtime::ConnectionManager::new(
+            interweave_transport_runtime::ConnectionPolicy::default(),
+            8,
+        );
+        let late = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let late_id = to_transport_identity(&late).expect("canonical");
+        let _ = manager.set_trust(
+            interweave_transport_runtime::TrustSources::new(
+                interweave_trust_api::PeerTrustPolicy::new([late_id]).expect("small"),
+                interweave_trust_api::InfrastructureSet::default(),
+            ),
+            &[],
+        );
+        // Trusted and advertising: every OTHER conjunct holds, so only
+        // the ceiling can refuse it.
+        state.advertises.insert(late, (true, 0));
+
+        let mut out = Vec::new();
+        handle_kad_event(
+            &mut state,
+            Some(&mut behaviour),
+            &manager,
+            kad::Event::RoutingUpdated {
+                peer: late,
+                is_new_peer: true,
+                addresses: kad::Addresses::new("/ip4/127.0.0.1/tcp/1".parse().expect("valid")),
+                bucket_range: (
+                    kad::KBucketDistance::default(),
+                    kad::KBucketDistance::default(),
+                ),
+                old_peer: None,
+            },
+            0,
+            &mut out,
+        );
+        assert_eq!(
+            state.routed.len(),
+            settings.max_routing_peers,
+            "the population bound holds against a queued update too"
+        );
+        assert!(!state.routed.contains(&late));
+
+        // A PEER ALREADY HOLDING ITS SEAT still passes: §11's bound is
+        // a population bound, not an address freeze, so this test
+        // cannot pass for a predicate that refuses everyone at the cap.
+        let held = *state.routed.iter().next().expect("non-empty");
+        let held_id = to_transport_identity(&held).expect("canonical");
+        let _ = manager.set_trust(
+            interweave_transport_runtime::TrustSources::new(
+                interweave_trust_api::PeerTrustPolicy::new([held_id]).expect("small"),
+                interweave_trust_api::InfrastructureSet::default(),
+            ),
+            &[],
+        );
+        state.advertises.insert(held, (true, 0));
+        let mut again = Vec::new();
+        handle_kad_event(
+            &mut state,
+            Some(&mut behaviour),
+            &manager,
+            kad::Event::RoutingUpdated {
+                peer: held,
+                is_new_peer: true,
+                addresses: kad::Addresses::new("/ip4/127.0.0.1/tcp/2".parse().expect("valid")),
+                bucket_range: (
+                    kad::KBucketDistance::default(),
+                    kad::KBucketDistance::default(),
+                ),
+                old_peer: None,
+            },
+            0,
+            &mut again,
+        );
+        assert!(
+            state.routed.contains(&held),
+            "a peer already routed is refreshing, not taking a new seat"
+        );
     }
 
     #[test]
