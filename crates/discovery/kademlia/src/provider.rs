@@ -14,7 +14,7 @@ use interweave_kademlia_control_api::{
 use interweave_transport_api::TransportIdentity;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::budgets::{Permit, QueryBudgets};
+use crate::budgets::QueryBudgets;
 use crate::scheduler::Pacing;
 use crate::{health, normalize};
 
@@ -44,19 +44,6 @@ pub const MAX_TRACKED_CANDIDATES: usize = MAX_ROUTING_PEERS;
 /// everything held is dropped instead, so churn cannot replace fresh
 /// evidence with old.
 pub const MAX_CAPABILITY_EVIDENCE: usize = MAX_ROUTING_PEERS;
-
-/// Ceiling on implicit-bootstrap charges held at once.
-///
-/// Each empty-to-nonempty routing transition really starts one library
-/// bootstrap (F2), but the charges bypass the configured ceilings by
-/// design, so churn with stalled completions must not grow them without
-/// bound — an unbounded held count is provider memory an adversary can
-/// drive AND a permanent exclusion of every scheduled query. Past the
-/// cap a transition mints nothing: the held charges already say the
-/// budget is saturated with unscheduled work, which is the fail-closed
-/// message, and stalled completions this deep mean the driver stream is
-/// broken — health says so through the success ageing.
-pub const MAX_IMPLICIT_CHARGES: usize = 8;
 
 /// Ceiling on routing OFFERS waiting for the driver.
 ///
@@ -261,26 +248,18 @@ pub struct KademliaDiscovery {
     /// `Some` means one exploration is running and `tick` starts no
     /// second one.
     exploration_snapshot: Option<u64>,
-    /// Slots held for the library's implicit bootstraps (F2): a
-    /// routing insertion on an EMPTY table starts one query nobody
-    /// requested, and it dials, so each is charged like the work it is.
-    /// A VEC, not an option: every empty-to-nonempty transition starts
-    /// one, and a table that empties and refills before the first
-    /// completes has two real queries running — an optional charge
-    /// accounted for one and let the rest run outside both budgets.
-    /// Bounded by [`MAX_IMPLICIT_CHARGES`].
-    implicit_charges: Vec<Permit>,
-    /// Implicit queries running BEYOND the charge cap — a count, not
-    /// permits, so churn holds memory constant. Settled before any held
-    /// charge is: the budget must stay saturated until the overflow
-    /// work is also done, or eight completions would free every slot
-    /// while uncharged queries still run.
-    implicit_uncharged: usize,
     /// The local self-lookup key, if the local identity is Ed25519.
     local_key: Option<[u8; 32]>,
     /// The latest instant any timed call has seen; what `health()` —
     /// which the trait gives no clock — judges evidence freshness at.
     clock: u64,
+    /// The provider's own query-handle counter.
+    ///
+    /// It names what it COMMANDS, and the driver names what the library
+    /// starts, in a disjoint half of the space — because the permit is
+    /// acquired before the command is sent, and a reservation cannot be
+    /// keyed by an answer that has not arrived yet.
+    next_handle: u64,
     /// Jitter entropy from the in-flight exploration's key, used when
     /// its completion schedules the next round.
     exploration_entropy: u64,
@@ -417,10 +396,9 @@ impl KademliaDiscovery {
             no_progress_rounds: 0,
             admissions: 0,
             exploration_snapshot: None,
-            implicit_charges: Vec::new(),
-            implicit_uncharged: 0,
             local_key,
             clock: 0,
+            next_handle: 0,
             exploration_entropy: 0,
         })
     }
@@ -484,7 +462,11 @@ impl KademliaDiscovery {
         }
         self.clock = self.clock.max(now_ms);
         match event {
-            KademliaEvent::QueryResults { candidates, class } => {
+            KademliaEvent::QueryResults {
+                handle,
+                candidates,
+                class,
+            } => {
                 // §9.3 counts a NEW USABLE ADDRESS for a routed peer as
                 // progress, not only an admission. Judged BEFORE the
                 // candidates are tracked, against what was known when
@@ -501,29 +483,37 @@ impl KademliaDiscovery {
                             },
                         )
                 });
-                self.settle(class, now_ms, true, address_progress);
+                self.settle(handle, class, now_ms, true, address_progress);
                 self.last_query_success_ms = Some(now_ms);
                 for candidate in candidates.as_slice() {
                     self.track(candidate, now_ms);
                 }
             }
-            KademliaEvent::RoutingPeerAdded { peer } => {
-                // F2: an insertion on an EMPTY table starts one bootstrap
-                // the provider never scheduled, and it dials — so it is
-                // charged like the work it is, past the ceilings if it
-                // must be, and the slot is settled by the bootstrap-class
-                // completion the driver reports for it.
-                if self.routing.is_empty() {
-                    if self.implicit_charges.len() < MAX_IMPLICIT_CHARGES {
-                        self.implicit_charges
-                            .push(self.budgets.charge_unscheduled(now_ms));
-                    } else {
-                        // Past the cap the work is COUNTED even though
-                        // it cannot hold a permit: the held charges must
-                        // not be settled while this overflow still runs.
-                        self.implicit_uncharged = self.implicit_uncharged.saturating_add(1);
-                    }
+            KademliaEvent::QueryStarted {
+                handle,
+                class: _,
+                origin,
+            } => {
+                // F2's charge, taken FROM THE ANNOUNCEMENT. It used to
+                // be inferred here from `RoutingPeerAdded` arriving on
+                // an empty routing set — a different signal from the
+                // completion that settles it, so a routing event that
+                // was suppressed, reordered, or refused left the query
+                // running with no charge against it, and its completion
+                // then released an unrelated permit. The driver is the
+                // only party that can see a query begin; it now says so.
+                //
+                // The work is real whether or not the budget had room,
+                // so the charge is unconditional and may exceed the
+                // ceilings — refusing the accounting would under-count.
+                // Bound is the driver's concurrency ceiling, which is
+                // what limits how many can be announced at once.
+                if origin == interweave_kademlia_control_api::QueryOrigin::Implicit {
+                    let permit = self.budgets.charge_unscheduled(now_ms);
+                    self.budgets.bind(permit, handle);
                 }
+            }
+            KademliaEvent::RoutingPeerAdded { peer } => {
                 self.routing.insert(peer);
                 self.admissions += 1;
                 // Progress: the backed-off pace no longer describes the
@@ -537,8 +527,12 @@ impl KademliaDiscovery {
                     self.no_progress_rounds = 0;
                 }
             }
-            KademliaEvent::QueryFailed { reason, class } => {
-                self.settle(class, now_ms, false, false);
+            KademliaEvent::QueryFailed {
+                handle,
+                reason,
+                class,
+            } => {
+                self.settle(handle, class, now_ms, false, false);
                 match reason {
                     QueryFailure::TimedOut | QueryFailure::NoRoutingPeers => {
                         self.last_query_success_ms = None;
@@ -553,22 +547,23 @@ impl KademliaDiscovery {
     }
 
     /// Settle the budget slot and pacing for one completed query.
-    fn settle(&mut self, class: QueryClass, now_ms: u64, succeeded: bool, address_progress: bool) {
-        let was_commanded = self.budgets.finish_oldest(class);
-        if class == QueryClass::Bootstrap && !was_commanded {
-            // One implicit bootstrap finished. The UNCHARGED overflow
-            // settles first: a held charge released while uncharged
-            // queries still ran would open the ceiling under exactly the
-            // load it exists to reflect. Only when the overflow is gone
-            // does a completion return a slot — its rate charge stays
-            // spent, because the window really was used.
-            if self.implicit_uncharged > 0 {
-                self.implicit_uncharged -= 1;
-            } else if !self.implicit_charges.is_empty() {
-                let charge = self.implicit_charges.remove(0);
-                self.budgets.consume(charge);
-            }
-        }
+    ///
+    /// KEYED BY THE QUERY. The permit this handle names is released and
+    /// no other — where the class-keyed version settled the oldest
+    /// outstanding permit of the class, so with a commanded and an
+    /// implicit bootstrap both in flight either completion released
+    /// either permit. A handle nothing holds settles nothing, which is
+    /// the honest answer for a duplicate or a query this provider never
+    /// commanded and was never told about.
+    fn settle(
+        &mut self,
+        handle: interweave_kademlia_control_api::QueryHandle,
+        class: QueryClass,
+        now_ms: u64,
+        succeeded: bool,
+        address_progress: bool,
+    ) {
+        let _ = self.budgets.finish(handle);
         if class == QueryClass::Exploration
             && let Some(snapshot) = self.exploration_snapshot.take()
         {
@@ -628,11 +623,13 @@ impl KademliaDiscovery {
         let mut jitter_bytes = [0_u8; 8];
         jitter_bytes.copy_from_slice(&entropy[..8]);
         self.exploration_entropy = u64::from_le_bytes(jitter_bytes);
+        let handle = self.mint_handle();
         self.queue_command(KademliaCommand::StartQuery {
+            handle,
             class: QueryClass::Exploration,
             key: entropy,
         });
-        self.budgets.bind(permit, QueryClass::Exploration);
+        self.budgets.bind(permit, handle);
         self.exploration_snapshot = Some(self.admissions);
         true
     }
@@ -658,11 +655,13 @@ impl KademliaDiscovery {
         let Ok(permit) = self.budgets.acquire(now_ms) else {
             return Err(BootstrapRefusal::BudgetExhausted);
         };
+        let handle = self.mint_handle();
         self.queue_command(KademliaCommand::StartQuery {
+            handle,
             class: QueryClass::Bootstrap,
             key,
         });
-        self.budgets.bind(permit, QueryClass::Bootstrap);
+        self.budgets.bind(permit, handle);
         self.pacing.record_bootstrap(now_ms);
         Ok(())
     }
@@ -767,13 +766,21 @@ impl KademliaDiscovery {
             self.budgets.release(permit);
             return Err(TargetedRefusal::NotTargetableIdentity);
         };
+        let handle = self.mint_handle();
         self.queue_command(KademliaCommand::StartQuery {
+            handle,
             class: QueryClass::Targeted,
             key,
         });
-        self.budgets.bind(permit, QueryClass::Targeted);
+        self.budgets.bind(permit, handle);
         self.cooldowns.insert(target.clone(), now_ms);
         Ok(())
+    }
+
+    /// Mint the next handle for a query this provider is commanding.
+    fn mint_handle(&mut self) -> interweave_kademlia_control_api::QueryHandle {
+        self.next_handle = self.next_handle.wrapping_add(1);
+        interweave_kademlia_control_api::QueryHandle::commanded(self.next_handle)
     }
 
     /// Record one query-result candidate, replacing what was tracked.
@@ -1182,10 +1189,6 @@ impl DiscoveryProvider for KademliaDiscovery {
         self.cooldowns.clear();
         self.routing.clear();
         self.exploration_snapshot = None;
-        for charge in self.implicit_charges.drain(..) {
-            self.budgets.consume(charge);
-        }
-        self.implicit_uncharged = 0;
     }
 }
 
@@ -1228,23 +1231,64 @@ mod tests {
         }
     }
 
+    use interweave_kademlia_control_api::{QueryHandle, QueryOrigin};
+
+    /// The handle of the query the provider most recently COMMANDED.
+    ///
+    /// A test settles a query by name now, not by class, so it has to
+    /// learn the name — which is exactly the property that makes the
+    /// accounting exact. Read from the command the provider queued.
+    fn last_handle(p: &KademliaDiscovery) -> QueryHandle {
+        p.commands
+            .iter()
+            .rev()
+            .find_map(|c| match c {
+                KademliaCommand::StartQuery { handle, .. } => Some(*handle),
+                _ => None,
+            })
+            // A test that never commanded one is exercising candidate
+            // tracking rather than settlement; give it a handle nothing
+            // holds, which settles nothing and says so.
+            .unwrap_or_else(|| QueryHandle::implicit(u64::MAX >> 1))
+    }
+
     /// A completion event of `class` carrying no candidates.
-    fn done(class: QueryClass) -> KademliaEvent {
+    fn done(handle: QueryHandle, class: QueryClass) -> KademliaEvent {
         KademliaEvent::QueryResults {
+            handle,
             candidates: interweave_kademlia_control_api::ObservedCandidates::new([])
                 .expect("empty is bounded"),
             class,
         }
     }
 
+    /// The driver announcing a query the library started (F2).
+    fn implicit_started(seq: u64) -> KademliaEvent {
+        KademliaEvent::QueryStarted {
+            handle: QueryHandle::implicit(seq),
+            class: QueryClass::Bootstrap,
+            origin: QueryOrigin::Implicit,
+        }
+    }
+
     /// A provider with one routed peer and its F2 charge already
     /// settled, so budget tests start from a clean slate.
     fn routed(p: &mut KademliaDiscovery, peer: &TransportIdentity, now_ms: u64) {
+        p.ingest_driver_event(implicit_started(seq_for(peer)), now_ms);
         p.ingest_driver_event(
             KademliaEvent::RoutingPeerAdded { peer: peer.clone() },
             now_ms,
         );
-        p.ingest_driver_event(done(QueryClass::Bootstrap), now_ms);
+        p.ingest_driver_event(
+            done(QueryHandle::implicit(seq_for(peer)), QueryClass::Bootstrap),
+            now_ms,
+        );
+    }
+
+    /// A stable implicit sequence per peer, so one peer's charge and its
+    /// settlement name the same query.
+    fn seq_for(peer: &TransportIdentity) -> u64 {
+        peer.as_str().bytes().map(u64::from).sum::<u64>() % 1_000
     }
 
     fn local() -> TransportIdentity {
@@ -1257,7 +1301,7 @@ mod tests {
         p
     }
 
-    fn results(peers: &[(TransportIdentity, &str)]) -> KademliaEvent {
+    fn results(handle: QueryHandle, peers: &[(TransportIdentity, &str)]) -> KademliaEvent {
         let candidates = peers
             .iter()
             .map(|(peer_id, address)| CandidatePeer {
@@ -1270,6 +1314,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         KademliaEvent::QueryResults {
+            handle,
             candidates: interweave_kademlia_control_api::ObservedCandidates::new(candidates)
                 .expect("bounded"),
             class: QueryClass::Exploration,
@@ -1553,7 +1598,13 @@ mod tests {
     fn a_query_result_becomes_a_kademlia_candidate() {
         let mut p = started(KademliaMode::Client);
         let peer = synthetic_peer(1);
-        p.ingest_driver_event(results(&[(peer.clone(), "/ip4/192.0.2.1/tcp/4001")]), 5_000);
+        p.ingest_driver_event(
+            results(
+                last_handle(&p),
+                &[(peer.clone(), "/ip4/192.0.2.1/tcp/4001")],
+            ),
+            5_000,
+        );
         let events = p.drain_events(5_000, usize::MAX);
         let obs = observations(&events);
         assert_eq!(obs.len(), 1);
@@ -1573,10 +1624,13 @@ mod tests {
         let mut p = started(KademliaMode::Client);
         let other = synthetic_peer(1);
         p.ingest_driver_event(
-            results(&[
-                (local(), "/ip4/192.0.2.9/tcp/4001"),
-                (other.clone(), "/ip4/192.0.2.1/tcp/4001"),
-            ]),
+            results(
+                last_handle(&p),
+                &[
+                    (local(), "/ip4/192.0.2.9/tcp/4001"),
+                    (other.clone(), "/ip4/192.0.2.1/tcp/4001"),
+                ],
+            ),
             5_000,
         );
         let events = p.drain_events(5_000, usize::MAX);
@@ -1589,7 +1643,13 @@ mod tests {
     fn expiry_retracts_the_candidate_it_tracked() {
         let mut p = started(KademliaMode::Client);
         let peer = synthetic_peer(1);
-        p.ingest_driver_event(results(&[(peer.clone(), "/ip4/192.0.2.1/tcp/4001")]), 1_000);
+        p.ingest_driver_event(
+            results(
+                last_handle(&p),
+                &[(peer.clone(), "/ip4/192.0.2.1/tcp/4001")],
+            ),
+            1_000,
+        );
         p.drain_events(1_000, usize::MAX);
         let events = p.drain_events(1_000 + TTL_MS + 1, usize::MAX);
         let expiries: Vec<_> = events
@@ -1619,9 +1679,21 @@ mod tests {
     fn a_refreshed_observation_extends_expiry() {
         let mut p = started(KademliaMode::Client);
         let peer = synthetic_peer(1);
-        p.ingest_driver_event(results(&[(peer.clone(), "/ip4/192.0.2.1/tcp/4001")]), 1_000);
+        p.ingest_driver_event(
+            results(
+                last_handle(&p),
+                &[(peer.clone(), "/ip4/192.0.2.1/tcp/4001")],
+            ),
+            1_000,
+        );
         p.drain_events(1_000, usize::MAX);
-        p.ingest_driver_event(results(&[(peer.clone(), "/ip4/192.0.2.1/tcp/4001")]), 9_000);
+        p.ingest_driver_event(
+            results(
+                last_handle(&p),
+                &[(peer.clone(), "/ip4/192.0.2.1/tcp/4001")],
+            ),
+            9_000,
+        );
         let refreshed = p.drain_events(9_000, usize::MAX);
         let obs = observations(&refreshed);
         assert_eq!(obs.len(), 1, "a refresh is re-emitted, not silent");
@@ -1640,7 +1712,10 @@ mod tests {
         let mut p = started(KademliaMode::Client);
         // The first peer is observed earliest, so its expiry is soonest.
         let victim = synthetic_peer(1);
-        p.ingest_driver_event(results(&[(victim.clone(), "/ip4/192.0.2.1/tcp/1")]), 1_000);
+        p.ingest_driver_event(
+            results(last_handle(&p), &[(victim.clone(), "/ip4/192.0.2.1/tcp/1")]),
+            1_000,
+        );
         let mut n = 2_u64;
         while (p.tracked.len()) < MAX_TRACKED_CANDIDATES {
             let batch: Vec<(TransportIdentity, String)> = (0..20)
@@ -1655,13 +1730,16 @@ mod tests {
                 .iter()
                 .map(|(peer, a)| (peer.clone(), a.as_str()))
                 .collect();
-            p.ingest_driver_event(results(&refs), 2_000);
+            p.ingest_driver_event(results(last_handle(&p), &refs), 2_000);
             n += 20;
         }
         assert_eq!(p.tracked.len(), MAX_TRACKED_CANDIDATES);
         let newcomer = synthetic_peer(n);
         p.ingest_driver_event(
-            results(&[(newcomer.clone(), "/ip4/198.51.100.2/tcp/1")]),
+            results(
+                last_handle(&p),
+                &[(newcomer.clone(), "/ip4/198.51.100.2/tcp/1")],
+            ),
             3_000,
         );
         assert_eq!(p.tracked.len(), MAX_TRACKED_CANDIDATES, "the bound holds");
@@ -1687,6 +1765,7 @@ mod tests {
         assert_eq!(
             commands,
             vec![KademliaCommand::StartQuery {
+                handle: QueryHandle::commanded(1),
                 class: QueryClass::Targeted,
                 key: want_key,
             }],
@@ -1981,7 +2060,10 @@ mod tests {
         p.ingest_driver_event(KademliaEvent::RoutingPeerAdded { peer: a.clone() }, 1_000);
         p.ingest_driver_event(KademliaEvent::RoutingPeerAdded { peer: b.clone() }, 1_000);
         p.ingest_driver_event(
-            results(&[(synthetic_peer(3), "/ip4/192.0.2.1/tcp/1")]),
+            results(
+                last_handle(&p),
+                &[(synthetic_peer(3), "/ip4/192.0.2.1/tcp/1")],
+            ),
             1_000,
         );
         assert_eq!(
@@ -1991,6 +2073,7 @@ mod tests {
         );
         p.ingest_driver_event(
             KademliaEvent::QueryFailed {
+                handle: QueryHandle::commanded(u64::MAX >> 1),
                 class: QueryClass::Exploration,
                 reason: QueryFailure::BudgetExhausted,
             },
@@ -2003,6 +2086,7 @@ mod tests {
         );
         p.ingest_driver_event(
             KademliaEvent::QueryFailed {
+                handle: QueryHandle::commanded(u64::MAX >> 1),
                 class: QueryClass::Exploration,
                 reason: QueryFailure::TimedOut,
             },
@@ -2052,7 +2136,10 @@ mod tests {
     fn shutdown_clears_and_commands_shutdown() {
         let mut p = started(KademliaMode::Client);
         let peer = synthetic_peer(1);
-        p.ingest_driver_event(results(&[(peer.clone(), "/ip4/192.0.2.1/tcp/1")]), 1_000);
+        p.ingest_driver_event(
+            results(last_handle(&p), &[(peer.clone(), "/ip4/192.0.2.1/tcp/1")]),
+            1_000,
+        );
         p.shutdown(2_000);
         assert_eq!(p.health(), ProviderHealth::Unavailable);
         assert!(
@@ -2074,7 +2161,7 @@ mod tests {
         let peer = synthetic_peer(1);
         let liar = synthetic_peer(2);
         let lying = format!("/ip4/192.0.2.1/tcp/4001/p2p/{}", liar.as_str());
-        p.ingest_driver_event(results(&[(peer, lying.as_str())]), 1_000);
+        p.ingest_driver_event(results(last_handle(&p), &[(peer, lying.as_str())]), 1_000);
         assert!(
             observations(&p.drain_events(1_000, usize::MAX)).is_empty(),
             "a candidate whose every address was rejected observes nothing"
@@ -2104,59 +2191,6 @@ mod tests {
     }
 
     #[test]
-    fn the_implicit_bootstrap_is_charged_and_settles_on_completion() {
-        let mut p = KademliaDiscovery::new(
-            KademliaProviderConfig {
-                max_queries_per_minute: 3,
-                ..config(KademliaMode::Client)
-            },
-            local(),
-        )
-        .expect("valid config");
-        p.start(0).expect("starts");
-        let router = synthetic_peer(1);
-        let (t1, t2, t3) = (synthetic_peer(2), synthetic_peer(3), synthetic_peer(4));
-        trust(&mut p, &[&router, &t1, &t2, &t3]);
-        for t in [&t1, &t2, &t3] {
-            give_evidence(&mut p, t, 1_000);
-        }
-
-        // F2: the first insertion on an empty table charges the implicit
-        // bootstrap — one slot held, one rate charge spent.
-        p.ingest_driver_event(
-            KademliaEvent::RoutingPeerAdded {
-                peer: router.clone(),
-            },
-            1_000,
-        );
-        assert_eq!(p.budgets.held(), 1, "the uncommanded query holds a slot");
-        p.request_targeted_lookup(&t1, 2_000, false)
-            .expect("the second slot is free");
-        assert_eq!(
-            p.request_targeted_lookup(&t2, 2_000, false),
-            Err(TargetedRefusal::BudgetExhausted),
-            "the implicit bootstrap occupies real concurrency"
-        );
-
-        // The driver reports the bootstrap it ran; the slot comes back.
-        p.ingest_driver_event(done(QueryClass::Bootstrap), 3_000);
-        p.request_targeted_lookup(&t2, 3_000, false)
-            .expect("the settled slot is free again");
-
-        // But its RATE charge stays spent: three starts are on the
-        // window (implicit + t1 + t2), and the ceiling is three.
-        p.ingest_driver_event(done(QueryClass::Targeted), 4_000);
-        p.ingest_driver_event(done(QueryClass::Targeted), 4_000);
-        assert_eq!(
-            p.request_targeted_lookup(&t3, 4_000, false),
-            Err(TargetedRefusal::BudgetExhausted),
-            "consume keeps the rate charge; the window really was used"
-        );
-        p.request_targeted_lookup(&t3, 1_000 + 60_000, false)
-            .expect("one window after the charge, the rate recovers");
-    }
-
-    #[test]
     fn an_observation_the_store_dropped_does_not_reset_the_backoff() {
         // §9.3's backoff is what stops a two-peer overlay running a
         // useless 60-second loop forever. A capability hint reset it
@@ -2174,7 +2208,7 @@ mod tests {
         let mut now = 10_000;
         for round in 0..3 {
             assert!(p.tick(now, [0_u8; 32]), "round {round} issues");
-            p.ingest_driver_event(done(QueryClass::Exploration), now + 1);
+            p.ingest_driver_event(done(last_handle(&p), QueryClass::Exploration), now + 1);
             now += 500_000;
         }
         assert_eq!(p.no_progress_rounds, 3, "the control: three quiet rounds");
@@ -2228,7 +2262,7 @@ mod tests {
         let mut now = 10_000;
         for round in 0..3 {
             assert!(p.tick(now, [0_u8; 32]), "round {round} issues");
-            p.ingest_driver_event(done(QueryClass::Exploration), now + 1);
+            p.ingest_driver_event(done(last_handle(&p), QueryClass::Exploration), now + 1);
             now += 500_000;
         }
         assert_eq!(p.no_progress_rounds, 3);
@@ -2276,7 +2310,7 @@ mod tests {
         let mut now = 10_000;
         for _ in 0..6 {
             assert!(p.tick(now, [0_u8; 32]));
-            p.ingest_driver_event(done(QueryClass::Exploration), now);
+            p.ingest_driver_event(done(last_handle(&p), QueryClass::Exploration), now);
             let due = p.pacing.next_exploration_due_ms().expect("scheduled");
             assert!(!p.tick(due - 1, [0_u8; 32]), "not before it is due");
             now = due;
@@ -2287,10 +2321,10 @@ mod tests {
             "the loop advanced exactly to each due time"
         );
         // Six no-progress rounds: 60s doubled past 960s rests at the cap.
-        p.ingest_driver_event(done(QueryClass::Exploration), now);
+        p.ingest_driver_event(done(last_handle(&p), QueryClass::Exploration), now);
         let before = now;
         assert!(p.tick(now, [0_u8; 32]));
-        p.ingest_driver_event(done(QueryClass::Exploration), now);
+        p.ingest_driver_event(done(last_handle(&p), QueryClass::Exploration), now);
         assert_eq!(
             p.pacing.next_exploration_due_ms(),
             Some(before + interweave_kademlia_control_api::MAX_EXPLORATION_INTERVAL_MS),
@@ -2322,6 +2356,7 @@ mod tests {
         assert_eq!(
             p.drain_commands(usize::MAX),
             vec![KademliaCommand::StartQuery {
+                handle: QueryHandle::commanded(1),
                 class: QueryClass::Bootstrap,
                 key: want_key,
             }],
@@ -2351,7 +2386,7 @@ mod tests {
         let mut now = 10_000;
         for _ in 0..3 {
             assert!(p.tick(now, [0_u8; 32]));
-            p.ingest_driver_event(done(QueryClass::Exploration), now);
+            p.ingest_driver_event(done(last_handle(&p), QueryClass::Exploration), now);
             now += 500_000;
         }
         assert_eq!(p.health(), ProviderHealth::Healthy, "validly saturated");
@@ -2440,7 +2475,10 @@ mod tests {
         routed(&mut p, &router, 1_000);
 
         assert!(p.tick(10_000, [0_u8; 32]));
-        p.ingest_driver_event(results(&[(router.clone(), "/ip4/192.0.2.1/tcp/1")]), 10_000);
+        p.ingest_driver_event(
+            results(last_handle(&p), &[(router.clone(), "/ip4/192.0.2.1/tcp/1")]),
+            10_000,
+        );
         assert_eq!(
             p.no_progress_rounds, 0,
             "a first address for a routed peer is progress"
@@ -2448,14 +2486,17 @@ mod tests {
 
         assert!(p.tick(200_000, [0_u8; 32]));
         p.ingest_driver_event(
-            results(&[(router.clone(), "/ip4/192.0.2.1/tcp/1")]),
+            results(last_handle(&p), &[(router.clone(), "/ip4/192.0.2.1/tcp/1")]),
             200_000,
         );
         assert_eq!(p.no_progress_rounds, 1, "the same address again is not");
 
         assert!(p.tick(400_000, [0_u8; 32]));
         p.ingest_driver_event(
-            results(&[(synthetic_peer(9), "/ip4/192.0.2.5/tcp/5")]),
+            results(
+                last_handle(&p),
+                &[(synthetic_peer(9), "/ip4/192.0.2.5/tcp/5")],
+            ),
             400_000,
         );
         assert_eq!(
@@ -2465,7 +2506,7 @@ mod tests {
 
         assert!(p.tick(700_000, [0_u8; 32]));
         p.ingest_driver_event(
-            results(&[(router.clone(), "/ip4/192.0.2.9/tcp/9")]),
+            results(last_handle(&p), &[(router.clone(), "/ip4/192.0.2.9/tcp/9")]),
             700_000,
         );
         assert_eq!(
@@ -2494,7 +2535,7 @@ mod tests {
         let mut now = 10_000;
         for _ in 0..3 {
             assert!(p.tick(now, [0_u8; 32]));
-            p.ingest_driver_event(done(QueryClass::Exploration), now);
+            p.ingest_driver_event(done(last_handle(&p), QueryClass::Exploration), now);
             now += 500_000;
         }
         assert_eq!(
@@ -2516,7 +2557,7 @@ mod tests {
         let mut now = 10_000;
         for _ in 0..3 {
             assert!(p.tick(now, [0_u8; 32]));
-            p.ingest_driver_event(done(QueryClass::Exploration), now);
+            p.ingest_driver_event(done(last_handle(&p), QueryClass::Exploration), now);
             now += 500_000;
         }
         assert_eq!(
@@ -2563,7 +2604,10 @@ mod tests {
         trust(&mut p, &[&a, &b]);
         routed(&mut p, &a, 1_000);
         p.ingest_driver_event(KademliaEvent::RoutingPeerAdded { peer: b }, 1_000);
-        p.ingest_driver_event(done(QueryClass::Exploration), 1_000);
+        p.ingest_driver_event(
+            done(QueryHandle::implicit(99), QueryClass::Exploration),
+            1_000,
+        );
         assert_eq!(p.health(), ProviderHealth::Healthy, "satisfied and recent");
 
         // The driver stalls. Time passes through the whole refresh
@@ -2577,7 +2621,7 @@ mod tests {
              not one success ever"
         );
 
-        p.ingest_driver_event(done(QueryClass::Bootstrap), stale + 10);
+        p.ingest_driver_event(done(last_handle(&p), QueryClass::Bootstrap), stale + 10);
         assert_eq!(
             p.health(),
             ProviderHealth::Healthy,
@@ -2586,29 +2630,52 @@ mod tests {
     }
 
     #[test]
-    fn every_empty_to_refill_transition_is_charged() {
-        // Review finding on PR #60 (P1): SPIKE-003's F2 fires on EACH
-        // empty-to-nonempty transition, and a single optional charge
-        // let every implicit query after the first run outside both
-        // budgets.
+    fn every_announced_implicit_query_is_charged_and_settles_by_name() {
+        // SPIKE-003's F2 fires on EACH empty-to-nonempty transition, so
+        // several implicit bootstraps can be in flight at once and every
+        // one is real work that dials.
+        //
+        // The charge used to be INFERRED here, from `RoutingPeerAdded`
+        // arriving on an empty routing set — a different signal from the
+        // completion that settled it, which is how the two drifted
+        // apart across four review rounds on PR #61. It is now taken
+        // from the driver's announcement, because the driver is the only
+        // party that can see a query begin, and released by the handle
+        // that names that query.
         let mut p = started(KademliaMode::Client);
         let (a, b) = (synthetic_peer(1), synthetic_peer(2));
         trust(&mut p, &[&a, &b]);
-        p.ingest_driver_event(KademliaEvent::RoutingPeerAdded { peer: a.clone() }, 1_000);
-        assert_eq!(p.budgets.held(), 1, "the first transition is charged");
-        // The table empties and refills BEFORE the first implicit
-        // bootstrap reports: a second real query starts.
-        p.ingest_driver_event(KademliaEvent::RoutingPeerRemoved { peer: a }, 2_000);
-        p.ingest_driver_event(KademliaEvent::RoutingPeerAdded { peer: b }, 3_000);
+
+        p.ingest_driver_event(implicit_started(1), 1_000);
+        assert_eq!(p.budgets.held(), 1, "the announcement is the charge");
+        p.ingest_driver_event(KademliaEvent::RoutingPeerAdded { peer: a }, 1_000);
         assert_eq!(
             p.budgets.held(),
-            2,
-            "two implicit queries are running; two slots are held"
+            1,
+            "and a routing event is no longer a second, inferred one"
         );
-        p.ingest_driver_event(done(QueryClass::Bootstrap), 4_000);
-        assert_eq!(p.budgets.held(), 1, "one completion settles ONE charge");
-        p.ingest_driver_event(done(QueryClass::Bootstrap), 5_000);
-        assert_eq!(p.budgets.held(), 0, "the second settles the other");
+
+        p.ingest_driver_event(implicit_started(2), 3_000);
+        assert_eq!(p.budgets.held(), 2, "two announced, two slots held");
+
+        // SETTLED BY NAME, and out of order on purpose: with class
+        // keying, either completion released either permit, so a test
+        // like this could not tell a correct implementation from one
+        // that settled the wrong one.
+        p.ingest_driver_event(done(QueryHandle::implicit(2), QueryClass::Bootstrap), 4_000);
+        assert_eq!(
+            p.budgets.held(),
+            1,
+            "the query that finished is the one settled"
+        );
+        p.ingest_driver_event(done(QueryHandle::implicit(2), QueryClass::Bootstrap), 4_500);
+        assert_eq!(
+            p.budgets.held(),
+            1,
+            "a duplicate completion settles nothing, rather than releasing its neighbour"
+        );
+        p.ingest_driver_event(done(QueryHandle::implicit(1), QueryClass::Bootstrap), 5_000);
+        assert_eq!(p.budgets.held(), 0, "and the other settles on its own name");
     }
 
     #[test]
@@ -2668,42 +2735,5 @@ mod tests {
             Err(TargetedRefusal::NoServerEvidence),
             "and its observations do not become eligibility either"
         );
-    }
-
-    #[test]
-    fn stalled_implicit_charges_are_bounded() {
-        let mut p = started(KademliaMode::Client);
-        let peer = synthetic_peer(1);
-        trust(&mut p, &[&peer]);
-        // Churn far past the cap with every completion stalled.
-        for i in 0..(MAX_IMPLICIT_CHARGES as u64 + 4) {
-            p.ingest_driver_event(
-                KademliaEvent::RoutingPeerAdded { peer: peer.clone() },
-                i * 10,
-            );
-            p.ingest_driver_event(
-                KademliaEvent::RoutingPeerRemoved { peer: peer.clone() },
-                i * 10 + 5,
-            );
-        }
-        assert_eq!(
-            p.budgets.held(),
-            MAX_IMPLICIT_CHARGES,
-            "churn cannot grow the held count without bound"
-        );
-        // Four completions settle the UNCHARGED overflow first: the
-        // held count must stay saturated while overflow queries run.
-        for i in 0..4_u64 {
-            p.ingest_driver_event(done(QueryClass::Bootstrap), 1_000 + i);
-        }
-        assert_eq!(
-            p.budgets.held(),
-            MAX_IMPLICIT_CHARGES,
-            "a held charge is not released while uncharged work still runs"
-        );
-        for i in 0..MAX_IMPLICIT_CHARGES as u64 {
-            p.ingest_driver_event(done(QueryClass::Bootstrap), 2_000 + i);
-        }
-        assert_eq!(p.budgets.held(), 0, "completions still settle every charge");
     }
 }
