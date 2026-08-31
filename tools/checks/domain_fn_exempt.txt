@@ -46,6 +46,7 @@ TrustSources::classify                call  self.trust.classify(
 PreAuthLimits::handshake_timeout_ms   call  preauth.handshake_timeout_ms(
 SubscriptionRegistry::subscribers     call  subs.subscribers(
 SubscriptionRegistry::set_desired     call  broadcast_state.subs.set_desired(
+PolicySnapshot::address_dialable      call  .address_dialable(&peer, &used, self.now_ms())
 SubscriptionRegistry::holds_any       call  broadcast_state.subs.holds_any(
 SessionQueues::set_bound              call  broadcast_state.queues.set_bound(
 
@@ -142,9 +143,10 @@ CandidateSet::len                                stage-12  reached through Disco
 CandidateSet::is_empty                           stage-12  candidate-set introspection, first read at runtime composition
 
 # --- stage-10 ----------------------------------------------------
-# The provider crate consumes the port now; what remains exempt is the
-# slice of it only the Swarm driver or the config layer can reach.
-ObservedCandidates                               stage-10  Kademlia control port; the driver mints these from query results
+# BOTH Stage 10 halves are in: the provider consumes
+# OfferedAddress/OfferedAddresses/RoutingView, and the driver mints
+# ObservedCandidates. What is left is the slice only the config layer,
+# or a stage after this one, can reach.
 validate_limits                                  stage-10  profile-config calls it when the enabled-entry gate flips this stage
 RoutingView::effective_target                    stage-12  consumed inside the port's own health today; the composed daemon's §16 diagnostics surface the trust-capped target directly
 
@@ -166,8 +168,6 @@ PolicySnapshot::classify                         stage-11  dial-management intro
 PolicySnapshot::connections                      stage-11  dial-management introspection, first read by the reachability stack
 PolicySnapshot::pending_dials                    stage-11  dial-management introspection, first read by the reachability stack
 PolicySnapshot::revision                         stage-11  dial-management introspection, first read by the reachability stack
-SnapshotHandle::admit                            stage-11  dial-management introspection, first read by the reachability stack
-SnapshotHandle::load                             stage-11  dial-management introspection, first read by the reachability stack
 
 # --- stage-12 ----------------------------------------------------
 DedupCache::expire                               stage-12  expiry and introspection driven at runtime composition

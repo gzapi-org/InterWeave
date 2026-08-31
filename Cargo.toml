@@ -121,7 +121,10 @@ bs58 = { version = "0.5", default-features = false, features = ["std"] }
 brotli = { version = "8", default-features = false, features = ["std"] }
 # The libp2p substrate, one behaviour per stage. Stage 4 enabled TCP,
 # Noise, Yamux and Identify; Stage 6 added request-response for direct v2;
-# Stage 7 adds GossipSub. Kademlia, AutoNAT, Relay and DCUtR remain absent
+# Stage 7 added GossipSub; Stage 10 adds Kademlia — the first autonomous
+# behaviour, and it lands only AFTER the root gate learned to admit
+# behaviour-originated dials by policy, the order CLAUDE.md §3 requires.
+# AutoNAT, Relay and DCUtR remain absent
 # from the feature list rather than merely unused, so a stray `use` cannot
 # switch one on: CLAUDE.md §3 forbids turning on autonomous libp2p
 # behaviour and retrofitting admission policy later, and a feature that is
@@ -149,6 +152,11 @@ libp2p = { version = "0.56", default-features = false, features = [
     "tokio",
     "macros",
     "ed25519",
+    # Stage 10. Peer routing only (ADR-0009): the driver in
+    # transport/libp2p owns the behaviour, BucketInserts::Manual and
+    # StoreInserts::FilterBoth are set at construction, and every dial a
+    # query originates passes the root gate that landed first.
+    "kad",
     # Stage 6. The direct v2 request-response primitive. Absent until
     # this stage opened, so a behaviour that dials could not exist
     # before the admission funnel it must pass through (CLAUDE.md §3).

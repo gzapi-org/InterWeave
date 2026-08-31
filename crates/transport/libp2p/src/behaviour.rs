@@ -7,9 +7,10 @@
 //! protocol that starts doing things on its own — Kademlia dials to fill
 //! buckets, AutoNAT probes, Relay renews reservations — and each of
 //! those is an outbound dial that must already be passing the root
-//! admission gate before it exists (CLAUDE.md §3). Identify does not
-//! originate dials; it answers on connections that already exist, which
-//! is why it is the one that can be here now.
+//! admission gate before it exists (CLAUDE.md §3). Kademlia is here NOW
+//! because Stage 10 satisfied that order: the outbound gate admits
+//! behaviour-originated dials by root policy, and it landed — tested —
+//! before the `kad` feature entered the workspace manifest.
 
 // The `NetworkBehaviour` derive generates `SubstrateBehaviourEvent` as a
 // sibling item, and its variants carry no documentation the derive could
@@ -22,8 +23,11 @@
 use std::time::Duration;
 
 use libp2p::gossipsub;
+use libp2p::kad;
+use libp2p::kad::store::MemoryStore;
 use libp2p::request_response::{self, ProtocolSupport};
 use libp2p::swarm::NetworkBehaviour;
+use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::{identify, identity};
 
 use interweave_transport_api::{MAX_PAYLOAD_BYTES, broadcast_v1};
@@ -167,6 +171,17 @@ pub struct SubstrateBehaviour {
     /// query_endpoints` refuses to call it on an unconnected peer at all,
     /// so the gate is the second line and not the first.
     pub endpoints: request_response::Behaviour<EndpointsCodec>,
+    /// Kademlia peer routing (ADR-0009), present only when configured.
+    ///
+    /// LAST, after both gates, and the strongest instance of the
+    /// ordering rule: this is the first behaviour that dials
+    /// AUTONOMOUSLY — an iterative query asks the Swarm to dial with no
+    /// caller anywhere — so it joins a Swarm whose outbound gate
+    /// already decides such dials by root policy. `Toggle` rather than
+    /// an always-on field because a profile without a kademlia entry
+    /// must not even advertise the protocol (§13: `enabled: false`
+    /// means zero activity).
+    pub kad: Toggle<kad::Behaviour<MemoryStore>>,
 }
 
 // EVERY DATA-PLANE BEHAVIOUR ABOVE IS INSTALLED UNIFORMLY, on every
@@ -182,12 +197,22 @@ pub struct SubstrateBehaviour {
 //
 // Stage 11 produces the first one, and then this shape is a gap. Each
 // entry point classifies its caller — direct ingress, the GossipSub
-// publisher check, `endpoints::build_answer` — so an infrastructure-only
-// peer gains no AUTHORITY. What it gains is EXPOSURE: the three
-// protocols are advertised to it and it can open their substreams, so a
-// refusal costs a parse and an accounting charge rather than a closed
-// stream. `build_answer`'s pre-trust rate budget exists precisely
-// because that is where the exposure lands today.
+// publisher check, `endpoints::build_answer`, and the Kademlia driver's
+// `try_admit` — so an infrastructure-only peer gains no AUTHORITY. What
+// it gains is EXPOSURE: the protocols are advertised to it and it can
+// open their substreams, so a refusal costs a parse and an accounting
+// charge rather than a closed stream. `build_answer`'s pre-trust rate
+// budget exists precisely because that is where the exposure lands
+// today.
+//
+// STAGE 10 ADDED A FOURTH, and it is named here rather than left to be
+// counted: `kad` joins `direct`, `broadcast` and `endpoints` in the set
+// installed uniformly. Its authority check is `try_admit`'s data-plane
+// trust requirement, so an infrastructure-only peer holds no routing
+// seat — but it can still open the DHT substream and be answered, which
+// is the same exposure the other three have. An implementer working the
+// Stage 11 correction from a list of three would restrict three and
+// leave this one.
 //
 // The Stage 11 correction is to restrict the protocol set offered on an
 // infrastructure-only connection, at the connection rather than at the
@@ -211,7 +236,12 @@ impl SubstrateBehaviour {
     /// rather than a runtime condition, and it is propagated rather than
     /// unwrapped so a future edit that introduced one fails to start
     /// instead of panicking in a task.
-    pub fn new(keypair: &identity::Keypair, preauth: PreAuthLimits) -> Result<Self, &'static str> {
+    pub fn new(
+        keypair: &identity::Keypair,
+        preauth: PreAuthLimits,
+        outbound: OutboundAdmission,
+        kad: Toggle<kad::Behaviour<MemoryStore>>,
+    ) -> Result<Self, &'static str> {
         let broadcast_config = gossipsub::ConfigBuilder::default()
             // STRICT, which is what makes the mesh id computable at all:
             // it guarantees every message reaching the application has an
@@ -231,7 +261,7 @@ impl SubstrateBehaviour {
 
         Ok(Self {
             preauth: PreAuthAdmission::new(preauth),
-            outbound: OutboundAdmission::default(),
+            outbound,
             identify: identify::Behaviour::new(identify::Config::new(
                 IDENTIFY_PROTOCOL.to_owned(),
                 keypair.public(),
@@ -260,6 +290,7 @@ impl SubstrateBehaviour {
                 [(ENDPOINTS_PROTOCOL, ProtocolSupport::Full)],
                 request_response::Config::default().with_request_timeout(ENDPOINTS_TIMEOUT),
             ),
+            kad,
         })
     }
 }

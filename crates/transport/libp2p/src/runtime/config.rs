@@ -31,7 +31,9 @@ pub const DEFAULT_EVENT_CAPACITY: usize = 256;
 pub const MAX_CONFIGURED_CAPACITY: usize = 65_536;
 
 /// How the substrate is built.
-#[derive(Debug, Clone, Copy)]
+// `Copy` ended at Stage 10: the kademlia settings carry the namespace
+// string, and a configuration was never a value to duplicate implicitly.
+#[derive(Debug, Clone)]
 pub struct SubstrateConfig {
     /// Depth of the command channel.
     pub command_capacity: usize,
@@ -95,6 +97,11 @@ pub struct SubstrateConfig {
     pub directory_cache_ttl_ms: u32,
     /// Most remote peers whose directory is cached at once.
     pub directory_cache_peers: usize,
+    /// Kademlia driver configuration, or `None` for a profile with no
+    /// enabled kademlia entry — in which case the behaviour is not
+    /// constructed and the protocol is never advertised (§13:
+    /// `enabled: false` means zero activity).
+    pub kademlia: Option<super::kademlia_driver::KademliaSettings>,
 }
 
 impl Default for SubstrateConfig {
@@ -113,6 +120,7 @@ impl Default for SubstrateConfig {
             max_pending_listens: 64,
             directory_cache_ttl_ms: interweave_transport_runtime::directory::DEFAULT_CACHE_TTL_MS,
             directory_cache_peers: interweave_transport_runtime::directory::DEFAULT_CACHE_PEERS,
+            kademlia: None,
         }
     }
 }
@@ -265,6 +273,9 @@ impl SubstrateConfig {
                 allowed: (1, max_representable_tick_ms()),
             });
         }
+        if let Some(kademlia) = &self.kademlia {
+            kademlia.validate().map_err(SubstrateError::Kademlia)?;
+        }
         Ok(())
     }
 }
@@ -282,6 +293,8 @@ pub enum SubstrateError {
     Stopped,
     /// A stored or observed PeerId is not one the neutral contract accepts.
     Identity(String),
+    /// A Kademlia setting the driver cannot honour.
+    Kademlia(&'static str),
     /// A [`SubstrateConfig`] value outside its permitted range.
     ///
     /// Returned rather than panicked. `mpsc::channel(0)` aborts the
@@ -311,6 +324,7 @@ impl core::fmt::Display for SubstrateError {
             Self::Transport(d) => write!(f, "transport: {d}"),
             Self::Stopped => write!(f, "the swarm task has stopped"),
             Self::Identity(d) => write!(f, "identity: {d}"),
+            Self::Kademlia(rule) => write!(f, "kademlia configuration: {rule}"),
             Self::InvalidProfile(broken) => {
                 write!(
                     f,

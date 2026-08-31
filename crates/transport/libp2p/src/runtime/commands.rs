@@ -9,7 +9,7 @@
 //! of one boundary, and a change to what a command means almost always
 //! implies a change to what the caller is told happened.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use libp2p::Multiaddr;
 use libp2p::core::transport::ListenerId;
@@ -19,10 +19,11 @@ use libp2p::swarm::SwarmEvent as Libp2pSwarmEvent;
 use interweave_transport_api::TransportError as DirectError;
 use interweave_transport_api::TransportIdentity;
 use interweave_transport_runtime::endpoint_registry::LocalSessionId;
-use interweave_transport_runtime::{ConnectionClass, ConnectionManager, DialOrigin, DialTicket};
+use interweave_transport_runtime::{ConnectionClass, ConnectionManager, DialOrigin};
 
 use crate::behaviour::SubstrateBehaviourEvent;
 use crate::gated_swarm::{GatedSwarm, NotConnected, mesh_admits};
+use crate::outbound_gate::InFlightTickets;
 
 use super::dialing::{
     ActiveListeners, OpenConnection, PendingListens, attempt_dial, connections_to_close,
@@ -49,7 +50,8 @@ pub(super) fn handle_command(
     direct_state: &mut DirectState,
     directory_state: &mut super::endpoints::DirectoryState,
     broadcast_state: &mut super::broadcast::BroadcastState,
-    in_flight: &mut HashMap<libp2p::swarm::ConnectionId, DialTicket>,
+    in_flight: &InFlightTickets,
+    kademlia: Option<&mut super::kademlia_driver::KademliaState>,
     max_pending_listens: usize,
     max_active_listeners: usize,
     effective_payload: usize,
@@ -467,6 +469,19 @@ pub(super) fn handle_command(
             // connection is named at most once however many revoked
             // entries match it, so the number reported is the number of
             // connections actually closed.
+            // AND THE ROUTING TABLE MOVES WITH IT (§11): a revoked
+            // peer leaves the DHT immediately, not when the next event
+            // happens to notice.
+            if let Some(state) = kademlia {
+                let mut events = Vec::new();
+                super::kademlia_driver::apply_revocations(
+                    state,
+                    swarm.kademlia_mut(),
+                    manager,
+                    &mut events,
+                );
+                buffer_revocation_events(outbox, event_capacity, events);
+            }
             let closing = connections_to_close(
                 manager,
                 &revoked,
@@ -725,7 +740,92 @@ pub(super) fn handle_command(
             // publishes the flag every snapshot reads live, so a holder
             // that took its snapshot a moment ago is draining too.
             manager.begin_shutdown();
+            // THE DRIVER DRAINS WITH IT: outstanding queries settle as
+            // shutting down rather than being silently outlived, and
+            // nothing new starts during the grace. Without this, the
+            // root drain left the DHT answering and querying while the
+            // rest of the runtime wound down.
+            if let Some(state) = kademlia
+                && let Some(behaviour) = swarm.kademlia_mut()
+            {
+                for event in super::kademlia_driver::handle_command(
+                    state,
+                    behaviour,
+                    manager,
+                    interweave_kademlia_control_api::KademliaCommand::Shutdown,
+                    now_ms,
+                ) {
+                    outbox.push_back(SwarmEvent::Kademlia { event });
+                }
+            }
             let _ = reply.send(());
+        }
+        SwarmCommand::Kademlia { command } => {
+            // Fire-and-forget: the driver's answers ride the event
+            // stream. A profile with no kademlia entry has no state and
+            // no behaviour, and the command is dropped — §13's
+            // `enabled: false` means zero activity, commands included.
+            //
+            // A DRAINING RUNTIME REFUSES NEW QUERIES the same way a
+            // stopping driver does: drain is "stop taking on new work",
+            // and a query is new work with dials inside it. Settled,
+            // not swallowed.
+            // BOUNDED, AND THIS CORRECTS AN EARLIER ARGUMENT IN THIS
+            // FILE. `buffer_revocation_events` says a query settlement
+            // is never gated because dropping one leaks the provider's
+            // permit. That is true of the settlement, and it is not a
+            // licence to grow without bound: this branch is NOT gated
+            // by `room`, so once `polling_room` disables Swarm polling a
+            // caller can keep draining the bounded command channel into
+            // an unbounded outbox, one immediate `BudgetExhausted` /
+            // `NoRoutingPeers` / `ShuttingDown` per command, forever.
+            // That is the memory-exhaustion vector the capacity exists
+            // to rule out, and the scheduled-retry branch above already
+            // makes exactly this argument for exactly this reason.
+            //
+            // The permit is the lesser loss, and only in a state where
+            // it costs nothing: the outbox is full only when the
+            // consumer has stopped reading, and a provider that is not
+            // receiving events is not issuing queries either. When it
+            // resumes, `recent_queries_succeeded` ages out and health
+            // reports the gap. An unbounded queue has no such recovery.
+            // PLUS THE ONE BEING SETTLED. Review finding on PR #61,
+            // against the slack fix itself: `outstanding_queries` counts
+            // what the driver has RECORDED, and a `StartQuery` that is
+            // refused immediately — `NoRoutingPeers`, or `ShuttingDown`
+            // from the draining and stopped paths — is never recorded
+            // at all. With nothing else in flight the count was zero, so
+            // the settlement got no slack and was dropped on a full
+            // outbox, leaking the very permit the slack exists to
+            // release. The command in hand IS an outstanding query from
+            // the provider's side: it bound a permit before sending it.
+            let outstanding = settlement_slack(kademlia.as_deref());
+            let settle = |outbox: &mut VecDeque<SwarmEvent>, event| {
+                let _ = buffer_kademlia_event(outbox, event_capacity, outstanding, event);
+            };
+            if manager.is_draining()
+                && let interweave_kademlia_control_api::KademliaCommand::StartQuery {
+                    class, ..
+                } = &command
+            {
+                settle(
+                    outbox,
+                    interweave_kademlia_control_api::KademliaEvent::QueryFailed {
+                        class: *class,
+                        reason: interweave_kademlia_control_api::QueryFailure::ShuttingDown,
+                    },
+                );
+                return;
+            }
+            if let Some(state) = kademlia
+                && let Some(behaviour) = swarm.kademlia_mut()
+            {
+                for event in super::kademlia_driver::handle_command(
+                    state, behaviour, manager, command, now_ms,
+                ) {
+                    settle(outbox, event);
+                }
+            }
         }
         SwarmCommand::Shutdown { reply } => {
             let _ = reply.send(());
@@ -978,9 +1078,120 @@ pub(super) fn translate(
     }
 }
 
+/// Buffer routing-seat withdrawals, dropping what will not fit.
+///
+/// THE ONE KADEMLIA EVENT CLASS THAT MAY BE DROPPED, and it is worth
+/// saying why here, because the others may not.
+///
+/// The seat is removed from the routing table by `apply_revocations`
+/// whether or not anyone hears about it, and the PROVIDER has already
+/// removed the same peers itself: `set_remote_trusted` retains its
+/// routing view to the new trust snapshot at the moment the revision
+/// lands, precisely so it never rests on a peer that is no longer
+/// authorized. These events are that removal CONFIRMED, not that
+/// removal performed, so a dropped one costs a notification.
+///
+/// Ungated, one `SetTrust` revoking a full table pushed up to
+/// `max_routing_peers` entries past the bound the rest of the loop
+/// keeps — into the slack `polling_room` reserves for the callers
+/// waiting on Swarm progress, which is the one thing
+/// `may_buffer_delivery` exists to protect.
+///
+/// A QUERY SETTLEMENT IS NOT DROPPABLE and is deliberately not routed
+/// through here: `QueryResults` and `QueryFailed` carry the completion
+/// the provider's budget keys on, and a dropped one leaks its permit
+/// for the life of the process. Those paths stay ungated and are
+/// bounded at their source instead — `max_concurrent_queries`
+/// outstanding, and the Swarm is not polled at all while
+/// `polling_room` is false.
+fn buffer_revocation_events(
+    outbox: &mut VecDeque<SwarmEvent>,
+    event_capacity: usize,
+    events: Vec<interweave_kademlia_control_api::KademliaEvent>,
+) -> usize {
+    let mut buffered = 0;
+    for event in events {
+        if !buffer_kademlia_event(outbox, event_capacity, 0, event) {
+            break;
+        }
+        buffered += 1;
+    }
+    buffered
+}
+
+/// How much progress slack a settlement on this command may use.
+///
+/// The driver's recorded queries PLUS THE ONE IN HAND. Review finding
+/// on PR #61, against the slack fix itself: `outstanding_queries`
+/// counts what the driver recorded, and a `StartQuery` refused
+/// immediately — `NoRoutingPeers`, or `ShuttingDown` from the draining
+/// and stopped paths — is never recorded at all. With nothing else in
+/// flight the count was zero, so on a full outbox the settlement got no
+/// slack and was dropped, leaking the permit the slack exists to
+/// release.
+///
+/// A named function rather than an expression at the call site because
+/// the `+ 1` is the whole finding, and an expression inline there can
+/// only be tested through a running Swarm.
+fn settlement_slack(kademlia: Option<&super::kademlia_driver::KademliaState>) -> usize {
+    kademlia
+        .map_or(
+            0,
+            super::kademlia_driver::KademliaState::outstanding_queries,
+        )
+        .saturating_add(1)
+}
+
+/// Buffer ONE Kademlia port event, or refuse for want of base capacity.
+///
+/// THE ONE PRIMITIVE, so the bound cannot hold on one path and not
+/// another — which is exactly how it failed: `buffer_revocation_events`
+/// argued that a query settlement must never be gated, because dropping
+/// one leaks the provider's permit, and the settlement paths were then
+/// left ungated entirely. Both halves of that were wrong together. The
+/// command branch is not gated by `polling_room`, so once polling stops
+/// a caller can drain the bounded command channel into an unbounded
+/// outbox, one immediate refusal per command, without limit.
+///
+/// The permit is the lesser loss, and only where it costs nothing: the
+/// outbox is full only when the consumer has stopped reading, and a
+/// provider that is not receiving events is not issuing queries either.
+/// When it resumes, `recent_queries_succeeded` ages out and health says
+/// so. An unbounded queue has no such recovery, and §6 forbids it.
+fn buffer_kademlia_event(
+    outbox: &mut VecDeque<SwarmEvent>,
+    event_capacity: usize,
+    outstanding_queries: usize,
+    event: interweave_kademlia_control_api::KademliaEvent,
+) -> bool {
+    // A SETTLEMENT IS PROGRESS, a routing withdrawal is a notification,
+    // and they are judged differently for that reason. `QueryResults`
+    // and `QueryFailed` release a provider budget permit that nothing
+    // else can, so they may use the slack reserved for callers awaiting
+    // progress — bounded by what the driver can have outstanding.
+    // Everything else gets base capacity only.
+    let room = if matches!(
+        event,
+        interweave_kademlia_control_api::KademliaEvent::QueryResults { .. }
+            | interweave_kademlia_control_api::KademliaEvent::QueryFailed { .. }
+    ) {
+        super::may_buffer_settlement(outbox.len(), event_capacity, outstanding_queries)
+    } else {
+        super::may_buffer_delivery(outbox.len(), event_capacity)
+    };
+    if !room {
+        return false;
+    }
+    outbox.push_back(SwarmEvent::Kademlia { event });
+    true
+}
+
 #[cfg(test)]
 mod expired_address_tests {
-    use super::{ActiveListeners, forget_address};
+    use super::{
+        ActiveListeners, SwarmEvent, TransportIdentity, VecDeque, buffer_kademlia_event,
+        buffer_revocation_events, forget_address,
+    };
     use libp2p::Multiaddr;
     use libp2p::core::transport::ListenerId;
 
@@ -1040,5 +1251,141 @@ mod expired_address_tests {
 
         assert!(!forget_address(&mut active, id, &addr(5)));
         assert!(!forget_address(&mut active, ListenerId::next(), &addr(4)));
+    }
+
+    #[test]
+    fn revoking_a_full_routing_table_cannot_overrun_the_outbox() {
+        // One `SetTrust` can revoke every seat in the table, and the
+        // driver answers with one withdrawal per seat. Pushed ungated,
+        // that is up to `max_routing_peers` entries past the base
+        // capacity — into the slack `polling_room` reserves for the
+        // callers waiting on Swarm progress, which is precisely what
+        // `may_buffer_delivery` exists to protect.
+        let peer = TransportIdentity::parse("12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN")
+            .expect("valid identity");
+        let withdrawals: Vec<_> = (0..1_024)
+            .map(
+                |_| interweave_kademlia_control_api::KademliaEvent::RoutingPeerRemoved {
+                    peer: peer.clone(),
+                },
+            )
+            .collect();
+
+        let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
+        assert_eq!(
+            buffer_revocation_events(&mut outbox, 8, withdrawals),
+            8,
+            "the base capacity, and not one more"
+        );
+        assert_eq!(outbox.len(), 8);
+
+        // A FULL outbox takes none of them, rather than one more.
+        let more =
+            vec![interweave_kademlia_control_api::KademliaEvent::RoutingPeerRemoved { peer }];
+        assert_eq!(buffer_revocation_events(&mut outbox, 8, more), 0);
+        assert_eq!(outbox.len(), 8, "the slack is not notification space");
+    }
+
+    #[test]
+    fn immediate_query_settlements_are_bounded_like_everything_else() {
+        // Review P1 on PR #61. The command branch is NOT gated by
+        // `polling_room`, so once polling stops a caller can drain the
+        // bounded command channel into an unbounded outbox — one
+        // immediate `BudgetExhausted` / `NoRoutingPeers` /
+        // `ShuttingDown` per command, without limit. The
+        // scheduled-retry branch already makes this argument; the
+        // settlement paths were exempted from it on the grounds that a
+        // dropped settlement leaks the provider's permit, which is true
+        // and is not a licence to grow without bound.
+        let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
+        let refusal = || interweave_kademlia_control_api::KademliaEvent::QueryFailed {
+            class: interweave_kademlia_control_api::QueryClass::Targeted,
+            reason: interweave_kademlia_control_api::QueryFailure::BudgetExhausted,
+        };
+        for _ in 0..4 {
+            assert!(buffer_kademlia_event(&mut outbox, 4, 0, refusal()));
+        }
+        assert!(
+            !buffer_kademlia_event(&mut outbox, 4, 0, refusal()),
+            "a caller spamming refused queries cannot grow the outbox past its base"
+        );
+        assert_eq!(outbox.len(), 4, "and nothing was appended past the bound");
+    }
+
+    #[test]
+    fn a_settlement_survives_a_momentarily_full_outbox() {
+        // The over-correction, and the second half of the P1. Gating a
+        // settlement on BASE capacity dropped it whenever the outbox
+        // was momentarily full — including when the consumer is
+        // perfectly active and merely lost a `select!` race — and the
+        // provider's permit was then gone for the life of the process.
+        //
+        // A settlement is progress, not a notification: it releases a
+        // permit nothing else can. So it gets the same slack the loop
+        // reserves for listeners and exchanges, bounded by what the
+        // driver can have outstanding.
+        let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
+        let settlement = || interweave_kademlia_control_api::KademliaEvent::QueryFailed {
+            class: interweave_kademlia_control_api::QueryClass::Targeted,
+            reason: interweave_kademlia_control_api::QueryFailure::NoRoutingPeers,
+        };
+        let withdrawal = || interweave_kademlia_control_api::KademliaEvent::RoutingPeerRemoved {
+            peer: TransportIdentity::parse("12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN")
+                .expect("valid identity"),
+        };
+        for _ in 0..4 {
+            assert!(buffer_kademlia_event(&mut outbox, 4, 2, settlement()));
+        }
+        // Base capacity is spent. Two queries are outstanding, so two
+        // settlements still fit — and a NOTIFICATION does not.
+        assert!(
+            !buffer_kademlia_event(&mut outbox, 4, 2, withdrawal()),
+            "a routing withdrawal gets base capacity only; the slack is not for it"
+        );
+        assert!(buffer_kademlia_event(&mut outbox, 4, 2, settlement()));
+        assert!(buffer_kademlia_event(&mut outbox, 4, 2, settlement()));
+        assert!(
+            !buffer_kademlia_event(&mut outbox, 4, 2, settlement()),
+            "and the slack is bounded by what can actually be outstanding"
+        );
+        assert_eq!(outbox.len(), 6);
+    }
+
+    #[test]
+    fn the_command_being_settled_earns_its_own_slot() {
+        // Review finding on PR #61, against the slack fix itself.
+        // `outstanding_queries` counts what the driver RECORDED, and a
+        // `StartQuery` refused immediately — `NoRoutingPeers`, or
+        // `ShuttingDown` from the draining and stopped paths — is never
+        // recorded at all. With nothing else in flight the count is
+        // zero, so on a full outbox the settlement got no slack and was
+        // dropped, leaking the permit the slack exists to release.
+        let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
+        let settlement = || interweave_kademlia_control_api::KademliaEvent::QueryFailed {
+            class: interweave_kademlia_control_api::QueryClass::Bootstrap,
+            reason: interweave_kademlia_control_api::QueryFailure::NoRoutingPeers,
+        };
+        for _ in 0..2 {
+            assert!(buffer_kademlia_event(&mut outbox, 2, 1, settlement()));
+        }
+        // Base capacity spent, NOTHING recorded as outstanding — the
+        // shape of a query refused before it was ever registered.
+        assert!(
+            buffer_kademlia_event(&mut outbox, 2, 1, settlement()),
+            "the command in hand is itself an outstanding query: the provider bound              a permit before sending it, and only this completion releases it"
+        );
+        assert!(
+            !buffer_kademlia_event(&mut outbox, 2, 1, settlement()),
+            "and it is ONE slot, not an unbounded exemption"
+        );
+
+        // THE SLACK ITSELF, not a literal handed to the helper. The
+        // first version of this test passed `1` directly and so proved
+        // nothing about the caller: dropping the `+ 1` left it green.
+        assert_eq!(
+            super::settlement_slack(None),
+            1,
+            "a command whose query was never recorded still earns its own slot"
+        );
     }
 }

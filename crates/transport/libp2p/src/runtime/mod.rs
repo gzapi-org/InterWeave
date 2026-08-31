@@ -43,13 +43,14 @@ use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::TransportError as DirectError;
 use interweave_transport_api::{EndpointId, TransportIdentity};
 use interweave_transport_runtime::{
-    ConnectionManager, ConnectionPolicy, DialDenial, DialOrigin, DialTicket, TrustSources,
+    ConnectionManager, ConnectionPolicy, DialDenial, DialOrigin, TrustSources,
 };
 use libp2p::{PeerId, noise, tcp, yamux};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::behaviour::SubstrateBehaviour;
 use crate::gated_swarm::{GatedSwarm, mesh_admits};
+use crate::outbound_gate::{InFlightTickets, OutboundAdmission};
 
 mod broadcast;
 mod commands;
@@ -58,6 +59,7 @@ mod dialing;
 mod direct;
 mod endpoints;
 mod handle;
+pub mod kademlia_driver;
 mod messages;
 
 // Re-exported so `lib.rs` and every call site keep the paths they had:
@@ -195,6 +197,29 @@ const fn shutdown_settled(
             && answering_directory == 0)
 }
 
+/// Hand the consumer what is already queued, before the loop ends.
+///
+/// SHUTDOWN SETTLEMENTS ARE IN HERE. The Kademlia driver answers a
+/// shutdown with one `QueryFailed { ShuttingDown }` per outstanding
+/// query, and the provider's budget releases a permit only on a
+/// completion — so a `break` that dropped the outbox discarded the very
+/// events the shutdown path exists to produce, and queued them for
+/// nobody. Review finding on PR #61: invoking the driver is not the
+/// same as delivering what it returned.
+///
+/// BEST EFFORT, and the limit is stated rather than hidden: `try_send`
+/// never blocks, so a consumer that has stopped reading gets what its
+/// channel can still hold and no more. Awaiting room instead would let
+/// a consumer that is not reading hang the shutdown it was asked to
+/// perform, which is worse than an undelivered notification.
+fn flush_outbox(outbox: &mut VecDeque<SwarmEvent>, tx: &mpsc::Sender<SwarmEvent>) {
+    while let Some(event) = outbox.pop_front() {
+        if tx.try_send(event).is_err() {
+            return;
+        }
+    }
+}
+
 /// Whether the Swarm may be polled.
 ///
 /// The outbox is bounded so a stalled consumer cannot make this process
@@ -224,12 +249,44 @@ const fn polling_room(
     pending_listens: usize,
     pending_exchanges: usize,
     answering_inbound: usize,
+    outstanding_queries: usize,
 ) -> bool {
     buffered
         < event_capacity
             .saturating_add(pending_listens)
             .saturating_add(pending_exchanges)
             .saturating_add(answering_inbound)
+            .saturating_add(outstanding_queries)
+}
+
+/// Whether a Kademlia query SETTLEMENT may be buffered.
+///
+/// A FOURTH KIND OF CALLER EARNS PROGRESS SLACK. The other three —
+/// listeners awaiting an address, exchanges awaiting a response,
+/// inbound answers queued — are all callers whose work only completes
+/// when a Swarm event reaches them. An outstanding Kademlia query is
+/// the same shape: the provider bound a budget permit before issuing
+/// it, and only a completion releases that permit.
+///
+/// So a settlement is not a notification and must not be judged as one.
+/// Gating it on base capacity alone dropped it whenever the outbox was
+/// MOMENTARILY full — including when the consumer is perfectly active
+/// and merely lost a `select!` race — and the permit was then gone for
+/// the life of the process. Pushing it unconditionally was the other
+/// error: the command branch is not gated by [`polling_room`], so a
+/// caller could drain the bounded command channel into an unbounded
+/// outbox one refusal at a time.
+///
+/// The slack is bounded by what the driver can have outstanding, which
+/// is `max_concurrent_queries` — its own ceiling, refused above it. So
+/// this cannot become the unbounded queue the capacity exists to rule
+/// out, and it cannot lose a settlement a live provider is waiting on.
+const fn may_buffer_settlement(
+    buffered: usize,
+    event_capacity: usize,
+    outstanding_queries: usize,
+) -> bool {
+    buffered < event_capacity.saturating_add(outstanding_queries)
 }
 
 // The directory's own pending queries and queued answers are folded into
@@ -360,40 +417,13 @@ impl SwarmRuntime {
         let keypair = identity.swarm_keypair();
         let local_peer = to_transport_identity(&PeerId::from_public_key(&keypair.public()))?;
 
-        let swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
-            .with_tokio()
-            .with_tcp(
-                tcp::Config::default().nodelay(true),
-                noise::Config::new,
-                yamux::Config::default,
-            )
-            .map_err(|e| SubstrateError::Transport(e.to_string()))?
-            // The behaviour is now fallible: GossipSub refuses a
-            // configuration whose authenticity and validation mode
-            // disagree, at construction. Boxed because the builder wants
-            // an error that implements `Error`, and a contradiction here
-            // should stop the runtime starting rather than panic inside
-            // the task that would have driven it.
-            .with_behaviour(|key| {
-                SubstrateBehaviour::new(key, config.preauth)
-                    .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
-            })
-            .map_err(|e| SubstrateError::Transport(e.to_string()))?
-            .with_swarm_config(|c| c.with_idle_connection_timeout(config.idle_timeout))
-            // THE HANDSHAKE TIMEOUT, taken from the same limits the
-            // pre-auth gate enforces rather than left to libp2p's
-            // default. The two happen to agree at ten seconds today,
-            // and a configuration that narrowed one without the other
-            // would produce a listener whose accounting and whose
-            // transport disagreed about when a handshake is over --
-            // slots reclaimed while the socket was still negotiating,
-            // or the reverse.
-            .with_connection_timeout(Duration::from_millis(config.preauth.handshake_timeout_ms()))
-            .build();
-        let mut swarm = GatedSwarm::new(swarm);
-
-        // The Stage 2 policy, driving a real dial path from the first
-        // line of substrate code rather than being wired in later.
+        // THE ROOT ADMISSION EXISTS BEFORE THE SWARM. The outbound gate
+        // inside the behaviour admits behaviour-originated dials through
+        // the manager's snapshot handle, so the manager — and the clock
+        // and in-flight set it shares with the runtime loop — must be
+        // constructed first. The ordering CLAUDE.md §3 demands, made
+        // structural: a behaviour cannot be built without the admission
+        // it consults.
         let policy = ConnectionPolicy::new(config.max_pending_dials, config.max_connections);
         let mut manager = ConnectionManager::new(policy, config.max_pending_dials);
         // THE LOCAL IDENTITY FIRST, from the keypair rather than from
@@ -413,17 +443,69 @@ impl SwarmRuntime {
         // A MONOTONIC CLOCK, because the policy is a state machine over
         // time and it had been given a literal `0` on every call. Every
         // backoff window, every quarantine, and every retry deadline was
-        // therefore evaluated at the same instant forever: an address
-        // quarantined for thirty minutes was quarantined until restart,
-        // and a peer in backoff never left it. `Instant` rather than
-        // wall time so a clock adjustment cannot move a deadline.
+        // therefore evaluated at the same instant forever. `Instant`
+        // rather than wall time so a clock adjustment cannot move a
+        // deadline. Shared with the gate: two clock origins would
+        // timestamp admissions and settlements on different axes, which
+        // is SPIKE-003's F8b in a new disguise.
         let started = tokio::time::Instant::now();
 
         // Tickets for dials the Swarm has accepted and not yet reported
         // on. Keyed by the connection id the dial was built with, which
         // is knowable before dialling and is what the outcome event
-        // carries back.
-        let mut in_flight: HashMap<libp2p::swarm::ConnectionId, DialTicket> = HashMap::new();
+        // carries back. SHARED with the gate, which deposits a
+        // behaviour dial's ticket in its pending hook and re-binds it
+        // at establishment.
+        let in_flight = InFlightTickets::default();
+        let outbound = OutboundAdmission::new(manager.handle(), in_flight.clone(), started);
+
+        // The Kademlia behaviour exists only when configured: a profile
+        // with no enabled kademlia entry advertises nothing, answers
+        // nothing, and dials nothing (§13). Validated by
+        // `SubstrateConfig::validate` before anything was built.
+        let local_pid = libp2p::PeerId::from_public_key(&keypair.public());
+        let (kad_toggle, mut kademlia_state) = match &config.kademlia {
+            Some(settings) => (
+                libp2p::swarm::behaviour::toggle::Toggle::from(Some(
+                    kademlia_driver::build_behaviour(settings, local_pid)
+                        .map_err(SubstrateError::Kademlia)?,
+                )),
+                Some(kademlia_driver::KademliaState::new(settings)),
+            ),
+            None => (libp2p::swarm::behaviour::toggle::Toggle::from(None), None),
+        };
+
+        let swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
+            .with_tokio()
+            .with_tcp(
+                tcp::Config::default().nodelay(true),
+                noise::Config::new,
+                yamux::Config::default,
+            )
+            .map_err(|e| SubstrateError::Transport(e.to_string()))?
+            // The behaviour is now fallible: GossipSub refuses a
+            // configuration whose authenticity and validation mode
+            // disagree, at construction. Boxed because the builder wants
+            // an error that implements `Error`, and a contradiction here
+            // should stop the runtime starting rather than panic inside
+            // the task that would have driven it.
+            .with_behaviour(|key| {
+                SubstrateBehaviour::new(key, config.preauth, outbound, kad_toggle)
+                    .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
+            })
+            .map_err(|e| SubstrateError::Transport(e.to_string()))?
+            .with_swarm_config(|c| c.with_idle_connection_timeout(config.idle_timeout))
+            // THE HANDSHAKE TIMEOUT, taken from the same limits the
+            // pre-auth gate enforces rather than left to libp2p's
+            // default. The two happen to agree at ten seconds today,
+            // and a configuration that narrowed one without the other
+            // would produce a listener whose accounting and whose
+            // transport disagreed about when a handshake is over --
+            // slots reclaimed while the socket was still negotiating,
+            // or the reverse.
+            .with_connection_timeout(Duration::from_millis(config.preauth.handshake_timeout_ms()))
+            .build();
+        let mut swarm = GatedSwarm::new(swarm);
 
         // Every connection this process holds open, each holding the
         // slot it occupies under `max_connections`. Bounded by that
@@ -565,6 +647,7 @@ impl SwarmRuntime {
                         tokio::time::Instant::now() >= *deadline,
                     )
                 {
+                    flush_outbox(&mut outbox, &event_tx);
                     if let Some((_, reply)) = stopping.take() {
                         let _ = reply.send(());
                     }
@@ -576,12 +659,16 @@ impl SwarmRuntime {
                 // branch below is inert then.
                 let grace_deadline = stopping.as_ref().map(|(deadline, _)| *deadline);
 
+                let outstanding_queries = kademlia_state
+                    .as_ref()
+                    .map_or(0, |s| s.outstanding_queries());
                 let room = polling_room(
                     outbox.len(),
                     config.event_capacity,
                     listens.len(),
                     pending_direct.len() + pending_endpoints.len(),
                     direct_state.answering() + directory_state.answering(),
+                    outstanding_queries,
                 );
 
                 tokio::select! {
@@ -629,7 +716,7 @@ impl SwarmRuntime {
                                 match attempt_dial(
                                     &mut swarm,
                                     &mut manager,
-                                    &mut in_flight,
+                                    &in_flight,
                                     &peer,
                                     &address,
                                     DialOrigin::ConnectionManager,
@@ -764,6 +851,37 @@ impl SwarmRuntime {
                             // spin forever.
                             None => break,
                             Some(SwarmCommand::Shutdown { reply }) => {
+                                // THE DRIVER STOPS ON THIS PATH TOO.
+                                // Review finding on PR #61: the drain
+                                // arm told the driver to shut down, but
+                                // `SwarmRuntime::shutdown` sends
+                                // `Shutdown`, which is intercepted here
+                                // and never reaches `handle_command`.
+                                // So an ordinary shutdown dropped every
+                                // outstanding Kademlia query without a
+                                // `QueryFailed`, and the provider's
+                                // budget permits — settled only by a
+                                // completion — leaked for good; and
+                                // through the grace below the behaviour
+                                // went on serving and querying while the
+                                // rest of the runtime wound down.
+                                //
+                                // Before the early break, so the
+                                // common case is covered rather than
+                                // only the graceful one.
+                                if let Some(state) = kademlia_state.as_mut()
+                                    && let Some(behaviour) = swarm.kademlia_mut()
+                                {
+                                    for event in kademlia_driver::handle_command(
+                                        state,
+                                        behaviour,
+                                        &manager,
+                                        interweave_kademlia_control_api::KademliaCommand::Shutdown,
+                                        now_ms(started),
+                                    ) {
+                                        outbox.push_back(SwarmEvent::Kademlia { event });
+                                    }
+                                }
                                 // NOTHING IN FLIGHT IS THE COMMON CASE,
                                 // and it still stops immediately.
                                 if shutdown_settled(
@@ -774,6 +892,7 @@ impl SwarmRuntime {
                                     false,
                                 ) || stopping.is_some()
                                 {
+                                    flush_outbox(&mut outbox, &event_tx);
                                     let _ = reply.send(());
                                     break;
                                 }
@@ -812,7 +931,8 @@ impl SwarmRuntime {
                                     &mut direct_state,
                                     &mut directory_state,
                                     &mut broadcast_state,
-                                    &mut in_flight,
+                                    &in_flight,
+                                    kademlia_state.as_mut(),
                                     config.max_pending_listens,
                                     config.max_active_listeners,
                                     config.max_payload_bytes,
@@ -927,11 +1047,36 @@ impl SwarmRuntime {
                             endpoints::Handled::Passed(event) => *event,
                         };
 
+                        // THE DRIVER SEES IT FIRST: kad events fold
+                        // onto the port and stop here; Identify is
+                        // peeked (F3) and passes on to the settlement
+                        // and translation below.
+                        let event = if let Some(state) = kademlia_state.as_mut() {
+                            let mut kad_events = Vec::new();
+                            let handled = kademlia_driver::handle_kademlia(
+                                event,
+                                &mut swarm,
+                                state,
+                                &manager,
+                                now_ms(started),
+                                &mut kad_events,
+                            );
+                            for event in kad_events {
+                                outbox.push_back(SwarmEvent::Kademlia { event });
+                            }
+                            match handled {
+                                kademlia_driver::KadHandled::Consumed => continue,
+                                kademlia_driver::KadHandled::Passed(event) => *event,
+                            }
+                        } else {
+                            event
+                        };
+
                         let mut refuse = Vec::new();
                         let announce = settle_outcome(
                             &event,
                             &mut manager,
-                            &mut in_flight,
+                            &in_flight,
                             &mut open,
                             &mut refuse,
                             now_ms(started),
@@ -1077,6 +1222,64 @@ impl SwarmRuntime {
 }
 
 #[cfg(test)]
+mod flush_tests {
+    #![allow(clippy::expect_used)]
+    use super::{SwarmEvent, flush_outbox};
+    use std::collections::VecDeque;
+    use tokio::sync::mpsc;
+
+    fn kad_settlement() -> SwarmEvent {
+        SwarmEvent::Kademlia {
+            event: interweave_kademlia_control_api::KademliaEvent::QueryFailed {
+                class: interweave_kademlia_control_api::QueryClass::Exploration,
+                reason: interweave_kademlia_control_api::QueryFailure::ShuttingDown,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn a_shutdown_delivers_the_settlements_it_queued() {
+        // Review finding on PR #61: the shutdown path invoked the driver
+        // and pushed its `QueryFailed` events into the outbox, and the
+        // `break` on the very next line dropped the queue. A query permit
+        // is released only by a completion, so the settlement the
+        // shutdown exists to produce reached nobody.
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
+        outbox.push_back(kad_settlement());
+        outbox.push_back(kad_settlement());
+
+        flush_outbox(&mut outbox, &tx);
+        assert!(outbox.is_empty(), "everything the channel could take went");
+        assert!(
+            matches!(rx.try_recv(), Ok(SwarmEvent::Kademlia { .. })),
+            "and the consumer actually receives it"
+        );
+        assert!(matches!(rx.try_recv(), Ok(SwarmEvent::Kademlia { .. })));
+    }
+
+    #[tokio::test]
+    async fn a_full_channel_ends_the_flush_rather_than_blocking_it() {
+        // BEST EFFORT is the contract, not an accident: awaiting room
+        // would let a consumer that stopped reading hang the shutdown it
+        // was asked to perform.
+        let (tx, _rx) = mpsc::channel(1);
+        let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
+        outbox.push_back(kad_settlement());
+        outbox.push_back(kad_settlement());
+        outbox.push_back(kad_settlement());
+
+        flush_outbox(&mut outbox, &tx);
+        assert_eq!(
+            outbox.len(),
+            1,
+            "one delivered, one consumed by the failed send, and the rest left \
+             rather than the loop spinning or awaiting"
+        );
+    }
+}
+
+#[cfg(test)]
 mod outbound_bound_tests {
     use super::{MAX_OUTBOUND_DIRECT, MAX_OUTBOUND_DIRECT_PER_PEER, admit_outbound};
     use interweave_transport_api::{TransportError, TransportIdentity};
@@ -1169,7 +1372,7 @@ mod backpressure_tests {
         let listens = 1;
 
         assert!(
-            polling_room(buffered, event_capacity, listens, 0, 0),
+            polling_room(buffered, event_capacity, listens, 0, 0, 0),
             "with a listener pending the Swarm must still be polled"
         );
         assert!(
@@ -1182,7 +1385,7 @@ mod backpressure_tests {
         let old_spelling = buffered < event_capacity + listens;
         assert!(old_spelling, "the previous condition admitted the push");
         assert!(
-            !polling_room(buffered + 1, event_capacity, listens, 0, 0),
+            !polling_room(buffered + 1, event_capacity, listens, 0, 0, 0),
             "which is precisely the state where the listener can never resolve"
         );
     }
@@ -1191,8 +1394,8 @@ mod backpressure_tests {
     /// is the whole allowance.
     #[test]
     fn a_stalled_consumer_with_nothing_in_flight_stops_polling() {
-        assert!(polling_room(0, 1, 0, 0, 0));
-        assert!(!polling_room(1, 1, 0, 0, 0));
+        assert!(polling_room(0, 1, 0, 0, 0, 0));
+        assert!(!polling_room(1, 1, 0, 0, 0, 0));
     }
 
     /// In-flight exchanges buy room, because polling is what settles
@@ -1201,11 +1404,11 @@ mod backpressure_tests {
     #[test]
     fn in_flight_exchanges_keep_polling_alive() {
         assert!(
-            polling_room(1, 1, 0, 1, 0),
+            polling_room(1, 1, 0, 1, 0, 0),
             "one exchange in flight, one event buffered: still polling"
         );
         assert!(
-            !polling_room(2, 1, 0, 1, 0),
+            !polling_room(2, 1, 0, 1, 0, 0),
             "and the slack is exactly one, not unbounded"
         );
     }
@@ -1218,7 +1421,7 @@ mod backpressure_tests {
     fn a_delivery_may_not_spend_the_slack_an_exchange_bought() {
         // One exchange in flight, base capacity one, one event already
         // buffered. Polling continues...
-        assert!(polling_room(1, 1, 0, 1, 0));
+        assert!(polling_room(1, 1, 0, 1, 0, 0));
         // ...and that remaining slot is NOT available to a delivery.
         assert!(
             !may_buffer_delivery(1, 1),
@@ -1234,11 +1437,11 @@ mod backpressure_tests {
     #[test]
     fn a_queued_inbound_answer_keeps_polling_alive() {
         assert!(
-            polling_room(1, 1, 0, 0, 1),
+            polling_room(1, 1, 0, 0, 1, 0),
             "nothing else in flight, but an answer is waiting to be written"
         );
         assert!(
-            !polling_room(2, 1, 0, 0, 1),
+            !polling_room(2, 1, 0, 0, 1, 0),
             "and that slack is exactly one, like the others"
         );
     }
@@ -1269,7 +1472,7 @@ mod backpressure_tests {
     fn a_listeners_slot_is_not_available_to_a_delivery() {
         // Outbox full at base capacity, one listener waiting. Polling
         // continues on the listener's account...
-        assert!(polling_room(1, 1, 1, 0, 0));
+        assert!(polling_room(1, 1, 1, 0, 0, 0));
         // ...and that slot is NOT a delivery's to take.
         assert!(
             !may_buffer_delivery(1, 1),
