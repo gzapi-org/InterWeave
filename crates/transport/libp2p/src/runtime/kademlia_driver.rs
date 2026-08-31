@@ -510,13 +510,26 @@ fn try_admit(
     }
     // OPTIMISTIC population accounting: `RoutingUpdated` is the truth
     // and arrives via poll, but two admissions inside one command batch
-    // would both read the stale count. Counting here can only
-    // over-count — a bucket that refuses the insert leaves a phantom —
-    // which under-admits, the fail-closed direction. The event handler
-    // reconciles from the behaviour's own report.
+    // would both read the stale count, so the seat is claimed here.
     state.routed.insert(pid);
+    // AND THE CLAIM IS ROLLED BACK WHEN THE TABLE REFUSED IT. The
+    // return of `add_address` was discarded, and `RoutingUpdated` only
+    // ever ADDS (`is_new_peer`) or removes an evicted `old_peer` — so a
+    // peer whose every address came back `Failed` was never named by
+    // any later event and its phantom seat was permanent. The count
+    // then ratcheted monotonically toward `max_routing_peers`, after
+    // which nothing new could be admitted at all. `Pending` is not a
+    // refusal: the peer is queued and `RoutingUpdated` follows if it
+    // lands, and a disconnect reclaims it if it does not.
+    let mut accepted = false;
     for addr in addresses {
-        let _ = behaviour.add_address(&pid, addr);
+        accepted |= !matches!(
+            behaviour.add_address(&pid, addr),
+            kad::RoutingUpdate::Failed
+        );
+    }
+    if !accepted {
+        state.routed.remove(&pid);
     }
     Vec::new()
 }
@@ -1393,6 +1406,68 @@ mod tests {
         assert!(
             !state.pending_offers.contains_key(&crowd[0]),
             "and the stalest is what made room, rather than the newest being refused"
+        );
+    }
+
+    #[test]
+    fn a_refused_insert_does_not_leave_a_phantom_seat() {
+        // The seat is claimed optimistically so two admissions in one
+        // batch cannot both read a stale count. The return of
+        // `add_address` was then DISCARDED — and `RoutingUpdated` only
+        // ever adds (`is_new_peer`) or removes an evicted `old_peer`,
+        // so a peer the table refused was never named by any later
+        // event and its phantom was permanent. `routed` then ratcheted
+        // toward `max_routing_peers`, after which nothing new could be
+        // admitted at all.
+        //
+        // The local peer is the reliable refusal: `add_address` looks
+        // up its own key, finds no bucket, and answers `Failed`. The
+        // manager here never binds a local identity, so classification
+        // does not intercept before the behaviour can refuse.
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let local = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let local_id = to_transport_identity(&local).expect("canonical");
+        let mut state = KademliaState::new(&settings);
+        let mut behaviour = build_behaviour(&settings, local).expect("buildable");
+        let mut manager = interweave_transport_runtime::ConnectionManager::new(
+            interweave_transport_runtime::ConnectionPolicy::default(),
+            8,
+        );
+        let _ = manager.set_trust(
+            interweave_transport_runtime::TrustSources::new(
+                interweave_trust_api::PeerTrustPolicy::new([local_id.clone()]).expect("small"),
+                interweave_trust_api::InfrastructureSet::default(),
+            ),
+            &[],
+        );
+        state.advertises.insert(local, (true, 0));
+        state
+            .pending_offers
+            .entry(local)
+            .or_default()
+            .0
+            .insert("/ip4/127.0.0.1/tcp/1".parse().expect("valid"));
+
+        let _ = try_admit(&mut state, &mut behaviour, &manager, local, &local_id, 0);
+        assert!(
+            !state.routed.contains(&local),
+            "a seat the table refused is given back, not held forever"
+        );
+        assert!(
+            state.routed.is_empty(),
+            "so the population count still describes the table"
         );
     }
 
