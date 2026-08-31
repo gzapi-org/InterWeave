@@ -558,6 +558,20 @@ impl KademliaDiscovery {
     /// either permit. A handle nothing holds settles nothing, which is
     /// the honest answer for a duplicate or a query this provider never
     /// commanded and was never told about.
+    ///
+    /// AND SETTLES NOTHING ELSE EITHER. Review finding on PR #64: the
+    /// `finish` result was discarded and the exploration branch ran
+    /// regardless, so a completion for a handle this provider does not
+    /// hold — a duplicate, or a query it was never told about — took
+    /// the snapshot belonging to the round still in flight. That
+    /// cleared `exploration_snapshot`, which is the only thing `tick`
+    /// consults before starting another round, so a second exploration
+    /// could run concurrently with the first; the real completion then
+    /// found no snapshot and updated neither pacing nor saturation. The
+    /// sentence above was already the intent. It is now also what the
+    /// code does, and
+    /// `a_stale_exploration_completion_settles_no_running_round` fails
+    /// if that stops being true.
     fn settle(
         &mut self,
         handle: interweave_kademlia_control_api::QueryHandle,
@@ -566,7 +580,9 @@ impl KademliaDiscovery {
         succeeded: bool,
         address_progress: bool,
     ) {
-        let _ = self.budgets.finish(handle);
+        if !self.budgets.finish(handle) {
+            return;
+        }
         if class == QueryClass::Exploration
             && let Some(snapshot) = self.exploration_snapshot.take()
         {
@@ -2339,6 +2355,47 @@ mod tests {
             p.pacing.next_exploration_due_ms(),
             Some(before + interweave_kademlia_control_api::MAX_EXPLORATION_INTERVAL_MS),
             "a two-peer overlay does not run a 60-second loop forever"
+        );
+    }
+
+    #[test]
+    fn a_stale_exploration_completion_settles_no_running_round() {
+        let mut p = started(KademliaMode::Client);
+        let router = synthetic_peer(1);
+        p.set_remote_trusted(
+            [router.clone(), synthetic_peer(2), synthetic_peer(3)]
+                .into_iter()
+                .collect(),
+        );
+        routed(&mut p, &router, 1_000);
+
+        // One exploration round, run to completion. Its handle is now
+        // settled: the provider holds no permit for it any more.
+        assert!(p.tick(10_000, [0_u8; 32]), "the view warrants a round");
+        let spent = last_handle(&p);
+        p.ingest_driver_event(done(spent, QueryClass::Exploration), 10_000);
+
+        // A second round starts and is still in flight.
+        assert!(p.tick(600_000, [1_u8; 32]), "the pace allows another");
+        let running = last_handle(&p);
+        assert_ne!(spent, running, "a fresh round has a fresh handle");
+
+        // The FIRST round's completion arrives again — a duplicate, or
+        // a driver replaying what it already reported. It names a
+        // handle this provider does not hold, so it must settle
+        // nothing: not the running round's snapshot, and not its seat.
+        p.ingest_driver_event(done(spent, QueryClass::Exploration), 600_001);
+        assert!(
+            !p.tick(1_200_000, [2_u8; 32]),
+            "a stale completion did not free the seat the running round holds"
+        );
+
+        // And the real completion still finds its snapshot, so pacing
+        // and saturation are judged against the round that ran.
+        p.ingest_driver_event(done(running, QueryClass::Exploration), 1_200_001);
+        assert!(
+            p.tick(1_800_000, [3_u8; 32]),
+            "the round that owned the seat gave it back"
         );
     }
 
