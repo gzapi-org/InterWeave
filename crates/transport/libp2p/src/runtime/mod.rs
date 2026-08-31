@@ -249,12 +249,44 @@ const fn polling_room(
     pending_listens: usize,
     pending_exchanges: usize,
     answering_inbound: usize,
+    outstanding_queries: usize,
 ) -> bool {
     buffered
         < event_capacity
             .saturating_add(pending_listens)
             .saturating_add(pending_exchanges)
             .saturating_add(answering_inbound)
+            .saturating_add(outstanding_queries)
+}
+
+/// Whether a Kademlia query SETTLEMENT may be buffered.
+///
+/// A FOURTH KIND OF CALLER EARNS PROGRESS SLACK. The other three —
+/// listeners awaiting an address, exchanges awaiting a response,
+/// inbound answers queued — are all callers whose work only completes
+/// when a Swarm event reaches them. An outstanding Kademlia query is
+/// the same shape: the provider bound a budget permit before issuing
+/// it, and only a completion releases that permit.
+///
+/// So a settlement is not a notification and must not be judged as one.
+/// Gating it on base capacity alone dropped it whenever the outbox was
+/// MOMENTARILY full — including when the consumer is perfectly active
+/// and merely lost a `select!` race — and the permit was then gone for
+/// the life of the process. Pushing it unconditionally was the other
+/// error: the command branch is not gated by [`polling_room`], so a
+/// caller could drain the bounded command channel into an unbounded
+/// outbox one refusal at a time.
+///
+/// The slack is bounded by what the driver can have outstanding, which
+/// is `max_concurrent_queries` — its own ceiling, refused above it. So
+/// this cannot become the unbounded queue the capacity exists to rule
+/// out, and it cannot lose a settlement a live provider is waiting on.
+const fn may_buffer_settlement(
+    buffered: usize,
+    event_capacity: usize,
+    outstanding_queries: usize,
+) -> bool {
+    buffered < event_capacity.saturating_add(outstanding_queries)
 }
 
 // The directory's own pending queries and queued answers are folded into
@@ -627,12 +659,16 @@ impl SwarmRuntime {
                 // branch below is inert then.
                 let grace_deadline = stopping.as_ref().map(|(deadline, _)| *deadline);
 
+                let outstanding_queries = kademlia_state
+                    .as_ref()
+                    .map_or(0, |s| s.outstanding_queries());
                 let room = polling_room(
                     outbox.len(),
                     config.event_capacity,
                     listens.len(),
                     pending_direct.len() + pending_endpoints.len(),
                     direct_state.answering() + directory_state.answering(),
+                    outstanding_queries,
                 );
 
                 tokio::select! {
@@ -1336,7 +1372,7 @@ mod backpressure_tests {
         let listens = 1;
 
         assert!(
-            polling_room(buffered, event_capacity, listens, 0, 0),
+            polling_room(buffered, event_capacity, listens, 0, 0, 0),
             "with a listener pending the Swarm must still be polled"
         );
         assert!(
@@ -1349,7 +1385,7 @@ mod backpressure_tests {
         let old_spelling = buffered < event_capacity + listens;
         assert!(old_spelling, "the previous condition admitted the push");
         assert!(
-            !polling_room(buffered + 1, event_capacity, listens, 0, 0),
+            !polling_room(buffered + 1, event_capacity, listens, 0, 0, 0),
             "which is precisely the state where the listener can never resolve"
         );
     }
@@ -1358,8 +1394,8 @@ mod backpressure_tests {
     /// is the whole allowance.
     #[test]
     fn a_stalled_consumer_with_nothing_in_flight_stops_polling() {
-        assert!(polling_room(0, 1, 0, 0, 0));
-        assert!(!polling_room(1, 1, 0, 0, 0));
+        assert!(polling_room(0, 1, 0, 0, 0, 0));
+        assert!(!polling_room(1, 1, 0, 0, 0, 0));
     }
 
     /// In-flight exchanges buy room, because polling is what settles
@@ -1368,11 +1404,11 @@ mod backpressure_tests {
     #[test]
     fn in_flight_exchanges_keep_polling_alive() {
         assert!(
-            polling_room(1, 1, 0, 1, 0),
+            polling_room(1, 1, 0, 1, 0, 0),
             "one exchange in flight, one event buffered: still polling"
         );
         assert!(
-            !polling_room(2, 1, 0, 1, 0),
+            !polling_room(2, 1, 0, 1, 0, 0),
             "and the slack is exactly one, not unbounded"
         );
     }
@@ -1385,7 +1421,7 @@ mod backpressure_tests {
     fn a_delivery_may_not_spend_the_slack_an_exchange_bought() {
         // One exchange in flight, base capacity one, one event already
         // buffered. Polling continues...
-        assert!(polling_room(1, 1, 0, 1, 0));
+        assert!(polling_room(1, 1, 0, 1, 0, 0));
         // ...and that remaining slot is NOT available to a delivery.
         assert!(
             !may_buffer_delivery(1, 1),
@@ -1401,11 +1437,11 @@ mod backpressure_tests {
     #[test]
     fn a_queued_inbound_answer_keeps_polling_alive() {
         assert!(
-            polling_room(1, 1, 0, 0, 1),
+            polling_room(1, 1, 0, 0, 1, 0),
             "nothing else in flight, but an answer is waiting to be written"
         );
         assert!(
-            !polling_room(2, 1, 0, 0, 1),
+            !polling_room(2, 1, 0, 0, 1, 0),
             "and that slack is exactly one, like the others"
         );
     }
@@ -1436,7 +1472,7 @@ mod backpressure_tests {
     fn a_listeners_slot_is_not_available_to_a_delivery() {
         // Outbox full at base capacity, one listener waiting. Polling
         // continues on the listener's account...
-        assert!(polling_room(1, 1, 1, 0, 0));
+        assert!(polling_room(1, 1, 1, 0, 0, 0));
         // ...and that slot is NOT a delivery's to take.
         assert!(
             !may_buffer_delivery(1, 1),

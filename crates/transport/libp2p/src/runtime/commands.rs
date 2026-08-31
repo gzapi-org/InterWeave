@@ -789,8 +789,9 @@ pub(super) fn handle_command(
             // receiving events is not issuing queries either. When it
             // resumes, `recent_queries_succeeded` ages out and health
             // reports the gap. An unbounded queue has no such recovery.
+            let outstanding = kademlia.as_ref().map_or(0, |s| s.outstanding_queries());
             let settle = |outbox: &mut VecDeque<SwarmEvent>, event| {
-                let _ = buffer_kademlia_event(outbox, event_capacity, event);
+                let _ = buffer_kademlia_event(outbox, event_capacity, outstanding, event);
             };
             if manager.is_draining()
                 && let interweave_kademlia_control_api::KademliaCommand::StartQuery {
@@ -1100,7 +1101,7 @@ fn buffer_revocation_events(
 ) -> usize {
     let mut buffered = 0;
     for event in events {
-        if !buffer_kademlia_event(outbox, event_capacity, event) {
+        if !buffer_kademlia_event(outbox, event_capacity, 0, event) {
             break;
         }
         buffered += 1;
@@ -1127,9 +1128,25 @@ fn buffer_revocation_events(
 fn buffer_kademlia_event(
     outbox: &mut VecDeque<SwarmEvent>,
     event_capacity: usize,
+    outstanding_queries: usize,
     event: interweave_kademlia_control_api::KademliaEvent,
 ) -> bool {
-    if !super::may_buffer_delivery(outbox.len(), event_capacity) {
+    // A SETTLEMENT IS PROGRESS, a routing withdrawal is a notification,
+    // and they are judged differently for that reason. `QueryResults`
+    // and `QueryFailed` release a provider budget permit that nothing
+    // else can, so they may use the slack reserved for callers awaiting
+    // progress — bounded by what the driver can have outstanding.
+    // Everything else gets base capacity only.
+    let room = if matches!(
+        event,
+        interweave_kademlia_control_api::KademliaEvent::QueryResults { .. }
+            | interweave_kademlia_control_api::KademliaEvent::QueryFailed { .. }
+    ) {
+        super::may_buffer_settlement(outbox.len(), event_capacity, outstanding_queries)
+    } else {
+        super::may_buffer_delivery(outbox.len(), event_capacity)
+    };
+    if !room {
         return false;
     }
     outbox.push_back(SwarmEvent::Kademlia { event });
@@ -1253,12 +1270,51 @@ mod expired_address_tests {
             reason: interweave_kademlia_control_api::QueryFailure::BudgetExhausted,
         };
         for _ in 0..4 {
-            assert!(buffer_kademlia_event(&mut outbox, 4, refusal()));
+            assert!(buffer_kademlia_event(&mut outbox, 4, 0, refusal()));
         }
         assert!(
-            !buffer_kademlia_event(&mut outbox, 4, refusal()),
+            !buffer_kademlia_event(&mut outbox, 4, 0, refusal()),
             "a caller spamming refused queries cannot grow the outbox past its base"
         );
         assert_eq!(outbox.len(), 4, "and nothing was appended past the bound");
+    }
+
+    #[test]
+    fn a_settlement_survives_a_momentarily_full_outbox() {
+        // The over-correction, and the second half of the P1. Gating a
+        // settlement on BASE capacity dropped it whenever the outbox
+        // was momentarily full — including when the consumer is
+        // perfectly active and merely lost a `select!` race — and the
+        // provider's permit was then gone for the life of the process.
+        //
+        // A settlement is progress, not a notification: it releases a
+        // permit nothing else can. So it gets the same slack the loop
+        // reserves for listeners and exchanges, bounded by what the
+        // driver can have outstanding.
+        let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
+        let settlement = || interweave_kademlia_control_api::KademliaEvent::QueryFailed {
+            class: interweave_kademlia_control_api::QueryClass::Targeted,
+            reason: interweave_kademlia_control_api::QueryFailure::NoRoutingPeers,
+        };
+        let withdrawal = || interweave_kademlia_control_api::KademliaEvent::RoutingPeerRemoved {
+            peer: TransportIdentity::parse("12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN")
+                .expect("valid identity"),
+        };
+        for _ in 0..4 {
+            assert!(buffer_kademlia_event(&mut outbox, 4, 2, settlement()));
+        }
+        // Base capacity is spent. Two queries are outstanding, so two
+        // settlements still fit — and a NOTIFICATION does not.
+        assert!(
+            !buffer_kademlia_event(&mut outbox, 4, 2, withdrawal()),
+            "a routing withdrawal gets base capacity only; the slack is not for it"
+        );
+        assert!(buffer_kademlia_event(&mut outbox, 4, 2, settlement()));
+        assert!(buffer_kademlia_event(&mut outbox, 4, 2, settlement()));
+        assert!(
+            !buffer_kademlia_event(&mut outbox, 4, 2, settlement()),
+            "and the slack is bounded by what can actually be outstanding"
+        );
+        assert_eq!(outbox.len(), 6);
     }
 }
