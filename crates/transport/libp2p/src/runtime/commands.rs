@@ -9,7 +9,7 @@
 //! of one boundary, and a change to what a command means almost always
 //! implies a change to what the caller is told happened.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use libp2p::Multiaddr;
 use libp2p::core::transport::ListenerId;
@@ -481,9 +481,7 @@ pub(super) fn handle_command(
                     &revoked,
                     &mut events,
                 );
-                for event in events {
-                    outbox.push_back(SwarmEvent::Kademlia { event });
-                }
+                buffer_revocation_events(outbox, event_capacity, events);
             }
             let closing = connections_to_close(
                 manager,
@@ -1047,9 +1045,54 @@ pub(super) fn translate(
     }
 }
 
+/// Buffer routing-seat withdrawals, dropping what will not fit.
+///
+/// THE ONE KADEMLIA EVENT CLASS THAT MAY BE DROPPED, and it is worth
+/// saying why here, because the others may not.
+///
+/// The seat is removed from the routing table by `apply_revocations`
+/// whether or not anyone hears about it, and the PROVIDER has already
+/// removed the same peers itself: `set_remote_trusted` retains its
+/// routing view to the new trust snapshot at the moment the revision
+/// lands, precisely so it never rests on a peer that is no longer
+/// authorized. These events are that removal CONFIRMED, not that
+/// removal performed, so a dropped one costs a notification.
+///
+/// Ungated, one `SetTrust` revoking a full table pushed up to
+/// `max_routing_peers` entries past the bound the rest of the loop
+/// keeps — into the slack `polling_room` reserves for the callers
+/// waiting on Swarm progress, which is the one thing
+/// `may_buffer_delivery` exists to protect.
+///
+/// A QUERY SETTLEMENT IS NOT DROPPABLE and is deliberately not routed
+/// through here: `QueryResults` and `QueryFailed` carry the completion
+/// the provider's budget keys on, and a dropped one leaks its permit
+/// for the life of the process. Those paths stay ungated and are
+/// bounded at their source instead — `max_concurrent_queries`
+/// outstanding, and the Swarm is not polled at all while
+/// `polling_room` is false.
+fn buffer_revocation_events(
+    outbox: &mut VecDeque<SwarmEvent>,
+    event_capacity: usize,
+    events: Vec<interweave_kademlia_control_api::KademliaEvent>,
+) -> usize {
+    let mut buffered = 0;
+    for event in events {
+        if !super::may_buffer_delivery(outbox.len(), event_capacity) {
+            break;
+        }
+        outbox.push_back(SwarmEvent::Kademlia { event });
+        buffered += 1;
+    }
+    buffered
+}
+
 #[cfg(test)]
 mod expired_address_tests {
-    use super::{ActiveListeners, forget_address};
+    use super::{
+        ActiveListeners, SwarmEvent, TransportIdentity, VecDeque, buffer_revocation_events,
+        forget_address,
+    };
     use libp2p::Multiaddr;
     use libp2p::core::transport::ListenerId;
 
@@ -1109,5 +1152,38 @@ mod expired_address_tests {
 
         assert!(!forget_address(&mut active, id, &addr(5)));
         assert!(!forget_address(&mut active, ListenerId::next(), &addr(4)));
+    }
+
+    #[test]
+    fn revoking_a_full_routing_table_cannot_overrun_the_outbox() {
+        // One `SetTrust` can revoke every seat in the table, and the
+        // driver answers with one withdrawal per seat. Pushed ungated,
+        // that is up to `max_routing_peers` entries past the base
+        // capacity — into the slack `polling_room` reserves for the
+        // callers waiting on Swarm progress, which is precisely what
+        // `may_buffer_delivery` exists to protect.
+        let peer = TransportIdentity::parse("12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN")
+            .expect("valid identity");
+        let withdrawals: Vec<_> = (0..1_024)
+            .map(
+                |_| interweave_kademlia_control_api::KademliaEvent::RoutingPeerRemoved {
+                    peer: peer.clone(),
+                },
+            )
+            .collect();
+
+        let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
+        assert_eq!(
+            buffer_revocation_events(&mut outbox, 8, withdrawals),
+            8,
+            "the base capacity, and not one more"
+        );
+        assert_eq!(outbox.len(), 8);
+
+        // A FULL outbox takes none of them, rather than one more.
+        let more =
+            vec![interweave_kademlia_control_api::KademliaEvent::RoutingPeerRemoved { peer }];
+        assert_eq!(buffer_revocation_events(&mut outbox, 8, more), 0);
+        assert_eq!(outbox.len(), 8, "the slack is not notification space");
     }
 }
