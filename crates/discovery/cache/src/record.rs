@@ -98,7 +98,18 @@ pub fn parse_kad_server_protocol_id(protocol_id: &str) -> Option<(u32, &str)> {
     let rest = rest.strip_prefix('/')?;
     let (version, hash) = rest.split_once('/')?;
     let major = version.strip_suffix(".0.0")?;
-    if major.is_empty() || major.len() > 10 || !major.bytes().all(|b| b.is_ascii_digit()) {
+    // CANONICAL DIGITS ONLY. `01.0.0` and `1.0.0` are DIFFERENT strings
+    // to libp2p, which matches protocol names by exact equality — so a
+    // peer advertising the first does not speak the second, and taking
+    // it as evidence for major 1 spends a targeted lookup on a peer
+    // that will not answer. A leading zero is refused, which also
+    // refuses major 0: the family starts at 1, as
+    // `ProviderConfigError::ZeroWireMajor` says on the config side.
+    if major.is_empty()
+        || major.len() > 10
+        || major.starts_with('0')
+        || !major.bytes().all(|b| b.is_ascii_digit())
+    {
         return None;
     }
     let major: u32 = major.parse().ok()?;
@@ -188,15 +199,18 @@ mod mapping_tests {
         // NOT this protocol, however close: each of these is one step
         // from the grammar, and a prefix match would take most of them.
         for wrong in [
-            "/interweave/kad/1.0.0",                             // no hash
-            "/interweave/kad/1.0.1/ssbtblqj7mexczivog5qfbfjvi",  // patch not zero
-            "/interweave/kad/1.1.0/ssbtblqj7mexczivog5qfbfjvi",  // minor not zero
-            "/interweave/kad/x.0.0/ssbtblqj7mexczivog5qfbfjvi",  // major not digits
-            "/interweave/kad/1.0.0/ssbtblqj7mexczivog5qfbfjv",   // 25-char hash
-            "/interweave/kad/1.0.0/ssbtblqj7mexczivog5qfbfjviZ", // bad charset
-            "/interweave/kad/1.0.0/ssbtblqj7mexczivog5qfbfjv1",  // '1' not base32
-            "/interweave/direct/2.0.0",                          // other family
-            "interweave/kad/1.0.0/ssbtblqj7mexczivog5qfbfjvi",   // no leading slash
+            "/interweave/kad/1.0.0",                                     // no hash
+            "/interweave/kad/1.0.1/ssbtblqj7mexczivog5qfbfjvi",          // patch not zero
+            "/interweave/kad/1.1.0/ssbtblqj7mexczivog5qfbfjvi",          // minor not zero
+            "/interweave/kad/x.0.0/ssbtblqj7mexczivog5qfbfjvi",          // major not digits
+            "/interweave/kad/01.0.0/ssbtblqj7mexczivog5qfbfjvi",         // non-canonical major
+            "/interweave/kad/0000000001.0.0/ssbtblqj7mexczivog5qfbfjvi", // ditto, padded
+            "/interweave/kad/0.0.0/ssbtblqj7mexczivog5qfbfjvi",          // the family starts at 1
+            "/interweave/kad/1.0.0/ssbtblqj7mexczivog5qfbfjv",           // 25-char hash
+            "/interweave/kad/1.0.0/ssbtblqj7mexczivog5qfbfjviZ",         // bad charset
+            "/interweave/kad/1.0.0/ssbtblqj7mexczivog5qfbfjv1",          // '1' not base32
+            "/interweave/direct/2.0.0",                                  // other family
+            "interweave/kad/1.0.0/ssbtblqj7mexczivog5qfbfjvi",           // no leading slash
         ] {
             assert_eq!(
                 parse_kad_server_protocol_id(wrong),
