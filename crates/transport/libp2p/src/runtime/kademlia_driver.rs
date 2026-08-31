@@ -248,6 +248,12 @@ pub(super) struct KademliaState {
     /// Offered addresses waiting for Identify evidence, with the time
     /// the stash was last written, for the same reason.
     pending_offers: BTreeMap<PeerId, (BTreeSet<Multiaddr>, u64)>,
+    /// Seats claimed optimistically that the behaviour has not yet
+    /// confirmed with `RoutingUpdated`. An `add_address` answering
+    /// `Pending` is queued behind a disconnected occupant and may never
+    /// land; without this, an abandoned insertion left a seat nothing
+    /// could remove.
+    unconfirmed: BTreeSet<PeerId>,
     /// Inbound record writes dropped, counted never stored (§12).
     record_writes_dropped: u64,
     /// Shutting down: new queries are refused.
@@ -267,6 +273,7 @@ impl KademliaState {
             results: HashMap::new(),
             advertises: BTreeMap::new(),
             pending_offers: BTreeMap::new(),
+            unconfirmed: BTreeSet::new(),
             record_writes_dropped: 0,
             stopping: false,
         }
@@ -460,9 +467,26 @@ fn make_room<V>(map: &mut BTreeMap<PeerId, V>, cap: usize, at: impl Fn(&V) -> u6
 /// toward its cap with entries no reconnect would refresh. The stash
 /// goes with it, because an offer waiting on evidence from a connection
 /// that has ended is waiting on nothing.
+///
+/// AN UNCONFIRMED SEAT GOES TOO. Review finding on PR #61: the
+/// phantom-seat rollback claimed "a disconnect reclaims it if it does
+/// not [land]", and this function did not touch `routed` at all, so the
+/// sentence described a mechanism that did not exist. `add_address`
+/// answering `Pending` queues the peer behind a disconnected occupant;
+/// if that insertion is abandoned — the candidate goes away before any
+/// `RoutingUpdated` — nothing removed the optimistic seat, and churn
+/// filled `max_routing_peers` with entries the table never held.
+///
+/// A CONFIRMED seat is left alone: `RoutingUpdated { is_new_peer }` is
+/// the behaviour's own report, and a routing entry deliberately outlives
+/// the connection that produced it. Only the unconfirmed claim is the
+/// caller's to withdraw.
 pub(super) fn forget_disconnected(state: &mut KademliaState, peer: &PeerId) {
     state.advertises.remove(peer);
     state.pending_offers.remove(peer);
+    if state.unconfirmed.remove(peer) {
+        state.routed.remove(peer);
+    }
 }
 
 /// §7's admission pipeline, driver side: trust, Identify evidence of
@@ -522,14 +546,28 @@ fn try_admit(
     // refusal: the peer is queued and `RoutingUpdated` follows if it
     // lands, and a disconnect reclaims it if it does not.
     let mut accepted = false;
+    let mut confirmed = false;
     for addr in addresses {
-        accepted |= !matches!(
-            behaviour.add_address(&pid, addr),
-            kad::RoutingUpdate::Failed
-        );
+        match behaviour.add_address(&pid, addr) {
+            kad::RoutingUpdate::Success => {
+                accepted = true;
+                confirmed = true;
+            }
+            // QUEUED, NOT HELD. `Pending` puts the peer behind a
+            // disconnected occupant; `RoutingUpdated` follows only if
+            // that occupant fails to respond, so the seat is a claim
+            // this driver must be able to take back.
+            kad::RoutingUpdate::Pending => accepted = true,
+            kad::RoutingUpdate::Failed => {}
+        }
     }
     if !accepted {
         state.routed.remove(&pid);
+        state.unconfirmed.remove(&pid);
+    } else if confirmed {
+        state.unconfirmed.remove(&pid);
+    } else {
+        state.unconfirmed.insert(pid);
     }
     Vec::new()
 }
@@ -645,6 +683,9 @@ fn handle_kad_event(
             // count in `try_admit` reconciles against.
             if is_new_peer {
                 state.routed.insert(peer);
+                // The behaviour's own report: the claim is no longer
+                // provisional, so a later disconnect must not take it.
+                state.unconfirmed.remove(&peer);
                 if let Ok(admitted) = to_transport_identity(&peer) {
                     out.push(KademliaEvent::RoutingPeerAdded { peer: admitted });
                 }
@@ -1775,6 +1816,56 @@ mod tests {
         apply_revocations(&mut state, Some(&mut behaviour), &manager, &mut second);
         assert!(state.routed.contains(&kept), "trust intact, seat intact");
         assert!(second.is_empty(), "and nothing is reported");
+    }
+
+    #[test]
+    fn an_abandoned_pending_seat_is_reclaimed_by_the_disconnect() {
+        // Review finding on PR #61, against a comment written while
+        // fixing the same class. The phantom-seat rollback said
+        // "`Pending` is not a refusal: ... a disconnect reclaims it if
+        // it does not [land]" — and `forget_disconnected` did not touch
+        // `routed` at all, so the sentence named a mechanism that did
+        // not exist. An `add_address` answering `Pending` queues the
+        // peer behind a disconnected occupant; if that insertion is
+        // abandoned, nothing removed the optimistic seat and churn
+        // filled `max_routing_peers` with entries the table never held.
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let mut state = KademliaState::new(&settings);
+        let provisional = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let held = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+
+        // One seat the behaviour only QUEUED, one it CONFIRMED.
+        state.routed.insert(provisional);
+        state.unconfirmed.insert(provisional);
+        state.routed.insert(held);
+
+        forget_disconnected(&mut state, &provisional);
+        assert!(
+            !state.routed.contains(&provisional),
+            "an unconfirmed claim is the caller's to withdraw, and the disconnect \
+             is what withdraws it"
+        );
+
+        forget_disconnected(&mut state, &held);
+        assert!(
+            state.routed.contains(&held),
+            "but a CONFIRMED seat outlives its connection — `RoutingUpdated` is the \
+             behaviour's own report, and a routing entry deliberately survives"
+        );
     }
 
     #[test]
