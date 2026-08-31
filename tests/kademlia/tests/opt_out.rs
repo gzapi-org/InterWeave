@@ -18,28 +18,34 @@
 //! subject must not — and the control is verified to FIRE, not merely
 //! written down.
 //!
-//! # What this suite does not yet prove
+//! # What this suite proves, and how the second half is observed
 //!
-//! **That a disabled peer advertises no DHT protocol on the wire.** The
-//! command half below is proven: mutating the opt-out so a disabled
-//! profile is configured after all makes it fail. The protocol half is
-//! not here, because the version that was written did not fail under
-//! that same mutation and would have been a green test asserting
-//! nothing.
+//! The protocol half does not infer an advertisement from a translated
+//! runtime event — that path is a dead end, because
+//! `SwarmEvent::Identified` carries the Identify VERSION string and not
+//! the peer's protocol list. It reads the list itself, from a raw
+//! `Swarm<identify::Behaviour>` that dials each subject and inspects
+//! `identify::Event::Received.info.protocols`. An observer outside the
+//! runtime is the only vantage point from which "advertises nothing"
+//! is a statement about the wire rather than about our own bookkeeping.
 //!
-//! Two things defeated it, both worth recording so the next attempt
-//! starts past them. `SwarmEvent::Identified` carries the Identify
-//! version string and not the peer's protocol list, so the advertisement
-//! cannot be read directly and has to be proven by consequence — by an
-//! observer that would route a peer advertising the DHT protocol. And
-//! any helper that waits for one event DISCARDS the others, so a test
-//! asserting an absence cannot use one: the admission it should catch is
-//! exactly what such a helper throws away. Accumulating every event
-//! fixed that and the test still passed under mutation, which means the
-//! remaining gap is in the scenario rather than the plumbing.
+//! # What defeated the first attempt, kept because it is the lesson
 //!
-//! Tracked rather than left implicit; the exit gate is not met by this
-//! file alone.
+//! The protocol half was written once, removed for proving nothing, and
+//! written again from a review's design. Two things defeated the first
+//! version. `SwarmEvent::Identified` carries the Identify VERSION
+//! string, not the protocol list, so the advertisement cannot be read
+//! from the runtime's own events and had to be inferred from a
+//! consequence — an observer that would have routed the peer. And any
+//! helper that waits for one event DISCARDS the others, so a test
+//! asserting an ABSENCE cannot use one: the admission it should catch
+//! is exactly what such a helper throws away.
+//!
+//! Accumulating every event fixed the second problem and the test still
+//! passed under mutation, which placed the fault in the first: inferring
+//! from a consequence was the wrong instrument. Reading `info.protocols`
+//! off a raw Identify swarm is direct, and the mutation fails against
+//! it.
 
 #![allow(clippy::expect_used, clippy::panic)]
 
@@ -48,6 +54,7 @@ use std::time::Duration;
 
 use interweave_kademlia_control_api::{KademliaCommand, KademliaMode, QueryClass};
 use interweave_profile_identity::ProfileIdentity;
+use interweave_transport_api::TransportIdentity;
 use interweave_transport_libp2p::runtime::kademlia_driver::KademliaSettings;
 use interweave_transport_libp2p::{SubstrateConfig, SwarmEvent, SwarmRuntime};
 use interweave_transport_runtime::TrustSources;
@@ -64,6 +71,14 @@ const PATIENCE: Duration = Duration::from_secs(20);
 const GRACE: Duration = Duration::from_secs(2);
 
 const NETWORK: &str = "example-private-network";
+
+fn trusting(peers: &[&TransportIdentity]) -> TrustSources {
+    TrustSources::new(
+        interweave_trust_api::PeerTrustPolicy::new(peers.iter().map(|p| (*p).clone()))
+            .expect("a handful"),
+        interweave_trust_api::InfrastructureSet::default(),
+    )
+}
 
 fn enabled(mode: KademliaMode) -> SubstrateConfig {
     SubstrateConfig {
@@ -183,4 +198,110 @@ async fn a_disabled_profile_answers_no_kademlia_command() {
 
     disabled_node.shutdown().await.expect("stops");
     enabled_node.shutdown().await.expect("stops");
+}
+
+/// What a raw Identify observer saw a peer advertise.
+///
+/// Outside the runtime on purpose. `SwarmEvent::Identified` carries the
+/// Identify version string and not the protocol list, so nothing inside
+/// can answer "what did this peer advertise" — and a disabled node that
+/// still advertised the DHT protocol would satisfy every in-crate
+/// assertion while violating ADR-0034's opt-out.
+async fn advertised_protocols(
+    keys: libp2p::identity::Keypair,
+    target: &TransportIdentity,
+    address: Multiaddr,
+) -> Vec<String> {
+    use futures::StreamExt as _;
+    let mut observer = libp2p::SwarmBuilder::with_existing_identity(keys)
+        .with_tokio()
+        .with_tcp(
+            libp2p::tcp::Config::default(),
+            libp2p::noise::Config::new,
+            libp2p::yamux::Config::default,
+        )
+        .expect("the same transport stack the subjects use")
+        .with_behaviour(|k| {
+            libp2p::identify::Behaviour::new(libp2p::identify::Config::new(
+                "/interweave-optout-observer/1".to_owned(),
+                k.public(),
+            ))
+        })
+        .expect("behaviour")
+        .build();
+
+    let peer: libp2p::PeerId = target.as_str().parse().expect("a libp2p identity");
+    observer
+        .dial(
+            libp2p::swarm::dial_opts::DialOpts::peer_id(peer)
+                .addresses(vec![address])
+                .build(),
+        )
+        .expect("dial accepted");
+
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(!remaining.is_zero(), "no Identify arrived from the subject");
+        match tokio::time::timeout(remaining, observer.select_next_some()).await {
+            Ok(libp2p::swarm::SwarmEvent::Behaviour(libp2p::identify::Event::Received {
+                info,
+                ..
+            })) => {
+                return info.protocols.iter().map(ToString::to_string).collect();
+            }
+            Ok(_) => {}
+            Err(_) => panic!("no Identify arrived from the subject"),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_disabled_profile_advertises_no_dht_protocol() {
+    // ZERO PROTOCOL ACTIVITY, read off the wire rather than inferred.
+    // The observer is a bare Identify swarm, so what it reports is what
+    // the subject actually advertised — not what our own translation
+    // layer chose to surface.
+    let expected = interweave_transport_libp2p::runtime::kademlia_driver::kad_protocol(NETWORK);
+
+    // The observer's identity is known up front, because each subject
+    // must TRUST it — otherwise the connection closes before Identify
+    // completes and "no DHT protocol" would mean "no conversation".
+    let observer_keys = libp2p::identity::Keypair::generate_ed25519();
+    let observer_peer = TransportIdentity::parse(observer_keys.public().to_peer_id().to_base58())
+        .expect("a canonical identity");
+
+    let on_id = ProfileIdentity::generate();
+    let off_id = ProfileIdentity::generate();
+    let on_peer = on_id.transport_identity().expect("identity");
+    let off_peer = off_id.transport_identity().expect("identity");
+
+    let mut on = SwarmRuntime::start(
+        &on_id,
+        enabled(KademliaMode::Server),
+        trusting(&[&observer_peer]),
+    )
+    .expect("starts");
+    let mut off =
+        SwarmRuntime::start(&off_id, disabled(), trusting(&[&observer_peer])).expect("starts");
+    let on_addr = listening(&mut on).await;
+    let off_addr = listening(&mut off).await;
+
+    // THE CONTROL FIRST. If an enabled server does not advertise the
+    // exact protocol, the subject's silence proves nothing about the
+    // opt-out and everything about the observer.
+    let advertised_on = advertised_protocols(observer_keys.clone(), &on_peer, on_addr).await;
+    assert!(
+        advertised_on.contains(&expected),
+        "the control: an enabled server advertises {expected}, got {advertised_on:?}"
+    );
+
+    let advertised_off = advertised_protocols(observer_keys, &off_peer, off_addr).await;
+    assert!(
+        !advertised_off.contains(&expected),
+        "a disabled profile must advertise no DHT protocol, got {advertised_off:?}"
+    );
+
+    on.shutdown().await.expect("stops");
+    off.shutdown().await.expect("stops");
 }

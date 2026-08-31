@@ -32,4 +32,5 @@ interweave-transport-libp2p = { path = "../../crates/transport/libp2p" }
 interweave-transport-runtime = { path = "../../crates/transport/runtime" }
 interweave-trust-api = { path = "../../crates/api/trust-api" }
 libp2p = { workspace = true }
+futures = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
