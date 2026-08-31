@@ -334,10 +334,14 @@ impl KademliaState {
     /// while the body returned commanded; the body was wrong.
     ///
     /// Bounded by `max_concurrent_queries + MAX_IMPLICIT_QUERIES`, both
-    /// of which this crate owns. An earlier version of this sentence
-    /// said the pool bounds the implicit half — that was the same
-    /// mistaken claim corrected in `kademlia-integration.md` §11 and in
-    /// the provider, and this was its third site.
+    /// of which this crate owns, and each half has the test that fails
+    /// if its refusal goes away:
+    /// `the_driver_caps_concurrent_queries_and_settles_the_refusal` for
+    /// the commanded half, `a_stopping_driver_announces_no_query_and_the_population_is_bounded`
+    /// for the other. An earlier version of this sentence said the pool
+    /// bounds the implicit half — that was the same mistaken claim
+    /// corrected in `kademlia-integration.md` §11 and in the provider,
+    /// and this was its third site.
     pub(super) fn outstanding_queries(&self) -> usize {
         self.queries.len() + self.implicit.len()
     }
@@ -1178,6 +1182,24 @@ fn handle_kad_event(
                     // in one pass. The charge and its release are still
                     // the same object, which is the property this design
                     // exists for; they simply arrive together.
+                    //
+                    // WHAT MAKES THAT SAFE IS THE `step.last` GUARD ON
+                    // THIS ARM, and it is a property of the pinned
+                    // dependency rather than of this code. In
+                    // libp2p-kad 0.48 `query_finished` and
+                    // `query_timeout` both set `step.last` only in the
+                    // branch that does NOT call
+                    // `continue_iter_closest`, so a last-step bootstrap
+                    // completion is one that has left the pool. If a
+                    // future version emitted a last step for a query it
+                    // then re-entered, `reconcile_implicit` would meet
+                    // that query alive and announce it a SECOND time
+                    // under a second handle — one charge per bucket
+                    // walked. The check that would catch it is
+                    // `behaviour.query(&id).is_none()`; it is not
+                    // written because today it is constant, and a guard
+                    // that cannot fail teaches a reader the wrong thing
+                    // about where the safety comes from.
                     let known = state.queries.remove(&id).or_else(|| {
                         state
                             .implicit

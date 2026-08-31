@@ -131,7 +131,23 @@ impl QueryBudgets {
     /// Bind a permit to the query it started.
     ///
     /// Consumes the permit, so it cannot be bound twice.
+    ///
+    /// A HANDLE IS BOUND ONCE. If one arrives twice — a driver bug, a
+    /// duplicated announcement, or a `QueryStarted` whose `origin` and
+    /// whose handle disagree — inserting the second permit over the
+    /// first would STRAND the first: gone from `unbound`, overwritten
+    /// in `running`, and so unreachable by `finish` and by `release`
+    /// alike. What that leaks is the RATE charge, one window slot per
+    /// occurrence, permanently. It does not leak a concurrency slot —
+    /// `acquire` counts map entries, and the overwrite leaves one — and
+    /// saying otherwise would be a claim `held()` cannot see. The
+    /// second permit is given back instead:
+    /// `a_rebound_handle_leaks_no_rate_charge` is the test.
     pub(crate) fn bind(&mut self, permit: Permit, handle: QueryHandle) {
+        if self.running.contains_key(&handle) {
+            self.release(permit);
+            return;
+        }
         if self.unbound.remove(&permit.0).is_some() {
             self.running.insert(handle, permit.0);
         }
@@ -168,6 +184,35 @@ impl QueryBudgets {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rebound_handle_leaks_no_rate_charge() {
+        let mut b = QueryBudgets::new(4, 60);
+        let h = QueryHandle::implicit(1);
+
+        let first = b.acquire(0).expect("room");
+        b.bind(first, h);
+        // The same handle announced twice, inside one window.
+        let second = b.acquire(0).expect("room");
+        b.bind(second, h);
+
+        // The refused bind gives back its rate charge. Overwriting
+        // instead would strand the FIRST permit's timestamp in the
+        // window with nothing able to remove it: `finish` settles by
+        // handle and the handle now names the second, `release` takes a
+        // permit nobody holds any more. Note this is the only
+        // observable — `held()` cannot see the strand, because the
+        // overwrite leaves exactly one entry in `running`, which is
+        // also why the concurrency ceiling is unaffected.
+        assert_eq!(
+            b.starts.len(),
+            1,
+            "one handle spends one rate charge, however often it is announced"
+        );
+
+        // And the binding that survives is settleable.
+        assert!(b.finish(h), "the bound permit is still reachable");
+    }
 
     #[test]
     fn the_ceiling_admits_exactly_its_budget() {
