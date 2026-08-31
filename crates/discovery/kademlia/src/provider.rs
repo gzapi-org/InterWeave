@@ -755,15 +755,32 @@ impl KademliaDiscovery {
     /// Recency decides, not sign: a NEWER negative replaces an older
     /// positive, which is what makes withdrawn server mode stick instead
     /// of being outvoted by stale optimism.
-    fn record_evidence(&mut self, peer: &TransportIdentity, incoming: Evidence) {
+    ///
+    /// Returns whether the store CHANGED — a different value, not merely
+    /// a write. The caller uses it to decide
+    /// whether saturation was really invalidated: an observation this
+    /// function dropped — self, an older one for a peer already held, or
+    /// an arrival staler than everything at the cap — told the provider
+    /// nothing new, and treating it as "there may be someone new to
+    /// find" let a source replaying old evidence hold exploration at the
+    /// base interval forever, which is §9.3's backoff defeated by
+    /// repetition.
+    fn record_evidence(&mut self, peer: &TransportIdentity, incoming: Evidence) -> bool {
         if *peer == self.local {
-            return;
+            return false;
         }
         if let Some(held) = self.evidence.get(peer) {
             if incoming.observed_at >= held.observed_at {
+                // CHANGED, not merely written. An equal timestamp still
+                // wins — a same-instant sign flip must stick, which is
+                // the cache's rule too — but re-writing the identical
+                // value taught this provider nothing, and a replayed
+                // hint is the common case.
+                let changed = incoming != *held;
                 self.evidence.insert(peer.clone(), incoming);
+                return changed;
             }
-            return;
+            return false;
         }
         if self.evidence.len() >= MAX_CAPABILITY_EVIDENCE {
             let stalest = self
@@ -777,10 +794,11 @@ impl KademliaDiscovery {
                 }
                 // The arrival is the stalest thing in sight; dropping it
                 // keeps what is fresher.
-                _ => return,
+                _ => return false,
             }
         }
         self.evidence.insert(peer.clone(), incoming);
+        true
     }
 
     /// Queue a command. Offers past the bound displace the OLDEST offer;
@@ -948,7 +966,7 @@ impl DiscoveryProvider for KademliaDiscovery {
                 // with an artificial life. The cache provider clamps the
                 // same way.
                 let observed_at = observed_at.min(now_ms);
-                self.record_evidence(
+                let learned = self.record_evidence(
                     &peer_id,
                     Evidence {
                         supported,
@@ -956,9 +974,14 @@ impl DiscoveryProvider for KademliaDiscovery {
                         expires_at: observed_at.saturating_add(self.config.candidate_ttl_ms),
                     },
                 );
-                // §9.3: a new capability observation invalidates
-                // saturation — there may be someone new to find.
-                self.no_progress_rounds = 0;
+                // §9.3: a NEW capability observation invalidates
+                // saturation — there may be someone new to find. One
+                // the store dropped is not new, and resetting on it let
+                // a source replaying old evidence pin exploration at
+                // the base interval forever.
+                if learned {
+                    self.no_progress_rounds = 0;
+                }
                 HintDisposition::Accepted
             }
             PeerHint::ObservedReachable {
@@ -1030,6 +1053,7 @@ impl DiscoveryProvider for KademliaDiscovery {
                 if !candidate.is_fresh_at(now_ms) {
                     return HintDisposition::Accepted;
                 }
+                let mut learned = false;
                 for observation in &candidate.protocol_observations {
                     if observation.protocol_id == self.expected_protocol {
                         // Clamped at delivery like the bare hint above,
@@ -1039,7 +1063,7 @@ impl DiscoveryProvider for KademliaDiscovery {
                         // observation eligible — the same class as the
                         // cache export's own-age bound.
                         let observed_at = observation.observed_at.min(now_ms);
-                        self.record_evidence(
+                        learned |= self.record_evidence(
                             &candidate.peer_id,
                             Evidence {
                                 supported: observation.supported,
@@ -1051,6 +1075,7 @@ impl DiscoveryProvider for KademliaDiscovery {
                         );
                     }
                 }
+                let mut seeded = false;
                 if !candidate.addresses.is_empty() {
                     // The port's own bounded parse — `parse_all` exists
                     // for exactly this caller, and keeps the length
@@ -1068,9 +1093,15 @@ impl DiscoveryProvider for KademliaDiscovery {
                         addresses,
                         peer: candidate.peer_id.clone(),
                     });
+                    seeded = true;
                 }
-                // §9.3: a new external seed invalidates saturation.
-                self.no_progress_rounds = 0;
+                // §9.3: a new external seed invalidates saturation —
+                // an offer really queued, or evidence that really
+                // landed. A candidate that produced neither carried
+                // nothing this provider did not already know.
+                if learned || seeded {
+                    self.no_progress_rounds = 0;
+                }
                 HintDisposition::Accepted
             }
         }
@@ -1959,6 +1990,63 @@ mod tests {
         );
         p.request_targeted_lookup(&t3, 1_000 + 60_000, false)
             .expect("one window after the charge, the rate recovers");
+    }
+
+    #[test]
+    fn an_observation_the_store_dropped_does_not_reset_the_backoff() {
+        // §9.3's backoff is what stops a two-peer overlay running a
+        // useless 60-second loop forever. A capability hint reset it
+        // unconditionally, so a source REPLAYING evidence the provider
+        // already held — or evidence older than what it held — pinned
+        // exploration at the base interval indefinitely. Only an
+        // observation that actually changed the store is news.
+        let mut p = started(KademliaMode::Client);
+        let router = synthetic_peer(1);
+        let subject = synthetic_peer(2);
+        trust(&mut p, &[&router, &subject]);
+        routed(&mut p, &router, 1_000);
+        give_evidence(&mut p, &subject, 5_000);
+
+        let mut now = 10_000;
+        for round in 0..3 {
+            assert!(p.tick(now, [0_u8; 32]), "round {round} issues");
+            p.ingest_driver_event(done(QueryClass::Exploration), now + 1);
+            now += 500_000;
+        }
+        assert_eq!(p.no_progress_rounds, 3, "the control: three quiet rounds");
+
+        // The SAME observation again, and then an OLDER one. Neither
+        // tells the provider anything it did not already hold.
+        give_evidence(&mut p, &subject, 5_000);
+        assert_eq!(
+            p.no_progress_rounds, 3,
+            "a replayed observation is not a reason to explore again"
+        );
+        assert_eq!(
+            p.add_hint(
+                PeerHint::ObservedProtocol {
+                    peer_id: subject.clone(),
+                    protocol_id: expected_id(&p),
+                    supported: false,
+                    observed_at: 4_000,
+                },
+                now,
+            ),
+            HintDisposition::Accepted,
+            "the hint class is still supported; it simply loses on recency"
+        );
+        assert_eq!(
+            p.no_progress_rounds, 3,
+            "an observation older than the one held changes nothing"
+        );
+
+        // A GENUINELY NEW one does reset — otherwise this test would
+        // pass for a provider that never resets at all.
+        give_evidence(&mut p, &synthetic_peer(3), now);
+        assert_eq!(
+            p.no_progress_rounds, 0,
+            "evidence that landed is news, and news invalidates saturation"
+        );
     }
 
     #[test]
