@@ -789,7 +789,17 @@ pub(super) fn handle_command(
             // receiving events is not issuing queries either. When it
             // resumes, `recent_queries_succeeded` ages out and health
             // reports the gap. An unbounded queue has no such recovery.
-            let outstanding = kademlia.as_ref().map_or(0, |s| s.outstanding_queries());
+            // PLUS THE ONE BEING SETTLED. Review finding on PR #61,
+            // against the slack fix itself: `outstanding_queries` counts
+            // what the driver has RECORDED, and a `StartQuery` that is
+            // refused immediately — `NoRoutingPeers`, or `ShuttingDown`
+            // from the draining and stopped paths — is never recorded
+            // at all. With nothing else in flight the count was zero, so
+            // the settlement got no slack and was dropped on a full
+            // outbox, leaking the very permit the slack exists to
+            // release. The command in hand IS an outstanding query from
+            // the provider's side: it bound a permit before sending it.
+            let outstanding = settlement_slack(kademlia.as_deref());
             let settle = |outbox: &mut VecDeque<SwarmEvent>, event| {
                 let _ = buffer_kademlia_event(outbox, event_capacity, outstanding, event);
             };
@@ -1109,6 +1119,29 @@ fn buffer_revocation_events(
     buffered
 }
 
+/// How much progress slack a settlement on this command may use.
+///
+/// The driver's recorded queries PLUS THE ONE IN HAND. Review finding
+/// on PR #61, against the slack fix itself: `outstanding_queries`
+/// counts what the driver recorded, and a `StartQuery` refused
+/// immediately — `NoRoutingPeers`, or `ShuttingDown` from the draining
+/// and stopped paths — is never recorded at all. With nothing else in
+/// flight the count was zero, so on a full outbox the settlement got no
+/// slack and was dropped, leaking the permit the slack exists to
+/// release.
+///
+/// A named function rather than an expression at the call site because
+/// the `+ 1` is the whole finding, and an expression inline there can
+/// only be tested through a running Swarm.
+fn settlement_slack(kademlia: Option<&super::kademlia_driver::KademliaState>) -> usize {
+    kademlia
+        .map_or(
+            0,
+            super::kademlia_driver::KademliaState::outstanding_queries,
+        )
+        .saturating_add(1)
+}
+
 /// Buffer ONE Kademlia port event, or refuse for want of base capacity.
 ///
 /// THE ONE PRIMITIVE, so the bound cannot hold on one path and not
@@ -1316,5 +1349,43 @@ mod expired_address_tests {
             "and the slack is bounded by what can actually be outstanding"
         );
         assert_eq!(outbox.len(), 6);
+    }
+
+    #[test]
+    fn the_command_being_settled_earns_its_own_slot() {
+        // Review finding on PR #61, against the slack fix itself.
+        // `outstanding_queries` counts what the driver RECORDED, and a
+        // `StartQuery` refused immediately — `NoRoutingPeers`, or
+        // `ShuttingDown` from the draining and stopped paths — is never
+        // recorded at all. With nothing else in flight the count is
+        // zero, so on a full outbox the settlement got no slack and was
+        // dropped, leaking the permit the slack exists to release.
+        let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
+        let settlement = || interweave_kademlia_control_api::KademliaEvent::QueryFailed {
+            class: interweave_kademlia_control_api::QueryClass::Bootstrap,
+            reason: interweave_kademlia_control_api::QueryFailure::NoRoutingPeers,
+        };
+        for _ in 0..2 {
+            assert!(buffer_kademlia_event(&mut outbox, 2, 1, settlement()));
+        }
+        // Base capacity spent, NOTHING recorded as outstanding — the
+        // shape of a query refused before it was ever registered.
+        assert!(
+            buffer_kademlia_event(&mut outbox, 2, 1, settlement()),
+            "the command in hand is itself an outstanding query: the provider bound              a permit before sending it, and only this completion releases it"
+        );
+        assert!(
+            !buffer_kademlia_event(&mut outbox, 2, 1, settlement()),
+            "and it is ONE slot, not an unbounded exemption"
+        );
+
+        // THE SLACK ITSELF, not a literal handed to the helper. The
+        // first version of this test passed `1` directly and so proved
+        // nothing about the caller: dropping the `+ 1` left it green.
+        assert_eq!(
+            super::settlement_slack(None),
+            1,
+            "a command whose query was never recorded still earns its own slot"
+        );
     }
 }
