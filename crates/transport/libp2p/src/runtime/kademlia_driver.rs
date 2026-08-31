@@ -179,6 +179,18 @@ impl KademliaSettings {
         if self.max_results_per_query.get() > MAX_RESULTS_PER_QUERY {
             return Err("kademlia max_results_per_query exceeds the port ceiling");
         }
+        // THE CROSS-FIELD RULE, which the independent ceilings above
+        // cannot express. Review finding on PR #61: every field passed
+        // its own range while `kbucket_size = 8` with
+        // `max_results_per_query = 20` sailed through — a query result
+        // limit the selected bucket width is not allowed to support.
+        // `kademlia-control-api::validate_limits` is the canonical
+        // statement of it, and this boundary is reachable without it
+        // because `SubstrateConfig` is public. The same hole the
+        // provider's own constructor had, one crate over.
+        if self.max_results_per_query.get() > self.kbucket_size.get() {
+            return Err("kademlia max_results_per_query must not exceed kbucket_size");
+        }
         Ok(())
     }
 }
@@ -1816,6 +1828,41 @@ mod tests {
         apply_revocations(&mut state, Some(&mut behaviour), &manager, &mut second);
         assert!(state.routed.contains(&kept), "trust intact, seat intact");
         assert!(second.is_empty(), "and nothing is reported");
+    }
+
+    #[test]
+    fn the_results_to_bucket_cross_field_rule_is_enforced() {
+        // Review finding on PR #61. Every field passed its own range
+        // while the PAIR was illegal: `kbucket_size = 8` with
+        // `max_results_per_query = 20` asks for more results than the
+        // selected bucket width is allowed to support, which
+        // `kademlia-control-api::validate_limits` refuses. This
+        // boundary is reachable without that validator because
+        // `SubstrateConfig` is public.
+        let base = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(8).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        assert!(
+            base.validate().is_err(),
+            "20 results out of an 8-wide bucket is refused"
+        );
+        assert!(
+            KademliaSettings {
+                max_results_per_query: NonZeroUsize::new(8).expect("nonzero"),
+                ..base.clone()
+            }
+            .validate()
+            .is_ok(),
+            "and equal to the bucket width is the boundary that is allowed"
+        );
     }
 
     #[test]
