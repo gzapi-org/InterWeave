@@ -426,7 +426,25 @@ pub(super) fn handle_command(
             // down; a completion arriving later finds no entry and is
             // ignored. Client mode withdraws the server protocol.
             behaviour.set_mode(Some(kad::Mode::Client));
-            for (_, class) in state.queries.drain() {
+            // CANCELLED, not merely forgotten. Review finding on PR
+            // #61: draining the map reported each query as
+            // `ShuttingDown` and left the libp2p query running, so the
+            // behaviour went on sending requests over existing
+            // connections and attempting query dials until its own
+            // timeout — after the provider had been told the work
+            // ended. Under `Drain` that is plainly visible, because the
+            // Swarm task stays alive; the lifecycle's "disable
+            // participation" has to mean the queries too, not only the
+            // mode.
+            //
+            // `finish` ends the query without waiting for its regular
+            // termination conditions. A completion it emits afterwards
+            // finds no entry in `queries` and is ignored, which is the
+            // same path an unknown id already takes.
+            for (id, class) in state.queries.drain() {
+                if let Some(mut running) = behaviour.query_mut(&id) {
+                    running.finish();
+                }
                 out.push(KademliaEvent::QueryFailed {
                     class,
                     reason: QueryFailure::ShuttingDown,
@@ -1848,6 +1866,68 @@ mod tests {
         apply_revocations(&mut state, Some(&mut behaviour), &manager, &mut second);
         assert!(state.routed.contains(&kept), "trust intact, seat intact");
         assert!(second.is_empty(), "and nothing is reported");
+    }
+
+    #[test]
+    fn shutdown_cancels_the_query_it_reports_as_settled() {
+        // Review finding on PR #61: draining `queries` reported each as
+        // `ShuttingDown` and left the libp2p query RUNNING, so the
+        // behaviour kept sending requests and attempting query dials
+        // until its own timeout — after the provider had been told the
+        // work ended. Under `Drain` the Swarm task stays alive, so that
+        // is not academic.
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let local = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let mut state = KademliaState::new(&settings);
+        let mut behaviour = build_behaviour(&settings, local).expect("buildable");
+        let manager = interweave_transport_runtime::ConnectionManager::new(
+            interweave_transport_runtime::ConnectionPolicy::default(),
+            8,
+        );
+
+        let id = behaviour.get_closest_peers(PeerId::random());
+        state.queries.insert(id, QueryClass::Exploration);
+        // `iter_queries` filters out FINISHED queries, which is the
+        // observable that distinguishes cancelled from merely forgotten.
+        assert!(
+            behaviour.iter_queries().any(|q| q.id() == id),
+            "the control: the query is running before the shutdown"
+        );
+
+        let out = handle_command(
+            &mut state,
+            &mut behaviour,
+            &manager,
+            KademliaCommand::Shutdown,
+            0,
+        );
+        assert!(
+            out.iter().any(|e| matches!(
+                e,
+                KademliaEvent::QueryFailed {
+                    reason: QueryFailure::ShuttingDown,
+                    ..
+                }
+            )),
+            "the settlement is still reported"
+        );
+        assert!(
+            !behaviour.iter_queries().any(|q| q.id() == id),
+            "and the query it settled is actually finished, not left running to \
+             send requests and dial until its own timeout"
+        );
     }
 
     #[test]
