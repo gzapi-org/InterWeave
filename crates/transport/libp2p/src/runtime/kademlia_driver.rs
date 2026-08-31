@@ -694,11 +694,31 @@ fn handle_kad_event(
             // THE BEHAVIOUR'S OWN REPORT is the truth the optimistic
             // count in `try_admit` reconciles against.
             if is_new_peer {
-                state.routed.insert(peer);
-                // The behaviour's own report: the claim is no longer
-                // provisional, so a later disconnect must not take it.
+                // REVALIDATED, not merely recorded. Review finding on
+                // PR #61: `add_address` queues this event, and trust can
+                // be revoked — or the peer can withdraw the server
+                // protocol — between the queueing and the poll. Both of
+                // those paths remove the peer from `routed` and tell the
+                // behaviour to drop it, and this handler then inserted
+                // it straight back and announced it, resurrecting a seat
+                // the behaviour no longer holds and handing the provider
+                // an addition that is already false.
+                //
+                // The same shape as the outbound gate's establishment
+                // check, one layer down: admission answered once, at
+                // queue time, and the state it depended on can move
+                // before the answer is used.
+                let eligible = to_transport_identity(&peer).ok().filter(|identity| {
+                    may_hold_a_seat(manager, identity)
+                        && matches!(state.advertises.get(&peer), Some((true, _)))
+                });
+                // The claim is settled either way; only an ELIGIBLE
+                // peer keeps the seat. Not an early return: the
+                // `old_peer` eviction below belongs to this same event
+                // and must still be reported.
                 state.unconfirmed.remove(&peer);
-                if let Ok(admitted) = to_transport_identity(&peer) {
+                if let Some(admitted) = eligible {
+                    state.routed.insert(peer);
                     out.push(KademliaEvent::RoutingPeerAdded { peer: admitted });
                 }
             }
@@ -1828,6 +1848,94 @@ mod tests {
         apply_revocations(&mut state, Some(&mut behaviour), &manager, &mut second);
         assert!(state.routed.contains(&kept), "trust intact, seat intact");
         assert!(second.is_empty(), "and nothing is reported");
+    }
+
+    #[test]
+    fn a_queued_routing_update_for_a_revoked_peer_is_not_accepted() {
+        // Review finding on PR #61. `add_address` QUEUES this event, and
+        // trust can be revoked — or the protocol withdrawn — between the
+        // queueing and the poll. Both paths remove the peer and tell the
+        // behaviour to drop it; this handler then inserted it straight
+        // back and announced it, resurrecting a seat the behaviour no
+        // longer holds and handing the provider an addition already
+        // false when it was sent.
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let mut state = KademliaState::new(&settings);
+        let mut manager = interweave_transport_runtime::ConnectionManager::new(
+            interweave_transport_runtime::ConnectionPolicy::default(),
+            8,
+        );
+        let revoked = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let trusted = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let trusted_id = to_transport_identity(&trusted).expect("canonical");
+        let _ = manager.set_trust(
+            interweave_transport_runtime::TrustSources::new(
+                interweave_trust_api::PeerTrustPolicy::new([trusted_id]).expect("small"),
+                interweave_trust_api::InfrastructureSet::default(),
+            ),
+            &[],
+        );
+        // Both advertise; only one is still trusted.
+        state.advertises.insert(revoked, (true, 0));
+        state.advertises.insert(trusted, (true, 0));
+
+        let mut out = Vec::new();
+        handle_kad_event(
+            &mut state,
+            &manager,
+            kad::Event::RoutingUpdated {
+                peer: revoked,
+                is_new_peer: true,
+                addresses: kad::Addresses::new("/ip4/127.0.0.1/tcp/1".parse().expect("valid")),
+                bucket_range: (
+                    kad::KBucketDistance::default(),
+                    kad::KBucketDistance::default(),
+                ),
+                old_peer: None,
+            },
+            0,
+            &mut out,
+        );
+        assert!(
+            !state.routed.contains(&revoked),
+            "a seat queued before the revocation is not granted after it"
+        );
+        assert!(out.is_empty(), "and no addition is announced");
+
+        // The CONTROL: a still-eligible peer is admitted, so this test
+        // cannot pass for a handler that accepts nobody.
+        handle_kad_event(
+            &mut state,
+            &manager,
+            kad::Event::RoutingUpdated {
+                peer: trusted,
+                is_new_peer: true,
+                addresses: kad::Addresses::new("/ip4/127.0.0.1/tcp/2".parse().expect("valid")),
+                bucket_range: (
+                    kad::KBucketDistance::default(),
+                    kad::KBucketDistance::default(),
+                ),
+                old_peer: None,
+            },
+            0,
+            &mut out,
+        );
+        assert!(state.routed.contains(&trusted));
+        assert_eq!(out.len(), 1, "the eligible peer is announced");
     }
 
     #[test]
