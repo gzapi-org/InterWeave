@@ -436,10 +436,33 @@ impl DiscoveryProvider for PeerCacheDiscovery {
                     // the advisory no-op is the cache's policy, not a
                     // refusal of the class.
                     Ok(()) => HintDisposition::Accepted,
+                    // THE BOUND THAT ACTUALLY REFUSED, carried through
+                    // rather than guessed. This arm is unreachable
+                    // today — every field `record_capability` bounds is
+                    // either a constant well under the cap or the
+                    // 26-byte hash the parser just produced — and that
+                    // is precisely why it must not invent one: it named
+                    // `protocol_id` and `MAX_LABEL_BYTES`, neither of
+                    // which is a thing that function checks, and an
+                    // unreachable arm that lies is a lie nothing will
+                    // ever correct.
+                    Err(crate::CacheError::OutOfBounds { field, got, max }) => {
+                        HintDisposition::Rejected(
+                            interweave_discovery_api::DiscoveryError::InvalidLength {
+                                field,
+                                got,
+                                max,
+                            },
+                        )
+                    }
+                    // The remaining variants are I/O and serialization,
+                    // which `record_capability` cannot reach: it mutates
+                    // the in-memory record and marks it dirty. Reported
+                    // against the field the caller actually supplied.
                     Err(_) => HintDisposition::Rejected(
                         interweave_discovery_api::DiscoveryError::InvalidLength {
-                            field: "protocol_id",
-                            got: protocol_id.as_str().len(),
+                            field: "network_hash",
+                            got: network_hash.len(),
                             max: crate::limits::MAX_LABEL_BYTES,
                         },
                     ),
