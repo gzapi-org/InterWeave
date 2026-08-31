@@ -481,11 +481,8 @@ relaxed here, deliberately, and only here:
   `pr-lifecycle` skill say fan-out happens only when the user asks. A
   review after a declined request does not need asking — the alternative
   is landing unreviewed code.
-- **Use `model: "opus"`, not `sonnet`.** The skill's cheapest-tier rule
-  is overridden for this one job: a review is the only thing standing
-  between a defect and `main`, and the tier that finds P1s is worth more
-  than the tokens it costs. This is the explicit authorisation that rule
-  asks for.
+- **`model: "opus"`**, per the standing rule below — no per-dispatch
+  authorisation needed.
 - **One agent per PR, with NO context from the session.** Pass the PR's
   tree and diff and nothing else. An agent told what the author expects
   confirms it; the whole value is that it does not know.
@@ -499,6 +496,31 @@ Everything else still applies: the findings are input rather than
 verdicts, a disagreement is stated with its reasoning rather than
 silently skipped, and a thread is resolved only when the work it names
 is done.
+
+#### A review runs on `opus`, and does not ask
+
+**Every subagent doing a code review uses `model: "opus"`.** This is a
+STANDING authorisation, not a per-dispatch one — it satisfies the
+premium-tier rule's "unless the user's prompt explicitly asks for that
+tier" clause once, here, for the whole class. Do not ask again, and do
+not fall back to `sonnet` because a particular review looks small.
+
+It applies to any review dispatch, not only the declined-reviewer path
+above: a review requested directly, a second opinion on a change already
+reviewed, an audit of merged code. If the job is *reviewing*, the tier
+is settled.
+
+The reasoning is the asymmetry. Everywhere else, the cheapest tier that
+can do the job is right because a weaker answer costs a retry. A review
+is the last thing between a defect and `main`, and its failure mode is
+not a retry — it is a green PR that merges. The defects this repository
+has actually shipped were found by review, and the ones review missed
+became P1s discovered rounds later. Tokens are the cheaper side of that
+trade by a wide margin.
+
+The other dispatch rules are unaffected: cheapest tier still governs
+extraction, search, pattern-following edits and everything else, and
+`fable` remains authorised only when asked for by name.
 
 ### Always
 
