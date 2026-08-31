@@ -418,6 +418,17 @@ impl GatedSwarm {
         self.inner.behaviour_mut().kad.as_mut()
     }
 
+    /// The Kademlia behaviour, read-only.
+    ///
+    /// For asking it a question without taking the mutable borrow —
+    /// how many queries a shutdown would have to settle, before the
+    /// command that settles them runs.
+    pub(crate) fn kademlia(
+        &self,
+    ) -> Option<&libp2p::kad::Behaviour<libp2p::kad::store::MemoryStore>> {
+        self.inner.behaviour().kad.as_ref()
+    }
+
     /// Close one connection by id.
     ///
     /// Returns whether the Swarm knew it. A connection this profile has

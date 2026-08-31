@@ -19,7 +19,7 @@
 //! caller left.
 //!
 //! SETTLEMENT IS KEYED BY THE QUERY, not by its class. The port used to
-//! carry only a [`QueryClass`], so a completion settled the oldest
+//! carry only a `QueryClass`, so a completion settled the oldest
 //! outstanding permit of that class — and with two bootstraps
 //! outstanding (one commanded, one the library started on an empty-table
 //! insertion, SPIKE-003 F2) either completion settled either permit.

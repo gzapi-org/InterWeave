@@ -342,6 +342,28 @@ impl KademliaState {
         self.queries.len() + self.implicit.len()
     }
 
+    /// Queries the driver will settle if told to shut down right now.
+    ///
+    /// **Includes the ones it has not met yet.** The shutdown sweep
+    /// enumerates live queries in NEITHER map and settles those too, and
+    /// the slack was computed before the command ran — so a sweep could
+    /// emit more settlements than the outbox would admit, and a dropped
+    /// settlement is a permit held for the life of the process. The
+    /// third population has to be counted before it is discovered.
+    pub(super) fn settleable_queries(
+        &self,
+        behaviour: Option<&kad::Behaviour<MemoryStore>>,
+    ) -> usize {
+        let unknown = behaviour.map_or(0, |b| {
+            b.iter_queries()
+                .filter(|q| {
+                    !self.queries.contains_key(&q.id()) && !self.implicit.contains_key(&q.id())
+                })
+                .count()
+        });
+        self.outstanding_queries() + unknown
+    }
+
     /// Inbound record writes dropped so far (§12: counted, never stored).
     ///
     /// Test-gated until Stage 12: the §16 diagnostics snapshot is the
@@ -2455,35 +2477,26 @@ mod tests {
     }
 
     #[test]
-    fn a_real_bootstrap_is_stopped_by_the_drain_not_merely_marked() {
-        // WHAT THIS DOES AND DOES NOT PROVE, because the difference
-        // cost two earlier tests their meaning.
+    fn a_draining_driver_issues_no_dial_from_a_re_entered_bootstrap() {
+        // THE OBSERVABLE IS THE HARM, not the bookkeeping. Two earlier
+        // versions of this test asserted through `iter_queries`, which
+        // FILTERS finished queries — so once `finish_all_while_stopping`
+        // had marked them, the break condition was evaluated on a set
+        // the previous statement had just emptied. It exited on
+        // iteration one for any table, working drain or not. A dial is
+        // what the drain exists to prevent, so a dial is what is
+        // counted, and the production helpers are what drive it.
         //
-        // It drives a REAL bootstrap — every other query test in this
-        // file uses `get_closest_peers`, the one class where `finish`
-        // is terminal — through the drain and polls the behaviour, so
-        // the pool has the chance to re-insert that a single
-        // post-sweep assertion never gives it. It asserts the drain
-        // converges: no query survives, within a bounded number of
-        // polls.
-        //
-        // It does NOT prove `finish_all_while_stopping` is load-bearing:
-        // removing that call leaves this green, because with one
-        // routing peer the bootstrap's `remaining` is empty and `finish`
-        // happens to be terminal after all. The re-entry case the review
-        // predicted needs a bucket layout I could not construct here.
-        // The re-finish is kept as cheap insurance against a case that
-        // is real in the library even if this test cannot reach it — and
-        // this comment says so rather than letting a green test imply
-        // coverage it does not have.
-        //
-        // `iter_queries` is the trap: it FILTERS finished queries out,
-        // FILTERS finished queries out, so it reports the `finish` MARK
-        // so right after the sweep it reports the mark rather than the
-        // end. That is how two shutdown tests, and the first version of
-        // this one, passed for a driver that stopped nothing.
+        // The layout IS constructible; a previous comment here said
+        // otherwise and was wrong. `query_finished` builds `remaining`
+        // from every bucket farther than the first non-empty one, so a
+        // peer in bucket k leaves 255-k to walk — empty only if it lands
+        // in the last bucket, which is a coin flip rather than a rule.
+        // Choosing a near peer makes the re-entry deterministic.
         use futures::task::noop_waker;
-        use std::task::Context;
+        use libp2p::kad::KBucketKey;
+        use libp2p::swarm::{NetworkBehaviour, ToSwarm};
+        use std::task::{Context, Poll};
 
         let settings = KademliaSettings {
             mode: KademliaMode::Client,
@@ -2496,15 +2509,29 @@ mod tests {
             max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
             max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
         };
+        let local = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let local_key = KBucketKey::from(local);
+        let peer = std::iter::repeat_with(|| {
+            libp2p::identity::Keypair::generate_ed25519()
+                .public()
+                .to_peer_id()
+        })
+        .find(|p| {
+            local_key
+                .distance(&KBucketKey::from(*p))
+                .ilog2()
+                .is_some_and(|i| i <= 250)
+        })
+        .expect("a near peer within a few dozen tries");
+
         let mut state = KademliaState::new(&settings);
-        let mut behaviour = build_behaviour(&settings, PeerId::random()).expect("buildable");
+        let mut behaviour = build_behaviour(&settings, local).expect("buildable");
         let manager = interweave_transport_runtime::ConnectionManager::new(
             interweave_transport_runtime::ConnectionPolicy::default(),
             8,
         );
-        let peer = libp2p::identity::Keypair::generate_ed25519()
-            .public()
-            .to_peer_id();
         let _ = behaviour.add_address(&peer, "/ip4/127.0.0.1/tcp/1".parse().expect("valid"));
         let id = behaviour.bootstrap().expect("a routing peer exists");
         state
@@ -2520,24 +2547,27 @@ mod tests {
         );
         assert!(state.stopping, "the control: the driver is draining");
 
-        // Drive the behaviour the way the runtime does. Each poll is a
-        // chance for the pool to re-insert; `finish_all_while_stopping`
-        // is what the event path does on every event while draining.
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
-        let mut polls = 0;
-        loop {
-            let _ = libp2p::swarm::NetworkBehaviour::poll(&mut behaviour, &mut cx);
-            finish_all_while_stopping(&mut behaviour);
-            polls += 1;
-            if behaviour.iter_queries().count() == 0 {
-                break;
+        let mut dials = 0_usize;
+        let mut out = Vec::new();
+        for _ in 0..512 {
+            match NetworkBehaviour::poll(&mut behaviour, &mut cx) {
+                Poll::Ready(ToSwarm::Dial { .. }) => dials += 1,
+                Poll::Ready(ToSwarm::GenerateEvent(event)) => {
+                    handle_kad_event(&mut state, None, &manager, event, 0, &mut out);
+                    // Exactly what the event path does while draining.
+                    finish_all_while_stopping(&mut behaviour);
+                    reconcile_implicit(&mut state, &behaviour, &mut out);
+                }
+                Poll::Ready(_) => {}
+                Poll::Pending => break,
             }
-            assert!(
-                polls < 64,
-                "the bootstrap kept re-entering: a drained driver is still walking buckets"
-            );
         }
+        assert_eq!(
+            dials, 0,
+            "a drained driver dialled: the bootstrap re-entered and kept walking buckets"
+        );
     }
 
     #[test]
@@ -2779,8 +2809,12 @@ mod tests {
         state
             .queries
             .insert(id, (QueryClass::Exploration, QueryHandle::commanded(1)));
-        // `iter_queries` filters out FINISHED queries, which is the
-        // observable that distinguishes cancelled from merely forgotten.
+        // FOR A CLOSEST-PEERS WALK ONLY, `finish` really is terminal:
+        // `query_finished` has no continuation for that class. So
+        // `iter_queries` going quiet here means the query ended. It does
+        // NOT mean that for a bootstrap, which re-enters for the next
+        // bucket — see `a_draining_driver_issues_no_dial_from_a_re_entered_bootstrap`,
+        // which counts dials because this observable cannot see that.
         assert!(
             behaviour.iter_queries().any(|q| q.id() == id),
             "the control: the query is running before the shutdown"
@@ -2869,7 +2903,9 @@ mod tests {
         );
         assert!(
             !behaviour.iter_queries().any(|q| q.id() == implicit),
-            "and it is actually finished, not left running"
+            "and it is actually finished — true for a closest-peers walk, \
+             whose class has no continuation. The bootstrap case is held by \
+             the dial-counting test, not by this observable."
         );
     }
 

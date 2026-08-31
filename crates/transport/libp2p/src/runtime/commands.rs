@@ -799,7 +799,10 @@ pub(super) fn handle_command(
             // outbox, leaking the very permit the slack exists to
             // release. The command in hand IS an outstanding query from
             // the provider's side: it bound a permit before sending it.
-            let outstanding = settlement_slack(kademlia.as_deref());
+            // COUNTED AGAINST WHAT THIS COMMAND MAY SETTLE, which for
+            // a shutdown includes the live queries the sweep is about to
+            // discover — a population the slack did not know existed.
+            let outstanding = settlement_slack(kademlia.as_deref(), swarm.kademlia());
             let settle = |outbox: &mut VecDeque<SwarmEvent>, event| {
                 let _ = buffer_kademlia_event(outbox, event_capacity, outstanding, event);
             };
@@ -1103,7 +1106,7 @@ pub(super) fn translate(
 /// A QUERY SETTLEMENT IS NOT DROPPABLE and is deliberately not routed
 /// through here: `QueryResults` and `QueryFailed` carry the completion
 /// the provider's budget keys on, and a dropped one leaks its permit
-/// for the life of the process. Those paths stay ungated and are
+/// for the life of the process. The Swarm-event path stays ungated and is
 /// bounded at their source instead — `max_concurrent_queries` for
 /// commanded work plus the driver's cap on library-started queries,
 /// and the Swarm is not polled at all while `polling_room` is false.
@@ -1136,12 +1139,12 @@ fn buffer_revocation_events(
 /// A named function rather than an expression at the call site because
 /// the `+ 1` is the whole finding, and an expression inline there can
 /// only be tested through a running Swarm.
-fn settlement_slack(kademlia: Option<&super::kademlia_driver::KademliaState>) -> usize {
+fn settlement_slack(
+    kademlia: Option<&super::kademlia_driver::KademliaState>,
+    behaviour: Option<&libp2p::kad::Behaviour<libp2p::kad::store::MemoryStore>>,
+) -> usize {
     kademlia
-        .map_or(
-            0,
-            super::kademlia_driver::KademliaState::outstanding_queries,
-        )
+        .map_or(0, |s| s.settleable_queries(behaviour))
         .saturating_add(1)
 }
 
@@ -1177,6 +1180,13 @@ fn buffer_kademlia_event(
         event,
         interweave_kademlia_control_api::KademliaEvent::QueryResults { .. }
             | interweave_kademlia_control_api::KademliaEvent::QueryFailed { .. }
+            // A CHARGE IS HALF OF A TRANSACTION, not a notification.
+            // `QueryStarted` rode base capacity while the settlement it
+            // pairs with rode the slack, so the two halves could be
+            // separated: the charge admitted, the release dropped, and
+            // the permit gone for the life of the provider. They travel
+            // in the same tier now.
+            | interweave_kademlia_control_api::KademliaEvent::QueryStarted { .. }
     ) {
         super::may_buffer_settlement(outbox.len(), event_capacity, outstanding_queries)
     } else {
@@ -1390,7 +1400,7 @@ mod expired_address_tests {
         // first version of this test passed `1` directly and so proved
         // nothing about the caller: dropping the `+ 1` left it green.
         assert_eq!(
-            super::settlement_slack(None),
+            super::settlement_slack(None, None),
             1,
             "a command whose query was never recorded still earns its own slot"
         );
