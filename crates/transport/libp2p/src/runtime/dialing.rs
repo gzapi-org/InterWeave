@@ -308,6 +308,20 @@ fn attempt_is_structural(error: &TransportError<std::io::Error>) -> bool {
 /// attempt to be structural -- a mix means at least one address reached
 /// the network and failed there, which is the ordinary case
 /// `record_failure` exists for.
+///
+/// THAT AGGREGATE RULE GOVERNS ONE CALLER, and it is worth naming
+/// because a second one now answers the same question differently.
+/// [`attempt_dial`]'s synchronous-refusal path is the aggregate's: an
+/// `AdmittedDial` binds exactly ONE address into its `DialOpts`, so
+/// `attempts` is a single entry there and "all" and "the first" are the
+/// same claim.
+///
+/// [`settle_failed_dial`] is where multi-address errors actually
+/// arrive, and it does NOT use this arm. Each attempt settles by its
+/// own class through the admission-free path, and the ticket takes the
+/// class of the attempt it was re-bound to -- the first. The aggregate
+/// answer was wrong for that job: it labelled every member of a mixed
+/// batch transient, which retried a structural route forever.
 pub(super) fn is_permanent_dial_error(error: &DialError) -> bool {
     match error {
         DialError::NoAddresses | DialError::LocalPeerId { .. } => true,
