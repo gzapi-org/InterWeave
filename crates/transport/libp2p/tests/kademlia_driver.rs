@@ -12,7 +12,9 @@
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use interweave_kademlia_control_api::{KademliaCommand, KademliaEvent, KademliaMode, QueryClass};
+use interweave_kademlia_control_api::{
+    KademliaCommand, KademliaEvent, KademliaMode, QueryClass, QueryHandle,
+};
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::TransportIdentity;
 use interweave_transport_libp2p::runtime::kademlia_driver::KademliaSettings;
@@ -361,6 +363,7 @@ async fn star(
 async fn explore(asker: &mut SwarmRuntime) {
     asker
         .kademlia(KademliaCommand::StartQuery {
+            handle: QueryHandle::commanded(1),
             class: QueryClass::Exploration,
             key: [0x42; 32],
         })
@@ -455,6 +458,7 @@ async fn a_draining_runtime_refuses_new_queries_and_settles_them() {
     let _ = listening(&mut a).await;
     a.drain().await.expect("draining");
     a.kademlia(KademliaCommand::StartQuery {
+        handle: QueryHandle::commanded(1),
         class: QueryClass::Exploration,
         key: [7; 32],
     })
@@ -467,6 +471,7 @@ async fn a_draining_runtime_refuses_new_queries_and_settles_them() {
                 event: KademliaEvent::QueryFailed {
                     class: QueryClass::Exploration,
                     reason: interweave_kademlia_control_api::QueryFailure::ShuttingDown,
+                    ..
                 },
             }
         )

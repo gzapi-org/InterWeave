@@ -12,7 +12,7 @@
 //! write attempts are counted and dropped (§12), and nothing in this
 //! module can read or write a record — the port has no command for it.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
@@ -23,6 +23,7 @@ use sha2::{Digest, Sha256};
 
 use interweave_kademlia_control_api::{
     KademliaCommand, KademliaEvent, KademliaMode, MAX_RESULTS_PER_QUERY, QueryClass, QueryFailure,
+    QueryHandle, QueryOrigin,
 };
 use interweave_transport_api::TransportIdentity;
 use interweave_transport_runtime::{ConnectionClass, ConnectionManager};
@@ -247,8 +248,22 @@ pub(super) struct KademliaState {
     max_concurrent_queries: usize,
     /// Peers this driver has admitted to the routing table.
     routed: BTreeSet<PeerId>,
+    /// The driver's implicit-handle counter. Names the queries the
+    /// LIBRARY starts, in the half of the handle space the provider
+    /// does not use — so the two minters cannot collide.
+    next_implicit: u64,
     /// Commanded queries in flight, by the class each was issued for.
-    queries: HashMap<kad::QueryId, QueryClass>,
+    queries: HashMap<kad::QueryId, (QueryClass, QueryHandle)>,
+    /// Queries the LIBRARY started that this driver has already seen
+    /// and announced (F2).
+    ///
+    /// THE FACT NO GUARD COULD SUPPLY. An implicit bootstrap is absent
+    /// from `queries` by construction, so "not commanded" cannot tell a
+    /// query that has just appeared from one that has been running since
+    /// an earlier insertion — and four review rounds on PR #61 got that
+    /// wrong one direction at a time. Remembering which ones are already
+    /// known makes "new" answerable by looking.
+    implicit: HashMap<kad::QueryId, QueryHandle>,
     /// Candidates accumulated per query across progress steps.
     results: HashMap<kad::QueryId, Vec<interweave_discovery_api::CandidatePeer>>,
     /// Whether each recently seen peer advertises the exact server
@@ -281,7 +296,9 @@ impl KademliaState {
             max_results_per_query: settings.max_results_per_query.get(),
             max_concurrent_queries: settings.max_concurrent_queries.get(),
             routed: BTreeSet::new(),
+            next_implicit: 0,
             queries: HashMap::new(),
+            implicit: HashMap::new(),
             results: HashMap::new(),
             advertises: BTreeMap::new(),
             pending_offers: BTreeMap::new(),
@@ -313,6 +330,62 @@ impl KademliaState {
     }
 }
 
+/// Notice every query the LIBRARY started, and announce it once.
+///
+/// **The fact four review rounds could not guess.** An implicit
+/// bootstrap (SPIKE-003 F2) never passes through `handle_command`, so it
+/// is absent from `queries` by construction — and "absent from
+/// `queries`" was therefore true of a query that had just appeared AND
+/// of one that had been running since an earlier insertion. PR #61
+/// round 8 established that cancelling all of them is wrong; round 9
+/// established that cancelling none is also wrong. Both are the same
+/// missing fact, and no guard could supply it.
+///
+/// Remembering which ones are already known makes "new" answerable by
+/// looking. A newly seen id is announced so the provider can charge it;
+/// one that has vanished is settled, because a query that ended without
+/// a completion still holds a permit.
+///
+/// Called on every Swarm event the driver sees, which is as often as
+/// the library can start one.
+fn reconcile_implicit(
+    state: &mut KademliaState,
+    behaviour: &kad::Behaviour<MemoryStore>,
+    out: &mut Vec<KademliaEvent>,
+) {
+    let live: HashSet<kad::QueryId> = behaviour.iter_queries().map(|q| q.id()).collect();
+    for id in &live {
+        if state.queries.contains_key(id) || state.implicit.contains_key(id) {
+            continue;
+        }
+        state.next_implicit = state.next_implicit.wrapping_add(1);
+        let handle = QueryHandle::implicit(state.next_implicit);
+        state.implicit.insert(*id, handle);
+        out.push(KademliaEvent::QueryStarted {
+            handle,
+            class: QueryClass::Bootstrap,
+            origin: QueryOrigin::Implicit,
+        });
+    }
+    // GONE WITHOUT A COMPLETION still owes a settlement: the permit the
+    // announcement created is released by nothing else.
+    let vanished: Vec<kad::QueryId> = state
+        .implicit
+        .keys()
+        .filter(|id| !live.contains(id))
+        .copied()
+        .collect();
+    for id in vanished {
+        if let Some(handle) = state.implicit.remove(&id) {
+            out.push(KademliaEvent::QueryFailed {
+                handle,
+                class: QueryClass::Bootstrap,
+                reason: QueryFailure::TimedOut,
+            });
+        }
+    }
+}
+
 /// Apply one provider command to the behaviour.
 ///
 /// Returns the port events the command produced immediately; most
@@ -332,8 +405,9 @@ pub(super) fn handle_command(
     // prevent. A refused query is still SETTLED, or the caller's
     // accounting waits forever.
     if state.stopping {
-        if let KademliaCommand::StartQuery { class, .. } = command {
+        if let KademliaCommand::StartQuery { handle, class, .. } = command {
             out.push(KademliaEvent::QueryFailed {
+                handle,
                 class,
                 reason: QueryFailure::ShuttingDown,
             });
@@ -382,7 +456,7 @@ pub(super) fn handle_command(
             }
             out.extend(try_admit(state, behaviour, manager, pid, &peer, now_ms));
         }
-        KademliaCommand::StartQuery { class, key } => {
+        KademliaCommand::StartQuery { handle, class, key } => {
             // THE DRIVER'S OWN CEILING. The provider budgets its
             // commands, but the port is public: a caller pumping the
             // command channel faster than queries time out would grow
@@ -391,6 +465,7 @@ pub(super) fn handle_command(
             // leave the caller's accounting waiting forever.
             if state.queries.len() >= state.max_concurrent_queries {
                 out.push(KademliaEvent::QueryFailed {
+                    handle,
                     class,
                     reason: QueryFailure::BudgetExhausted,
                 });
@@ -399,9 +474,10 @@ pub(super) fn handle_command(
             match class {
                 QueryClass::Bootstrap => match behaviour.bootstrap() {
                     Ok(id) => {
-                        state.queries.insert(id, class);
+                        state.queries.insert(id, (class, handle));
                     }
                     Err(_) => out.push(KademliaEvent::QueryFailed {
+                        handle,
                         class,
                         reason: QueryFailure::NoRoutingPeers,
                     }),
@@ -409,7 +485,7 @@ pub(super) fn handle_command(
                 QueryClass::Targeted => match peer_from_lookup_key(key) {
                     Some(target) => {
                         let id = behaviour.get_closest_peers(target);
-                        state.queries.insert(id, class);
+                        state.queries.insert(id, (class, handle));
                     }
                     // The provider refuses untargetable identities
                     // upstream; a key that decodes to no PeerId here is
@@ -418,6 +494,7 @@ pub(super) fn handle_command(
                     // routing peers" is the nearest bounded truth: there
                     // is nothing at that key to route toward.
                     None => out.push(KademliaEvent::QueryFailed {
+                        handle,
                         class,
                         reason: QueryFailure::NoRoutingPeers,
                     }),
@@ -426,7 +503,7 @@ pub(super) fn handle_command(
                     let results =
                         NonZeroUsize::new(state.max_results_per_query).unwrap_or(NonZeroUsize::MIN);
                     let id = behaviour.get_n_closest_peers(key.to_vec(), results);
-                    state.queries.insert(id, class);
+                    state.queries.insert(id, (class, handle));
                 }
             }
         }
@@ -452,34 +529,35 @@ pub(super) fn handle_command(
             // termination conditions. A completion it emits afterwards
             // finds no entry in `queries` and is ignored, which is the
             // same path an unknown id already takes.
-            // THE IMPLICIT ONES TOO. Review finding on PR #61: a
-            // library-started bootstrap (F2) is deliberately absent
-            // from `queries` — the completion path treats an unknown id
-            // as implicit — so draining this map neither finished it
-            // nor emitted the settlement that releases the provider's
-            // unscheduled charge. It kept querying past the shutdown
-            // and its charge was held for the life of the provider.
+            // THE IMPLICIT ONES TOO, and now they have names. A
+            // library-started bootstrap (F2) never passes through this
+            // function, so it is absent from `queries`; `reconcile_implicit`
+            // is what noticed it and told the provider to charge it, and
+            // `state.implicit` is what remembers the handle that charge
+            // is keyed by. Draining only `queries` left those queries
+            // running and their charges held for the life of the
+            // provider.
             //
-            // Collected before finishing, because `iter_queries`
-            // borrows the behaviour that `query_mut` needs.
-            let commanded: Vec<kad::QueryId> = state.queries.keys().copied().collect();
-            let implicit: Vec<kad::QueryId> = behaviour
-                .iter_queries()
-                .map(|q| q.id())
-                .filter(|id| !state.queries.contains_key(id))
+            // Collected before finishing, because `iter_queries` borrows
+            // the behaviour that `query_mut` needs.
+            reconcile_implicit(state, behaviour, &mut out);
+            let settling: Vec<(kad::QueryId, QueryClass, QueryHandle)> = state
+                .queries
+                .drain()
+                .map(|(id, (class, handle))| (id, class, handle))
+                .chain(
+                    state
+                        .implicit
+                        .drain()
+                        .map(|(id, handle)| (id, QueryClass::Bootstrap, handle)),
+                )
                 .collect();
-            for (id, class) in commanded
-                .into_iter()
-                .filter_map(|id| state.queries.remove(&id).map(|c| (id, c)))
-                // An implicit query settles as the bootstrap class it
-                // is, which is the completion the provider's charge
-                // keys on.
-                .chain(implicit.into_iter().map(|id| (id, QueryClass::Bootstrap)))
-            {
+            for (id, class, handle) in settling {
                 if let Some(mut running) = behaviour.query_mut(&id) {
                     running.finish();
                 }
                 out.push(KademliaEvent::QueryFailed {
+                    handle,
                     class,
                     reason: QueryFailure::ShuttingDown,
                 });
@@ -723,6 +801,15 @@ pub(super) fn handle_kademlia(
     match event {
         Libp2pSwarmEvent::Behaviour(SubstrateBehaviourEvent::Kad(kad_event)) => {
             handle_kad_event(state, swarm.kademlia_mut(), manager, kad_event, now_ms, out);
+            // AFTER the event, so a query the event's own insertion
+            // started is noticed on the same pass that caused it. This
+            // is the single place "which implicit queries are new" is
+            // decided, and having one place is the whole point: four
+            // review rounds on PR #61 each answered it differently at a
+            // different call site.
+            if let Some(behaviour) = swarm.kademlia_mut() {
+                reconcile_implicit(state, behaviour, out);
+            }
             KadHandled::Consumed
         }
         other => KadHandled::Passed(Box::new(other)),
@@ -815,22 +902,20 @@ fn handle_kad_event(
                     // already have run and every uncommanded query is
                     // work the drain exists to stop. On a running driver
                     // a stray bootstrap completes and settles itself.
-                    if state.stopping {
-                        let started: Vec<kad::QueryId> = behaviour
-                            .iter_queries()
-                            .map(|q| q.id())
-                            .filter(|id| !state.queries.contains_key(id))
-                            .collect();
-                        for id in started {
-                            if let Some(mut running) = behaviour.query_mut(&id) {
-                                running.finish();
-                            }
-                            out.push(KademliaEvent::QueryFailed {
-                                class: QueryClass::Bootstrap,
-                                reason: QueryFailure::ShuttingDown,
-                            });
-                        }
-                    }
+                    // AND NOTHING SPECIAL ABOUT ITS QUERIES. Rounds
+                    // 8 and 9 of PR #61 argued over whether to cancel
+                    // the bootstrap such an insertion may have started:
+                    // cancelling every uncommanded query killed
+                    // unrelated ones, and cancelling none left one
+                    // running that the provider had never charged. Both
+                    // were consequences of not being able to name it.
+                    //
+                    // `reconcile_implicit` runs on every Swarm event, so
+                    // whatever this insertion started is noticed,
+                    // announced, and charged like any other implicit
+                    // query — and settles on its own completion, or with
+                    // the rest on shutdown. There is no case left to
+                    // special-case.
                 }
             }
             if let Some(evicted) = old_peer
@@ -867,30 +952,47 @@ fn handle_kad_event(
                 };
                 accumulate(state, manager, id, peers, now_ms);
                 if step.last {
-                    let Some(class) = state.queries.remove(&id) else {
+                    let Some((class, handle)) = state.queries.remove(&id) else {
                         return;
                     };
                     let found = state.results.remove(&id).unwrap_or_default();
                     if found.is_empty() && timed_out {
                         out.push(KademliaEvent::QueryFailed {
+                            handle,
                             class,
                             reason: QueryFailure::TimedOut,
                         });
                     } else if let Ok(candidates) =
                         interweave_kademlia_control_api::ObservedCandidates::new(found)
                     {
-                        out.push(KademliaEvent::QueryResults { candidates, class });
+                        out.push(KademliaEvent::QueryResults {
+                            handle,
+                            candidates,
+                            class,
+                        });
                     }
                 }
             }
             kad::QueryResult::Bootstrap(outcome) if step.last => {
                 {
-                    // An UNKNOWN id here is the library's implicit
-                    // bootstrap — the one F2 measured, started by a
-                    // routing insertion nobody scheduled. Reporting it
-                    // as a bootstrap completion is what lets the
-                    // provider settle the charge it took for it.
-                    let class = state.queries.remove(&id).unwrap_or(QueryClass::Bootstrap);
+                    // AN UNKNOWN ID IS NOT AN ANONYMOUS ONE any more.
+                    // The library's implicit bootstrap (F2) was reported
+                    // as a bare bootstrap-class completion, and the
+                    // provider then had to guess which charge it
+                    // settled. `reconcile_implicit` has already given
+                    // this query a handle and told the provider to
+                    // charge it, so the completion names the same query
+                    // and settles that charge and no other.
+                    let Some((class, handle)) = state.queries.remove(&id).or_else(|| {
+                        state
+                            .implicit
+                            .remove(&id)
+                            .map(|h| (QueryClass::Bootstrap, h))
+                    }) else {
+                        // Never announced, so nothing is holding a
+                        // permit for it and there is nothing to settle.
+                        return;
+                    };
                     match outcome {
                         // Empty is always within the bound; a bootstrap
                         // completion carries no candidates of its own.
@@ -898,10 +1000,15 @@ fn handle_kad_event(
                             if let Ok(candidates) =
                                 interweave_kademlia_control_api::ObservedCandidates::new([])
                             {
-                                out.push(KademliaEvent::QueryResults { candidates, class });
+                                out.push(KademliaEvent::QueryResults {
+                                    handle,
+                                    candidates,
+                                    class,
+                                });
                             }
                         }
                         Err(_) => out.push(KademliaEvent::QueryFailed {
+                            handle,
                             class,
                             reason: QueryFailure::TimedOut,
                         }),
@@ -1962,6 +2069,71 @@ mod tests {
     }
 
     #[test]
+    fn an_implicit_query_is_announced_once_and_settled_by_name() {
+        // THE FACT FOUR REVIEW ROUNDS COULD NOT GUESS. An implicit
+        // bootstrap never passes through `handle_command`, so "absent
+        // from `queries`" was equally true of one that had just started
+        // and one running since an earlier insertion. Round 8 of PR #61
+        // concluded cancelling all of them was wrong; round 9 concluded
+        // cancelling none was also wrong. Remembering which are known
+        // makes "new" answerable by looking, and the answer is a name.
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let mut state = KademliaState::new(&settings);
+        let mut behaviour = build_behaviour(&settings, PeerId::random()).expect("buildable");
+
+        // One query the library started; nobody commanded it.
+        let first = behaviour.get_closest_peers(PeerId::random());
+        let mut out = Vec::new();
+        reconcile_implicit(&mut state, &behaviour, &mut out);
+        let announced: Vec<QueryHandle> = out
+            .iter()
+            .filter_map(|e| match e {
+                KademliaEvent::QueryStarted { handle, origin, .. } => {
+                    assert_eq!(*origin, QueryOrigin::Implicit);
+                    Some(*handle)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(announced.len(), 1, "the new query is announced");
+        assert_eq!(
+            state.implicit.get(&first),
+            Some(&announced[0]),
+            "and remembered under the name it was given"
+        );
+
+        // ANNOUNCED ONCE. A second pass must not charge it again — that
+        // is the half "cancel everything uncommanded" got wrong.
+        out.clear();
+        reconcile_implicit(&mut state, &behaviour, &mut out);
+        assert!(
+            out.is_empty(),
+            "a query already known is not new, however many times it is looked at"
+        );
+
+        // A SECOND one starts. Only it is new.
+        let second = behaviour.get_closest_peers(PeerId::random());
+        out.clear();
+        reconcile_implicit(&mut state, &behaviour, &mut out);
+        assert_eq!(out.len(), 1, "only the newcomer is announced");
+        assert_ne!(
+            state.implicit.get(&second),
+            state.implicit.get(&first),
+            "and it is a different query, not the same one twice"
+        );
+    }
+
+    #[test]
     fn shutdown_cancels_the_query_it_reports_as_settled() {
         // Review finding on PR #61: draining `queries` reported each as
         // `ShuttingDown` and left the libp2p query RUNNING, so the
@@ -1991,7 +2163,9 @@ mod tests {
         );
 
         let id = behaviour.get_closest_peers(PeerId::random());
-        state.queries.insert(id, QueryClass::Exploration);
+        state
+            .queries
+            .insert(id, (QueryClass::Exploration, QueryHandle::commanded(1)));
         // `iter_queries` filters out FINISHED queries, which is the
         // observable that distinguishes cancelled from merely forgotten.
         assert!(
@@ -2074,6 +2248,7 @@ mod tests {
                 KademliaEvent::QueryFailed {
                     class: QueryClass::Bootstrap,
                     reason: QueryFailure::ShuttingDown,
+                    ..
                 }
             )),
             "it settles as the bootstrap class, which is the completion the \
@@ -2445,6 +2620,7 @@ mod tests {
                 &mut behaviour,
                 &manager,
                 KademliaCommand::StartQuery {
+                    handle: QueryHandle::commanded(1),
                     class: QueryClass::Exploration,
                     key: [i; 32],
                 },
@@ -2457,6 +2633,7 @@ mod tests {
             &mut behaviour,
             &manager,
             KademliaCommand::StartQuery {
+                handle: QueryHandle::commanded(1),
                 class: QueryClass::Exploration,
                 key: [9; 32],
             },
@@ -2465,6 +2642,7 @@ mod tests {
         assert_eq!(
             refused,
             vec![KademliaEvent::QueryFailed {
+                handle: QueryHandle::commanded(1),
                 class: QueryClass::Exploration,
                 reason: QueryFailure::BudgetExhausted,
             }],
@@ -2525,6 +2703,7 @@ mod tests {
             &mut behaviour,
             &manager,
             KademliaCommand::StartQuery {
+                handle: QueryHandle::commanded(1),
                 class: QueryClass::Exploration,
                 key: [1; 32],
             },
@@ -2533,6 +2712,7 @@ mod tests {
         assert_eq!(
             refused,
             vec![KademliaEvent::QueryFailed {
+                handle: QueryHandle::commanded(1),
                 class: QueryClass::Exploration,
                 reason: QueryFailure::ShuttingDown,
             }]

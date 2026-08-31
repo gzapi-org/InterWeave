@@ -1225,12 +1225,14 @@ impl SwarmRuntime {
 mod flush_tests {
     #![allow(clippy::expect_used)]
     use super::{SwarmEvent, flush_outbox};
+    use interweave_kademlia_control_api::QueryHandle;
     use std::collections::VecDeque;
     use tokio::sync::mpsc;
 
     fn kad_settlement() -> SwarmEvent {
         SwarmEvent::Kademlia {
             event: interweave_kademlia_control_api::KademliaEvent::QueryFailed {
+                handle: QueryHandle::commanded(1),
                 class: interweave_kademlia_control_api::QueryClass::Exploration,
                 reason: interweave_kademlia_control_api::QueryFailure::ShuttingDown,
             },

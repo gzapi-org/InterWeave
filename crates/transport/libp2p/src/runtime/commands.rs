@@ -805,12 +805,15 @@ pub(super) fn handle_command(
             };
             if manager.is_draining()
                 && let interweave_kademlia_control_api::KademliaCommand::StartQuery {
-                    class, ..
+                    handle,
+                    class,
+                    ..
                 } = &command
             {
                 settle(
                     outbox,
                     interweave_kademlia_control_api::KademliaEvent::QueryFailed {
+                        handle: *handle,
                         class: *class,
                         reason: interweave_kademlia_control_api::QueryFailure::ShuttingDown,
                     },
@@ -1192,6 +1195,7 @@ mod expired_address_tests {
         ActiveListeners, SwarmEvent, TransportIdentity, VecDeque, buffer_kademlia_event,
         buffer_revocation_events, forget_address,
     };
+    use interweave_kademlia_control_api::QueryHandle;
     use libp2p::Multiaddr;
     use libp2p::core::transport::ListenerId;
 
@@ -1299,6 +1303,7 @@ mod expired_address_tests {
         // and is not a licence to grow without bound.
         let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
         let refusal = || interweave_kademlia_control_api::KademliaEvent::QueryFailed {
+            handle: QueryHandle::commanded(1),
             class: interweave_kademlia_control_api::QueryClass::Targeted,
             reason: interweave_kademlia_control_api::QueryFailure::BudgetExhausted,
         };
@@ -1326,6 +1331,7 @@ mod expired_address_tests {
         // driver can have outstanding.
         let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
         let settlement = || interweave_kademlia_control_api::KademliaEvent::QueryFailed {
+            handle: QueryHandle::commanded(1),
             class: interweave_kademlia_control_api::QueryClass::Targeted,
             reason: interweave_kademlia_control_api::QueryFailure::NoRoutingPeers,
         };
@@ -1362,6 +1368,7 @@ mod expired_address_tests {
         // dropped, leaking the permit the slack exists to release.
         let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
         let settlement = || interweave_kademlia_control_api::KademliaEvent::QueryFailed {
+            handle: QueryHandle::commanded(1),
             class: interweave_kademlia_control_api::QueryClass::Bootstrap,
             reason: interweave_kademlia_control_api::QueryFailure::NoRoutingPeers,
         };
