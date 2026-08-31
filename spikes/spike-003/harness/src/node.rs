@@ -124,10 +124,6 @@ pub struct Node {
     pub own_queries: HashMap<kad::QueryId, QueryClass>,
     /// What this node saw, written only by `topology::record`.
     pub observed: crate::topology::Observations,
-    /// Tickets for the setup connections this node dialled, held for
-    /// its lifetime so those sockets occupy the ceilings they would
-    /// occupy in production.
-    setup_tickets: Vec<interweave_transport_runtime::DialTicket>,
 }
 
 impl Node {
@@ -191,7 +187,6 @@ impl Node {
             trusted: Vec::new(),
             own_queries: HashMap::new(),
             observed: crate::topology::Observations::default(),
-            setup_tickets: Vec::new(),
         }
     }
 
@@ -311,19 +306,36 @@ impl Node {
     /// If the dial cannot be started at all.
     pub fn dial_admitted(&mut self, address: Multiaddr) {
         use libp2p::swarm::dial_opts::DialOpts;
-        // THROUGH THE REAL ADMISSION, so a setup connection consumes the
-        // ceilings it would consume in production. Registering only the
-        // `AdmittedDials` marker left these sockets uncounted by the
-        // `ConnectionManager`, which made every tight-ceiling scenario
-        // less tight than it claimed: a node at `max_connections = 1`
-        // that was already connected through this helper still had its
-        // slot free.
+        // A SETUP DIAL IS NOT ADMITTED, and this comment used to claim
+        // it was. The claim was added to close a real gap — setup
+        // sockets go uncounted by the `ConnectionManager`, so a node at
+        // `max_connections = 1` already connected through this helper
+        // still has its slot free — and the code that was supposed to
+        // close it never ran.
         //
-        // The ticket is held in `setup_tickets` for the life of the
-        // node rather than settled, which is what an established
-        // connection does to a slot — the alternative, settling
-        // immediately, would return the reservation and reintroduce the
-        // same gap.
+        // `DialOpts::from(Multiaddr)` sets no peer id, and
+        // `get_peer_id` recovers one only from a trailing `/p2p/`
+        // component. Every address reaching here is `dial_address()`,
+        // i.e. the listen address straight off `NewListenAddr`, which
+        // has no such component — at any of the call sites. So the
+        // admission was gated on a condition that is never true, and
+        // the tickets it would have held were never minted.
+        //
+        // IT IS RECORDED RATHER THAN FIXED, deliberately. Making it
+        // admit would change what the experiments measure: K19 fills
+        // the pending-dial ceiling with a direct `admit` and asserts
+        // `pending_dials() == 1`, which holds precisely BECAUSE setup
+        // dials take no ticket — node 0 runs at `max_pending_dials: 1`
+        // and its own setup dial would consume it. SPIKE-003 is closed
+        // with a PASS and its findings bind Stage 10; silently changing
+        // the apparatus under a closed record is worse than an honest
+        // limitation. No recorded finding depends on this: K19's fill
+        // is direct, F8's section calls this helper for none of its
+        // ceiling peers, and K25/F15 is bounded by `max_pending_dials`
+        // against two candidate addresses.
+        //
+        // A future experiment that needs setup connections to occupy a
+        // ceiling must fill it directly, as K19 does.
         let opts: DialOpts = address.into();
         // SAVED BEFORE `opts` MOVES. The cleanup used to forget a
         // hardcoded id zero, which is not the id that was registered —
@@ -333,34 +345,9 @@ impl Node {
         // originated. That is a leak in the measurement apparatus, not
         // only in the cleanup.
         let id = opts.connection_id();
-        // The manager decides it, exactly as the gate makes it decide a
-        // behaviour dial. A refusal here is a real refusal: the node is
-        // at a ceiling the experiment set, and pretending otherwise is
-        // what the finding was about.
-        let ticket = opts.get_peer_id().and_then(|p| {
-            let identity = interweave_transport_api::TransportIdentity::parse(p.to_base58())
-                .ok()?;
-            self.manager
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .handle()
-                .admit(
-                    &interweave_transport_runtime::DialRequest {
-                        peer: Some(identity),
-                        address: String::new(),
-                        origin: interweave_transport_runtime::DialOrigin::Manual,
-                    },
-                    0,
-                )
-                .ok()
-        });
         self.admitted.register(id);
         if self.swarm.dial(opts).is_err() {
             self.admitted.forget(id);
-            return;
-        }
-        if let Some(t) = ticket {
-            self.setup_tickets.push(t);
         }
     }
 
