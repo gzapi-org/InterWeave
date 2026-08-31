@@ -1352,6 +1352,176 @@ mod tests {
     }
 
     #[test]
+    fn a_peer_that_stops_advertising_the_server_protocol_loses_its_seat() {
+        // Review finding on PR #61: "REPLACED, not merged" had no test.
+        // `remember_advertisement` was never called twice for one peer
+        // with differing protocol lists, so unioning the advertisement —
+        // the exact regression the comment warns against, and the one
+        // SPIKE-003 F5 measured on a real mode change — passed every
+        // test in the tree, as did deleting the `Withdrawn` arm whole.
+        //
+        // §7's rule: "if a peer no longer advertises the exact server
+        // protocol, stale positive evidence is removed/replaced." A peer
+        // that switches to client mode and keeps its seat is a route
+        // queries keep targeting that no longer serves.
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let mut state = KademliaState::new(&settings);
+        let mut manager = interweave_transport_runtime::ConnectionManager::new(
+            interweave_transport_runtime::ConnectionPolicy::default(),
+            8,
+        );
+        let server = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let server_id = to_transport_identity(&server).expect("canonical");
+        let _ = manager.set_trust(
+            interweave_transport_runtime::TrustSources::new(
+                interweave_trust_api::PeerTrustPolicy::new([server_id]).expect("small"),
+                interweave_trust_api::InfrastructureSet::default(),
+            ),
+            &[],
+        );
+        let serving = StreamProtocol::try_from_owned(state.protocol.clone()).expect("legal");
+
+        // It advertises, and holds a seat.
+        assert!(matches!(
+            remember_advertisement(
+                &mut state,
+                &manager,
+                server,
+                std::slice::from_ref(&serving),
+                &[],
+                0
+            ),
+            Advertisement::Serving(_)
+        ));
+        assert_eq!(state.advertises.get(&server).map(|(a, _)| *a), Some(true));
+        state.routed.insert(server);
+
+        // THE MODE CHANGE: a fresh Identify, same peer, without the
+        // server protocol. Another protocol is present, so this is a
+        // real advertisement rather than an empty one.
+        let other =
+            StreamProtocol::try_from_owned("/interweave/direct/2.0.0".to_owned()).expect("legal");
+        assert!(
+            matches!(
+                remember_advertisement(&mut state, &manager, server, &[other], &[], 1_000),
+                Advertisement::Withdrawn
+            ),
+            "a union would still report Serving here, which is the regression"
+        );
+        assert_eq!(
+            state.advertises.get(&server).map(|(a, _)| *a),
+            Some(false),
+            "the stored advertisement is REPLACED, not merged"
+        );
+    }
+
+    #[test]
+    fn untrusted_churn_cannot_displace_a_trusted_offer_still_awaiting_evidence() {
+        // Review finding on PR #61: the pre-stash trust gate had no test
+        // that isolated it. `a_table_full_of_unusable_peers_still_admits
+        // _a_trusted_server` passes with the gate deleted, because
+        // `make_room` bounds the map either way and the trusted arrival
+        // there is the NEWEST — it would displace something regardless.
+        //
+        // The scenario the gate actually exists for is the opposite
+        // order: a trusted peer's offer is stashed FIRST and waits for
+        // its Identify evidence, while untrusted offers keep arriving
+        // with newer timestamps. Without the gate they are stashed, and
+        // stalest-displacement then evicts the one entry that could
+        // have become a routing seat. mDNS on a shared LAN produces
+        // exactly this shape.
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let mut state = KademliaState::new(&settings);
+        let local = PeerId::random();
+        let mut behaviour = build_behaviour(&settings, local).expect("buildable");
+        let mut manager = interweave_transport_runtime::ConnectionManager::new(
+            interweave_transport_runtime::ConnectionPolicy::default(),
+            8,
+        );
+        let waiting = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let waiting_id = to_transport_identity(&waiting).expect("canonical");
+        let _ = manager.set_trust(
+            interweave_transport_runtime::TrustSources::new(
+                interweave_trust_api::PeerTrustPolicy::new([waiting_id.clone()]).expect("small"),
+                interweave_trust_api::InfrastructureSet::default(),
+            ),
+            &[],
+        );
+
+        let addresses = interweave_kademlia_control_api::OfferedAddresses::parse_all([
+            "/ip4/198.51.100.7/tcp/4001",
+        ])
+        .expect("bounded");
+        // The trusted offer lands FIRST and stays pending: no Identify
+        // evidence, so `try_admit` leaves it stashed.
+        let _ = handle_command(
+            &mut state,
+            &mut behaviour,
+            &manager,
+            KademliaCommand::OfferRoutingPeer {
+                addresses: addresses.clone(),
+                peer: waiting_id,
+            },
+            0,
+        );
+        assert!(
+            state.pending_offers.contains_key(&waiting),
+            "the control: it is stashed and waiting"
+        );
+
+        // Then untrusted churn, every one of them NEWER.
+        for i in 1..=(MAX_PENDING_OFFERS as u64 * 2) {
+            let stranger = libp2p::identity::Keypair::generate_ed25519()
+                .public()
+                .to_peer_id();
+            let _ = handle_command(
+                &mut state,
+                &mut behaviour,
+                &manager,
+                KademliaCommand::OfferRoutingPeer {
+                    addresses: addresses.clone(),
+                    peer: to_transport_identity(&stranger).expect("canonical"),
+                },
+                i,
+            );
+        }
+
+        assert!(
+            state.pending_offers.contains_key(&waiting),
+            "a peer that can never hold a seat must not be able to evict one that can"
+        );
+        assert_eq!(
+            state.pending_offers.len(),
+            1,
+            "and nothing untrusted was stashed at all"
+        );
+    }
+
+    #[test]
     fn a_stash_full_of_trusted_peers_displaces_the_stalest() {
         // The trust gate is not the whole answer: `PeerTrustPolicy`
         // admits up to 4096 peers, which is sixteen times the offer
