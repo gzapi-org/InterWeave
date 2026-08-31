@@ -241,10 +241,13 @@ pub(super) struct KademliaState {
     results: HashMap<kad::QueryId, Vec<interweave_discovery_api::CandidatePeer>>,
     /// Whether each recently seen peer advertises the exact server
     /// protocol, REPLACED on every Identify — a handler that unioned
-    /// could never observe a withdrawal (F5).
-    advertises: BTreeMap<PeerId, bool>,
-    /// Offered addresses waiting for Identify evidence.
-    pending_offers: BTreeMap<PeerId, BTreeSet<Multiaddr>>,
+    /// could never observe a withdrawal (F5) — with the time it was
+    /// last observed, so the cap displaces the stalest rather than
+    /// refusing the newest.
+    advertises: BTreeMap<PeerId, (bool, u64)>,
+    /// Offered addresses waiting for Identify evidence, with the time
+    /// the stash was last written, for the same reason.
+    pending_offers: BTreeMap<PeerId, (BTreeSet<Multiaddr>, u64)>,
     /// Inbound record writes dropped, counted never stored (§12).
     record_writes_dropped: u64,
     /// Shutting down: new queries are refused.
@@ -322,16 +325,23 @@ pub(super) fn handle_command(
             if manager.is_local_peer(&peer) {
                 return out;
             }
+            // TRUST FIRST, then the waiting room (§7's pipeline order).
+            // An offer for a peer that can never hold a seat is not
+            // stashed at all: `try_admit` would refuse it below, but
+            // only after it had taken one of the bounded slots, and it
+            // never gives them back.
+            if !may_hold_a_seat(manager, &peer) {
+                return out;
+            }
             // STASHED, not inserted: an offer is a hint, and §7's
             // pipeline requires authenticated Identify evidence of the
             // exact server protocol before anything reaches the routing
             // table. The addresses wait, bounded, for that evidence.
-            if !state.pending_offers.contains_key(&pid)
-                && state.pending_offers.len() >= MAX_PENDING_OFFERS
-            {
-                return out;
+            if !state.pending_offers.contains_key(&pid) {
+                make_room(&mut state.pending_offers, MAX_PENDING_OFFERS, |(_, at)| *at);
             }
-            let stash = state.pending_offers.entry(pid).or_default();
+            let (stash, seen) = state.pending_offers.entry(pid).or_default();
+            *seen = now_ms;
             for offered in addresses.as_slice() {
                 if stash.len() >= 64 {
                     break;
@@ -410,6 +420,51 @@ pub(super) fn handle_command(
     out
 }
 
+/// Whether this peer could ever hold a routing seat.
+///
+/// §7's pipeline puts `PeerTrustPolicy authorization` BEFORE the
+/// authenticated Identify step, and the stashes below are that step's
+/// waiting room. Asked here rather than only in [`try_admit`] because a
+/// bounded table filled by peers that can never pass the later check is
+/// a table an adversary closes: mDNS on a shared LAN offers a candidate
+/// for every node it sees, and the first `MAX_PENDING_OFFERS` of them
+/// held their slots for the life of the process.
+fn may_hold_a_seat(manager: &ConnectionManager, identity: &TransportIdentity) -> bool {
+    manager.classify(identity) == ConnectionClass::DataPlaneTrusted
+}
+
+/// Make room in a bounded observation map by dropping its STALEST entry.
+///
+/// Displacement, not refusal. Refusing the newcomer at the cap lets
+/// whatever arrived first hold its slot forever, so a table that filled
+/// once never admitted anyone again — a permanent denial dressed as a
+/// bound. Dropping the stalest costs the least useful entry, and the
+/// evidence it held is re-learned from the next Identify.
+fn make_room<V>(map: &mut BTreeMap<PeerId, V>, cap: usize, at: impl Fn(&V) -> u64) {
+    while map.len() >= cap {
+        let Some(stalest) = map
+            .iter()
+            .min_by_key(|(peer, v)| (at(v), **peer))
+            .map(|(peer, _)| *peer)
+        else {
+            return;
+        };
+        map.remove(&stalest);
+    }
+}
+
+/// Forget what a closed connection was evidence for.
+///
+/// An Identify advertisement is an observation ABOUT A CONNECTION, so it
+/// does not outlive one: keeping it made `advertises` grow monotonically
+/// toward its cap with entries no reconnect would refresh. The stash
+/// goes with it, because an offer waiting on evidence from a connection
+/// that has ended is waiting on nothing.
+pub(super) fn forget_disconnected(state: &mut KademliaState, peer: &PeerId) {
+    state.advertises.remove(peer);
+    state.pending_offers.remove(peer);
+}
+
 /// §7's admission pipeline, driver side: trust, Identify evidence of
 /// the EXACT server protocol, the population bound, then — and only
 /// then — `add_address`.
@@ -427,10 +482,10 @@ fn try_admit(
     // Routing peers are held to data-plane trust (§13's
     // routing_peer_policy). Discovery of anyone else is legal; RETAINING
     // them is not.
-    if manager.classify(identity) != ConnectionClass::DataPlaneTrusted {
+    if !may_hold_a_seat(manager, identity) {
         return Vec::new();
     }
-    if state.advertises.get(&pid) != Some(&true) {
+    if !matches!(state.advertises.get(&pid), Some((true, _))) {
         // No authenticated Identify evidence of the exact server
         // protocol yet: the offer stays stashed until it arrives.
         return Vec::new();
@@ -440,7 +495,11 @@ fn try_admit(
     if !state.routed.contains(&pid) && state.routed.len() >= state.max_routing_peers {
         return Vec::new();
     }
-    let mut addresses: BTreeSet<Multiaddr> = state.pending_offers.remove(&pid).unwrap_or_default();
+    let mut addresses: BTreeSet<Multiaddr> = state
+        .pending_offers
+        .remove(&pid)
+        .map(|(stash, _)| stash)
+        .unwrap_or_default();
     for known in manager.dial_candidates(identity, now_ms) {
         if let Some(addr) = suffix_checked_str(&known, &pid) {
             addresses.insert(addr);
@@ -528,6 +587,21 @@ pub(super) fn handle_kademlia(
             now_ms,
             out,
         );
+        return KadHandled::Passed(Box::new(event));
+    }
+    // A CLOSED CONNECTION TAKES ITS EVIDENCE WITH IT. An Identify
+    // advertisement is an observation about a connection, so holding it
+    // afterwards let `advertises` fill monotonically with entries
+    // nothing would ever refresh — and once full, no new peer could be
+    // admitted. Passed on, not consumed: the settlement path below owns
+    // the slot accounting.
+    if let Libp2pSwarmEvent::ConnectionClosed {
+        peer_id,
+        num_established: 0,
+        ..
+    } = &event
+    {
+        forget_disconnected(state, peer_id);
         return KadHandled::Passed(Box::new(event));
     }
     match event {
@@ -701,6 +775,76 @@ fn candidate_addresses(info: &kad::PeerInfo) -> std::collections::BTreeSet<Strin
     out
 }
 
+/// What one Identify observation means for the §7 pipeline.
+enum Advertisement {
+    /// Not eligible, or not this driver's business.
+    Ignored,
+    /// Advertises the exact server protocol; its addresses are stashed
+    /// and the caller should run the admission pipeline.
+    Serving(TransportIdentity),
+    /// Withdrew the protocol. If it held a seat the caller must evict.
+    Withdrawn,
+}
+
+/// The bookkeeping half of [`observe_identify`], with no Swarm in it.
+///
+/// Split out because it holds the two bounded tables and the trust gate
+/// that guards them, and the only way to test THAT — rather than a copy
+/// of it — is to be able to call it without a running Swarm.
+fn remember_advertisement(
+    state: &mut KademliaState,
+    manager: &ConnectionManager,
+    pid: PeerId,
+    protocols: &[StreamProtocol],
+    listen_addrs: &[Multiaddr],
+    now_ms: u64,
+) -> Advertisement {
+    let advertises = protocols.iter().any(|p| p.as_ref() == state.protocol);
+    let Ok(identity) = to_transport_identity(&pid) else {
+        return Advertisement::Ignored;
+    };
+    // TRUST FIRST (§7's pipeline order puts authorization before the
+    // Identify step). A peer that can never hold a seat is not
+    // remembered at all: this map is bounded and `try_admit` consults
+    // it, so entries that can never satisfy it were pure
+    // denial-of-admission once the cap was reached.
+    if !may_hold_a_seat(manager, &identity) {
+        // Anything held from when it WAS eligible goes now, rather than
+        // waiting for a revocation path to name it.
+        forget_disconnected(state, &pid);
+        return Advertisement::Ignored;
+    }
+    // REPLACED, not merged: a handler that unioned advertisements could
+    // never observe a withdrawal, and SPIKE-003's F5 measured the
+    // withdrawal happening on a real mode change.
+    if !state.advertises.contains_key(&pid) {
+        make_room(&mut state.advertises, MAX_OBSERVED_PEERS, |(_, at)| *at);
+    }
+    state.advertises.insert(pid, (advertises, now_ms));
+    if !advertises {
+        return Advertisement::Withdrawn;
+    }
+    // The peer's own listen addresses are candidate routes — this is
+    // F3's substance: an INBOUND connection's Identify is as much a
+    // routing observation as one this node dialled for. Peer-asserted,
+    // so they go through the same stash the offers use, never straight
+    // to the table.
+    if !state.pending_offers.contains_key(&pid) {
+        make_room(&mut state.pending_offers, MAX_PENDING_OFFERS, |(_, at)| *at);
+    }
+    let (stash, seen) = state.pending_offers.entry(pid).or_default();
+    *seen = now_ms;
+    for addr in listen_addrs {
+        if stash.len() >= 64 {
+            break;
+        }
+        if let Some(bare) = suffix_checked(addr, &pid) {
+            stash.insert(bare);
+        }
+    }
+    Advertisement::Serving(identity)
+}
+
 /// One authenticated Identify observation enters the §7 pipeline (F3).
 #[allow(clippy::too_many_arguments)]
 fn observe_identify(
@@ -713,47 +857,25 @@ fn observe_identify(
     now_ms: u64,
     out: &mut Vec<KademliaEvent>,
 ) {
-    let advertises = protocols.iter().any(|p| p.as_ref() == state.protocol);
-    // REPLACED, not merged: a handler that unioned advertisements could
-    // never observe a withdrawal, and SPIKE-003's F5 measured the
-    // withdrawal happening on a real mode change.
-    if state.advertises.contains_key(&pid) || state.advertises.len() < MAX_OBSERVED_PEERS {
-        state.advertises.insert(pid, advertises);
-    }
-    if !advertises {
-        // Fresh evidence supersedes: a routed peer that stopped
-        // advertising the exact server protocol leaves the table.
-        if state.routed.remove(&pid) {
+    match remember_advertisement(state, manager, pid, protocols, listen_addrs, now_ms) {
+        Advertisement::Ignored => {}
+        Advertisement::Withdrawn => {
+            // Fresh evidence supersedes: a routed peer that stopped
+            // advertising the exact server protocol leaves the table.
+            if state.routed.remove(&pid) {
+                if let Some(behaviour) = swarm.kademlia_mut() {
+                    behaviour.remove_peer(&pid);
+                }
+                if let Ok(departed) = to_transport_identity(&pid) {
+                    out.push(KademliaEvent::RoutingPeerRemoved { peer: departed });
+                }
+            }
+        }
+        Advertisement::Serving(identity) => {
             if let Some(behaviour) = swarm.kademlia_mut() {
-                behaviour.remove_peer(&pid);
-            }
-            if let Ok(departed) = to_transport_identity(&pid) {
-                out.push(KademliaEvent::RoutingPeerRemoved { peer: departed });
+                out.extend(try_admit(state, behaviour, manager, pid, &identity, now_ms));
             }
         }
-        return;
-    }
-    let Ok(identity) = to_transport_identity(&pid) else {
-        return;
-    };
-    // The peer's own listen addresses are candidate routes — this is
-    // F3's substance: an INBOUND connection's Identify is as much a
-    // routing observation as one this node dialled for. Peer-asserted,
-    // so they go through the same stash the offers use, never straight
-    // to the table.
-    if state.pending_offers.contains_key(&pid) || state.pending_offers.len() < MAX_PENDING_OFFERS {
-        let stash = state.pending_offers.entry(pid).or_default();
-        for addr in listen_addrs {
-            if stash.len() >= 64 {
-                break;
-            }
-            if let Some(bare) = suffix_checked(addr, &pid) {
-                stash.insert(bare);
-            }
-        }
-    }
-    if let Some(behaviour) = swarm.kademlia_mut() {
-        out.extend(try_admit(state, behaviour, manager, pid, &identity, now_ms));
     }
 }
 
@@ -775,8 +897,7 @@ pub(super) fn apply_revocations(
         let Ok(pid) = entry.peer.as_str().parse::<PeerId>() else {
             continue;
         };
-        state.advertises.remove(&pid);
-        state.pending_offers.remove(&pid);
+        forget_disconnected(state, &pid);
         if state.routed.remove(&pid) {
             if let Some(behaviour) = swarm.kademlia_mut() {
                 behaviour.remove_peer(&pid);
@@ -1042,11 +1163,12 @@ mod tests {
             &[],
         );
         for peer in [a, b] {
-            state.advertises.insert(peer, true);
+            state.advertises.insert(peer, (true, 0));
             state
                 .pending_offers
                 .entry(peer)
                 .or_default()
+                .0
                 .insert("/ip4/127.0.0.1/tcp/1".parse().expect("valid"));
         }
 
@@ -1068,11 +1190,248 @@ mod tests {
             .pending_offers
             .entry(a)
             .or_default()
+            .0
             .insert("/ip4/127.0.0.1/tcp/2".parse().expect("valid"));
         let _ = try_admit(&mut state, &mut behaviour, &manager, a, &a_id, 1);
         assert!(
             !state.pending_offers.contains_key(&a),
             "a population bound is not an address freeze (§11)"
+        );
+    }
+
+    #[test]
+    fn a_table_full_of_unusable_peers_still_admits_a_trusted_server() {
+        // THE PIN. Both stashes were refuse-the-newcomer at the cap and
+        // had no eviction outside trust revocation, so the first 256
+        // offers and the first 1024 Identify advertisements held their
+        // slots for the life of the process — and `try_admit` requires
+        // an `advertises` entry, so a pinned table is a permanent
+        // refusal to route anybody new. Nothing here is trusted, which
+        // is the point: mDNS on a shared LAN offers a candidate for
+        // every node it sees.
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let mut state = KademliaState::new(&settings);
+        let local = PeerId::random();
+        let mut behaviour = build_behaviour(&settings, local).expect("buildable");
+        let mut manager = interweave_transport_runtime::ConnectionManager::new(
+            interweave_transport_runtime::ConnectionPolicy::default(),
+            8,
+        );
+        let server = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let server_id = to_transport_identity(&server).expect("canonical");
+        // ONLY the server is trusted. Every stranger below is refused
+        // by `try_admit` on trust, which is exactly why its slot was
+        // never worth taking.
+        let _ = manager.set_trust(
+            interweave_transport_runtime::TrustSources::new(
+                interweave_trust_api::PeerTrustPolicy::new([server_id.clone()]).expect("small"),
+                interweave_trust_api::InfrastructureSet::default(),
+            ),
+            &[],
+        );
+
+        let addresses = interweave_kademlia_control_api::OfferedAddresses::parse_all([
+            "/ip4/198.51.100.7/tcp/4001",
+        ])
+        .expect("bounded");
+        for i in 0..(MAX_PENDING_OFFERS * 2) {
+            let stranger = libp2p::identity::Keypair::generate_ed25519()
+                .public()
+                .to_peer_id();
+            let stranger_id = to_transport_identity(&stranger).expect("canonical");
+            let _ = handle_command(
+                &mut state,
+                &mut behaviour,
+                &manager,
+                KademliaCommand::OfferRoutingPeer {
+                    addresses: addresses.clone(),
+                    peer: stranger_id,
+                },
+                i as u64,
+            );
+            // The advertisement half of the pin, driven directly: a
+            // stranger that completed Identify used to take a slot here
+            // too, and nothing gave it back.
+            let serving = StreamProtocol::try_from_owned(state.protocol.clone()).expect("legal");
+            let _ =
+                remember_advertisement(&mut state, &manager, stranger, &[serving], &[], i as u64);
+        }
+        assert!(
+            state.pending_offers.len() <= MAX_PENDING_OFFERS,
+            "the bound still holds"
+        );
+        assert!(
+            state.advertises.len() <= MAX_OBSERVED_PEERS,
+            "and so does this one"
+        );
+
+        // NOW the trusted server arrives, last.
+        let _ = handle_command(
+            &mut state,
+            &mut behaviour,
+            &manager,
+            KademliaCommand::OfferRoutingPeer {
+                addresses,
+                peer: server_id.clone(),
+            },
+            10_000,
+        );
+        assert!(
+            state.pending_offers.contains_key(&server),
+            "a trusted peer's offer is stashed even after strangers filled the table"
+        );
+        let serving = StreamProtocol::try_from_owned(state.protocol.clone()).expect("legal");
+        let _ = remember_advertisement(&mut state, &manager, server, &[serving], &[], 10_001);
+        assert!(
+            matches!(state.advertises.get(&server), Some((true, _))),
+            "and its advertisement is remembered"
+        );
+        let _ = try_admit(
+            &mut state,
+            &mut behaviour,
+            &manager,
+            server,
+            &server_id,
+            10_002,
+        );
+        assert!(
+            state.routed.contains(&server),
+            "the seat is reachable: a table full of peers that can never hold one \
+             must not be a permanent refusal to route anybody"
+        );
+    }
+
+    #[test]
+    fn a_stash_full_of_trusted_peers_displaces_the_stalest() {
+        // The trust gate is not the whole answer: `PeerTrustPolicy`
+        // admits up to 4096 peers, which is sixteen times the offer
+        // stash and four times the advertisement map. So a profile with
+        // a large trust set fills both LEGITIMATELY, and under
+        // refuse-the-newcomer the first 256 offers held their slots for
+        // the life of the process — a bound that had become a wall.
+        // Every peer here is trusted, so only displacement can pass it.
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let mut state = KademliaState::new(&settings);
+        let local = PeerId::random();
+        let mut behaviour = build_behaviour(&settings, local).expect("buildable");
+        let mut manager = interweave_transport_runtime::ConnectionManager::new(
+            interweave_transport_runtime::ConnectionPolicy::default(),
+            8,
+        );
+
+        let crowd: Vec<PeerId> = (0..=MAX_PENDING_OFFERS)
+            .map(|_| {
+                libp2p::identity::Keypair::generate_ed25519()
+                    .public()
+                    .to_peer_id()
+            })
+            .collect();
+        let ids: Vec<TransportIdentity> = crowd
+            .iter()
+            .map(|p| to_transport_identity(p).expect("canonical"))
+            .collect();
+        let _ = manager.set_trust(
+            interweave_transport_runtime::TrustSources::new(
+                interweave_trust_api::PeerTrustPolicy::new(ids.iter().cloned())
+                    .expect("well under the 4096 cap"),
+                interweave_trust_api::InfrastructureSet::default(),
+            ),
+            &[],
+        );
+
+        let addresses = interweave_kademlia_control_api::OfferedAddresses::parse_all([
+            "/ip4/198.51.100.7/tcp/4001",
+        ])
+        .expect("bounded");
+        // Ascending timestamps, so "stalest" is unambiguous.
+        for (i, id) in ids.iter().enumerate() {
+            let _ = handle_command(
+                &mut state,
+                &mut behaviour,
+                &manager,
+                KademliaCommand::OfferRoutingPeer {
+                    addresses: addresses.clone(),
+                    peer: id.clone(),
+                },
+                i as u64,
+            );
+        }
+
+        assert!(
+            state.pending_offers.len() <= MAX_PENDING_OFFERS,
+            "the bound holds: {} slots",
+            state.pending_offers.len()
+        );
+        let newest = crowd.last().expect("non-empty");
+        assert!(
+            state.pending_offers.contains_key(newest),
+            "the LAST trusted offer is stashed — refusing the newcomer at the cap \
+             would have dropped exactly this one"
+        );
+        assert!(
+            !state.pending_offers.contains_key(&crowd[0]),
+            "and the stalest is what made room, rather than the newest being refused"
+        );
+    }
+
+    #[test]
+    fn a_closed_connection_takes_its_advertisement_with_it() {
+        // An Identify advertisement is an observation ABOUT a
+        // connection. Held past the close, `advertises` filled with
+        // entries nothing would refresh and the cap became a wall.
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let mut state = KademliaState::new(&settings);
+        let peer = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        state.advertises.insert(peer, (true, 0));
+        state
+            .pending_offers
+            .entry(peer)
+            .or_default()
+            .0
+            .insert("/ip4/127.0.0.1/tcp/1".parse().expect("valid"));
+
+        forget_disconnected(&mut state, &peer);
+        assert!(
+            state.advertises.is_empty(),
+            "the advertisement did not outlive its connection"
+        );
+        assert!(
+            state.pending_offers.is_empty(),
+            "and an offer waiting on evidence from a closed connection waits on nothing"
         );
     }
 
