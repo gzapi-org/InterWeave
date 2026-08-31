@@ -169,6 +169,16 @@ different hosts. **Isolation is required**, and the model is **one full
 task that merely looks parallelisable is not an invitation. The isolation
 contract governs **how** to dispatch, never **whether**.
 
+**ONE EXCEPTION: a review the automated reviewer declined.** When
+`@codex review` answers "You have reached your Codex usage limits", the
+gate in `CLAUDE.md` §9 reads as satisfied while nothing has been
+reviewed — `pr-review-status.sh` counts a refusal as "already answered".
+Dispatch a reviewer without being asked, one per PR, and read §9's
+"When the reviewer declines" for the rest: `model: "opus"` rather than
+the cheapest tier that fits, no session context passed, and the findings
+posted to the PR and answered there rather than reported into the
+transcript.
+
 The `PreToolUse` hook in `.claude/settings.json` denies a dispatch missing
 `model` or `isolation` and states why at the moment of the call, so those
 two requirements are not restated here.
@@ -181,7 +191,10 @@ ask is answered by the user, not by the rule. So:
   prompt explicitly asks for that tier for that dispatch. "The task looks
   hard" is not authorisation; neither is "the session is already running
   that model" — the hook's own text says the inheritance is the failure
-  mode, not the default.
+  mode, not the default. **A PR review after a declined request is the
+  standing exception**, authorised in `CLAUDE.md` §9: use `opus` there,
+  because a review is the last thing between a defect and `main` and the
+  tier that finds P1s is worth more than the tokens.
 - **Choose the cheapest tier that can do the job**: `haiku` for mechanical,
   well-specified work (extraction, pattern-following edits, structured
   search); `sonnet` for judgement work (multi-file reasoning, reviews,

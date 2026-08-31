@@ -463,6 +463,43 @@ Zero unresolved P1 or P2 findings is also a precondition for declaring a
 stage complete. Nothing enforces that; it is the same class of obligation
 as the follow-up phase, which no red check announces either.
 
+#### When the reviewer declines, dispatch one — this is the exception
+
+`@codex review` can come back **"You have reached your Codex usage limits
+for code reviews."** That is not coverage, and `pr-review-status.sh`
+counts the refusal as "already answered" — so the gate above reads as
+satisfied while nothing has been reviewed. It has already let two PRs
+merge with their final heads unreviewed (#58 and #59; #59 merged four
+hours after the refusal, carrying a 265-line rewrite of the conformance
+suite).
+
+So when the reviewer declines for usage limits, **dispatch a subagent to
+do the review instead**. The rules that normally govern dispatch are
+relaxed here, deliberately, and only here:
+
+- **Reviewing is an exception to the opt-in rule.** §9 and the
+  `pr-lifecycle` skill say fan-out happens only when the user asks. A
+  review after a declined request does not need asking — the alternative
+  is landing unreviewed code.
+- **Use `model: "opus"`, not `sonnet`.** The skill's cheapest-tier rule
+  is overridden for this one job: a review is the only thing standing
+  between a defect and `main`, and the tier that finds P1s is worth more
+  than the tokens it costs. This is the explicit authorisation that rule
+  asks for.
+- **One agent per PR, with NO context from the session.** Pass the PR's
+  tree and diff and nothing else. An agent told what the author expects
+  confirms it; the whole value is that it does not know.
+- **The review goes ON THE PR, not into the transcript.** The agent's
+  report is not the deliverable — post the findings to the pull request,
+  fix them, and answer there. A finding that lives only in a session is
+  a finding nobody can audit, and the thread is what makes the fix
+  checkable against the claim.
+
+Everything else still applies: the findings are input rather than
+verdicts, a disagreement is stated with its reasoning rather than
+silently skipped, and a thread is resolved only when the work it names
+is done.
+
 ### Always
 
 - `git fetch` before any push or integrate — your `origin/main` goes stale.
