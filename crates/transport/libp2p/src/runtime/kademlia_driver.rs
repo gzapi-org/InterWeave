@@ -327,12 +327,19 @@ impl KademliaState {
     /// Queries this driver has outstanding, commanded or implicit.
     ///
     /// The progress slack a settlement may use: each one holds a
-    /// provider budget permit that only a completion releases. Bounded
-    /// by `max_concurrent_queries` for commanded work, plus whatever
-    /// implicit bootstraps the library has started, which the pool
-    /// itself bounds.
+    /// provider budget permit that only a completion releases — and
+    /// that is as true of a library-started query as of a commanded
+    /// one, so counting only `queries` understated the slack by up to
+    /// [`MAX_IMPLICIT_QUERIES`]. The doc said "commanded or implicit"
+    /// while the body returned commanded; the body was wrong.
+    ///
+    /// Bounded by `max_concurrent_queries + MAX_IMPLICIT_QUERIES`, both
+    /// of which this crate owns. An earlier version of this sentence
+    /// said the pool bounds the implicit half — that was the same
+    /// mistaken claim corrected in `kademlia-integration.md` §11 and in
+    /// the provider, and this was its third site.
     pub(super) fn outstanding_queries(&self) -> usize {
-        self.queries.len()
+        self.queries.len() + self.implicit.len()
     }
 
     /// Inbound record writes dropped so far (§12: counted, never stored).
@@ -343,6 +350,33 @@ impl KademliaState {
     #[cfg(test)]
     pub(super) const fn record_writes_dropped(&self) -> u64 {
         self.record_writes_dropped
+    }
+}
+
+/// Keep finishing every live query while the driver is stopping.
+///
+/// **One `finish` does not stop a bootstrap, it advances one.** The call
+/// marks the peer-iterator finished; `query_finished` then re-inserts
+/// the SAME `QueryId` with a fresh iterator for the next bucket, and
+/// only the exhaustion of `remaining` sets `step.last`. So the shutdown
+/// sweep's single pass left a drained node issuing FIND_NODE and
+/// attempting query dials through every remaining bucket — the one
+/// thing the drain exists to stop.
+///
+/// Re-finishing on each event is what actually terminates it: a
+/// finished iterator yields no peers, so each re-entered bucket
+/// sub-query completes on the following poll having done no network
+/// work, and `remaining` drains in a few polls instead of a few
+/// timeouts.
+///
+/// `iter_queries` is not evidence either way — it filters finished
+/// queries out, so it reports the mark rather than the end. That is why
+/// a test asserting termination through it must use a bootstrap and not
+/// a closest-peers walk, which is the one class where `finish` really
+/// is terminal.
+fn finish_all_while_stopping(behaviour: &mut kad::Behaviour<MemoryStore>) {
+    for mut running in behaviour.iter_queries_mut() {
+        running.finish();
     }
 }
 
@@ -578,10 +612,17 @@ pub(super) fn handle_command(
             // participation" has to mean the queries too, not only the
             // mode.
             //
-            // `finish` ends the query without waiting for its regular
-            // termination conditions. A completion it emits afterwards
-            // finds no entry in `queries` and is ignored, which is the
-            // same path an unknown id already takes.
+            // `finish` does NOT end a bootstrap. It marks the
+            // peer-iterator finished; `query_finished` then calls
+            // `continue_iter_closest` with the SAME id and a fresh
+            // iterator for the next bucket, and only sets `step.last`
+            // once `remaining` is exhausted. One call therefore
+            // ADVANCES a bootstrap rather than stopping it — which is
+            // why `finish_all_while_stopping` re-finishes on every
+            // event until the pool drains, and why `iter_queries()`
+            // going quiet is not evidence of termination: it filters
+            // finished queries out, so it reports the mark, not the
+            // end.
             // THE IMPLICIT ONES TOO, and now they have names. A
             // library-started bootstrap (F2) never passes through this
             // function, so it is absent from `queries`; `reconcile_implicit`
@@ -891,6 +932,11 @@ pub(super) fn handle_kademlia(
             // review rounds on PR #61 each answered it differently at a
             // different call site.
             if let Some(behaviour) = swarm.kademlia_mut() {
+                if state.stopping {
+                    // The sweep's single `finish` only advanced each
+                    // bootstrap; this is what ends them.
+                    finish_all_while_stopping(behaviour);
+                }
                 reconcile_implicit(state, behaviour, out);
             }
             KadHandled::Consumed
@@ -1116,6 +1162,17 @@ fn handle_kad_event(
                             .remove(&id)
                             .map(|h| (QueryClass::Bootstrap, h))
                     });
+                    // AND THIS DOOR CLOSES WHILE STOPPING TOO. The
+                    // guard went on `reconcile_implicit` and not here,
+                    // so a drained driver still announced — by the very
+                    // path a re-entered bootstrap walks through. Safe by
+                    // construction: while stopping, an unknown id is
+                    // either one the sweep already settled or one that
+                    // began after it and was never charged, so there is
+                    // no permit to release and nothing to announce.
+                    if state.stopping && known.is_none() {
+                        return;
+                    }
                     let (class, handle) = match known {
                         Some(pair) => pair,
                         None => {
@@ -2316,6 +2373,171 @@ mod tests {
             state.routed.contains(&held),
             "a peer already routed is refreshing, not taking a new seat"
         );
+    }
+
+    #[test]
+    fn a_stopping_driver_announces_nothing_by_either_door() {
+        // The `stopping` guard went on `reconcile_implicit` and not on
+        // the completion fallback — and the fallback is the door a
+        // re-entered bootstrap walks through. A drained driver
+        // therefore still announced: a fresh handle, a `QueryStarted`,
+        // and a `charge_unscheduled` that bypasses both ceilings and
+        // spends rate `finish` does not refund, plus a
+        // `last_query_success_ms` reporting a healthy query after the
+        // drain.
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let mut state = KademliaState::new(&settings);
+        let mut behaviour = build_behaviour(&settings, PeerId::random()).expect("buildable");
+        let manager = interweave_transport_runtime::ConnectionManager::new(
+            interweave_transport_runtime::ConnectionPolicy::default(),
+            8,
+        );
+        let unknown = behaviour.get_closest_peers(PeerId::random());
+
+        let completion = |id| kad::Event::OutboundQueryProgressed {
+            id,
+            result: kad::QueryResult::Bootstrap(Ok(kad::BootstrapOk {
+                peer: PeerId::random(),
+                num_remaining: 0,
+            })),
+            stats: kad::QueryStats::empty(),
+            step: kad::ProgressStep {
+                count: NonZeroUsize::new(1).expect("nonzero"),
+                last: true,
+            },
+        };
+
+        // RUNNING: the fallback announces, which is the fix that closed
+        // the uncharged-query hole — so this test cannot pass for a
+        // driver that never announces.
+        let mut running = Vec::new();
+        handle_kad_event(
+            &mut state,
+            Some(&mut behaviour),
+            &manager,
+            completion(unknown),
+            0,
+            &mut running,
+        );
+        assert!(
+            running
+                .iter()
+                .any(|e| matches!(e, KademliaEvent::QueryStarted { .. })),
+            "the control: a running driver charges the work it discovers"
+        );
+
+        // STOPPING: the same event announces nothing at all.
+        state.stopping = true;
+        let another = behaviour.get_closest_peers(PeerId::random());
+        let mut drained = Vec::new();
+        handle_kad_event(
+            &mut state,
+            Some(&mut behaviour),
+            &manager,
+            completion(another),
+            0,
+            &mut drained,
+        );
+        assert!(
+            drained.is_empty(),
+            "a drained driver announces by neither door: {drained:?}"
+        );
+    }
+
+    #[test]
+    fn a_real_bootstrap_is_stopped_by_the_drain_not_merely_marked() {
+        // WHAT THIS DOES AND DOES NOT PROVE, because the difference
+        // cost two earlier tests their meaning.
+        //
+        // It drives a REAL bootstrap — every other query test in this
+        // file uses `get_closest_peers`, the one class where `finish`
+        // is terminal — through the drain and polls the behaviour, so
+        // the pool has the chance to re-insert that a single
+        // post-sweep assertion never gives it. It asserts the drain
+        // converges: no query survives, within a bounded number of
+        // polls.
+        //
+        // It does NOT prove `finish_all_while_stopping` is load-bearing:
+        // removing that call leaves this green, because with one
+        // routing peer the bootstrap's `remaining` is empty and `finish`
+        // happens to be terminal after all. The re-entry case the review
+        // predicted needs a bucket layout I could not construct here.
+        // The re-finish is kept as cheap insurance against a case that
+        // is real in the library even if this test cannot reach it — and
+        // this comment says so rather than letting a green test imply
+        // coverage it does not have.
+        //
+        // `iter_queries` is the trap: it FILTERS finished queries out,
+        // FILTERS finished queries out, so it reports the `finish` MARK
+        // so right after the sweep it reports the mark rather than the
+        // end. That is how two shutdown tests, and the first version of
+        // this one, passed for a driver that stopped nothing.
+        use futures::task::noop_waker;
+        use std::task::Context;
+
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let mut state = KademliaState::new(&settings);
+        let mut behaviour = build_behaviour(&settings, PeerId::random()).expect("buildable");
+        let manager = interweave_transport_runtime::ConnectionManager::new(
+            interweave_transport_runtime::ConnectionPolicy::default(),
+            8,
+        );
+        let peer = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let _ = behaviour.add_address(&peer, "/ip4/127.0.0.1/tcp/1".parse().expect("valid"));
+        let id = behaviour.bootstrap().expect("a routing peer exists");
+        state
+            .queries
+            .insert(id, (QueryClass::Bootstrap, QueryHandle::commanded(1)));
+
+        let _ = handle_command(
+            &mut state,
+            &mut behaviour,
+            &manager,
+            KademliaCommand::Shutdown,
+            0,
+        );
+        assert!(state.stopping, "the control: the driver is draining");
+
+        // Drive the behaviour the way the runtime does. Each poll is a
+        // chance for the pool to re-insert; `finish_all_while_stopping`
+        // is what the event path does on every event while draining.
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut polls = 0;
+        loop {
+            let _ = libp2p::swarm::NetworkBehaviour::poll(&mut behaviour, &mut cx);
+            finish_all_while_stopping(&mut behaviour);
+            polls += 1;
+            if behaviour.iter_queries().count() == 0 {
+                break;
+            }
+            assert!(
+                polls < 64,
+                "the bootstrap kept re-entering: a drained driver is still walking buckets"
+            );
+        }
     }
 
     #[test]

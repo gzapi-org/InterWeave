@@ -1104,9 +1104,9 @@ pub(super) fn translate(
 /// through here: `QueryResults` and `QueryFailed` carry the completion
 /// the provider's budget keys on, and a dropped one leaks its permit
 /// for the life of the process. Those paths stay ungated and are
-/// bounded at their source instead — `max_concurrent_queries`
-/// outstanding, and the Swarm is not polled at all while
-/// `polling_room` is false.
+/// bounded at their source instead — `max_concurrent_queries` for
+/// commanded work plus the driver's cap on library-started queries,
+/// and the Swarm is not polled at all while `polling_room` is false.
 fn buffer_revocation_events(
     outbox: &mut VecDeque<SwarmEvent>,
     event_capacity: usize,

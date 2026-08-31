@@ -277,8 +277,10 @@ const fn polling_room(
 /// caller could drain the bounded command channel into an unbounded
 /// outbox one refusal at a time.
 ///
-/// The slack is bounded by what the driver can have outstanding, which
-/// is `max_concurrent_queries` — its own ceiling, refused above it. So
+/// The slack is bounded by what the driver can have outstanding —
+/// `max_concurrent_queries` for commanded work PLUS the driver's cap on
+/// library-started queries, since one of those holds a permit exactly
+/// as a commanded one does. Both ceilings are this project's. So
 /// this cannot become the unbounded queue the capacity exists to rule
 /// out, and it cannot lose a settlement a live provider is waiting on.
 const fn may_buffer_settlement(
