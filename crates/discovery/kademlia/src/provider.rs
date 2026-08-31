@@ -483,7 +483,9 @@ impl KademliaDiscovery {
                             },
                         )
                 });
-                self.settle(handle, class, now_ms, true, address_progress);
+                if !self.settle(handle, class, now_ms, true, address_progress) {
+                    return;
+                }
                 self.last_query_success_ms = Some(now_ms);
                 for candidate in candidates.as_slice() {
                     self.track(candidate, now_ms);
@@ -535,7 +537,9 @@ impl KademliaDiscovery {
                 reason,
                 class,
             } => {
-                self.settle(handle, class, now_ms, false, false);
+                if !self.settle(handle, class, now_ms, false, false) {
+                    return;
+                }
                 match reason {
                     QueryFailure::TimedOut | QueryFailure::NoRoutingPeers => {
                         self.last_query_success_ms = None;
@@ -572,6 +576,19 @@ impl KademliaDiscovery {
     /// code does, and
     /// `a_stale_exploration_completion_settles_no_running_round` fails
     /// if that stops being true.
+    ///
+    /// Returns whether this provider held the handle — `false` means
+    /// the completion belongs to no round it is running, and the CALLER
+    /// must drop it too. Gating only the pacing here was the first
+    /// half of this fix and the review caught the rest: the results arm
+    /// still marked query health fresh and re-tracked every candidate,
+    /// so a replay could hold health up and refresh candidate TTLs
+    /// indefinitely, and the failure arm could clear the health of a
+    /// round still in flight. The objection that dropping candidates
+    /// loses observed reachability does not survive contact with what a
+    /// replay is: the same candidates, already tracked once, carrying
+    /// nothing new.
+    #[must_use]
     fn settle(
         &mut self,
         handle: interweave_kademlia_control_api::QueryHandle,
@@ -579,9 +596,9 @@ impl KademliaDiscovery {
         now_ms: u64,
         succeeded: bool,
         address_progress: bool,
-    ) {
+    ) -> bool {
         if !self.budgets.finish(handle) {
-            return;
+            return false;
         }
         if class == QueryClass::Exploration
             && let Some(snapshot) = self.exploration_snapshot.take()
@@ -607,6 +624,7 @@ impl KademliaDiscovery {
                 self.exploration_entropy,
             );
         }
+        true
     }
 
     /// Start one exploration round if the view warrants one (§9.3).
@@ -1272,10 +1290,29 @@ mod tests {
                 KademliaCommand::StartQuery { handle, .. } => Some(*handle),
                 _ => None,
             })
-            // A test that never commanded one is exercising candidate
-            // tracking rather than settlement; give it a handle nothing
-            // holds, which settles nothing and says so.
-            .unwrap_or_else(|| QueryHandle::implicit(u64::MAX >> 1))
+            .expect(
+                "no query was commanded — use `held` to mint a handle \
+                 this provider actually holds. A `QueryResults` naming \
+                 an unheld handle is now dropped entirely, so a fixture \
+                 that invents one silently tests nothing.",
+            )
+    }
+
+    /// A handle this provider holds, for a test that needs a completion
+    /// to land but has no routing to explore through.
+    ///
+    /// Review finding on PR #64: a completion for a handle the provider
+    /// does not hold is dropped whole — pacing, query health and
+    /// candidates alike — so a fixture must give the provider a reason
+    /// to hold one before answering it. This announces a
+    /// library-started query, which the provider charges from the
+    /// announcement and binds to the handle: the production path for a
+    /// query it did not command, and the only one with neither an
+    /// interval floor nor a routing precondition. `seq` must be
+    /// distinct per round within a test.
+    fn held(p: &mut KademliaDiscovery, seq: u64, now_ms: u64) -> QueryHandle {
+        p.ingest_driver_event(implicit_started(seq), now_ms);
+        QueryHandle::implicit(seq)
     }
 
     /// A completion event of `class` carrying no candidates.
@@ -1624,11 +1661,9 @@ mod tests {
     fn a_query_result_becomes_a_kademlia_candidate() {
         let mut p = started(KademliaMode::Client);
         let peer = synthetic_peer(1);
+        let h = held(&mut p, 1, 5_000);
         p.ingest_driver_event(
-            results(
-                last_handle(&p),
-                &[(peer.clone(), "/ip4/192.0.2.1/tcp/4001")],
-            ),
+            results(h, &[(peer.clone(), "/ip4/192.0.2.1/tcp/4001")]),
             5_000,
         );
         let events = p.drain_events(5_000, usize::MAX);
@@ -1649,9 +1684,10 @@ mod tests {
     fn the_local_peer_is_never_emitted() {
         let mut p = started(KademliaMode::Client);
         let other = synthetic_peer(1);
+        let h = held(&mut p, 1, 5_000);
         p.ingest_driver_event(
             results(
-                last_handle(&p),
+                h,
                 &[
                     (local(), "/ip4/192.0.2.9/tcp/4001"),
                     (other.clone(), "/ip4/192.0.2.1/tcp/4001"),
@@ -1669,11 +1705,9 @@ mod tests {
     fn expiry_retracts_the_candidate_it_tracked() {
         let mut p = started(KademliaMode::Client);
         let peer = synthetic_peer(1);
+        let h = held(&mut p, 1, 1_000);
         p.ingest_driver_event(
-            results(
-                last_handle(&p),
-                &[(peer.clone(), "/ip4/192.0.2.1/tcp/4001")],
-            ),
+            results(h, &[(peer.clone(), "/ip4/192.0.2.1/tcp/4001")]),
             1_000,
         );
         p.drain_events(1_000, usize::MAX);
@@ -1702,22 +1736,94 @@ mod tests {
     }
 
     #[test]
+    fn a_replayed_result_refreshes_neither_health_nor_expiry() {
+        let mut p = started(KademliaMode::Client);
+        let (a, b) = (synthetic_peer(1), synthetic_peer(2));
+        trust(&mut p, &[&a, &b]);
+        p.ingest_driver_event(KademliaEvent::RoutingPeerAdded { peer: a }, 1_000);
+        p.ingest_driver_event(KademliaEvent::RoutingPeerAdded { peer: b }, 1_000);
+
+        let peer = synthetic_peer(3);
+        let h = held(&mut p, 1, 1_000);
+        let answer = results(h, &[(peer.clone(), "/ip4/192.0.2.1/tcp/1")]);
+        p.ingest_driver_event(answer.clone(), 1_000);
+        p.drain_events(1_000, usize::MAX);
+        assert_eq!(p.health(), ProviderHealth::Healthy, "satisfied and recent");
+
+        // The SAME completion again, much later. Its handle is spent:
+        // the provider settled it the first time and holds no permit
+        // for it now. A replay carries nothing new by construction —
+        // the same candidates, already tracked once — so it must not
+        // stand in for a fresh answer.
+        p.ingest_driver_event(answer, 9_000);
+        p.drain_events(9_000, usize::MAX);
+
+        // Expiry is measured from the first observation, not the replay.
+        let expiries = p.drain_events(1_000 + TTL_MS + 1, usize::MAX);
+        assert!(
+            expiries.iter().any(|e| matches!(
+                e,
+                DiscoveryEvent::CandidateExpired { peer_id, .. } if *peer_id == peer
+            )),
+            "the replay did not extend the candidate it re-observed"
+        );
+
+        // And query health ages from the first answer too, so a stalled
+        // driver replaying an old success cannot hold health up.
+        assert_eq!(
+            p.health(),
+            ProviderHealth::Degraded,
+            "\u{a7}14: a replayed success is not a success within refresh expectations"
+        );
+    }
+
+    #[test]
+    fn a_replayed_failure_degrades_no_running_round() {
+        let mut p = started(KademliaMode::Client);
+        let (a, b) = (synthetic_peer(1), synthetic_peer(2));
+        trust(&mut p, &[&a, &b]);
+        p.ingest_driver_event(KademliaEvent::RoutingPeerAdded { peer: a }, 1_000);
+        p.ingest_driver_event(KademliaEvent::RoutingPeerAdded { peer: b }, 1_000);
+
+        // A round that timed out, settled.
+        let spent = held(&mut p, 1, 1_000);
+        let failure = KademliaEvent::QueryFailed {
+            handle: spent,
+            class: QueryClass::Exploration,
+            reason: QueryFailure::TimedOut,
+        };
+        p.ingest_driver_event(failure.clone(), 1_000);
+        assert_eq!(p.health(), ProviderHealth::Degraded, "the timeout landed");
+
+        // A later round that succeeded.
+        let good = held(&mut p, 2, 2_000);
+        p.ingest_driver_event(done(good, QueryClass::Exploration), 2_000);
+        assert_eq!(p.health(), ProviderHealth::Healthy, "recovered");
+
+        // The old failure replayed. Its handle is spent, so it must not
+        // clear the health of the round that answered after it — a
+        // stale timeout says nothing about the network now.
+        p.ingest_driver_event(failure, 3_000);
+        assert_eq!(
+            p.health(),
+            ProviderHealth::Healthy,
+            "a replayed failure does not retract a later success"
+        );
+    }
+
+    #[test]
     fn a_refreshed_observation_extends_expiry() {
         let mut p = started(KademliaMode::Client);
         let peer = synthetic_peer(1);
+        let first = held(&mut p, 1, 1_000);
         p.ingest_driver_event(
-            results(
-                last_handle(&p),
-                &[(peer.clone(), "/ip4/192.0.2.1/tcp/4001")],
-            ),
+            results(first, &[(peer.clone(), "/ip4/192.0.2.1/tcp/4001")]),
             1_000,
         );
         p.drain_events(1_000, usize::MAX);
+        let second = held(&mut p, 2, 9_000);
         p.ingest_driver_event(
-            results(
-                last_handle(&p),
-                &[(peer.clone(), "/ip4/192.0.2.1/tcp/4001")],
-            ),
+            results(second, &[(peer.clone(), "/ip4/192.0.2.1/tcp/4001")]),
             9_000,
         );
         let refreshed = p.drain_events(9_000, usize::MAX);
@@ -1738,8 +1844,14 @@ mod tests {
         let mut p = started(KademliaMode::Client);
         // The first peer is observed earliest, so its expiry is soonest.
         let victim = synthetic_peer(1);
+        // One held handle per round: a completion naming an unheld one
+        // is dropped whole, so a round that shares a spent handle
+        // tracks nothing and this loop would never reach the bound.
+        let mut seq = 0_u64;
+        seq += 1;
+        let h = held(&mut p, seq, 1_000);
         p.ingest_driver_event(
-            results(last_handle(&p), &[(victim.clone(), "/ip4/192.0.2.1/tcp/1")]),
+            results(h, &[(victim.clone(), "/ip4/192.0.2.1/tcp/1")]),
             1_000,
         );
         let mut n = 2_u64;
@@ -1756,16 +1868,17 @@ mod tests {
                 .iter()
                 .map(|(peer, a)| (peer.clone(), a.as_str()))
                 .collect();
-            p.ingest_driver_event(results(last_handle(&p), &refs), 2_000);
+            seq += 1;
+            let h = held(&mut p, seq, 2_000);
+            p.ingest_driver_event(results(h, &refs), 2_000);
             n += 20;
         }
         assert_eq!(p.tracked.len(), MAX_TRACKED_CANDIDATES);
         let newcomer = synthetic_peer(n);
+        seq += 1;
+        let h = held(&mut p, seq, 3_000);
         p.ingest_driver_event(
-            results(
-                last_handle(&p),
-                &[(newcomer.clone(), "/ip4/198.51.100.2/tcp/1")],
-            ),
+            results(h, &[(newcomer.clone(), "/ip4/198.51.100.2/tcp/1")]),
             3_000,
         );
         assert_eq!(p.tracked.len(), MAX_TRACKED_CANDIDATES, "the bound holds");
@@ -2085,11 +2198,9 @@ mod tests {
         assert_eq!(p.health(), ProviderHealth::Degraded, "warming, not broken");
         p.ingest_driver_event(KademliaEvent::RoutingPeerAdded { peer: a.clone() }, 1_000);
         p.ingest_driver_event(KademliaEvent::RoutingPeerAdded { peer: b.clone() }, 1_000);
+        let h = held(&mut p, 1, 1_000);
         p.ingest_driver_event(
-            results(
-                last_handle(&p),
-                &[(synthetic_peer(3), "/ip4/192.0.2.1/tcp/1")],
-            ),
+            results(h, &[(synthetic_peer(3), "/ip4/192.0.2.1/tcp/1")]),
             1_000,
         );
         assert_eq!(
@@ -2097,9 +2208,13 @@ mod tests {
             ProviderHealth::Healthy,
             "a two-peer trusted overlay is fully healthy at its effective target"
         );
+        // A driver-side budget refusal names a handle the provider DOES
+        // hold: the permit was acquired and bound before the command
+        // went out, and the driver refused after that.
+        let refused = held(&mut p, 2, 2_000);
         p.ingest_driver_event(
             KademliaEvent::QueryFailed {
-                handle: QueryHandle::commanded(u64::MAX >> 1),
+                handle: refused,
                 class: QueryClass::Exploration,
                 reason: QueryFailure::BudgetExhausted,
             },
@@ -2110,9 +2225,10 @@ mod tests {
             ProviderHealth::Healthy,
             "a refused budget is scheduling, not the network failing"
         );
+        let timed_out = held(&mut p, 3, 2_000);
         p.ingest_driver_event(
             KademliaEvent::QueryFailed {
-                handle: QueryHandle::commanded(u64::MAX >> 1),
+                handle: timed_out,
                 class: QueryClass::Exploration,
                 reason: QueryFailure::TimedOut,
             },
@@ -2162,10 +2278,8 @@ mod tests {
     fn shutdown_clears_and_commands_shutdown() {
         let mut p = started(KademliaMode::Client);
         let peer = synthetic_peer(1);
-        p.ingest_driver_event(
-            results(last_handle(&p), &[(peer.clone(), "/ip4/192.0.2.1/tcp/1")]),
-            1_000,
-        );
+        let h = held(&mut p, 1, 1_000);
+        p.ingest_driver_event(results(h, &[(peer.clone(), "/ip4/192.0.2.1/tcp/1")]), 1_000);
         p.shutdown(2_000);
         assert_eq!(p.health(), ProviderHealth::Unavailable);
         assert!(
@@ -2187,7 +2301,8 @@ mod tests {
         let peer = synthetic_peer(1);
         let liar = synthetic_peer(2);
         let lying = format!("/ip4/192.0.2.1/tcp/4001/p2p/{}", liar.as_str());
-        p.ingest_driver_event(results(last_handle(&p), &[(peer, lying.as_str())]), 1_000);
+        let h = held(&mut p, 1, 1_000);
+        p.ingest_driver_event(results(h, &[(peer, lying.as_str())]), 1_000);
         assert!(
             observations(&p.drain_events(1_000, usize::MAX)).is_empty(),
             "a candidate whose every address was rejected observes nothing"
@@ -2671,10 +2786,8 @@ mod tests {
         trust(&mut p, &[&a, &b]);
         routed(&mut p, &a, 1_000);
         p.ingest_driver_event(KademliaEvent::RoutingPeerAdded { peer: b }, 1_000);
-        p.ingest_driver_event(
-            done(QueryHandle::implicit(99), QueryClass::Exploration),
-            1_000,
-        );
+        let h = held(&mut p, 99, 1_000);
+        p.ingest_driver_event(done(h, QueryClass::Exploration), 1_000);
         assert_eq!(p.health(), ProviderHealth::Healthy, "satisfied and recent");
 
         // The driver stalls. Time passes through the whole refresh
@@ -2688,7 +2801,8 @@ mod tests {
              not one success ever"
         );
 
-        p.ingest_driver_event(done(last_handle(&p), QueryClass::Bootstrap), stale + 10);
+        let fresh = held(&mut p, 100, stale + 10);
+        p.ingest_driver_event(done(fresh, QueryClass::Bootstrap), stale + 10);
         assert_eq!(
             p.health(),
             ProviderHealth::Healthy,
