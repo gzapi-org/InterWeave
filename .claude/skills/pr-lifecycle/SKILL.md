@@ -181,7 +181,11 @@ below, not by anything special about this path.
 
 The `PreToolUse` hook in `.claude/settings.json` denies a dispatch missing
 `model` or `isolation` and states why at the moment of the call, so those
-two requirements are not restated here.
+two requirements are not restated here. **A dispatch whose `description`
+names it a review is exempt from both the isolation requirement and the
+premium-model prompt** — a review writes nothing, so it reads the session
+tree with no worktree, and `opus` is standing for it (`CLAUDE.md` §9).
+That exemption keys on the description, so a review must say so there.
 
 **Which model, though, is a decision the hook cannot make for you.** It
 denies a *missing* `model`; on `opus` or `fable` it only **asks**, and an

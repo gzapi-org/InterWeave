@@ -486,6 +486,14 @@ relaxed here, deliberately, and only here:
 - **One agent per PR, with NO context from the session.** Pass the PR's
   tree and diff and nothing else. An agent told what the author expects
   confirms it; the whole value is that it does not know.
+- **No worktree — a review reads the session tree directly.** Isolation
+  exists to keep an agent's WRITES out of the clone, and a review writes
+  nothing, so a worktree buys nothing here and costs something real:
+  `worktree.baseRef` is `head`, so an isolation worktree shows the last
+  COMMIT and a reviewer inside one cannot see uncommitted work at all.
+  Omit `isolation`, give the agent the repository path, and tell it the
+  tree is read-only — the instruction is what holds, as it already does
+  for "run no git" and "never commit".
 - **The review goes ON THE PR, not into the transcript.** The agent's
   report is not the deliverable — post the findings to the pull request,
   fix them, and answer there. A finding that lives only in a session is
