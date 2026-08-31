@@ -781,13 +781,29 @@ impl CandidateSet {
         // are untouched, because the statement is per source; the
         // applied-floor survives, so a withdrawn fact still cannot be
         // re-asserted by delayed older evidence.
-        entry.observations.retain(|(pid, src), _| {
-            *src != candidate.source
-                || candidate
-                    .protocol_observations
-                    .iter()
-                    .any(|o| o.protocol_id == *pid)
-        });
+        //
+        // AND ONLY A SNAPSHOT THAT IS NOT STALE MAY WITHDRAW. Review
+        // finding on PR #60: this retain ignored the `stale` predicate
+        // the address and applied paths above both obey, so a DELAYED
+        // OLDER snapshot from the same source retracted facts a newer
+        // one had asserted. The insertion loop below was already safe —
+        // every fact is refused under its own floor — which is what
+        // made the gap one-directional and easy to miss: evidence could
+        // not travel backwards in time, but a retraction could.
+        //
+        // The granularity is the snapshot, not the fact, because that
+        // is what an omission is a statement about: a source saying
+        // "these are my facts" can only speak for the moment it
+        // describes.
+        if !stale {
+            entry.observations.retain(|(pid, src), _| {
+                *src != candidate.source
+                    || candidate
+                        .protocol_observations
+                        .iter()
+                        .any(|o| o.protocol_id == *pid)
+            });
+        }
 
         for observation in &candidate.protocol_observations {
             let key = (observation.protocol_id.clone(), candidate.source.clone());
@@ -1589,6 +1605,83 @@ mod tests {
         assert!(
             cand.protocol_observations.iter().any(|o| !o.supported),
             "another source's fact is untouched — the statement is per source"
+        );
+    }
+
+    #[test]
+    fn a_stale_snapshot_cannot_withdraw_what_a_newer_one_asserted() {
+        // Review finding on PR #60. Omission-by-a-source is withdrawal,
+        // but the retain ignored the `stale` predicate that the address
+        // and applied paths both obey — so a DELAYED OLDER snapshot
+        // retracted a fact the newer one had asserted, and targeted
+        // discovery stayed suppressed until that source changed again.
+        //
+        // The insertion loop was already safe: every fact is refused
+        // under its own floor. That is what made the gap
+        // one-directional and easy to miss — evidence could not travel
+        // backwards in time, but a RETRACTION could.
+        let mut set = CandidateSet::new();
+        let trust = nobody();
+        let p = identity(1);
+        let kad =
+            ProtocolId::parse("/interweave/kad/1.0.0/ssbtblqj7mexczivog5qfbfjvi").expect("valid");
+
+        let mut newer = for_id(&p, "peer-cache", "/ip4/10.0.0.1/tcp/1", 200, Some(u64::MAX));
+        newer.protocol_observations.insert(ProtocolObservation {
+            protocol_id: kad.clone(),
+            supported: true,
+            observed_at: 200,
+        });
+        set.observe(&newer, 200, &trust, true, false);
+        assert!(
+            set.candidates(300, &|_| None)
+                .iter()
+                .find(|c| c.peer_id == p)
+                .expect("known")
+                .protocol_observations
+                .iter()
+                .any(|o| o.supported),
+            "the control: the fact is held"
+        );
+
+        // THE DELAYED OLDER SNAPSHOT: same source, same live address,
+        // no protocol observations, and an earlier observation time.
+        set.observe(
+            &for_id(&p, "peer-cache", "/ip4/10.0.0.1/tcp/1", 100, Some(u64::MAX)),
+            300,
+            &trust,
+            true,
+            false,
+        );
+        assert!(
+            set.candidates(400, &|_| None)
+                .iter()
+                .find(|c| c.peer_id == p)
+                .expect("known")
+                .protocol_observations
+                .iter()
+                .any(|o| o.supported),
+            "a snapshot too stale to update an address is too stale to retract a fact"
+        );
+
+        // A NON-STALE omission still withdraws, or this test would pass
+        // for a build that never withdraws at all.
+        set.observe(
+            &for_id(&p, "peer-cache", "/ip4/10.0.0.1/tcp/1", 400, Some(u64::MAX)),
+            400,
+            &trust,
+            true,
+            false,
+        );
+        assert!(
+            !set.candidates(500, &|_| None)
+                .iter()
+                .find(|c| c.peer_id == p)
+                .expect("known")
+                .protocol_observations
+                .iter()
+                .any(|o| o.supported),
+            "omission by a CURRENT snapshot is still withdrawal"
         );
     }
 
