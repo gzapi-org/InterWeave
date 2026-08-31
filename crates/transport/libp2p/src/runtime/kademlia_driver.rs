@@ -291,6 +291,17 @@ impl KademliaState {
         }
     }
 
+    /// Queries this driver has outstanding, commanded or implicit.
+    ///
+    /// The progress slack a settlement may use: each one holds a
+    /// provider budget permit that only a completion releases. Bounded
+    /// by `max_concurrent_queries` for commanded work, plus whatever
+    /// implicit bootstraps the library has started, which the pool
+    /// itself bounds.
+    pub(super) fn outstanding_queries(&self) -> usize {
+        self.queries.len()
+    }
+
     /// Inbound record writes dropped so far (§12: counted, never stored).
     ///
     /// Test-gated until Stage 12: the §16 diagnostics snapshot is the
@@ -441,7 +452,30 @@ pub(super) fn handle_command(
             // termination conditions. A completion it emits afterwards
             // finds no entry in `queries` and is ignored, which is the
             // same path an unknown id already takes.
-            for (id, class) in state.queries.drain() {
+            // THE IMPLICIT ONES TOO. Review finding on PR #61: a
+            // library-started bootstrap (F2) is deliberately absent
+            // from `queries` — the completion path treats an unknown id
+            // as implicit — so draining this map neither finished it
+            // nor emitted the settlement that releases the provider's
+            // unscheduled charge. It kept querying past the shutdown
+            // and its charge was held for the life of the provider.
+            //
+            // Collected before finishing, because `iter_queries`
+            // borrows the behaviour that `query_mut` needs.
+            let commanded: Vec<kad::QueryId> = state.queries.keys().copied().collect();
+            let implicit: Vec<kad::QueryId> = behaviour
+                .iter_queries()
+                .map(|q| q.id())
+                .filter(|id| !state.queries.contains_key(id))
+                .collect();
+            for (id, class) in commanded
+                .into_iter()
+                .filter_map(|id| state.queries.remove(&id).map(|c| (id, c)))
+                // An implicit query settles as the bootstrap class it
+                // is, which is the completion the provider's charge
+                // keys on.
+                .chain(implicit.into_iter().map(|id| (id, QueryClass::Bootstrap)))
+            {
                 if let Some(mut running) = behaviour.query_mut(&id) {
                     running.finish();
                 }
@@ -450,6 +484,7 @@ pub(super) fn handle_command(
                     reason: QueryFailure::ShuttingDown,
                 });
             }
+            state.queries.clear();
             state.results.clear();
             state.pending_offers.clear();
         }
@@ -1927,6 +1962,68 @@ mod tests {
             !behaviour.iter_queries().any(|q| q.id() == id),
             "and the query it settled is actually finished, not left running to \
              send requests and dial until its own timeout"
+        );
+    }
+
+    #[test]
+    fn shutdown_settles_the_implicit_bootstrap_it_never_commanded() {
+        // Review finding on PR #61. A library-started bootstrap (F2) is
+        // deliberately ABSENT from `queries` — the completion path
+        // treats an unknown id as implicit — so draining that map
+        // neither finished the query nor emitted the settlement that
+        // releases the provider's unscheduled charge. It kept querying
+        // past the shutdown, and the charge was held for the life of
+        // the provider, permanently narrowing its budget.
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let local = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let mut state = KademliaState::new(&settings);
+        let mut behaviour = build_behaviour(&settings, local).expect("buildable");
+        let manager = interweave_transport_runtime::ConnectionManager::new(
+            interweave_transport_runtime::ConnectionPolicy::default(),
+            8,
+        );
+
+        // Started by the library, never recorded in `queries` — the
+        // shape F2 measured.
+        let implicit = behaviour.get_closest_peers(PeerId::random());
+        assert!(
+            !state.queries.contains_key(&implicit),
+            "the control: this is exactly the id the driver did not command"
+        );
+
+        let out = handle_command(
+            &mut state,
+            &mut behaviour,
+            &manager,
+            KademliaCommand::Shutdown,
+            0,
+        );
+        assert!(
+            out.iter().any(|e| matches!(
+                e,
+                KademliaEvent::QueryFailed {
+                    class: QueryClass::Bootstrap,
+                    reason: QueryFailure::ShuttingDown,
+                }
+            )),
+            "it settles as the bootstrap class, which is the completion the \
+             provider's unscheduled charge keys on"
+        );
+        assert!(
+            !behaviour.iter_queries().any(|q| q.id() == implicit),
+            "and it is actually finished, not left running"
         );
     }
 
