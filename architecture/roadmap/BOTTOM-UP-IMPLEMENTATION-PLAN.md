@@ -1046,9 +1046,11 @@ Three limits, stated because the tests cannot reach past them.
   were re-dated at this closure because their previous reason — "the
   conformance suite composes the manager" — was wrong about what counts:
   that check strips `#[cfg(test)]` and excludes `tests/` wholesale.
-- **`protocol_observations` stay empty**, per the Stage 10 deferral at
-  L967-991. `PeerCacheDiscovery` does not fill them and says so at its
-  source.
+- **`protocol_observations` were left empty at this closure**, per the
+  Stage 10 deferral that stood at the time. Stage 10 decided the mapping
+  (`kademlia-integration.md` §7, 2026-08-30) and `PeerCacheDiscovery` now
+  fills them; the sentence is kept in the past tense because this block
+  records what Stage 9 proved, not what is true today.
 
 ## 13. Stage 10 — Kademlia
 
@@ -1099,25 +1101,27 @@ are absent from the libp2p feature list, so the spike could not consume
 the AutoNAT-verified-or-relay-reservation rule this stage's §14 requires.
 SPIKE-004 is where that arrives. Do not treat it as proved.
 
-**Decide the capability-observation mapping in the architecture before
-writing code.** `PeerCache::candidates` exports `protocol_observations`
-**empty**, and that is a deferral — not a statement that a peer has no
-observations. `providers/peer-cache.md` has the Kademlia provider read
-fresh capability evidence "through normal candidate/hint data", which is
-that field, and the "targeted lookup only with locally computable fresh
-server-capability evidence" item below is the consumer that needs it.
+**The capability-observation mapping is DECIDED (2026-08-30). This
+prerequisite is closed.** It is kept here rather than deleted because the
+stage's remaining work inherits the decision, and because a reader who
+came for the prerequisite needs to be told it was met rather than left to
+infer it from silence.
 
-The mapping is not specified anywhere, which is why the code declined to
-guess one: a stored observation is `(protocol_family, wire_major,
-network_hash, role)`, while a `ProtocolObservation` carries a single
-`protocol_id`. ADR-0047's canonical
-`/interweave/kad/1.0.0/<network-hash>` gives three of those four an
-evident home and `role` none, and "wire_major 1 means 1.0.0" is an
-inference no document states.
+The mapping is stated in `kademlia-integration.md` §7 and repeated in
+`providers/peer-cache.md`: a stored observation is
+`(protocol_family, wire_major, network_hash, role)` and a
+`ProtocolObservation` carries one `protocol_id`, so the four are encoded
+AS the derived server protocol string,
+`/interweave/kad/<wire_major>.0.0/<network_hash>`, with `role = server`
+implied by presence and the minor/patch always zero. `PeerCache::candidates`
+fills the field, `PeerCacheDiscovery::add_hint` parses the exact grammar
+back, and both directions are round-tripped against
+`fixtures/kademlia/kad-network-namespace-v1.json` rather than against
+each other.
 
-Specify it, then fill in `crates/discovery/cache/src/cache.rs`. A
-targeted lookup built on the empty set does not fail loudly — it reads as
-"no peer supports this" and silently degrades to no targeting at all.
+The consequence that motivated the prerequisite no longer applies: a
+targeted lookup built on the empty set read as "no peer supports this"
+and silently degraded to no targeting at all.
 
 ### Activate
 
