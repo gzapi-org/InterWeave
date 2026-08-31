@@ -460,6 +460,48 @@ mod tests {
         )
     }
 
+    #[test]
+    fn kademlia_is_still_the_only_behaviour_that_can_originate_a_dial() {
+        // THE COMMENT IN THE PENDING HOOK OWES THIS TEST. It reads "every
+        // one of those is a Kademlia iterative-query dial today", and on
+        // that basis every unticketed dial is admitted under
+        // `DialOrigin::KademliaQuery`.
+        //
+        // The moment a second dialling behaviour is enabled the sentence
+        // is false and the origin is a lie — and the failure is quiet in
+        // the worst direction. `KademliaQuery.is_data_plane()` is true,
+        // so a relay reservation to an infrastructure-only peer would be
+        // refused by `authorizes_for`: fail-closed, but presenting as
+        // "relay reservations mysteriously stopped working" rather than
+        // as a classification bug. ADR-0036 keeps those two authorities
+        // apart precisely so one cannot be spent as the other.
+        //
+        // Read from the manifest rather than from `cfg!`, because a
+        // dependency's enabled features are not visible to a dependent's
+        // conditional compilation — the fact that needs guarding lives
+        // in the feature list, so that is what is inspected.
+        let manifest = include_str!("../../../../Cargo.toml");
+        let features = manifest
+            .split_once("libp2p = { version")
+            .expect("the workspace pins libp2p")
+            .1
+            .split_once("] }")
+            .expect("the feature list closes")
+            .0;
+        for dialling in ["autonat", "relay", "dcutr"] {
+            assert!(
+                !features.contains(&format!("\"{dialling}\"")),
+                "{dialling} is enabled, so a behaviour other than Kademlia can now \
+                 originate a dial — the pending hook must classify by origin instead \
+                 of assuming DialOrigin::KademliaQuery"
+            );
+        }
+        assert!(
+            features.contains("\"kad\""),
+            "and the guard is only meaningful while kad itself is on"
+        );
+    }
+
     #[tokio::test]
     async fn an_untrusted_behaviour_dial_is_refused_and_reserves_nothing() {
         // The spike's own mutation, against production: admit everything
