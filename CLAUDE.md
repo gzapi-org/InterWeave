@@ -506,6 +506,15 @@ relaxed here, deliberately, and only here:
   fix them, and answer there. A finding that lives only in a session is
   a finding nobody can audit, and the thread is what makes the fix
   checkable against the claim.
+- **A CLEAN review is posted too.** Say what was read and that nothing
+  was found. This is the case the rule most needs, and the easiest to
+  skip: there is no finding to write up, so the natural move is to arm
+  the merge and move on. But `pr-review-status.sh` has already counted
+  the usage-limit refusal as an answered request, so the gate reads as
+  satisfied — and with nothing on the PR, the record shows a review
+  that was declined and no evidence any other one happened. A clean
+  comment is the only thing separating "reviewed, nothing found" from
+  "never reviewed".
 
 Everything else still applies: the findings are input rather than
 verdicts, a disagreement is stated with its reasoning rather than

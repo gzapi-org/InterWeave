@@ -176,7 +176,9 @@ reviewed — `pr-review-status.sh` counts a refusal as "already answered".
 Dispatch a reviewer without being asked, one per PR, and read §9's
 "When the reviewer declines" for the rest: no session context passed,
 and the findings posted to the PR and answered there rather than
-reported into the transcript. The model is `opus` by the standing rule
+reported into the transcript — including when there are none, since a
+clean review that leaves no comment is indistinguishable from the
+refusal that preceded it. The model is `opus` by the standing rule
 below, not by anything special about this path.
 
 The `PreToolUse` hook in `.claude/settings.json` denies a dispatch missing
