@@ -1197,6 +1197,39 @@ impl ConnectionManager {
         self.publish();
     }
 
+    /// Settle a dial THIS NODE refused, scoring nothing.
+    ///
+    /// The counterpart of [`Self::record_authorization_withdrawn`] for a
+    /// refusal that is not about trust: the outbound gate's established
+    /// hook denies a connection whose address the quarantine
+    /// suppresses, and libp2p reports that back as an ordinary
+    /// `DialError::Denied`.
+    ///
+    /// Passing it to [`Self::record_failure`] was wrong in two ways at
+    /// once, and both are self-inflicted. The address-scoped score
+    /// extended the very quarantine that caused the refusal, so a
+    /// suppression this node keeps re-testing could never lapse — a
+    /// time-bounded verdict turned permanent by the act of enforcing
+    /// it. And the peer-scoped backoff that rides with it advanced a
+    /// TRUSTED peer toward punitive backoff over one address this node
+    /// declined to use, which is exactly what ADR-0011 separates
+    /// address failures from peer failures to prevent: a known-good
+    /// route must not be suppressed by a bad one.
+    ///
+    /// Nothing about the network or the remote peer failed here. The
+    /// slot is returned and no retry is scheduled, for the same reason
+    /// the authorization path schedules none.
+    pub fn record_locally_refused(&mut self, ticket: DialTicket, now_ms: u64) {
+        let _ = now_ms;
+        if ticket.owns_scheduler_claim()
+            && let Some(peer) = ticket.peer().cloned()
+        {
+            self.clear_retry_claim(&peer);
+        }
+        self.settle(ticket);
+        self.publish();
+    }
+
     /// Established connections right now, dialed and accepted.
     #[must_use]
     pub fn connections(&self) -> usize {
@@ -2761,6 +2794,53 @@ mod tests {
             m.record_failure(t, u64::from(i) * 1_000);
         }
         assert_eq!(m.scheduled_retries(), 4, "the table is bounded");
+    }
+
+    #[test]
+    fn a_locally_refused_dial_scores_neither_the_address_nor_the_peer() {
+        // The outbound gate refuses a connection whose address the
+        // quarantine suppresses, and libp2p reports that as
+        // `DialError::Denied`. Settled as an ordinary failure it was
+        // wrong twice over, both self-inflicted: the address score
+        // extended the quarantine that caused the refusal, so a
+        // suppression this node keeps re-testing could never lapse; and
+        // the peer backoff riding with it advanced a TRUSTED peer over
+        // one address this node declined to use, which is the
+        // address-versus-peer separation ADR-0011 exists for.
+        let mut m = manager(4);
+        let quarantined = "/ip4/10.0.0.1/tcp/1";
+        let good = "/ip4/10.0.0.2/tcp/1";
+
+        let t = m
+            .handle()
+            .admit(&request(P1, quarantined), 0)
+            .expect("admitted");
+        assert!(m.record_identity_mismatch(t, 0), "the quarantine is set");
+
+        // The gate now refuses a dial on that same route.
+        let refused = m
+            .handle()
+            .admit(&request(P1, good), 1)
+            .expect("a different route is admitted");
+        m.record_locally_refused(refused, 1);
+
+        assert_eq!(
+            m.scheduled_retries(),
+            0,
+            "this node's own refusal schedules no retry"
+        );
+        // Bound, not dropped: a `DialTicket` settles itself on drop, so
+        // an unbound one would return the slot before it is counted.
+        let readmitted = m
+            .handle()
+            .admit(&request(P1, good), 2)
+            .expect("the peer was not advanced into backoff by our own refusal");
+        assert_eq!(
+            m.handle().load().pending_dials(),
+            1,
+            "and the refused dial's slot came back, so this one fits"
+        );
+        drop(readmitted);
     }
 
     #[test]
