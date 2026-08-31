@@ -169,9 +169,32 @@ different hosts. **Isolation is required**, and the model is **one full
 task that merely looks parallelisable is not an invitation. The isolation
 contract governs **how** to dispatch, never **whether**.
 
+**ONE EXCEPTION: a review the automated reviewer declined.** When
+`@codex review` answers "You have reached your Codex usage limits", the
+gate in `CLAUDE.md` §9 reads as satisfied while nothing has been
+reviewed — `pr-review-status.sh` counts a refusal as "already answered".
+Dispatch a reviewer without being asked, one per PR, and read §9's
+"When the reviewer declines" for the rest: no session context passed,
+and the findings posted to the PR and answered there rather than
+reported into the transcript — including when there are none, since a
+clean review that leaves no comment is indistinguishable from the
+refusal that preceded it. The model is `opus` by the standing rule
+below, not by anything special about this path.
+
 The `PreToolUse` hook in `.claude/settings.json` denies a dispatch missing
 `model` or `isolation` and states why at the moment of the call, so those
-two requirements are not restated here.
+two requirements are not restated here. **A dispatch whose `description`
+names it a review is exempt from both the isolation requirement and the
+premium-model prompt** — a review writes nothing, so it reads the session
+tree with no worktree, and `opus` is standing for it (`CLAUDE.md` §9).
+That exemption is narrow on purpose, and a review must be NAMED to get
+it: the description has to BEGIN with `review` or `re-review`, and the
+model has to be `opus`. Both halves earn their place — matching
+`review` anywhere let `Address review feedback` through, which is a
+WRITING dispatch that would then have run with no worktree in the
+session clone; and without the model condition a `sonnet` or `fable`
+dispatch could take the exemption and evade the very rules it sits
+beside.
 
 **Which model, though, is a decision the hook cannot make for you.** It
 denies a *missing* `model`; on `opus` or `fable` it only **asks**, and an
@@ -181,11 +204,19 @@ ask is answered by the user, not by the rule. So:
   prompt explicitly asks for that tier for that dispatch. "The task looks
   hard" is not authorisation; neither is "the session is already running
   that model" — the hook's own text says the inheritance is the failure
-  mode, not the default.
+  mode, not the default. **CODE REVIEW IS THE STANDING EXCEPTION** and
+  needs no per-dispatch authorisation: every review subagent runs on
+  `opus`, whether the automated reviewer declined, a review was asked
+  for directly, or merged code is being audited. `CLAUDE.md` §9 carries
+  the rule and why — a review's failure mode is not a retry, it is a
+  green PR that merges.
 - **Choose the cheapest tier that can do the job**: `haiku` for mechanical,
   well-specified work (extraction, pattern-following edits, structured
-  search); `sonnet` for judgement work (multi-file reasoning, reviews,
-  convention-holding prose).
+  search); `sonnet` for judgement work (multi-file reasoning,
+  convention-holding prose). NOT reviews — those are `opus` by the
+  standing rule above, and this sentence listing them as `sonnet` work
+  is what invited a hook exemption wide enough to let a `sonnet` review
+  through it.
 - **Fan-out multiplies cost by the agent count**, so a large wave is a
   reason to drop a tier, not to keep the session's.
 

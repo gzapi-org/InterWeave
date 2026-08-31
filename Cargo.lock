@@ -1713,6 +1713,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "interweave-kademlia-tests"
+version = "0.0.0"
+dependencies = [
+ "futures",
+ "interweave-kademlia-control-api",
+ "interweave-profile-identity",
+ "interweave-transport-api",
+ "interweave-transport-libp2p",
+ "interweave-transport-runtime",
+ "interweave-trust-api",
+ "libp2p",
+ "tokio",
+]
+
+[[package]]
 name = "interweave-local-client-api"
 version = "0.0.0"
 dependencies = [
