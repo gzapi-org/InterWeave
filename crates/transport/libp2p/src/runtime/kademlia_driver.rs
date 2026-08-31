@@ -722,7 +722,7 @@ pub(super) fn handle_kademlia(
     }
     match event {
         Libp2pSwarmEvent::Behaviour(SubstrateBehaviourEvent::Kad(kad_event)) => {
-            handle_kad_event(state, manager, kad_event, now_ms, out);
+            handle_kad_event(state, swarm.kademlia_mut(), manager, kad_event, now_ms, out);
             KadHandled::Consumed
         }
         other => KadHandled::Passed(Box::new(other)),
@@ -732,6 +732,7 @@ pub(super) fn handle_kademlia(
 /// Fold one `kad::Event` onto the port.
 fn handle_kad_event(
     state: &mut KademliaState,
+    behaviour: Option<&mut kad::Behaviour<MemoryStore>>,
     manager: &ConnectionManager,
     event: kad::Event,
     now_ms: u64,
@@ -784,6 +785,36 @@ fn handle_kad_event(
                 if let Some(admitted) = eligible {
                     state.routed.insert(peer);
                     out.push(KademliaEvent::RoutingPeerAdded { peer: admitted });
+                } else if let Some(behaviour) = behaviour {
+                    // THE BEHAVIOUR HAS ALREADY INSERTED IT. Review
+                    // finding on PR #61, against the previous fix:
+                    // `RoutingUpdated` is emitted AFTER the insertion,
+                    // so declining to record it suppressed the
+                    // `RoutingPeerAdded` and left the real routing entry
+                    // in place — and an empty-to-nonempty insertion can
+                    // still start an implicit bootstrap, which is the
+                    // post-drain query activity the check was added to
+                    // prevent. Refusing the bookkeeping is not refusing
+                    // the seat.
+                    behaviour.remove_peer(&peer);
+                    // And any query that insertion just started: an
+                    // implicit bootstrap is absent from `queries` by
+                    // construction, so the shutdown sweep — which may
+                    // already have run — would never see it.
+                    let started: Vec<kad::QueryId> = behaviour
+                        .iter_queries()
+                        .map(|q| q.id())
+                        .filter(|id| !state.queries.contains_key(id))
+                        .collect();
+                    for id in started {
+                        if let Some(mut running) = behaviour.query_mut(&id) {
+                            running.finish();
+                        }
+                        out.push(KademliaEvent::QueryFailed {
+                            class: QueryClass::Bootstrap,
+                            reason: QueryFailure::ShuttingDown,
+                        });
+                    }
                 }
             }
             if let Some(evicted) = old_peer
@@ -1276,17 +1307,17 @@ mod tests {
                 record: None,
             },
         };
-        handle_kad_event(&mut state, &manager, put, 0, &mut out);
+        handle_kad_event(&mut state, None, &manager, put, 0, &mut out);
         let add = kad::Event::InboundRequest {
             request: kad::InboundRequest::AddProvider { record: None },
         };
-        handle_kad_event(&mut state, &manager, add, 0, &mut out);
+        handle_kad_event(&mut state, None, &manager, add, 0, &mut out);
         let read = kad::Event::InboundRequest {
             request: kad::InboundRequest::FindNode {
                 num_closer_peers: 1,
             },
         };
-        handle_kad_event(&mut state, &manager, read, 0, &mut out);
+        handle_kad_event(&mut state, None, &manager, read, 0, &mut out);
         assert_eq!(
             state.record_writes_dropped(),
             2,
@@ -2059,6 +2090,7 @@ mod tests {
             max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
         };
         let mut state = KademliaState::new(&settings);
+        let mut behaviour = build_behaviour(&settings, PeerId::random()).expect("buildable");
         let mut manager = interweave_transport_runtime::ConnectionManager::new(
             interweave_transport_runtime::ConnectionPolicy::default(),
             8,
@@ -2084,6 +2116,7 @@ mod tests {
         let mut out = Vec::new();
         handle_kad_event(
             &mut state,
+            Some(&mut behaviour),
             &manager,
             kad::Event::RoutingUpdated {
                 peer: revoked,
@@ -2108,6 +2141,7 @@ mod tests {
         // cannot pass for a handler that accepts nobody.
         handle_kad_event(
             &mut state,
+            Some(&mut behaviour),
             &manager,
             kad::Event::RoutingUpdated {
                 peer: trusted,
@@ -2132,9 +2166,21 @@ mod tests {
         // already run — query dials during a drained lifetime.
         state.stopping = true;
         state.routed.remove(&trusted);
+        // ACTUALLY IN THE TABLE FIRST. Synthesising the event alone
+        // proved nothing: with the peer absent, `remove_peer` is a
+        // no-op and the assertion below held whether or not it ran.
+        let _ = behaviour.add_address(&trusted, "/ip4/127.0.0.1/tcp/9".parse().expect("valid"));
+        assert!(
+            behaviour
+                .kbuckets()
+                .flat_map(|b| b.iter().map(|e| *e.node.key.preimage()).collect::<Vec<_>>())
+                .any(|p| p == trusted),
+            "the control: the behaviour really holds it before the event"
+        );
         let mut after = Vec::new();
         handle_kad_event(
             &mut state,
+            Some(&mut behaviour),
             &manager,
             kad::Event::RoutingUpdated {
                 peer: trusted,
@@ -2153,7 +2199,26 @@ mod tests {
             !state.routed.contains(&trusted),
             "a seat queued before the drain is not granted after it"
         );
-        assert!(after.is_empty(), "and nothing is announced");
+        assert!(
+            !after
+                .iter()
+                .any(|e| matches!(e, KademliaEvent::RoutingPeerAdded { .. })),
+            "and nothing is announced"
+        );
+        // AND THE BEHAVIOUR'S OWN ENTRY IS GONE. Review finding on the
+        // previous version of this fix: `RoutingUpdated` is emitted
+        // AFTER the insertion, so declining the bookkeeping left the
+        // real routing entry in place — and an empty-to-nonempty
+        // insertion can still start an implicit bootstrap, which is
+        // exactly the post-drain query activity this check exists to
+        // prevent. Refusing the bookkeeping is not refusing the seat.
+        assert!(
+            behaviour
+                .kbuckets()
+                .flat_map(|b| b.iter().map(|e| *e.node.key.preimage()).collect::<Vec<_>>())
+                .all(|p| p != trusted),
+            "the peer is removed from the routing table itself, not only from `routed`"
+        );
     }
 
     #[test]
