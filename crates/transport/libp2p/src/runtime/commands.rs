@@ -770,17 +770,40 @@ pub(super) fn handle_command(
             // stopping driver does: drain is "stop taking on new work",
             // and a query is new work with dials inside it. Settled,
             // not swallowed.
+            // BOUNDED, AND THIS CORRECTS AN EARLIER ARGUMENT IN THIS
+            // FILE. `buffer_revocation_events` says a query settlement
+            // is never gated because dropping one leaks the provider's
+            // permit. That is true of the settlement, and it is not a
+            // licence to grow without bound: this branch is NOT gated
+            // by `room`, so once `polling_room` disables Swarm polling a
+            // caller can keep draining the bounded command channel into
+            // an unbounded outbox, one immediate `BudgetExhausted` /
+            // `NoRoutingPeers` / `ShuttingDown` per command, forever.
+            // That is the memory-exhaustion vector the capacity exists
+            // to rule out, and the scheduled-retry branch above already
+            // makes exactly this argument for exactly this reason.
+            //
+            // The permit is the lesser loss, and only in a state where
+            // it costs nothing: the outbox is full only when the
+            // consumer has stopped reading, and a provider that is not
+            // receiving events is not issuing queries either. When it
+            // resumes, `recent_queries_succeeded` ages out and health
+            // reports the gap. An unbounded queue has no such recovery.
+            let settle = |outbox: &mut VecDeque<SwarmEvent>, event| {
+                let _ = buffer_kademlia_event(outbox, event_capacity, event);
+            };
             if manager.is_draining()
                 && let interweave_kademlia_control_api::KademliaCommand::StartQuery {
                     class, ..
                 } = &command
             {
-                outbox.push_back(SwarmEvent::Kademlia {
-                    event: interweave_kademlia_control_api::KademliaEvent::QueryFailed {
+                settle(
+                    outbox,
+                    interweave_kademlia_control_api::KademliaEvent::QueryFailed {
                         class: *class,
                         reason: interweave_kademlia_control_api::QueryFailure::ShuttingDown,
                     },
-                });
+                );
                 return;
             }
             if let Some(state) = kademlia
@@ -789,7 +812,7 @@ pub(super) fn handle_command(
                 for event in super::kademlia_driver::handle_command(
                     state, behaviour, manager, command, now_ms,
                 ) {
-                    outbox.push_back(SwarmEvent::Kademlia { event });
+                    settle(outbox, event);
                 }
             }
         }
@@ -1077,20 +1100,47 @@ fn buffer_revocation_events(
 ) -> usize {
     let mut buffered = 0;
     for event in events {
-        if !super::may_buffer_delivery(outbox.len(), event_capacity) {
+        if !buffer_kademlia_event(outbox, event_capacity, event) {
             break;
         }
-        outbox.push_back(SwarmEvent::Kademlia { event });
         buffered += 1;
     }
     buffered
 }
 
+/// Buffer ONE Kademlia port event, or refuse for want of base capacity.
+///
+/// THE ONE PRIMITIVE, so the bound cannot hold on one path and not
+/// another — which is exactly how it failed: `buffer_revocation_events`
+/// argued that a query settlement must never be gated, because dropping
+/// one leaks the provider's permit, and the settlement paths were then
+/// left ungated entirely. Both halves of that were wrong together. The
+/// command branch is not gated by `polling_room`, so once polling stops
+/// a caller can drain the bounded command channel into an unbounded
+/// outbox, one immediate refusal per command, without limit.
+///
+/// The permit is the lesser loss, and only where it costs nothing: the
+/// outbox is full only when the consumer has stopped reading, and a
+/// provider that is not receiving events is not issuing queries either.
+/// When it resumes, `recent_queries_succeeded` ages out and health says
+/// so. An unbounded queue has no such recovery, and §6 forbids it.
+fn buffer_kademlia_event(
+    outbox: &mut VecDeque<SwarmEvent>,
+    event_capacity: usize,
+    event: interweave_kademlia_control_api::KademliaEvent,
+) -> bool {
+    if !super::may_buffer_delivery(outbox.len(), event_capacity) {
+        return false;
+    }
+    outbox.push_back(SwarmEvent::Kademlia { event });
+    true
+}
+
 #[cfg(test)]
 mod expired_address_tests {
     use super::{
-        ActiveListeners, SwarmEvent, TransportIdentity, VecDeque, buffer_revocation_events,
-        forget_address,
+        ActiveListeners, SwarmEvent, TransportIdentity, VecDeque, buffer_kademlia_event,
+        buffer_revocation_events, forget_address,
     };
     use libp2p::Multiaddr;
     use libp2p::core::transport::ListenerId;
@@ -1184,5 +1234,31 @@ mod expired_address_tests {
             vec![interweave_kademlia_control_api::KademliaEvent::RoutingPeerRemoved { peer }];
         assert_eq!(buffer_revocation_events(&mut outbox, 8, more), 0);
         assert_eq!(outbox.len(), 8, "the slack is not notification space");
+    }
+
+    #[test]
+    fn immediate_query_settlements_are_bounded_like_everything_else() {
+        // Review P1 on PR #61. The command branch is NOT gated by
+        // `polling_room`, so once polling stops a caller can drain the
+        // bounded command channel into an unbounded outbox — one
+        // immediate `BudgetExhausted` / `NoRoutingPeers` /
+        // `ShuttingDown` per command, without limit. The
+        // scheduled-retry branch already makes this argument; the
+        // settlement paths were exempted from it on the grounds that a
+        // dropped settlement leaks the provider's permit, which is true
+        // and is not a licence to grow without bound.
+        let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
+        let refusal = || interweave_kademlia_control_api::KademliaEvent::QueryFailed {
+            class: interweave_kademlia_control_api::QueryClass::Targeted,
+            reason: interweave_kademlia_control_api::QueryFailure::BudgetExhausted,
+        };
+        for _ in 0..4 {
+            assert!(buffer_kademlia_event(&mut outbox, 4, refusal()));
+        }
+        assert!(
+            !buffer_kademlia_event(&mut outbox, 4, refusal()),
+            "a caller spamming refused queries cannot grow the outbox past its base"
+        );
+        assert_eq!(outbox.len(), 4, "and nothing was appended past the bound");
     }
 }
