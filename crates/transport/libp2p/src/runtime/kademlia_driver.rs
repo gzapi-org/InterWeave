@@ -1029,12 +1029,28 @@ fn handle_kad_event(
                 // `contains` first, because a peer already holding its
                 // seat is refreshing rather than taking a new one —
                 // §11's population bound is not an address freeze.
+                //
+                // AND A REPLACEMENT IS NOT A GROWTH. Review finding on
+                // PR #64: the ceiling was tested against the population
+                // BEFORE this event, while the eviction below belongs
+                // to the same event and frees a seat. So a same-bucket
+                // swap on a full table refused the newcomer for a seat
+                // that was about to be vacated, and then vacated it —
+                // shrinking a full table by one, and shrinking the real
+                // one too, since `remove_peer` drops the newcomer the
+                // behaviour had already inserted. What the bound
+                // forbids is exceeding `max_routing_peers` after the
+                // event, so the seat `old_peer` is giving up counts.
+                let replacing = old_peer
+                    .as_ref()
+                    .is_some_and(|old| *old != peer && state.routed.contains(old));
                 let eligible = to_transport_identity(&peer).ok().filter(|identity| {
                     !state.stopping
                         && may_hold_a_seat(manager, identity)
                         && matches!(state.advertises.get(&peer), Some((true, _)))
                         && (state.routed.contains(&peer)
-                            || state.routed.len() < state.max_routing_peers)
+                            || state.routed.len()
+                                < state.max_routing_peers + usize::from(replacing))
                 });
                 // The claim is settled either way; only an ELIGIBLE
                 // peer keeps the seat. Not an early return: the
@@ -2304,6 +2320,127 @@ mod tests {
         apply_revocations(&mut state, Some(&mut behaviour), &manager, &mut second);
         assert!(state.routed.contains(&kept), "trust intact, seat intact");
         assert!(second.is_empty(), "and nothing is reported");
+    }
+
+    #[test]
+    fn a_same_bucket_swap_does_not_shrink_a_full_table() {
+        // Review finding on PR #64. The ceiling was evaluated against
+        // the population before the event, but the `old_peer` eviction
+        // belongs to the same event — so a swap on a full table refused
+        // the newcomer for a seat it was itself about to free, then
+        // freed it. One seat lost per swap, and the real table lost it
+        // too: `remove_peer` drops the peer the behaviour had already
+        // inserted.
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 4,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let mut state = KademliaState::new(&settings);
+        let mut behaviour = build_behaviour(&settings, PeerId::random()).expect("buildable");
+        let mut manager = interweave_transport_runtime::ConnectionManager::new(
+            interweave_transport_runtime::ConnectionPolicy::default(),
+            8,
+        );
+
+        // A full table, and one of its members is the peer being
+        // evicted by this very update.
+        let seats: Vec<PeerId> = (0..settings.max_routing_peers)
+            .map(|_| {
+                libp2p::identity::Keypair::generate_ed25519()
+                    .public()
+                    .to_peer_id()
+            })
+            .collect();
+        for seat in &seats {
+            state.routed.insert(*seat);
+        }
+        let evicted = seats[0];
+
+        let newcomer = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let newcomer_id = to_transport_identity(&newcomer).expect("canonical");
+        let _ = manager.set_trust(
+            interweave_transport_runtime::TrustSources::new(
+                interweave_trust_api::PeerTrustPolicy::new([newcomer_id]).expect("small"),
+                interweave_trust_api::InfrastructureSet::default(),
+            ),
+            &[],
+        );
+        state.advertises.insert(newcomer, (true, 0));
+
+        let mut out = Vec::new();
+        handle_kad_event(
+            &mut state,
+            Some(&mut behaviour),
+            &manager,
+            kad::Event::RoutingUpdated {
+                peer: newcomer,
+                is_new_peer: true,
+                addresses: kad::Addresses::new("/ip4/127.0.0.1/tcp/1".parse().expect("valid")),
+                bucket_range: (
+                    kad::KBucketDistance::default(),
+                    kad::KBucketDistance::default(),
+                ),
+                old_peer: Some(evicted),
+            },
+            0,
+            &mut out,
+        );
+
+        assert!(
+            state.routed.contains(&newcomer),
+            "the replacement takes the seat the eviction frees"
+        );
+        assert!(!state.routed.contains(&evicted), "and the evicted leaves");
+        assert_eq!(
+            state.routed.len(),
+            settings.max_routing_peers,
+            "a swap holds the population exactly at the cap, it does not shrink it"
+        );
+
+        // A swap is still not a way past the cap: an INELIGIBLE
+        // replacement is refused and the eviction still happens, so
+        // this cannot pass for a predicate that simply stopped
+        // counting.
+        let stranger = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        state.advertises.insert(stranger, (true, 0));
+        let mut again = Vec::new();
+        handle_kad_event(
+            &mut state,
+            Some(&mut behaviour),
+            &manager,
+            kad::Event::RoutingUpdated {
+                peer: stranger,
+                is_new_peer: true,
+                addresses: kad::Addresses::new("/ip4/127.0.0.1/tcp/2".parse().expect("valid")),
+                bucket_range: (
+                    kad::KBucketDistance::default(),
+                    kad::KBucketDistance::default(),
+                ),
+                old_peer: Some(seats[1]),
+            },
+            0,
+            &mut again,
+        );
+        assert!(
+            !state.routed.contains(&stranger),
+            "an untrusted replacement is refused however many seats open"
+        );
+        assert_eq!(
+            state.routed.len(),
+            settings.max_routing_peers - 1,
+            "and its eviction still lands, so the seat is simply given up"
+        );
     }
 
     #[test]
