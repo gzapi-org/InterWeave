@@ -997,7 +997,25 @@ its source.
   at another and pass the entire suite.
   `the_suite_catches_a_provider_that_fabricates_an_unrelated_candidate`
   and `…that_expires_the_wrong_peer` make both permanent, and restoring
-  the no-op adapter still fails three checks.
+  the no-op adapter fails **four** of the fourteen —
+  `provider_emits_normalized_candidate`,
+  `provider_handles_duplicate_observation`,
+  `provider_handles_candidate_update` and
+  `provider_expires_when_semantics_support_ttl`.
+
+  **The count is measured, and it was wrong here once.** This block
+  claimed three, and at the closure it was ONE: `StaticSubject::observe`
+  returned the very address `new()` had seeded and `start()` had already
+  emitted, so `set_entries` diffed to empty and queued nothing, and the
+  checks were satisfied by the leftover start event. The static half of
+  the repair was therefore inert in exactly the way the mDNS half had
+  been — the defect this block describes, surviving inside the sentence
+  claiming it was fixed. Giving `observe` an address that differs from
+  the seed, and matching an emission to its observation by peer AND
+  address rather than peer alone, is what takes it from one to four.
+  Anyone changing this suite should re-measure rather than trust the
+  number: run each check against a subject whose adapter has been
+  reverted to a no-op and count what fails.
 - **Composition merges by PeerId and keeps provenance.**
   `the_three_providers_compose_into_one_candidate_set`;
   `a_candidate_survives_one_providers_retraction_when_another_still_vouches`
