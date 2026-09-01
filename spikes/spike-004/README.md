@@ -452,9 +452,18 @@ crate's own ceiling, `MAX_NUMBER_OF_UPGRADE_ATTEMPTS = 3`, is a
 `pub(crate)` constant counting retries per relayed connection — neither
 a concurrency cap nor a cooldown. So §13's "at most four concurrent, one
 per peer, five-minute failure cooldown" has to be enforced outside the
-behaviour, and the dial gate is the only place that sees every attempt.
+behaviour.
 
-R12.4 confirms it can, and says EVERY rather than at least one: the
+**Not by the gate alone, though.** The gate is the only place that sees
+every dial, and R12.4 confirms every hole-punch dial arrives there
+attributed — but it is handed no logical attempt identifier and no
+outcome. A gate enforcing "one per peer" on dials would refuse its own
+attempt's sibling candidates; one enforcing the cooldown on dials would
+never learn that an attempt failed. The attempt lifecycle belongs to a
+DCUtR adapter, with a token for the attempt reaching the gate, which
+admits or refuses it as a unit.
+
+R12.4 says EVERY rather than at least one: the
 announced and resolved counts for the origin agree on both nodes, with
 zero dials of any origin meeting a gate with no note. `> 0` would have
 been satisfied by one admitted dial per node while the rest bypassed the
@@ -489,9 +498,6 @@ logical-peer view is Phase 6's to build.
   what redundancy buys.
 - **No resource-cost measurement.** Relay bandwidth, connection and
   probe budgets are phase B.
-- Reservation lifecycle, DCUtR bounds, relayed pre-auth accounting and
-  relayed end-PeerId trust are **not yet covered** by this phase-A run;
-  they are reachable on loopback and are the next experiments to add.
 - **Reservation REFRESH and expiry are not covered.** The crate's
   default reservation lasts an hour, so a run of this length cannot see
   a renewal. Obtain and withdrawal are measured (F9); the middle of the
@@ -645,6 +651,11 @@ trusting the result:
 | `ProductionNode` drops its `ConnectionManager` (bug 9, reintroduced) | R6.7, R6.8, R6.11 |
 | the circuit listen removed, so nothing dials | R6.4, R6.5, R6.7, R6.8, R6.10, R6.11 |
 
+The FIRST of those is the one worth reading: it left R6.6 passing,
+because with no refusal at all `refusals().iter().all(..)` is vacuously
+true. R6.6 now requires the list to be non-empty as well, so it stands
+without leaning on R6.5.
+
 R7's three:
 
 | Mutation | Fails |
@@ -652,6 +663,12 @@ R7's three:
 | the infrastructure-only destination added to the data-plane allowlist too | R7.5 |
 | the source stops trusting the destination | R7.6, R7.8, R7.9, R7.10, R7.11, R7.12 |
 | the circuit dial announced as `Manual` rather than `RelayCircuit` | R7.8 |
+
+The SECOND is the one that matters: R7 is about an OUTBOUND circuit
+dial, so removing the destination from the source's data-plane
+allowlist refuses that dial outright and takes every relayed
+observation with it. The relay's own authorization is untouched and
+buys the source nothing.
 
 R8's three and R9's three:
 
@@ -664,6 +681,17 @@ R8's three and R9's three:
 | per-source ceiling raised to two | R9.2 |
 | global ceiling lowered to four | R9.4 |
 
+**Two of R8's mutations changed nothing, and both are worth stating.**
+The separate direct-control node is redundant: DCUtR upgrades the
+relayed path on loopback, so a direct inbound from the *same* peer pair
+arrives anyway — a better control than the one written, since only the
+path differs. And the DESTINATION refusing to trust the SOURCE changes
+nothing because **nothing gates inbound here**: the harness gate records
+and the production gate is outbound-only. That is not in tension with
+R7's mutation, which removes trust in the other direction and refuses an
+outbound dial. R8 measures what an inbound decision could read, never a
+decision being made.
+
 R10's two and R11's one:
 
 | Mutation | Fails |
@@ -674,22 +702,3 @@ R10's two and R11's one:
 | DCUtR disabled at the source | R12.4, R12.5, R12.7, R12.8 |
 | DCUtR dials are never announced | R5.5, R12.4, R12.5, R12.7 |
 | the lost relay is not actually dropped (again, against the tightened claims) | R10.7, R10.9, R10.10 |
-
-**Two of R8's mutations changed nothing, and both are worth stating.**
-The separate direct-control node is redundant: DCUtR upgrades the
-relayed path on loopback, so a direct inbound from the *same* peer pair
-arrives anyway — a better control than the one written, since only the
-path differs. And the destination refusing to trust the source changes
-nothing because **nothing gates inbound here**: the harness gate records
-and the production gate is outbound-only. R8 measures what an inbound
-decision could read, never a decision.
-
-The second is the one that matters: it shows the relayed observations
-depend on the END peer's class, since removing that one trust entry
-refuses the dial outright — the relay's authorization is untouched and
-buys the source nothing.
-
-The first mutation is the one worth reading: it leaves R6.6 passing,
-because with no refusal at all `refusals().iter().all(..)` is vacuously
-true. R6.6 now requires the list to be non-empty as well, so it stands
-without leaning on R6.5.
