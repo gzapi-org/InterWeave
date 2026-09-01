@@ -85,9 +85,28 @@ refusing it.
 What makes this fixable rather than blocking: the dial-back is an
 ordinary `ToSwarm::Dial` (`PeerCondition::Always`, `allocate_new_port`),
 so it **traverses the root gate** — R4.4 records the permissive server's
-dial-back admitted through it as `autonat-probe`. The pending hook can
-refuse on peer and class; the ESTABLISHED hook is where the address
-exists and where the §7 checks belong.
+dial-back admitted through it as `autonat-probe`.
+
+**And the check belongs at the PENDING hook, not the established one.**
+An earlier version of this paragraph said the opposite, and a review
+caught it: `handle_established_outbound_connection` runs *after* the TCP
+connection is open, so a server validating there would already have
+contacted the target — which is the entirety of what an SSRF check
+exists to prevent. R4.10 measures that the dial-back candidate IS
+present at the pending hook (one address, `[1]`), before any socket, so
+an address check there precedes contact.
+
+Two things the gate still cannot do alone, and Stage 11 must solve:
+
+- **The gate does not know the observed source address** of the probing
+  connection, and §7's central rule is *candidate IP equals observed
+  source IP*. That correlation lives in the AutoNAT server's own
+  request handling, not in a dial hook — so the wrapper or replacement
+  around `autonat::v2::server` has to carry it, with the gate as the
+  second line rather than the only one.
+- **Address-class filtering** (literal IP, no DNS, no loopback/private/
+  link-local/special-use) needs no such correlation and can be enforced
+  at the pending hook for every behaviour dial at once.
 
 **F3 — `RelayCircuit` is a command-path origin, not a
 behaviour-originated one.** Review finding on PR #69: the first version
@@ -181,6 +200,9 @@ offered by US — is what must be restricted at the connection.
 - Reservation lifecycle, DCUtR bounds, relayed pre-auth accounting and
   relayed end-PeerId trust are **not yet covered** by this phase-A run;
   they are reachable on loopback and are the next experiments to add.
+- **F3 is about the opening dial only.** No circuit completed, so
+  whatever the relay behaviour may do after a relay ACCEPTS one is
+  unobserved. R5.12 says so at the assertion itself.
 - **A relayed data path does not complete here.** R5 obtains a
   reservation and the circuit is then refused `NO_RESERVATION` by a
   relay that had just accepted one. This is recorded as an open
@@ -237,7 +259,7 @@ cd spikes/spike-004/harness
 cargo run
 ```
 
-Exits 0 only when every required observation held — **28 of them**, and
+Exits 0 only when every required observation held — **30 of them**, and
 every finding above is carried by one rather than by a printed number.
 That is a review finding on PR #69, raised four times over: F3, F4, F6
 and F7 were each asserted in this file while the harness only noted the
@@ -248,7 +270,8 @@ claim owes now:
 | --- | --- |
 | F1 attribution | R2.6–R2.8: zero unattributed, resolved AS `RelayReservation` |
 | F2 dial-back crosses the gate | R4.6–R4.8: admitted as `AutonatProbe`, the probe completed, and an untrusting server's is REFUSED |
-| F3 circuit is command-path | R5.6, with R5.8/R5.9 — the dial must have happened for the negative to mean anything |
+| F3 circuit is command-path | R5.6, with R5.8/R5.9 (the dial happened and was attributed) and R5.11 (the behaviour dialled only the relay). **Scoped**: R5.12 records that no circuit completed here, so this is evidence about the dial that OPENS a circuit, not the lifecycle |
+| F2 where the check runs | R4.10: the candidate is at the pending hook, before any socket |
 | F4 pending-hook address count | R2.9: exactly one, where Kademlia's is zero |
 | F6 class split and precedence | R3.1/R3.2 by denial REASON, and R3.4 flips all four when the peer is in both sets |
 | D1 DCUtR divergence | R3.5 pins today's behaviour, so a fix fails here rather than passing silently |

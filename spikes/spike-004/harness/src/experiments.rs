@@ -542,6 +542,32 @@ pub async fn r4_autonat_server_dial_back(report: &mut Report) {
             client_a.observed.details("autonat-client")
         ),
     );
+
+    // WHERE THE §7 CHECKS CAN ACTUALLY RUN. Review finding on PR #69,
+    // against F2's own recommendation: `handle_established_outbound_
+    // connection` runs AFTER the TCP connection is open, so a server
+    // that validated there would already have contacted the target —
+    // which is the whole of what an SSRF check exists to prevent.
+    //
+    // So the question is whether the dial-back's address is present at
+    // the PENDING hook, before any socket. Measured rather than
+    // assumed, because F4 showed the answer differs per behaviour.
+    let server_pending = permissive.ledger.pending_address_counts();
+    report.note(
+        "R4.9",
+        format!(
+            "addresses at the AutoNAT server's PENDING hook, per dial: {server_pending:?}"
+        ),
+    );
+    report.require(
+        "R4.10",
+        server_pending.iter().all(|n| *n == 1),
+        &format!(
+            "the dial-back candidate is present at the pending hook, BEFORE any socket \
+             opens — so an address check there precedes contact, which one at the \
+             established hook would not (got {server_pending:?})"
+        ),
+    );
 }
 
 /// R5 — a relay CIRCUIT is a different origin from a reservation, and
@@ -704,8 +730,20 @@ pub async fn r5_circuit_is_not_a_reservation(report: &mut Report) {
     report.require(
         "R5.6",
         !resolved.contains_key("relay-circuit"),
-        "the relay BEHAVIOUR originates no circuit dial — the transport does — so \
-         RelayCircuit is a command-path origin that the dialling caller must set",
+        "up to the point the relay refused the circuit, the relay BEHAVIOUR originated no \
+         dial — the transport did — so RelayCircuit is a command-path origin here",
+    );
+    // AND THE LIMIT OF THAT CLAIM, stated where it is made. Review
+    // finding on PR #69: the circuit never established, so nothing
+    // here exercises whatever the behaviour may do AFTER a relay
+    // accepts one. F3 is evidence about the dial that OPENS a circuit,
+    // not about the whole lifecycle, and a completed relayed path is
+    // phase-A work still to be built.
+    report.note(
+        "R5.12",
+        "R5.6 covers the dial that opens a circuit only: this run never completed one, so \
+         post-acceptance behaviour is unobserved and F3 is scoped accordingly"
+            .to_owned(),
     );
     report.note(
         "R5.7",
