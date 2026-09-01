@@ -278,11 +278,25 @@ const fn polling_room(
 /// outbox one refusal at a time.
 ///
 /// The slack is bounded by what the driver can have outstanding —
-/// `max_concurrent_queries` for commanded work PLUS the driver's cap on
-/// library-started queries, since one of those holds a permit exactly
-/// as a commanded one does. Both ceilings are this project's. So
-/// this cannot become the unbounded queue the capacity exists to rule
-/// out, and it cannot lose a settlement a live provider is waiting on.
+/// `max_concurrent_queries` for commanded work PLUS
+/// `MAX_IMPLICIT_QUERIES` for library-started work, since one of those
+/// holds a permit exactly as a commanded one does. Both ceilings are
+/// this project's.
+///
+/// WITH ONE EXCEPTION, and it is worth stating rather than rounding
+/// off. Review finding on PR #64: a shutdown also settles queries live
+/// in the kad pool that the driver never tracked, two events each, and
+/// `settleable_queries` counts them so the outbox can hold them. That
+/// term is bounded by the pool — by how many queries the LIBRARY has
+/// running — not by anything this project owns. It applies to a single
+/// `Shutdown` pass, after which both maps are empty and the driver
+/// starts nothing further, so it cannot accumulate; but "both ceilings
+/// are this project's" would be false as a description of the slack,
+/// and the sentence it replaced was.
+///
+/// So this cannot become the unbounded queue the capacity exists to
+/// rule out, and it cannot lose a settlement a live provider is waiting
+/// on.
 const fn may_buffer_settlement(
     buffered: usize,
     event_capacity: usize,
