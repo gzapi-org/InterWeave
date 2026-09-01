@@ -1205,6 +1205,56 @@ across the port.
 - small trusted overlays can become healthy/saturated;
 - autonomous query dials obey root dial policy.
 
+**Met.** The port ships as `crates/api/kademlia-control-api`, the
+provider as `crates/discovery/kademlia`, and the Swarm-owned driver in
+`crates/transport/libp2p`. Three of the four clauses are met by named
+tests; the fourth is met by scope only, and the section below is the
+record of which is which rather than a summary of it.
+
+- **The opt-out produces nothing, and each half carries a control that
+  is verified to FIRE.** `tests/kademlia/tests/opt_out.rs`: a disabled
+  profile answers no Kademlia command, beside an enabled node that must
+  answer the same one, and advertises no DHT protocol — read off the
+  wire from a third party's Identify rather than from local
+  configuration. The first version of the second test inferred the
+  advertisement from whether another node routed the subject; that
+  passed under mutation, because a peer can fail to route for reasons
+  that have nothing to do with the protocol list. Inferring from a
+  consequence was the wrong instrument.
+- **A query dial obeys the root gate in BOTH directions.**
+  `the_gate_refuses_the_walks_dial_to_a_stranger` and
+  `an_exploration_converges_the_star_through_admitted_dials`. Only the
+  pair is evidence: a gate that refused everything would pass the
+  refusal alone. This is the clause SPIKE-003 reordered the stage
+  around — the feature could not simply be switched on, because every
+  query dial is behaviour-originated and carries no admission ticket.
+- **A small trusted overlay becomes healthy, and that test is the only
+  place the port's two halves run against each other.**
+  `tests/kademlia/tests/overlay_health.rs`. Everything else tests one
+  side against the port's DEFINITION, so a driver that emits an event
+  the provider mis-reads satisfies both suites. **Its bounds are part of
+  the claim**: it proves the driver-to-provider direction — drop the
+  ingest and health never arrives — and does NOT prove the provider's
+  commands are what convergence depends on, because the library's own
+  automatic bootstrap finds the third node whether or not any command is
+  delivered. A three-node star rather than a pair because with one
+  trusted peer the provider is target-satisfied the moment that peer is
+  routed and never explores; the two-node version passed with every
+  command discarded.
+- **"Configured entries default on" is MET BY SCOPE ONLY and carries
+  forward.** It is not reachable from this stage by any test, and the
+  next subsection says why in full: no composition root exists to hold a
+  default (**Stage 12**), and SPIKE-003 independently withholds shipping
+  default-enabled until **SPIKE-004** supplies the server-mode
+  reachability evidence ADR-0034 requires. A later stage AND a later
+  spike. Do not read the stage's closure as clearing either.
+
+What the stage did NOT establish, beyond that clause: **server-mode
+reachability evidence is not validated at all.** AutoNAT and Relay are
+absent from the libp2p feature list, so §14's
+AutoNAT-verified-or-relay-reservation rule has never been exercised.
+Nothing here should be read as evidence for it.
+
 ### What this gate can and cannot reach inside Stage 10
 
 Recorded because one clause is **not reachable from this stage at all**,
@@ -1305,7 +1355,18 @@ a peer that dialled *it*.
 
 ### Prerequisite
 
-Run and close **SPIKE-004**.
+Run and close **SPIKE-004**. It has **not run**, and this stage being
+the open one does not change that.
+
+**So the open stage authorizes the spike and nothing else.** CLAUDE.md
+§3 makes the open stage the answer to "which packages may I create", and
+read without this paragraph it would say AutoNAT, Relay and DCUtR — the
+exact retrofit the hard sequencing rule forbids, one layer up from where
+Stage 10 met it. No package here may be created, and no production code
+anywhere may assume server-mode reachability evidence exists, until
+SPIKE-004 closes. Stage 10's `Met.` block says the same thing from the
+other side: its §14 rule was never exercised, because AutoNAT and Relay
+are absent from the libp2p feature list.
 
 ### Implement in this order
 
