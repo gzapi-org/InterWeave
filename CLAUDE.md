@@ -15,12 +15,21 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   AutoNAT/Relay/DCUtR work is authorized. Two things it did NOT settle
   bind anything built now. **Phase B — the real-NAT matrix — has not
   run, so the stage cannot CLOSE** and no production code may assume
-  server-mode reachability evidence exists. And its four findings bind
-  rather than inform: attribution must precede enabling any of the three
-  behaviours, `AUTONAT.md` §7 must be implemented here at the PENDING
-  hook, `RelayCircuit` is a command-path origin, and **D1 is a live
-  ADR-0036 violation in already-shipped code** — `DcutrHolePunch` is
-  admitted for an infrastructure-only peer. Read the verdict in
+  server-mode reachability evidence exists. And its findings bind rather
+  than inform. Attribution must precede enabling any of the three
+  behaviours; a gate refusal of a behaviour dial is INVISIBLE, so the
+  gate must record its own refusals; `AUTONAT.md` §7 must be implemented
+  here at the PENDING hook; `RelayCircuit` is a command-path origin;
+  `RELAY.md` §8's budgets are none of the crate's defaults and every
+  per-peer ceiling admits one more than it says; DCUtR has no knobs, so
+  §13's bounds are the gate's; and `CONNECTIVITY.md` §78's "no second
+  `PeerConnected`" is work, because the Swarm reports a second
+  connection for a peer already connected. **Three of them are live
+  violations in already-shipped code** — `DcutrHolePunch` (D1) and
+  `RelayCircuit` (D2) are both admitted for an infrastructure-only peer,
+  and `PreAuthAdmission` buckets a relayed inbound by the source PeerId
+  the circuit carries (D3), which §10 forbids by name. All three must be
+  fixed before the paths they govern are enabled. Read the verdict in
   `architecture/roadmap/SPIKES.md` before extending the stage. Read `[workspace].members` for the current roster and `[workspace.metadata.interweave].status` for the open stage rather than trusting either written here. **What each completed stage proved is in its `Met.` block in the canonical plan** — including, for Stages 6 through 9, the clauses met by scope and the limits their tests cannot reach. Read the block before extending that stage; it is the record, and this file does not mirror it. Stage 9's block matters more than most: it records that the mDNS multicast MECHANISM was never built, so the stage proved the provider and not LAN discovery.
 - Three facts about the built code are **not** derivable from it, and are recorded here because nothing else would say them at the moment they matter. **The reservation map's waiter ACCOUNTING is inert today and must NOT be removed as dead weight** — SPIKE-002/A11 measured the unbounded version as a memory-exhaustion vector, 40 copies attaching 39 waiters with zero refusals, and it binds in every stage. **The Stage 6 P1 about binding the source endpoint to the caller's lease was carried to Stage 8 by an explicit decision on PR #38 and closed there** — a direct send now takes the `EndpointLease` `claim_endpoint` returns, and `EndpointRegistry::holds_lease` verifies its epoch against the live lease, so a caller sends only as an endpoint it actually claimed (the plan's Stage 8 `Met.` block records this). And **broadcast and direct must remain independently functional and must never substitute for each other**, which is a standing constraint rather than a stage's exit gate.
 - Stage 10 closed Kademlia, activating `crates/api/kademlia-control-api` and `crates/discovery/kademlia` with the Swarm-owned driver in `crates/transport/libp2p`; Stage 9 activated `crates/discovery/{static,cache,mdns}`. The Stage-1 contract crates under `crates/api/` remain types and validation only — no I/O, no runtime, no backend — and the Stage-2 crates remain pure state machines.

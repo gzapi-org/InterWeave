@@ -2330,10 +2330,35 @@ pub async fn r12_dcutr_bounds(report: &mut Report) {
     // AND THE RELAYED PATH IS NOT TORN DOWN BY THE UPGRADE, which §13's
     // fallback rule depends on: the peer stays connected throughout,
     // and there is no window where it is not.
+    // THE RELAYED CONNECTION ITSELF, by id, not the peer's presence in
+    // a set. Review finding on PR #69: `connected` holds PeerIds, so a
+    // relayed connection that closed as the direct one opened leaves
+    // the peer present and the assertion passing — which is the
+    // opposite of the fallback §13 requires. The claim is that BOTH
+    // connections to this peer are open at once.
+    let open_relayed = source
+        .observed
+        .open_connections
+        .values()
+        .filter(|(peer, relayed)| *peer == dest_peer && *relayed)
+        .count();
+    let open_direct = source
+        .observed
+        .open_connections
+        .values()
+        .filter(|(peer, relayed)| *peer == dest_peer && !*relayed)
+        .count();
+    report.note(
+        "R12.10",
+        format!(
+            "open connections to the destination: {open_relayed} relayed, {open_direct}              direct"
+        ),
+    );
     report.require(
         "R12.8",
-        source.observed.connected.contains(&dest_peer),
-        "the peer is still connected after the upgrade — the direct connection was added \
-         beside the relayed one rather than replacing it through a disconnect",
+        open_relayed > 0 && open_direct > 0,
+        &format!(
+            "the RELAYED connection is still open beside the new direct one              ({open_relayed} relayed, {open_direct} direct) — the upgrade added a path              rather than replacing one, which is what §13's fallback rule needs"
+        ),
     );
 }

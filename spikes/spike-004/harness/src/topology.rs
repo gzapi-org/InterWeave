@@ -28,6 +28,15 @@ pub struct Observed {
     pub external_addresses: BTreeSet<Multiaddr>,
     /// Peers currently connected.
     pub connected: BTreeSet<PeerId>,
+    /// Connections currently OPEN, by id, with the peer and whether the
+    /// connection is relayed.
+    ///
+    /// A `BTreeSet<PeerId>` cannot tell a peer whose relayed connection
+    /// survived a hole punch from one whose relayed connection closed
+    /// as the direct connection opened: the peer is present either way.
+    /// Review finding on PR #69, and §13's fallback rule is exactly the
+    /// difference between those two.
+    pub open_connections: BTreeMap<libp2p::swarm::ConnectionId, (PeerId, bool)>,
     /// Outgoing dial failures, by the error's rendering.
     pub dial_failures: BTreeMap<String, u64>,
     /// Protocols each peer told us it supports, via Identify.
@@ -55,13 +64,28 @@ impl Observed {
 fn record(node: &mut Node, event: SwarmEvent<SpikeBehaviourEvent>) {
     let seen = &mut node.observed;
     match event {
-        SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+        SwarmEvent::ConnectionEstablished {
+            peer_id,
+            connection_id,
+            endpoint,
+            ..
+        } => {
             seen.connected.insert(peer_id);
+            seen.open_connections
+                .insert(connection_id, (peer_id, endpoint.is_relayed()));
             seen.events
                 .push(("connection-established", peer_id.to_string()));
         }
-        SwarmEvent::ConnectionClosed { peer_id, .. } => {
-            seen.connected.remove(&peer_id);
+        SwarmEvent::ConnectionClosed {
+            peer_id,
+            connection_id,
+            num_established,
+            ..
+        } => {
+            seen.open_connections.remove(&connection_id);
+            if num_established == 0 {
+                seen.connected.remove(&peer_id);
+            }
             seen.events.push(("connection-closed", peer_id.to_string()));
         }
         SwarmEvent::OutgoingConnectionError { error, peer_id, .. } => {

@@ -473,8 +473,11 @@ for an already-connected relayed peer *"does not emit a second
 inheritance: the Swarm reports two `ConnectionEstablished` events naming
 the same peer, one relayed and one direct, and nothing below the runtime
 deduplicates them. The relayed connection is not torn down by the
-upgrade either (R12.8), so §13's "keep the relayed path as fallback" has
-something to keep — but the logical-peer view is Phase 6's to build.
+upgrade either — R12.8 asserts that by CONNECTION, one relayed and one
+direct open at once, because a set of PeerIds cannot tell a surviving
+fallback from a replaced one and a review on PR #69 said so. §13's "keep
+the relayed path as fallback" therefore has something to keep, but the
+logical-peer view is Phase 6's to build.
 
 ## Stated limits
 
@@ -615,7 +618,7 @@ claim owes now:
 | F10 relay defaults vs §8 | R11.2/R11.3 (the two that break a deployment), R11.4 (the two that are looser), R11.1 and R11.5 record the rest |
 | F11 per-peer off-by-one | R11.7 (a ceiling of one admits two) with R11.9 as the control (the third is refused) |
 | F12 DCUtR bounds live at the gate | R12.4 with R12.9 (announced == resolved for the origin on both nodes, zero unattributed — every punch dial, not merely one) and R12.5 (both ends dial, fewer results are reported, so a dial count is not an attempt count) |
-| F13 §78's dedupe is ours | R12.7 (two `ConnectionEstablished` for one logical peer) with R12.8 (the relayed path survives the upgrade) |
+| F13 §78's dedupe is ours | R12.7 (two `ConnectionEstablished` for one logical peer) with R12.8 and R12.10 (one relayed and one direct connection OPEN AT ONCE, by connection id and endpoint — not a peer present in a set) |
 | ADR-0036's relayed end-PeerId clause | R7.12 (the path went through the relay), R7.9/R7.10 (two distinct authenticated identities), R7.11 (Identify completed with the destination through the circuit) |
 | F3, again | R5.11 — no relay-behaviour dial targeted the destination, which origin counts alone cannot show |
 | F7 advertised control protocols | R1.6/R1.7: Identify arrived and names both. **Scoped**: the harness has no data-plane behaviours, so it says nothing about isolation |
@@ -668,7 +671,7 @@ R10's two and R11's one:
 | the lost relay is not actually dropped | R10.7 |
 | the client never listens on the second relay's circuit | R10.2, R10.3, R10.5 |
 | per-source circuit ceiling left at the crate default | R11.7, R11.9 |
-| DCUtR disabled at the source | R12.4, R12.5, R12.7 |
+| DCUtR disabled at the source | R12.4, R12.5, R12.7, R12.8 |
 | DCUtR dials are never announced | R5.5, R12.4, R12.5, R12.7 |
 | the lost relay is not actually dropped (again, against the tightened claims) | R10.7, R10.9, R10.10 |
 

@@ -245,7 +245,9 @@ overflow-checks = true
 # AutoNAT/Relay/DCUtR work this value authorizes may proceed. Its phase
 # B — the real-NAT matrix — has not run, so the stage cannot CLOSE, and
 # no production code may assume server-mode reachability evidence
-# exists. The verdict's four findings bind rather than inform: read
+# exists. The verdict's findings bind rather than inform, and three of
+# them are live violations in already-shipped code that must be fixed
+# before the paths they govern are enabled: read
 # architecture/roadmap/SPIKES.md before extending the stage.
 status = "stage-11-connectivity"
 architecture_root = "architecture"
