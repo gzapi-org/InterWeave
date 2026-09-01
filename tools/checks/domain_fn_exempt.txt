@@ -153,7 +153,7 @@ LookupKey::as_public_key                         call  key.as_public_key(
 # OfferedAddress/OfferedAddresses/RoutingView, and the driver mints
 # ObservedCandidates. What is left is the slice only the config layer,
 # or a stage after this one, can reach.
-validate_limits                                  stage-10  profile-config calls it when the enabled-entry gate flips this stage
+validate_limits                                  stage-12  profile-config holds all six fields and defers the cross-field rules while it refuses enabled=true; that gate is Stage 12 composition, not Stage 10
 RoutingView::effective_target                    stage-12  consumed inside the port's own health today; the composed daemon's §16 diagnostics surface the trust-capped target directly
 
 # --- stage-11 ----------------------------------------------------
