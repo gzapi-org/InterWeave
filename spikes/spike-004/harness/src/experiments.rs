@@ -87,6 +87,33 @@ pub async fn r1_crate_semantics(report: &mut Report) {
             client.observed.identify_protocols.get(&server_peer)
         ),
     );
+
+    // REQUIRED, because F7 treats this list as the baseline the Stage
+    // 11 exposure correction is measured against. Noted only, a run
+    // where Identify never arrived — or where the pinned crate
+    // advertised something else — would exit 0 with the baseline
+    // unobserved.
+    let advertised = client
+        .observed
+        .identify_protocols
+        .get(&server_peer)
+        .cloned()
+        .unwrap_or_default();
+    report.require(
+        "R1.6",
+        !advertised.is_empty(),
+        "Identify arrived, so the advertised protocol list was actually observed",
+    );
+    for expected in [
+        "/libp2p/autonat/2/dial-request",
+        "/libp2p/circuit/relay/0.2.0/hop",
+    ] {
+        report.require(
+            "R1.7",
+            advertised.iter().any(|p| p == expected),
+            &format!("an infrastructure node advertises {expected}"),
+        );
+    }
 }
 
 /// R2 — every behaviour-originated dial is attributable.
@@ -145,11 +172,23 @@ pub async fn r2_dial_attribution(report: &mut Report) {
             "behaviour dials seen by the gate: {behaviour_dials}, unattributed: {unattributed}"
         ),
     );
+    let pending_counts = client.ledger.pending_address_counts();
     report.note(
         "R2.4",
-        format!(
-            "addresses the PENDING hook was handed, per dial: {:?} (F9: expected all zero)",
-            client.ledger.pending_address_counts()
+        format!("addresses the PENDING hook was handed, per dial: {pending_counts:?}"),
+    );
+    // REQUIRED, because F4 is a claim ABOUT this number: SPIKE-003
+    // recorded an empty list for a Kademlia dial, and a relay dial
+    // carries one. Noted only, a run where it arrived with zero would
+    // exit 0 while the README said otherwise — and the note's own text
+    // used to say "expected all zero", contradicting the finding it
+    // was evidence for.
+    report.require(
+        "R2.9",
+        pending_counts == vec![1],
+        &format!(
+            "the relay reservation dial reached the pending hook carrying exactly one \
+             address, unlike Kademlia's (got {pending_counts:?})"
         ),
     );
     report.note(
@@ -261,6 +300,46 @@ pub fn r3_infrastructure_cannot_reach_the_data_plane(report: &mut Report) {
             &format!(
                 "{origin:?} is refused for an infrastructure-only peer AS a data-plane \
                  origin (got {denial:?})"
+            ),
+        );
+    }
+
+    // AND THE PRECEDENCE, EXERCISED. ADR-0036 says data-plane trust
+    // wins when a peer is in both sets, and the README says this run
+    // observed it — which was true only of a mutation I ran by hand.
+    // A regression in that path would have left every assertion above
+    // passing. So the same peer is added to the data-plane allowlist
+    // and asked again.
+    let mut both = ConnectionManager::new(ConnectionPolicy::new(32, 32), 32);
+    let _ = both.set_trust(
+        TrustSources::new(
+            PeerTrustPolicy::new([relay.clone()]).expect("one peer"),
+            InfrastructureSet::new([relay.clone()]).expect("the same peer"),
+        ),
+        &[],
+    );
+    let both_handle = both.handle();
+    for origin in [
+        DialOrigin::KademliaQuery,
+        DialOrigin::ConnectionManager,
+        DialOrigin::Manual,
+        DialOrigin::DiscoveryReconnect,
+    ] {
+        let admitted = both_handle
+            .admit(
+                &DialRequest {
+                    peer: Some(relay.clone()),
+                    address: String::new(),
+                    origin,
+                },
+                0,
+            )
+            .is_ok();
+        report.require(
+            "R3.4",
+            admitted,
+            &format!(
+                "{origin:?} is ADMITTED for a peer in both sets — data-plane trust wins"
             ),
         );
     }
@@ -496,7 +575,14 @@ pub async fn r5_circuit_is_not_a_reservation(report: &mut Report) {
     let via_relay: Multiaddr = format!("{circuit}/p2p/{dest_peer}")
         .parse()
         .expect("a circuit address naming the destination");
-    let _ = source.dial(dest_peer, via_relay);
+    // The result is kept: a synchronous refusal here would make every
+    // claim below vacuous, and R5.8 is what notices.
+    let circuit_dial = source.dial(dest_peer, via_relay);
+    report.require(
+        "R5.9",
+        circuit_dial.is_ok(),
+        "the circuit dial was accepted by the swarm rather than refused synchronously",
+    );
 
     {
         let mut nodes = [&mut dest, &mut relay_node, &mut source];
@@ -546,6 +632,16 @@ pub async fn r5_circuit_is_not_a_reservation(report: &mut Report) {
     // The classifier still matters for the reservation/circuit split
     // IF a future crate version dials circuits from the behaviour; it
     // is not what produces `RelayCircuit` today.
+    // THE DIAL MUST HAVE HAPPENED for the negative to mean anything.
+    // If `source.dial` were refused synchronously, `resolved` would be
+    // empty and R5.6 would pass having observed no circuit dial at all
+    // — concluding the transport owns circuit dials from silence.
+    report.require(
+        "R5.8",
+        resolved.get("manual").copied().unwrap_or(0) > 0,
+        "the circuit dial reached the gate and was attributed, so R5.6's negative is a \
+         measurement rather than an absence",
+    );
     report.require(
         "R5.6",
         !resolved.contains_key("relay-circuit"),
