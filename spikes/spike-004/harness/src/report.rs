@@ -15,6 +15,7 @@ use std::fmt::Write as _;
 pub struct Report {
     lines: Vec<String>,
     failures: Vec<String>,
+    divergences: Vec<String>,
     required: usize,
 }
 
@@ -27,6 +28,22 @@ impl Report {
         if !held {
             self.failures.push(line.clone());
         }
+        self.lines.push(line);
+    }
+
+    /// Record a measured disagreement between the CODE and an accepted
+    /// document.
+    ///
+    /// Not a failure: the code is what it is, and a spike that exited
+    /// non-zero because production has a defect would be unrunnable
+    /// until production changed. Not a note either — a note is
+    /// something observed, and this is something WRONG. It is printed
+    /// under its own heading, counted, and is the spike's primary
+    /// output: work the stage must do, with the document it violates
+    /// named so a reader can check the claim.
+    pub fn divergence(&mut self, id: &str, measured: &str, violates: &str) {
+        let line = format!("DIVERGES {id}  {measured}\n           violates: {violates}");
+        self.divergences.push(line.clone());
         self.lines.push(line);
     }
 
@@ -44,10 +61,15 @@ impl Report {
         }
         let _ = writeln!(
             out,
-            "\n{} required observation(s), {} failed",
+            "\n{} required observation(s), {} failed; {} divergence(s) from accepted \
+             documents",
             self.required,
-            self.failures.len()
+            self.failures.len(),
+            self.divergences.len()
         );
+        for divergence in &self.divergences {
+            let _ = writeln!(out, "  {divergence}");
+        }
         for failure in &self.failures {
             let _ = writeln!(out, "  {failure}");
         }

@@ -325,7 +325,7 @@ impl Node {
             .condition(libp2p::swarm::dial_opts::PeerCondition::Always)
             .build();
         self.attribution
-            .announce(opts.connection_id(), DialOrigin::Manual);
+            .announce(opts.connection_id(), DialOrigin::Manual, Some(peer));
         self.swarm.dial(opts)
     }
 

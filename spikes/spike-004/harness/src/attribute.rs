@@ -71,6 +71,11 @@ struct Inner {
     /// Dials the gate met with no note at all. THE FAILURE MODE: each
     /// one is a dial production would misattribute to Kademlia.
     unattributed: u64,
+    /// Who each announced dial was aimed at, by origin. Needed because
+    /// "no circuit dial happened" cannot be shown from origin counts
+    /// alone: a relay-client dial TO the relay and one TOWARD a
+    /// destination are the same origin under a regressed classifier.
+    targets: BTreeMap<&'static str, Vec<PeerId>>,
 }
 
 fn label(origin: DialOrigin) -> &'static str {
@@ -87,11 +92,30 @@ fn label(origin: DialOrigin) -> &'static str {
 }
 
 impl Attribution {
-    /// Record that `origin` is about to dial under `id`.
-    pub fn announce(&self, id: ConnectionId, origin: DialOrigin) {
+    /// Record that `origin` is about to dial `peer` under `id`.
+    pub fn announce(&self, id: ConnectionId, origin: DialOrigin, peer: Option<PeerId>) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.notes.insert(id, origin);
         *inner.announced.entry(label(origin)).or_insert(0) += 1;
+        if let Some(peer) = peer {
+            inner
+                .targets
+                .entry(label(origin))
+                .or_default()
+                .push(peer);
+        }
+    }
+
+    /// Peers dialled under `origin`.
+    #[must_use]
+    pub fn targets(&self, origin: DialOrigin) -> Vec<PeerId> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .targets
+            .get(label(origin))
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// The origin of the dial `id`, if a behaviour announced it.
@@ -281,8 +305,10 @@ impl<B: NetworkBehaviour> NetworkBehaviour for Attributing<B> {
         // `handle_pending_outbound_connection` is later handed — so
         // this is a correlation, not a guess.
         if let Poll::Ready(ToSwarm::Dial { opts }) = &polled {
-            let origin = (self.classify)(opts.get_peer_id());
-            self.attribution.announce(opts.connection_id(), origin);
+            let peer = opts.get_peer_id();
+            let origin = (self.classify)(peer);
+            self.attribution
+                .announce(opts.connection_id(), origin, peer);
         }
         polled
     }

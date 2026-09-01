@@ -123,13 +123,40 @@ refusal will pass for `ConnectionLimitReached` while believing it
 measured trust or class. This cost two rewrites here (see below) and is
 worth stating because Stage 11's own tests will construct managers.
 
+**D1 — `DcutrHolePunch` is admitted for an infrastructure-only peer,
+and ADR-0036 says it must not be.** The one finding here that is a
+defect in THIS project rather than in a dependency, and the reason the
+harness has a "divergence" category at all.
+
+ADR-0036's protocol-admission matrix reads *"DCUtR with that peer as
+application destination | DataPlaneTrusted: yes |
+ConnectivityInfrastructureOnly: **no**"*, and `DCUTR.md` §2 says never
+to initiate DCUtR merely with an infrastructure-only peer as the
+destination. `DialOrigin::is_data_plane` lists only `Manual`,
+`ConnectionManager`, `DiscoveryReconnect` and `KademliaQuery`, so a
+hole-punch counts as control-plane traffic and `ConnectionPolicy::admit`
+lets it through.
+
+**Stage 11 must fix this, and the two obvious fixes are not the same
+rule.** Adding `DcutrHolePunch` to `is_data_plane` forbids every
+hole-punch toward an infrastructure-only peer — but a hole-punch
+*through* infrastructure toward a trusted peer is legitimate and is what
+DCUtR is for. The matrix is about the peer as *application destination*,
+so the check likely belongs on the destination's class rather than on
+the origin alone. R3.5 asserts today's behaviour so that changing it
+fails here rather than passing silently.
+
+This was found because an earlier version of R3 *required* the
+admission — recording the violation as evidence that the split held.
+
 **F6 — the infrastructure/data-plane split holds against the real
 policy, in both directions.** R3 asks the production
 `ConnectionManager::admit` for one peer authorized ONLY as
 infrastructure: `RelayReservation`, `RelayCircuit`, `AutonatProbe` and
 `DcutrHolePunch` are admitted; `KademliaQuery`, `ConnectionManager`,
 `Manual` and `DiscoveryReconnect` are refused, and refused specifically
-as `NotAuthorizedForDataPlane`. Adding the same peer to the data-plane
+as `NotAuthorizedForDataPlane`. (`DcutrHolePunch` is the exception, and
+it is D1 above rather than part of this finding.) Adding the same peer to the data-plane
 allowlist flips all four refusals to admissions, which is ADR-0036's
 "data-plane trust wins" observed rather than restated.
 
@@ -160,7 +187,7 @@ offered by US — is what must be restricted at the connection.
   observation, not a finding: the run does not distinguish a fixture
   race from crate behaviour, and nothing in this record depends on it.
 
-## Five fixture bugs this run found in itself
+## Six fixture bugs this run found in itself
 
 Recorded because each one passed before it was caught, and each is the
 same shape a Stage 11 test could take.
@@ -193,7 +220,12 @@ same shape a Stage 11 test could take.
    nothing the harness did, so a regression in that path would have
    left every assertion passing. R2.4's note even printed "expected all
    zero" while F4 claimed one.
-5. **R4 trusted a peer that did not exist.** `Node::new` mints its own
+5. **R3 required the ADR violation.** The first version asserted that
+   `DcutrHolePunch` *should* be admitted for an infrastructure-only
+   peer, so D1 — a real defect in this project's policy — was recorded
+   as evidence that the class split worked. A spike that asserts the
+   current behaviour is correct cannot find a bug in it.
+6. **R4 trusted a peer that did not exist.** `Node::new` mints its own
    keypair; the fixture generated a separate one to name in the servers'
    allowlists, so the dial-back was refused as `Unauthorized` — which
    read as a finding about the crate and was a bug in the fixture.
@@ -219,6 +251,8 @@ claim owes now:
 | F3 circuit is command-path | R5.6, with R5.8/R5.9 — the dial must have happened for the negative to mean anything |
 | F4 pending-hook address count | R2.9: exactly one, where Kademlia's is zero |
 | F6 class split and precedence | R3.1/R3.2 by denial REASON, and R3.4 flips all four when the peer is in both sets |
+| D1 DCUtR divergence | R3.5 pins today's behaviour, so a fix fails here rather than passing silently |
+| F3, again | R5.11 — no relay-behaviour dial targeted the destination, which origin counts alone cannot show |
 | F7 advertised baseline | R1.6/R1.7: Identify arrived and names both control protocols |
 
 The claims that carry the mechanism are mutation-checked:

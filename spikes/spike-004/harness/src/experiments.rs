@@ -270,11 +270,12 @@ pub fn r3_infrastructure_cannot_reach_the_data_plane(report: &mut Report) {
         )
     };
 
+    // THE CONTROL PROTOCOLS ADR-0036's matrix permits for this class:
+    // AutoNAT probe control, and relay reservation/circuit control.
     for origin in [
         DialOrigin::RelayReservation,
         DialOrigin::RelayCircuit,
         DialOrigin::AutonatProbe,
-        DialOrigin::DcutrHolePunch,
     ] {
         let outcome = ask(origin);
         report.require(
@@ -283,6 +284,41 @@ pub fn r3_infrastructure_cannot_reach_the_data_plane(report: &mut Report) {
             &format!("{origin:?} is admitted for an infrastructure-only peer"),
         );
     }
+
+    // AND ONE THE MATRIX DENIES. Review finding on PR #69, and it is
+    // the most consequential thing this spike found, because it is a
+    // defect in THIS project rather than in a dependency.
+    //
+    // ADR-0036's protocol-admission matrix reads "DCUtR with that peer
+    // as application destination | DataPlaneTrusted: yes |
+    // ConnectivityInfrastructureOnly: **no**", and DCUTR.md §2 says
+    // never to initiate DCUtR merely with an infrastructure-only peer
+    // as the destination. But `DialOrigin::is_data_plane` lists only
+    // Manual, ConnectionManager, DiscoveryReconnect and KademliaQuery,
+    // so `DcutrHolePunch` is treated as control-plane and admitted.
+    //
+    // The earlier version of this experiment REQUIRED that admission,
+    // which recorded the violation as evidence that the split holds.
+    // It is recorded as a divergence instead, and asserted in its
+    // current shape so that fixing it is noticed here.
+    let dcutr = ask(DialOrigin::DcutrHolePunch);
+    report.require(
+        "R3.5",
+        dcutr.is_ok(),
+        "DcutrHolePunch is TODAY admitted for an infrastructure-only peer — asserted so \
+         that changing it fails this observation rather than passing silently",
+    );
+    report.divergence(
+        "D1",
+        "DialOrigin::DcutrHolePunch is admitted for a ConnectivityInfrastructureOnly peer, \
+         because DialOrigin::is_data_plane omits it and the policy therefore treats a \
+         hole-punch as control-plane traffic",
+        "ADR-0036 protocol-admission matrix (DCUtR with that peer as application \
+         destination: no) and architecture/transport/libp2p/DCUTR.md §2. Stage 11 must \
+         either add DcutrHolePunch to is_data_plane or gate it on the DESTINATION's class \
+         — the two are not the same rule, since a hole-punch THROUGH infrastructure toward \
+         a trusted peer is legitimate",
+    );
     for origin in [
         DialOrigin::KademliaQuery,
         DialOrigin::ConnectionManager,
@@ -641,6 +677,29 @@ pub async fn r5_circuit_is_not_a_reservation(report: &mut Report) {
         resolved.get("manual").copied().unwrap_or(0) > 0,
         "the circuit dial reached the gate and was attributed, so R5.6's negative is a \
          measurement rather than an absence",
+    );
+    // AND NOT MERELY "no dial was labelled a circuit". Review finding
+    // on PR #69: if the behaviour DID emit the circuit dial and the
+    // classifier regressed to calling it a reservation, `resolved`
+    // would hold `manual` and `relay-reservation` and every assertion
+    // here would still pass while the conclusion was false. The
+    // discriminator is WHO was dialled: a reservation goes to the
+    // relay, a circuit toward the destination.
+    let reservation_targets = source
+        .attribution
+        .targets(interweave_transport_runtime::DialOrigin::RelayReservation);
+    report.note(
+        "R5.10",
+        format!(
+            "relay-behaviour dials targeted: {:?} (relay={relay_peer}, dest={dest_peer})",
+            reservation_targets
+        ),
+    );
+    report.require(
+        "R5.11",
+        !reservation_targets.contains(&dest_peer),
+        "no dial the relay BEHAVIOUR made was aimed at the destination — so the circuit \
+         was not emitted by the behaviour under a regressed label",
     );
     report.require(
         "R5.6",
