@@ -179,6 +179,24 @@ impl QueryBudgets {
     pub(crate) fn held(&self) -> usize {
         self.running.len() + self.unbound.len()
     }
+
+    /// Permits held by LIBRARY-STARTED queries.
+    ///
+    /// Read from the handle's own origin bit, which is the same object
+    /// the release will name — so this cannot disagree with what
+    /// `finish` will settle. The count is what bounds
+    /// `charge_unscheduled`, which takes its charge unconditionally by
+    /// design: the work is real whether or not the budget had room, so
+    /// refusing the ACCOUNTING would under-count, and the only safe
+    /// place to stop is at how many such charges are held at once.
+    pub(crate) fn implicit_held(&self) -> usize {
+        self.running
+            .keys()
+            .filter(|handle| {
+                handle.origin() == interweave_kademlia_control_api::QueryOrigin::Implicit
+            })
+            .count()
+    }
 }
 
 #[cfg(test)]

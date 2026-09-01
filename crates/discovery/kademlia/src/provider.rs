@@ -55,6 +55,29 @@ pub const MAX_CAPABILITY_EVIDENCE: usize = MAX_ROUTING_PEERS;
 /// how many can be outstanding.
 pub const MAX_PENDING_COMMANDS: usize = 256;
 
+/// Charges held at once for queries this provider did not command.
+///
+/// A LOCAL BOUND, in the crate whose budget it protects. Review finding
+/// on PR #64: an earlier constant of this name was deleted rather than
+/// moved when charges became handle-keyed, leaving `QueryBudgets`
+/// growing on `pub` input with its only ceiling in
+/// `crates/transport/libp2p` — a different crate, at twice the largest
+/// `max_concurrent_queries` this provider will accept. That is the
+/// wrong direction on both counts: an unbounded held count is provider
+/// memory an adversary can drive, and holding sixteen unscheduled
+/// permits would refuse every commanded query for as long as they run,
+/// which is a self-inflicted denial of the thing the budget exists to
+/// schedule.
+///
+/// Set to the largest `max_concurrent_queries` §13 permits, so
+/// unscheduled work can at worst match commanded work rather than
+/// exceed it. Past the ceiling the announcement is COUNTED and not
+/// charged: the query still runs — nothing here can stop it — but the
+/// provider stops taking permits it would have to hold, and the
+/// completion then names a handle it does not hold, which `settle`
+/// already ignores.
+pub const MAX_IMPLICIT_CHARGES: usize = 8;
+
 /// The base-32 alphabet of a network hash: lowercase RFC 4648, unpadded.
 const NETWORK_HASH_LEN: usize = 26;
 
@@ -248,6 +271,13 @@ pub struct KademliaDiscovery {
     /// `Some` means one exploration is running and `tick` starts no
     /// second one.
     exploration_snapshot: Option<u64>,
+    /// Library-started queries announced past [`MAX_IMPLICIT_CHARGES`].
+    ///
+    /// Counted rather than charged, because a drop nobody can observe
+    /// is not a policy — the same reason §12 counts refused record
+    /// writes. Read by the §16 diagnostics snapshot when Stage 12
+    /// gives it a consumer.
+    implicit_uncharged: u64,
     /// The local self-lookup key, if the local identity is Ed25519.
     local_key: Option<[u8; 32]>,
     /// The latest instant any timed call has seen; what `health()` —
@@ -396,6 +426,7 @@ impl KademliaDiscovery {
             no_progress_rounds: 0,
             admissions: 0,
             exploration_snapshot: None,
+            implicit_uncharged: 0,
             local_key,
             clock: 0,
             next_handle: 0,
@@ -513,9 +544,31 @@ impl KademliaDiscovery {
                 // concurrency ceiling governs commanded work and never
                 // sees these — which an earlier version of this comment
                 // claimed it did, and a review caught.
-                if origin == interweave_kademlia_control_api::QueryOrigin::Implicit {
-                    let permit = self.budgets.charge_unscheduled(now_ms);
-                    self.budgets.bind(permit, handle);
+                //
+                // THE HANDLE DECIDES, and the field must agree with it.
+                // Review finding on PR #64: origin was carried by two
+                // independent signals — bit 63 of the handle and this
+                // field — and only the field was read, which is the
+                // shape of drift this whole change exists to remove.
+                // The handle is what the release will name, so it is
+                // what the charge is taken against; a disagreement is a
+                // driver bug and is caught in a debug build.
+                debug_assert_eq!(
+                    handle.origin(),
+                    origin,
+                    "a QueryStarted whose handle and origin field disagree"
+                );
+                if handle.origin() == interweave_kademlia_control_api::QueryOrigin::Implicit {
+                    // AND BOUNDED. Past `MAX_IMPLICIT_CHARGES` the work
+                    // is counted rather than charged — see the
+                    // constant. Its completion then names a handle this
+                    // provider does not hold, which `settle` drops.
+                    if self.budgets.implicit_held() >= MAX_IMPLICIT_CHARGES {
+                        self.implicit_uncharged = self.implicit_uncharged.saturating_add(1);
+                    } else {
+                        let permit = self.budgets.charge_unscheduled(now_ms);
+                        self.budgets.bind(permit, handle);
+                    }
                 }
             }
             KademliaEvent::RoutingPeerAdded { peer } => {
@@ -1808,6 +1861,51 @@ mod tests {
             p.health(),
             ProviderHealth::Healthy,
             "a replayed failure does not retract a later success"
+        );
+    }
+
+    #[test]
+    fn unscheduled_charges_are_bounded_and_the_surplus_is_counted() {
+        // Review finding on PR #64: the provider-side bound on
+        // unscheduled charges was deleted rather than moved when
+        // charges became handle-keyed, so `QueryBudgets` grew on `pub`
+        // input with its only ceiling in another crate, at twice the
+        // largest `max_concurrent_queries` this provider accepts.
+        let mut p = started(KademliaMode::Client);
+
+        // Twice the ceiling announced, none of them settled.
+        for seq in 1..=(MAX_IMPLICIT_CHARGES as u64 * 2) {
+            p.ingest_driver_event(implicit_started(seq), 1_000);
+        }
+        assert_eq!(
+            p.budgets.implicit_held(),
+            MAX_IMPLICIT_CHARGES,
+            "the held count stops at the ceiling however many arrive"
+        );
+        assert_eq!(
+            p.implicit_uncharged, MAX_IMPLICIT_CHARGES as u64,
+            "and the surplus is counted, not silently dropped"
+        );
+
+        // An uncharged query'''s completion names a handle the provider
+        // does not hold, which settles nothing and releases nothing.
+        let beyond = QueryHandle::implicit(MAX_IMPLICIT_CHARGES as u64 * 2);
+        p.ingest_driver_event(done(beyond, QueryClass::Bootstrap), 2_000);
+        assert_eq!(
+            p.budgets.implicit_held(),
+            MAX_IMPLICIT_CHARGES,
+            "settling what was never charged takes nobody else'''s permit"
+        );
+
+        // A charged one gives its seat back, and the next announcement
+        // takes it — so the ceiling is a ceiling, not a latch.
+        p.ingest_driver_event(done(QueryHandle::implicit(1), QueryClass::Bootstrap), 2_000);
+        assert_eq!(p.budgets.implicit_held(), MAX_IMPLICIT_CHARGES - 1);
+        p.ingest_driver_event(implicit_started(9_999), 2_000);
+        assert_eq!(
+            p.budgets.implicit_held(),
+            MAX_IMPLICIT_CHARGES,
+            "a freed seat is fillable"
         );
     }
 
