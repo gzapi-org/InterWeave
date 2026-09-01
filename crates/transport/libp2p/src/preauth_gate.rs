@@ -58,10 +58,27 @@ const REFUSAL: &str = "connection refused";
 /// here, in the crate that does.
 ///
 /// A multiaddr with no IP component -- a memory transport, a relayed
-/// address -- yields the address as written. That is a distinct bucket
-/// rather than a shared one, which is the fail-closed direction: it
+/// address -- yields the address as written.
+///
+/// For the memory transport that is the fail-closed direction: it
 /// cannot merge two peers into one bucket, only fail to merge two
 /// addresses that belong together.
+///
+/// **For a relayed address it is the wrong direction, and SPIKE-004
+/// measured it.** A relayed inbound arrives with `remote_addr` of
+/// `/p2p/<source>` and no IP anywhere, so the bucket becomes the source
+/// PeerId -- one bucket per identity, over one relay connection, and
+/// identities are free to mint. `contracts/CONNECTIVITY.md` §10
+/// requires the opposite: charge the relay transport connection and
+/// relay PeerId, and "MUST NOT create unbounded pseudo-source buckets
+/// from circuit metadata". The relay's PeerId is present in
+/// `local_addr` and is not read here.
+///
+/// The risk §10 names is proliferation, not merging, which is why the
+/// memory-transport reasoning does not carry over. Unreachable today --
+/// no relay feature is compiled, so no relayed inbound can arrive --
+/// and Stage 11 must fix it before the relay client lands. Recorded as
+/// divergence D3 in `spikes/spike-004/README.md`.
 fn source_label(address: &Multiaddr) -> String {
     use libp2p::multiaddr::Protocol;
 
