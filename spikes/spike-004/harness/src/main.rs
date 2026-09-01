@@ -18,6 +18,7 @@ mod attribute;
 mod experiments;
 mod gate;
 mod node;
+mod production;
 mod report;
 mod topology;
 
@@ -32,6 +33,7 @@ async fn main() {
     experiments::r3_infrastructure_cannot_reach_the_data_plane(&mut report);
     experiments::r4_autonat_server_dial_back(&mut report).await;
     experiments::r5_circuit_is_not_a_reservation(&mut report).await;
+    experiments::r6_production_gate_refuses_the_reservation(&mut report).await;
 
     print!("{}", report.render());
 

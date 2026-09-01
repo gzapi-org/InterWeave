@@ -40,13 +40,35 @@ member this harness would switch all three on inside
 `interweave-transport-libp2p` invisibly — nothing in the production
 crate would have changed.
 
-## How the measurement is honest
+## How the measurement is honest, and where it is a proposal
 
-The harness depends on `interweave-transport-libp2p`,
-`-runtime`, `-api` and `interweave-trust-api` **by path**, and asks
-`ConnectionManager::admit` through a real `SnapshotHandle`. Measuring a
-copy of the gate would measure a copy. The dependency runs spike →
-product, the direction CLAUDE.md §4 permits.
+The harness depends on `interweave-transport-runtime`, `-api`,
+`interweave-trust-api` and `interweave-transport-libp2p` **by path**.
+The dependency runs spike → product, the direction CLAUDE.md §4 permits.
+
+**The POLICY is production; the HOOK is a proposal, and the difference
+matters.** `InstrumentedGate` asks `ConnectionManager::admit` through a
+real `SnapshotHandle`, so every trust, class, backoff, quarantine and
+ceiling decision here is the shipped one. The gate *behaviour* around it
+is this harness's own, because production's
+`OutboundAdmission::handle_pending_outbound_connection` hardcodes
+`DialOrigin::KademliaQuery` — which is the thing under test. A spike
+measuring a change cannot use the code the change replaces.
+
+An earlier version of this section said the harness ran "the production
+root gate", full stop, while no source file referenced
+`interweave-transport-libp2p` at all: the dependency was declared and
+unused. A review caught it.
+
+`R6` now runs the real `OutboundAdmission` in front of a real relay
+client, so the comparison exists. **It does not yet work**: the relay
+client never dials under that fixture, with or without data-plane trust,
+so R6 measures the fixture rather than the class. Its control is the
+only reason that is written here instead of as "measured: the
+production gate refuses the reservation" — which would have been a
+false finding, and a confident one. Finishing R6 is the next phase-A
+experiment, and until it does, **F1 rests on reading three files rather
+than on running them.**
 
 `cargo run` exits non-zero if any required observation is false, so it
 cannot report success while its own output disproves this file.
@@ -289,7 +311,7 @@ cd spikes/spike-004/harness
 cargo run
 ```
 
-Exits 0 only when every required observation held — **32 of them**, and
+Exits 0 only when every required observation held — **34 of them**, and
 every finding above is carried by one rather than by a printed number.
 That is a review finding on PR #69, raised four times over: F3, F4, F6
 and F7 were each asserted in this file while the harness only noted the
