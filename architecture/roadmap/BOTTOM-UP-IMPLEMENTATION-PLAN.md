@@ -1329,11 +1329,11 @@ loopback, so the exit gate's NAT/relay/hole-punch matrix is unmet and
 independently operated relay/probe services, interface change,
 hole-punch success rates, measured resource cost.
 
-The verdict and its five binding findings are in
+The verdict and its binding findings are in
 [`SPIKES.md`](./SPIKES.md); the record is
-[`spikes/spike-004/`](../../spikes/spike-004/README.md). Four of them
-change the order or the content of the work below and are repeated where
-they bite:
+[`spikes/spike-004/`](../../spikes/spike-004/README.md), numbered F1
+through F13 there. These change the order or the content of the work
+below and are repeated where they bite:
 
 - **Attribution comes before the features.** Enabling AutoNAT, Relay or
   DCUtR without it means every reservation and probe is refused as
