@@ -7,8 +7,14 @@
 //! # The problem this measures
 //!
 //! `OutboundAdmission::handle_pending_outbound_connection` is handed a
-//! `ConnectionId`, an `Option<PeerId>` and an EMPTY address list. It is
-//! not told which behaviour asked. Production gets away with that today
+//! `ConnectionId`, an `Option<PeerId>` and an address slice whose
+//! contents depend on the ORIGIN — empty for a Kademlia query, one
+//! candidate for a relay reservation or an AutoNAT dial-back (R2.9 and
+//! R4.10). What none of them carries is which behaviour asked.
+//!
+//! The distinction matters beyond attribution: `AUTONAT.md` §7's
+//! dial-back restriction is an SSRF check on a requester-chosen
+//! address, so it needs that candidate HERE, before the socket. Production gets away with that today
 //! because Kademlia is the only behaviour that can originate a dial, so
 //! "no ticket" and "Kademlia" are the same set — a fact a test in
 //! `outbound_gate.rs` pins by parsing the root manifest's libp2p

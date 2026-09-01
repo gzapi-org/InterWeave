@@ -142,9 +142,12 @@ pub async fn r1_crate_semantics(report: &mut Report) {
 /// R2 — every behaviour-originated dial is attributable.
 ///
 /// THE QUESTION STAGE 11 CANNOT PROCEED WITHOUT. Production's pending
-/// hook is handed a `ConnectionId`, an `Option<PeerId>` and an empty
-/// address list, and today infers `KademliaQuery` because Kademlia is
-/// the only behaviour that can dial. With three more, that inference
+/// hook is handed a `ConnectionId`, an `Option<PeerId>` and an address
+/// slice whose contents depend on the origin — empty for a Kademlia
+/// query, one candidate for a relay reservation (R2.9) or an AutoNAT
+/// dial-back (R4.10). None of them names the behaviour that asked, so
+/// the hook today infers `KademliaQuery` because Kademlia is the only
+/// behaviour that can dial. With three more, that inference
 /// is wrong for every one of them — and wrong in the direction that
 /// fails closed against the infrastructure the stack needs, because
 /// `KademliaQuery.is_data_plane()` is true.
