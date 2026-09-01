@@ -389,6 +389,16 @@ other survives. The surviving address is the control — without it the
 same observation would pass for a client that abandoned relaying
 altogether.
 
+**Withdrawal is measured from the loss, not from a timer.** The first
+version pumped ten seconds and then sampled once, which shows only that
+the address is gone by the end and cannot see a stale window in which
+peers keep dialling a dead relay — a review on PR #69 raised it. R10.9
+now waits for the client to observe the connection closing, and R10.10
+requires the address to be gone within one second of that: two orders of
+magnitude below the reservation lifetime and far below any dial timeout,
+so an address surviving it is a stale window rather than a scheduling
+artefact.
+
 **Not measured: renewal.** The crate's default reservation lasts an
 hour, so nothing in a run of this length can see a refresh, and expiry
 is asserted from nothing here.
@@ -444,8 +454,12 @@ a concurrency cap nor a cooldown. So §13's "at most four concurrent, one
 per peer, five-minute failure cooldown" has to be enforced outside the
 behaviour, and the dial gate is the only place that sees every attempt.
 
-R12.4 confirms it can: every hole-punch dial arrives there under
-`dcutr-hole-punch`, which is F1's mechanism doing the job §13 needs.
+R12.4 confirms it can, and says EVERY rather than at least one: the
+announced and resolved counts for the origin agree on both nodes, with
+zero dials of any origin meeting a gate with no note. `> 0` would have
+been satisfied by one admitted dial per node while the rest bypassed the
+gate — which is precisely the regression F12's conclusion depends on not
+happening, and a review on PR #69 said so.
 **But the gate cannot read "one attempt" off its own dial count.** Both
 ends dial for a single punch — source one, destination one — and only
 one of them reports a result, because the peer that reports is whichever
@@ -575,7 +589,7 @@ cd spikes/spike-004/harness
 cargo run
 ```
 
-Exits 0 only when every required observation held — **77 of them**, and
+Exits 0 only when every required observation held — **79 of them**, and
 every finding above is carried by one rather than by a printed number.
 That is a review finding on PR #69, raised four times over: F3, F4, F6
 and F7 were each asserted in this file while the harness only noted the
@@ -597,10 +611,10 @@ claim owes now:
 | D3 relayed pre-auth bucket | R9.3 pins today's behaviour, R9.2 is the control (direct inbounds from one IP — the second refused), R9.4 shows the global cap is what remains |
 | §10's premise and its capability | R8.4 (no source IP on a relayed remote), R8.5 (the relay's PeerId IS available at the pending hook), R8.7 the control (a direct inbound does carry an IP), R8.8 (the two are distinguishable there) |
 | ADR-0036's inbound relayed clause | R8.9/R8.10: the destination's established hook names the SOURCE's authenticated PeerId on a relayed local address, and never the relay's |
-| F9 reservations and withdrawal | R10.2/R10.3 (two relays, each recording its own acceptance), R10.5 (both addresses advertised), R10.7 (the lost one withdrawn) with R10.8 as the control (the survivor stays) |
+| F9 reservations and withdrawal | R10.2/R10.3 (two relays, each recording its own acceptance), R10.5 (both addresses advertised), R10.9 (the loss was observed) and R10.10 (withdrawn within a second of it), R10.7 with R10.8 as the control (the survivor stays) |
 | F10 relay defaults vs §8 | R11.2/R11.3 (the two that break a deployment), R11.4 (the two that are looser), R11.1 and R11.5 record the rest |
 | F11 per-peer off-by-one | R11.7 (a ceiling of one admits two) with R11.9 as the control (the third is refused) |
-| F12 DCUtR bounds live at the gate | R12.4 (every punch dial arrives attributed) and R12.5 (both ends dial, fewer results are reported, so a dial count is not an attempt count) |
+| F12 DCUtR bounds live at the gate | R12.4 with R12.9 (announced == resolved for the origin on both nodes, zero unattributed — every punch dial, not merely one) and R12.5 (both ends dial, fewer results are reported, so a dial count is not an attempt count) |
 | F13 §78's dedupe is ours | R12.7 (two `ConnectionEstablished` for one logical peer) with R12.8 (the relayed path survives the upgrade) |
 | ADR-0036's relayed end-PeerId clause | R7.12 (the path went through the relay), R7.9/R7.10 (two distinct authenticated identities), R7.11 (Identify completed with the destination through the circuit) |
 | F3, again | R5.11 — no relay-behaviour dial targeted the destination, which origin counts alone cannot show |
@@ -655,6 +669,8 @@ R10's two and R11's one:
 | the client never listens on the second relay's circuit | R10.2, R10.3, R10.5 |
 | per-source circuit ceiling left at the crate default | R11.7, R11.9 |
 | DCUtR disabled at the source | R12.4, R12.5, R12.7 |
+| DCUtR dials are never announced | R5.5, R12.4, R12.5, R12.7 |
+| the lost relay is not actually dropped (again, against the tightened claims) | R10.7, R10.9, R10.10 |
 
 **Two of R8's mutations changed nothing, and both are worth stating.**
 The separate direct-control node is redundant: DCUtR upgrades the

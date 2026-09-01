@@ -1792,10 +1792,54 @@ pub async fn r10_reservation_lifecycle(report: &mut Report) {
     // — which is the shape §8's "withdrawn immediately on loss" is
     // about.
     drop(relay_b);
-    {
+
+    // WITHDRAWAL IS PART OF THE LOSS, not something that happens
+    // eventually. Review finding on PR #69: an unconditional ten-second
+    // pump followed by one sample shows only that the address is gone
+    // by the end, and a stale-address window is exactly what makes
+    // peers keep dialling a dead relay. So the loss is waited for
+    // FIRST, and the address is then sampled against a stated bound.
+    let closed = {
         let mut nodes = [&mut client, &mut relay_a];
-        pump(&mut nodes, Duration::from_secs(10)).await;
-    }
+        pump_until(&mut nodes, Duration::from_secs(10), |n| {
+            n[0].observed.events.iter().any(|(label, detail)| {
+                *label == "connection-closed" && detail == &peer_b.to_string()
+            })
+        })
+        .await
+    };
+    report.require(
+        "R10.9",
+        closed,
+        "the client observed the relay's connection closing, so what follows is measured \
+         from the loss rather than from a timer",
+    );
+
+    // HOW LONG the address may still be advertised after the loss.
+    //
+    // Not zero: the withdrawal travels from the relay transport's
+    // listener to the Swarm's listener set, and a sample taken inside
+    // the same poll could race that hand-off. One second is two orders
+    // of magnitude below the reservation lifetime and far below any
+    // dial timeout, so an address surviving it is a stale window rather
+    // than a scheduling artefact.
+    const WITHDRAWAL_BOUND: Duration = Duration::from_secs(1);
+
+    let withdrawn_within_bound = {
+        let mut nodes = [&mut client, &mut relay_a];
+        pump_until(&mut nodes, WITHDRAWAL_BOUND, |n| {
+            !n[0].swarm.listeners().any(|a| {
+                a.to_string().contains("p2p-circuit") && a.to_string().contains(&peer_b.to_string())
+            })
+        })
+        .await
+    };
+    report.require(
+        "R10.10",
+        withdrawn_within_bound,
+        "the lost relay's address is withdrawn WITHIN a second of the loss being observed, \
+         so there is no stale window in which peers would keep dialling a dead relay",
+    );
 
     let after: Vec<String> = client
         .swarm
@@ -2188,11 +2232,53 @@ pub async fn r12_dcutr_bounds(report: &mut Report) {
             dest.observed.details("dcutr").len()
         ),
     );
+    // EVERY dial, not at least one. Review finding on PR #69: this
+    // scenario makes several candidate dials from both ends, so
+    // `punch_dials > 0` is satisfied by one admitted dial per node
+    // while the rest go unattributed — which is the exact regression
+    // F12's conclusion depends on not happening. The claim is
+    // therefore the three numbers agreeing: announced == resolved for
+    // this origin on each node, and zero dials met with no note at all.
+    let announced_punches = source
+        .attribution
+        .announced()
+        .get("dcutr-hole-punch")
+        .copied()
+        .unwrap_or(0)
+        + dest
+            .attribution
+            .announced()
+            .get("dcutr-hole-punch")
+            .copied()
+            .unwrap_or(0);
+    let resolved_punches = source
+        .attribution
+        .resolved()
+        .get("dcutr-hole-punch")
+        .copied()
+        .unwrap_or(0)
+        + dest
+            .attribution
+            .resolved()
+            .get("dcutr-hole-punch")
+            .copied()
+            .unwrap_or(0);
+    let unattributed = source.attribution.unattributed() + dest.attribution.unattributed();
+    report.note(
+        "R12.9",
+        format!(
+            "hole-punch dials announced {announced_punches}, resolved at a gate              {resolved_punches}, unattributed dials of any origin {unattributed}"
+        ),
+    );
     report.require(
         "R12.4",
-        punch_dials > 0,
-        "every hole-punch dial reached a gate under `dcutr-hole-punch`, so §13's bounds \
-         have somewhere to be enforced at all",
+        punch_dials > 0
+            && announced_punches > 0
+            && resolved_punches == announced_punches
+            && unattributed == 0,
+        &format!(
+            "EVERY hole-punch dial reached a gate under `dcutr-hole-punch` — announced              {announced_punches}, resolved {resolved_punches}, {unattributed} dial(s) of              any origin met the gate with no note — so §13's bounds have somewhere to be              enforced at all"
+        ),
     );
     // BOTH ENDS DIAL, and only one reports. That is the shape §13's
     // "one hole punch per peer" has to reckon with: a node's own gate
