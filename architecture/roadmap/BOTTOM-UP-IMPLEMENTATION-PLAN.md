@@ -144,7 +144,7 @@ Spikes are **just-in-time implementation gates**, not a large front-loaded phase
 |---|---|---|
 | SPIKE-002 | Stage 6 direct v2 | **CLOSED 2026-08-24, PASS** — rust-libp2p request/response scheduling, concurrent same-key retries, negotiation/failure behavior |
 | SPIKE-003 | Stage 10 Kademlia | **CLOSED 2026-08-30, PASS for the stage; v1 release gate still open** — driver behavior, autonomous dials, client/server mode, private namespace, routing/query behavior |
-| SPIKE-004 | Stage 11 mandatory connectivity | AutoNAT v2, Relay v2, DCUtR, infrastructure class, dial admission, deployment/NAT matrix |
+| SPIKE-004 | Stage 11 mandatory connectivity | **PHASE A CLOSED 2026-09-01, PASS for implementation; the NAT matrix is NOT run and phase B is required before stage closure** — AutoNAT v2, Relay v2, DCUtR, infrastructure class, dial admission, deployment/NAT matrix |
 | SPIKE-006 | identity recovery implementation in Stage 3 | **CLOSED 2026-08-19, PASS** — exact 32-byte Ed25519 secret import/export and same-PeerId restore |
 | SPIKE-001 | Stage 16 Claude bridge | current Claude Code Channel/MCP packaging and runtime contract |
 | SPIKE-005 | admin hardening when enabled | stronger same-user local admin boundary |
@@ -1319,18 +1319,38 @@ the clauses this stage met and the one that moved.
 
 ### Prerequisite
 
-Run and close **SPIKE-004**. It has **not run**, and this stage being
-the open one does not change that.
+Run and close **SPIKE-004**. **Phase A closed 2026-09-01: PASS FOR
+IMPLEMENTATION.** The work below is authorized. What is NOT authorized
+is calling the stage complete — phase A ran on one machine over
+loopback, so the exit gate's NAT/relay/hole-punch matrix is unmet and
+**phase B is required before stage closure**: real and carrier NAT, two
+independently operated relay/probe services, interface change,
+hole-punch success rates, measured resource cost.
 
-**So the open stage authorizes the spike and nothing else.** CLAUDE.md
-§3 makes the open stage the answer to "which packages may I create", and
-read without this paragraph it would say AutoNAT, Relay and DCUtR — the
-exact retrofit the hard sequencing rule forbids, one layer up from where
-Stage 10 met it. No package here may be created, and no production code
-anywhere may assume server-mode reachability evidence exists, until
-SPIKE-004 closes. Stage 10's `Met.` block says the same thing from the
-other side: its §14 rule was never exercised, because AutoNAT and Relay
-are absent from the libp2p feature list.
+The verdict and its four binding findings are in
+[`SPIKES.md`](./SPIKES.md); the record is
+[`spikes/spike-004/`](../../spikes/spike-004/README.md). Three of them
+change the order or the content of the work below and are repeated where
+they bite:
+
+- **Attribution comes before the features.** Enabling AutoNAT, Relay or
+  DCUtR without it means every reservation and probe is refused as
+  `KademliaQuery` against the infrastructure the stack needs — silently,
+  as an ordinary dial failure. This is the same shape as SPIKE-003's
+  "do not begin by enabling the feature", and it is why step 1 below is
+  not step 1 any more.
+- **`AUTONAT.md` §7 is not implemented by the crate**, and the check
+  must run at the PENDING hook: the established hook runs after the
+  socket is open, which is after the target has been contacted.
+- **D1 is a defect in already-shipped code**, not in this stage's work:
+  `DcutrHolePunch` is admitted for a `ConnectivityInfrastructureOnly`
+  peer, which ADR-0036's matrix forbids. Resolve it before step 6.
+
+Server-mode reachability evidence for ADR-0034's v1 release gate — the
+item SPIKE-003 could not supply — is still outstanding and belongs to
+phase B. Stage 10's `Met.` block says the same from the other side: its
+§14 rule was never exercised, because AutoNAT and Relay were absent from
+the libp2p feature list.
 
 ### Implement in this order
 
