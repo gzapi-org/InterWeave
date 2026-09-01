@@ -130,10 +130,20 @@ circuits from the behaviour; it is not what produces the variant today.
 universal.** SPIKE-003 recorded F9 from Kademlia's behaviour, where the
 hook exists so each behaviour may CONTRIBUTE addresses and the list
 arrives empty. R2.4 measures **one** address at the pending hook for a
-relay-reservation dial. So a Stage 11 gate must not assume either shape:
-`addresses.first()` is sometimes there and sometimes not, and an
-address-scoped decision still belongs in
-`handle_established_outbound_connection` where it is always available.
+relay-reservation dial, and R4.10 measures one for an AutoNAT
+dial-back. So a Stage 11 gate must not assume either shape:
+`addresses.first()` is sometimes there and sometimes not.
+
+**Which does not mean deferring the decision to the established hook.**
+An earlier version of this paragraph said it did, and it survived the
+correction to F2 above by one sentence — the two halves of one rule,
+edited apart. For an SSRF filter the established hook is too late by
+construction: the socket is already open and the target already
+contacted. The rule is that a check which MUST precede contact belongs
+at the pending hook and must handle the address being absent (refuse, or
+defer to a per-behaviour wrapper that has it); only a check that may run
+after contact — an identity mismatch, a quarantine — belongs at the
+established hook, where the address is always available.
 
 **F5 — `ConnectionPolicy::default()` refuses everything.** It carries
 `max_pending_dials: 0` and `max_connections: 0`, both enforced by the
