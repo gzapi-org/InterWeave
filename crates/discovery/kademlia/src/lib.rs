@@ -23,5 +23,6 @@ mod scheduler;
 
 pub use provider::{
     BootstrapRefusal, KademliaDiscovery, KademliaProviderConfig, MAX_CAPABILITY_EVIDENCE,
-    MAX_PENDING_COMMANDS, MAX_TRACKED_CANDIDATES, ProviderConfigError, SOURCE, TargetedRefusal,
+    MAX_IMPLICIT_CHARGES, MAX_PENDING_COMMANDS, MAX_TRACKED_CANDIDATES, ProviderConfigError,
+    SOURCE, TargetedRefusal,
 };

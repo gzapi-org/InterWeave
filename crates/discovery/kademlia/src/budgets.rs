@@ -28,7 +28,7 @@
 //! is holding is visible (`false`) rather than silently widening the
 //! ceiling.
 
-use interweave_kademlia_control_api::QueryHandle;
+use interweave_kademlia_control_api::{QueryClass, QueryHandle};
 use std::collections::{HashMap, VecDeque};
 
 /// The rate window: one minute, sliding.
@@ -61,7 +61,9 @@ pub(crate) struct QueryBudgets {
     /// window and again in the first of the next.
     starts: VecDeque<u64>,
     /// Permits bound to a running query, by the handle that names it.
-    running: HashMap<QueryHandle, u64>,
+    /// Permits bound to a running query, by the handle that names it,
+    /// with the class that handle was announced under.
+    running: HashMap<QueryHandle, (u64, QueryClass)>,
     /// Slots taken but not yet bound, with the timestamp each spent —
     /// so releasing gives back both.
     unbound: HashMap<u64, u64>,
@@ -143,13 +145,13 @@ impl QueryBudgets {
     /// saying otherwise would be a claim `held()` cannot see. The
     /// second permit is given back instead:
     /// `a_rebound_handle_leaks_no_rate_charge` is the test.
-    pub(crate) fn bind(&mut self, permit: Permit, handle: QueryHandle) {
+    pub(crate) fn bind(&mut self, permit: Permit, handle: QueryHandle, class: QueryClass) {
         if self.running.contains_key(&handle) {
             self.release(permit);
             return;
         }
         if self.unbound.remove(&permit.0).is_some() {
-            self.running.insert(handle, permit.0);
+            self.running.insert(handle, (permit.0, class));
         }
     }
 
@@ -170,7 +172,24 @@ impl QueryBudgets {
     /// Visible rather than a widened ceiling, and unlike the
     /// class-keyed version it cannot settle somebody else's permit to
     /// say so.
-    pub(crate) fn finish(&mut self, handle: QueryHandle) -> bool {
+    /// AND IN THE CLASS IT WAS ANNOUNCED UNDER. Review finding on PR
+    /// #64: the announced class was discarded and the completion's was
+    /// trusted, so a `QueryStarted { h, Bootstrap }` followed by a
+    /// `QueryFailed { h, Exploration }` settled the permit AND
+    /// consumed `exploration_snapshot` — clearing the seat of a round
+    /// genuinely in flight, which is the harm
+    /// `a_stale_exploration_completion_settles_no_running_round`
+    /// exists to prevent, reached by a class mismatch instead of a
+    /// stale handle. The driver does not do this; storing the class
+    /// makes that structural rather than conventional.
+    pub(crate) fn finish(&mut self, handle: QueryHandle, class: QueryClass) -> bool {
+        if self
+            .running
+            .get(&handle)
+            .is_none_or(|(_, announced)| *announced != class)
+        {
+            return false;
+        }
         self.running.remove(&handle).is_some()
     }
 
@@ -209,10 +228,10 @@ mod tests {
         let h = QueryHandle::implicit(1);
 
         let first = b.acquire(0).expect("room");
-        b.bind(first, h);
+        b.bind(first, h, QueryClass::Bootstrap);
         // The same handle announced twice, inside one window.
         let second = b.acquire(0).expect("room");
-        b.bind(second, h);
+        b.bind(second, h, QueryClass::Bootstrap);
 
         // The refused bind gives back its rate charge. Overwriting
         // instead would strand the FIRST permit's timestamp in the
@@ -229,7 +248,10 @@ mod tests {
         );
 
         // And the binding that survives is settleable.
-        assert!(b.finish(h), "the bound permit is still reachable");
+        assert!(
+            b.finish(h, QueryClass::Bootstrap),
+            "the bound permit is still reachable"
+        );
     }
 
     #[test]
@@ -238,10 +260,13 @@ mod tests {
         let p0 = b.acquire(0).expect("first fits");
         let p1 = b.acquire(0).expect("second fits");
         assert_eq!(b.acquire(0).unwrap_err(), BudgetRefusal::Concurrency);
-        b.bind(p0, QueryHandle::commanded(1));
-        b.bind(p1, QueryHandle::commanded(2));
+        b.bind(p0, QueryHandle::commanded(1), QueryClass::Bootstrap);
+        b.bind(p1, QueryHandle::commanded(2), QueryClass::Bootstrap);
         assert_eq!(b.acquire(0).unwrap_err(), BudgetRefusal::Concurrency);
-        assert!(b.finish(QueryHandle::commanded(1)), "keyed settle");
+        assert!(
+            b.finish(QueryHandle::commanded(1), QueryClass::Bootstrap),
+            "keyed settle"
+        );
         b.acquire(1).expect("a settled slot is a free slot");
     }
 
@@ -249,15 +274,15 @@ mod tests {
     fn completion_is_keyed_by_class_not_counted() {
         let mut b = QueryBudgets::new(2, 60);
         let p = b.acquire(0).expect("fits");
-        b.bind(p, QueryHandle::commanded(1));
+        b.bind(p, QueryHandle::commanded(1), QueryClass::Bootstrap);
         assert!(
-            !b.finish(QueryHandle::implicit(1)),
+            !b.finish(QueryHandle::implicit(1), QueryClass::Bootstrap),
             "a completion for a class with nothing outstanding is foreign"
         );
         assert_eq!(b.held(), 1, "and it settles nothing");
-        assert!(b.finish(QueryHandle::commanded(1)));
+        assert!(b.finish(QueryHandle::commanded(1), QueryClass::Bootstrap));
         assert!(
-            !b.finish(QueryHandle::commanded(1)),
+            !b.finish(QueryHandle::commanded(1), QueryClass::Bootstrap),
             "a duplicate completion is visible, not a widened ceiling"
         );
     }
@@ -268,8 +293,8 @@ mod tests {
         // The whole budget, spent in the last moments of one "bucket".
         for _ in 0..6 {
             let p = b.acquire(59_990).expect("within rate");
-            b.bind(p, QueryHandle::commanded(1));
-            b.finish(QueryHandle::commanded(1));
+            b.bind(p, QueryHandle::commanded(1), QueryClass::Bootstrap);
+            b.finish(QueryHandle::commanded(1), QueryClass::Bootstrap);
         }
         assert_eq!(
             b.acquire(60_010).unwrap_err(),
@@ -296,10 +321,10 @@ mod tests {
         let p = b
             .acquire(1)
             .expect("an acquisition that never became a query spent nothing");
-        b.bind(p, QueryHandle::commanded(10));
-        b.bind(kept, QueryHandle::commanded(11));
-        assert!(b.finish(QueryHandle::commanded(10)));
-        assert!(b.finish(QueryHandle::commanded(11)));
+        b.bind(p, QueryHandle::commanded(10), QueryClass::Bootstrap);
+        b.bind(kept, QueryHandle::commanded(11), QueryClass::Bootstrap);
+        assert!(b.finish(QueryHandle::commanded(10), QueryClass::Bootstrap));
+        assert!(b.finish(QueryHandle::commanded(11), QueryClass::Bootstrap));
         assert_eq!(b.held(), 0, "finishing frees the slot");
         assert_eq!(
             b.acquire(2).unwrap_err(),
@@ -312,18 +337,18 @@ mod tests {
     fn an_unscheduled_charge_ignores_both_ceilings() {
         let mut b = QueryBudgets::new(1, 1);
         let p = b.acquire(0).expect("fits");
-        b.bind(p, QueryHandle::commanded(2));
+        b.bind(p, QueryHandle::commanded(2), QueryClass::Bootstrap);
         let charge = b.charge_unscheduled(0);
-        b.bind(charge, QueryHandle::implicit(1));
+        b.bind(charge, QueryHandle::implicit(1), QueryClass::Bootstrap);
         assert_eq!(b.held(), 2, "the work was real; the accounting follows it");
         // SETTLED BY ITS OWN NAME. Both outstanding queries are of the
         // same class, so a class-keyed settle could not say which one
         // this completion was for — which is the whole reason the
         // handle exists.
-        assert!(b.finish(QueryHandle::implicit(1)));
+        assert!(b.finish(QueryHandle::implicit(1), QueryClass::Bootstrap));
         assert_eq!(b.held(), 1, "and the commanded one still holds its slot");
         assert!(
-            !b.finish(QueryHandle::implicit(1)),
+            !b.finish(QueryHandle::implicit(1), QueryClass::Bootstrap),
             "a duplicate settles nothing rather than releasing its neighbour"
         );
         assert_eq!(b.held(), 1);

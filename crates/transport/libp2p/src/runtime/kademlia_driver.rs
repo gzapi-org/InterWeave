@@ -435,17 +435,21 @@ fn finish_all_while_stopping(behaviour: &mut kad::Behaviour<MemoryStore>) {
 /// one that has vanished is settled, because a query that ended without
 /// a completion still holds a permit.
 ///
-/// Called from the Kademlia behaviour-event arm and from `Shutdown` —
-/// NOT from every Swarm event, and the library does not start a query
-/// at an event anyway: `Behaviour::poll` triggers its automatic
-/// bootstrap silently, behind a throttle. So this catches a
-/// library-started query only while one is still in the pool when some
-/// Kademlia event arrives. The query that produces no event but its own
-/// completion is caught there instead, in the Bootstrap arm, which
-/// announces an unknown completion before settling it.
+/// Called from `handle_kademlia`, after EVERY Swarm event. An earlier
+/// version of this paragraph said the opposite — Kademlia events and
+/// `Shutdown` only — and all of it is now false: the shutdown sweep
+/// enumerates for itself (it must settle during a drain, where this
+/// function must stay silent), and reconciling only on Kademlia events
+/// was the defect a later review named. The library starts its
+/// automatic bootstrap silently inside `Behaviour::poll`, so a query
+/// whose only Kademlia event is its own completion was never met while
+/// it ran; it dials, and a dial produces Swarm events that are not
+/// Kademlia ones.
 ///
-/// Two paths for one obligation, because the library gives no single
-/// moment that covers both.
+/// A query that still produces nothing at all before completing is
+/// caught in the Bootstrap arm instead, which announces an unknown
+/// completion before settling it. Two paths for one obligation, because
+/// the library gives no single moment that covers both.
 fn reconcile_implicit(
     state: &mut KademliaState,
     behaviour: &kad::Behaviour<MemoryStore>,
@@ -1177,7 +1181,17 @@ fn handle_kad_event(
                     // wrong.
                 }
             }
+            // THE SAME GUARD AS `replacing`, and for the same reason.
+            // Review finding on PR #64: the eligibility half excluded
+            // `old_peer == peer` explicitly while this half did not, so
+            // the two disagreed about whether the case is possible.
+            // Were it to happen, one event would insert the peer and
+            // then remove it, emitting `RoutingPeerAdded` immediately
+            // followed by `RoutingPeerRemoved` for one peer and giving
+            // up the seat. `take_applied_pending` cannot produce it in
+            // libp2p-kad 0.48; the halves agreeing is the point.
             if let Some(evicted) = old_peer
+                && evicted != peer
                 && state.routed.remove(&evicted)
                 && let Ok(departed) = to_transport_identity(&evicted)
             {

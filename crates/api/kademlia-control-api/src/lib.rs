@@ -83,9 +83,23 @@ pub enum QueryClass {
 /// because "the library started it" is not a property of the class.
 ///
 /// Minted by the driver, opaque to everyone else. Not a `kad::QueryId`:
-/// this crate is neutral and names no backend type. Monotonic, so a
-/// handle is never reused within a process — a settled query's handle
-/// arriving again is a duplicate to be refused, not a fresh query.
+/// this crate is neutral and names no backend type. Monotonic for any
+/// realistic process lifetime, so a settled query's handle arriving
+/// again is a duplicate to be refused, not a fresh query.
+///
+/// NOT "never reused", which the sequence cannot promise: both minters
+/// use `wrapping_add`, and `commanded` masks bit 63 off, so `commanded(1)`
+/// and `commanded(2^63 + 1)` are one handle. Unreachable — a process
+/// would have to start 2^63 queries — but it is a bound the type does
+/// not enforce, and this claimed it did. The refusal that follows from
+/// it is enforced regardless of the sequence: `QueryBudgets::bind`
+/// refuses a handle already bound rather than overwriting, so a
+/// collision would cost a rate charge and not somebody else's permit.
+///
+/// The `Deserialize` here is for local diagnostics, not a wire format.
+/// It accepts any `u64` with no validation, so uniqueness is a property
+/// of the minters in one process and would stop being one if this
+/// crossed a boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct QueryHandle(u64);
 
