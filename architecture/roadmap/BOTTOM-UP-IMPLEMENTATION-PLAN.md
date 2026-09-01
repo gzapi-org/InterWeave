@@ -1413,7 +1413,11 @@ data-plane origin, against the infrastructure the stage exists to use.
    restriction, which the crate does not implement, at the PENDING hook
    because the established one runs after the target is contacted;
 5. Circuit Relay v2 client reservations;
-6. Relay server role;
+6. Relay server role — **`relay::Config::default()` is not `RELAY.md`
+   §8**, in both directions (128 KiB and 120s per circuit against 64 MiB
+   and 1h; reservation ceilings looser than §8's), `max_pending_control`
+   has no field in the struct, and every per-peer ceiling admits one
+   more than it says because the crate refuses on `>` rather than `>=`;
 7. relayed inbound/outbound peer paths;
 8. DCUtR;
 9. direct-versus-relayed path preference/stability;

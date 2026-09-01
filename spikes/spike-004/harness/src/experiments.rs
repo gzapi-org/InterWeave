@@ -1682,3 +1682,374 @@ pub async fn r9_relayed_preauth_bucket(report: &mut Report) {
         ),
     );
 }
+
+/// R10 — reservations are held on several relays at once, and the
+/// address one contributes is withdrawn when that relay is lost.
+///
+/// `contracts/CONNECTIVITY.md` §8 keys reservation targets to
+/// reachability state (2 while Unknown or NotVerified, 1 when
+/// VerifiedPublic, 4 at most) and requires reservation-derived
+/// addresses to be advertised while live and withdrawn immediately on
+/// loss. The targets are ours to schedule; what the crate has to
+/// support for them to be expressible is holding more than one
+/// reservation at a time, and giving up an address when its relay goes.
+///
+/// Both are measurable on loopback. Renewal is not: the crate's default
+/// reservation is an hour long, so nothing in a run this short can
+/// observe a refresh, and that is stated as a limit rather than
+/// asserted from silence.
+pub async fn r10_reservation_lifecycle(report: &mut Report) {
+    let mut relay_a = Node::new(Roles::infrastructure(), &[], &[]);
+    let addr_a = relay_a.listen().await;
+    relay_a.swarm.add_external_address(addr_a.clone());
+    let peer_a = relay_a.peer_id;
+
+    let mut relay_b = Node::new(Roles::infrastructure(), &[], &[]);
+    let addr_b = relay_b.listen().await;
+    relay_b.swarm.add_external_address(addr_b.clone());
+    let peer_b = relay_b.peer_id;
+
+    let mut client = Node::new(
+        Roles::client(),
+        &[],
+        &[relay_a.identity.clone(), relay_b.identity.clone()],
+    );
+    let _ = client.listen().await;
+    client.add_relay(peer_a);
+    client.add_relay(peer_b);
+    client.swarm.add_peer_address(peer_a, addr_a.clone());
+    client.swarm.add_peer_address(peer_b, addr_b.clone());
+
+    let circuit_a = circuit_addr(&addr_a, &peer_a);
+    let circuit_b = circuit_addr(&addr_b, &peer_b);
+    let _ = client.swarm.listen_on(circuit_a);
+    let _ = client.swarm.listen_on(circuit_b);
+
+    {
+        let mut nodes = [&mut client, &mut relay_a, &mut relay_b];
+        pump_until(&mut nodes, Duration::from_secs(25), |n| {
+            n[0].observed.count("relay-reservation-accepted") >= 2
+        })
+        .await;
+    }
+
+    report.note(
+        "R10.1",
+        format!(
+            "client reservation events: {:?}",
+            client.observed.details("relay-reservation-accepted")
+        ),
+    );
+    report.require(
+        "R10.2",
+        client.observed.count("relay-reservation-accepted") >= 2,
+        &format!(
+            "the client holds reservations on TWO relays at once, so §8's target of two is \
+             expressible on this crate ({} accepted)",
+            client.observed.count("relay-reservation-accepted")
+        ),
+    );
+    // AND BOTH RELAYS AGREE, which the client's own event count cannot
+    // show: two accepted events could both come from one relay
+    // renewing.
+    report.require(
+        "R10.3",
+        relay_a
+            .observed
+            .details("relay-server")
+            .iter()
+            .any(|d| d.contains("ReservationReqAccepted"))
+            && relay_b
+                .observed
+                .details("relay-server")
+                .iter()
+                .any(|d| d.contains("ReservationReqAccepted")),
+        "each relay separately recorded accepting a reservation, so the two are distinct \
+         relays rather than one renewing",
+    );
+
+    // THE ADDRESSES. A reservation's whole product is an address to
+    // advertise, so the listen set is where the reservation is visible.
+    let listening: Vec<String> = client
+        .swarm
+        .listeners()
+        .map(std::string::ToString::to_string)
+        .collect();
+    report.note("R10.4", format!("client listen addresses: {listening:?}"));
+    let via_a = listening
+        .iter()
+        .any(|a| a.contains("p2p-circuit") && a.contains(&peer_a.to_string()));
+    let via_b = listening
+        .iter()
+        .any(|a| a.contains("p2p-circuit") && a.contains(&peer_b.to_string()));
+    report.require(
+        "R10.5",
+        via_a && via_b,
+        &format!("both reservation-derived addresses are advertised while live: {listening:?}"),
+    );
+
+    // THE LOSS. Relay B goes away entirely — process gone, socket gone
+    // — which is the shape §8's "withdrawn immediately on loss" is
+    // about.
+    drop(relay_b);
+    {
+        let mut nodes = [&mut client, &mut relay_a];
+        pump(&mut nodes, Duration::from_secs(10)).await;
+    }
+
+    let after: Vec<String> = client
+        .swarm
+        .listeners()
+        .map(std::string::ToString::to_string)
+        .collect();
+    report.note(
+        "R10.6",
+        format!("client listen addresses after loss: {after:?}"),
+    );
+    report.require(
+        "R10.7",
+        !after
+            .iter()
+            .any(|a| a.contains("p2p-circuit") && a.contains(&peer_b.to_string())),
+        &format!("the lost relay's reservation address is withdrawn: {after:?}"),
+    );
+    // THE CONTROL, and without it R10.7 would pass for a client that
+    // dropped every relayed address, or all its listeners, when any
+    // relay died.
+    report.require(
+        "R10.8",
+        after
+            .iter()
+            .any(|a| a.contains("p2p-circuit") && a.contains(&peer_a.to_string())),
+        &format!(
+            "the surviving relay's address is still advertised, so R10.7 is one \
+             reservation ending rather than the client giving up relaying: {after:?}"
+        ),
+    );
+}
+
+/// R11 — the relay server's budgets, as `RELAY.md` §8 sets them and as
+/// the crate defaults them.
+///
+/// §8 is a table of eight ceilings. A stage that constructs
+/// `relay::Behaviour::new(peer, Config::default())` gets none of them,
+/// and the differences are not all in the safe direction — so this
+/// records each one and asserts the two that would silently break a
+/// deployment.
+///
+/// The per-peer ceilings are then MEASURED rather than read, because
+/// the crate compares with `>` rather than `>=` and an off-by-one in a
+/// resource limit is exactly what a table copied from a specification
+/// would not reveal.
+pub async fn r11_relay_server_budgets(report: &mut Report) {
+    let defaults = libp2p::relay::Config::default();
+    report.note(
+        "R11.1",
+        format!(
+            "libp2p-relay 0.21.1 defaults: max_reservations={}, max_reservations_per_peer={}, \
+             reservation_duration={:?}, max_circuits={}, max_circuits_per_peer={}, \
+             max_circuit_duration={:?}, max_circuit_bytes={}",
+            defaults.max_reservations,
+            defaults.max_reservations_per_peer,
+            defaults.reservation_duration,
+            defaults.max_circuits,
+            defaults.max_circuits_per_peer,
+            defaults.max_circuit_duration,
+            defaults.max_circuit_bytes,
+        ),
+    );
+
+    // THE TWO THAT WOULD BREAK A DEPLOYMENT, not merely differ from it.
+    // §8 asks for 64 MiB per circuit and an hour; the defaults are
+    // 128 KiB and two minutes — three 48 KiB application payloads and
+    // the circuit is spent.
+    report.require(
+        "R11.2",
+        defaults.max_circuit_bytes < 64 * 1024 * 1024,
+        &format!(
+            "the default per-circuit byte budget ({} bytes) is far below RELAY.md §8's \
+             64 MiB, so Phase 4 must set it rather than take the default",
+            defaults.max_circuit_bytes
+        ),
+    );
+    report.require(
+        "R11.3",
+        defaults.max_circuit_duration < Duration::from_secs(3600),
+        &format!(
+            "and the default circuit duration ({:?}) is below §8's 1h",
+            defaults.max_circuit_duration
+        ),
+    );
+    // AND THE TWO THAT ARE LOOSER THAN THE SPECIFICATION, which is the
+    // direction that matters for a budget.
+    report.require(
+        "R11.4",
+        defaults.max_reservations > 64 && defaults.max_reservations_per_peer > 1,
+        &format!(
+            "the default reservation ceilings ({} total, {} per peer) are LOOSER than §8's \
+             64 and 1",
+            defaults.max_reservations, defaults.max_reservations_per_peer
+        ),
+    );
+    // AND ONE §8 NAMES THAT THE CRATE DOES NOT HAVE. `Config` carries
+    // no pending-control-operations ceiling at all, so §8's
+    // `max_pending_control` cannot be expressed by configuring this
+    // behaviour — it needs a wrapper or an amendment, and Phase 4 must
+    // decide which.
+    report.note(
+        "R11.5",
+        "RELAY.md §8's max_pending_control has no field in relay::Config; the struct's \
+         seven public knobs are the reservation and circuit ones above plus the two rate \
+         limiter vectors"
+            .to_owned(),
+    );
+
+    // THE OFF-BY-ONE, measured. The crate refuses when
+    // `num_circuits_of_peer(src) > max_circuits_per_peer`, so a ceiling
+    // of one admits two. Set it to one, open two circuits from one
+    // source to two destinations, and count what the relay accepted.
+    let mut relay_node = Node::with_relay_config(
+        Roles::infrastructure(),
+        &[],
+        &[],
+        libp2p::relay::Config {
+            max_circuits_per_peer: 1,
+            ..libp2p::relay::Config::default()
+        },
+    );
+    let relay_addr = relay_node.listen().await;
+    relay_node.swarm.add_external_address(relay_addr.clone());
+    let relay_id = relay_node.identity.clone();
+    let relay_peer = relay_node.peer_id;
+    let circuit = circuit_addr(&relay_addr, &relay_peer);
+
+    let mut dest_a = Node::new(Roles::client(), &[relay_id.clone()], &[]);
+    let _ = dest_a.listen().await;
+    dest_a.add_relay(relay_peer);
+    dest_a
+        .swarm
+        .add_peer_address(relay_peer, relay_addr.clone());
+    let _ = dest_a.swarm.listen_on(circuit.clone());
+    let dest_a_peer = dest_a.peer_id;
+
+    let mut dest_b = Node::new(Roles::client(), &[relay_id.clone()], &[]);
+    let _ = dest_b.listen().await;
+    dest_b.add_relay(relay_peer);
+    dest_b
+        .swarm
+        .add_peer_address(relay_peer, relay_addr.clone());
+    let _ = dest_b.swarm.listen_on(circuit.clone());
+    let dest_b_peer = dest_b.peer_id;
+
+    // A THIRD, and it is what turns "two were accepted" into "the
+    // ceiling bites, one later than it reads". Without it, two
+    // admissions under a ceiling of one are equally consistent with the
+    // ceiling being ignored altogether.
+    let mut dest_c = Node::new(Roles::client(), &[relay_id.clone()], &[]);
+    let _ = dest_c.listen().await;
+    dest_c.add_relay(relay_peer);
+    dest_c
+        .swarm
+        .add_peer_address(relay_peer, relay_addr.clone());
+    let _ = dest_c.swarm.listen_on(circuit.clone());
+    let dest_c_peer = dest_c.peer_id;
+
+    let mut source = Node::new(
+        Roles::client(),
+        &[
+            dest_a.identity.clone(),
+            dest_b.identity.clone(),
+            dest_c.identity.clone(),
+        ],
+        &[relay_id],
+    );
+    let _ = source.listen().await;
+    source.add_relay(relay_peer);
+    source
+        .swarm
+        .add_peer_address(relay_peer, relay_addr.clone());
+
+    {
+        let mut nodes = [
+            &mut dest_a,
+            &mut dest_b,
+            &mut dest_c,
+            &mut relay_node,
+            &mut source,
+        ];
+        pump_until(&mut nodes, Duration::from_secs(30), |n| {
+            n[3].observed
+                .details("relay-server")
+                .iter()
+                .filter(|d| d.contains("ReservationReqAccepted"))
+                .count()
+                >= 3
+        })
+        .await;
+    }
+
+    // ONE AT A TIME, with the first settled before the second is
+    // asked for. Two circuit dials issued together do not test a
+    // ceiling: the relay counts circuits it has ACCEPTED, so a second
+    // request that arrives while the first is still negotiating is
+    // counted against nothing.
+    let mut dial_results = Vec::new();
+    for dest in [dest_a_peer, dest_b_peer, dest_c_peer] {
+        let via: Multiaddr = format!("{circuit}/p2p/{dest}")
+            .parse()
+            .expect("a circuit address naming a destination");
+        dial_results.push(format!("{:?}", source.dial_circuit(dest, via).is_ok()));
+        let mut nodes = [
+            &mut dest_a,
+            &mut dest_b,
+            &mut dest_c,
+            &mut relay_node,
+            &mut source,
+        ];
+        pump(&mut nodes, Duration::from_secs(8)).await;
+    }
+    report.note(
+        "R11.8",
+        format!("circuit dials accepted by the swarm: {dial_results:?}"),
+    );
+
+    let accepted = relay_node
+        .observed
+        .details("relay-server")
+        .iter()
+        .filter(|d| d.contains("CircuitReqAccepted"))
+        .count();
+    report.note(
+        "R11.6",
+        format!(
+            "with max_circuits_per_peer = 1, circuits accepted from ONE source: {accepted}; \
+             relay events: {:?}",
+            relay_node.observed.details("relay-server")
+        ),
+    );
+    let denied = relay_node
+        .observed
+        .details("relay-server")
+        .iter()
+        .filter(|d| d.contains("CircuitReqDenied"))
+        .count();
+    report.require(
+        "R11.7",
+        accepted == 2,
+        &format!(
+            "MEASURED OFF-BY-ONE: a per-source ceiling of one admits TWO circuits \
+             ({accepted} accepted from three asked for), because the crate refuses on `>` \
+             rather than `>=`. Every per-peer number copied from RELAY.md §8 is therefore \
+             one higher than it reads"
+        ),
+    );
+    report.require(
+        "R11.9",
+        denied > 0,
+        &format!(
+            "and the third IS refused ({denied} denial(s)), so the ceiling is enforced one \
+             later than it reads rather than not enforced at all — which is the difference \
+             between an off-by-one and a missing check"
+        ),
+    );
+}

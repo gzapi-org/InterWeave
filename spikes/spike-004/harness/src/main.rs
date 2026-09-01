@@ -37,6 +37,8 @@ async fn main() {
     experiments::r7_relayed_path_trust(&mut report).await;
     experiments::r8_relayed_inbound_accounting(&mut report).await;
     experiments::r9_relayed_preauth_bucket(&mut report).await;
+    experiments::r10_reservation_lifecycle(&mut report).await;
+    experiments::r11_relay_server_budgets(&mut report).await;
 
     print!("{}", report.render());
 

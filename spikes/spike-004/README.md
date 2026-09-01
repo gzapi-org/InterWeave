@@ -374,6 +374,68 @@ record at the gate — the pending hook already has the
 `ConnectionId`, the peer and the verdict — because neither the Swarm
 event stream nor the rendered error carries it.
 
+**F9 — §8's reservation targets are expressible, and an address dies
+with its relay.** `CONNECTIVITY.md` §8 keys reservation targets to
+reachability state — two while Unknown or NotVerified, one when
+VerifiedPublic, four at most — and requires the reservation-derived
+address to be advertised while live and withdrawn immediately on loss.
+The scheduling is ours; what the crate must supply is the ability to
+hold more than one reservation at a time and to give an address up. R10
+measures both: a client holds reservations on two relays at once (each
+relay separately recording its own acceptance, so it is two relays and
+not one renewing), advertises a circuit address derived from each, and
+when one relay is dropped outright loses exactly that address while the
+other survives. The surviving address is the control — without it the
+same observation would pass for a client that abandoned relaying
+altogether.
+
+**Not measured: renewal.** The crate's default reservation lasts an
+hour, so nothing in a run of this length can see a refresh, and expiry
+is asserted from nothing here.
+
+**F10 — the relay server's defaults are not `RELAY.md` §8's, and one of
+§8's ceilings has no knob at all.** R11 reads
+`relay::Config::default()` on the pinned crate:
+
+| `RELAY.md` §8 | libp2p-relay 0.21.1 default |
+| --- | --- |
+| `max_reservations` 64 | 128 — **looser** |
+| `max_reservations_per_peer` 1 | 4 — **looser** |
+| `reservation_duration` 1h | 1h |
+| `max_circuits` 128 | 16 |
+| `max_circuits_per_source_peer` 4 | `max_circuits_per_peer` 4 (same rule, different name) |
+| `max_circuit_duration` 1h | **120s** |
+| `max_circuit_bytes` 64 MiB | **128 KiB** |
+| `max_pending_control` 64 | *no such field* |
+
+Two of these break a deployment rather than merely differing from it:
+128 KiB per circuit is three 48 KiB application payloads, and 120s is a
+conversation. Two are looser than the specification, which is the
+direction that matters for a budget. And `max_pending_control` cannot be
+expressed by configuring this behaviour at all — Phase 4 must decide
+between a wrapper and an amendment rather than discovering the absence
+while writing the config struct.
+
+**F11 — every per-peer ceiling admits one more than it says.** The crate
+refuses when `num_circuits_of_peer(src) > max_circuits_per_peer`, a `>`
+where a `>=` is meant, and the same shape guards
+`max_reservations_per_peer`. R11 measures it rather than reading it:
+with the ceiling set to **one**, a single source opens **two** circuits
+to two destinations and the relay accepts both. The third is refused
+`ResourceLimitExceeded` — which is the control, and the difference
+between an off-by-one and a missing check.
+
+So `max_reservations_per_peer: 1` from §8 yields two reservations per
+peer, and `max_circuits_per_source_peer: 4` yields five. Phase 4 must
+either subtract one when configuring or amend §8 to say what the numbers
+mean; copying the table across is wrong in every row that has a
+per-peer form.
+
+The dials had to be issued one at a time for this to be measurable: the
+relay counts circuits it has ACCEPTED, so two requests in flight
+together are each counted against nothing, and a first attempt saw one
+circuit accepted and concluded the ceiling held.
+
 ## Stated limits
 
 - **Loopback only.** No NAT of any kind. Every DCUtR observation here is
@@ -387,10 +449,13 @@ event stream nor the rendered error carries it.
 - Reservation lifecycle, DCUtR bounds, relayed pre-auth accounting and
   relayed end-PeerId trust are **not yet covered** by this phase-A run;
   they are reachable on loopback and are the next experiments to add.
-- **Reservation lifecycle and DCUtR bounds are not yet covered** by
-  this phase-A run — obtain, refresh, expiry and withdrawal, and the
-  hole-punch attempt bounds and cooldown. Both are reachable on
-  loopback and are the next experiments to add.
+- **Reservation REFRESH and expiry are not covered.** The crate's
+  default reservation lasts an hour, so a run of this length cannot see
+  a renewal. Obtain and withdrawal are measured (F9); the middle of the
+  lifecycle is not.
+- **DCUtR bounds are not covered** — attempt ceilings, per-peer limit
+  and failure cooldown. Hole punches happen in these runs and are
+  attributed at the gate; nothing here asserts how many are allowed.
 - **Inbound admission is not gated here, only recorded.** R8's hooks
   observe; nothing refuses. The production gate is outbound-only and
   Stage 11 must build the inbound side, so R8's numbers say what a
@@ -483,7 +548,7 @@ cd spikes/spike-004/harness
 cargo run
 ```
 
-Exits 0 only when every required observation held — **62 of them**, and
+Exits 0 only when every required observation held — **72 of them**, and
 every finding above is carried by one rather than by a printed number.
 That is a review finding on PR #69, raised four times over: F3, F4, F6
 and F7 were each asserted in this file while the harness only noted the
@@ -505,6 +570,9 @@ claim owes now:
 | D3 relayed pre-auth bucket | R9.3 pins today's behaviour, R9.2 is the control (direct inbounds from one IP — the second refused), R9.4 shows the global cap is what remains |
 | §10's premise and its capability | R8.4 (no source IP on a relayed remote), R8.5 (the relay's PeerId IS available at the pending hook), R8.7 the control (a direct inbound does carry an IP), R8.8 (the two are distinguishable there) |
 | ADR-0036's inbound relayed clause | R8.9/R8.10: the destination's established hook names the SOURCE's authenticated PeerId on a relayed local address, and never the relay's |
+| F9 reservations and withdrawal | R10.2/R10.3 (two relays, each recording its own acceptance), R10.5 (both addresses advertised), R10.7 (the lost one withdrawn) with R10.8 as the control (the survivor stays) |
+| F10 relay defaults vs §8 | R11.2/R11.3 (the two that break a deployment), R11.4 (the two that are looser), R11.1 and R11.5 record the rest |
+| F11 per-peer off-by-one | R11.7 (a ceiling of one admits two) with R11.9 as the control (the third is refused) |
 | ADR-0036's relayed end-PeerId clause | R7.12 (the path went through the relay), R7.9/R7.10 (two distinct authenticated identities), R7.11 (Identify completed with the destination through the circuit) |
 | F3, again | R5.11 — no relay-behaviour dial targeted the destination, which origin counts alone cannot show |
 | F7 advertised control protocols | R1.6/R1.7: Identify arrived and names both. **Scoped**: the harness has no data-plane behaviours, so it says nothing about isolation |
@@ -549,6 +617,14 @@ R8's three and R9's three:
 | the relayed remote address carries an IP after all | R9.3, R9.4 |
 | per-source ceiling raised to two | R9.2 |
 | global ceiling lowered to four | R9.4 |
+
+R10's two and R11's one:
+
+| Mutation | Fails |
+| --- | --- |
+| the lost relay is not actually dropped | R10.7 |
+| the client never listens on the second relay's circuit | R10.2, R10.3, R10.5 |
+| per-source circuit ceiling left at the crate default | R11.7, R11.9 |
 
 **Two of R8's mutations changed nothing, and both are worth stating.**
 The separate direct-control node is redundant: DCUtR upgrades the

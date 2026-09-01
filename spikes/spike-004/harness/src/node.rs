@@ -137,6 +137,19 @@ impl Node {
         data_plane: &[TransportIdentity],
         infrastructure: &[TransportIdentity],
     ) -> Self {
+        Self::with_relay_config(roles, data_plane, infrastructure, relay::Config::default())
+    }
+
+    /// The same, with the relay server's budgets chosen.
+    ///
+    /// `RELAY.md` §8 sets ceilings the crate's defaults do not match,
+    /// so an experiment about a ceiling has to be able to set one.
+    pub fn with_relay_config(
+        roles: Roles,
+        data_plane: &[TransportIdentity],
+        infrastructure: &[TransportIdentity],
+        relay_config: relay::Config,
+    ) -> Self {
         let keypair = identity::Keypair::generate_ed25519();
         let peer_id = PeerId::from_public_key(&keypair.public());
         let identity_str = TransportIdentity::parse(peer_id.to_base58()).expect("canonical PeerId");
@@ -234,7 +247,7 @@ impl Node {
                     .into(),
                 relay_server: roles
                     .relay_server
-                    .then(|| relay::Behaviour::new(peer_id, relay::Config::default()))
+                    .then(|| relay::Behaviour::new(peer_id, relay_config))
                     .into(),
                 dcutr: roles
                     .dcutr
