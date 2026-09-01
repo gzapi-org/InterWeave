@@ -67,6 +67,175 @@ pub enum QueryClass {
     Exploration,
 }
 
+/// One query, named across the port.
+///
+/// **The identity a class alone could not supply.** The events carried
+/// only [`QueryClass`], so a completion settled the OLDEST outstanding
+/// permit of its class — and a class is not an identity. Two bootstraps
+/// can be outstanding at once: one the provider commanded, and one
+/// rust-libp2p started by itself when a routing insertion landed on an
+/// empty table (SPIKE-003 F2). With only a class to match on, either
+/// completion settled either permit.
+///
+/// That gap could not be closed by a guard, and four review rounds on
+/// PR #61 proved it one direction at a time: a driver cannot tell a
+/// query THIS insertion started from one an earlier insertion started,
+/// because "the library started it" is not a property of the class.
+///
+/// Minted by the driver, opaque to everyone else. Not a `kad::QueryId`:
+/// this crate is neutral and names no backend type. Monotonic for any
+/// realistic process lifetime, so a settled query's handle arriving
+/// again is a duplicate to be refused, not a fresh query.
+///
+/// NOT "never reused", which the sequence cannot promise: both minters
+/// use `wrapping_add`, and `commanded` masks bit 63 off, so `commanded(1)`
+/// and `commanded(2^63 + 1)` are one handle. Unreachable — a process
+/// would have to start 2^63 queries — but it is a bound the type does
+/// not enforce, and this claimed it did. The refusal that follows from
+/// it is enforced regardless of the sequence: `QueryBudgets::bind`
+/// refuses a handle already bound rather than overwriting, so a
+/// collision would cost a rate charge and not somebody else's permit.
+///
+/// The `Deserialize` here is for local diagnostics, not a wire format.
+/// It accepts any `u64` with no validation, so uniqueness is a property
+/// of the minters in one process and would stop being one if this
+/// crossed a boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct QueryHandle(u64);
+
+/// The bit that says who minted a handle.
+///
+/// TWO MINTERS, DISJOINT BY CONSTRUCTION. The provider names the queries
+/// it commands, because it holds their permits before the driver has
+/// seen the command and cannot key a reservation by an answer that has
+/// not arrived. The driver names the ones the library starts, because
+/// nobody else can observe them. A shared counter would need one minter
+/// to see the other's, so the space is split instead: a collision
+/// cannot be arranged, only excluded.
+const IMPLICIT_BIT: u64 = 1 << 63;
+
+impl QueryHandle {
+    /// Mint a handle for a query the PROVIDER is commanding.
+    #[must_use]
+    pub const fn commanded(seq: u64) -> Self {
+        Self(seq & !IMPLICIT_BIT)
+    }
+
+    /// Mint a handle for a query the LIBRARY started.
+    #[must_use]
+    pub const fn implicit(seq: u64) -> Self {
+        Self(seq | IMPLICIT_BIT)
+    }
+
+    /// Who minted it, readable without asking anyone.
+    #[must_use]
+    pub const fn origin(self) -> QueryOrigin {
+        if self.0 & IMPLICIT_BIT == 0 {
+            QueryOrigin::Commanded
+        } else {
+            QueryOrigin::Implicit
+        }
+    }
+
+    /// Rebuild a handle from its opaque value.
+    #[must_use]
+    pub const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// The opaque value, for a driver mapping it back to its own id.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl core::fmt::Display for QueryHandle {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "query-{}", self.0)
+    }
+}
+
+/// Who asked for a query.
+///
+/// **Not a detail of the class.** A bootstrap the provider commanded and
+/// one the library started on its own are the same class and different
+/// obligations: the first spends a permit the provider already acquired,
+/// the second is work that happened anyway and must be charged after the
+/// fact (F2). The provider used to infer the difference from
+/// `RoutingPeerAdded` on an empty routing set — a different signal from
+/// the one that settles it, which is how the two drifted apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum QueryOrigin {
+    /// The provider asked for it with [`KademliaCommand::StartQuery`].
+    Commanded,
+    /// The library started it; nobody asked. Charged after the fact.
+    Implicit,
+}
+
+/// What the 32 bytes of a lookup key MEAN.
+///
+/// **A width is not a meaning.** The key was a bare `[u8; 32]`, which
+/// says how many bytes there are and nothing about what they are — so
+/// the driver applied one interpretation to all of them, wrapping any
+/// key in the Ed25519 identity envelope to rebuild a `PeerId`. For an
+/// exploration key, or for a digest-form identity's bytes, the `PeerId`
+/// that comes back names a different peer, and nothing local could
+/// detect it: any 32 bytes make a syntactically valid Ed25519 PeerId.
+/// No test could hold that shut, because there was nothing to check.
+///
+/// So the meaning travels with the bytes. A digest-form (`Qm…`)
+/// identity has no recoverable public key and therefore cannot be
+/// encoded as [`Self::Ed25519PublicKey`] at all — the case
+/// `kademlia-integration.md` §9.2 refuses is now unrepresentable rather
+/// than merely refused upstream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LookupKey {
+    /// The target's Ed25519 public key.
+    ///
+    /// A `12D3KooW…` PeerId is a constant six-byte identity-multihash
+    /// envelope around exactly these bytes, so the driver reconstructs
+    /// the full PeerId and asks the DHT for that peer's true location.
+    Ed25519PublicKey {
+        /// The key bytes.
+        key: [u8; 32],
+    },
+    /// A point in the key space that belongs to no identity.
+    ///
+    /// An exploration walk's random target. Reconstructing a `PeerId`
+    /// from it would name a peer that does not exist, which is what
+    /// the untyped version could not stop.
+    KeySpacePoint {
+        /// The raw point.
+        point: [u8; 32],
+    },
+}
+
+impl LookupKey {
+    /// The bytes, for a driver that needs them as a DHT key.
+    #[must_use]
+    pub const fn bytes(&self) -> &[u8; 32] {
+        match self {
+            Self::Ed25519PublicKey { key } => key,
+            Self::KeySpacePoint { point } => point,
+        }
+    }
+
+    /// The public key, when these bytes ARE one.
+    ///
+    /// `None` for a key-space point, which is the whole distinction:
+    /// only an identity's key may be turned back into an identity.
+    #[must_use]
+    pub const fn as_public_key(&self) -> Option<&[u8; 32]> {
+        match self {
+            Self::Ed25519PublicKey { key } => Some(key),
+            Self::KeySpacePoint { .. } => None,
+        }
+    }
+}
+
 /// Read a bounded sequence without materializing it first.
 ///
 /// `Vec::deserialize` parses and allocates the whole array before a
@@ -412,14 +581,22 @@ pub enum KademliaCommand {
     },
     /// Start one query of the given class.
     StartQuery {
+        /// The name the provider gives this query, so the completion
+        /// that settles its permit can be recognised as this one.
+        ///
+        /// Minted by the provider rather than echoed back by the
+        /// driver, because the permit is acquired BEFORE the command is
+        /// sent — a slot reserved against an answer that has not
+        /// arrived cannot be keyed by that answer.
+        handle: QueryHandle,
         /// Which class, for budget and cooldown accounting.
         class: QueryClass,
-        /// The 32-byte lookup key.
+        /// The 32-byte lookup key, and what those bytes mean.
         ///
-        /// A fixed array, so an exploration key cannot be the wrong width
-        /// and a "key" cannot smuggle a payload — this is peer routing,
-        /// and the key space is the identifier space.
-        key: [u8; 32],
+        /// Fixed width, so a key cannot smuggle a payload — this is peer
+        /// routing, and the key space is the identifier space. Typed, so
+        /// an exploration point cannot be read back as an identity.
+        key: LookupKey,
     },
     /// Stop new queries and settle in-flight work.
     Shutdown,
@@ -429,8 +606,28 @@ pub enum KademliaCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "event")]
 pub enum KademliaEvent {
+    /// A query began, and the provider owes it an accounting.
+    ///
+    /// **Every query, including the ones nobody asked for.** The
+    /// provider used to infer a library-started bootstrap from
+    /// `RoutingPeerAdded` arriving on an empty routing set, which is a
+    /// different signal from the completion that settles it — so a
+    /// suppressed or reordered routing event left a query running with
+    /// no charge against it, and its completion then released an
+    /// unrelated permit. The driver is the only party that can observe
+    /// a query beginning, so it is the party that says so.
+    QueryStarted {
+        /// Names this query for the rest of its life.
+        handle: QueryHandle,
+        /// Which class.
+        class: QueryClass,
+        /// Whether the provider asked for it.
+        origin: QueryOrigin,
+    },
     /// A query returned peers, already normalized as discovery candidates.
     QueryResults {
+        /// The query that produced them.
+        handle: QueryHandle,
         /// The observed candidates, bounded by their own type.
         candidates: ObservedCandidates,
         /// Which class produced them.
@@ -452,6 +649,8 @@ pub enum KademliaEvent {
     },
     /// A query ended without results.
     QueryFailed {
+        /// The query that ended.
+        handle: QueryHandle,
         /// Which class.
         class: QueryClass,
         /// Bounded diagnostic class, not a free-form message.
@@ -892,8 +1091,9 @@ mod tests {
                 addresses: OfferedAddresses::new([]).expect("empty is legal"),
             },
             KademliaCommand::StartQuery {
+                handle: QueryHandle::commanded(3),
                 class: QueryClass::Exploration,
-                key: [0u8; 32],
+                key: LookupKey::KeySpacePoint { point: [0u8; 32] },
             },
             KademliaCommand::Shutdown,
         ];
@@ -911,8 +1111,9 @@ mod tests {
     #[test]
     fn commands_and_events_serialize_with_their_discriminants() {
         let c = KademliaCommand::StartQuery {
+            handle: QueryHandle::commanded(5),
             class: QueryClass::Bootstrap,
-            key: [1u8; 32],
+            key: LookupKey::Ed25519PublicKey { key: [1u8; 32] },
         };
         let json = serde_json::to_value(&c).expect("ser");
         assert_eq!(json["command"], "start_query");
@@ -923,12 +1124,84 @@ mod tests {
         );
 
         let e = KademliaEvent::QueryFailed {
+            handle: QueryHandle::new(7),
             class: QueryClass::Targeted,
             reason: QueryFailure::TimedOut,
         };
         let json = serde_json::to_value(&e).expect("ser");
         assert_eq!(json["event"], "query_failed");
         assert_eq!(json["reason"], "timed_out");
+        assert_eq!(json["handle"], 7, "the handle crosses the wire with it");
+        assert_eq!(
+            serde_json::from_value::<KademliaEvent>(json).expect("de"),
+            e,
+            "and comes back the same query"
+        );
+    }
+
+    #[test]
+    fn a_query_is_named_for_its_whole_life() {
+        // THE IDENTITY A CLASS COULD NOT SUPPLY. Two bootstraps can be
+        // outstanding at once — one commanded, one the library started
+        // on an empty-table insertion (F2) — and with only a class to
+        // match on, either completion settled either permit. A handle
+        // is what makes "which query finished" answerable at all.
+        let started = KademliaEvent::QueryStarted {
+            handle: QueryHandle::new(1),
+            class: QueryClass::Bootstrap,
+            origin: QueryOrigin::Implicit,
+        };
+        let json = serde_json::to_value(&started).expect("ser");
+        assert_eq!(json["event"], "query_started");
+        assert_eq!(json["origin"], "implicit", "who asked is not the class");
+        assert_eq!(
+            serde_json::from_value::<KademliaEvent>(json).expect("de"),
+            started
+        );
+
+        // Two queries of the SAME class are different queries.
+        assert_ne!(QueryHandle::new(1), QueryHandle::new(2));
+        assert_eq!(QueryHandle::new(9).get(), 9);
+
+        // THE TWO MINTERS CANNOT COLLIDE. The provider names what it
+        // commands, because it holds the permit before the driver has
+        // seen the command; the driver names what the library starts,
+        // because nobody else can see those. Sharing a counter would
+        // need one to observe the other's, so the space is split.
+        assert_eq!(QueryHandle::commanded(1).origin(), QueryOrigin::Commanded);
+        assert_eq!(QueryHandle::implicit(1).origin(), QueryOrigin::Implicit);
+        assert_ne!(
+            QueryHandle::commanded(1),
+            QueryHandle::implicit(1),
+            "the same sequence from the two minters is two different queries"
+        );
+    }
+
+    #[test]
+    fn a_key_says_what_it_is_and_only_an_identity_becomes_one() {
+        // A WIDTH IS NOT A MEANING. As a bare `[u8; 32]` the driver had
+        // to guess, and it guessed the same way for every key: wrap the
+        // bytes in the Ed25519 envelope and rebuild a `PeerId`. Any 32
+        // bytes make a syntactically valid one, so an exploration point
+        // came back as a peer that does not exist and nothing local
+        // could tell. There was no check to write.
+        let identity = LookupKey::Ed25519PublicKey { key: [7u8; 32] };
+        let point = LookupKey::KeySpacePoint { point: [7u8; 32] };
+        assert_eq!(identity.bytes(), point.bytes(), "the same bytes");
+        assert_ne!(identity, point, "and not the same thing");
+        assert_eq!(identity.as_public_key(), Some(&[7u8; 32]));
+        assert_eq!(
+            point.as_public_key(),
+            None,
+            "only an identity's key may be turned back into an identity"
+        );
+        let json = serde_json::to_value(point).expect("ser");
+        assert_eq!(json["kind"], "key_space_point");
+        assert_eq!(
+            serde_json::from_value::<LookupKey>(json).expect("de"),
+            point,
+            "and the meaning crosses the wire with the bytes"
+        );
     }
 
     #[test]

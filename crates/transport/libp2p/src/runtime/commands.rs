@@ -799,18 +799,24 @@ pub(super) fn handle_command(
             // outbox, leaking the very permit the slack exists to
             // release. The command in hand IS an outstanding query from
             // the provider's side: it bound a permit before sending it.
+            // COUNTED AGAINST WHAT THIS COMMAND MAY SETTLE, which for
+            // a shutdown includes the live queries the sweep is about to
+            // discover — a population the slack did not know existed.
             let outstanding = settlement_slack(kademlia.as_deref());
             let settle = |outbox: &mut VecDeque<SwarmEvent>, event| {
                 let _ = buffer_kademlia_event(outbox, event_capacity, outstanding, event);
             };
             if manager.is_draining()
                 && let interweave_kademlia_control_api::KademliaCommand::StartQuery {
-                    class, ..
+                    handle,
+                    class,
+                    ..
                 } = &command
             {
                 settle(
                     outbox,
                     interweave_kademlia_control_api::KademliaEvent::QueryFailed {
+                        handle: *handle,
                         class: *class,
                         reason: interweave_kademlia_control_api::QueryFailure::ShuttingDown,
                     },
@@ -1100,10 +1106,10 @@ pub(super) fn translate(
 /// A QUERY SETTLEMENT IS NOT DROPPABLE and is deliberately not routed
 /// through here: `QueryResults` and `QueryFailed` carry the completion
 /// the provider's budget keys on, and a dropped one leaks its permit
-/// for the life of the process. Those paths stay ungated and are
-/// bounded at their source instead — `max_concurrent_queries`
-/// outstanding, and the Swarm is not polled at all while
-/// `polling_room` is false.
+/// for the life of the process. The Swarm-event path stays ungated and is
+/// bounded at their source instead — `max_concurrent_queries` for
+/// commanded work plus the driver's cap on library-started queries,
+/// and the Swarm is not polled at all while `polling_room` is false.
 fn buffer_revocation_events(
     outbox: &mut VecDeque<SwarmEvent>,
     event_capacity: usize,
@@ -1133,6 +1139,13 @@ fn buffer_revocation_events(
 /// A named function rather than an expression at the call site because
 /// the `+ 1` is the whole finding, and an expression inline there can
 /// only be tested through a running Swarm.
+///
+/// RECORDED QUERIES ARE ALL OF THEM. A shutdown also finishes queries
+/// live in the pool that this driver never recorded, and an earlier
+/// version of this function counted those too — because the sweep
+/// announced and settled each one, two events apiece. It no longer
+/// emits anything for them: a query the driver never announced was
+/// never charged, so there is nothing to settle and nothing to buffer.
 fn settlement_slack(kademlia: Option<&super::kademlia_driver::KademliaState>) -> usize {
     kademlia
         .map_or(
@@ -1174,6 +1187,13 @@ fn buffer_kademlia_event(
         event,
         interweave_kademlia_control_api::KademliaEvent::QueryResults { .. }
             | interweave_kademlia_control_api::KademliaEvent::QueryFailed { .. }
+            // A CHARGE IS HALF OF A TRANSACTION, not a notification.
+            // `QueryStarted` rode base capacity while the settlement it
+            // pairs with rode the slack, so the two halves could be
+            // separated: the charge admitted, the release dropped, and
+            // the permit gone for the life of the provider. They travel
+            // in the same tier now.
+            | interweave_kademlia_control_api::KademliaEvent::QueryStarted { .. }
     ) {
         super::may_buffer_settlement(outbox.len(), event_capacity, outstanding_queries)
     } else {
@@ -1192,6 +1212,7 @@ mod expired_address_tests {
         ActiveListeners, SwarmEvent, TransportIdentity, VecDeque, buffer_kademlia_event,
         buffer_revocation_events, forget_address,
     };
+    use interweave_kademlia_control_api::QueryHandle;
     use libp2p::Multiaddr;
     use libp2p::core::transport::ListenerId;
 
@@ -1299,6 +1320,7 @@ mod expired_address_tests {
         // and is not a licence to grow without bound.
         let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
         let refusal = || interweave_kademlia_control_api::KademliaEvent::QueryFailed {
+            handle: QueryHandle::commanded(1),
             class: interweave_kademlia_control_api::QueryClass::Targeted,
             reason: interweave_kademlia_control_api::QueryFailure::BudgetExhausted,
         };
@@ -1326,6 +1348,7 @@ mod expired_address_tests {
         // driver can have outstanding.
         let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
         let settlement = || interweave_kademlia_control_api::KademliaEvent::QueryFailed {
+            handle: QueryHandle::commanded(1),
             class: interweave_kademlia_control_api::QueryClass::Targeted,
             reason: interweave_kademlia_control_api::QueryFailure::NoRoutingPeers,
         };
@@ -1362,6 +1385,7 @@ mod expired_address_tests {
         // dropped, leaking the permit the slack exists to release.
         let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
         let settlement = || interweave_kademlia_control_api::KademliaEvent::QueryFailed {
+            handle: QueryHandle::commanded(1),
             class: interweave_kademlia_control_api::QueryClass::Bootstrap,
             reason: interweave_kademlia_control_api::QueryFailure::NoRoutingPeers,
         };

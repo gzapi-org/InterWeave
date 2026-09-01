@@ -52,7 +52,9 @@
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use interweave_kademlia_control_api::{KademliaCommand, KademliaMode, QueryClass};
+use interweave_kademlia_control_api::{
+    KademliaCommand, KademliaMode, LookupKey, QueryClass, QueryHandle,
+};
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::TransportIdentity;
 use interweave_transport_libp2p::runtime::kademlia_driver::KademliaSettings;
@@ -163,8 +165,11 @@ async fn a_disabled_profile_answers_no_kademlia_command() {
 
     disabled_node
         .kademlia(KademliaCommand::StartQuery {
+            // An exploration point, not an identity: §9.3 walks a random
+            // point in the key space and the type says so.
+            handle: QueryHandle::commanded(1),
             class: QueryClass::Exploration,
-            key: [3; 32],
+            key: LookupKey::KeySpacePoint { point: [3; 32] },
         })
         .await
         .expect("the channel accepts it");
@@ -184,8 +189,11 @@ async fn a_disabled_profile_answers_no_kademlia_command() {
     let _ = listening(&mut enabled_node).await;
     enabled_node
         .kademlia(KademliaCommand::StartQuery {
+            // An exploration point, not an identity: §9.3 walks a random
+            // point in the key space and the type says so.
+            handle: QueryHandle::commanded(1),
             class: QueryClass::Exploration,
-            key: [3; 32],
+            key: LookupKey::KeySpacePoint { point: [3; 32] },
         })
         .await
         .expect("the channel accepts it");

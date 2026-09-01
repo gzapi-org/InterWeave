@@ -391,7 +391,13 @@ kad::Config::new(custom_protocol)
 Behaviour::set_mode(Some(Mode::Client | Mode::Server))
 ```
 
-The provider scheduler owns the configured periodic bootstrap refresh instead of inheriting the library's default periodic interval. Rust-libp2p documents that routing-table insertion may itself trigger bootstrap behavior; SPIKE-003 must verify the exact selected-version behavior and count any such implicit bootstrap work in diagnostics/rate analysis.
+The provider scheduler owns the configured periodic bootstrap refresh instead of inheriting the library's default periodic interval. Rust-libp2p documents that routing-table insertion may itself trigger bootstrap behavior; SPIKE-003 verified it for the selected version (finding F2 — a routing insertion on an empty table starts one query nobody requested, and it dials), and such work is counted in the budgets.
+
+**How it is counted, and why the driver is the one that says so.** A query the library starts never passes through the provider's command path, so the provider cannot see it begin. It was therefore INFERRED, from a routing-admission event arriving while the provider's routing view was empty — a different signal from the completion that settles the charge. Those two drift: a routing event suppressed, reordered, or refused by a later eligibility check leaves the query running with nothing charged against it, and its completion then releases some other query's budget slot.
+
+So the driver announces every query it observes beginning, including the ones nobody asked for, and each carries a handle that names it for its whole life. The provider charges what it is told and releases the permit that handle names — never "the oldest outstanding query of this class", which cannot distinguish a commanded bootstrap from a library-started one when both are in flight. A completion for a handle nothing holds settles nothing, rather than taking a neighbour's slot to report itself.
+
+**The bound on unrequested work is its own.** The concurrency ceiling governs COMMANDED queries and a library-started one never passes through the command path, so that ceiling never sees it — a claim that it did was corrected after review. The driver caps how many library-started queries it tracks at once, and that cap is this project's rather than a property of the library: rust-libp2p happens to decline a second automatic bootstrap while one is outstanding, which is true of the pinned version and is a private state machine, not a contract.
 
 ## 12. Records/provider records are disabled
 

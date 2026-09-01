@@ -277,10 +277,26 @@ const fn polling_room(
 /// caller could drain the bounded command channel into an unbounded
 /// outbox one refusal at a time.
 ///
-/// The slack is bounded by what the driver can have outstanding, which
-/// is `max_concurrent_queries` — its own ceiling, refused above it. So
-/// this cannot become the unbounded queue the capacity exists to rule
-/// out, and it cannot lose a settlement a live provider is waiting on.
+/// The slack is bounded by what the driver can have outstanding —
+/// `max_concurrent_queries` for commanded work PLUS
+/// `MAX_IMPLICIT_QUERIES` for library-started work, since one of those
+/// holds a permit exactly as a commanded one does. Both ceilings are
+/// this project's.
+///
+/// WITH ONE EXCEPTION, and it is worth stating rather than rounding
+/// off. Review finding on PR #64: a shutdown also settles queries live
+/// in the kad pool that the driver never tracked, two events each, and
+/// `settleable_queries` counts them so the outbox can hold them. That
+/// term is bounded by the pool — by how many queries the LIBRARY has
+/// running — not by anything this project owns. It applies to a single
+/// `Shutdown` pass, after which both maps are empty and the driver
+/// starts nothing further, so it cannot accumulate; but "both ceilings
+/// are this project's" would be false as a description of the slack,
+/// and the sentence it replaced was.
+///
+/// So this cannot become the unbounded queue the capacity exists to
+/// rule out, and it cannot lose a settlement a live provider is waiting
+/// on.
 const fn may_buffer_settlement(
     buffered: usize,
     event_capacity: usize,
@@ -827,6 +843,36 @@ impl SwarmRuntime {
                                 }
                             }
                         }
+
+                        // THE TICK RECONCILES TOO. Review finding on
+                        // PR #64: the library's automatic bootstrap can
+                        // start on a connection that is already
+                        // established — the routing insertion comes
+                        // from `Identify::Received` — and then dials
+                        // nothing, so it produces no Swarm event at all
+                        // between starting and completing. Reconciling
+                        // only after events left such a query uncharged
+                        // for its whole lifetime on an otherwise idle
+                        // node, with commanded work free to spend the
+                        // entire budget beside it.
+                        //
+                        // This tick already exists and already walks a
+                        // bounded table, so the uncharged window
+                        // becomes `retry_tick` rather than the query's
+                        // lifetime. Pushed like the event path pushes:
+                        // a `QueryStarted` is settlement-tier, and its
+                        // pair is what the outbox must not split.
+                        if let Some(state) = kademlia_state.as_mut() {
+                            let mut kad_events = Vec::new();
+                            kademlia_driver::reconcile(
+                                state,
+                                &mut swarm,
+                                &mut kad_events,
+                            );
+                            for event in kad_events {
+                                outbox.push_back(SwarmEvent::Kademlia { event });
+                            }
+                        }
                     }
                     // `reserve` waits for capacity WITHOUT consuming an
                     // event, so nothing is lost when another branch wins.
@@ -1225,12 +1271,14 @@ impl SwarmRuntime {
 mod flush_tests {
     #![allow(clippy::expect_used)]
     use super::{SwarmEvent, flush_outbox};
+    use interweave_kademlia_control_api::QueryHandle;
     use std::collections::VecDeque;
     use tokio::sync::mpsc;
 
     fn kad_settlement() -> SwarmEvent {
         SwarmEvent::Kademlia {
             event: interweave_kademlia_control_api::KademliaEvent::QueryFailed {
+                handle: QueryHandle::commanded(1),
                 class: interweave_kademlia_control_api::QueryClass::Exploration,
                 reason: interweave_kademlia_control_api::QueryFailure::ShuttingDown,
             },
