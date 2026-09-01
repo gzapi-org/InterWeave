@@ -1419,8 +1419,14 @@ data-plane origin, against the infrastructure the stage exists to use.
    has no field in the struct, and every per-peer ceiling admits one
    more than it says because the crate refuses on `>` rather than `>=`;
 7. relayed inbound/outbound peer paths;
-8. DCUtR;
-9. direct-versus-relayed path preference/stability;
+8. DCUtR — **the crate has no knobs**, so §13's four-concurrent,
+   one-per-peer and five-minute cooldown are the gate's to enforce; and
+   a dial count is not an attempt count, since both ends dial for one
+   punch and only one reports the result;
+9. direct-versus-relayed path preference/stability — including
+   §78's "no second `PeerConnected`", which the Swarm does NOT give:
+   it reports a second `ConnectionEstablished` for the same peer when
+   the punch succeeds, and the relayed connection survives beside it;
 10. network-change invalidation/recovery.
 
 ### Mandatory invariants

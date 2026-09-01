@@ -39,6 +39,7 @@ async fn main() {
     experiments::r9_relayed_preauth_bucket(&mut report).await;
     experiments::r10_reservation_lifecycle(&mut report).await;
     experiments::r11_relay_server_budgets(&mut report).await;
+    experiments::r12_dcutr_bounds(&mut report).await;
 
     print!("{}", report.render());
 

@@ -2053,3 +2053,201 @@ pub async fn r11_relay_server_budgets(report: &mut Report) {
         ),
     );
 }
+
+/// R12 — DCUtR has no bounds of its own, and a successful punch is a
+/// second connection to a peer already connected.
+///
+/// `DCUTR.md` and `CONNECTIVITY.md` §13 set three bounds: at most four
+/// concurrent hole punches, one per peer, and a five-minute cooldown
+/// after failure. None of them is a knob. `dcutr::Behaviour::new` takes
+/// a `PeerId` and nothing else, and the crate's own ceiling —
+/// `MAX_NUMBER_OF_UPGRADE_ATTEMPTS = 3` — is a `pub(crate)` constant
+/// counting retries per relayed connection, which is neither a
+/// concurrency cap nor a cooldown.
+///
+/// So the bounds must be enforced outside the behaviour, and the dial
+/// gate is the only place that sees every attempt. Whether it can COUNT
+/// them there is the question this asks, and the answer shapes Phase 6:
+/// one hole punch is several dials.
+///
+/// §78 is the other half: *"a successful DCUtR hole punch for an
+/// already-connected relayed peer therefore does not emit a second
+/// `PeerConnected`."* That is a rule about our event, and it exists
+/// because of what the Swarm below does.
+pub async fn r12_dcutr_bounds(report: &mut Report) {
+    let mut relay_node = Node::new(Roles::infrastructure(), &[], &[]);
+    let relay_addr = relay_node.listen().await;
+    relay_node.swarm.add_external_address(relay_addr.clone());
+    let relay_id = relay_node.identity.clone();
+    let relay_peer = relay_node.peer_id;
+
+    let mut dest = Node::new(Roles::client(), &[relay_id.clone()], &[]);
+    let _ = dest.listen().await;
+    dest.add_relay(relay_peer);
+    dest.swarm.add_peer_address(relay_peer, relay_addr.clone());
+    let circuit = circuit_addr(&relay_addr, &relay_peer);
+    let _ = dest.swarm.listen_on(circuit.clone());
+    let dest_peer = dest.peer_id;
+    let dest_id = dest.identity.clone();
+
+    let mut source = Node::new(Roles::client(), &[], &[]);
+    source.set_trust_sets(&[dest_id], &[relay_id]);
+    let _ = source.listen().await;
+    source.add_relay(relay_peer);
+    source
+        .swarm
+        .add_peer_address(relay_peer, relay_addr.clone());
+    dest.set_trust_sets(&[source.identity.clone()], &[relay_node.identity.clone()]);
+
+    {
+        let mut nodes = [&mut dest, &mut relay_node, &mut source];
+        pump_until(&mut nodes, Duration::from_secs(25), |n| {
+            n[1].observed
+                .details("relay-server")
+                .iter()
+                .any(|d| d.contains("ReservationReqAccepted"))
+        })
+        .await;
+    }
+
+    let via_relay: Multiaddr = format!("{circuit}/p2p/{dest_peer}")
+        .parse()
+        .expect("a circuit address naming the destination");
+    let _ = source.dial_circuit(dest_peer, via_relay);
+    {
+        let mut nodes = [&mut dest, &mut relay_node, &mut source];
+        pump_until(&mut nodes, Duration::from_secs(25), |n| {
+            !n[0].observed.details("dcutr").is_empty() || !n[2].observed.details("dcutr").is_empty()
+        })
+        .await;
+        pump(&mut nodes, Duration::from_secs(8)).await;
+    }
+
+    let punches: Vec<String> = source
+        .observed
+        .details("dcutr")
+        .into_iter()
+        .chain(dest.observed.details("dcutr"))
+        .collect();
+    report.note(
+        "R12.1",
+        format!("dcutr events across both ends: {punches:?}"),
+    );
+    report.require(
+        "R12.2",
+        !punches.is_empty(),
+        "a hole punch was attempted over the relayed path, so what follows is about a real \
+         upgrade rather than about nothing happening",
+    );
+
+    // THE COUNTING PROBLEM. Every hole-punch dial is attributed and
+    // reaches the gate — which is F1's mechanism doing its job — but
+    // DCUtR dials every candidate address at once, so the gate sees
+    // several dials for one attempt toward one peer. A gate enforcing
+    // §13's "one per peer" by counting dials would refuse its own
+    // attempt partway through.
+    let punch_dials = source
+        .ledger
+        .allowed_by_origin()
+        .get("dcutr-hole-punch")
+        .copied()
+        .unwrap_or(0)
+        + dest
+            .ledger
+            .allowed_by_origin()
+            .get("dcutr-hole-punch")
+            .copied()
+            .unwrap_or(0);
+    let punch_targets = source
+        .attribution
+        .targets(interweave_transport_runtime::DialOrigin::DcutrHolePunch)
+        .len()
+        + dest
+            .attribution
+            .targets(interweave_transport_runtime::DialOrigin::DcutrHolePunch)
+            .len();
+    let source_dials = source
+        .ledger
+        .allowed_by_origin()
+        .get("dcutr-hole-punch")
+        .copied()
+        .unwrap_or(0);
+    let dest_dials = dest
+        .ledger
+        .allowed_by_origin()
+        .get("dcutr-hole-punch")
+        .copied()
+        .unwrap_or(0);
+    report.note(
+        "R12.3",
+        format!(
+            "hole-punch dials admitted: source {source_dials}, destination {dest_dials} \
+             (total {punch_dials}, {punch_targets} target entries); dcutr events: source \
+             {}, destination {}",
+            source.observed.details("dcutr").len(),
+            dest.observed.details("dcutr").len()
+        ),
+    );
+    report.require(
+        "R12.4",
+        punch_dials > 0,
+        "every hole-punch dial reached a gate under `dcutr-hole-punch`, so §13's bounds \
+         have somewhere to be enforced at all",
+    );
+    // BOTH ENDS DIAL, and only one reports. That is the shape §13's
+    // "one hole punch per peer" has to reckon with: a node's own gate
+    // sees a hole-punch dial for a punch its own DCUtR may never
+    // report, because the peer that reports the result is whichever
+    // one's dial won.
+    report.require(
+        "R12.5",
+        source_dials > 0 && dest_dials > 0 && punches.len() < (source_dials + dest_dials) as usize,
+        &format!(
+            "BOTH ends dial for one punch (source {source_dials}, destination \
+             {dest_dials}) and fewer results are reported ({}) — so a gate cannot read \
+             \"one attempt\" off its own dial count, which is the shape §13's per-peer \
+             bound has to take",
+            punches.len()
+        ),
+    );
+
+    // §78, AND WHY IT IS A RULE AT ALL. The Swarm reports a second
+    // `ConnectionEstablished` for a peer that was already connected:
+    // the relayed connection and the direct one are two connections,
+    // and libp2p says so both times. Nothing deduplicates them, so
+    // "does not emit a second PeerConnected" is work Phase 6 owes
+    // rather than a property inherited from the library.
+    let established_to_dest = source
+        .observed
+        .events
+        .iter()
+        .filter(|(label, detail)| {
+            *label == "connection-established" && detail == &dest_peer.to_string()
+        })
+        .count();
+    report.note(
+        "R12.6",
+        format!(
+            "source ConnectionEstablished events naming the destination: {established_to_dest}"
+        ),
+    );
+    report.require(
+        "R12.7",
+        established_to_dest >= 2,
+        &format!(
+            "the Swarm reports a SECOND connection to an already-connected peer when the \
+             punch succeeds ({established_to_dest} for one logical peer), so §78's \"no \
+             second PeerConnected\" is a rule the runtime must implement rather than one \
+             the library provides"
+        ),
+    );
+    // AND THE RELAYED PATH IS NOT TORN DOWN BY THE UPGRADE, which §13's
+    // fallback rule depends on: the peer stays connected throughout,
+    // and there is no window where it is not.
+    report.require(
+        "R12.8",
+        source.observed.connected.contains(&dest_peer),
+        "the peer is still connected after the upgrade — the direct connection was added \
+         beside the relayed one rather than replacing it through a disconnect",
+    );
+}

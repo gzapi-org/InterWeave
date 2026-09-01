@@ -436,6 +436,32 @@ relay counts circuits it has ACCEPTED, so two requests in flight
 together are each counted against nothing, and a first attempt saw one
 circuit accepted and concluded the ceiling held.
 
+**F12 — DCUtR has no bounds of its own, and one attempt is not one
+dial.** `dcutr::Behaviour::new` takes a `PeerId` and nothing else. The
+crate's own ceiling, `MAX_NUMBER_OF_UPGRADE_ATTEMPTS = 3`, is a
+`pub(crate)` constant counting retries per relayed connection — neither
+a concurrency cap nor a cooldown. So §13's "at most four concurrent, one
+per peer, five-minute failure cooldown" has to be enforced outside the
+behaviour, and the dial gate is the only place that sees every attempt.
+
+R12.4 confirms it can: every hole-punch dial arrives there under
+`dcutr-hole-punch`, which is F1's mechanism doing the job §13 needs.
+**But the gate cannot read "one attempt" off its own dial count.** Both
+ends dial for a single punch — source one, destination one — and only
+one of them reports a result, because the peer that reports is whichever
+dial won. A per-peer rule counting dials would therefore be counting
+something else.
+
+**F13 — a successful punch is a second connection to a peer that is
+already connected.** `CONNECTIVITY.md` §78 says a successful hole punch
+for an already-connected relayed peer *"does not emit a second
+`PeerConnected`"*. R12.7 shows why that is a rule rather than an
+inheritance: the Swarm reports two `ConnectionEstablished` events naming
+the same peer, one relayed and one direct, and nothing below the runtime
+deduplicates them. The relayed connection is not torn down by the
+upgrade either (R12.8), so §13's "keep the relayed path as fallback" has
+something to keep — but the logical-peer view is Phase 6's to build.
+
 ## Stated limits
 
 - **Loopback only.** No NAT of any kind. Every DCUtR observation here is
@@ -453,9 +479,10 @@ circuit accepted and concluded the ceiling held.
   default reservation lasts an hour, so a run of this length cannot see
   a renewal. Obtain and withdrawal are measured (F9); the middle of the
   lifecycle is not.
-- **DCUtR bounds are not covered** — attempt ceilings, per-peer limit
-  and failure cooldown. Hole punches happen in these runs and are
-  attributed at the gate; nothing here asserts how many are allowed.
+- **DCUtR FAILURE is not observed.** On loopback a punch succeeds, so
+  the cooldown, the retry ceiling and the fallback-on-failure rule are
+  untested here; F12 is about where the bounds must live, not about
+  them working. Failure behaviour is phase B.
 - **Inbound admission is not gated here, only recorded.** R8's hooks
   observe; nothing refuses. The production gate is outbound-only and
   Stage 11 must build the inbound side, so R8's numbers say what a
@@ -548,7 +575,7 @@ cd spikes/spike-004/harness
 cargo run
 ```
 
-Exits 0 only when every required observation held — **72 of them**, and
+Exits 0 only when every required observation held — **77 of them**, and
 every finding above is carried by one rather than by a printed number.
 That is a review finding on PR #69, raised four times over: F3, F4, F6
 and F7 were each asserted in this file while the harness only noted the
@@ -573,6 +600,8 @@ claim owes now:
 | F9 reservations and withdrawal | R10.2/R10.3 (two relays, each recording its own acceptance), R10.5 (both addresses advertised), R10.7 (the lost one withdrawn) with R10.8 as the control (the survivor stays) |
 | F10 relay defaults vs §8 | R11.2/R11.3 (the two that break a deployment), R11.4 (the two that are looser), R11.1 and R11.5 record the rest |
 | F11 per-peer off-by-one | R11.7 (a ceiling of one admits two) with R11.9 as the control (the third is refused) |
+| F12 DCUtR bounds live at the gate | R12.4 (every punch dial arrives attributed) and R12.5 (both ends dial, fewer results are reported, so a dial count is not an attempt count) |
+| F13 §78's dedupe is ours | R12.7 (two `ConnectionEstablished` for one logical peer) with R12.8 (the relayed path survives the upgrade) |
 | ADR-0036's relayed end-PeerId clause | R7.12 (the path went through the relay), R7.9/R7.10 (two distinct authenticated identities), R7.11 (Identify completed with the destination through the circuit) |
 | F3, again | R5.11 — no relay-behaviour dial targeted the destination, which origin counts alone cannot show |
 | F7 advertised control protocols | R1.6/R1.7: Identify arrived and names both. **Scoped**: the harness has no data-plane behaviours, so it says nothing about isolation |
@@ -625,6 +654,7 @@ R10's two and R11's one:
 | the lost relay is not actually dropped | R10.7 |
 | the client never listens on the second relay's circuit | R10.2, R10.3, R10.5 |
 | per-source circuit ceiling left at the crate default | R11.7, R11.9 |
+| DCUtR disabled at the source | R12.4, R12.5, R12.7 |
 
 **Two of R8's mutations changed nothing, and both are worth stating.**
 The separate direct-control node is redundant: DCUtR upgrades the
