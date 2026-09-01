@@ -802,7 +802,7 @@ pub(super) fn handle_command(
             // COUNTED AGAINST WHAT THIS COMMAND MAY SETTLE, which for
             // a shutdown includes the live queries the sweep is about to
             // discover — a population the slack did not know existed.
-            let outstanding = settlement_slack(kademlia.as_deref(), swarm.kademlia());
+            let outstanding = settlement_slack(kademlia.as_deref());
             let settle = |outbox: &mut VecDeque<SwarmEvent>, event| {
                 let _ = buffer_kademlia_event(outbox, event_capacity, outstanding, event);
             };
@@ -1139,12 +1139,19 @@ fn buffer_revocation_events(
 /// A named function rather than an expression at the call site because
 /// the `+ 1` is the whole finding, and an expression inline there can
 /// only be tested through a running Swarm.
-fn settlement_slack(
-    kademlia: Option<&super::kademlia_driver::KademliaState>,
-    behaviour: Option<&libp2p::kad::Behaviour<libp2p::kad::store::MemoryStore>>,
-) -> usize {
+///
+/// RECORDED QUERIES ARE ALL OF THEM. A shutdown also finishes queries
+/// live in the pool that this driver never recorded, and an earlier
+/// version of this function counted those too — because the sweep
+/// announced and settled each one, two events apiece. It no longer
+/// emits anything for them: a query the driver never announced was
+/// never charged, so there is nothing to settle and nothing to buffer.
+fn settlement_slack(kademlia: Option<&super::kademlia_driver::KademliaState>) -> usize {
     kademlia
-        .map_or(0, |s| s.settleable_queries(behaviour))
+        .map_or(
+            0,
+            super::kademlia_driver::KademliaState::outstanding_queries,
+        )
         .saturating_add(1)
 }
 
@@ -1400,7 +1407,7 @@ mod expired_address_tests {
         // first version of this test passed `1` directly and so proved
         // nothing about the caller: dropping the `+ 1` left it green.
         assert_eq!(
-            super::settlement_slack(None, None),
+            super::settlement_slack(None),
             1,
             "a command whose query was never recorded still earns its own slot"
         );

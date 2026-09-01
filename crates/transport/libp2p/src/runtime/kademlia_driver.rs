@@ -346,41 +346,6 @@ impl KademliaState {
         self.queries.len() + self.implicit.len()
     }
 
-    /// Events a shutdown right now would EMIT, not queries it would
-    /// settle.
-    ///
-    /// **Includes the ones it has not met yet.** The sweep enumerates
-    /// live queries in NEITHER map and settles those too, and the slack
-    /// is computed before the command runs — so a sweep could emit more
-    /// than the outbox would admit, and a dropped settlement is a permit
-    /// held for the life of the process. The third population has to be
-    /// counted before it is discovered.
-    ///
-    /// AND AN UNMET QUERY COSTS TWO EVENTS, not one. Review finding on
-    /// PR #64: this counted queries while the sweep emits a
-    /// `QueryStarted` AND a `QueryFailed` for each one it has never
-    /// announced, so the arithmetic held only while at most one such
-    /// query existed. Beyond that the surplus was dropped silently, and
-    /// because the sweep pushed every announcement before any
-    /// settlement, what fell off the end was releases for charges the
-    /// provider had just taken — the exact leak this PR exists to
-    /// remove, reintroduced by the sweep's own pairing. The emission
-    /// order is fixed too, so a truncated flush cannot separate a pair;
-    /// this function counts what is emitted so the outbox can hold it.
-    pub(super) fn settleable_queries(
-        &self,
-        behaviour: Option<&kad::Behaviour<MemoryStore>>,
-    ) -> usize {
-        let unknown = behaviour.map_or(0, |b| {
-            b.iter_queries()
-                .filter(|q| {
-                    !self.queries.contains_key(&q.id()) && !self.implicit.contains_key(&q.id())
-                })
-                .count()
-        });
-        self.outstanding_queries() + unknown.saturating_mul(2)
-    }
-
     /// Inbound record writes dropped so far (§12: counted, never stored).
     ///
     /// Test-gated until Stage 12: the §16 diagnostics snapshot is the
@@ -693,52 +658,53 @@ pub(super) fn handle_command(
             // announced is announced and settled in the same pass — the
             // charge and its release still one object, as everywhere
             // else.
-            // ANNOUNCED AND SETTLED ADJACENTLY, and never tracked.
-            // Review finding on PR #64 against the first version of
-            // this sweep: it announced every unmet query, then settled
-            // every query, in two passes. So a truncated outbox flush —
-            // `flush_outbox` stops at the first full channel and
-            // discards the rest — dropped releases for charges it had
-            // just delivered. Emitting each pair together means a
-            // truncation can lose a whole pair, which costs nothing,
-            // but cannot separate one.
+            // FINISHED, AND NOT ANNOUNCED. Review finding on PR #64
+            // against two earlier versions of this sweep. It used to
+            // announce every live query in neither map and then settle
+            // it — first in two passes, then as adjacent pairs — so
+            // that "the charge and its release are one object" held
+            // here too.
             //
-            // These queries also do not enter `state.implicit`. The map
-            // is drained by this same command, so inserting into it
-            // bought nothing and made `MAX_IMPLICIT_QUERIES` — a bound
-            // on what the driver TRACKS at once — momentarily false. A
-            // query announced and settled in one pass is never tracked.
+            // Adjacency in the deque is not atomicity at the channel.
+            // `flush_outbox` sends one event at a time and stops at the
+            // first `try_send` that fails, so a pair straddling the
+            // last free slot is split: the charge is delivered and the
+            // release is discarded. For a provider that outlives this
+            // transport — restarted around it — that is a permit lost
+            // for its lifetime.
+            //
+            // The pair was a no-op that could only lose. A query this
+            // driver never announced was never charged, so there is
+            // nothing to settle; announcing it at shutdown CREATES the
+            // charge that then has to survive the channel. It is
+            // finished in the pool, because the work must stop, and
+            // nothing is emitted for it. The completion arm already
+            // refuses to announce an unknown query while stopping, for
+            // the same reason.
             let unknown: Vec<kad::QueryId> = behaviour
                 .iter_queries()
                 .map(|q| q.id())
                 .filter(|id| !state.queries.contains_key(id) && !state.implicit.contains_key(id))
                 .collect();
-            let mut settling: Vec<(kad::QueryId, QueryClass, QueryHandle, bool)> = state
+            for id in unknown {
+                if let Some(mut running) = behaviour.query_mut(&id) {
+                    running.finish();
+                }
+            }
+            let settling: Vec<(kad::QueryId, QueryClass, QueryHandle)> = state
                 .queries
                 .drain()
-                .map(|(id, (class, handle))| (id, class, handle, false))
+                .map(|(id, (class, handle))| (id, class, handle))
                 .chain(
                     state
                         .implicit
                         .drain()
-                        .map(|(id, handle)| (id, QueryClass::Bootstrap, handle, false)),
+                        .map(|(id, handle)| (id, QueryClass::Bootstrap, handle)),
                 )
                 .collect();
-            for id in unknown {
-                state.next_implicit = state.next_implicit.wrapping_add(1);
-                let handle = QueryHandle::implicit(state.next_implicit);
-                settling.push((id, QueryClass::Bootstrap, handle, true));
-            }
-            for (id, class, handle, announce) in settling {
+            for (id, class, handle) in settling {
                 if let Some(mut running) = behaviour.query_mut(&id) {
                     running.finish();
-                }
-                if announce {
-                    out.push(KademliaEvent::QueryStarted {
-                        handle,
-                        class,
-                        origin: QueryOrigin::Implicit,
-                    });
                 }
                 out.push(KademliaEvent::QueryFailed {
                     handle,
@@ -2590,15 +2556,20 @@ mod tests {
     }
 
     #[test]
-    fn a_shutdown_pairs_every_announcement_with_its_settlement() {
-        // Review finding on PR #64. The sweep announced every unmet
-        // query, then settled every query, in two passes — while
-        // `settleable_queries` counted one event per query. So with two
-        // unmet queries and a full outbox the surplus was dropped, and
-        // because announcements went first what fell off the end were
-        // RELEASES for charges the provider had just taken: a permit
-        // held for the life of the provider, which is the leak this
-        // whole change removes.
+    fn a_shutdown_announces_no_query_it_never_announced() {
+        // Two review findings on PR #64 converge here. The sweep used
+        // to announce every live query in neither map and then settle
+        // it, so that the charge and its release stayed one object —
+        // first in two passes (which let the slack drop the releases),
+        // then as adjacent pairs.
+        //
+        // Adjacency in the deque is not atomicity at the channel:
+        // `flush_outbox` sends one at a time and stops at the first
+        // full channel, so a pair straddling the last free slot is
+        // split and the charge outlives its release. The pair was a
+        // no-op that could only lose — a query never announced was
+        // never charged — so the sweep emits nothing for it and simply
+        // stops the work.
         let settings = KademliaSettings {
             mode: KademliaMode::Client,
             network_id: "example-private-network".to_owned(),
@@ -2612,22 +2583,20 @@ mod tests {
         };
         let mut state = KademliaState::new(&settings);
         let mut behaviour = build_behaviour(&settings, PeerId::random()).expect("buildable");
-
-        // THREE queries the driver has never met — more than the one
-        // the old arithmetic happened to survive.
-        for _ in 0..3 {
-            let _ = behaviour.get_closest_peers(PeerId::random());
-        }
-        assert_eq!(
-            state.settleable_queries(Some(&behaviour)),
-            6,
-            "an unmet query costs two events, and the slack must say so"
-        );
-
         let manager = interweave_transport_runtime::ConnectionManager::new(
             interweave_transport_runtime::ConnectionPolicy::default(),
             8,
         );
+
+        // One query the driver DOES know about, and three it does not.
+        let known = behaviour.get_closest_peers(PeerId::random());
+        state
+            .queries
+            .insert(known, (QueryClass::Exploration, QueryHandle::commanded(1)));
+        for _ in 0..3 {
+            let _ = behaviour.get_closest_peers(PeerId::random());
+        }
+
         let out = handle_command(
             &mut state,
             &mut behaviour,
@@ -2636,39 +2605,37 @@ mod tests {
             0,
         );
 
-        // Every announcement has its settlement, and they are adjacent
-        // — so a truncated flush can lose a whole pair but never split
-        // one.
-        let mut announced = 0_usize;
-        for pair in out.windows(2) {
-            if let KademliaEvent::QueryStarted { handle, .. } = &pair[0] {
-                announced += 1;
-                assert!(
-                    matches!(
-                        &pair[1],
-                        KademliaEvent::QueryFailed {
-                            handle: settled,
-                            reason: QueryFailure::ShuttingDown,
-                            ..
-                        } if settled == handle
-                    ),
-                    "an announcement is followed immediately by its own settlement"
-                );
-            }
-        }
-        assert_eq!(announced, 3, "all three unmet queries were announced");
         assert!(
-            out.len() <= state.max_routing_peers.saturating_mul(2) + 6,
-            "and the sweep emits no more than the slack counted"
+            !out.iter()
+                .any(|e| matches!(e, KademliaEvent::QueryStarted { .. })),
+            "a shutdown creates no charge that then has to survive the channel"
+        );
+        assert_eq!(
+            out.iter()
+                .filter(|e| matches!(e, KademliaEvent::QueryFailed { .. }))
+                .count(),
+            1,
+            "only the recorded query is settled, because only it was charged"
+        );
+        assert_eq!(
+            state.outstanding_queries(),
+            0,
+            "and the slack that counted it is now spent"
+        );
+        assert_eq!(
+            behaviour.iter_queries().count(),
+            0,
+            "every query in the pool was finished, announced or not"
         );
 
-        // The sweep tracks none of them: `MAX_IMPLICIT_QUERIES` bounds
-        // what the driver holds at once, and a query announced and
-        // settled in one pass is never held.
-        assert!(
-            state.implicit.is_empty(),
-            "a settled query is not left in the tracked map"
-        );
+        // The unrecorded work still STOPS. Emitting nothing for it is
+        // an accounting decision, not permission to leave it running.
+        //
+        // `iter_queries` filters finished queries, so it reports the
+        // mark rather than termination — sound HERE because these are
+        // closest-peers walks, whose class has no continuation in
+        // `query_finished`. It would not be sound for a bootstrap; that
+        // case is held by the dial-counting test.
     }
 
     #[test]
@@ -3388,6 +3355,26 @@ mod tests {
         assert!(
             !state.queries.contains_key(&implicit),
             "the control: this is exactly the id the driver did not command"
+        );
+
+        // RECONCILED FIRST, because that is where the charge comes
+        // from now. When this test was written the provider inferred
+        // the charge from `RoutingPeerAdded`, so a shutdown had to
+        // settle a query it had never met; a later finding on PR #64
+        // established that a query the driver never ANNOUNCED was never
+        // charged, and that announcing one at shutdown only creates a
+        // charge that has to survive the channel. The runtime
+        // reconciles after every Swarm event and on its retry tick, so
+        // this is the state a live shutdown actually finds — and the
+        // obligation the original finding named is unchanged: the query
+        // must be settled, and it must stop.
+        let mut announced = Vec::new();
+        reconcile_implicit(&mut state, &behaviour, &mut announced);
+        assert!(
+            announced
+                .iter()
+                .any(|e| matches!(e, KademliaEvent::QueryStarted { .. })),
+            "the charge exists because the driver announced it"
         );
 
         let out = handle_command(
