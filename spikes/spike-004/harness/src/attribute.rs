@@ -167,6 +167,28 @@ impl Attribution {
             .unattributed
     }
 
+    /// Forget a note whose dial never reached the gate.
+    ///
+    /// Review finding on PR #69: the Swarm can reject an emitted
+    /// `ToSwarm::Dial` BEFORE calling the pending hook — a false
+    /// `PeerCondition` is the ordinary way — and then the gate never
+    /// resolves the note. Left alone it stays in `notes` for the life
+    /// of the process, one entry per rejected dial, which is the
+    /// unbounded map this mechanism must not become. `DialFailure`
+    /// carries the same `ConnectionId`, so the wrapper that wrote the
+    /// note is also told when to drop it.
+    ///
+    /// Not counted as unattributed: the gate never met this dial, so
+    /// nothing was misattributed. Silent by design, and R2.8 is what
+    /// notices if the cleanup stops working.
+    pub fn forget(&self, id: ConnectionId) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .notes
+            .remove(&id);
+    }
+
     /// Notes written and never consumed — a dial the Swarm dropped
     /// before the gate saw it, or a leak in this mechanism.
     #[must_use]
@@ -282,6 +304,12 @@ impl<B: NetworkBehaviour> NetworkBehaviour for Attributing<B> {
     }
 
     fn on_swarm_event(&mut self, event: FromSwarm<'_>) {
+        // A dial that failed never reaches the gate if the Swarm
+        // rejected it before the pending hook, so the note it left
+        // has to be dropped here or it is never dropped at all.
+        if let FromSwarm::DialFailure(failure) = &event {
+            self.attribution.forget(failure.connection_id);
+        }
         self.inner.on_swarm_event(event);
     }
 
