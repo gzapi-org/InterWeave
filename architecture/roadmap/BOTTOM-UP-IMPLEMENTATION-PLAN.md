@@ -1099,10 +1099,12 @@ the work:
 > inferring it. Turning `kad` on before the gate can admit a
 > behaviour-originated dial *through* `PolicySnapshot::admit` under
 > `DialOrigin::KademliaQuery` produces a subsystem whose every query dies
-> at the first hop it lacks a connection for, silently, because a refused
-> behaviour dial surfaces as an ordinary dial failure. Extend the gate
-> first; the spike's `PolicyAdmit` mode is a measured proposal, not
-> production code.
+> at the first hop it lacks a connection for, silently. (SPIKE-003 wrote
+> "surfaces as an ordinary dial failure"; SPIKE-004 measured that it
+> surfaces as nothing — the Swarm discards the denial of a
+> behaviour-originated dial, so Stage 11 owes a record at the gate.)
+> Extend the gate first; the spike's `PolicyAdmit` mode is a measured
+> proposal, not production code.
 
 Two more that reading the design would not predict. A **routing insertion
 starts one query nobody asked for**, and it dials — so the provider's

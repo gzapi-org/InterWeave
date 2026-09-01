@@ -94,7 +94,11 @@ cannot report success while its own output disproves this file.
 
 **F1 — a dial can be attributed to the behaviour that made it, and
 Stage 11 does not work without it.** Production's pending hook is handed
-a `ConnectionId`, an `Option<PeerId>` and nothing else; today it infers
+a `ConnectionId`, an `Option<PeerId>` and an address slice whose
+contents depend on the ORIGIN — empty for a Kademlia query, one
+candidate for a relay reservation (R2.9) or an AutoNAT dial-back
+(R4.10), and F2's pre-socket check needs that last one. **What none of
+them carries is which behaviour asked**, so the hook today infers
 `DialOrigin::KademliaQuery` because Kademlia is the only behaviour that
 can dial. `KademliaQuery.is_data_plane()` is true, and R3.2 shows a
 data-plane origin is refused for an infrastructure-only peer — so
