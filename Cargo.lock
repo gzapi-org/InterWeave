@@ -1717,6 +1717,8 @@ name = "interweave-kademlia-tests"
 version = "0.0.0"
 dependencies = [
  "futures",
+ "interweave-discovery-api",
+ "interweave-discovery-kademlia",
  "interweave-kademlia-control-api",
  "interweave-profile-identity",
  "interweave-transport-api",
