@@ -58,7 +58,17 @@ pub enum DiscoveryProviderType {
     Mdns,
     /// Operator-configured entries.
     StaticBootstrap,
-    /// Peer routing over a DHT. Not implemented until Stage 10.
+    /// Peer routing over a DHT.
+    ///
+    /// BUILT, AND NOT CONSTRUCTED. Stage 10 shipped the provider as
+    /// `crates/discovery/kademlia` with its driver in
+    /// `crates/transport/libp2p`; what does not exist is a composition
+    /// root that constructs one from an entry here, which is Stage 12.
+    /// `validate` therefore still refuses an enabled entry — for that
+    /// reason, and separately because ADR-0034's v1 release gate holds
+    /// shipping configured entries default-enabled until SPIKE-004.
+    /// This comment said "not implemented until Stage 10" through the
+    /// stage that implemented it.
     Kademlia,
 }
 

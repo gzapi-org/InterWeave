@@ -125,8 +125,8 @@ bs58 = { version = "0.5", default-features = false, features = ["std"] }
 brotli = { version = "8", default-features = false, features = ["std"] }
 # The libp2p substrate, one behaviour per stage. Stage 4 enabled TCP,
 # Noise, Yamux and Identify; Stage 6 added request-response for direct v2;
-# Stage 7 added GossipSub; Stage 10 adds Kademlia — the first autonomous
-# behaviour, and it lands only AFTER the root gate learned to admit
+# Stage 7 added GossipSub; Stage 10 added Kademlia — the first autonomous
+# behaviour, and it landed only AFTER the root gate learned to admit
 # behaviour-originated dials by policy, the order CLAUDE.md §3 requires.
 # AutoNAT, Relay and DCUtR remain absent
 # from the feature list rather than merely unused, so a stray `use` cannot
