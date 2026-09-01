@@ -232,7 +232,7 @@ must leave intact.
   observation, not a finding: the run does not distinguish a fixture
   race from crate behaviour, and nothing in this record depends on it.
 
-## Six fixture bugs this run found in itself
+## Seven fixture bugs this run found in itself
 
 Recorded because each one passed before it was caught, and each is the
 same shape a Stage 11 test could take.
@@ -270,7 +270,14 @@ same shape a Stage 11 test could take.
    peer, so D1 — a real defect in this project's policy — was recorded
    as evidence that the class split worked. A spike that asserts the
    current behaviour is correct cannot find a bug in it.
-6. **R4 trusted a peer that did not exist.** `Node::new` mints its own
+6. **The cleanup test could not fail either.** R2.10 was written with
+   a dial to a dead address, which the Swarm ACCEPTS — the gate saw it,
+   the note was consumed normally, and deleting the cleanup left the
+   observation green. Only a dial the Swarm refuses synchronously, on a
+   false `PeerCondition`, skips the hook; R2.11 establishes that
+   refusal before R2.10 counts. The second vacuous test in this PR
+   found by running the mutation rather than by reading it.
+7. **R4 trusted a peer that did not exist.** `Node::new` mints its own
    keypair; the fixture generated a separate one to name in the servers'
    allowlists, so the dial-back was refused as `Unauthorized` — which
    read as a finding about the crate and was a bug in the fixture.
@@ -282,7 +289,7 @@ cd spikes/spike-004/harness
 cargo run
 ```
 
-Exits 0 only when every required observation held — **30 of them**, and
+Exits 0 only when every required observation held — **32 of them**, and
 every finding above is carried by one rather than by a printed number.
 That is a review finding on PR #69, raised four times over: F3, F4, F6
 and F7 were each asserted in this file while the harness only noted the
@@ -305,6 +312,7 @@ The claims that carry the mechanism are mutation-checked:
 
 - deleting the `announce` call in `Attributing::poll` fails R2.6 and
   R2.7 (`unattributed: 1`);
+- deleting the `DialFailure` cleanup fails R2.10 with `after 1`;
 - R4.6/R4.7/R4.8 fail on a run where the probe reaches the wrong server,
   which is how the lucky-run bug above was caught;
 - adding the infrastructure peer to the data-plane allowlist fails all
