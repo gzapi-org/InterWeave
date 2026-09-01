@@ -2285,15 +2285,24 @@ pub async fn r12_dcutr_bounds(report: &mut Report) {
     // sees a hole-punch dial for a punch its own DCUtR may never
     // report, because the peer that reports the result is whichever
     // one's dial won.
+    // EXACTLY ONE END REPORTS, which is the shape the conclusion rests
+    // on. Review finding on PR #69: "fewer results than dials" is
+    // satisfied by two source dials, one destination dial and a result
+    // from each side — a run in which every node DOES learn its own
+    // attempt's outcome, and the conclusion that the cooldown cannot
+    // live at the gate would not follow. So the claim is the asymmetry
+    // itself: both ends dial, one reports, the other learns nothing.
+    let source_events = source.observed.details("dcutr").len();
+    let dest_events = dest.observed.details("dcutr").len();
     report.require(
         "R12.5",
-        source_dials > 0 && dest_dials > 0 && punches.len() < (source_dials + dest_dials) as usize,
+        source_dials > 0 && dest_dials > 0 && ((source_events > 0) != (dest_events > 0)),
         &format!(
             "BOTH ends dial for one punch (source {source_dials}, destination \
-             {dest_dials}) and fewer results are reported ({}) — so a gate cannot read \
-             \"one attempt\" off its own dial count, which is the shape §13's per-peer \
-             bound has to take",
-            punches.len()
+             {dest_dials}) and EXACTLY ONE reports the result (source {source_events}, \
+             destination {dest_events}) — so a node's own dial count tells it neither how \
+             many attempts are open nor whether one failed, which is why §13's bounds \
+             cannot be a gate counting dials"
         ),
     );
 

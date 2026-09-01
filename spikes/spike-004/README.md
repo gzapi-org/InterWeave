@@ -457,9 +457,12 @@ behaviour.
 **Not by the gate alone, though.** The gate is the only place that sees
 every dial, and R12.4 confirms every hole-punch dial arrives there
 attributed — but it is handed no logical attempt identifier and no
-outcome. A gate enforcing "one per peer" on dials would refuse its own
-attempt's sibling candidates; one enforcing the cooldown on dials would
-never learn that an attempt failed. The attempt lifecycle belongs to a
+outcome. R12.5 measures the asymmetry the conclusion rests on: both ends
+dial for one punch and EXACTLY ONE reports the result, so the other end
+never learns how its own attempt ended. A gate enforcing "one per peer"
+on dials would refuse its own attempt's sibling candidates; one
+enforcing the cooldown on dials would never learn that an attempt
+failed. The attempt lifecycle belongs to a
 DCUtR adapter, with a token for the attempt reaching the gate, which
 admits or refuses it as a unit.
 
@@ -623,7 +626,7 @@ claim owes now:
 | F9 reservations and withdrawal | R10.2/R10.3 (two relays, each recording its own acceptance), R10.5 (both addresses advertised), R10.9 (the loss was observed) and R10.10 (withdrawn within a second of it), R10.7 with R10.8 as the control (the survivor stays) |
 | F10 relay defaults vs §8 | R11.2/R11.3 (the two that break a deployment), R11.4 (the two that are looser), R11.1 and R11.5 record the rest |
 | F11 per-peer off-by-one | R11.7 (a ceiling of one admits two) with R11.9 as the control (the third is refused) |
-| F12 DCUtR bounds live at the gate | R12.4 with R12.9 (announced == resolved for the origin on both nodes, zero unattributed — every punch dial, not merely one) and R12.5 (both ends dial, fewer results are reported, so a dial count is not an attempt count) |
+| F12 DCUtR bounds are an adapter's, not the gate's | R12.4 with R12.9 (announced == resolved for the origin on both nodes, zero unattributed — every punch dial, not merely one) and R12.5 (both ends dial and EXACTLY ONE reports the result, so a node's dial count tells it neither how many attempts are open nor whether one failed) |
 | F13 §78's dedupe is ours | R12.7 (two `ConnectionEstablished` for one logical peer) with R12.8 and R12.10 (one relayed and one direct connection OPEN AT ONCE, by connection id and endpoint — not a peer present in a set) |
 | ADR-0036's relayed end-PeerId clause | R7.12 (the path went through the relay), R7.9/R7.10 (two distinct authenticated identities), R7.11 (Identify completed with the destination through the circuit) |
 | F3, again | R5.11 — no relay-behaviour dial targeted the destination, which origin counts alone cannot show |
