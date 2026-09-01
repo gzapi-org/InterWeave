@@ -608,7 +608,7 @@ cd spikes/spike-004/harness
 cargo run
 ```
 
-Exits 0 only when every required observation held — **79 of them**, and
+Exits 0 only when every required observation held — **82 of them**, and
 every finding above is carried by one rather than by a printed number.
 That is a review finding on PR #69, raised four times over: F3, F4, F6
 and F7 were each asserted in this file while the harness only noted the
@@ -637,7 +637,7 @@ claim owes now:
 | F13 §78's dedupe is ours | R12.7 (two `ConnectionEstablished` for one logical peer) with R12.8 and R12.10 (one relayed and one direct connection OPEN AT ONCE, by connection id and endpoint — not a peer present in a set) |
 | ADR-0036's relayed end-PeerId clause | R7.12 (the path went through the relay), R7.9/R7.10 (two distinct authenticated identities), R7.11 (Identify completed with the destination through the circuit) |
 | F3, again | R5.11 — no relay-behaviour dial targeted the destination, which origin counts alone cannot show |
-| F7 advertised control protocols | R1.6/R1.7: Identify arrived and names both. **Scoped**: the harness has no data-plane behaviours, so it says nothing about isolation |
+| F7 advertised control protocols | R1.6/R1.7 (Identify arrived and names all four) with R1.8 (and NOTHING else — the list is exact, since it is what a restriction must leave intact). **Scoped**: the harness has no data-plane behaviours, so it says nothing about isolation |
 
 The claims that carry the mechanism are mutation-checked:
 

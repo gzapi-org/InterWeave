@@ -107,16 +107,36 @@ pub async fn r1_crate_semantics(report: &mut Report) {
         !advertised.is_empty(),
         "Identify arrived, so the advertised protocol list was actually observed",
     );
-    for expected in [
+    // THE WHOLE LIST, not a subset. Review finding on PR #69: the
+    // README records F7 as an exact four-protocol set — it is the list
+    // a data-plane restriction must leave intact — while this loop
+    // checked two of them, so a run that dropped Identify's own
+    // protocols or gained an unexpected one exited 0 while
+    // contradicting the recorded evidence.
+    const EXPECTED_INFRASTRUCTURE_PROTOCOLS: [&str; 4] = [
+        "/ipfs/id/1.0.0",
+        "/ipfs/id/push/1.0.0",
         "/libp2p/autonat/2/dial-request",
         "/libp2p/circuit/relay/0.2.0/hop",
-    ] {
+    ];
+    for expected in EXPECTED_INFRASTRUCTURE_PROTOCOLS {
         report.require(
             "R1.7",
             advertised.iter().any(|p| p == expected),
             &format!("an infrastructure node advertises {expected}"),
         );
     }
+    report.require(
+        "R1.8",
+        advertised.len() == EXPECTED_INFRASTRUCTURE_PROTOCOLS.len()
+            && advertised
+                .iter()
+                .all(|p| EXPECTED_INFRASTRUCTURE_PROTOCOLS.contains(&p.as_str())),
+        &format!(
+            "and advertises NOTHING ELSE — F7's list is exact, because it is what a \
+             data-plane restriction must leave intact: {advertised:?}"
+        ),
+    );
 }
 
 /// R2 — every behaviour-originated dial is attributable.
@@ -2182,12 +2202,13 @@ pub async fn r12_dcutr_bounds(report: &mut Report) {
          upgrade rather than about nothing happening",
     );
 
-    // THE COUNTING PROBLEM. Every hole-punch dial is attributed and
-    // reaches the gate — which is F1's mechanism doing its job — but
-    // DCUtR dials every candidate address at once, so the gate sees
-    // several dials for one attempt toward one peer. A gate enforcing
-    // §13's "one per peer" by counting dials would refuse its own
-    // attempt partway through.
+    // THE COUNTING PROBLEM, as this run measures it. Every hole-punch
+    // dial is attributed and reaches the gate — F1's mechanism doing
+    // its job — but a gate counting dials still cannot enforce §13,
+    // because it is never told how an attempt ended: both ends dial and
+    // only one of them is told the result (R12.5). Candidate
+    // multiplicity is a second reason to expect the same and is NOT
+    // measured here; on loopback each endpoint dials once.
     let punch_dials = source
         .ledger
         .allowed_by_origin()
