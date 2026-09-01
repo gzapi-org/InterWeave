@@ -143,14 +143,18 @@ pub struct DiscoveryProviderSettings {
     // `architecture/config/examples/kademlia-enabled.yaml` fail to
     // deserialize, with a serde error about an unknown key. That error
     // arrives BEFORE `validate`, so the refusal an operator was meant to
-    // read ("this build does not include KademliaDiscovery; Stage 10 adds
-    // it") could never be reached, and a DISABLED kademlia entry — which
+    // read (a reasoned refusal naming the provider) could never be
+    // reached, and a DISABLED kademlia entry — which
     // is legal and is how an operator stages a profile ahead of the
     // build — was rejected outright.
     //
-    // So the schema is modelled now and consumed at Stage 10. Nothing
-    // here interprets a value; `validate` still refuses the provider when
-    // it is enabled.
+    // So the schema is modelled here and consumed by whatever
+    // constructs the provider. Stage 10 built the provider and did NOT
+    // reach that point: nothing composes it, so nothing consumes these
+    // values yet, and this file still interprets none of them.
+    // `validate` refuses the provider when it is enabled, and now for a
+    // reason that has moved — not "unbuilt" but "unconstructed, and not
+    // cleared to default on".
     /// `kademlia`: config schema version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_version: Option<u32>,
@@ -1683,10 +1687,20 @@ pub enum ConfigError {
         /// Which type.
         provider: &'static str,
     },
-    /// A provider is enabled that this build does not implement.
+    /// A provider is enabled that this build cannot run.
     ///
     /// Never a silent omission: the runtime must not start while leaving
     /// out a provider the operator turned on.
+    ///
+    /// NOT THE SAME AS "not implemented", and the name is now the weaker
+    /// claim of the two. Neither provider this refuses is missing:
+    /// `crates/discovery/kademlia` is complete and closed Stage 10, and
+    /// `crates/discovery/mdns` ships its normalization half. What each
+    /// lacks is different — Kademlia has no composition root to
+    /// construct it (Stage 12) and is separately held from shipping
+    /// default-enabled until SPIKE-004, while mDNS has no multicast
+    /// backend. Telling an operator to "use a build that does implement
+    /// it" sent them looking for a build that does not exist.
     DiscoveryProviderNotImplemented {
         /// Which type.
         provider: &'static str,
@@ -1857,7 +1871,7 @@ impl core::fmt::Display for ConfigError {
             ),
             Self::DiscoveryProviderNotImplemented { provider } => write!(
                 f,
-                "discovery provider '{provider}' is enabled but this build does not implement it; disable it or use a build that does"
+                "discovery provider '{provider}' is enabled but this build cannot run it; disable the entry"
             ),
             Self::TooManyStaticPeers { got } => write!(
                 f,
@@ -2676,7 +2690,8 @@ mod tests {
                     provider: "kademlia"
                 }
             )),
-            "Stage 10 implements it; enabling it now must fail loudly"
+            "Stage 10 built the provider and no stage has composed it; \
+             enabling it must still fail loudly"
         );
     }
 
