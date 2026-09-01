@@ -217,7 +217,10 @@ impl NetworkBehaviour for InstrumentedGate {
         // identity mismatch, a quarantine — because this hook runs once
         // the socket is open. A check that must PRECEDE contact, which
         // is every SSRF filter, cannot live here at all.
-        self.ledger.lock().established_addresses.push(addr.to_string());
+        self.ledger
+            .lock()
+            .established_addresses
+            .push(addr.to_string());
         Ok(dummy::ConnectionHandler)
     }
 

@@ -38,7 +38,9 @@ pub async fn r1_crate_semantics(report: &mut Report) {
     let server_peer_for_dial = server.peer_id;
     let mut client = Node::new(Roles::client(), &[server_id], &[]);
     let _ = client.listen().await;
-    client.dial(server_peer_for_dial, server_addr.clone()).expect("dial accepted");
+    client
+        .dial(server_peer_for_dial, server_addr.clone())
+        .expect("dial accepted");
 
     let server_peer = server.peer_id;
     let settled = {
@@ -268,8 +270,8 @@ pub async fn r2_dial_attribution(report: &mut Report) {
 /// traffic.
 pub fn r3_infrastructure_cannot_reach_the_data_plane(report: &mut Report) {
     use interweave_transport_api::TransportIdentity;
-    use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
     use interweave_transport_runtime::{ConnectionManager, TrustSources};
+    use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 
     let relay = TransportIdentity::parse(
         libp2p::identity::Keypair::generate_ed25519()
@@ -410,9 +412,7 @@ pub fn r3_infrastructure_cannot_reach_the_data_plane(report: &mut Report) {
         report.require(
             "R3.4",
             admitted,
-            &format!(
-                "{origin:?} is ADMITTED for a peer in both sets — data-plane trust wins"
-            ),
+            &format!("{origin:?} is ADMITTED for a peer in both sets — data-plane trust wins"),
         );
     }
 
@@ -489,8 +489,7 @@ pub async fn r4_autonat_server_dial_back(report: &mut Report) {
     {
         let mut nodes = [&mut client_a, &mut permissive];
         pump_until(&mut nodes, Duration::from_secs(20), |n| {
-            n[1]
-                .ledger
+            n[1].ledger
                 .allowed_by_origin()
                 .get("autonat-probe")
                 .copied()
@@ -547,8 +546,7 @@ pub async fn r4_autonat_server_dial_back(report: &mut Report) {
     // belong would rest on nothing.
     report.require(
         "R4.8",
-        strict.ledger.behaviour_originated() > 0
-            && strict.ledger.allowed_by_origin().is_empty(),
+        strict.ledger.behaviour_originated() > 0 && strict.ledger.allowed_by_origin().is_empty(),
         "an untrusting server's dial-back is made by the crate and REFUSED by its own root \
          gate, so the gate is a real decision point and not a pass-through",
     );
@@ -591,9 +589,7 @@ pub async fn r4_autonat_server_dial_back(report: &mut Report) {
     let server_pending = permissive.ledger.pending_address_counts();
     report.note(
         "R4.9",
-        format!(
-            "addresses at the AutoNAT server's PENDING hook, per dial: {server_pending:?}"
-        ),
+        format!("addresses at the AutoNAT server's PENDING hook, per dial: {server_pending:?}"),
     );
     report.require(
         "R4.10",
@@ -641,7 +637,9 @@ pub async fn r5_circuit_is_not_a_reservation(report: &mut Report) {
     let mut source = Node::new(Roles::client(), &[relay_id, dest_id], &[]);
     let _ = source.listen().await;
     source.add_relay(relay_peer);
-    source.swarm.add_peer_address(relay_peer, relay_addr.clone());
+    source
+        .swarm
+        .add_peer_address(relay_peer, relay_addr.clone());
 
     // WAIT ON THE RELAY, not on the destination. The relay is where a
     // reservation exists; the client's own event can lag it, and the
@@ -651,8 +649,7 @@ pub async fn r5_circuit_is_not_a_reservation(report: &mut Report) {
     {
         let mut nodes = [&mut dest, &mut relay_node, &mut source];
         pump_until(&mut nodes, Duration::from_secs(20), |n| {
-            n[1]
-                .observed
+            n[1].observed
                 .details("relay-server")
                 .iter()
                 .any(|d| d.contains("ReservationReqAccepted"))
@@ -796,14 +793,31 @@ pub async fn r5_circuit_is_not_a_reservation(report: &mut Report) {
 /// Every other experiment runs `InstrumentedGate`, which is the gate
 /// Stage 11 would have to build. Measuring a proposal proves the
 /// proposal works. This one puts `OutboundAdmission` — production, by
-/// path, unmodified — in front of a real relay client and records what
-/// it does.
+/// path, unmodified — in front of a real `relay::client::Behaviour`
+/// and records what it does.
 ///
 /// F1 is otherwise a chain of reading: the pending hook builds its
 /// `DialRequest` with `origin: DialOrigin::KademliaQuery`,
 /// `is_data_plane()` is true for it, and `ConnectionPolicy::admit`
 /// refuses a data-plane origin for a `ConnectivityInfrastructureOnly`
 /// peer. Three files. This runs the chain instead of arguing it.
+///
+/// # Why it is measured at the gate and not at the Swarm
+///
+/// The first version of this experiment watched `SwarmEvent` and saw
+/// nothing at all — no `Dialing`, no `OutgoingConnectionError` — and
+/// its control saw nothing either, so it could only be recorded as a
+/// fact about the fixture. It was not. `Swarm::dial` denies the dial,
+/// hands the behaviour `FromSwarm::DialFailure`, and returns `Err`;
+/// the caller for a behaviour-emitted dial is
+/// `if let Ok(()) = self.dial(opts)` (libp2p-swarm 0.47.1
+/// `lib.rs:1098`), which DISCARDS it. A policy refusal of a
+/// behaviour-originated dial is therefore invisible in the Swarm event
+/// stream, which is finding F8 and is asserted below in its own right.
+///
+/// So the instrument moved to where the decision is made:
+/// [`crate::production::Observing`] forwards every call to the real
+/// gate and records the verdict the real gate returned.
 pub async fn r6_production_gate_refuses_the_reservation(report: &mut Report) {
     use crate::production::ProductionNode;
 
@@ -812,26 +826,38 @@ pub async fn r6_production_gate_refuses_the_reservation(report: &mut Report) {
     let relay_id = relay_node.identity.clone();
     let relay_peer = relay_node.peer_id;
 
-    // The relay is authorized for reachability and nothing else, which
-    // is what a relay is under ADR-0036.
+    // THE SUBJECT: the relay is authorized for reachability and
+    // nothing else, which is what a relay is under ADR-0036.
     let mut node = ProductionNode::new(&[relay_id]);
-    let _ = node.listen().await;
-    node.swarm.add_peer_address(relay_peer, relay_addr.clone());
+    // THE CONTROL: identical in every way except the class the relay
+    // is authorized under. Built here, beside the subject, so a reader
+    // can see that the single difference is the trust set.
+    let mut control = ProductionNode::with_trust(&[relay_node.identity.clone()], &[]);
 
-    let circuit: Multiaddr = format!("{relay_addr}/p2p/{relay_peer}/p2p-circuit")
-        .parse()
-        .expect("a circuit address");
-    let listen = node.swarm.listen_on(circuit);
-    report.note("R6.6", format!("listen_on(circuit) -> {listen:?}"));
+    for target in [&mut node, &mut control] {
+        let _ = target.listen().await;
+        target
+            .swarm
+            .add_peer_address(relay_peer, relay_addr.clone());
+        let circuit: Multiaddr = format!("{relay_addr}/p2p/{relay_peer}/p2p-circuit")
+            .parse()
+            .expect("a circuit address");
+        let listen = target.swarm.listen_on(circuit);
+        assert!(
+            listen.is_ok(),
+            "the relay transport took the listen: {listen:?}"
+        );
+    }
 
-    // Drive both for long enough that the relay client would have
-    // reserved, had its dial been admitted.
+    // Drive all three for long enough that a reservation would have
+    // been made had the dial been admitted.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while tokio::time::Instant::now() < deadline {
         let _ = tokio::time::timeout(
             Duration::from_millis(50),
             futures::future::poll_fn(|cx| {
                 node.drain(cx);
+                control.drain(cx);
                 let mut progressed = false;
                 while let std::task::Poll::Ready(Some(_)) =
                     futures::StreamExt::poll_next_unpin(&mut relay_node.swarm, cx)
@@ -848,94 +874,150 @@ pub async fn r6_production_gate_refuses_the_reservation(report: &mut Report) {
         .await;
     }
 
-    report.note("R6.1", format!("production gate dial failures: {:?}", node.failures));
-    report.note("R6.5", format!("dial attempts the Swarm started: {}", node.dialing));
-    report.note("R6.7", format!("other events: {:?}", node.other.iter().take(6).collect::<Vec<_>>()));
+    let subject = node.decisions.all();
+    let control_decisions = control.decisions.all();
+    report.note(
+        "R6.1",
+        format!(
+            "production gate decisions, infrastructure-only relay: {:?}",
+            subject
+                .iter()
+                .map(|d| (d.connection_id, d.refusal.clone()))
+                .collect::<Vec<_>>()
+        ),
+    );
     report.note(
         "R6.2",
-        format!("production node connections established: {}", node.connected),
+        format!(
+            "production gate decisions, control (relay data-plane trusted): {:?}",
+            control_decisions
+                .iter()
+                .map(|d| (d.connection_id, d.refusal.clone()))
+                .collect::<Vec<_>>()
+        ),
     );
-
-    // THE CLAIM F1 RESTS ON. The reservation dial does not become a
-    // connection, and the refusal names the gate rather than the
-    // network — a distinction that matters, because "the relay was
-    // unreachable" and "our own policy refused it" look identical to an
-    // operator watching a peer that never connects.
-    // NOT A REQUIREMENT, because the control below fails too.
     report.note(
         "R6.3",
         format!(
-            "production-gate node connected to an infrastructure-only relay: {}",
-            node.connected
-        ),
-    );
-    // THE CONTROL, and it is what makes R6.3 mean anything. The same
-    // node, the same relay, the same addresses — the relay moved from
-    // the infrastructure set to the data-plane allowlist. If that one
-    // change lets the reservation through, the refusal was the CLASS
-    // and not the network, the addresses, or the fixture.
-    let mut trusted = ProductionNode::with_trust(&[relay_node.identity.clone()], &[]);
-    let _ = trusted.listen().await;
-    trusted.swarm.add_peer_address(relay_peer, relay_addr.clone());
-    let circuit2: Multiaddr = format!("{relay_addr}/p2p/{relay_peer}/p2p-circuit")
-        .parse()
-        .expect("a circuit address");
-    let _ = trusted.swarm.listen_on(circuit2);
-
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while tokio::time::Instant::now() < deadline {
-        let _ = tokio::time::timeout(
-            Duration::from_millis(50),
-            futures::future::poll_fn(|cx| {
-                trusted.drain(cx);
-                let mut progressed = false;
-                while let std::task::Poll::Ready(Some(_)) =
-                    futures::StreamExt::poll_next_unpin(&mut relay_node.swarm, cx)
-                {
-                    progressed = true;
-                }
-                if progressed {
-                    std::task::Poll::Ready(())
-                } else {
-                    std::task::Poll::Pending
-                }
-            }),
-        )
-        .await;
-    }
-    report.note(
-        "R6.8",
-        format!(
-            "control (relay data-plane trusted): connected={}, dialing={}, failures={:?}",
-            trusted.connected, trusted.dialing, trusted.failures
-        ),
-    );
-    report.require(
-        "R6.9",
-        trusted.connected == node.connected,
-        &format!(
-            "the control behaves identically to the subject ({} vs {}), so this experiment \
-             measures the FIXTURE rather than the trust class — and F1 still rests on \
-             reading the three files rather than on running them",
-            trusted.connected, node.connected
+            "swarm-visible: subject dialing={} connected={} failures={:?}; \
+             control dialing={} connected={} failures={:?}",
+            node.dialing,
+            node.connected,
+            node.failures,
+            control.dialing,
+            control.connected,
+            control.failures
         ),
     );
 
-    // WHAT THE RUN ACTUALLY SHOWS, with the control's verdict applied:
-    // this node starts no dial and reports no dial error, and the same
-    // is true when the relay is data-plane trusted. So it is a fact
-    // about the fixture. It is recorded because it is also the thing to
-    // chase next — if the finished experiment still shows no dial and
-    // no error, then a refused reservation is QUIETER than F1 assumed,
-    // which said it "surfaces as an ordinary dial failure".
+    // THE FIXTURE DIALS. Without this every claim below is vacuous:
+    // a relay client that never asked to dial would produce the same
+    // "no connection" outcome for reasons having nothing to do with
+    // the gate. This is the assertion the first version of R6 lacked,
+    // and lacking it is why it misread its own result.
     report.require(
         "R6.4",
-        node.dialing == 0
-            && !node.failures.iter().any(|f| f.contains("Denied")),
+        !subject.is_empty(),
         &format!(
-            "no dial started and no dial error reported (dialing {}, failures {:?}) — \
-             recorded as this fixture's behaviour, not as the gate's",
+            "the relay client originated a dial and the production gate was asked about it \
+             ({} decision(s))",
+            subject.len()
+        ),
+    );
+
+    // THE CLAIM F1 RESTS ON: the shipped gate refuses the reservation
+    // dial toward an infrastructure-only peer, and the refusal names
+    // Kademlia — the origin the hook assumed, for a dial no Kademlia
+    // made.
+    report.require(
+        "R6.5",
+        subject.iter().all(|d| d.refusal.is_some()) && !subject.is_empty(),
+        &format!(
+            "every reservation dial toward the infrastructure-only relay was refused: {:?}",
+            node.decisions.refusals()
+        ),
+    );
+    report.require(
+        "R6.6",
+        !node.decisions.refusals().is_empty()
+            && node
+                .decisions
+                .refusals()
+                .iter()
+                .all(|r| r.contains("kademlia")),
+        &format!(
+            "the refusal attributes the relay's dial to Kademlia, which is F1 in one string: \
+             {:?}",
+            node.decisions.refusals()
+        ),
+    );
+
+    // THE CONTROL, and it is what makes R6.5 mean anything. One change
+    // — the relay moved from the infrastructure set to the data-plane
+    // allowlist — and the same dial is admitted. So the refusal is the
+    // CLASS, not the network, the addresses or the fixture.
+    report.require(
+        "R6.7",
+        control.decisions.admissions() > 0,
+        &format!(
+            "control: the same dial is ADMITTED when the relay is data-plane trusted \
+             ({} admission(s), refusals {:?})",
+            control.decisions.admissions(),
+            control.decisions.refusals()
+        ),
+    );
+    report.require(
+        "R6.8",
+        control.connected > node.connected,
+        &format!(
+            "control reaches the relay and the subject does not ({} vs {} connection(s))",
+            control.connected, node.connected
+        ),
+    );
+
+    // F8 — THE REFUSAL IS SILENT. Not a divergence from an accepted
+    // document (no document promises otherwise) but a finding that
+    // binds Phase 1: the gate's own denial produces no `Dialing` and
+    // no `OutgoingConnectionError`, because the Swarm discards the
+    // `Err` from a behaviour-originated dial. The only outward trace
+    // is the relay client giving up on its listener — reported as a
+    // NORMAL close.
+    report.require(
+        "R6.9",
+        node.dialing == 0
+            && node
+                .failures
+                .iter()
+                .all(|f| !f.contains("Dial error") && !f.contains("Denied")),
+        &format!(
+            "a gate refusal of a behaviour dial emits no Dialing and no \
+             OutgoingConnectionError (dialing {}, swarm events {:?})",
             node.dialing, node.failures
+        ),
+    );
+    // THE POSITIVE CONTROL FOR F8, without which R6.9 is an assertion
+    // that nothing happened in a fixture where nothing happens. The
+    // control's dial is admitted and the Swarm reports it: one
+    // `Dialing`, one `ConnectionEstablished`. So the subject's silence
+    // is the refusal being invisible, not this node being unable to
+    // report a dial.
+    report.require(
+        "R6.11",
+        control.dialing == 1 && node.dialing == 0,
+        &format!(
+            "an ADMITTED behaviour dial is visible as `Dialing` and a REFUSED one is not              (control {} vs subject {})",
+            control.dialing, node.dialing
+        ),
+    );
+    report.require(
+        "R6.10",
+        node.failures
+            .iter()
+            .any(|f| f.contains("listener closed: Ok")),
+        &format!(
+            "the only outward trace of the refusal is the relay listener closing \
+             SUCCESSFULLY: {:?}",
+            node.failures
         ),
     );
 }

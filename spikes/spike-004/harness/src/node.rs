@@ -15,9 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use interweave_transport_api::TransportIdentity;
-use interweave_transport_runtime::{
-    ConnectionManager, ConnectionPolicy, DialOrigin, TrustSources,
-};
+use interweave_transport_runtime::{ConnectionManager, ConnectionPolicy, DialOrigin, TrustSources};
 use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::{Multiaddr, PeerId, Swarm, identify, identity, noise, relay, tcp, yamux};
@@ -100,10 +98,12 @@ pub struct SpikeBehaviour {
     /// FIRST, so every dial meets it before the transport does.
     pub gate: InstrumentedGate,
     pub identify: identify::Behaviour,
-    pub autonat_client:
-        libp2p::swarm::behaviour::toggle::Toggle<Attributing<libp2p::autonat::v2::client::Behaviour>>,
-    pub autonat_server:
-        libp2p::swarm::behaviour::toggle::Toggle<Attributing<libp2p::autonat::v2::server::Behaviour>>,
+    pub autonat_client: libp2p::swarm::behaviour::toggle::Toggle<
+        Attributing<libp2p::autonat::v2::client::Behaviour>,
+    >,
+    pub autonat_server: libp2p::swarm::behaviour::toggle::Toggle<
+        Attributing<libp2p::autonat::v2::server::Behaviour>,
+    >,
     pub relay_client:
         libp2p::swarm::behaviour::toggle::Toggle<Attributing<relay::client::Behaviour>>,
     pub relay_server: libp2p::swarm::behaviour::toggle::Toggle<relay::Behaviour>,
@@ -139,8 +139,7 @@ impl Node {
     ) -> Self {
         let keypair = identity::Keypair::generate_ed25519();
         let peer_id = PeerId::from_public_key(&keypair.public());
-        let identity_str =
-            TransportIdentity::parse(peer_id.to_base58()).expect("canonical PeerId");
+        let identity_str = TransportIdentity::parse(peer_id.to_base58()).expect("canonical PeerId");
 
         // CEILINGS SET EXPLICITLY. `ConnectionPolicy::default()`
         // carries `max_pending_dials: 0` and `max_connections: 0`, and
@@ -251,7 +250,6 @@ impl Node {
             .expect("behaviour")
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(30)))
             .build();
-
 
         Self {
             swarm,

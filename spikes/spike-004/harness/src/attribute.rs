@@ -44,13 +44,13 @@ use std::task::{Context, Poll};
 
 use interweave_transport_runtime::DialOrigin;
 use libp2p::Multiaddr;
+use libp2p::PeerId;
 use libp2p::core::Endpoint;
 use libp2p::core::transport::PortUse;
 use libp2p::swarm::{
     ConnectionDenied, ConnectionId, FromSwarm, NetworkBehaviour, THandler, THandlerInEvent,
     THandlerOutEvent, ToSwarm,
 };
-use libp2p::PeerId;
 
 /// What each behaviour-originated dial was for, keyed by the
 /// `ConnectionId` the originating behaviour minted.
@@ -98,11 +98,7 @@ impl Attribution {
         inner.notes.insert(id, origin);
         *inner.announced.entry(label(origin)).or_insert(0) += 1;
         if let Some(peer) = peer {
-            inner
-                .targets
-                .entry(label(origin))
-                .or_default()
-                .push(peer);
+            inner.targets.entry(label(origin)).or_default().push(peer);
         }
     }
 
@@ -289,7 +285,8 @@ impl<B: NetworkBehaviour> NetworkBehaviour for Attributing<B> {
         local: &Multiaddr,
         remote: &Multiaddr,
     ) -> Result<(), ConnectionDenied> {
-        self.inner.handle_pending_inbound_connection(id, local, remote)
+        self.inner
+            .handle_pending_inbound_connection(id, local, remote)
     }
 
     fn handle_pending_outbound_connection(

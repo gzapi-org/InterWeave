@@ -65,10 +65,7 @@ fn record(node: &mut Node, event: SwarmEvent<SpikeBehaviourEvent>) {
             seen.events.push(("connection-closed", peer_id.to_string()));
         }
         SwarmEvent::OutgoingConnectionError { error, peer_id, .. } => {
-            *seen
-                .dial_failures
-                .entry(format!("{error}"))
-                .or_insert(0) += 1;
+            *seen.dial_failures.entry(format!("{error}")).or_insert(0) += 1;
             seen.events
                 .push(("dial-failed", format!("{peer_id:?}: {error}")));
         }
@@ -152,7 +149,11 @@ pub async fn pump(nodes: &mut [&mut Node], budget: Duration) {
                         progressed = true;
                     }
                 }
-                if progressed { Poll::Ready(()) } else { Poll::Pending }
+                if progressed {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
             }),
         )
         .await;

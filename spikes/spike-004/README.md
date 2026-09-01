@@ -60,15 +60,32 @@ root gate", full stop, while no source file referenced
 `interweave-transport-libp2p` at all: the dependency was declared and
 unused. A review caught it.
 
-`R6` now runs the real `OutboundAdmission` in front of a real relay
-client, so the comparison exists. **It does not yet work**: the relay
-client never dials under that fixture, with or without data-plane trust,
-so R6 measures the fixture rather than the class. Its control is the
-only reason that is written here instead of as "measured: the
-production gate refuses the reservation" — which would have been a
-false finding, and a confident one. Finishing R6 is the next phase-A
-experiment, and until it does, **F1 rests on reading three files rather
-than on running them.**
+**`R6` closes that gap.** It runs the real `OutboundAdmission`,
+unmodified and by path, in front of a real `relay::client::Behaviour`,
+and measures what the shipped gate answers when the relay client asks
+to dial its relay. With the relay authorized as infrastructure only the
+gate refuses — `kademlia dial refused: NotAuthorizedForDataPlane`, for a
+dial no Kademlia made. Move that same relay into the data-plane
+allowlist, change nothing else, and the identical dial is admitted and
+connects. F1 is measured, not read.
+
+Getting there took two corrections worth recording, because both are
+the same mistake in different clothes — **an experiment whose subject
+and control agree tells you about your fixture, not about your
+subject**:
+
+- The first version watched `SwarmEvent` and saw nothing: no dial, no
+  error, in either configuration. Written up as "the relay client never
+  dials", which was false. It dialled every time; the refusal is simply
+  invisible from outside (F8), so the instrument had to move to where
+  the decision is made.
+- With the instrument moved, both configurations refused with
+  `PolicySuperseded` — because `ProductionNode` dropped its
+  `ConnectionManager` after taking a handle, and
+  `SnapshotHandle::is_current` upgrades a weak reference to the manager
+  and refuses when it is gone. Production is right to do that and has
+  two tests pinning it; the harness was wrong. Holding the manager is
+  what let the control separate from the subject.
 
 `cargo run` exits non-zero if any required observation is false, so it
 cannot report success while its own output disproves this file.
@@ -83,7 +100,14 @@ can dial. `KademliaQuery.is_data_plane()` is true, and R3.2 shows a
 data-plane origin is refused for an infrastructure-only peer — so
 without attribution **every relay reservation and every AutoNAT probe
 would be refused against exactly the infrastructure the stack exists to
-use.** Fails closed, silently, as an ordinary dial failure.
+use.** R6 runs that: the shipped gate refuses a real relay client's
+reservation dial toward an infrastructure-only relay with `kademlia
+dial refused: NotAuthorizedForDataPlane`, and admits the same dial when
+the only change is the relay's trust class (R6.5–R6.8).
+
+It fails closed and it fails **silently** — not "as an ordinary dial
+failure", which an earlier version of this sentence claimed and which
+would at least have been visible. See F8.
 
 The mechanism that works: a wrapper behaviour announces
 `ConnectionId -> DialOrigin` from the originating behaviour's own
@@ -232,6 +256,54 @@ establishes is narrower and still useful: the control protocols an
 infrastructure peer advertises to US, which is the list a restriction
 must leave intact.
 
+**F8 — a gate refusal of a behaviour-originated dial is INVISIBLE, and
+Stage 11 must make it observable.** The Swarm's handling of a
+behaviour-emitted dial is `if let Ok(()) = self.dial(opts)`
+(libp2p-swarm 0.47.1, `lib.rs:1098`). `Swarm::dial` builds
+`DialError::Denied`, notifies the behaviour via `FromSwarm::DialFailure`
+and returns it — and that `Err` is **discarded**. So a dial our own
+policy refuses produces no `SwarmEvent::Dialing` and no
+`SwarmEvent::OutgoingConnectionError`.
+
+Precisely: the *originating behaviour* is told, via
+`FromSwarm::DialFailure`, and reacts in its own terms. Nothing outside
+that behaviour is told anything. So the refusal reaches an observer only
+translated into whatever the behaviour does next — a Kademlia query that
+fails, a relay listener that closes — with the policy that caused it
+nowhere in the report.
+
+R6.9 measures the absence and R6.11 is its positive control: the same
+node, with the relay data-plane trusted, reports exactly one `Dialing`.
+So the silence is the refusal, not a fixture that cannot report dials.
+
+In R6 that translation is the relay client giving up on its listener —
+reported as `ListenerClosed { reason: Ok(()) }`, a **successful** close
+(R6.10). An operator watching a node that never obtains a reservation
+sees a normal shutdown of a listener they did not ask to shut down.
+
+This also corrects a sentence SPIKE-003 wrote and this plan repeated:
+that a refused behaviour dial "surfaces as an ordinary dial failure".
+For Kademlia it surfaces as a failed *query*, which is close enough to
+be misleading; as an `OutgoingConnectionError` it does not surface at
+all. The distinction matters because the remedy differs — a dial error
+an operator can read names an address, and this names nothing.
+
+Two smaller edges of the same finding:
+
+- `DialError::Denied`'s `Display` is the bare string `"Dial error"` —
+  the `print_error_chain` the other variants use is not reached for it.
+- `ConnectionDenied`'s `Display` is `"connection denied"`. Everything
+  `OutboundAdmission` writes about *why* — `kademlia dial refused:
+  NotAuthorizedForDataPlane` — lives in `Error::source`, so a refusal
+  logged the obvious way says nothing. R6 walks the chain deliberately;
+  that it must is part of this finding.
+
+**What binds Stage 11**: attribution (F1) removes the wrong refusals,
+but a right refusal is just as silent. The stage owes an explicit
+record at the gate — the pending hook already has the
+`ConnectionId`, the peer and the verdict — because neither the Swarm
+event stream nor the rendered error carries it.
+
 ## Stated limits
 
 - **Loopback only.** No NAT of any kind. Every DCUtR observation here is
@@ -254,7 +326,7 @@ must leave intact.
   observation, not a finding: the run does not distinguish a fixture
   race from crate behaviour, and nothing in this record depends on it.
 
-## Seven fixture bugs this run found in itself
+## Nine fixture bugs this run found in itself
 
 Recorded because each one passed before it was caught, and each is the
 same shape a Stage 11 test could take.
@@ -303,6 +375,23 @@ same shape a Stage 11 test could take.
    keypair; the fixture generated a separate one to name in the servers'
    allowlists, so the dial-back was refused as `Unauthorized` — which
    read as a finding about the crate and was a bug in the fixture.
+8. **R6 watched the wrong place and wrote up the silence as a
+   finding.** The first version measured `SwarmEvent` and concluded
+   "the relay client never dials", because a refused behaviour dial
+   emits nothing (F8). It dialled on every run. Only its control saved
+   it: subject and control were identical, so the result had to be
+   recorded as a fact about the fixture rather than about the gate. An
+   experiment whose control agrees with its subject has measured
+   neither.
+9. **R6 then refused everything, for a reason unrelated to trust.**
+   `ProductionNode` took a `SnapshotHandle` and dropped the
+   `ConnectionManager`; `is_current` upgrades a weak reference to the
+   manager and refuses when it is gone, so every dial was
+   `PolicySuperseded` and subject and control agreed *again* — this
+   time with the instrument in the right place. Production's behaviour
+   here is deliberate and pinned by
+   `a_handle_that_outlives_its_manager_admits_nothing`. The node now
+   holds its manager, and R6.7/R6.8 fail if it stops.
 
 ## Reproducing
 
@@ -311,7 +400,7 @@ cd spikes/spike-004/harness
 cargo run
 ```
 
-Exits 0 only when every required observation held — **34 of them**, and
+Exits 0 only when every required observation held — **40 of them**, and
 every finding above is carried by one rather than by a printed number.
 That is a review finding on PR #69, raised four times over: F3, F4, F6
 and F7 were each asserted in this file while the harness only noted the
@@ -321,6 +410,8 @@ claim owes now:
 | Finding | What must hold |
 | --- | --- |
 | F1 attribution | R2.6–R2.8: zero unattributed, resolved AS `RelayReservation` |
+| F1 why it is needed | R6.4–R6.8: the SHIPPED gate refuses a real relay client's reservation dial as `NotAuthorizedForDataPlane`, and admits it when the relay's trust class is the only thing changed |
+| F8 the refusal is silent | R6.9 (no `Dialing`, no `OutgoingConnectionError`), R6.11 (the admitted dial IS reported — the positive control), R6.10 (the only trace is a listener closing successfully) |
 | F2 dial-back crosses the gate | R4.6–R4.8: admitted as `AutonatProbe`, the probe completed, and an untrusting server's is REFUSED |
 | F3 circuit is command-path | R5.6, with R5.8/R5.9 (the dial happened and was attributed) and R5.11 (the behaviour dialled only the relay). **Scoped**: R5.12 records that no circuit completed here, so this is evidence about the dial that OPENS a circuit, not the lifecycle |
 | F2 where the check runs | R4.10: the candidate is at the pending hook, before any socket |
@@ -341,3 +432,18 @@ The claims that carry the mechanism are mutation-checked:
   four R3.2 refusals with `got None` — which is ADR-0036's precedence
   rule from the other side, and is now also asserted in its own right by
   R3.4 rather than existing only as a mutation someone ran by hand.
+
+R6's four, run as a batch, each asserting the patch applied before
+trusting the result:
+
+| Mutation | Fails |
+| --- | --- |
+| subject's relay moved to the data-plane allowlist | R6.5, R6.8, R6.9, R6.10, R6.11 |
+| control's relay moved to the infrastructure set | R6.7, R6.8, R6.11 |
+| `ProductionNode` drops its `ConnectionManager` (bug 9, reintroduced) | R6.7, R6.8, R6.11 |
+| the circuit listen removed, so nothing dials | R6.4, R6.5, R6.7, R6.8, R6.10, R6.11 |
+
+The first mutation is the one worth reading: it leaves R6.6 passing,
+because with no refusal at all `refusals().iter().all(..)` is vacuously
+true. R6.6 now requires the list to be non-empty as well, so it stands
+without leaning on R6.5.
