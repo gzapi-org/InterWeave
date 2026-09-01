@@ -203,9 +203,20 @@ impl NetworkBehaviour for InstrumentedGate {
         _role: Endpoint,
         _port: PortUse,
     ) -> Result<THandler<Self>, ConnectionDenied> {
-        // WHERE THE ADDRESS EXISTS. The pending hook is handed an empty
-        // list for a behaviour dial (F9), so an address-scoped decision
-        // can only be made here. Recorded rather than asserted.
+        // THE ADDRESS THE SWARM ACTUALLY USED, which is not the same
+        // question as the one the pending hook can answer.
+        //
+        // An earlier version said the pending hook gets an empty list
+        // for a behaviour dial (SPIKE-003's F9) and therefore every
+        // address-scoped decision belongs here. That generalised from
+        // Kademlia: R2.9 and R4.10 measure one address at the pending
+        // hook for a relay reservation and an AutoNAT dial-back, and
+        // the pending hook below now passes it to the policy.
+        //
+        // What belongs HERE is a check that may run after contact — an
+        // identity mismatch, a quarantine — because this hook runs once
+        // the socket is open. A check that must PRECEDE contact, which
+        // is every SSRF filter, cannot live here at all.
         self.ledger.lock().established_addresses.push(addr.to_string());
         Ok(dummy::ConnectionHandler)
     }

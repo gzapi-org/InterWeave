@@ -1337,14 +1337,15 @@ they bite:
   DCUtR without it means every reservation and probe is refused as
   `KademliaQuery` against the infrastructure the stack needs — silently,
   as an ordinary dial failure. This is the same shape as SPIKE-003's
-  "do not begin by enabling the feature", and it is why step 1 below is
-  not step 1 any more.
+  "do not begin by enabling the feature", and it is why the ordered list
+  below now begins with attribution rather than with AutoNAT.
 - **`AUTONAT.md` §7 is not implemented by the crate**, and the check
   must run at the PENDING hook: the established hook runs after the
   socket is open, which is after the target has been contacted.
 - **D1 is a defect in already-shipped code**, not in this stage's work:
   `DcutrHolePunch` is admitted for a `ConnectivityInfrastructureOnly`
-  peer, which ADR-0036's matrix forbids. Resolve it before step 6.
+  peer, which ADR-0036's matrix forbids. It is step 2 of the list below,
+  before DCUtR is built rather than after.
 
 Server-mode reachability evidence for ADR-0034's v1 release gate — the
 item SPIKE-003 could not supply — is still outstanding and belongs to
@@ -1354,14 +1355,30 @@ the libp2p feature list.
 
 ### Implement in this order
 
-1. AutoNAT v2 client;
-2. AutoNAT v2 server role;
-3. Circuit Relay v2 client reservations;
-4. Relay server role;
-5. relayed inbound/outbound peer paths;
-6. DCUtR;
-7. direct-versus-relayed path preference/stability;
-8. network-change invalidation/recovery.
+**Steps 1 and 2 are SPIKE-004's, and they come before any behaviour is
+enabled.** The list below used to begin at what is now step 3, and
+following it would have enabled a dialling behaviour while every
+unticketed dial was still classified `KademliaQuery` — refused, as a
+data-plane origin, against the infrastructure the stage exists to use.
+
+1. **dial attribution**: every behaviour-originated dial reaches the
+   root gate under its own `DialOrigin`, and the map that carries it
+   drops a note for a dial the Swarm refuses before the pending hook;
+   `GatedSwarm::dial` sets `RelayCircuit` from the address, since the
+   transport rather than the behaviour dials a circuit;
+2. **resolve D1**: `DcutrHolePunch` is admitted for a
+   `ConnectivityInfrastructureOnly` peer and ADR-0036's matrix forbids
+   it. Before DCUtR is built, not after;
+3. AutoNAT v2 client;
+4. AutoNAT v2 server role — including `AUTONAT.md` §7's dial-back
+   restriction, which the crate does not implement, at the PENDING hook
+   because the established one runs after the target is contacted;
+5. Circuit Relay v2 client reservations;
+6. Relay server role;
+7. relayed inbound/outbound peer paths;
+8. DCUtR;
+9. direct-versus-relayed path preference/stability;
+10. network-change invalidation/recovery.
 
 ### Mandatory invariants
 
