@@ -245,13 +245,29 @@ impl NetworkBehaviour for InstrumentedGate {
         let identity = TransportIdentity::parse(target.to_base58())
             .expect("a libp2p PeerId is a canonical identity");
 
+        // THE ADDRESS, WHEN THERE IS ONE. Review finding on PR #69:
+        // this discarded it and said it "does not exist yet at this
+        // hook" — true of a Kademlia dial (SPIKE-003's F9) and false of
+        // the two this spike measures. R2.9 requires a relay
+        // reservation to arrive with exactly one address here, and
+        // R4.10 requires the same of an AutoNAT dial-back.
+        //
+        // That distinction is the whole of F2's correction. A check
+        // that must precede contact — an SSRF filter on a
+        // requester-supplied target — can only run at THIS hook,
+        // because the established one runs after the socket is open.
+        // A gate that threw the address away here could not host one.
+        //
+        // Empty when the list is empty, which is honest rather than
+        // convenient: the policy's address-scoped rules then have
+        // nothing to match, and the established hook re-asks with the
+        // address the Swarm actually used.
         let request = DialRequest {
             peer: Some(identity),
-            // EMPTY ON PURPOSE, and it is what F9 is about: the address
-            // does not exist yet at this hook, so a placeholder is
-            // honest and `handle_established_outbound_connection` is
-            // where the address-scoped question gets asked.
-            address: String::new(),
+            address: addresses
+                .first()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
             origin,
         };
 
