@@ -252,6 +252,41 @@ PeerId, separately from the relay's, with Identify completing through
 the circuit (R7.9–R7.12). The rule "evaluate the end PeerId" is
 decidable here because the end PeerId is what arrives.
 
+**D3 — a relayed inbound connection is charged to a bucket the attacker
+names.** `contracts/CONNECTIVITY.md` §10 requires charging the
+authenticated relay transport connection and relay PeerId, plus the
+global caps, and says the destination *"MUST NOT create unbounded
+pseudo-source buckets from circuit metadata."*
+
+R8 measured what the destination is handed before Noise: a remote of
+`/p2p/<source>` — no IP anywhere (R8.4) — with the relay's PeerId sitting
+in the LOCAL address (R8.5). R9 then calls the shipped
+`PreAuthAdmission`'s own `handle_pending_inbound_connection` with exactly
+those shapes. `source_label` returns a multiaddr as written when it
+holds no IP, so the bucket is `/p2p/<source>`: **one bucket per source
+identity, over one relay connection, and identities are free to mint.**
+The relay's PeerId is right there in the local address and is not read.
+
+The control is what makes it a finding rather than an observation
+(R9.2): two DIRECT inbounds from one IP, same gate, same
+`max_pending_per_source: 1` — the second is refused. The ceiling works.
+The relayed pair escapes it. R9.4 measures what is left: the global
+`max_pending_total` still holds at 8 of 32, so this is the bucket's
+granularity failing, not the absence of any bound.
+
+**Not reachable in a shipped build today** — no relay feature is
+compiled, so no relayed inbound can arrive — and live the moment Phase 4
+lands. That is why it is recorded against the code rather than against
+the stage, exactly as D1 is.
+
+**And the comment above `source_label` argues the opposite**, naming the
+relayed case and calling it "the fail-closed direction … it cannot merge
+two peers into one bucket, only fail to merge two addresses that belong
+together." That reasoning is right for the memory transport and wrong
+here: §10's risk is not merging, it is proliferation. An unenforced
+claim about a case nobody had run — which is the shape this repository's
+own rule about comments is written against.
+
 **F6 — the infrastructure/data-plane split holds against the real
 policy, in both directions.** R3 asks the production
 `ConnectionManager::admit` for one peer authorized ONLY as
@@ -352,10 +387,14 @@ event stream nor the rendered error carries it.
 - Reservation lifecycle, DCUtR bounds, relayed pre-auth accounting and
   relayed end-PeerId trust are **not yet covered** by this phase-A run;
   they are reachable on loopback and are the next experiments to add.
-- **Relayed pre-auth accounting, reservation lifecycle and DCUtR
-  bounds are not yet covered** by this phase-A run; they are reachable
-  on loopback now that a circuit completes, and are the next
-  experiments to add.
+- **Reservation lifecycle and DCUtR bounds are not yet covered** by
+  this phase-A run — obtain, refresh, expiry and withdrawal, and the
+  hole-punch attempt bounds and cooldown. Both are reachable on
+  loopback and are the next experiments to add.
+- **Inbound admission is not gated here, only recorded.** R8's hooks
+  observe; nothing refuses. The production gate is outbound-only and
+  Stage 11 must build the inbound side, so R8's numbers say what a
+  decision COULD read, never that one was made.
 
 ## Ten fixture bugs this run found in itself
 
@@ -444,7 +483,7 @@ cd spikes/spike-004/harness
 cargo run
 ```
 
-Exits 0 only when every required observation held — **52 of them**, and
+Exits 0 only when every required observation held — **62 of them**, and
 every finding above is carried by one rather than by a printed number.
 That is a review finding on PR #69, raised four times over: F3, F4, F6
 and F7 were each asserted in this file while the harness only noted the
@@ -463,6 +502,9 @@ claim owes now:
 | F6 class split and precedence | R3.1/R3.2 by denial REASON, and R3.4 flips all four when the peer is in both sets |
 | D1 DCUtR divergence | R3.5 pins today's behaviour, so a fix fails here rather than passing silently |
 | D2 relayed-circuit divergence | R7.4 pins today's behaviour, R7.5 is the control (same destination, data-plane origin, refused), R7.2 shows the class check runs on the destination at all |
+| D3 relayed pre-auth bucket | R9.3 pins today's behaviour, R9.2 is the control (direct inbounds from one IP — the second refused), R9.4 shows the global cap is what remains |
+| §10's premise and its capability | R8.4 (no source IP on a relayed remote), R8.5 (the relay's PeerId IS available at the pending hook), R8.7 the control (a direct inbound does carry an IP), R8.8 (the two are distinguishable there) |
+| ADR-0036's inbound relayed clause | R8.9/R8.10: the destination's established hook names the SOURCE's authenticated PeerId on a relayed local address, and never the relay's |
 | ADR-0036's relayed end-PeerId clause | R7.12 (the path went through the relay), R7.9/R7.10 (two distinct authenticated identities), R7.11 (Identify completed with the destination through the circuit) |
 | F3, again | R5.11 — no relay-behaviour dial targeted the destination, which origin counts alone cannot show |
 | F7 advertised control protocols | R1.6/R1.7: Identify arrived and names both. **Scoped**: the harness has no data-plane behaviours, so it says nothing about isolation |
@@ -496,6 +538,26 @@ R7's three:
 | the infrastructure-only destination added to the data-plane allowlist too | R7.5 |
 | the source stops trusting the destination | R7.6, R7.8, R7.9, R7.10, R7.11, R7.12 |
 | the circuit dial announced as `Manual` rather than `RelayCircuit` | R7.8 |
+
+R8's three and R9's three:
+
+| Mutation | Fails |
+| --- | --- |
+| the destination never listens on the circuit | R8.3, R8.4, R8.5, R8.8, R8.9, R8.10 |
+| the direct control node never dials | *nothing* — see below |
+| the destination stops trusting the source | *nothing* — see below |
+| the relayed remote address carries an IP after all | R9.3, R9.4 |
+| per-source ceiling raised to two | R9.2 |
+| global ceiling lowered to four | R9.4 |
+
+**Two of R8's mutations changed nothing, and both are worth stating.**
+The separate direct-control node is redundant: DCUtR upgrades the
+relayed path on loopback, so a direct inbound from the *same* peer pair
+arrives anyway — a better control than the one written, since only the
+path differs. And the destination refusing to trust the source changes
+nothing because **nothing gates inbound here**: the harness gate records
+and the production gate is outbound-only. R8 measures what an inbound
+decision could read, never a decision.
 
 The second is the one that matters: it shows the relayed observations
 depend on the END peer's class, since removing that one trust entry

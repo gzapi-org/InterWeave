@@ -63,6 +63,14 @@ struct LedgerInner {
     pending_address_counts: Vec<usize>,
     /// Addresses seen at the ESTABLISHED hook, where they do exist.
     established_addresses: Vec<String>,
+    /// `(local, remote)` as the PENDING INBOUND hook was handed them —
+    /// the only pre-authentication view of an arriving connection, and
+    /// therefore the only place `CONNECTIVITY.md` §10's pre-Noise
+    /// accounting can key on anything.
+    pending_inbound: Vec<(String, String)>,
+    /// `(peer, local, remote)` once the remote identity is
+    /// authenticated.
+    established_inbound: Vec<(String, String, String)>,
 }
 
 impl DialLedger {
@@ -98,6 +106,16 @@ impl DialLedger {
     #[must_use]
     pub fn established_addresses(&self) -> Vec<String> {
         self.lock().established_addresses.clone()
+    }
+
+    #[must_use]
+    pub fn pending_inbound(&self) -> Vec<(String, String)> {
+        self.lock().pending_inbound.clone()
+    }
+
+    #[must_use]
+    pub fn established_inbound(&self) -> Vec<(String, String, String)> {
+        self.lock().established_inbound.clone()
     }
 }
 
@@ -185,13 +203,36 @@ impl NetworkBehaviour for InstrumentedGate {
     type ConnectionHandler = dummy::ConnectionHandler;
     type ToSwarm = std::convert::Infallible;
 
+    /// RECORDED, not decided. Pre-authentication admission is a
+    /// separate mechanism from the dial gate and Stage 11 does not
+    /// build it here; what this hook can answer is the question
+    /// `CONNECTIVITY.md` §10 turns on — what an arriving relayed
+    /// connection actually presents before anything is authenticated.
+    fn handle_pending_inbound_connection(
+        &mut self,
+        _id: ConnectionId,
+        local: &Multiaddr,
+        remote: &Multiaddr,
+    ) -> Result<(), ConnectionDenied> {
+        self.ledger
+            .lock()
+            .pending_inbound
+            .push((local.to_string(), remote.to_string()));
+        Ok(())
+    }
+
     fn handle_established_inbound_connection(
         &mut self,
         _id: ConnectionId,
-        _peer: PeerId,
-        _local: &Multiaddr,
-        _remote: &Multiaddr,
+        peer: PeerId,
+        local: &Multiaddr,
+        remote: &Multiaddr,
     ) -> Result<THandler<Self>, ConnectionDenied> {
+        self.ledger.lock().established_inbound.push((
+            peer.to_string(),
+            local.to_string(),
+            remote.to_string(),
+        ));
         Ok(dummy::ConnectionHandler)
     }
 

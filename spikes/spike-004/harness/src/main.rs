@@ -35,6 +35,8 @@ async fn main() {
     experiments::r5_circuit_is_not_a_reservation(&mut report).await;
     experiments::r6_production_gate_refuses_the_reservation(&mut report).await;
     experiments::r7_relayed_path_trust(&mut report).await;
+    experiments::r8_relayed_inbound_accounting(&mut report).await;
+    experiments::r9_relayed_preauth_bucket(&mut report).await;
 
     print!("{}", report.render());
 

@@ -1321,3 +1321,364 @@ pub async fn r7_relayed_path_trust(report: &mut Report) {
         ),
     );
 }
+
+/// R8 — what a relayed inbound connection presents before anything is
+/// authenticated.
+///
+/// `contracts/CONNECTIVITY.md` §10 requires relayed pre-Noise resource
+/// use to be charged to the relay connection and the relay's PeerId
+/// plus the global caps, explicitly NOT to a pseudo-source bucket. That
+/// rule rests on a premise about the wire — that an arriving relayed
+/// connection carries no original source IP — and on a capability —
+/// that the receiver can tell a relayed connection from a direct one,
+/// and name its relay, at the moment it must decide.
+///
+/// Both are measurable here, and the second is the one a design would
+/// not tell you: `handle_pending_inbound_connection` runs before Noise,
+/// so whatever it is handed is all the accounting can key on.
+pub async fn r8_relayed_inbound_accounting(report: &mut Report) {
+    let mut relay_node = Node::new(Roles::infrastructure(), &[], &[]);
+    let relay_addr = relay_node.listen().await;
+    relay_node.swarm.add_external_address(relay_addr.clone());
+    let relay_id = relay_node.identity.clone();
+    let relay_peer = relay_node.peer_id;
+
+    let mut dest = Node::new(Roles::client(), &[], &[]);
+    let dest_direct = dest.listen().await;
+    let dest_peer = dest.peer_id;
+    let dest_id = dest.identity.clone();
+    dest.add_relay(relay_peer);
+    dest.swarm.add_peer_address(relay_peer, relay_addr.clone());
+    let circuit = circuit_addr(&relay_addr, &relay_peer);
+    let _ = dest.swarm.listen_on(circuit.clone());
+
+    let mut source = Node::new(Roles::client(), &[], &[]);
+    source.set_trust_sets(&[dest_id.clone()], &[relay_id]);
+    let _ = source.listen().await;
+    let source_peer = source.peer_id;
+    source.add_relay(relay_peer);
+    source
+        .swarm
+        .add_peer_address(relay_peer, relay_addr.clone());
+    // The destination must accept the source over the circuit; it is
+    // the relay it holds as infrastructure.
+    dest.set_trust_sets(&[source.identity.clone()], &[relay_node.identity.clone()]);
+
+    {
+        let mut nodes = [&mut dest, &mut relay_node, &mut source];
+        pump_until(&mut nodes, Duration::from_secs(20), |n| {
+            n[1].observed
+                .details("relay-server")
+                .iter()
+                .any(|d| d.contains("ReservationReqAccepted"))
+        })
+        .await;
+    }
+
+    let via_relay: Multiaddr = format!("{circuit}/p2p/{dest_peer}")
+        .parse()
+        .expect("a circuit address naming the destination");
+    let _ = source.dial_circuit(dest_peer, via_relay);
+
+    {
+        let mut nodes = [&mut dest, &mut relay_node, &mut source];
+        // Wait for ESTABLISHMENT, not merely for the pending hook. The
+        // first version stopped at the pending hook and then pumped a
+        // pair that did not include the relay, so the connection never
+        // completed and the established-inbound ledger was empty — an
+        // absence that would have read as "the hook is not called for a
+        // relayed connection", which is false.
+        pump_until(&mut nodes, Duration::from_secs(20), |n| {
+            !n[0].ledger.established_inbound().is_empty()
+        })
+        .await;
+    }
+
+    let inbound = dest.ledger.pending_inbound();
+    report.note(
+        "R8.1",
+        format!("destination pending-inbound hooks: {inbound:?}"),
+    );
+    let established = dest.ledger.established_inbound();
+    report.note(
+        "R8.2",
+        format!("destination established-inbound hooks: {established:?}"),
+    );
+
+    // ADR-0036's relayed sentence, measured on the side it is written
+    // about: "inbound relayed DESTINATION connections are evaluated
+    // against the authenticated remote application PeerId, not merely
+    // the relay PeerId." R7 showed the outbound half. Here the
+    // destination's established hook is handed the SOURCE's PeerId over
+    // a local address that is the relay's — two different identities,
+    // in one call, so a rule naming either is decidable.
+    report.require(
+        "R8.9",
+        !established.is_empty()
+            && established.iter().any(|(peer, local, _)| {
+                peer == &source_peer.to_string() && local.contains("p2p-circuit")
+            }),
+        &format!(
+            "the destination's established hook names the SOURCE's authenticated PeerId on a              relayed local address, so the end identity is available where the trust              decision belongs: {established:?}"
+        ),
+    );
+    report.require(
+        "R8.10",
+        !established.is_empty()
+            && established
+                .iter()
+                .all(|(peer, _, _)| peer != &relay_peer.to_string()),
+        "and it is not the relay's PeerId — the party that carried the connection is not          the party the connection is from",
+    );
+
+    let relayed: Vec<&(String, String)> = inbound
+        .iter()
+        .filter(|(local, _)| local.contains("p2p-circuit"))
+        .collect();
+    report.require(
+        "R8.3",
+        !relayed.is_empty(),
+        "a relayed connection reached the destination's PENDING inbound hook, which is \
+         where §10's pre-Noise accounting must decide",
+    );
+
+    // THE PREMISE §10 RESTS ON. No IP anywhere in what the receiver is
+    // handed for the remote — so a per-source-IP bucket is not merely
+    // discouraged, it is unbuildable.
+    report.require(
+        "R8.4",
+        !relayed.is_empty()
+            && relayed
+                .iter()
+                .all(|(_, remote)| !remote.contains("/ip4/") && !remote.contains("/ip6/")),
+        &format!(
+            "the relayed remote address carries no source IP: {:?}",
+            relayed.iter().map(|(_, r)| r).collect::<Vec<_>>()
+        ),
+    );
+
+    // THE CAPABILITY §10 NEEDS. The relay is nameable from the LOCAL
+    // address before authentication, so "charge the relay connection
+    // and the relay's PeerId" is decidable at the only moment it can
+    // be.
+    report.require(
+        "R8.5",
+        !relayed.is_empty()
+            && relayed
+                .iter()
+                .all(|(local, _)| local.contains(&relay_peer.to_string())),
+        &format!(
+            "the relay's PeerId is present in the local address at the pending hook, so the \
+             bucket §10 names can be chosen there: {:?}",
+            relayed.iter().map(|(l, _)| l).collect::<Vec<_>>()
+        ),
+    );
+
+    // THE CONTROL, and without it "no IP" says nothing: a DIRECT
+    // inbound connection to the same node, through the same hook, DOES
+    // carry one. So the absence is the relayed path's, not this
+    // fixture's.
+    let mut direct = Node::new(Roles::client(), &[dest_id], &[]);
+    let _ = direct.listen().await;
+    dest.set_trust_sets(
+        &[source.identity.clone(), direct.identity.clone()],
+        &[relay_node.identity.clone()],
+    );
+    let _ = direct.dial(dest_peer, dest_direct);
+    {
+        let mut nodes = [&mut dest, &mut direct];
+        pump(&mut nodes, Duration::from_secs(6)).await;
+    }
+    let after = dest.ledger.pending_inbound();
+    let direct_inbound: Vec<&(String, String)> = after
+        .iter()
+        .filter(|(local, _)| !local.contains("p2p-circuit"))
+        .collect();
+    report.note(
+        "R8.6",
+        format!("destination direct pending-inbound hooks: {direct_inbound:?}"),
+    );
+    report.require(
+        "R8.7",
+        !direct_inbound.is_empty()
+            && direct_inbound
+                .iter()
+                .all(|(_, remote)| remote.contains("/ip4/")),
+        "the control: a DIRECT inbound connection through the same hook DOES carry a source \
+         IP, so R8.4's absence is the relayed path and not this fixture",
+    );
+
+    // AND THE TWO ARE DISTINGUISHABLE, which is what lets one hook
+    // apply two accounting rules.
+    report.require(
+        "R8.8",
+        !relayed.is_empty()
+            && !direct_inbound.is_empty()
+            && relayed
+                .iter()
+                .all(|(local, _)| local.contains("p2p-circuit"))
+            && direct_inbound
+                .iter()
+                .all(|(local, _)| !local.contains("p2p-circuit")),
+        "relayed and direct inbound connections are told apart at the pending hook by the \
+         local address alone",
+    );
+}
+
+/// R9 — the pre-auth bucket a relayed inbound connection is charged to.
+///
+/// `contracts/CONNECTIVITY.md` §10 is explicit: where the original
+/// client IP is unavailable, the destination MUST charge the
+/// **authenticated relay transport connection / relay PeerId** plus the
+/// global caps, and **MUST NOT create unbounded pseudo-source buckets
+/// from circuit metadata.**
+///
+/// R8 measured what the hook is handed: a remote address of
+/// `/p2p/<source>` with no IP anywhere. This asks what the SHIPPED
+/// `PreAuthAdmission` — production, by path, unmodified — does with
+/// that, by calling its `handle_pending_inbound_connection` with the
+/// exact address shapes R8 observed on the wire.
+///
+/// The per-source ceiling is set to one, so "a second connection from
+/// the same bucket is refused" is a single call rather than a loop.
+pub async fn r9_relayed_preauth_bucket(report: &mut Report) {
+    use interweave_transport_libp2p::PreAuthAdmission;
+    use interweave_transport_runtime::preauth::PreAuthLimitsBuilder;
+    use libp2p::swarm::{ConnectionId, NetworkBehaviour};
+
+    let limits = PreAuthLimitsBuilder {
+        max_pending_per_source: 1,
+        max_pending_total: 8,
+        ..PreAuthLimitsBuilder::default()
+    }
+    .build()
+    .expect("valid limits");
+    let mut gate = PreAuthAdmission::new(limits);
+
+    let peer = |_: u8| {
+        libp2p::PeerId::from_public_key(&libp2p::identity::Keypair::generate_ed25519().public())
+    };
+    let relay_peer = peer(0);
+    let (src1, src2) = (peer(1), peer(2));
+
+    // EXACTLY THE SHAPES R8 OBSERVED, so this is not a guess about what
+    // a relayed inbound looks like.
+    let relayed_local: Multiaddr = format!("/ip4/127.0.0.1/tcp/4001/p2p/{relay_peer}/p2p-circuit")
+        .parse()
+        .expect("a relayed local address");
+    let relayed_remote = |src: &libp2p::PeerId| -> Multiaddr {
+        format!("/p2p/{src}")
+            .parse()
+            .expect("a relayed remote address")
+    };
+
+    let first = gate.handle_pending_inbound_connection(
+        ConnectionId::new_unchecked(1),
+        &relayed_local,
+        &relayed_remote(&src1),
+    );
+    let second = gate.handle_pending_inbound_connection(
+        ConnectionId::new_unchecked(2),
+        &relayed_local,
+        &relayed_remote(&src2),
+    );
+    report.note(
+        "R9.1",
+        format!(
+            "two relayed inbounds over ONE relay, different source PeerIds: first={:?}, \
+             second={:?}",
+            first.is_ok(),
+            second.is_ok()
+        ),
+    );
+
+    // THE CONTROL FIRST, because without it "the second was admitted"
+    // could mean the ceiling is not enforced at all. Two DIRECT
+    // inbounds from one IP: the second is refused, so
+    // `max_pending_per_source: 1` is doing its job.
+    let mut direct_gate = PreAuthAdmission::new(limits);
+    let direct_local: Multiaddr = "/ip4/127.0.0.1/tcp/4001".parse().expect("local");
+    let direct_remote: Multiaddr = "/ip4/198.51.100.7/tcp/5001".parse().expect("remote");
+    let direct_first = direct_gate.handle_pending_inbound_connection(
+        ConnectionId::new_unchecked(3),
+        &direct_local,
+        &direct_remote,
+    );
+    let direct_second = direct_gate.handle_pending_inbound_connection(
+        ConnectionId::new_unchecked(4),
+        &direct_local,
+        &"/ip4/198.51.100.7/tcp/5002".parse().expect("remote"),
+    );
+    report.require(
+        "R9.2",
+        direct_first.is_ok() && direct_second.is_err(),
+        &format!(
+            "the control: two direct inbounds from ONE IP — the second is refused, so the \
+             per-source ceiling is enforced (first={:?}, second={:?})",
+            direct_first.is_ok(),
+            direct_second.is_ok()
+        ),
+    );
+
+    // THE DIVERGENCE. The same ceiling, the same gate, one relay
+    // connection — and each source PeerId gets a bucket of its own.
+    // PeerIds are free to mint, so the bucket count is chosen by
+    // whoever is attacking, which is what "unbounded pseudo-source
+    // buckets from circuit metadata" names.
+    report.require(
+        "R9.3",
+        first.is_ok() && second.is_ok(),
+        &format!(
+            "TODAY'S BEHAVIOUR, pinned so a fix fails here rather than passing silently: two \
+             relayed inbounds over one relay each get their own bucket (first={:?}, \
+             second={:?})",
+            first.is_ok(),
+            second.is_ok()
+        ),
+    );
+    if first.is_ok() && second.is_ok() {
+        report.divergence(
+            "D3",
+            "PreAuthAdmission buckets a relayed inbound by the SOURCE PeerId carried in \
+             the circuit's remote address. `source_label` returns the multiaddr as \
+             written when it holds no IP, and R8 measured that address to be \
+             `/p2p/<source>` — so one relay connection yields one bucket per source \
+             identity, and identities are free to mint. The relay's own PeerId is present \
+             in the LOCAL address (R8.5) and is not read",
+            "contracts/CONNECTIVITY.md §10, which requires charging the authenticated \
+             relay transport connection / relay PeerId plus the global caps and says the \
+             destination MUST NOT create unbounded pseudo-source buckets from circuit \
+             metadata. Not reachable in a shipped build today — no relay feature is \
+             compiled — and live the moment Stage 11's Phase 4 lands, which is why it is \
+             recorded against the code rather than against the stage",
+        );
+    }
+
+    // AND THE GLOBAL CAP IS THE ONLY THING LEFT STANDING. Worth
+    // measuring rather than assuming: if it too were per-bucket, there
+    // would be no bound at all.
+    let mut exhaust = PreAuthAdmission::new(limits);
+    let mut admitted = 0_usize;
+    for i in 0..32_usize {
+        let src = peer(0);
+        if exhaust
+            .handle_pending_inbound_connection(
+                ConnectionId::new_unchecked(100 + i),
+                &relayed_local,
+                &relayed_remote(&src),
+            )
+            .is_ok()
+        {
+            admitted += 1;
+        }
+    }
+    report.require(
+        "R9.4",
+        admitted == 8,
+        &format!(
+            "the GLOBAL ceiling still bounds the total ({admitted} of 32 admitted against \
+             max_pending_total 8), so the failure is the bucket's granularity and not the \
+             absence of any bound"
+        ),
+    );
+}
