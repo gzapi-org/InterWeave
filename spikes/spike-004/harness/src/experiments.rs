@@ -222,6 +222,42 @@ pub async fn r2_dial_attribution(report: &mut Report) {
         client.attribution.outstanding() == 0,
         "no announced dial went unclaimed, so the note map does not grow without bound",
     );
+
+    // AND THE PATH THAT ACTUALLY LEAKS. Review finding on PR #69: R2.8
+    // above follows only the reservation, whose note the pending hook
+    // consumes — so deleting the `DialFailure` cleanup leaves it green
+    // and the fix unverified.
+    //
+    // A dial to an address nothing listens on is refused by the Swarm
+    // and never reaches the gate, so its note can only be dropped by
+    // the cleanup. `outstanding` after it is what distinguishes the
+    // two.
+    // A dial to a dead address is NOT that path — the swarm accepts it,
+    // the gate sees it, the note is consumed normally, and a first
+    // version of this observation passed with the cleanup deleted. What
+    // the Swarm refuses SYNCHRONOUSLY, before any hook, is a dial whose
+    // `PeerCondition` is false: the client is already connected to the
+    // relay, so `Disconnected` cannot hold.
+    let before = client.attribution.outstanding();
+    let refused = client.dial_if_disconnected(relay_peer, relay_addr.clone());
+    report.require(
+        "R2.11",
+        refused.is_err(),
+        "the Swarm refused the dial before any hook ran, which is the path that leaks",
+    );
+    {
+        let mut nodes = [&mut client, &mut relay_node];
+        pump(&mut nodes, Duration::from_secs(5)).await;
+    }
+    report.require(
+        "R2.10",
+        client.attribution.outstanding() == before,
+        &format!(
+            "a dial that failed without reaching the gate left no note behind (before \
+             {before}, after {})",
+            client.attribution.outstanding()
+        ),
+    );
 }
 
 /// R3 — infrastructure authorization does not reach the data plane.

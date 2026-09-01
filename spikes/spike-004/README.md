@@ -189,13 +189,26 @@ it is D1 above rather than part of this finding.) Adding the same peer to the da
 allowlist flips all four refusals to admissions, which is ADR-0036's
 "data-plane trust wins" observed rather than restated.
 
-**F7 — an infrastructure node advertises its control protocols and
-nothing stops a client seeing them.** R1.5: a relay+AutoNAT server's
-Identify list is `/ipfs/id/1.0.0`, `/ipfs/id/push/1.0.0`,
-`/libp2p/autonat/2/dial-request`, `/libp2p/circuit/relay/0.2.0/hop`.
-This is the baseline the Stage 11 exposure correction is measured
-against: the reverse direction — what an infrastructure-only peer is
-offered by US — is what must be restricted at the connection.
+**F7 — an infrastructure node advertises its control protocols, and
+this harness cannot say anything about the data-plane ones.** R1.5 and
+R1.7: a relay+AutoNAT server's Identify list is `/ipfs/id/1.0.0`,
+`/ipfs/id/push/1.0.0`, `/libp2p/autonat/2/dial-request`,
+`/libp2p/circuit/relay/0.2.0/hop`.
+
+**That is the whole of it, and it is not an exposure baseline.** An
+earlier version of this paragraph called it one. `SpikeBehaviour`
+carries Identify and the three connectivity behaviours and nothing else
+— no GossipSub, no direct, no endpoint directory, no Kademlia — so this
+run cannot observe whether an infrastructure-only peer is offered a
+data-plane protocol, which is the invariant §14 actually states.
+
+**So the protocol-isolation correction is NOT unlocked by this
+verdict.** It needs a node carrying both the data-plane behaviours and a
+real infrastructure-only connection, which is phase-B-shaped work on
+`SubstrateBehaviour` rather than on this harness. What phase A
+establishes is narrower and still useful: the control protocols an
+infrastructure peer advertises to US, which is the list a restriction
+must leave intact.
 
 ## Stated limits
 
@@ -286,7 +299,7 @@ claim owes now:
 | F6 class split and precedence | R3.1/R3.2 by denial REASON, and R3.4 flips all four when the peer is in both sets |
 | D1 DCUtR divergence | R3.5 pins today's behaviour, so a fix fails here rather than passing silently |
 | F3, again | R5.11 — no relay-behaviour dial targeted the destination, which origin counts alone cannot show |
-| F7 advertised baseline | R1.6/R1.7: Identify arrived and names both control protocols |
+| F7 advertised control protocols | R1.6/R1.7: Identify arrived and names both. **Scoped**: the harness has no data-plane behaviours, so it says nothing about isolation |
 
 The claims that carry the mechanism are mutation-checked:
 

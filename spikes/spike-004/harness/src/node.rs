@@ -329,6 +329,28 @@ impl Node {
         self.swarm.dial(opts)
     }
 
+    /// Dial only if not already connected.
+    ///
+    /// The Swarm refuses this SYNCHRONOUSLY when the condition is
+    /// false, without ever calling the pending hook — which is the
+    /// path that leaks an attribution note, and the only way to reach
+    /// it deliberately. A dial to a dead address does NOT reach it: the
+    /// swarm accepts that dial, the gate sees it, and the note is
+    /// consumed normally.
+    pub fn dial_if_disconnected(
+        &mut self,
+        peer: PeerId,
+        address: Multiaddr,
+    ) -> Result<(), libp2p::swarm::DialError> {
+        let opts = libp2p::swarm::dial_opts::DialOpts::peer_id(peer)
+            .addresses(vec![address])
+            .condition(libp2p::swarm::dial_opts::PeerCondition::Disconnected)
+            .build();
+        self.attribution
+            .announce(opts.connection_id(), DialOrigin::Manual, Some(peer));
+        self.swarm.dial(opts)
+    }
+
     /// Listen on loopback and return the bound address.
     pub async fn listen(&mut self) -> Multiaddr {
         let addr: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse().expect("loopback");

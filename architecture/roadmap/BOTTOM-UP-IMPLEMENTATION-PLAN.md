@@ -1347,6 +1347,17 @@ they bite:
   peer, which ADR-0036's matrix forbids. It is step 2 of the list below,
   before DCUtR is built rather than after.
 
+**And one thing phase A does NOT unlock: the protocol-isolation
+correction.** The exposure invariant below is about what an
+infrastructure-only connection is OFFERED — four data-plane protocols
+installed uniformly — and the phase-A harness carries none of them. Its
+`SpikeBehaviour` is Identify plus the three connectivity behaviours, so
+it can show which control protocols such a peer advertises and nothing
+about whether ours are withheld from it. That correction needs a node
+carrying the data-plane behaviours beside a real infrastructure-only
+connection; treat it as evidence still owed, not as a step the verdict
+authorized.
+
 Server-mode reachability evidence for ADR-0034's v1 release gate — the
 item SPIKE-003 could not supply — is still outstanding and belongs to
 phase B. Stage 10's `Met.` block says the same from the other side: its

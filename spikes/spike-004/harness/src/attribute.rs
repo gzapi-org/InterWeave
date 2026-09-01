@@ -304,12 +304,12 @@ impl<B: NetworkBehaviour> NetworkBehaviour for Attributing<B> {
     }
 
     fn on_swarm_event(&mut self, event: FromSwarm<'_>) {
-        // A dial that failed never reaches the gate if the Swarm
-        // rejected it before the pending hook, so the note it left
-        // has to be dropped here or it is never dropped at all.
         if let FromSwarm::DialFailure(failure) = &event {
             self.attribution.forget(failure.connection_id);
         }
+        // A dial that failed never reaches the gate if the Swarm
+        // rejected it before the pending hook, so the note it left
+        // has to be dropped here or it is never dropped at all.
         self.inner.on_swarm_event(event);
     }
 
