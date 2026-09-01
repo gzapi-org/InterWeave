@@ -160,7 +160,7 @@ offered by US — is what must be restricted at the connection.
   observation, not a finding: the run does not distinguish a fixture
   race from crate behaviour, and nothing in this record depends on it.
 
-## Four fixture bugs this run found in itself
+## Five fixture bugs this run found in itself
 
 Recorded because each one passed before it was caught, and each is the
 same shape a Stage 11 test could take.
@@ -185,7 +185,15 @@ same shape a Stage 11 test could take.
    REQUIRED rather than noted, and R4.8 is the control: an untrusting
    server's dial-back is still made by the crate and refused by its own
    gate, so R4.6 cannot pass for a gate that admits everything.
-4. **R4 trusted a peer that did not exist.** `Node::new` mints its own
+4. **This file asserted what the harness only printed.** Four findings
+   — F3, F4, F6, F7 — were stated as established while the run could
+   not fail on any of them. F6's precedence rule was the sharpest: the
+   README said adding the peer to the data-plane allowlist flips all
+   four refusals, which was true of a mutation run by hand and of
+   nothing the harness did, so a regression in that path would have
+   left every assertion passing. R2.4's note even printed "expected all
+   zero" while F4 claimed one.
+5. **R4 trusted a peer that did not exist.** `Node::new` mints its own
    keypair; the fixture generated a separate one to name in the servers'
    allowlists, so the dial-back was refused as `Unauthorized` — which
    read as a finding about the crate and was a bug in the fixture.
@@ -197,13 +205,29 @@ cd spikes/spike-004/harness
 cargo run
 ```
 
-Exits 0 only when every required observation held. The two claims that
-carry the findings are mutation-checked:
+Exits 0 only when every required observation held — **28 of them**, and
+every finding above is carried by one rather than by a printed number.
+That is a review finding on PR #69, raised four times over: F3, F4, F6
+and F7 were each asserted in this file while the harness only noted the
+value behind them, so a run contradicting one still exited 0. What each
+claim owes now:
+
+| Finding | What must hold |
+| --- | --- |
+| F1 attribution | R2.6–R2.8: zero unattributed, resolved AS `RelayReservation` |
+| F2 dial-back crosses the gate | R4.6–R4.8: admitted as `AutonatProbe`, the probe completed, and an untrusting server's is REFUSED |
+| F3 circuit is command-path | R5.6, with R5.8/R5.9 — the dial must have happened for the negative to mean anything |
+| F4 pending-hook address count | R2.9: exactly one, where Kademlia's is zero |
+| F6 class split and precedence | R3.1/R3.2 by denial REASON, and R3.4 flips all four when the peer is in both sets |
+| F7 advertised baseline | R1.6/R1.7: Identify arrived and names both control protocols |
+
+The claims that carry the mechanism are mutation-checked:
 
 - deleting the `announce` call in `Attributing::poll` fails R2.6 and
   R2.7 (`unattributed: 1`);
 - R4.6/R4.7/R4.8 fail on a run where the probe reaches the wrong server,
   which is how the lucky-run bug above was caught;
 - adding the infrastructure peer to the data-plane allowlist fails all
-  four R3.2 refusals with `got None`, which is also ADR-0036's
-  precedence rule observed from the other side.
+  four R3.2 refusals with `got None` — which is ADR-0036's precedence
+  rule from the other side, and is now also asserted in its own right by
+  R3.4 rather than existing only as a mutation someone ran by hand.
