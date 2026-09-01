@@ -1184,6 +1184,102 @@ SPIKE-003 evidence converts into permanent cases under `tests/kademlia`: namespa
 - small trusted overlays can become healthy/saturated;
 - autonomous query dials obey root dial policy.
 
+### What this gate can and cannot reach inside Stage 10
+
+Recorded because one clause is **not reachable from this stage at all**,
+and a reader who finds three of four met would otherwise close the stage
+on a majority. This is not a `Met.` block: the stage is open, and
+nothing here declares it otherwise.
+
+**The fact behind both the reachable and the unreachable:
+`KademliaDiscovery` is constructed nowhere outside its own crate.** The
+provider and the Swarm-owned driver each implement
+`kademlia-control-api` and are each tested against it; no production
+code connects one to the other. The transport runtime owns the driver
+and emits `SwarmEvent::Kademlia`, and nothing consumes those events as a
+provider. That is what a neutral port is for and what composition is
+for, not an omission in this stage — but it means anything phrased about
+PROVIDER state has no production path to observe it.
+`tests/kademlia/tests/overlay_health.rs` joins the halves by hand, which
+is enough for clause 3 because that clause is about behaviour; clause 1
+is about a default a user configures, and a test harness cannot stand in
+for the composition root that would hold one.
+
+**Clause 1 is two claims and they part company.** "Standard build
+supports Kademlia" is met — the port, the provider and the Swarm-owned
+driver are built and exercised against real nodes in
+`crates/transport/libp2p/tests/kademlia_driver.rs`. "Configured entries
+default on" is not, for two independent reasons, and the second outlives
+the first:
+
+- **There is no site where a default could be expressed.** `apps/` is
+  empty, so nothing reads a profile configuration and decides which
+  discovery providers to construct. `SubstrateConfig.kademlia` is an
+  `Option` the caller supplies; a caller that omits it gets no
+  behaviour, which is an absent decision rather than a default. The
+  composition that would make "configured entries" a thing a user
+  configures is **Stage 12**, and stage discipline puts it out of bounds
+  here.
+- **SPIKE-003 withholds it independently.** Its verdict is PASS FOR THE
+  STAGE and explicitly not for ADR-0034's v1 release gate: implementing
+  this stage is unlocked, *shipping configured entries default-enabled
+  is not*. That holds after composition exists, and is lifted by
+  SPIKE-004's reachability evidence rather than by any code in this
+  stage.
+
+So the clause needs a later stage AND a later spike. It cannot be
+retired by better tests here, and an implementer who reads the gate as a
+test checklist will look for the missing test and not find one, because
+there is nothing to test yet.
+
+**Clause 2 is met.** `tests/kademlia/tests/opt_out.rs`: a disabled
+profile answers no Kademlia command — with an enabled control in the
+same test, so it cannot pass for a build that drops every command — and
+advertises no DHT protocol, read off the wire from a third-party
+observer's Identify rather than from local configuration.
+
+**Clause 3 is met, and the test that meets it is the only place the
+port's two halves run against each other.**
+`tests/kademlia/tests/overlay_health.rs` stands up a three-node trusted
+star, attaches a real `KademliaDiscovery` to one node's real runtime,
+pumps driver events in and provider commands back, and asserts
+`ProviderHealth::Healthy` with both trusted peers routed. The harness is
+a test rather than composition — it does by hand what a Stage 12
+composition root will own — which is why the clause is reachable here
+even though the production wiring is not.
+
+Two bounds on it, stated because they are easy to read past:
+
+- It proves the DRIVER-TO-PROVIDER direction. Stop feeding the provider
+  and health never arrives; that mutation leaves it Degraded with an
+  empty routing table. This is the property no other suite can reach,
+  since every other test exercises one side against the port's
+  definition rather than against the other side's behaviour.
+- It does NOT prove the provider's commands are what convergence depends
+  on. Discard every command and the overlay still becomes healthy,
+  because the library's own automatic bootstrap walks the star and finds
+  the third node; the provider observes the result either way. The
+  command direction is asserted to travel, not to be necessary — and
+  cannot be shown necessary while libp2p bootstraps itself.
+
+A three-node star rather than a pair for a reason worth keeping: with
+one trusted peer the provider is target-satisfied the moment that peer
+is routed, so it never explores, and the first version of this test
+passed with every command discarded. `effective_target` capped by the
+trusted population is what makes a small overlay reachable at all —
+§13's floor of 8 would otherwise put health out of reach for three
+nodes.
+
+**Clause 4 is met, in both directions.**
+`the_gate_refuses_the_walks_dial_to_a_stranger` and
+`an_exploration_converges_the_star_through_admitted_dials` show a
+behaviour-originated dial refused and admitted by the same root policy,
+which is what SPIKE-003's reordering finding demanded. The seed-node
+finding — under `BucketInserts::Manual` an inbound connection inserts
+nothing, so a bootstrap hub would route nobody — is covered by
+`a_trusted_server_routes_and_a_client_never_does`, where the hub routes
+a peer that dialled *it*.
+
 ## 14. Stage 11 — mandatory Internet connectivity
 
 ### Prerequisite
