@@ -89,7 +89,25 @@ dial-back admitted through it as `autonat-probe`. The pending hook can
 refuse on peer and class; the ESTABLISHED hook is where the address
 exists and where the §7 checks belong.
 
-**F3 — "the pending hook is handed an empty address list" is not
+**F3 — `RelayCircuit` is a command-path origin, not a
+behaviour-originated one.** Review finding on PR #69: the first version
+of the attribution wrapper gave each behaviour one FIXED origin, so
+`relay::client::Behaviour` announced everything as `RelayReservation`
+and `RelayCircuit` could never reach the gate. The wrapper now takes a
+classifier per dial — and R5 shows the split it was built for is not
+where the variant comes from.
+
+Dialling `/…/p2p-circuit/p2p/<dest>` is handled by the relay
+**transport**. The behaviour emits no `ToSwarm::Dial`, so no poll-time
+mechanism can see one, and R5.2 records the source's circuit dial
+resolving as `manual` — the command path — rather than as a circuit.
+The conclusion for Stage 11: **`GatedSwarm::dial` sets `RelayCircuit`
+from the address it was handed**, because the caller dialling through a
+relay is the party that knows. The classifier still earns its place for
+the reservation-vs-circuit split if a future crate version dials
+circuits from the behaviour; it is not what produces the variant today.
+
+**F4 — "the pending hook is handed an empty address list" is not
 universal.** SPIKE-003 recorded F9 from Kademlia's behaviour, where the
 hook exists so each behaviour may CONTRIBUTE addresses and the list
 arrives empty. R2.4 measures **one** address at the pending hook for a
@@ -98,14 +116,14 @@ relay-reservation dial. So a Stage 11 gate must not assume either shape:
 address-scoped decision still belongs in
 `handle_established_outbound_connection` where it is always available.
 
-**F4 — `ConnectionPolicy::default()` refuses everything.** It carries
+**F5 — `ConnectionPolicy::default()` refuses everything.** It carries
 `max_pending_dials: 0` and `max_connections: 0`, both enforced by the
 manager. A harness or test that takes the default and then asserts a
 refusal will pass for `ConnectionLimitReached` while believing it
 measured trust or class. This cost two rewrites here (see below) and is
 worth stating because Stage 11's own tests will construct managers.
 
-**F5 — the infrastructure/data-plane split holds against the real
+**F6 — the infrastructure/data-plane split holds against the real
 policy, in both directions.** R3 asks the production
 `ConnectionManager::admit` for one peer authorized ONLY as
 infrastructure: `RelayReservation`, `RelayCircuit`, `AutonatProbe` and
@@ -115,7 +133,7 @@ as `NotAuthorizedForDataPlane`. Adding the same peer to the data-plane
 allowlist flips all four refusals to admissions, which is ADR-0036's
 "data-plane trust wins" observed rather than restated.
 
-**F6 — an infrastructure node advertises its control protocols and
+**F7 — an infrastructure node advertises its control protocols and
 nothing stops a client seeing them.** R1.5: a relay+AutoNAT server's
 Identify list is `/ipfs/id/1.0.0`, `/ipfs/id/push/1.0.0`,
 `/libp2p/autonat/2/dial-request`, `/libp2p/circuit/relay/0.2.0/hop`.
@@ -136,8 +154,13 @@ offered by US — is what must be restricted at the connection.
 - Reservation lifecycle, DCUtR bounds, relayed pre-auth accounting and
   relayed end-PeerId trust are **not yet covered** by this phase-A run;
   they are reachable on loopback and are the next experiments to add.
+- **A relayed data path does not complete here.** R5 obtains a
+  reservation and the circuit is then refused `NO_RESERVATION` by a
+  relay that had just accepted one. This is recorded as an open
+  observation, not a finding: the run does not distinguish a fixture
+  race from crate behaviour, and nothing in this record depends on it.
 
-## Three fixture bugs this run found in itself
+## Four fixture bugs this run found in itself
 
 Recorded because each one passed before it was caught, and each is the
 same shape a Stage 11 test could take.
@@ -152,7 +175,17 @@ same shape a Stage 11 test could take.
    dial and the only dial in the run was the harness's own. `> 0` passed
    on it. It now names the origin it expects and forces a genuine
    behaviour-originated dial by reserving on an unconnected relay.
-3. **R4 trusted a peer that did not exist.** `Node::new` mints its own
+3. **R4's evidence came from a lucky run.** Review finding on PR #69.
+   R4.3–R4.5 were NOTES, so a run in which no probe reached the
+   permissive server exited 0 while this file claimed a dial-back had
+   crossed the gate — and the very next run did exactly that: the
+   AutoNAT client picks among the servers it is connected to, it chose
+   the strict one, and the permissive server made zero dials. Each
+   scenario now uses one server so it is deterministic, the claims are
+   REQUIRED rather than noted, and R4.8 is the control: an untrusting
+   server's dial-back is still made by the crate and refused by its own
+   gate, so R4.6 cannot pass for a gate that admits everything.
+4. **R4 trusted a peer that did not exist.** `Node::new` mints its own
    keypair; the fixture generated a separate one to name in the servers'
    allowlists, so the dial-back was refused as `Unauthorized` — which
    read as a finding about the crate and was a bug in the fixture.
@@ -169,6 +202,8 @@ carry the findings are mutation-checked:
 
 - deleting the `announce` call in `Attributing::poll` fails R2.6 and
   R2.7 (`unattributed: 1`);
+- R4.6/R4.7/R4.8 fail on a run where the probe reaches the wrong server,
+  which is how the lucky-run bug above was caught;
 - adding the infrastructure peer to the data-plane allowlist fails all
   four R3.2 refusals with `got None`, which is also ADR-0036's
   precedence rule observed from the other side.

@@ -31,6 +31,7 @@ async fn main() {
     experiments::r2_dial_attribution(&mut report).await;
     experiments::r3_infrastructure_cannot_reach_the_data_plane(&mut report);
     experiments::r4_autonat_server_dial_back(&mut report).await;
+    experiments::r5_circuit_is_not_a_reservation(&mut report).await;
 
     print!("{}", report.render());
 

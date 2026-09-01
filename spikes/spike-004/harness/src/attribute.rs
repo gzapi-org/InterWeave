@@ -155,6 +155,32 @@ impl Attribution {
     }
 }
 
+/// How a wrapper decides the origin of one dial.
+///
+/// A FUNCTION OF THE DIAL, not a constant per behaviour. Review finding
+/// on PR #69: the first version gave each wrapper one fixed origin,
+/// which cannot be right for `relay::client::Behaviour` — the same
+/// behaviour is responsible for reservations AND circuits, and
+/// `DialOrigin` distinguishes them (`RelayReservation` vs
+/// `RelayCircuit`) precisely because the production policy may treat
+/// them differently. A constant meant `RelayCircuit` could never reach
+/// the gate at all.
+///
+/// The classifier is handed what the announcement can actually see:
+/// `DialOpts::get_peer_id`. It is NOT handed the addresses —
+/// `DialOpts::get_addresses` is `pub(crate)` in libp2p-swarm 0.47.1, so
+/// a `/p2p-circuit` suffix is not a signal available here. That
+/// constraint is a finding in itself, and it is why production's
+/// classifier will have to key on what it CONFIGURED — which peers are
+/// its relays — rather than on what the dial looks like.
+pub type Classifier = Arc<dyn Fn(Option<PeerId>) -> DialOrigin + Send + Sync>;
+
+/// A classifier that always answers the same way.
+#[must_use]
+pub fn always(origin: DialOrigin) -> Classifier {
+    Arc::new(move |_| origin)
+}
+
 /// Wraps one behaviour and announces the dials it emits.
 ///
 /// Transparent in every other respect: the same events, the same
@@ -162,15 +188,15 @@ impl Attribution {
 /// note on the way past.
 pub struct Attributing<B> {
     inner: B,
-    origin: DialOrigin,
+    classify: Classifier,
     attribution: Attribution,
 }
 
 impl<B> Attributing<B> {
-    pub fn new(inner: B, origin: DialOrigin, attribution: Attribution) -> Self {
+    pub fn new(inner: B, classify: Classifier, attribution: Attribution) -> Self {
         Self {
             inner,
-            origin,
+            classify,
             attribution,
         }
     }
@@ -255,7 +281,8 @@ impl<B: NetworkBehaviour> NetworkBehaviour for Attributing<B> {
         // `handle_pending_outbound_connection` is later handed — so
         // this is a correlation, not a guess.
         if let Poll::Ready(ToSwarm::Dial { opts }) = &polled {
-            self.attribution.announce(opts.connection_id(), self.origin);
+            let origin = (self.classify)(opts.get_peer_id());
+            self.attribution.announce(opts.connection_id(), origin);
         }
         polled
     }

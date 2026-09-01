@@ -22,8 +22,24 @@ use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::{Multiaddr, PeerId, Swarm, identify, identity, noise, relay, tcp, yamux};
 
-use crate::attribute::{Attributing, Attribution};
+use std::collections::BTreeSet;
+
+use crate::attribute::{Attributing, Attribution, Classifier, always};
 use crate::gate::{DialLedger, InstrumentedGate};
+
+/// Classify a relay-client dial: to a configured relay it is a
+/// reservation, to anyone else a circuit toward that peer.
+fn relay_classifier(relays: Arc<Mutex<BTreeSet<PeerId>>>) -> Classifier {
+    Arc::new(move |peer| {
+        let known = relays.lock().unwrap_or_else(|e| e.into_inner());
+        match peer {
+            Some(p) if known.contains(&p) => DialOrigin::RelayReservation,
+            Some(_) => DialOrigin::RelayCircuit,
+            // A dial naming no peer cannot be a circuit toward one.
+            None => DialOrigin::RelayReservation,
+        }
+    })
+}
 
 /// Pending dials one spike node may hold at once.
 const SPIKE_MAX_PENDING_DIALS: usize = 32;
@@ -97,6 +113,9 @@ pub struct SpikeBehaviour {
 /// A built node and the instruments attached to it.
 pub struct Node {
     pub swarm: Swarm<SpikeBehaviour>,
+    /// The peers this node treats as its relays, for classifying a
+    /// relay-client dial as a reservation rather than a circuit.
+    pub relays: Arc<Mutex<BTreeSet<PeerId>>>,
     pub observed: crate::topology::Observed,
     pub peer_id: PeerId,
     pub identity: TransportIdentity,
@@ -147,6 +166,12 @@ impl Node {
         let manager = Arc::new(Mutex::new(manager));
 
         let attribution = Attribution::default();
+        // WHICH PEERS ARE RELAYS is configuration, not something a dial
+        // reveals: `DialOpts::get_addresses` is `pub(crate)`, so the
+        // `/p2p-circuit` suffix is invisible at announcement time. The
+        // node records what it was told, exactly as production would
+        // record its configured relays.
+        let relays: Arc<Mutex<BTreeSet<PeerId>>> = Arc::new(Mutex::new(BTreeSet::new()));
         let gate = InstrumentedGate::new(handle, Arc::clone(&manager), attribution.clone());
         let ledger = gate.ledger();
 
@@ -183,7 +208,7 @@ impl Node {
                             // probe interval it carries rather than
                             // assuming one.
                             libp2p::autonat::v2::client::Behaviour::default(),
-                            DialOrigin::AutonatProbe,
+                            always(DialOrigin::AutonatProbe),
                             attribution.clone(),
                         )
                     })
@@ -193,7 +218,7 @@ impl Node {
                     .then(|| {
                         Attributing::new(
                             libp2p::autonat::v2::server::Behaviour::default(),
-                            DialOrigin::AutonatProbe,
+                            always(DialOrigin::AutonatProbe),
                             attribution.clone(),
                         )
                     })
@@ -203,7 +228,7 @@ impl Node {
                     .then(|| {
                         Attributing::new(
                             relay_client,
-                            DialOrigin::RelayReservation,
+                            relay_classifier(Arc::clone(&relays)),
                             attribution.clone(),
                         )
                     })
@@ -217,7 +242,7 @@ impl Node {
                     .then(|| {
                         Attributing::new(
                             libp2p::dcutr::Behaviour::new(peer_id),
-                            DialOrigin::DcutrHolePunch,
+                            always(DialOrigin::DcutrHolePunch),
                             attribution.clone(),
                         )
                     })
@@ -230,6 +255,7 @@ impl Node {
 
         Self {
             swarm,
+            relays,
             observed: crate::topology::Observed::default(),
             peer_id,
             identity: identity_str,
@@ -237,6 +263,19 @@ impl Node {
             attribution,
             manager,
         }
+    }
+
+    /// Name a peer as one of this node's relays.
+    ///
+    /// A dial the relay client makes TO a configured relay is a
+    /// reservation; one to any other peer is a circuit toward that
+    /// peer. That is the only discriminator available at announcement
+    /// time, and it is configuration rather than inspection.
+    pub fn add_relay(&mut self, relay: PeerId) {
+        self.relays
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(relay);
     }
 
     /// Replace this node's data-plane allowlist.

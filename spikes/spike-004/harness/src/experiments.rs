@@ -124,6 +124,7 @@ pub async fn r2_dial_attribution(report: &mut Report) {
     client
         .swarm
         .add_peer_address(relay_peer, relay_addr.clone());
+    client.add_relay(relay_peer);
     let _ = client.swarm.listen_on(circuit);
 
     {
@@ -306,51 +307,100 @@ pub async fn r4_autonat_server_dial_back(report: &mut Report) {
             .to_owned(),
     );
 
-    // And the consequence, MEASURED: the dial-back reaches each
-    // server's own root gate, so the gate is where the missing checks
-    // can live. Two servers, differing only in what they authorize:
+    // And the consequence, MEASURED — in two runs, not one.
     //
-    //   permissive — trusts the client for the data plane, so its
-    //                dial-back is admitted;
-    //   strict     — trusts nobody, so its dial-back is refused by its
-    //                own gate even though the crate was willing.
+    // The first version connected the client to BOTH servers and hoped
+    // the probe went to the permissive one. The AutoNAT client picks
+    // among the servers it is connected to, so which one was probed
+    // varied run to run: the recorded evidence came from a lucky pass,
+    // and a later run had the permissive server make zero dials while
+    // the strict one refused the only probe. Review finding on PR #69,
+    // and the requirements below are what turn that from a note nobody
+    // checks into a failure.
     //
-    // The client trusts both, because it has to be able to reach them
-    // to be probed at all; the difference under test is on the server
-    // side.
-    // THE CLIENT IS BUILT FIRST, so the servers can trust the identity
-    // it actually has. `Node::new` mints its own keypair, and the first
-    // version of this experiment generated a separate one to name in
-    // the servers' allowlists — so "permissive" trusted a peer that did
-    // not exist and refused the real client's dial-back as
-    // `Unauthorized`, which read as a finding about the crate and was a
-    // bug in the fixture.
-    let mut client = Node::new(Roles::client(), &[], &[]);
-    let client_id = client.identity.clone();
+    // One server per scenario is what makes each deterministic.
 
-    let mut permissive = Node::new(Roles::infrastructure(), &[client_id.clone()], &[]);
+    // SCENARIO A — a server that trusts the client. Its dial-back must
+    // reach the root gate and be admitted there as AutonatProbe, which
+    // is precisely what makes F2 fixable at the gate rather than
+    // blocking on a crate change.
+    let mut client_a = Node::new(Roles::client(), &[], &[]);
+    let client_a_id = client_a.identity.clone();
+    let mut permissive = Node::new(Roles::infrastructure(), &[client_a_id], &[]);
     let permissive_addr = permissive.listen().await;
-    let permissive_id = permissive.identity.clone();
     let permissive_peer = permissive.peer_id;
-
-    let mut strict = Node::new(Roles::infrastructure(), &[], &[]);
-    let strict_addr = strict.listen().await;
-    let strict_id = strict.identity.clone();
-    let strict_peer = strict.peer_id;
-
-    // The client must reach both to be probed at all; the difference
-    // under test is on the server side.
-    client.trust_data_plane(&[permissive_id, strict_id]);
-    let _ = client.listen().await;
-    client
+    client_a.trust_data_plane(&[permissive.identity.clone()]);
+    let _ = client_a.listen().await;
+    client_a
         .dial(permissive_peer, permissive_addr)
         .expect("dial accepted");
-    client.dial(strict_peer, strict_addr).expect("dial accepted");
 
     {
-        let mut nodes = [&mut client, &mut permissive, &mut strict];
-        pump(&mut nodes, Duration::from_secs(12)).await;
+        let mut nodes = [&mut client_a, &mut permissive];
+        pump_until(&mut nodes, Duration::from_secs(20), |n| {
+            n[1]
+                .ledger
+                .allowed_by_origin()
+                .get("autonat-probe")
+                .copied()
+                .unwrap_or(0)
+                > 0
+        })
+        .await;
     }
+
+    // SCENARIO B — a server that trusts nobody. The crate is equally
+    // willing to dial back; its own gate is what refuses.
+    let mut client_b = Node::new(Roles::client(), &[], &[]);
+    let mut strict = Node::new(Roles::infrastructure(), &[], &[]);
+    let strict_addr = strict.listen().await;
+    let strict_peer = strict.peer_id;
+    client_b.trust_data_plane(&[strict.identity.clone()]);
+    let _ = client_b.listen().await;
+    client_b
+        .dial(strict_peer, strict_addr)
+        .expect("dial accepted");
+
+    {
+        let mut nodes = [&mut client_b, &mut strict];
+        pump_until(&mut nodes, Duration::from_secs(20), |n| {
+            n[1].ledger.behaviour_originated() > 0
+        })
+        .await;
+    }
+
+    let permissive_probes = permissive
+        .ledger
+        .allowed_by_origin()
+        .get("autonat-probe")
+        .copied()
+        .unwrap_or(0);
+    report.require(
+        "R4.6",
+        permissive_probes > 0,
+        "the AutoNAT server's dial-back reached the root gate and was admitted there as \
+         AutonatProbe — which is what makes F2 fixable at the gate",
+    );
+    report.require(
+        "R4.7",
+        client_a
+            .observed
+            .details("autonat-client")
+            .iter()
+            .any(|d| d.contains("result=Ok(())")),
+        "the probe completed, so the dial-back was real work rather than a refusal counted \
+         as one",
+    );
+    // THE CONTROL. Without it R4.6 would pass for a gate that admitted
+    // everything, and the claim that the gate is where the §7 checks
+    // belong would rest on nothing.
+    report.require(
+        "R4.8",
+        strict.ledger.behaviour_originated() > 0
+            && strict.ledger.allowed_by_origin().is_empty(),
+        "an untrusting server's dial-back is made by the crate and REFUSED by its own root \
+         gate, so the gate is a real decision point and not a pass-through",
+    );
 
     report.note(
         "R4.3",
@@ -374,7 +424,140 @@ pub async fn r4_autonat_server_dial_back(report: &mut Report) {
         "R4.5",
         format!(
             "client autonat results: {:?}",
-            client.observed.details("autonat-client")
+            client_a.observed.details("autonat-client")
         ),
+    );
+}
+
+/// R5 — a relay CIRCUIT is a different origin from a reservation, and
+/// the attribution mechanism has to be able to say so.
+///
+/// Review finding on PR #69: giving each wrapper one fixed origin meant
+/// `relay::client::Behaviour` announced every dial as
+/// `RelayReservation`, so `RelayCircuit` — a distinct variant the
+/// production policy already defines — could never reach the gate.
+/// R2 exercises only a reservation and could not have revealed it.
+///
+/// What this measures is both halves: that a circuit toward a
+/// destination is classified apart from a reservation to the relay,
+/// and — if the relay TRANSPORT rather than the behaviour originates
+/// the connection — that the mechanism's limit is recorded rather than
+/// assumed away.
+pub async fn r5_circuit_is_not_a_reservation(report: &mut Report) {
+    let mut relay_node = Node::new(Roles::infrastructure(), &[], &[]);
+    let relay_addr = relay_node.listen().await;
+    let relay_id = relay_node.identity.clone();
+    let relay_peer = relay_node.peer_id;
+
+    // The destination reserves a slot on the relay and listens on it.
+    let mut dest = Node::new(Roles::client(), &[relay_id.clone()], &[]);
+    let _ = dest.listen().await;
+    dest.add_relay(relay_peer);
+    dest.swarm.add_peer_address(relay_peer, relay_addr.clone());
+    let dest_peer = dest.peer_id;
+    let dest_id = dest.identity.clone();
+    let circuit = circuit_addr(&relay_addr, &relay_peer);
+    let _ = dest.swarm.listen_on(circuit.clone());
+
+    // The source trusts both, knows the relay, and dials the
+    // destination THROUGH it.
+    let mut source = Node::new(Roles::client(), &[relay_id, dest_id], &[]);
+    let _ = source.listen().await;
+    source.add_relay(relay_peer);
+    source.swarm.add_peer_address(relay_peer, relay_addr.clone());
+
+    // WAIT ON THE RELAY, not on the destination. The relay is where a
+    // reservation exists; the client's own event can lag it, and the
+    // first version dialled the circuit before the relay had the
+    // reservation — the relay answered NO_RESERVATION and the run
+    // reported a failure that was a race in the fixture.
+    {
+        let mut nodes = [&mut dest, &mut relay_node, &mut source];
+        pump_until(&mut nodes, Duration::from_secs(20), |n| {
+            n[1]
+                .observed
+                .details("relay-server")
+                .iter()
+                .any(|d| d.contains("ReservationReqAccepted"))
+        })
+        .await;
+    }
+    let reserved = relay_node
+        .observed
+        .details("relay-server")
+        .iter()
+        .any(|d| d.contains("ReservationReqAccepted"));
+    report.require(
+        "R5.1",
+        reserved,
+        "the destination obtained a relay reservation, so a circuit toward it is possible",
+    );
+
+    let via_relay: Multiaddr = format!("{circuit}/p2p/{dest_peer}")
+        .parse()
+        .expect("a circuit address naming the destination");
+    let _ = source.dial(dest_peer, via_relay);
+
+    {
+        let mut nodes = [&mut dest, &mut relay_node, &mut source];
+        pump(&mut nodes, Duration::from_secs(12)).await;
+    }
+
+    let resolved = source.attribution.resolved();
+    report.note("R5.2", format!("source resolved origins: {resolved:?}"));
+    report.note(
+        "R5.3",
+        format!(
+            "source connected: {:?}, relay server events: {:?}",
+            source.observed.connected.len(),
+            relay_node.observed.details("relay-server")
+        ),
+    );
+    report.note(
+        "R5.4",
+        format!(
+            "source relay-client events: {:?}",
+            source.observed.details("relay-circuit-outbound")
+        ),
+    );
+
+    // THE MECHANISM'S CAPABILITY, asserted where it can be: the
+    // classifier answers RelayCircuit for a peer that is not a
+    // configured relay. Whether the relay BEHAVIOUR originates such a
+    // dial (rather than the relay transport) is what R5.2 records —
+    // and if it does not, the note says so rather than the requirement
+    // pretending it did.
+    report.require(
+        "R5.5",
+        source.attribution.unattributed() == 0,
+        "every dial the source's gate met was still attributable once circuits are in play",
+    );
+
+    // WHAT R5 ACTUALLY SETTLED, and it is not what the review or I
+    // expected. The source's circuit dial resolved as `manual`, not as
+    // `relay-circuit`: dialling `/…/p2p-circuit/p2p/<dest>` is handled
+    // by the relay TRANSPORT, so `relay::client::Behaviour` emits no
+    // `ToSwarm::Dial` for it and the poll-time wrapper never sees one.
+    //
+    // So `RelayCircuit` is not a behaviour-originated origin at all —
+    // it is a COMMAND-PATH one. The caller dialling a peer through a
+    // relay knows it is doing so, and production's `GatedSwarm::dial`
+    // is where that origin gets set, from the address it was handed.
+    // The classifier still matters for the reservation/circuit split
+    // IF a future crate version dials circuits from the behaviour; it
+    // is not what produces `RelayCircuit` today.
+    report.require(
+        "R5.6",
+        !resolved.contains_key("relay-circuit"),
+        "the relay BEHAVIOUR originates no circuit dial — the transport does — so \
+         RelayCircuit is a command-path origin that the dialling caller must set",
+    );
+    report.note(
+        "R5.7",
+        "the circuit did not complete on loopback (relay reported NO_RESERVATION against a \
+         reservation it had accepted). Not claimed as a finding: a relayed data path is \
+         phase-A work still to be built, and this run does not distinguish a fixture race \
+         from crate behaviour"
+            .to_owned(),
     );
 }
