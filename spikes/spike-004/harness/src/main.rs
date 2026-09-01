@@ -34,6 +34,7 @@ async fn main() {
     experiments::r4_autonat_server_dial_back(&mut report).await;
     experiments::r5_circuit_is_not_a_reservation(&mut report).await;
     experiments::r6_production_gate_refuses_the_reservation(&mut report).await;
+    experiments::r7_relayed_path_trust(&mut report).await;
 
     print!("{}", report.render());
 

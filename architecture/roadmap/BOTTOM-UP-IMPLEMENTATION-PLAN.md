@@ -1351,10 +1351,14 @@ they bite:
 - **`AUTONAT.md` §7 is not implemented by the crate**, and the check
   must run at the PENDING hook: the established hook runs after the
   socket is open, which is after the target has been contacted.
-- **D1 is a defect in already-shipped code**, not in this stage's work:
-  `DcutrHolePunch` is admitted for a `ConnectivityInfrastructureOnly`
-  peer, which ADR-0036's matrix forbids. It is step 2 of the list below,
-  before DCUtR is built rather than after.
+- **D1 and D2 are defects in already-shipped code**, not in this
+  stage's work: `DcutrHolePunch` and `RelayCircuit` are both admitted
+  for a `ConnectivityInfrastructureOnly` peer, which ADR-0036's matrix
+  and enforcement clause forbid. They are step 2 of the list below,
+  before DCUtR or relayed paths are built rather than after. The fix is
+  not "add both to `is_data_plane`" — `RelayReservation` must stay
+  non-data-plane, and D2 differs from it precisely because a circuit
+  dial names the DESTINATION while a reservation names the relay.
 
 **And one thing phase A does NOT unlock: the protocol-isolation
 correction.** The exposure invariant below is about what an
@@ -1389,9 +1393,10 @@ data-plane origin, against the infrastructure the stage exists to use.
    records its own refusals here**: the Swarm discards the denial of a
    behaviour dial, so a refusal that is not written down at the hook is
    written down nowhere;
-2. **resolve D1**: `DcutrHolePunch` is admitted for a
-   `ConnectivityInfrastructureOnly` peer and ADR-0036's matrix forbids
-   it. Before DCUtR is built, not after;
+2. **resolve D1 and D2**: `DcutrHolePunch` and `RelayCircuit` are both
+   admitted for a `ConnectivityInfrastructureOnly` peer, which
+   ADR-0036's matrix and its enforcement clause forbid. Before DCUtR or
+   relayed paths are built, not after;
 3. AutoNAT v2 client;
 4. AutoNAT v2 server role — including `AUTONAT.md` §7's dial-back
    restriction, which the crate does not implement, at the PENDING hook

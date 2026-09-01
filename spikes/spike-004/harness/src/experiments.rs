@@ -8,6 +8,7 @@
 
 use std::time::Duration;
 
+use interweave_transport_api::TransportIdentity;
 use interweave_transport_runtime::{ConnectionPolicy, DialDenial, DialOrigin, DialRequest};
 use libp2p::Multiaddr;
 
@@ -1062,6 +1063,261 @@ pub async fn r6_production_gate_refuses_the_reservation(report: &mut Report) {
             "the only outward trace of the refusal is the relay listener closing \
              SUCCESSFULLY: {:?}",
             node.failures
+        ),
+    );
+}
+
+/// R7 — a relayed circuit is a data-plane path, and the gate does not
+/// treat it as one.
+///
+/// ADR-0036's enforcement clause: "The root dial gate evaluates both
+/// requested dial purpose and destination class. It must not authorize
+/// a generic application dial merely because the PeerId is an
+/// infrastructure peer." Dialling a peer through a relay is a generic
+/// application dial — a circuit exists to carry application traffic —
+/// and R5 established that the origin can only be set by the caller,
+/// because the relay transport rather than the behaviour makes the
+/// dial.
+///
+/// So the question this asks is narrow and answerable: with the relay
+/// held as infrastructure, what does the shipped policy do with a
+/// `RelayCircuit` dial toward a destination in each of the three
+/// classes?
+///
+/// It also measures the positive half of the same clause — that the
+/// authenticated END identity is what the relayed connection carries,
+/// independent of the relay's — because a rule about the end PeerId is
+/// worth nothing if the end PeerId is not what arrives.
+pub async fn r7_relayed_path_trust(report: &mut Report) {
+    // THE POLICY QUESTION FIRST, decided against the production policy
+    // directly. Three destinations differing only in class, one origin,
+    // one relay held as infrastructure throughout.
+    let relay = TransportIdentity::parse(
+        libp2p::PeerId::from_public_key(&libp2p::identity::Keypair::generate_ed25519().public())
+            .to_base58(),
+    )
+    .expect("canonical");
+    let trusted_dest = TransportIdentity::parse(
+        libp2p::PeerId::from_public_key(&libp2p::identity::Keypair::generate_ed25519().public())
+            .to_base58(),
+    )
+    .expect("canonical");
+    let infra_dest = TransportIdentity::parse(
+        libp2p::PeerId::from_public_key(&libp2p::identity::Keypair::generate_ed25519().public())
+            .to_base58(),
+    )
+    .expect("canonical");
+    let stranger = TransportIdentity::parse(
+        libp2p::PeerId::from_public_key(&libp2p::identity::Keypair::generate_ed25519().public())
+            .to_base58(),
+    )
+    .expect("canonical");
+
+    let mut manager =
+        interweave_transport_runtime::ConnectionManager::new(ConnectionPolicy::new(32, 32), 32);
+    let _ = manager.set_trust(
+        interweave_transport_runtime::TrustSources::new(
+            interweave_trust_api::PeerTrustPolicy::new([trusted_dest.clone()]).expect("small"),
+            interweave_trust_api::InfrastructureSet::new([relay.clone(), infra_dest.clone()])
+                .expect("small"),
+        ),
+        &[],
+    );
+    let handle = manager.handle();
+    let ask = |peer: &TransportIdentity, origin: DialOrigin| {
+        handle.admit(
+            &DialRequest {
+                peer: Some(peer.clone()),
+                address: "/ip4/127.0.0.1/tcp/1".to_owned(),
+                origin,
+            },
+            0,
+        )
+    };
+
+    report.require(
+        "R7.1",
+        ask(&trusted_dest, DialOrigin::RelayCircuit).is_ok(),
+        "a circuit toward a data-plane trusted destination is admitted, which is the case \
+         the feature exists for",
+    );
+    report.require(
+        "R7.2",
+        matches!(
+            ask(&stranger, DialOrigin::RelayCircuit),
+            Err(DialDenial::Unauthorized)
+        ),
+        "a circuit toward a peer in NEITHER set is refused as Unauthorized, so the class \
+         check runs on the destination rather than on the relay",
+    );
+
+    // THE DIVERGENCE. `RelayCircuit` is absent from
+    // `DialOrigin::is_data_plane`, so an infrastructure-only
+    // destination — a peer authorized for reachability and nothing
+    // else — is dialable as a circuit. A circuit is application
+    // traffic by construction.
+    let infra_circuit = ask(&infra_dest, DialOrigin::RelayCircuit);
+    report.note(
+        "R7.3",
+        format!("circuit toward an infrastructure-only destination: {infra_circuit:?}"),
+    );
+    report.require(
+        "R7.4",
+        infra_circuit.is_ok(),
+        "TODAY'S BEHAVIOUR, pinned so a fix fails here rather than passing silently: a \
+         RelayCircuit dial toward an infrastructure-only destination is ADMITTED",
+    );
+    if infra_circuit.is_ok() {
+        report.divergence(
+            "D2",
+            "DialOrigin::RelayCircuit is admitted for a ConnectivityInfrastructureOnly \
+             destination, because is_data_plane omits it — so a peer authorized for \
+             reachability alone is reachable over a relayed circuit, which carries \
+             application traffic by construction",
+            "ADR-0036 enforcement (\"the root dial gate evaluates both requested dial \
+             purpose and destination class; it must not authorize a generic application \
+             dial merely because the PeerId is an infrastructure peer\"). The fix is not \
+             the same as D1's: RelayReservation must stay non-data-plane, since a \
+             reservation IS the reachability purpose, while RelayCircuit names the \
+             destination and not the relay — R5.6 is why, and it is the two origins' \
+             whole difference",
+        );
+    }
+    // AND THE CONTROL FOR THE CLAIM THAT THIS IS ABOUT THE ORIGIN, not
+    // about the class check being broken: the same destination, the
+    // same policy, a data-plane origin — refused.
+    report.require(
+        "R7.5",
+        matches!(
+            ask(&infra_dest, DialOrigin::Manual),
+            Err(DialDenial::NotAuthorizedForDataPlane)
+        ),
+        "the same infrastructure-only destination IS refused under a data-plane origin, so \
+         R7.4 is the origin's classification and not a broken class check",
+    );
+
+    // THE POSITIVE HALF: the end identity survives the relayed path.
+    let mut relay_node = Node::new(Roles::infrastructure(), &[], &[]);
+    let relay_addr = relay_node.listen().await;
+    relay_node.swarm.add_external_address(relay_addr.clone());
+    let relay_id = relay_node.identity.clone();
+    let relay_peer = relay_node.peer_id;
+
+    let mut dest = Node::new(Roles::client(), &[relay_id.clone()], &[]);
+    let _ = dest.listen().await;
+    dest.add_relay(relay_peer);
+    dest.swarm.add_peer_address(relay_peer, relay_addr.clone());
+    let dest_peer = dest.peer_id;
+    let dest_id = dest.identity.clone();
+    let circuit = circuit_addr(&relay_addr, &relay_peer);
+    let _ = dest.swarm.listen_on(circuit.clone());
+
+    // The source holds the relay as INFRASTRUCTURE and the destination
+    // in the data plane, which is the deployment ADR-0036 describes.
+    let mut source = Node::new(Roles::client(), &[], &[]);
+    source.set_trust_sets(&[dest_id], &[relay_id]);
+    let _ = source.listen().await;
+    source.add_relay(relay_peer);
+    source
+        .swarm
+        .add_peer_address(relay_peer, relay_addr.clone());
+
+    {
+        let mut nodes = [&mut dest, &mut relay_node, &mut source];
+        pump_until(&mut nodes, Duration::from_secs(20), |n| {
+            n[1].observed
+                .details("relay-server")
+                .iter()
+                .any(|d| d.contains("ReservationReqAccepted"))
+        })
+        .await;
+    }
+
+    let via_relay: Multiaddr = format!("{circuit}/p2p/{dest_peer}")
+        .parse()
+        .expect("a circuit address naming the destination");
+    let dialed = source.dial_circuit(dest_peer, via_relay);
+    report.require(
+        "R7.6",
+        dialed.is_ok(),
+        "the circuit dial announced as RelayCircuit was accepted rather than refused \
+         synchronously",
+    );
+
+    {
+        let mut nodes = [&mut dest, &mut relay_node, &mut source];
+        pump(&mut nodes, Duration::from_secs(12)).await;
+    }
+
+    report.note(
+        "R7.7",
+        format!(
+            "source gate: allowed {:?}, refused {:?}",
+            source.ledger.allowed_by_origin(),
+            source.ledger.refusals()
+        ),
+    );
+    report.require(
+        "R7.8",
+        source
+            .ledger
+            .allowed_by_origin()
+            .get("relay-circuit")
+            .copied()
+            .unwrap_or(0)
+            > 0,
+        "the gate admitted the circuit UNDER `relay-circuit`, so the origin the command \
+         path sets is the one the policy judged",
+    );
+
+    // THE END IDENTITY, and it is the whole of ADR-0036's relayed
+    // clause. The source's connection is to the DESTINATION's PeerId,
+    // authenticated over the circuit, and the relay's PeerId is a
+    // different peer it is separately connected to.
+    // THE PATH WAS THE RELAY'S, which "connected to the destination"
+    // does not say on its own — DCUtR may upgrade a relayed connection
+    // to a direct one, and on loopback it does. Asserted at the relay,
+    // which is the only party that can say a circuit carried this.
+    report.require(
+        "R7.12",
+        relay_node
+            .observed
+            .details("relay-server")
+            .iter()
+            .any(|d| d.contains("CircuitReqAccepted"))
+            && source
+                .observed
+                .details("relay-circuit-outbound")
+                .iter()
+                .any(|d| d.contains("OutboundCircuitEstablished")),
+        "the relay accepted the circuit and the source established it, so the connection \
+         below was reached THROUGH the relay",
+    );
+    report.require(
+        "R7.9",
+        source.observed.connected.contains(&dest_peer),
+        "the source is connected to the DESTINATION's authenticated PeerId, not merely to \
+         the relay it reached it through",
+    );
+    report.require(
+        "R7.10",
+        dest_peer != relay_peer && source.observed.connected.contains(&relay_peer),
+        "and to the relay's, separately — two distinct authenticated identities, which is \
+         what makes \"evaluated against the end PeerId\" a decidable rule",
+    );
+    // NOT MERELY CONNECTED: Identify completing over the relayed
+    // connection is the end peer proving its own identity through the
+    // relay, which a connection count alone cannot show.
+    report.require(
+        "R7.11",
+        source.observed.identify_protocols.contains_key(&dest_peer),
+        &format!(
+            "Identify completed with the destination through the circuit: {:?}",
+            source
+                .observed
+                .identify_protocols
+                .get(&dest_peer)
+                .map(|p| p.len())
         ),
     );
 }

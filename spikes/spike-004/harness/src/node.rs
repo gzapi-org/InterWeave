@@ -276,6 +276,53 @@ impl Node {
             .insert(relay);
     }
 
+    /// Replace both authorization sets at once.
+    ///
+    /// [`Self::trust_data_plane`] clears the infrastructure set, which
+    /// is right for a node whose only question is data-plane trust and
+    /// wrong for one that must hold a relay as infrastructure WHILE
+    /// deciding about a destination.
+    pub fn set_trust_sets(
+        &mut self,
+        data_plane: &[TransportIdentity],
+        infrastructure: &[TransportIdentity],
+    ) {
+        let _ = self
+            .manager
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_trust(
+                TrustSources::new(
+                    PeerTrustPolicy::new(data_plane.iter().cloned()).expect("small allowlist"),
+                    InfrastructureSet::new(infrastructure.iter().cloned()).expect("small"),
+                ),
+                &[],
+            );
+    }
+
+    /// Dial a peer THROUGH a relay, as F3 says production must.
+    ///
+    /// Identical to [`Self::dial`] but for the origin announced. R5
+    /// established that `relay::client::Behaviour` emits no
+    /// `ToSwarm::Dial` for a circuit — the relay transport handles the
+    /// address — so `RelayCircuit` can only come from the caller, which
+    /// in production is `GatedSwarm::dial` reading the `/p2p-circuit`
+    /// component of the address it was handed. This models exactly
+    /// that, so what the gate then does with the origin is measurable.
+    pub fn dial_circuit(
+        &mut self,
+        peer: PeerId,
+        address: Multiaddr,
+    ) -> Result<(), libp2p::swarm::DialError> {
+        let opts = libp2p::swarm::dial_opts::DialOpts::peer_id(peer)
+            .addresses(vec![address])
+            .condition(libp2p::swarm::dial_opts::PeerCondition::Always)
+            .build();
+        self.attribution
+            .announce(opts.connection_id(), DialOrigin::RelayCircuit, Some(peer));
+        self.swarm.dial(opts)
+    }
+
     /// Replace this node's data-plane allowlist.
     ///
     /// For a fixture that must build a node before it knows whom to

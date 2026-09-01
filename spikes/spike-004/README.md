@@ -224,16 +224,51 @@ fails here rather than passing silently.
 This was found because an earlier version of R3 *required* the
 admission — recording the violation as evidence that the split held.
 
+**D2 — `RelayCircuit` is admitted for an infrastructure-only
+DESTINATION, and a circuit is application traffic by construction.**
+The same omission from `is_data_plane`, one origin over, and it is the
+more consequential of the two: a relayed circuit exists to carry the
+data plane. ADR-0036's enforcement clause is explicit — *"the root dial
+gate evaluates both requested dial purpose and destination class. It
+must not authorize a generic application dial merely because the PeerId
+is an infrastructure peer."* R7.4 pins today's answer (admitted); R7.5
+is the control, showing the very same destination refused
+`NotAuthorizedForDataPlane` under a data-plane origin, so this is the
+origin's classification and not a broken class check.
+
+**The fix is NOT the same as D1's, and is not "add both to
+`is_data_plane`".** `RelayReservation` must stay non-data-plane: a
+reservation *is* the reachability purpose, and making it data-plane
+would refuse every relay the stack needs — which is F1 from the other
+direction. `RelayCircuit` is different because of what R5.6 measured:
+the relay behaviour originates no circuit dial, so the origin can only
+be set by the caller, and the peer that caller names is the
+**destination**. Two origins that look adjacent in the enum name
+different parties.
+
+The positive half of ADR-0036's relayed clause holds and is measured:
+the source ends up connected to the destination's own authenticated
+PeerId, separately from the relay's, with Identify completing through
+the circuit (R7.9–R7.12). The rule "evaluate the end PeerId" is
+decidable here because the end PeerId is what arrives.
+
 **F6 — the infrastructure/data-plane split holds against the real
 policy, in both directions.** R3 asks the production
 `ConnectionManager::admit` for one peer authorized ONLY as
 infrastructure: `RelayReservation`, `RelayCircuit`, `AutonatProbe` and
 `DcutrHolePunch` are admitted; `KademliaQuery`, `ConnectionManager`,
 `Manual` and `DiscoveryReconnect` are refused, and refused specifically
-as `NotAuthorizedForDataPlane`. (`DcutrHolePunch` is the exception, and
-it is D1 above rather than part of this finding.) Adding the same peer to the data-plane
+as `NotAuthorizedForDataPlane`. Adding the same peer to the data-plane
 allowlist flips all four refusals to admissions, which is ADR-0036's
 "data-plane trust wins" observed rather than restated.
+
+**Two of the four admissions are the divergences, not the finding.**
+`RelayReservation` and `AutonatProbe` are what the split exists to
+permit. `DcutrHolePunch` is D1 and `RelayCircuit` is D2, and what F6
+establishes is that the MECHANISM works — the policy reads the
+destination's class and the origin's purpose and combines them — which
+is why the two wrong answers are a question of which origins are on
+which side rather than of whether the split is enforced.
 
 **F7 — an infrastructure node advertises its control protocols, and
 this harness cannot say anything about the data-plane ones.** R1.5 and
@@ -317,9 +352,10 @@ event stream nor the rendered error carries it.
 - Reservation lifecycle, DCUtR bounds, relayed pre-auth accounting and
   relayed end-PeerId trust are **not yet covered** by this phase-A run;
   they are reachable on loopback and are the next experiments to add.
-- **Relayed pre-auth accounting and relayed end-PeerId trust are not
-  yet covered** by this phase-A run; they are reachable on loopback now
-  that a circuit completes, and are the next experiments to add.
+- **Relayed pre-auth accounting, reservation lifecycle and DCUtR
+  bounds are not yet covered** by this phase-A run; they are reachable
+  on loopback now that a circuit completes, and are the next
+  experiments to add.
 
 ## Ten fixture bugs this run found in itself
 
@@ -408,7 +444,7 @@ cd spikes/spike-004/harness
 cargo run
 ```
 
-Exits 0 only when every required observation held — **42 of them**, and
+Exits 0 only when every required observation held — **52 of them**, and
 every finding above is carried by one rather than by a printed number.
 That is a review finding on PR #69, raised four times over: F3, F4, F6
 and F7 were each asserted in this file while the harness only noted the
@@ -426,6 +462,8 @@ claim owes now:
 | F4 pending-hook address count | R2.9: exactly one, where Kademlia's is zero |
 | F6 class split and precedence | R3.1/R3.2 by denial REASON, and R3.4 flips all four when the peer is in both sets |
 | D1 DCUtR divergence | R3.5 pins today's behaviour, so a fix fails here rather than passing silently |
+| D2 relayed-circuit divergence | R7.4 pins today's behaviour, R7.5 is the control (same destination, data-plane origin, refused), R7.2 shows the class check runs on the destination at all |
+| ADR-0036's relayed end-PeerId clause | R7.12 (the path went through the relay), R7.9/R7.10 (two distinct authenticated identities), R7.11 (Identify completed with the destination through the circuit) |
 | F3, again | R5.11 — no relay-behaviour dial targeted the destination, which origin counts alone cannot show |
 | F7 advertised control protocols | R1.6/R1.7: Identify arrived and names both. **Scoped**: the harness has no data-plane behaviours, so it says nothing about isolation |
 
@@ -450,6 +488,19 @@ trusting the result:
 | control's relay moved to the infrastructure set | R6.7, R6.8, R6.11 |
 | `ProductionNode` drops its `ConnectionManager` (bug 9, reintroduced) | R6.7, R6.8, R6.11 |
 | the circuit listen removed, so nothing dials | R6.4, R6.5, R6.7, R6.8, R6.10, R6.11 |
+
+R7's three:
+
+| Mutation | Fails |
+| --- | --- |
+| the infrastructure-only destination added to the data-plane allowlist too | R7.5 |
+| the source stops trusting the destination | R7.6, R7.8, R7.9, R7.10, R7.11, R7.12 |
+| the circuit dial announced as `Manual` rather than `RelayCircuit` | R7.8 |
+
+The second is the one that matters: it shows the relayed observations
+depend on the END peer's class, since removing that one trust entry
+refuses the dial outright — the relay's authorization is untouched and
+buys the source nothing.
 
 The first mutation is the one worth reading: it leaves R6.6 passing,
 because with no refusal at all `refusals().iter().all(..)` is vacuously
