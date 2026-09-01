@@ -317,16 +317,11 @@ event stream nor the rendered error carries it.
 - Reservation lifecycle, DCUtR bounds, relayed pre-auth accounting and
   relayed end-PeerId trust are **not yet covered** by this phase-A run;
   they are reachable on loopback and are the next experiments to add.
-- **F3 is about the opening dial only.** No circuit completed, so
-  whatever the relay behaviour may do after a relay ACCEPTS one is
-  unobserved. R5.12 says so at the assertion itself.
-- **A relayed data path does not complete here.** R5 obtains a
-  reservation and the circuit is then refused `NO_RESERVATION` by a
-  relay that had just accepted one. This is recorded as an open
-  observation, not a finding: the run does not distinguish a fixture
-  race from crate behaviour, and nothing in this record depends on it.
+- **Relayed pre-auth accounting and relayed end-PeerId trust are not
+  yet covered** by this phase-A run; they are reachable on loopback now
+  that a circuit completes, and are the next experiments to add.
 
-## Nine fixture bugs this run found in itself
+## Ten fixture bugs this run found in itself
 
 Recorded because each one passed before it was caught, and each is the
 same shape a Stage 11 test could take.
@@ -392,6 +387,19 @@ same shape a Stage 11 test could take.
    here is deliberate and pinned by
    `a_handle_that_outlives_its_manager_admits_nothing`. The node now
    holds its manager, and R6.7/R6.8 fail if it stops.
+10. **The relay had no external address, so no circuit could ever
+    complete.** A relay server builds a reservation's address list from
+    its own `ExternalAddresses` (libp2p-relay 0.21.1
+    `behaviour.rs:449`), and a loopback node that never calls
+    `add_external_address` has none. The client accepted a reservation
+    it could not use, closed its listener with
+    `NoAddressesInReservation`, and the relay dropped the reservation
+    with the connection — so a later CONNECT was answered
+    `NO_RESERVATION` against a reservation the relay had genuinely
+    accepted. Written up as an unexplained crate behaviour and
+    deliberately not claimed as a finding, which is the only reason it
+    did not become one. R5.7 and R5.12 now require the circuit to
+    complete, and fail when the external address is removed.
 
 ## Reproducing
 
@@ -400,7 +408,7 @@ cd spikes/spike-004/harness
 cargo run
 ```
 
-Exits 0 only when every required observation held — **40 of them**, and
+Exits 0 only when every required observation held — **42 of them**, and
 every finding above is carried by one rather than by a printed number.
 That is a review finding on PR #69, raised four times over: F3, F4, F6
 and F7 were each asserted in this file while the harness only noted the
@@ -413,7 +421,7 @@ claim owes now:
 | F1 why it is needed | R6.4–R6.8: the SHIPPED gate refuses a real relay client's reservation dial as `NotAuthorizedForDataPlane`, and admits it when the relay's trust class is the only thing changed |
 | F8 the refusal is silent | R6.9 (no `Dialing`, no `OutgoingConnectionError`), R6.11 (the admitted dial IS reported — the positive control), R6.10 (the only trace is a listener closing successfully) |
 | F2 dial-back crosses the gate | R4.6–R4.8: admitted as `AutonatProbe`, the probe completed, and an untrusting server's is REFUSED |
-| F3 circuit is command-path | R5.6, with R5.8/R5.9 (the dial happened and was attributed) and R5.11 (the behaviour dialled only the relay). **Scoped**: R5.12 records that no circuit completed here, so this is evidence about the dial that OPENS a circuit, not the lifecycle |
+| F3 circuit is command-path | R5.6, with R5.8/R5.9 (the dial happened and was attributed) and R5.11 (the behaviour dialled only the relay). R5.7 and R5.12 establish that the circuit was ACCEPTED and ESTABLISHED, so this covers the path rather than only the dial that opens it |
 | F2 where the check runs | R4.10: the candidate is at the pending hook, before any socket |
 | F4 pending-hook address count | R2.9: exactly one, where Kademlia's is zero |
 | F6 class split and precedence | R3.1/R3.2 by denial REASON, and R3.4 flips all four when the peer is in both sets |

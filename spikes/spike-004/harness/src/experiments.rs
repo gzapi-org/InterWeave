@@ -134,6 +134,15 @@ pub async fn r1_crate_semantics(report: &mut Report) {
 pub async fn r2_dial_attribution(report: &mut Report) {
     let mut relay_node = Node::new(Roles::infrastructure(), &[], &[]);
     let relay_addr = relay_node.listen().await;
+    // WITHOUT THIS THE RESERVATION CARRIES NO ADDRESSES. The relay
+    // server builds a reservation's address list from its own
+    // `ExternalAddresses` (libp2p-relay 0.21.1 `behaviour.rs:449`), and
+    // a loopback node that never calls `add_external_address` has none
+    // — so the client accepts a reservation it cannot use, closes its
+    // listener with `NoAddressesInReservation`, and the relay drops the
+    // reservation with the connection. A later CONNECT is then answered
+    // NO_RESERVATION against a reservation the relay did accept.
+    relay_node.swarm.add_external_address(relay_addr.clone());
     let relay_id = relay_node.identity.clone();
     let relay_peer = relay_node.peer_id;
 
@@ -619,6 +628,15 @@ pub async fn r4_autonat_server_dial_back(report: &mut Report) {
 pub async fn r5_circuit_is_not_a_reservation(report: &mut Report) {
     let mut relay_node = Node::new(Roles::infrastructure(), &[], &[]);
     let relay_addr = relay_node.listen().await;
+    // WITHOUT THIS THE RESERVATION CARRIES NO ADDRESSES. The relay
+    // server builds a reservation's address list from its own
+    // `ExternalAddresses` (libp2p-relay 0.21.1 `behaviour.rs:449`), and
+    // a loopback node that never calls `add_external_address` has none
+    // — so the client accepts a reservation it cannot use, closes its
+    // listener with `NoAddressesInReservation`, and the relay drops the
+    // reservation with the connection. A later CONNECT is then answered
+    // NO_RESERVATION against a reservation the relay did accept.
+    relay_node.swarm.add_external_address(relay_addr.clone());
     let relay_id = relay_node.identity.clone();
     let relay_peer = relay_node.peer_id;
 
@@ -763,28 +781,45 @@ pub async fn r5_circuit_is_not_a_reservation(report: &mut Report) {
     report.require(
         "R5.6",
         !resolved.contains_key("relay-circuit"),
-        "up to the point the relay refused the circuit, the relay BEHAVIOUR originated no \
-         dial — the transport did — so RelayCircuit is a command-path origin here",
+        "across a circuit that opened, established and carried the relayed path, the relay \
+         BEHAVIOUR originated no dial — the transport did — so RelayCircuit is a \
+         command-path origin",
     );
-    // AND THE LIMIT OF THAT CLAIM, stated where it is made. Review
-    // finding on PR #69: the circuit never established, so nothing
-    // here exercises whatever the behaviour may do AFTER a relay
-    // accepts one. F3 is evidence about the dial that OPENS a circuit,
-    // not about the whole lifecycle, and a completed relayed path is
-    // phase-A work still to be built.
-    report.note(
-        "R5.12",
-        "R5.6 covers the dial that opens a circuit only: this run never completed one, so \
-         post-acceptance behaviour is unobserved and F3 is scoped accordingly"
-            .to_owned(),
-    );
-    report.note(
+    // AND THE CIRCUIT COMPLETED, which is what lets R5.6 speak about
+    // the lifecycle rather than only about the opening dial. An
+    // earlier run stopped at NO_RESERVATION and this note said F3 was
+    // scoped to the dial alone; the refusal was a fixture bug (the
+    // relay had no external address, so its reservation carried no
+    // addresses — see R5.13) and not a limit of the evidence.
+    report.require(
         "R5.7",
-        "the circuit did not complete on loopback (relay reported NO_RESERVATION against a \
-         reservation it had accepted). Not claimed as a finding: a relayed data path is \
-         phase-A work still to be built, and this run does not distinguish a fixture race \
-         from crate behaviour"
-            .to_owned(),
+        relay_node
+            .observed
+            .details("relay-server")
+            .iter()
+            .any(|d| d.contains("CircuitReqAccepted")),
+        "the relay ACCEPTED the circuit, so what follows is observed on a live relayed \
+         path rather than on a refused one",
+    );
+    report.require(
+        "R5.12",
+        source
+            .observed
+            .details("relay-circuit-outbound")
+            .iter()
+            .any(|d| d.contains("OutboundCircuitEstablished")),
+        "the source established the outbound circuit, so R5.6's negative covers the whole \
+         path and not only the dial that opens it",
+    );
+    // THE RELAY'S OWN LIMITS, recorded because CONNECTIVITY.md §9 sets
+    // ours and a reader should be able to compare them with what the
+    // crate's defaults actually offer.
+    report.note(
+        "R5.13",
+        format!(
+            "relay-client circuit events (the limits the relay imposed): {:?}",
+            source.observed.details("relay-circuit-outbound")
+        ),
     );
 }
 
@@ -823,6 +858,15 @@ pub async fn r6_production_gate_refuses_the_reservation(report: &mut Report) {
 
     let mut relay_node = Node::new(Roles::infrastructure(), &[], &[]);
     let relay_addr = relay_node.listen().await;
+    // WITHOUT THIS THE RESERVATION CARRIES NO ADDRESSES. The relay
+    // server builds a reservation's address list from its own
+    // `ExternalAddresses` (libp2p-relay 0.21.1 `behaviour.rs:449`), and
+    // a loopback node that never calls `add_external_address` has none
+    // — so the client accepts a reservation it cannot use, closes its
+    // listener with `NoAddressesInReservation`, and the relay drops the
+    // reservation with the connection. A later CONNECT is then answered
+    // NO_RESERVATION against a reservation the relay did accept.
+    relay_node.swarm.add_external_address(relay_addr.clone());
     let relay_id = relay_node.identity.clone();
     let relay_peer = relay_node.peer_id;
 
