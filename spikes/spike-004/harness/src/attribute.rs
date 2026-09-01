@@ -248,14 +248,6 @@ impl<B> Attributing<B> {
             attribution,
         }
     }
-
-    pub fn inner_mut(&mut self) -> &mut B {
-        &mut self.inner
-    }
-
-    pub fn inner_ref(&self) -> &B {
-        &self.inner
-    }
 }
 
 impl<B: NetworkBehaviour> NetworkBehaviour for Attributing<B> {

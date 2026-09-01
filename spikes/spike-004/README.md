@@ -25,9 +25,16 @@ hole-punch matrix passes") cannot be met from loopback.
 
 ## What was pinned
 
-`libp2p = "=0.56.0"` — exact, with `Cargo.lock` committed beside it —
-carrying the production feature list plus the three spike-only features
-`autonat`, `relay`, `dcutr`. Most of what is recorded below is the
+`libp2p = "=0.56.0"` — exact, with `Cargo.lock` committed beside it.
+The manifest's own feature array is `tcp`, `noise`, `yamux`,
+`identify`, `tokio`, `macros`, `ed25519` plus the three spike-only
+`autonat`, `relay`, `dcutr`; the production crate's remaining features
+(`kad`, `request-response`, `gossipsub`) arrive through the path
+dependency on `interweave-transport-libp2p`, which Cargo unions in. So
+the RESOLVED graph is the production set plus three, and the array in
+the file is not — a distinction worth stating here, directly above the
+paragraph about feature unification, because a reader takes the array
+at face value otherwise. Most of what is recorded below is the
 library's own behaviour: probe event shapes, what the AutoNAT server
 validates, whether a dial carries an address at the pending hook. A
 floating `0.56` resolves a later patch, and a result that cannot be
@@ -168,8 +175,13 @@ where the variant comes from.
 
 Dialling `/…/p2p-circuit/p2p/<dest>` is handled by the relay
 **transport**. The behaviour emits no `ToSwarm::Dial`, so no poll-time
-mechanism can see one, and R5.2 records the source's circuit dial
-resolving as `manual` — the command path — rather than as a circuit.
+mechanism can see one. The evidence is R5.6 — no dial resolved as
+`relay-circuit` at all — together with R5.11, which shows that no dial
+the relay BEHAVIOUR made was aimed at the destination. (R5.2's `manual`
+count is not itself evidence: the harness announced its own dial that
+way. What R5.11 rules out is the classifier having relabelled a real
+behaviour-originated circuit dial as a reservation, which origin counts
+alone cannot show.)
 The conclusion for Stage 11: **`GatedSwarm::dial` sets `RelayCircuit`
 from the address it was handed**, because the caller dialling through a
 relay is the party that knows. The classifier still earns its place for
@@ -250,6 +262,31 @@ be set by the caller, and the peer that caller names is the
 **destination**. Two origins that look adjacent in the enum name
 different parties.
 
+**But D2 is a document CONFLICT before it is a code defect, and Stage 11
+must resolve it in that order.** A review on PR #69 was right to hold
+this to CLAUDE.md §2. ADR-0036's enforcement clause forbids the
+admission; two accepted rows appear to permit it:
+
+- `transport/libp2p/CONNECTIVITY.md` §4's protocol matrix reads
+  *"Relay v2 control | eligible | eligible"*, and ADR-0036's own matrix
+  says the same for reservation/circuit control;
+- §11 says infrastructure-only PeerIds are dialable "only for permitted
+  connectivity origins" and then names exactly two that never use the
+  infrastructure set — `direct-user-command` and `kademlia-query`.
+  `relay-circuit` is in the origin list and is not among them.
+
+The spike's reading is that a circuit *toward* a destination is not
+"relay control *with*" that peer, and that the matrix already draws
+exactly this distinction one row down — *"DCUtR as destination peer |
+no"* — which is why D1 has no such ambiguity and D2 does. The matrix
+simply has no row for a circuit whose DESTINATION is the
+infrastructure-only peer.
+
+That reading is a recommendation, not a verdict. **The architecture is
+amended or clarified first — a row for the destination case — and the
+code follows it.** Changing `is_data_plane` against a contract that
+arguably permits today's behaviour is precisely what §2 forbids.
+
 The positive half of ADR-0036's relayed clause holds and is measured:
 the source ends up connected to the destination's own authenticated
 PeerId, separately from the relay's, with Identify completing through
@@ -280,8 +317,13 @@ granularity failing, not the absence of any bound.
 
 **Not reachable in a shipped build today** — no relay feature is
 compiled, so no relayed inbound can arrive — and live the moment Phase 4
-lands. That is why it is recorded against the code rather than against
-the stage, exactly as D1 is.
+lands. **The same is true of D1 and D2**, and an earlier version of this
+paragraph implied otherwise: `grep` over `crates/` shows
+`DialOrigin::DcutrHolePunch` and `DialOrigin::RelayCircuit` appear only
+in the enum definition and in `#[cfg(test)]` blocks, so nothing in
+production constructs either. All three are latent to exactly the same
+degree, and all three are recorded against the code rather than against
+the stage because that is where the fix belongs.
 
 **And the comment above `source_label` argues the opposite**, naming the
 relayed case and calling it "the fail-closed direction … it cannot merge
@@ -320,7 +362,9 @@ earlier version of this paragraph called it one. `SpikeBehaviour`
 carries Identify and the three connectivity behaviours and nothing else
 — no GossipSub, no direct, no endpoint directory, no Kademlia — so this
 run cannot observe whether an infrastructure-only peer is offered a
-data-plane protocol, which is the invariant §14 actually states.
+data-plane protocol, which is the invariant
+`transport/libp2p/CONNECTIVITY.md` §4's protocol matrix actually
+states.
 
 **So the protocol-isolation correction is NOT unlocked by this
 verdict.** It needs a node carrying both the data-plane behaviours and a
@@ -379,8 +423,8 @@ record at the gate — the pending hook already has the
 event stream nor the rendered error carries it.
 
 **F9 — §8's reservation targets are expressible, and an address dies
-with its relay.** `CONNECTIVITY.md` §8 keys reservation targets to
-reachability state — two while Unknown or NotVerified, one when
+with its relay.** `transport/libp2p/CONNECTIVITY.md` §8 keys reservation
+targets to reachability state — two while Unknown or NotVerified, one when
 VerifiedPublic, four at most — and requires the reservation-derived
 address to be advertised while live and withdrawn immediately on loss.
 The scheduling is ours; what the crate must supply is the ability to
@@ -439,11 +483,20 @@ to two destinations and the relay accepts both. The third is refused
 `ResourceLimitExceeded` — which is the control, and the difference
 between an off-by-one and a missing check.
 
-So `max_reservations_per_peer: 1` from §8 yields two reservations per
-peer, and `max_circuits_per_source_peer: 4` yields five. Phase 4 must
+So `max_circuits_per_source_peer: 4` from §8 yields five. Phase 4 must
 either subtract one when configuring or amend §8 to say what the numbers
-mean; copying the table across is wrong in every row that has a
-per-peer form.
+mean; copying the table across is wrong in every row that has a per-peer
+form.
+
+**MEASURED for circuits, READ for reservations.** `behaviour.rs:412`
+guards `max_reservations_per_peer` with the same `>`, so
+`max_reservations_per_peer: 1` should likewise yield two — but this run
+does not show it. A client's relay behaviour reuses its existing
+connection for a second reservation, and the relay keys reservations by
+`ConnectionId` in a `HashSet`, so a second reservation on one connection
+does not grow the count. Reaching it needs two separate connections from
+one peer, which the fixture does not build. Stated here rather than
+asserted, on the same rule that narrowed F7 and F12.
 
 The dials had to be issued one at a time for this to be measurable: the
 relay counts circuits it has ACCEPTED, so two requests in flight
@@ -454,7 +507,7 @@ circuit accepted and concluded the ceiling held.
 dial.** `dcutr::Behaviour::new` takes a `PeerId` and nothing else. The
 crate's own ceiling, `MAX_NUMBER_OF_UPGRADE_ATTEMPTS = 3`, is a
 `pub(crate)` constant counting retries per relayed connection — neither
-a concurrency cap nor a cooldown. So §13's "at most four concurrent, one
+a concurrency cap nor a cooldown. So `transport/libp2p/CONNECTIVITY.md` §13's "at most four concurrent, one
 per peer, five-minute failure cooldown" has to be enforced outside the
 behaviour.
 
@@ -490,7 +543,7 @@ dial won. A per-peer rule counting dials would therefore be counting
 something else.
 
 **F13 — a successful punch is a second connection to a peer that is
-already connected.** `CONNECTIVITY.md` §78 says a successful hole punch
+already connected.** `contracts/CONNECTIVITY.md` §5 says a successful hole punch
 for an already-connected relayed peer *"does not emit a second
 `PeerConnected`"*. R12.7 shows why that is a rule rather than an
 inheritance: the Swarm reports two `ConnectionEstablished` events naming
@@ -520,6 +573,14 @@ logical-peer view is Phase 6's to build.
   the cooldown, the retry ceiling and the fallback-on-failure rule are
   untested here; F12 is about where the bounds must live, not about
   them working. Failure behaviour is phase B.
+- **Three items of `transport/libp2p/CONNECTIVITY.md` §26's gate are untouched and were
+  not previously listed here.** Direct-versus-relay racing and
+  cancellation semantics are never exercised; network-change behaviour
+  is not simulated; and `direct`/GossipSub over a relayed connection is
+  unreachable from this harness, because `SpikeBehaviour` carries no
+  data-plane behaviour (see F7). The last of those is Phase 2's own
+  work rather than an environment limit. §26 now carries the same
+  item-by-item split.
 - **Inbound admission is not gated here, only recorded.** R8's hooks
   observe; nothing refuses. The production gate is outbound-only and
   Stage 11 must build the inbound side, so R8's numbers say what a
@@ -612,7 +673,7 @@ cd spikes/spike-004/harness
 cargo run
 ```
 
-Exits 0 only when every required observation held — **82 of them**, and
+Exits 0 only when every required observation held — **86 of them**, and
 every finding above is carried by one rather than by a printed number.
 That is a review finding on PR #69, raised four times over: F3, F4, F6
 and F7 were each asserted in this file while the harness only noted the
@@ -624,21 +685,24 @@ claim owes now:
 | F1 attribution | R2.6–R2.8: zero unattributed, resolved AS `RelayReservation` |
 | F1 why it is needed | R6.4–R6.8: the SHIPPED gate refuses a real relay client's reservation dial as `NotAuthorizedForDataPlane`, and admits it when the relay's trust class is the only thing changed |
 | F8 the refusal is silent | R6.9 (no `Dialing`, no `OutgoingConnectionError`), R6.11 (the admitted dial IS reported — the positive control), R6.10 (the only trace is a listener closing successfully) |
-| F2 dial-back crosses the gate | R4.6–R4.8: admitted as `AutonatProbe`, the probe completed, and an untrusting server's is REFUSED |
+| F2 dial-back crosses the gate | R4.6–R4.8: admitted as `AutonatProbe`, the probe completed, and an untrusting server's is REFUSED *on trust* (R4.8 checks the denial reason, since an empty allow-list also holds for an unattributed or nameless dial) |
+| F2 the check is MISSING | R4.12: the candidate the server dialled back to is a LOOPBACK address, which §7 requires be rejected even from an authorized peer. This is the finding measured rather than read — R4.1 is a note, and a note cannot fail. **Scoped**: only §7's special-use rule is reached; the source-equality and unrelated-public-IP cases need a second interface and are phase B |
 | F3 circuit is command-path | R5.6, with R5.8/R5.9 (the dial happened and was attributed) and R5.11 (the behaviour dialled only the relay). R5.7 and R5.12 establish that the circuit was ACCEPTED and ESTABLISHED, so this covers the path rather than only the dial that opens it |
 | F2 where the check runs | R4.10: the candidate is at the pending hook, before any socket |
 | F4 pending-hook address count | R2.9: exactly one, where Kademlia's is zero |
 | F6 class split and precedence | R3.1/R3.2 by denial REASON, and R3.4 flips all four when the peer is in both sets |
 | D1 DCUtR divergence | R3.5 pins today's behaviour, so a fix fails here rather than passing silently |
+| D2, pinned rather than endorsed | R3.6 — the same admission R3.1 used to list under "the matrix permits", split out so that fixing D2 does not fail an experiment claiming the matrix allows it |
+| F5 default policy refuses everything | R3.7: `ConnectionPolicy::default()` refuses a fully TRUSTED peer with `ConnectionLimitReached`, so a fixture taking the default measures nothing about class |
 | D2 relayed-circuit divergence | R7.4 pins today's behaviour, R7.5 is the control (same destination, data-plane origin, refused), R7.2 shows the class check runs on the destination at all |
-| D3 relayed pre-auth bucket | R9.3 pins today's behaviour, R9.2 is the control (direct inbounds from one IP — the second refused), R9.4 shows the global cap is what remains |
-| §10's premise and its capability | R8.4 (no source IP on a relayed remote), R8.5 (the relay's PeerId IS available at the pending hook), R8.7 the control (a direct inbound does carry an IP), R8.8 (the two are distinguishable there) |
+| D3 relayed pre-auth bucket | R9.3 pins today's behaviour, R9.2 is the control (direct inbounds from one IP — the second refused), R9.4 shows the global cap is what remains, and R9.5/R9.6 record that the fixture is R8's MEASURED address with one identity substituted rather than a format string |
+| §10's premise and its capability | R8.4 (no source IP on a relayed remote), R8.11 (the remote IS the source's PeerId — D3's whole force), R8.5 (the relay's PeerId IS available at the pending hook), R8.7 the control (a direct inbound does carry an IP), R8.8 (the two are distinguishable there) |
 | ADR-0036's inbound relayed clause | R8.9/R8.10: the destination's established hook names the SOURCE's authenticated PeerId on a relayed local address, and never the relay's |
 | F9 reservations and withdrawal | R10.2/R10.3 (two relays, each recording its own acceptance), R10.5 (both addresses advertised), R10.9 (the loss was observed) and R10.10 (withdrawn within a second of it), R10.7 with R10.8 as the control (the survivor stays) |
 | F10 relay defaults vs §8 | R11.2/R11.3 (the two that break a deployment), R11.4 (the two that are looser), R11.1 and R11.5 record the rest |
 | F11 per-peer off-by-one | R11.7 (a ceiling of one admits two) with R11.9 as the control (the third is refused) |
 | F12 DCUtR bounds are an adapter's, not the gate's | R12.4 with R12.9 (announced == resolved for the origin on both nodes, zero unattributed — every punch dial, not merely one) and R12.5 (both ends dial and EXACTLY ONE reports the result, so a node's dial count tells it neither how many attempts are open nor whether one failed) |
-| F13 §78's dedupe is ours | R12.7 (two `ConnectionEstablished` for one logical peer) with R12.8 and R12.10 (one relayed and one direct connection OPEN AT ONCE, by connection id and endpoint — not a peer present in a set) |
+| F13 §5's dedupe is ours | R12.7 (two `ConnectionEstablished` for one logical peer) with R12.8 and R12.10 (one relayed and one direct connection OPEN AT ONCE, by connection id and endpoint — not a peer present in a set) |
 | ADR-0036's relayed end-PeerId clause | R7.12 (the path went through the relay), R7.9/R7.10 (two distinct authenticated identities), R7.11 (Identify completed with the destination through the circuit) |
 | F3, again | R5.11 — no relay-behaviour dial targeted the destination, which origin counts alone cannot show |
 | F7 advertised control protocols | R1.6/R1.7 (Identify arrived and names all four) with R1.8 (and NOTHING else — the list is exact, since it is what a restriction must leave intact). **Scoped**: the harness has no data-plane behaviours, so it says nothing about isolation |
@@ -656,7 +720,11 @@ The claims that carry the mechanism are mutation-checked:
   R3.4 rather than existing only as a mutation someone ran by hand.
 
 R6's four, run as a batch, each asserting the patch applied before
-trusting the result:
+trusting the result. The first row is also the one that caught R6.6's
+own weakness: before the predicate named `NotAuthorizedForDataPlane`,
+this mutation left R6.6 GREEN, because `OutboundAdmission` renders every
+denial as `kademlia dial refused: {denial:?}` and the old check looked
+only for `kademlia`.
 
 | Mutation | Fails |
 | --- | --- |
@@ -706,7 +774,7 @@ R7's mutation, which removes trust in the other direction and refuses an
 outbound dial. R8 measures what an inbound decision could read, never a
 decision being made.
 
-R10's two and R11's one:
+R10's, R11's and R12's:
 
 | Mutation | Fails |
 | --- | --- |
@@ -714,5 +782,8 @@ R10's two and R11's one:
 | the client never listens on the second relay's circuit | R10.2, R10.3, R10.5 |
 | per-source circuit ceiling left at the crate default | R11.7, R11.9 |
 | DCUtR disabled at the source | R12.4, R12.5, R12.7, R12.8 |
+| the production node drops its `ConnectionManager` (against the tightened R6.6) | R6.6, R6.7, R6.8, R6.11 |
+| the permissive AutoNAT server trusts nobody | R4.6, R4.7 |
+| R3.7 built with a non-default policy | R3.7 |
 | DCUtR dials are never announced | R5.5, R12.4, R12.5, R12.7 |
 | the lost relay is not actually dropped (again, against the tightened claims) | R10.7, R10.9, R10.10 |

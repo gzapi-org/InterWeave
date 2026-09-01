@@ -212,8 +212,6 @@ pub struct ProductionBehaviour {
 /// A node running the shipped gate.
 pub struct ProductionNode {
     pub swarm: Swarm<ProductionBehaviour>,
-    pub peer_id: PeerId,
-    pub identity: TransportIdentity,
     /// Dial failures and listener events seen, by rendering.
     ///
     /// Diagnostic only. R6.9's claim is about the EVENT VARIANT, and a
@@ -235,12 +233,18 @@ pub struct ProductionNode {
     /// What the production gate itself answered, which the Swarm event
     /// stream does not report.
     pub decisions: Decisions,
-    /// HELD, not dropped. `SnapshotHandle::is_current` upgrades a weak
+    /// HELD, not dropped, and read by nothing — which is the point.
+    ///
+    /// `SnapshotHandle::is_current` upgrades a weak
     /// reference to the manager and refuses when it is gone, so a node
     /// that built a gate and let the manager fall out of scope refuses
     /// every dial with `PolicySuperseded` — regardless of trust, which
     /// makes the control look identical to the subject. That is
     /// exactly how this experiment first misread itself.
+    #[expect(
+        dead_code,
+        reason = "held so the gate's snapshot stays current; R6.7 and R6.8 fail if it is dropped"
+    )]
     pub manager: ConnectionManager,
 }
 
@@ -261,8 +265,6 @@ impl ProductionNode {
         infrastructure: &[TransportIdentity],
     ) -> Self {
         let keypair = identity::Keypair::generate_ed25519();
-        let peer_id = PeerId::from_public_key(&keypair.public());
-        let identity_str = TransportIdentity::parse(peer_id.to_base58()).expect("canonical");
 
         let mut manager = ConnectionManager::new(ConnectionPolicy::new(32, 32), 32);
         let _ = manager.set_trust(
@@ -306,8 +308,6 @@ impl ProductionNode {
 
         Self {
             swarm,
-            peer_id,
-            identity: identity_str,
             failures: Vec::new(),
             outgoing_errors: 0,
             connected: 0,

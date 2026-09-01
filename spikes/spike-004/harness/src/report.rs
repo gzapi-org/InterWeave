@@ -80,9 +80,4 @@ impl Report {
     pub fn failed(&self) -> bool {
         !self.failures.is_empty()
     }
-
-    #[must_use]
-    pub fn required_count(&self) -> usize {
-        self.required
-    }
 }

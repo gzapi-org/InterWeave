@@ -314,6 +314,40 @@ pub fn r3_infrastructure_cannot_reach_the_data_plane(report: &mut Report) {
     )
     .expect("canonical");
 
+    // F5, ASSERTED RATHER THAN NARRATED. Review finding on PR #69: the
+    // README stated `ConnectionPolicy::default()` refuses everything
+    // and nothing in the harness ever built one, so the finding had no
+    // observation at all — it was the reason this experiment first
+    // measured nothing, recorded as a lesson and not as a check.
+    {
+        let mut zeroed = ConnectionManager::new(ConnectionPolicy::default(), 32);
+        let _ = zeroed.set_trust(
+            TrustSources::new(
+                PeerTrustPolicy::new([relay.clone()]).expect("small allowlist"),
+                InfrastructureSet::default(),
+            ),
+            &[],
+        );
+        let refused = zeroed.handle().admit(
+            &DialRequest {
+                peer: Some(relay.clone()),
+                address: String::new(),
+                origin: DialOrigin::Manual,
+            },
+            0,
+        );
+        report.require(
+            "R3.7",
+            matches!(refused, Err(DialDenial::ConnectionLimitReached)),
+            &format!(
+                "`ConnectionPolicy::default()` refuses a fully TRUSTED peer with \
+                 ConnectionLimitReached, because its ceilings are zero — the default is a \
+                 refuse-everything policy, not a permissive one, and a fixture taking it \
+                 measures nothing about class: {refused:?}"
+            ),
+        );
+    }
+
     // CEILINGS, or this proves nothing. `ConnectionPolicy::default()`
     // carries `max_connections: 0`, so the first version of this
     // experiment refused all eight origins with `ConnectionLimitReached`
@@ -342,12 +376,10 @@ pub fn r3_infrastructure_cannot_reach_the_data_plane(report: &mut Report) {
     };
 
     // THE CONTROL PROTOCOLS ADR-0036's matrix permits for this class:
-    // AutoNAT probe control, and relay reservation/circuit control.
-    for origin in [
-        DialOrigin::RelayReservation,
-        DialOrigin::RelayCircuit,
-        DialOrigin::AutonatProbe,
-    ] {
+    // AutoNAT probe control, and relay RESERVATION control. Both name
+    // the infrastructure peer as the party the exchange is WITH, which
+    // is what "eligible" in that row means.
+    for origin in [DialOrigin::RelayReservation, DialOrigin::AutonatProbe] {
         let outcome = ask(origin);
         report.require(
             "R3.1",
@@ -355,6 +387,29 @@ pub fn r3_infrastructure_cannot_reach_the_data_plane(report: &mut Report) {
             &format!("{origin:?} is admitted for an infrastructure-only peer"),
         );
     }
+
+    // AND `RelayCircuit`, WHICH IS NOT ONE OF THEM — pinned in its
+    // current shape rather than approved, exactly as R3.5 pins D1.
+    // Review finding on PR #69: this origin sat in the loop above under
+    // the heading "the matrix permits", while D2 records the same
+    // admission as a violation. A spike that asserts today's behaviour
+    // is CORRECT cannot find a bug in it, which is fixture bug 5, and
+    // leaving it there would have failed this experiment on the commit
+    // that fixed D2 — telling the implementer the matrix permits what
+    // they had just correctly forbidden.
+    //
+    // R7.4 is where D2 is recorded, with its control. This assertion
+    // exists so that R3 does not silently disagree with it.
+    let circuit = ask(DialOrigin::RelayCircuit);
+    report.require(
+        "R3.6",
+        circuit.is_ok(),
+        &format!(
+            "TODAY'S BEHAVIOUR, pinned and NOT endorsed: RelayCircuit is admitted for an \
+             infrastructure-only peer ({circuit:?}). See D2 — a circuit names the \
+             DESTINATION, so this is not the \"relay control\" row of the matrix"
+        ),
+    );
 
     // AND ONE THE MATRIX DENIES. Review finding on PR #69, and it is
     // the most consequential thing this spike found, because it is a
@@ -579,9 +634,19 @@ pub async fn r4_autonat_server_dial_back(report: &mut Report) {
     // belong would rest on nothing.
     report.require(
         "R4.8",
-        strict.ledger.behaviour_originated() > 0 && strict.ledger.allowed_by_origin().is_empty(),
-        "an untrusting server's dial-back is made by the crate and REFUSED by its own root \
-         gate, so the gate is a real decision point and not a pass-through",
+        strict.ledger.behaviour_originated() > 0
+            && strict.ledger.allowed_by_origin().is_empty()
+            && strict
+                .ledger
+                .refusals()
+                .keys()
+                .any(|r| r.contains("Unauthorized")),
+        &format!(
+            "an untrusting server's dial-back is made by the crate and REFUSED by its own \
+             root gate ON TRUST — `allowed.is_empty()` alone would also hold for a dial \
+             refused as unattributed or nameless, which is a different claim: {:?}",
+            strict.ledger.refusals()
+        ),
     );
 
     report.note(
@@ -633,6 +698,44 @@ pub async fn r4_autonat_server_dial_back(report: &mut Report) {
              established hook would not (got {server_pending:?})"
         ),
     );
+
+    // F2 MEASURED, not read. Review finding on PR #69: F2's central
+    // claim — that the crate does not implement §7 — rested on R4.1, a
+    // NOTE, so a patch release adding the check would leave this
+    // experiment green while the record said otherwise.
+    //
+    // §7: "loopback, unspecified, multicast, link-local, RFC1918
+    // private IPv4, IPv6 ULA, and other non-global/special-use
+    // destinations are rejected ... even if supplied by an authorized
+    // peer", and "mismatch/rejection is a probe failure and never
+    // becomes a generic dial request". Every candidate in this run is
+    // `127.0.0.1` — squarely inside that list — and the server emitted
+    // the dial anyway. That is the missing check, observed.
+    //
+    // What this does NOT reach is the source-equality rule: on loopback
+    // the candidate and the observed source are the same address, so
+    // only the special-use half is measured. The unrelated-public-IP
+    // case §7 asks conformance to attempt needs a second interface and
+    // is phase B.
+    let candidates: Vec<String> = permissive
+        .ledger
+        .pending_addresses()
+        .into_iter()
+        .flatten()
+        .collect();
+    report.note(
+        "R4.11",
+        format!("dial-back candidates admitted: {candidates:?}"),
+    );
+    report.require(
+        "R4.12",
+        !candidates.is_empty() && candidates.iter().all(|a| a.contains("/ip4/127.")),
+        &format!(
+            "the server dialled back to a LOOPBACK candidate, which AUTONAT.md §7 requires \
+             be rejected even from an authorized peer — so the crate's missing dial-back \
+             restriction is measured rather than read: {candidates:?}"
+        ),
+    );
 }
 
 /// R5 — a relay CIRCUIT is a different origin from a reservation, and
@@ -665,7 +768,7 @@ pub async fn r5_circuit_is_not_a_reservation(report: &mut Report) {
     let relay_peer = relay_node.peer_id;
 
     // The destination reserves a slot on the relay and listens on it.
-    let mut dest = Node::new(Roles::client(), &[relay_id.clone()], &[]);
+    let mut dest = Node::new(Roles::client(), std::slice::from_ref(&relay_id), &[]);
     let _ = dest.listen().await;
     dest.add_relay(relay_peer);
     dest.swarm.add_peer_address(relay_peer, relay_addr.clone());
@@ -950,7 +1053,7 @@ pub async fn r6_production_gate_refuses_the_reservation(report: &mut Report) {
             "production gate decisions, infrastructure-only relay: {:?}",
             subject
                 .iter()
-                .map(|d| (d.connection_id, d.refusal.clone()))
+                .map(|d| (d.connection_id, d.peer, d.refusal.clone()))
                 .collect::<Vec<_>>()
         ),
     );
@@ -960,7 +1063,7 @@ pub async fn r6_production_gate_refuses_the_reservation(report: &mut Report) {
             "production gate decisions, control (relay data-plane trusted): {:?}",
             control_decisions
                 .iter()
-                .map(|d| (d.connection_id, d.refusal.clone()))
+                .map(|d| (d.connection_id, d.peer, d.refusal.clone()))
                 .collect::<Vec<_>>()
         ),
     );
@@ -1012,10 +1115,11 @@ pub async fn r6_production_gate_refuses_the_reservation(report: &mut Report) {
                 .decisions
                 .refusals()
                 .iter()
-                .all(|r| r.contains("kademlia")),
+                .all(|r| r.contains("kademlia") && r.contains("NotAuthorizedForDataPlane")),
         &format!(
-            "the refusal attributes the relay's dial to Kademlia, which is F1 in one string: \
-             {:?}",
+            "the refusal attributes the relay's dial to Kademlia AND names the CLASS as \
+             the reason — `kademlia` alone matches every denial the gate renders, which \
+             is how a PolicySuperseded run once read as a class refusal: {:?}",
             node.decisions.refusals()
         ),
     );
@@ -1069,9 +1173,9 @@ pub async fn r6_production_gate_refuses_the_reservation(report: &mut Report) {
     // report a dial.
     report.require(
         "R6.11",
-        control.dialing == 1 && node.dialing == 0,
+        control.dialing >= 1 && node.dialing == 0,
         &format!(
-            "an ADMITTED behaviour dial is visible as `Dialing` and a REFUSED one is not              (control {} vs subject {})",
+            "an ADMITTED behaviour dial is visible as `Dialing` and a REFUSED one is not (control {} vs subject {})",
             control.dialing, node.dialing
         ),
     );
@@ -1224,7 +1328,7 @@ pub async fn r7_relayed_path_trust(report: &mut Report) {
     let relay_id = relay_node.identity.clone();
     let relay_peer = relay_node.peer_id;
 
-    let mut dest = Node::new(Roles::client(), &[relay_id.clone()], &[]);
+    let mut dest = Node::new(Roles::client(), std::slice::from_ref(&relay_id), &[]);
     let _ = dest.listen().await;
     dest.add_relay(relay_peer);
     dest.swarm.add_peer_address(relay_peer, relay_addr.clone());
@@ -1343,6 +1447,19 @@ pub async fn r7_relayed_path_trust(report: &mut Report) {
     );
 }
 
+/// The address pair a real relayed inbound connection presented.
+///
+/// Handed to R9 so its fixture is the shape the wire delivered rather
+/// than a format string that agrees with the author. Review finding on
+/// PR #69: D3's force depends on the source PeerId being IN that
+/// address, and a hand-written remote cannot be evidence of that.
+#[derive(Debug, Clone)]
+pub struct RelayedInbound {
+    pub local: String,
+    pub remote: String,
+    pub source: String,
+}
+
 /// R8 — what a relayed inbound connection presents before anything is
 /// authenticated.
 ///
@@ -1357,7 +1474,7 @@ pub async fn r7_relayed_path_trust(report: &mut Report) {
 /// Both are measurable here, and the second is the one a design would
 /// not tell you: `handle_pending_inbound_connection` runs before Noise,
 /// so whatever it is handed is all the accounting can key on.
-pub async fn r8_relayed_inbound_accounting(report: &mut Report) {
+pub async fn r8_relayed_inbound_accounting(report: &mut Report) -> Option<RelayedInbound> {
     let mut relay_node = Node::new(Roles::infrastructure(), &[], &[]);
     let relay_addr = relay_node.listen().await;
     relay_node.swarm.add_external_address(relay_addr.clone());
@@ -1374,7 +1491,7 @@ pub async fn r8_relayed_inbound_accounting(report: &mut Report) {
     let _ = dest.swarm.listen_on(circuit.clone());
 
     let mut source = Node::new(Roles::client(), &[], &[]);
-    source.set_trust_sets(&[dest_id.clone()], &[relay_id]);
+    source.set_trust_sets(std::slice::from_ref(&dest_id), &[relay_id]);
     let _ = source.listen().await;
     let source_peer = source.peer_id;
     source.add_relay(relay_peer);
@@ -1440,7 +1557,7 @@ pub async fn r8_relayed_inbound_accounting(report: &mut Report) {
                 peer == &source_peer.to_string() && local.contains("p2p-circuit")
             }),
         &format!(
-            "the destination's established hook names the SOURCE's authenticated PeerId on a              relayed local address, so the end identity is available where the trust              decision belongs: {established:?}"
+            "the destination's established hook names the SOURCE's authenticated PeerId on a relayed local address, so the end identity is available where the trust decision belongs: {established:?}"
         ),
     );
     report.require(
@@ -1449,7 +1566,7 @@ pub async fn r8_relayed_inbound_accounting(report: &mut Report) {
             && established
                 .iter()
                 .all(|(peer, _, _)| peer != &relay_peer.to_string()),
-        "and it is not the relay's PeerId — the party that carried the connection is not          the party the connection is from",
+        "and it is not the relay's PeerId — the party that carried the connection is not the party the connection is from",
     );
 
     let relayed: Vec<&(String, String)> = inbound
@@ -1474,6 +1591,23 @@ pub async fn r8_relayed_inbound_accounting(report: &mut Report) {
                 .all(|(_, remote)| !remote.contains("/ip4/") && !remote.contains("/ip6/")),
         &format!(
             "the relayed remote address carries no source IP: {:?}",
+            relayed.iter().map(|(_, r)| r).collect::<Vec<_>>()
+        ),
+    );
+    // AND IT CARRIES THE SOURCE'S PeerId, which is D3's entire force.
+    // Review finding on PR #69: R8.4 asserted only that no IP was
+    // present, so a future rendering with no source component at all
+    // would keep it green while D3 — "identities are free to mint" —
+    // became a claim about an address that never arrives.
+    report.require(
+        "R8.11",
+        !relayed.is_empty()
+            && relayed
+                .iter()
+                .all(|(_, remote)| remote.contains(&source_peer.to_string())),
+        &format!(
+            "the relayed remote address IS the source's PeerId, so the bucket \
+             `source_label` derives from it is one per identity: {:?}",
             relayed.iter().map(|(_, r)| r).collect::<Vec<_>>()
         ),
     );
@@ -1544,6 +1678,12 @@ pub async fn r8_relayed_inbound_accounting(report: &mut Report) {
         "relayed and direct inbound connections are told apart at the pending hook by the \
          local address alone",
     );
+
+    relayed.first().map(|(local, remote)| RelayedInbound {
+        local: local.clone(),
+        remote: remote.clone(),
+        source: source_peer.to_string(),
+    })
 }
 
 /// R9 — the pre-auth bucket a relayed inbound connection is charged to.
@@ -1562,10 +1702,32 @@ pub async fn r8_relayed_inbound_accounting(report: &mut Report) {
 ///
 /// The per-source ceiling is set to one, so "a second connection from
 /// the same bucket is refused" is a single call rather than a loop.
-pub async fn r9_relayed_preauth_bucket(report: &mut Report) {
+pub async fn r9_relayed_preauth_bucket(report: &mut Report, observed: Option<RelayedInbound>) {
     use interweave_transport_libp2p::PreAuthAdmission;
     use interweave_transport_runtime::preauth::PreAuthLimitsBuilder;
     use libp2p::swarm::{ConnectionId, NetworkBehaviour};
+
+    // THE SHAPES R8 ACTUALLY OBSERVED, carried here rather than
+    // retyped. Review finding on PR #69: a hand-written
+    // `format!("/p2p/{src}")` agrees with the author, so a rendering
+    // change on the wire would leave this experiment green while D3
+    // described an address that no longer arrives.
+    let Some(observed) = observed else {
+        report.require(
+            "R9.0",
+            false,
+            "R8 observed no relayed inbound, so this experiment has no measured address \
+             shape to work from and refuses to invent one",
+        );
+        return;
+    };
+    report.note(
+        "R9.5",
+        format!(
+            "fixture taken from R8's measurement: local={:?}, remote={:?}",
+            observed.local, observed.remote
+        ),
+    );
 
     let limits = PreAuthLimitsBuilder {
         max_pending_per_source: 1,
@@ -1576,32 +1738,39 @@ pub async fn r9_relayed_preauth_bucket(report: &mut Report) {
     .expect("valid limits");
     let mut gate = PreAuthAdmission::new(limits);
 
-    let peer = |_: u8| {
+    let fresh_peer = || {
         libp2p::PeerId::from_public_key(&libp2p::identity::Keypair::generate_ed25519().public())
+            .to_string()
     };
-    let relay_peer = peer(0);
-    let (src1, src2) = (peer(1), peer(2));
-
-    // EXACTLY THE SHAPES R8 OBSERVED, so this is not a guess about what
-    // a relayed inbound looks like.
-    let relayed_local: Multiaddr = format!("/ip4/127.0.0.1/tcp/4001/p2p/{relay_peer}/p2p-circuit")
+    // A SECOND SOURCE, minted the way an attacker mints one: the same
+    // address with a different identity in it. Substituting into the
+    // observed string is what keeps the shape the wire's rather than
+    // this file's.
+    let relayed_local: Multiaddr = observed.local.parse().expect("R8's local address");
+    let remote_one: Multiaddr = observed.remote.parse().expect("R8's remote address");
+    let remote_two: Multiaddr = observed
+        .remote
+        .replace(&observed.source, &fresh_peer())
         .parse()
-        .expect("a relayed local address");
-    let relayed_remote = |src: &libp2p::PeerId| -> Multiaddr {
-        format!("/p2p/{src}")
-            .parse()
-            .expect("a relayed remote address")
-    };
+        .expect("the same shape with another identity");
+    report.require(
+        "R9.6",
+        remote_two != remote_one,
+        &format!(
+            "the second source differs from the first only in identity ({remote_one} vs \
+             {remote_two}), so what follows varies exactly one thing"
+        ),
+    );
 
     let first = gate.handle_pending_inbound_connection(
         ConnectionId::new_unchecked(1),
         &relayed_local,
-        &relayed_remote(&src1),
+        &remote_one,
     );
     let second = gate.handle_pending_inbound_connection(
         ConnectionId::new_unchecked(2),
         &relayed_local,
-        &relayed_remote(&src2),
+        &remote_two,
     );
     report.note(
         "R9.1",
@@ -1681,12 +1850,16 @@ pub async fn r9_relayed_preauth_bucket(report: &mut Report) {
     let mut exhaust = PreAuthAdmission::new(limits);
     let mut admitted = 0_usize;
     for i in 0..32_usize {
-        let src = peer(0);
+        let remote: Multiaddr = observed
+            .remote
+            .replace(&observed.source, &fresh_peer())
+            .parse()
+            .expect("the same shape with another identity");
         if exhaust
             .handle_pending_inbound_connection(
                 ConnectionId::new_unchecked(100 + i),
                 &relayed_local,
-                &relayed_remote(&src),
+                &remote,
             )
             .is_ok()
         {
@@ -1988,7 +2161,7 @@ pub async fn r11_relay_server_budgets(report: &mut Report) {
     let relay_peer = relay_node.peer_id;
     let circuit = circuit_addr(&relay_addr, &relay_peer);
 
-    let mut dest_a = Node::new(Roles::client(), &[relay_id.clone()], &[]);
+    let mut dest_a = Node::new(Roles::client(), std::slice::from_ref(&relay_id), &[]);
     let _ = dest_a.listen().await;
     dest_a.add_relay(relay_peer);
     dest_a
@@ -1997,7 +2170,7 @@ pub async fn r11_relay_server_budgets(report: &mut Report) {
     let _ = dest_a.swarm.listen_on(circuit.clone());
     let dest_a_peer = dest_a.peer_id;
 
-    let mut dest_b = Node::new(Roles::client(), &[relay_id.clone()], &[]);
+    let mut dest_b = Node::new(Roles::client(), std::slice::from_ref(&relay_id), &[]);
     let _ = dest_b.listen().await;
     dest_b.add_relay(relay_peer);
     dest_b
@@ -2010,7 +2183,7 @@ pub async fn r11_relay_server_budgets(report: &mut Report) {
     // ceiling bites, one later than it reads". Without it, two
     // admissions under a ceiling of one are equally consistent with the
     // ceiling being ignored altogether.
-    let mut dest_c = Node::new(Roles::client(), &[relay_id.clone()], &[]);
+    let mut dest_c = Node::new(Roles::client(), std::slice::from_ref(&relay_id), &[]);
     let _ = dest_c.listen().await;
     dest_c.add_relay(relay_peer);
     dest_c
@@ -2136,7 +2309,7 @@ pub async fn r11_relay_server_budgets(report: &mut Report) {
 /// shapes Phase 6: both ends dial for one punch and only one of them is
 /// told how it ended.
 ///
-/// §78 is the other half: *"a successful DCUtR hole punch for an
+/// `contracts/CONNECTIVITY.md` §5 is the other half: *"a successful DCUtR hole punch for an
 /// already-connected relayed peer therefore does not emit a second
 /// `PeerConnected`."* That is a rule about our event, and it exists
 /// because of what the Swarm below does.
@@ -2147,7 +2320,7 @@ pub async fn r12_dcutr_bounds(report: &mut Report) {
     let relay_id = relay_node.identity.clone();
     let relay_peer = relay_node.peer_id;
 
-    let mut dest = Node::new(Roles::client(), &[relay_id.clone()], &[]);
+    let mut dest = Node::new(Roles::client(), std::slice::from_ref(&relay_id), &[]);
     let _ = dest.listen().await;
     dest.add_relay(relay_peer);
     dest.swarm.add_peer_address(relay_peer, relay_addr.clone());
@@ -2290,7 +2463,7 @@ pub async fn r12_dcutr_bounds(report: &mut Report) {
     report.note(
         "R12.9",
         format!(
-            "hole-punch dials announced {announced_punches}, resolved at a gate              {resolved_punches}, unattributed dials of any origin {unattributed}"
+            "hole-punch dials announced {announced_punches}, resolved at a gate {resolved_punches}, unattributed dials of any origin {unattributed}"
         ),
     );
     report.require(
@@ -2300,7 +2473,7 @@ pub async fn r12_dcutr_bounds(report: &mut Report) {
             && resolved_punches == announced_punches
             && unattributed == 0,
         &format!(
-            "EVERY hole-punch dial reached a gate under `dcutr-hole-punch` — announced              {announced_punches}, resolved {resolved_punches}, {unattributed} dial(s) of              any origin met the gate with no note — so §13's bounds have somewhere to be              enforced at all"
+            "EVERY hole-punch dial reached a gate under `dcutr-hole-punch` — announced {announced_punches}, resolved {resolved_punches}, {unattributed} dial(s) of any origin met the gate with no note — so §13's bounds have somewhere to be enforced at all"
         ),
     );
     // BOTH ENDS DIAL, and only one reports. That is the shape §13's
@@ -2337,7 +2510,7 @@ pub async fn r12_dcutr_bounds(report: &mut Report) {
         ),
     );
 
-    // §78, AND WHY IT IS A RULE AT ALL. The Swarm reports a second
+    // §5, AND WHY IT IS A RULE AT ALL. The Swarm reports a second
     // `ConnectionEstablished` for a peer that was already connected:
     // the relayed connection and the direct one are two connections,
     // and libp2p says so both times. Nothing deduplicates them, so
@@ -2362,7 +2535,7 @@ pub async fn r12_dcutr_bounds(report: &mut Report) {
         established_to_dest >= 2,
         &format!(
             "the Swarm reports a SECOND connection to an already-connected peer when the \
-             punch succeeds ({established_to_dest} for one logical peer), so §78's \"no \
+             punch succeeds ({established_to_dest} for one logical peer), so §5's \"no \
              second PeerConnected\" is a rule the runtime must implement rather than one \
              the library provides"
         ),
@@ -2391,14 +2564,14 @@ pub async fn r12_dcutr_bounds(report: &mut Report) {
     report.note(
         "R12.10",
         format!(
-            "open connections to the destination: {open_relayed} relayed, {open_direct}              direct"
+            "open connections to the destination: {open_relayed} relayed, {open_direct} direct"
         ),
     );
     report.require(
         "R12.8",
         open_relayed > 0 && open_direct > 0,
         &format!(
-            "the RELAYED connection is still open beside the new direct one              ({open_relayed} relayed, {open_direct} direct) — the upgrade added a path              rather than replacing one, which is what §13's fallback rule needs"
+            "the RELAYED connection is still open beside the new direct one ({open_relayed} relayed, {open_direct} direct) — the upgrade added a path rather than replacing one, which is what §13's fallback rule needs"
         ),
     );
 }

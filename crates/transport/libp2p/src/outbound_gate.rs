@@ -315,10 +315,12 @@ impl NetworkBehaviour for OutboundAdmission {
         // only behaviour that can dial today. SPIKE-004 measured a
         // relay reservation and an AutoNAT dial-back arriving here with
         // one candidate each, so Stage 11 must read the slice rather
-        // than inherit this — see the module note. F16's cost is accepted knowingly: the
-        // reservation cannot be separated from the admission, so an
-        // address table full of live quarantines refuses behaviour
-        // dials outright, which is fail-closed.
+        // than inherit this — see the module note.
+        //
+        // F16's cost is accepted knowingly: the reservation cannot be
+        // separated from the admission, so an address table full of
+        // live quarantines refuses behaviour dials outright, which is
+        // fail-closed.
         let request = DialRequest {
             peer: Some(identity),
             address: String::new(),

@@ -80,17 +80,6 @@ impl Roles {
             dcutr: false,
         }
     }
-
-    #[must_use]
-    pub const fn bare() -> Self {
-        Self {
-            autonat_client: false,
-            autonat_server: false,
-            relay_client: false,
-            relay_server: false,
-            dcutr: false,
-        }
-    }
 }
 
 #[derive(NetworkBehaviour)]

@@ -37,8 +37,6 @@ pub struct Observed {
     /// Review finding on PR #69, and §13's fallback rule is exactly the
     /// difference between those two.
     pub open_connections: BTreeMap<libp2p::swarm::ConnectionId, (PeerId, bool)>,
-    /// Outgoing dial failures, by the error's rendering.
-    pub dial_failures: BTreeMap<String, u64>,
     /// Protocols each peer told us it supports, via Identify.
     pub identify_protocols: BTreeMap<PeerId, BTreeSet<String>>,
 }
@@ -89,7 +87,6 @@ fn record(node: &mut Node, event: SwarmEvent<SpikeBehaviourEvent>) {
             seen.events.push(("connection-closed", peer_id.to_string()));
         }
         SwarmEvent::OutgoingConnectionError { error, peer_id, .. } => {
-            *seen.dial_failures.entry(format!("{error}")).or_insert(0) += 1;
             seen.events
                 .push(("dial-failed", format!("{peer_id:?}: {error}")));
         }

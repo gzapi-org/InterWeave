@@ -48,9 +48,15 @@ pub struct DialLedger {
 
 #[derive(Debug, Default)]
 struct LedgerInner {
-    /// Dials carrying a root admission ticket (the command path).
-    admitted_by_ticket: u64,
-    /// Dials with no ticket — behaviour-originated, by definition.
+    /// Every dial this gate was asked about that carried no root
+    /// admission ticket.
+    ///
+    /// NOT "behaviour-originated" in the production sense, and the name
+    /// is kept for the ledger's readers rather than for accuracy: this
+    /// harness models the command path with an announced `Manual` note
+    /// rather than with a ticket, so `Node::dial` lands here too.
+    /// Review finding on PR #69 — the previous doc comment claimed a
+    /// distinction the counter does not make.
     behaviour_originated: u64,
     /// Of those, how many were allowed, by the origin they were
     /// admitted UNDER.
@@ -61,6 +67,13 @@ struct LedgerInner {
     /// is empty for a behaviour dial, and the spike records it rather
     /// than repeating the claim.
     pending_address_counts: Vec<usize>,
+    /// The addresses THEMSELVES, per dial.
+    ///
+    /// A count answers "is there one"; `AUTONAT.md` §7 asks what it IS,
+    /// because the rule is about the address's class. Recording only
+    /// the count is why F2's central claim was read rather than
+    /// measured (review finding on PR #69).
+    pending_addresses: Vec<Vec<String>>,
     /// Addresses seen at the ESTABLISHED hook, where they do exist.
     established_addresses: Vec<String>,
     /// `(local, remote)` as the PENDING INBOUND hook was handed them —
@@ -84,11 +97,6 @@ impl DialLedger {
     }
 
     #[must_use]
-    pub fn admitted_by_ticket(&self) -> u64 {
-        self.lock().admitted_by_ticket
-    }
-
-    #[must_use]
     pub fn allowed_by_origin(&self) -> BTreeMap<&'static str, u64> {
         self.lock().allowed_by_origin.clone()
     }
@@ -101,6 +109,11 @@ impl DialLedger {
     #[must_use]
     pub fn pending_address_counts(&self) -> Vec<usize> {
         self.lock().pending_address_counts.clone()
+    }
+
+    #[must_use]
+    pub fn pending_addresses(&self) -> Vec<Vec<String>> {
+        self.lock().pending_addresses.clone()
     }
 
     #[must_use]
@@ -174,19 +187,6 @@ impl InstrumentedGate {
     #[must_use]
     pub fn ledger(&self) -> DialLedger {
         self.ledger.clone()
-    }
-
-    #[must_use]
-    pub fn pending_behaviour_dials(&self) -> usize {
-        self.held.lock().unwrap_or_else(|e| e.into_inner()).len()
-    }
-
-    #[must_use]
-    pub fn held_connections(&self) -> usize {
-        self.connections
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len()
     }
 
     fn now_ms(&self) -> u64 {
@@ -282,6 +282,8 @@ impl NetworkBehaviour for InstrumentedGate {
             let mut l = self.ledger.lock();
             l.behaviour_originated += 1;
             l.pending_address_counts.push(addresses.len());
+            l.pending_addresses
+                .push(addresses.iter().map(ToString::to_string).collect());
         }
 
         let Some(origin) = attributed else {
