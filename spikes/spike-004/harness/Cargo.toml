@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# SPIKE-004 harness — EVIDENCE ONLY, and deliberately not a workspace
+# member. Nothing depends on it, and its results reach production as
+# permanent tests rather than as code (CLAUDE.md §4, spikes/README.md).
+#
+# Staying outside the workspace is what keeps `autonat`, `relay` and
+# `dcutr` off the production feature list. Cargo unifies features across
+# one build of one workspace, so as a member this harness would switch
+# all three on inside `interweave-transport-libp2p` — undoing CLAUDE.md
+# §3's "absent from the feature list rather than merely unused", and
+# doing it invisibly, because nothing in the production crate would have
+# changed. That rule is the whole reason this spike runs BEFORE Stage 11
+# rather than during it, and it binds harder here than it did for
+# SPIKE-003: three behaviours, all of which dial on their own.
+#
+# An EMPTY workspace table is what keeps it out: the package is its own
+# workspace root, so it is never built by `cargo xtask ci`, never enters
+# the root `Cargo.lock`, and is one deliberate `path =` away from
+# production rather than one accident away.
+[workspace]
+
+[package]
+name = "spike-004-harness"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+# PINNED TO WHAT THE PRODUCT RESOLVES, with the lock committed beside
+# it. `autonat`, `relay` and `dcutr` are the spike-only FEATURES; every
+# version below is the one the root Cargo.lock resolves today. A
+# floating "0.56" resolves a later patch, and most of what this spike
+# records — probe event semantics, reservation lifecycle, whether a
+# hole-punch dial is attributable at the admission hook — is exactly
+# what a patch release may change. A result that cannot be rebuilt is
+# not evidence.
+libp2p = { version = "=0.56.0", default-features = false, features = [
+    "tcp",
+    "noise",
+    "yamux",
+    "identify",
+    "tokio",
+    "macros",
+    "ed25519",
+    "autonat",
+    "relay",
+    "dcutr",
+] }
+tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+futures = "=0.3.34"
+
+# THE PRODUCTION DIAL GATE, by path and on purpose. The question this
+# spike exists to answer is whether AutoNAT, relay and DCUtR dials are
+# subject to the root admission AND distinguishable from each other
+# there, and measuring a copy of the gate would measure a copy. The
+# dependency runs spike -> product, which is the direction CLAUDE.md §4
+# permits; the reverse is what it forbids.
+interweave-transport-libp2p = { path = "../../../crates/transport/libp2p" }
+interweave-transport-runtime = { path = "../../../crates/transport/runtime" }
+interweave-transport-api = { path = "../../../crates/api/transport-api" }
+interweave-trust-api = { path = "../../../crates/api/trust-api" }

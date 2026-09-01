@@ -1,0 +1,380 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Andrea Benetton
+
+//! The numbered observations. Each returns findings into a [`Report`];
+//! the process exits non-zero if any required one is false, so
+//! `cargo run` cannot report success while its own output disproves the
+//! record.
+
+use std::time::Duration;
+
+use interweave_transport_runtime::{ConnectionPolicy, DialDenial, DialOrigin, DialRequest};
+use libp2p::Multiaddr;
+
+use crate::node::{Node, Roles};
+use crate::report::Report;
+use crate::topology::{pump, pump_until};
+
+/// A relayed listen address for `client` through `relay`.
+fn circuit_addr(relay_addr: &Multiaddr, relay: &libp2p::PeerId) -> Multiaddr {
+    format!("{relay_addr}/p2p/{relay}/p2p-circuit")
+        .parse()
+        .expect("a circuit address")
+}
+
+/// R1 — what the pinned crates actually emit.
+///
+/// Recorded rather than assumed: every later observation reads these
+/// events, and a spike that asserted a shape the crate does not produce
+/// would fail for the wrong reason.
+pub async fn r1_crate_semantics(report: &mut Report) {
+    let mut server = Node::new(Roles::infrastructure(), &[], &[]);
+    let server_addr = server.listen().await;
+    let server_id = server.identity.clone();
+
+    // The client trusts the server for DATA PLANE here, which is the
+    // control: R3 repeats it with infrastructure-only authorization and
+    // the difference is the finding.
+    let server_peer_for_dial = server.peer_id;
+    let mut client = Node::new(Roles::client(), &[server_id], &[]);
+    let _ = client.listen().await;
+    client.dial(server_peer_for_dial, server_addr.clone()).expect("dial accepted");
+
+    let server_peer = server.peer_id;
+    let settled = {
+        let mut nodes = [&mut client, &mut server];
+        pump_until(&mut nodes, Duration::from_secs(10), |n| {
+            n[0].observed.connected.contains(&server_peer)
+        })
+        .await
+    };
+    report.require(
+        "R1.1",
+        settled,
+        "a client connects to an infrastructure node over loopback",
+    );
+
+    {
+        let mut nodes = [&mut client, &mut server];
+        pump(&mut nodes, Duration::from_secs(8)).await;
+    }
+
+    report.note(
+        "R1.2",
+        format!(
+            "autonat client events: {:?}",
+            client.observed.details("autonat-client")
+        ),
+    );
+    report.note(
+        "R1.3",
+        format!(
+            "autonat server events: {:?}",
+            server.observed.details("autonat-server")
+        ),
+    );
+    report.note(
+        "R1.4",
+        format!(
+            "client external addresses: {:?}",
+            client.observed.external_addresses
+        ),
+    );
+    report.note(
+        "R1.5",
+        format!(
+            "identify protocols the client saw from the server: {:?}",
+            client.observed.identify_protocols.get(&server_peer)
+        ),
+    );
+}
+
+/// R2 — every behaviour-originated dial is attributable.
+///
+/// THE QUESTION STAGE 11 CANNOT PROCEED WITHOUT. Production's pending
+/// hook is handed a `ConnectionId`, an `Option<PeerId>` and an empty
+/// address list, and today infers `KademliaQuery` because Kademlia is
+/// the only behaviour that can dial. With three more, that inference
+/// is wrong for every one of them — and wrong in the direction that
+/// fails closed against the infrastructure the stack needs, because
+/// `KademliaQuery.is_data_plane()` is true.
+///
+/// The mechanism under test announces `ConnectionId -> DialOrigin` from
+/// the originating behaviour's own `poll`. What this measures is
+/// whether the note is ALWAYS there when the gate looks.
+pub async fn r2_dial_attribution(report: &mut Report) {
+    let mut relay_node = Node::new(Roles::infrastructure(), &[], &[]);
+    let relay_addr = relay_node.listen().await;
+    let relay_id = relay_node.identity.clone();
+    let relay_peer = relay_node.peer_id;
+
+    let mut client = Node::new(Roles::client(), &[relay_id], &[]);
+    let _ = client.listen().await;
+
+    // NOT CONNECTED FIRST, on purpose. The first version of this
+    // experiment dialled the relay manually and only then asked to
+    // reserve — so the relay client had a connection already and never
+    // needed to dial, and the whole run produced exactly one dial,
+    // which was the harness's own MANUAL one. R2.7 passed on it and
+    // measured nothing about the mechanism it exists to test.
+    //
+    // Listening on a circuit address for a relay we hold no connection
+    // to is what forces `relay::client` to originate the dial itself.
+    let circuit = circuit_addr(&relay_addr, &relay_peer);
+    client
+        .swarm
+        .add_peer_address(relay_peer, relay_addr.clone());
+    let _ = client.swarm.listen_on(circuit);
+
+    {
+        let mut nodes = [&mut client, &mut relay_node];
+        pump(&mut nodes, Duration::from_secs(10)).await;
+    }
+
+    let announced = client.attribution.announced();
+    let resolved = client.attribution.resolved();
+    let unattributed = client.attribution.unattributed();
+    let behaviour_dials = client.ledger.behaviour_originated();
+
+    report.note("R2.1", format!("announced by origin: {announced:?}"));
+    report.note("R2.2", format!("resolved by origin: {resolved:?}"));
+    report.note(
+        "R2.3",
+        format!(
+            "behaviour dials seen by the gate: {behaviour_dials}, unattributed: {unattributed}"
+        ),
+    );
+    report.note(
+        "R2.4",
+        format!(
+            "addresses the PENDING hook was handed, per dial: {:?} (F9: expected all zero)",
+            client.ledger.pending_address_counts()
+        ),
+    );
+    report.note(
+        "R2.5",
+        format!(
+            "addresses at the ESTABLISHED hook: {:?}",
+            client.ledger.established_addresses()
+        ),
+    );
+
+    // THE REQUIRED CLAIM. Not "some dials were attributed" — every one
+    // the gate met had a note, because a single miss is a dial
+    // production would misclassify.
+    report.require(
+        "R2.6",
+        unattributed == 0,
+        "every behaviour-originated dial the gate met carried an announced origin",
+    );
+    // NOT `> 0`: a manual dial is also "a dial". The claim is that a
+    // BEHAVIOUR originated one and the mechanism named it, so the
+    // assertion has to name the origin it expects.
+    let relay_dials = resolved.get("relay-reservation").copied().unwrap_or(0);
+    report.require(
+        "R2.7",
+        relay_dials > 0,
+        "the relay client originated a dial of its own and the gate resolved it as \
+         RelayReservation, so R2.6 is not vacuous",
+    );
+    report.require(
+        "R2.8",
+        client.attribution.outstanding() == 0,
+        "no announced dial went unclaimed, so the note map does not grow without bound",
+    );
+}
+
+/// R3 — infrastructure authorization does not reach the data plane.
+///
+/// ADR-0036's whole point, exercised against the REAL policy rather
+/// than a restatement of it: the same peer, the same address, the same
+/// instant, admitted for reachability and refused for application
+/// traffic.
+pub fn r3_infrastructure_cannot_reach_the_data_plane(report: &mut Report) {
+    use interweave_transport_api::TransportIdentity;
+    use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
+    use interweave_transport_runtime::{ConnectionManager, TrustSources};
+
+    let relay = TransportIdentity::parse(
+        libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id()
+            .to_base58(),
+    )
+    .expect("canonical");
+
+    // CEILINGS, or this proves nothing. `ConnectionPolicy::default()`
+    // carries `max_connections: 0`, so the first version of this
+    // experiment refused all eight origins with `ConnectionLimitReached`
+    // — every R3.2 "is refused" passed for a reason that had nothing to
+    // do with class, and every R3.1 failed. A test that cannot tell
+    // `NotAuthorizedForDataPlane` from "no room" is not testing ADR-0036.
+    let mut manager = ConnectionManager::new(ConnectionPolicy::new(32, 32), 32);
+    let _ = manager.set_trust(
+        TrustSources::new(
+            PeerTrustPolicy::new([]).expect("empty allowlist"),
+            InfrastructureSet::new([relay.clone()]).expect("one relay"),
+        ),
+        &[],
+    );
+    let handle = manager.handle();
+
+    let ask = |origin: DialOrigin| {
+        handle.admit(
+            &DialRequest {
+                peer: Some(relay.clone()),
+                address: String::new(),
+                origin,
+            },
+            0,
+        )
+    };
+
+    for origin in [
+        DialOrigin::RelayReservation,
+        DialOrigin::RelayCircuit,
+        DialOrigin::AutonatProbe,
+        DialOrigin::DcutrHolePunch,
+    ] {
+        let outcome = ask(origin);
+        report.require(
+            "R3.1",
+            outcome.is_ok(),
+            &format!("{origin:?} is admitted for an infrastructure-only peer"),
+        );
+    }
+    for origin in [
+        DialOrigin::KademliaQuery,
+        DialOrigin::ConnectionManager,
+        DialOrigin::Manual,
+        DialOrigin::DiscoveryReconnect,
+    ] {
+        // THE REASON, not merely the refusal. Any misconfiguration —
+        // a zero ceiling, a drain flag — refuses everything, and a
+        // test that only asked `is_err()` would report ADR-0036 held
+        // while measuring something else entirely.
+        let denial = ask(origin).err();
+        report.require(
+            "R3.2",
+            denial == Some(DialDenial::NotAuthorizedForDataPlane),
+            &format!(
+                "{origin:?} is refused for an infrastructure-only peer AS a data-plane \
+                 origin (got {denial:?})"
+            ),
+        );
+    }
+
+    // THE CONSEQUENCE FOR STAGE 11, stated as an observation rather
+    // than left implicit: an unattributed dial defaults to
+    // `KademliaQuery` in production today, and R3.2 shows that is
+    // refused for exactly the peers the reachability stack must dial.
+    // So attribution (R2) is not a nicety; without it the stack fails
+    // closed against its own infrastructure.
+    report.note(
+        "R3.3",
+        "an unattributed dial would be admitted as KademliaQuery, which R3.2 shows is refused \
+         for an infrastructure-only peer — so R2's mechanism is load-bearing, not cosmetic"
+            .to_owned(),
+    );
+}
+
+/// R4 — what the AutoNAT v2 server validates before dialling back.
+///
+/// `AUTONAT.md` §7 makes four checks mandatory: literal IP only, the
+/// candidate IP equal to the observed source IP, prohibited address
+/// classes refused, and a mismatch treated as a probe failure rather
+/// than a generic dial. This records what the pinned crate does, which
+/// is what decides whether Stage 11 implements those checks itself.
+pub async fn r4_autonat_server_dial_back(report: &mut Report) {
+    // Read from the crate rather than inferred: the server's request
+    // handler pops the LAST supplied address, and when it differs from
+    // the observed address it charges the client "dial data" and then
+    // dials it anyway. There is no IP-class filter and no
+    // equality-with-source requirement in that path.
+    report.note(
+        "R4.1",
+        "libp2p-autonat 0.15.0 v2 server: handle_request_internal pops addrs.last(), and on \
+         `addr != observed_multiaddr` requests dial-data (amortization) rather than refusing; \
+         no literal-IP, source-equality or special-use class check exists in that path"
+            .to_owned(),
+    );
+    report.note(
+        "R4.2",
+        "the dial-back is an ordinary ToSwarm::Dial with PeerCondition::Always and \
+         allocate_new_port (v2/server/behaviour.rs), so it DOES traverse the root gate's \
+         pending and established hooks — which is where the missing checks can be added"
+            .to_owned(),
+    );
+
+    // And the consequence, MEASURED: the dial-back reaches each
+    // server's own root gate, so the gate is where the missing checks
+    // can live. Two servers, differing only in what they authorize:
+    //
+    //   permissive — trusts the client for the data plane, so its
+    //                dial-back is admitted;
+    //   strict     — trusts nobody, so its dial-back is refused by its
+    //                own gate even though the crate was willing.
+    //
+    // The client trusts both, because it has to be able to reach them
+    // to be probed at all; the difference under test is on the server
+    // side.
+    // THE CLIENT IS BUILT FIRST, so the servers can trust the identity
+    // it actually has. `Node::new` mints its own keypair, and the first
+    // version of this experiment generated a separate one to name in
+    // the servers' allowlists — so "permissive" trusted a peer that did
+    // not exist and refused the real client's dial-back as
+    // `Unauthorized`, which read as a finding about the crate and was a
+    // bug in the fixture.
+    let mut client = Node::new(Roles::client(), &[], &[]);
+    let client_id = client.identity.clone();
+
+    let mut permissive = Node::new(Roles::infrastructure(), &[client_id.clone()], &[]);
+    let permissive_addr = permissive.listen().await;
+    let permissive_id = permissive.identity.clone();
+    let permissive_peer = permissive.peer_id;
+
+    let mut strict = Node::new(Roles::infrastructure(), &[], &[]);
+    let strict_addr = strict.listen().await;
+    let strict_id = strict.identity.clone();
+    let strict_peer = strict.peer_id;
+
+    // The client must reach both to be probed at all; the difference
+    // under test is on the server side.
+    client.trust_data_plane(&[permissive_id, strict_id]);
+    let _ = client.listen().await;
+    client
+        .dial(permissive_peer, permissive_addr)
+        .expect("dial accepted");
+    client.dial(strict_peer, strict_addr).expect("dial accepted");
+
+    {
+        let mut nodes = [&mut client, &mut permissive, &mut strict];
+        pump(&mut nodes, Duration::from_secs(12)).await;
+    }
+
+    report.note(
+        "R4.3",
+        format!(
+            "strict server gate ledger: behaviour dials={}, allowed={:?}, refusals={:?}",
+            strict.ledger.behaviour_originated(),
+            strict.ledger.allowed_by_origin(),
+            strict.ledger.refusals()
+        ),
+    );
+    report.note(
+        "R4.4",
+        format!(
+            "permissive server gate ledger: behaviour dials={}, allowed={:?}, refusals={:?}",
+            permissive.ledger.behaviour_originated(),
+            permissive.ledger.allowed_by_origin(),
+            permissive.ledger.refusals()
+        ),
+    );
+    report.note(
+        "R4.5",
+        format!(
+            "client autonat results: {:?}",
+            client.observed.details("autonat-client")
+        ),
+    );
+}
