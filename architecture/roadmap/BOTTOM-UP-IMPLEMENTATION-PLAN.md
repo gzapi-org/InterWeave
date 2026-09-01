@@ -1327,18 +1327,27 @@ loopback, so the exit gate's NAT/relay/hole-punch matrix is unmet and
 independently operated relay/probe services, interface change,
 hole-punch success rates, measured resource cost.
 
-The verdict and its four binding findings are in
+The verdict and its five binding findings are in
 [`SPIKES.md`](./SPIKES.md); the record is
-[`spikes/spike-004/`](../../spikes/spike-004/README.md). Three of them
+[`spikes/spike-004/`](../../spikes/spike-004/README.md). Four of them
 change the order or the content of the work below and are repeated where
 they bite:
 
 - **Attribution comes before the features.** Enabling AutoNAT, Relay or
   DCUtR without it means every reservation and probe is refused as
-  `KademliaQuery` against the infrastructure the stack needs — silently,
-  as an ordinary dial failure. This is the same shape as SPIKE-003's
-  "do not begin by enabling the feature", and it is why the ordered list
-  below now begins with attribution rather than with AutoNAT.
+  `KademliaQuery` against the infrastructure the stack needs. The spike
+  ran the shipped gate in front of a real relay client and measured
+  exactly that, with the relay's trust class as the only variable. This
+  is the same shape as SPIKE-003's "do not begin by enabling the
+  feature", and it is why the ordered list below now begins with
+  attribution rather than with AutoNAT.
+- **A gate refusal of a behaviour dial is invisible.** The Swarm
+  discards the `Err` from a denied pending hook, so there is no
+  `Dialing` and no `OutgoingConnectionError`; only the originating
+  behaviour is told, and an observer sees its reaction instead — in the
+  spike, a relay listener closing *successfully*. Whatever this stage
+  builds at the gate must record its own refusals, because nothing
+  downstream will.
 - **`AUTONAT.md` §7 is not implemented by the crate**, and the check
   must run at the PENDING hook: the established hook runs after the
   socket is open, which is after the target has been contacted.
@@ -1376,7 +1385,10 @@ data-plane origin, against the infrastructure the stage exists to use.
    root gate under its own `DialOrigin`, and the map that carries it
    drops a note for a dial the Swarm refuses before the pending hook;
    `GatedSwarm::dial` sets `RelayCircuit` from the address, since the
-   transport rather than the behaviour dials a circuit;
+   transport rather than the behaviour dials a circuit. **The gate
+   records its own refusals here**: the Swarm discards the denial of a
+   behaviour dial, so a refusal that is not written down at the hook is
+   written down nowhere;
 2. **resolve D1**: `DcutrHolePunch` is admitted for a
    `ConnectivityInfrastructureOnly` peer and ADR-0036's matrix forbids
    it. Before DCUtR is built, not after;
