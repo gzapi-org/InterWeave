@@ -1422,14 +1422,15 @@ data-plane origin, against the infrastructure the stage exists to use.
 8. DCUtR — **the crate has no knobs**, so §13's four-concurrent,
    one-per-peer and five-minute cooldown must be built here. **They do
    not belong to the dial gate alone.** The gate sees independent dials
-   and is handed neither a logical attempt identifier nor the attempt's
-   result: a punch has several candidate addresses, both ends dial, and
-   only one of them reports what happened. A gate enforcing "one per
-   peer" on dials would refuse its own attempt's sibling candidates,
-   and one enforcing the cooldown on dials would never learn that an
-   attempt failed. So the ATTEMPT lifecycle is the DCUtR adapter's to
-   track — open, candidates, outcome — and what reaches the gate is a
-   token for that attempt, which the gate admits or refuses as a unit;
+   and is handed no attempt outcome: the spike measured that both ends
+   dial for one punch and exactly one of them is told the result, so
+   the node that dialled may never learn how its own attempt ended and
+   a cooldown keyed on dials would never start. So the ATTEMPT
+   lifecycle is the DCUtR adapter's to track — open, candidates,
+   outcome — and what reaches the gate is a token for that attempt,
+   which the gate admits or refuses as a unit. (Candidate multiplicity
+   is a further reason to expect the same, and is NOT measured: on
+   loopback each endpoint dialled once.);
 9. direct-versus-relayed path preference/stability — including
    §78's "no second `PeerConnected`", which the Swarm does NOT give:
    it reports a second `ConnectionEstablished` for the same peer when

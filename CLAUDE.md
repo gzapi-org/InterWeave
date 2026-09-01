@@ -22,8 +22,9 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   here at the PENDING hook; `RelayCircuit` is a command-path origin;
   `RELAY.md` §8's budgets are none of the crate's defaults and every
   per-peer ceiling admits one more than it says; DCUtR has no knobs, so
-  §13's bounds must be built — by an adapter tracking the attempt
-  lifecycle, not by the gate counting dials; and `CONNECTIVITY.md` §78's "no second
+  §13's bounds must be built by an adapter tracking the attempt
+  lifecycle — the node that dials a punch may not be the one told how
+  it ended, so a cooldown at the gate would never start; and `CONNECTIVITY.md` §78's "no second
   `PeerConnected`" is work, because the Swarm reports a second
   connection for a peer already connected. **Three of them are live
   violations in already-shipped code** — `DcutrHolePunch` (D1) and

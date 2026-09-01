@@ -1029,15 +1029,13 @@ pub async fn r6_production_gate_refuses_the_reservation(report: &mut Report) {
     // NORMAL close.
     report.require(
         "R6.9",
-        node.dialing == 0
-            && node
-                .failures
-                .iter()
-                .all(|f| !f.contains("Dial error") && !f.contains("Denied")),
+        node.dialing == 0 && node.outgoing_errors == 0,
         &format!(
             "a gate refusal of a behaviour dial emits no Dialing and no \
-             OutgoingConnectionError (dialing {}, swarm events {:?})",
-            node.dialing, node.failures
+             OutgoingConnectionError — counted by EVENT VARIANT, not matched against a \
+             rendering that could change (dialing {}, outgoing errors {}, swarm events \
+             {:?})",
+            node.dialing, node.outgoing_errors, node.failures
         ),
     );
     // THE POSITIVE CONTROL FOR F8, without which R6.9 is an assertion
@@ -2292,6 +2290,14 @@ pub async fn r12_dcutr_bounds(report: &mut Report) {
     // attempt's outcome, and the conclusion that the cooldown cannot
     // live at the gate would not follow. So the claim is the asymmetry
     // itself: both ends dial, one reports, the other learns nothing.
+    //
+    // AND THAT IS ALL IT CLAIMS. A second review finding: each endpoint
+    // dialled exactly ONCE here, so this run says nothing about sibling
+    // candidate dials for one punch — loopback offers a single address,
+    // and the crate dialling every observed candidate is read from the
+    // source rather than measured. The conclusion carried forward is
+    // therefore the OUTCOME one: a node's gate may never learn how its
+    // own attempt ended, so a cooldown cannot be keyed there.
     let source_events = source.observed.details("dcutr").len();
     let dest_events = dest.observed.details("dcutr").len();
     report.require(

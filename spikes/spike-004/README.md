@@ -459,10 +459,17 @@ every dial, and R12.4 confirms every hole-punch dial arrives there
 attributed — but it is handed no logical attempt identifier and no
 outcome. R12.5 measures the asymmetry the conclusion rests on: both ends
 dial for one punch and EXACTLY ONE reports the result, so the other end
-never learns how its own attempt ended. A gate enforcing "one per peer"
-on dials would refuse its own attempt's sibling candidates; one
-enforcing the cooldown on dials would never learn that an attempt
-failed. The attempt lifecycle belongs to a
+never learns how its own attempt ended. A cooldown keyed on dials at the
+gate would therefore never start, because the node that dialled may not
+be the node that is told the attempt failed.
+
+**That is the whole of what is measured, and a review on PR #69 was
+right to hold the finding to it.** Each endpoint dialled exactly once
+here. Loopback offers one candidate address, so this run says nothing
+about a single punch producing several sibling dials — that the crate
+dials every observed candidate is read from its source, not measured,
+and the "a per-peer gate would refuse its own siblings" argument is not
+carried forward as evidence. The attempt lifecycle belongs to a
 DCUtR adapter, with a token for the attempt reaching the gate, which
 admits or refuses it as a unit.
 

@@ -214,8 +214,19 @@ pub struct ProductionNode {
     pub swarm: Swarm<ProductionBehaviour>,
     pub peer_id: PeerId,
     pub identity: TransportIdentity,
-    /// Dial failures seen, by rendering — where the refusal shows up.
+    /// Dial failures and listener events seen, by rendering.
+    ///
+    /// Diagnostic only. R6.9's claim is about the EVENT VARIANT, and a
+    /// rendering can change; see [`Self::outgoing_errors`].
     pub failures: Vec<String>,
+    /// `SwarmEvent::OutgoingConnectionError` occurrences, counted by
+    /// variant rather than matched by string.
+    ///
+    /// F8 says a gate refusal of a behaviour dial emits no outgoing
+    /// connection error at all. Asserting that by searching renderings
+    /// for `Dial error` would pass for any error rendered differently,
+    /// which is the opposite of what an absence claim needs.
+    pub outgoing_errors: usize,
     /// Dial attempts the Swarm actually started.
     pub dialing: usize,
     /// Everything else, for diagnosis.
@@ -298,6 +309,7 @@ impl ProductionNode {
             peer_id,
             identity: identity_str,
             failures: Vec::new(),
+            outgoing_errors: 0,
             connected: 0,
             dialing: 0,
             other: Vec::new(),
@@ -325,6 +337,7 @@ impl ProductionNode {
         while let std::task::Poll::Ready(Some(event)) = self.swarm.poll_next_unpin(cx) {
             match event {
                 libp2p::swarm::SwarmEvent::OutgoingConnectionError { error, .. } => {
+                    self.outgoing_errors += 1;
                     self.failures.push(format!("{error}"));
                 }
                 libp2p::swarm::SwarmEvent::ConnectionEstablished { .. } => {
