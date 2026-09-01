@@ -25,6 +25,8 @@ workspace = true
 [dependencies]
 
 [dev-dependencies]
+interweave-discovery-api = { path = "../../crates/api/discovery-api" }
+interweave-discovery-kademlia = { path = "../../crates/discovery/kademlia" }
 interweave-kademlia-control-api = { path = "../../crates/api/kademlia-control-api" }
 interweave-profile-identity = { path = "../../crates/identity/profile-identity" }
 interweave-transport-api = { path = "../../crates/api/transport-api" }
