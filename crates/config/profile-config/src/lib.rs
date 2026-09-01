@@ -43,12 +43,17 @@ pub use persist::{
 /// Which provider a `discovery.providers` entry configures.
 ///
 /// A tagged union, per `config.schema.yaml`. `kademlia` is a KNOWN type
-/// this build does not implement: it parses, and enabling it is a
-/// validation error rather than a silent omission —
-/// `PROVIDER-CONTRACT.md` is explicit that "the runtime must never
-/// silently start while omitting a provider that configuration enables",
-/// and ADR-0034 makes a reduced build reject a defaulted-on entry as a
-/// hard startup error. Stage 10 implements it.
+/// this build cannot RUN: it parses, and enabling it is a validation
+/// error rather than a silent omission — `PROVIDER-CONTRACT.md` is
+/// explicit that "the runtime must never silently start while omitting
+/// a provider that configuration enables", and ADR-0034 makes a reduced
+/// build reject a defaulted-on entry as a hard startup error.
+///
+/// "Does not implement" was true when this was written and stopped
+/// being true at Stage 10, which shipped the provider and its driver.
+/// What is still missing is a composition root that constructs one —
+/// Stage 12 — so the refusal stands for a different reason than it did.
+/// See [`DiscoveryProviderType::Kademlia`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DiscoveryProviderType {
@@ -58,7 +63,17 @@ pub enum DiscoveryProviderType {
     Mdns,
     /// Operator-configured entries.
     StaticBootstrap,
-    /// Peer routing over a DHT. Not implemented until Stage 10.
+    /// Peer routing over a DHT.
+    ///
+    /// BUILT, AND NOT CONSTRUCTED. Stage 10 shipped the provider as
+    /// `crates/discovery/kademlia` with its driver in
+    /// `crates/transport/libp2p`; what does not exist is a composition
+    /// root that constructs one from an entry here, which is Stage 12.
+    /// `validate` therefore still refuses an enabled entry — for that
+    /// reason, and separately because ADR-0034's v1 release gate holds
+    /// shipping configured entries default-enabled until SPIKE-004.
+    /// This comment said "not implemented until Stage 10" through the
+    /// stage that implemented it.
     Kademlia,
 }
 
@@ -135,8 +150,8 @@ pub struct DiscoveryProviderSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_entries: Option<u32>,
 
-    // `kademlia`: the documented namespace, PARSED THOUGH THE PROVIDER IS
-    // NOT BUILT.
+    // `kademlia`: the documented namespace, PARSED THOUGH NOTHING HERE
+    // CONSTRUCTS THE PROVIDER.
     //
     // This struct is `deny_unknown_fields`, so omitting these did not
     // leave them unread — it made the canonical profile in
