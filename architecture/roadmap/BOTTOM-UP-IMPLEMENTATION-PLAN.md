@@ -1353,17 +1353,20 @@ below and are repeated where they bite:
 - **`AUTONAT.md` §7 is not implemented by the crate**, and the check
   must run at the PENDING hook: the established hook runs after the
   socket is open, which is after the target has been contacted.
-- **D1, D2 and D3 are defects in already-shipped code**, not in this
-  stage's work. `DcutrHolePunch` and `RelayCircuit` are both admitted
-  for a `ConnectivityInfrastructureOnly` peer, which ADR-0036's matrix
-  and enforcement clause forbid; the fix is not "add both to
-  `is_data_plane`", because `RelayReservation` must stay
+- **D1, D2 and D3 sit in already-shipped code**, not in this stage's
+  work, and none is reachable in a shipped build today — nothing
+  constructs `DcutrHolePunch` or `RelayCircuit`, and no relay feature
+  is compiled — so all three are latent until this stage enables the
+  paths they govern. `DcutrHolePunch` and `RelayCircuit` are both
+  admitted for a `ConnectivityInfrastructureOnly` peer; the fix is not
+  "add both to `is_data_plane`", because `RelayReservation` must stay
   non-data-plane and D2 differs from it precisely in naming the
   DESTINATION rather than the relay. And `PreAuthAdmission` buckets a
   relayed inbound by the source PeerId the circuit carries, which is
-  the "unbounded pseudo-source bucket" `CONNECTIVITY.md` §10 forbids by
-  name. All three are step 2 of the list below, before DCUtR or
-  relayed paths are built rather than after.
+  the "unbounded pseudo-source bucket" `contracts/CONNECTIVITY.md` §10
+  forbids by name. **D2 needs an architecture clarification before its
+  code change** — see step 2. All three land before DCUtR or relayed
+  paths are built rather than after.
 - **ADR-0036's inbound relayed clause has no implementation site.** The
   shipped gate is outbound-only, so a relayed inbound is never
   evaluated against the authenticated end PeerId at all. The spike
@@ -1434,7 +1437,7 @@ data-plane origin, against the infrastructure the stage exists to use.
    is a further reason to expect the same, and is NOT measured: on
    loopback each endpoint dialled once.);
 9. direct-versus-relayed path preference/stability — including
-   §78's "no second `PeerConnected`", which the Swarm does NOT give:
+   `contracts/CONNECTIVITY.md` §5's "no second `PeerConnected`", which the Swarm does NOT give:
    it reports a second `ConnectionEstablished` for the same peer when
    the punch succeeds, and the relayed connection survives beside it;
 10. network-change invalidation/recovery.
