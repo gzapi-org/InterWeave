@@ -946,28 +946,46 @@ pub(super) fn handle_kademlia(
     out: &mut Vec<KademliaEvent>,
 ) -> KadHandled {
     let handled = classify_swarm_event(event, swarm, state, manager, now_ms, out);
-    // AFTER EVERY EVENT, not only a Kademlia one. Review finding on PR
-    // #64: the library starts its automatic bootstrap inside
-    // `Behaviour::poll` and emits no Kademlia event for it, so under
-    // `BucketInserts::Manual` its FIRST and only Kademlia event is the
-    // final completion. Reconciling only on Kademlia events therefore
-    // never met such a query while it was running: the completion arm
-    // announced and settled it in one pass, and for the whole time it
-    // was dialling or waiting out its timeout the provider held no
-    // charge against it — so commanded queries could spend the entire
-    // concurrency and rate budget beside work nobody was counting.
-    //
-    // That query DIALS, and a dial produces `Dialing`,
-    // `ConnectionEstablished` or `OutgoingConnectionError` — none of
-    // them Kademlia events, all of them arriving before the
-    // completion. Reconciling here narrows the unaccounted window from
-    // the query's whole lifetime to a single event.
-    //
-    // It cannot be closed entirely: the dial is issued from inside the
-    // same `Behaviour::poll` that starts the query, so no observer in
-    // this process can announce it beforehand. What is achievable is
-    // that the charge is held while the network work happens, and that
-    // is what this does.
+    reconcile(state, swarm, out);
+    handled
+}
+
+/// Notice the queries the library started without saying so, and charge
+/// them.
+///
+/// Called after EVERY Swarm event, and on the runtime's periodic tick.
+/// Both, and the reasons are different.
+///
+/// The library starts its automatic bootstrap inside `Behaviour::poll`
+/// and emits no Kademlia event for it, so under `BucketInserts::Manual`
+/// its FIRST and only Kademlia event is the final completion.
+/// Reconciling only on Kademlia events therefore never met such a query
+/// while it ran: the completion arm announced and settled it in one
+/// pass, and for the whole time it was working the provider held no
+/// charge against it — so commanded queries could spend the entire
+/// concurrency and rate budget beside work nobody was counting.
+///
+/// AFTER EVERY EVENT, because a query that dials produces `Dialing`,
+/// `ConnectionEstablished` or `OutgoingConnectionError` — not Kademlia
+/// events, and all of them before the completion.
+///
+/// AND ON A TICK, because it need not dial at all. Review finding on PR
+/// #64 against the event-only version: the insertion that triggers the
+/// automatic bootstrap most often comes from `Identify::Received` on a
+/// connection that is ALREADY ESTABLISHED, and such a query sends its
+/// requests over that connection. It can therefore produce no Swarm
+/// event whatsoever between starting and completing, and on an
+/// otherwise idle node nothing would reconcile until the completion.
+/// "That query dials" was an assumption, and it was wrong.
+///
+/// The window cannot be closed entirely — the query begins inside a
+/// `Behaviour::poll` no observer here precedes — but with the tick it
+/// is bounded by `retry_tick` rather than by the query's lifetime.
+pub(super) fn reconcile(
+    state: &mut KademliaState,
+    swarm: &mut crate::gated_swarm::GatedSwarm,
+    out: &mut Vec<KademliaEvent>,
+) {
     if let Some(behaviour) = swarm.kademlia_mut() {
         if state.stopping {
             // The sweep's single `finish` only advanced each bootstrap;
@@ -976,7 +994,6 @@ pub(super) fn handle_kademlia(
         }
         reconcile_implicit(state, behaviour, out);
     }
-    handled
 }
 
 /// Fold one Swarm event onto the port, without reconciliation.
@@ -2441,6 +2458,68 @@ mod tests {
             .expect("behaviour")
             .build();
         crate::gated_swarm::GatedSwarm::new(swarm)
+    }
+
+    #[tokio::test]
+    async fn a_query_that_dials_nothing_is_still_announced() {
+        // Review finding on PR #64 against the event-only
+        // reconciliation. The insertion that triggers the automatic
+        // bootstrap most often comes from `Identify::Received` on a
+        // connection that is ALREADY established, and such a query
+        // sends its requests over that connection — no `Dialing`, no
+        // `ConnectionEstablished`, no failure. It can produce no Swarm
+        // event whatsoever between starting and completing, so an
+        // event-driven reconciliation on an idle node meets it for the
+        // first time at its completion and the charge covers none of
+        // its network life.
+        //
+        // `reconcile` is therefore reachable without an event at all,
+        // and the runtime drives it from the retry tick. This asserts
+        // the entry point that tick calls, on a driver that has seen no
+        // event.
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let mut swarm = gated_swarm_with_kad(&settings);
+        let mut state = KademliaState::new(&settings);
+
+        // A query nobody commanded, live in the pool, with no event of
+        // any kind delivered to the driver.
+        let _ = swarm
+            .kademlia_mut()
+            .expect("kad enabled")
+            .get_closest_peers(PeerId::random());
+
+        let mut out = Vec::new();
+        reconcile(&mut state, &mut swarm, &mut out);
+        assert!(
+            out.iter().any(|e| matches!(
+                e,
+                KademliaEvent::QueryStarted {
+                    origin: interweave_kademlia_control_api::QueryOrigin::Implicit,
+                    ..
+                }
+            )),
+            "a tick announces a query no event would have surfaced"
+        );
+        assert_eq!(state.implicit.len(), 1, "and tracks it exactly once");
+
+        // A second tick with nothing new says nothing new — the tick is
+        // idempotent, so it cannot charge the same query once a second.
+        let mut again = Vec::new();
+        reconcile(&mut state, &mut swarm, &mut again);
+        assert!(
+            again.is_empty(),
+            "an already-announced query is not announced again on the next tick"
+        );
     }
 
     #[tokio::test]

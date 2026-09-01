@@ -843,6 +843,36 @@ impl SwarmRuntime {
                                 }
                             }
                         }
+
+                        // THE TICK RECONCILES TOO. Review finding on
+                        // PR #64: the library's automatic bootstrap can
+                        // start on a connection that is already
+                        // established — the routing insertion comes
+                        // from `Identify::Received` — and then dials
+                        // nothing, so it produces no Swarm event at all
+                        // between starting and completing. Reconciling
+                        // only after events left such a query uncharged
+                        // for its whole lifetime on an otherwise idle
+                        // node, with commanded work free to spend the
+                        // entire budget beside it.
+                        //
+                        // This tick already exists and already walks a
+                        // bounded table, so the uncharged window
+                        // becomes `retry_tick` rather than the query's
+                        // lifetime. Pushed like the event path pushes:
+                        // a `QueryStarted` is settlement-tier, and its
+                        // pair is what the outbox must not split.
+                        if let Some(state) = kademlia_state.as_mut() {
+                            let mut kad_events = Vec::new();
+                            kademlia_driver::reconcile(
+                                state,
+                                &mut swarm,
+                                &mut kad_events,
+                            );
+                            for event in kad_events {
+                                outbox.push_back(SwarmEvent::Kademlia { event });
+                            }
+                        }
                     }
                     // `reserve` waits for capacity WITHOUT consuming an
                     // event, so nothing is lost when another branch wins.
