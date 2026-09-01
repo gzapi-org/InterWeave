@@ -2127,10 +2127,11 @@ pub async fn r11_relay_server_budgets(report: &mut Report) {
 /// counting retries per relayed connection, which is neither a
 /// concurrency cap nor a cooldown.
 ///
-/// So the bounds must be enforced outside the behaviour, and the dial
-/// gate is the only place that sees every attempt. Whether it can COUNT
-/// them there is the question this asks, and the answer shapes Phase 6:
-/// one hole punch is several dials.
+/// So the bounds must be enforced outside the behaviour. The dial gate
+/// is the only place that sees every dial — but whether a dial count
+/// can BE an attempt count is the question this asks, and the answer
+/// shapes Phase 6: both ends dial for one punch and only one of them is
+/// told how it ended.
 ///
 /// §78 is the other half: *"a successful DCUtR hole punch for an
 /// already-connected relayed peer therefore does not emit a second
@@ -2251,13 +2252,13 @@ pub async fn r12_dcutr_bounds(report: &mut Report) {
             dest.observed.details("dcutr").len()
         ),
     );
-    // EVERY dial, not at least one. Review finding on PR #69: this
-    // scenario makes several candidate dials from both ends, so
-    // `punch_dials > 0` is satisfied by one admitted dial per node
-    // while the rest go unattributed — which is the exact regression
-    // F12's conclusion depends on not happening. The claim is
-    // therefore the three numbers agreeing: announced == resolved for
-    // this origin on each node, and zero dials met with no note at all.
+    // EVERY dial, not at least one. Review finding on PR #69:
+    // `punch_dials > 0` is satisfied by a single admitted dial while
+    // any others — a second endpoint's, a retry, a further candidate —
+    // go unattributed, which is the exact regression F12's conclusion
+    // depends on not happening. The claim is therefore the three
+    // numbers agreeing: announced == resolved for this origin on each
+    // node, and zero dials met with no note at all.
     let announced_punches = source
         .attribution
         .announced()

@@ -26,10 +26,10 @@
 //!
 //! # What each hook can decide (F9)
 //!
-//! For a behaviour-originated dial libp2p calls the pending hook with
-//! an EMPTY address list — the hook exists so each behaviour can
-//! contribute addresses, and the union is dialled after it returns. So
-//! the pending hook decides everything peer-scoped and global, on the
+//! For a KADEMLIA dial libp2p calls the pending hook with an EMPTY
+//! address list — the hook exists so each behaviour can contribute
+//! addresses, and the union is dialled after it returns. So the
+//! pending hook decides everything peer-scoped and global, on the
 //! empty placeholder address, and the ADDRESS decision moves to
 //! `handle_established_outbound_connection`, which is handed the
 //! address the dial actually used: the ticket is re-bound to it
@@ -37,8 +37,19 @@
 //! quarantine is asked through the capacity-free
 //! [`PolicySnapshot::address_dialable`] (F11). A quarantined route
 //! therefore costs one TCP connect and is then refused — later than
-//! the command path's check, and the only place a behaviour dial has
+//! the command path's check, and the only place a Kademlia dial has
 //! one at all.
+//!
+//! **The empty list is Kademlia's, not every behaviour's.** SPIKE-004
+//! measured a relay reservation and an AutoNAT dial-back each arriving
+//! at this hook with ONE candidate address, so the slice is
+//! origin-dependent and this module's `_addresses` parameter stops
+//! being ignorable when Stage 11 adds those behaviours. It matters in
+//! one direction especially: `AUTONAT.md` §7's dial-back restriction
+//! is an SSRF check on a requester-chosen address, and deferring it to
+//! the established hook means performing the connect the check exists
+//! to prevent. Stage 11 must read the slice here rather than inherit
+//! the assumption above.
 //!
 //! # What it is not
 //!
@@ -294,11 +305,17 @@ impl NetworkBehaviour for OutboundAdmission {
                 "behaviour dial names an identity outside the neutral grammar: {peer}"
             ))));
         };
-        // THE EMPTY PLACEHOLDER, deliberately (F9): the hook is given
-        // no addresses, so peer-scoped and global policy — trust,
-        // backoff, drain, both ceilings — are decided here, and the
-        // address decision waits for the established hook, where an
-        // address exists. F16's cost is accepted knowingly: the
+        // THE EMPTY PLACEHOLDER, deliberately (F9): a Kademlia dial
+        // reaches this hook with no addresses, so peer-scoped and
+        // global policy — trust, backoff, drain, both ceilings — are
+        // decided here, and the address decision waits for the
+        // established hook, where an address exists.
+        //
+        // `_addresses` is ignored because it is always empty for the
+        // only behaviour that can dial today. SPIKE-004 measured a
+        // relay reservation and an AutoNAT dial-back arriving here with
+        // one candidate each, so Stage 11 must read the slice rather
+        // than inherit this — see the module note. F16's cost is accepted knowingly: the
         // reservation cannot be separated from the admission, so an
         // address table full of live quarantines refuses behaviour
         // dials outright, which is fail-closed.
