@@ -1175,7 +1175,28 @@ application messages
 
 ### Tests
 
-SPIKE-003 evidence converts into permanent cases under `tests/kademlia`: namespace derivation against the frozen golden, manual routing admission, bounded exploration/saturation, and dial-gate obedience for query-originated dials.
+SPIKE-003 evidence converts into permanent cases: namespace derivation
+against the frozen golden, manual routing admission, bounded
+exploration/saturation, and dial-gate obedience for query-originated
+dials.
+
+**Three of the four are NOT under `tests/kademlia`, and should not be.**
+This sentence originally said they all would be, which sends an auditor
+to a directory holding two files and invites the conclusion that two
+cases are missing. CLAUDE.md §4 puts a test at the lowest layer that
+completely proves the behaviour, and only two of these need two real
+runtimes over real sockets. Where each one is:
+
+| Case | Where | Why there |
+| --- | --- | --- |
+| namespace derivation vs the frozen golden | `crates/transport/libp2p/src/runtime/kademlia_driver.rs` — `the_namespace_matches_every_frozen_vector` | Pure derivation. Reads every vector from `fixtures/kademlia/kad-network-namespace-v1.json` and refuses an empty fixture, so a derivation that agrees only with itself cannot pass. |
+| manual routing admission | `crates/transport/libp2p/tests/kademlia_driver.rs` — `a_trusted_server_routes_and_a_client_never_does` | Needs two runtimes: admission turns on Identify arriving over a real connection, and the client half is the control. Covers the inbound direction SPIKE-003's seed-node finding named — the hub routes a peer that dialled *it*. |
+| bounded exploration/saturation | provider unit tests, plus `tests/kademlia/tests/overlay_health.rs` | The pacing, backoff and saturation conjuncts are a state machine and belong beside it. Reaching `Healthy` needs a real driver feeding a real provider, which only the suite has. |
+| dial-gate obedience for query-originated dials | `crates/transport/libp2p/tests/kademlia_driver.rs` — `the_gate_refuses_the_walks_dial_to_a_stranger`, with `an_exploration_converges_the_star_through_admitted_dials` as the admitted control | A behaviour-originated dial only exists inside a running Swarm. Both directions, because a gate that refuses everything would pass the refusal half alone. |
+
+`tests/kademlia` holds the two cases that are only observable from
+outside a single process: the opt-out, and the overlay reaching health
+across the port.
 
 ### Exit gate
 
