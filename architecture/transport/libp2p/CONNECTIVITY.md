@@ -671,7 +671,7 @@ Failure blocks standard-v1 release or triggers a new ADR. It no longer authorize
 
 ### Phase A (2026-09-01): what this gate has and has not received
 
-SPIKE-004 ran in two phases and only the first is closed. Phase A is loopback on one machine; the verdict and its findings are in [`SPIKES.md`](../../roadmap/SPIKES.md) and the record is [`spikes/spike-004/`](../../../spikes/spike-004/README.md). Against the ten items above:
+SPIKE-004 ran in two phases and only the first is closed. Phase A is loopback on one machine; the verdict and its findings are in [`SPIKES.md`](../../roadmap/SPIKES.md) and the record is [`spikes/spike-004/`](../../../spikes/spike-004/README.md). Against the nine items above (the third splits, since the relayed transport is answered and the data-plane protocols over it are not):
 
 - **answered by phase A**: AutoNAT v2 client/server event and API behaviour with per-scenario server selection; Circuit Relay v2 reservation lifecycle for obtain, multi-relay hold and withdrawal-on-loss, with address generation; the relay client transport over Noise/Yamux to a completed circuit; DCUtR success events and connection coexistence; root dial-gate visibility for every behaviour-originated AutoNAT, relay and DCUtR dial.
 - **not answered, and not by loopback**: reservation refresh and expiry (the crate's default reservation lasts an hour); DCUtR failure and its cooldown (a loopback punch succeeds); direct-versus-relay racing and cancellation semantics (never exercised); network-change behaviour; resource and bandwidth cost under target defaults.

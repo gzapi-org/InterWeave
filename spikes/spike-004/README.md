@@ -514,19 +514,28 @@ behaviour.
 **Not by the gate alone, though.** The gate is the only place that sees
 every dial, and R12.4 confirms every hole-punch dial arrives there
 attributed — but it is handed no logical attempt identifier and no
-outcome. R12.5 measures the asymmetry the conclusion rests on: both ends
-dial for one punch and EXACTLY ONE reports the result, so the other end
-never learns how its own attempt ended. A cooldown keyed on dials at the
-gate would therefore never start, because the node that dialled may not
-be the node that is told the attempt failed.
+outcome. R12.5 measures the split the conclusion rests on: **one hole
+punch produces a dial at BOTH ends**, so no single node's gate ever sees
+the attempt, only its own half. A per-peer "one hole punch" ceiling
+counted at one gate is counting half of something.
 
-**That is the whole of what is measured, and a review on PR #69 was
-right to hold the finding to it.** Each endpoint dialled exactly once
-here. Loopback offers one candidate address, so this run says nothing
-about a single punch producing several sibling dials — that the crate
-dials every observed candidate is read from its source, not measured,
-and the "a per-peer gate would refuse its own siblings" argument is not
-carried forward as evidence. The attempt lifecycle belongs to a
+**A claim that was here and is now gone, because a run disproved it.**
+An earlier version of R12.5 required that EXACTLY ONE end report the
+result, having seen that in several runs — and F12 rested on it: the
+node that dialled would never learn how its attempt ended. Run the
+harness enough times and both ends report. The requirement was a shape
+three runs happened to have, which is the same error as measuring a
+fixture, and it was caught by the harness failing rather than by anyone
+reading it. The per-node result counts are R12.13, a note. What survives
+is the weaker and true statement: whether a node is told its own
+attempt's outcome is not something this harness can pin, and the outcome
+reaches the DCUtR behaviour rather than the gate either way.
+
+**Candidate multiplicity is not measured** either: each endpoint dialled
+once, because loopback offers one candidate address. That the crate
+dials every observed candidate is read from its source, so "a per-peer
+gate would refuse its own attempt's siblings" is not carried forward as
+evidence. The attempt lifecycle belongs to a
 DCUtR adapter, with a token for the attempt reaching the gate, which
 admits or refuses it as a unit.
 
@@ -573,6 +582,23 @@ logical-peer view is Phase 6's to build.
   the cooldown, the retry ceiling and the fallback-on-failure rule are
   untested here; F12 is about where the bounds must live, not about
   them working. Failure behaviour is phase B.
+- **Three of SPIKE-004's own expected-evidence items in `SPIKES.md` are
+  neither answered nor previously disclaimed, and all three are blocked
+  on components this stage has yet to build rather than on the
+  environment.** *Multi-observer aggregation to
+  `unknown`/`verified_public`/`not_verified`* — the crate's per-probe
+  results are observed, but the aggregation over two servers is our
+  reachability state machine and does not exist. *Identify-learned
+  infrastructure candidates disabled by default, and never displacing
+  usable static ones* — that promotion policy is ours and does not
+  exist. *Relay service admission accepting only configured
+  `DataPlaneTrusted`/`ConnectivityInfrastructureOnly` classes* — every
+  relay server here is built with empty trust sets and accepts a
+  reservation from anyone, because `relay::Behaviour` has no admission
+  hook; the class check is a wrapper Phase 4 writes. **R3, R6 and R7
+  measure the CLIENT's dial gate, never a relay's own service
+  admission**, and nothing in this record should be read as validating
+  the latter.
 - **Three items of `transport/libp2p/CONNECTIVITY.md` §26's gate are untouched and were
   not previously listed here.** Direct-versus-relay racing and
   cancellation semantics are never exercised; network-change behaviour
@@ -666,6 +692,42 @@ same shape a Stage 11 test could take.
     did not become one. R5.7 and R5.12 now require the circuit to
     complete, and fail when the external address is removed.
 
+## What CI does and does not run
+
+**Nothing here runs in CI, and the phrase "pinned so a fix fails here"
+has to be read against that.** The harness is its own workspace root —
+deliberately, because Cargo unifies features across one workspace and
+membership would switch `autonat`, `relay` and `dcutr` on inside
+`interweave-transport-libp2p`. The cost is that `cargo xtask ci`, the
+`rust` job and `cargo deny` never touch this directory: nothing re-runs
+`cargo run`, and nothing even proves these files still compile against
+the production crates they path-depend on. A refactor of
+`OutboundAdmission::new` or `PreAuthLimitsBuilder` breaks the harness
+with no signal at all.
+
+So where a divergence has to fail something CI runs, the pin lives in
+production:
+
+- **D1 and D2** are pinned by `connection_policy.rs`'s
+  `the_split_is_by_origin_and_every_origin_is_listed`, which matches
+  `DialOrigin::ALL` exhaustively — adding either origin to
+  `is_data_plane` fails it.
+- **D3** had no counterpart, so this change adds one: four tests beside
+  `source_label` in `preauth_gate.rs`, including
+  `two_relayed_sources_over_one_relay_get_different_buckets`. That file
+  previously had no test module at all, which is why the comment above
+  `source_label` could argue the relayed case was fail-closed for as
+  long as it did.
+
+Everything else here is evidence, and evidence is re-run by hand.
+
+**The harness's dependency graph is also outside `cargo deny`.** Its
+3,790-line lock — `libp2p-autonat`, `libp2p-relay`, `libp2p-dcutr` and
+their transitive dependencies — is not covered by the licence or
+advisory checks, which run at the repository root. Inherited from
+spike-003's layout rather than new here, but the exemption is otherwise
+invisible.
+
 ## Reproducing
 
 ```
@@ -679,6 +741,9 @@ That is a review finding on PR #69, raised four times over: F3, F4, F6
 and F7 were each asserted in this file while the harness only noted the
 value behind them, so a run contradicting one still exited 0. What each
 claim owes now:
+
+Every row names a `require`, which is what can fail. Where a note is
+mentioned it is labelled as one — a note is printed, never checked.
 
 | Finding | What must hold |
 | --- | --- |
@@ -695,14 +760,14 @@ claim owes now:
 | D2, pinned rather than endorsed | R3.6 — the same admission R3.1 used to list under "the matrix permits", split out so that fixing D2 does not fail an experiment claiming the matrix allows it |
 | F5 default policy refuses everything | R3.7: `ConnectionPolicy::default()` refuses a fully TRUSTED peer with `ConnectionLimitReached`, so a fixture taking the default measures nothing about class |
 | D2 relayed-circuit divergence | R7.4 pins today's behaviour, R7.5 is the control (same destination, data-plane origin, refused), R7.2 shows the class check runs on the destination at all |
-| D3 relayed pre-auth bucket | R9.3 pins today's behaviour, R9.2 is the control (direct inbounds from one IP — the second refused), R9.4 shows the global cap is what remains, and R9.5/R9.6 record that the fixture is R8's MEASURED address with one identity substituted rather than a format string |
+| D3 relayed pre-auth bucket | R9.3 pins today's behaviour, R9.2 is the control (direct inbounds from one IP — the second refused), R9.4 shows the global cap is what remains, and R9.6 requires the two sources to differ only in identity — the fixture being R8's MEASURED address with one substitution, which R9.5 records as a note |
 | §10's premise and its capability | R8.4 (no source IP on a relayed remote), R8.11 (the remote IS the source's PeerId — D3's whole force), R8.5 (the relay's PeerId IS available at the pending hook), R8.7 the control (a direct inbound does carry an IP), R8.8 (the two are distinguishable there) |
 | ADR-0036's inbound relayed clause | R8.9/R8.10: the destination's established hook names the SOURCE's authenticated PeerId on a relayed local address, and never the relay's |
 | F9 reservations and withdrawal | R10.2/R10.3 (two relays, each recording its own acceptance), R10.5 (both addresses advertised), R10.9 (the loss was observed) and R10.10 (withdrawn within a second of it), R10.7 with R10.8 as the control (the survivor stays) |
 | F10 relay defaults vs §8 | R11.2/R11.3 (the two that break a deployment), R11.4 (the two that are looser), R11.1 and R11.5 record the rest |
 | F11 per-peer off-by-one | R11.7 (a ceiling of one admits two) with R11.9 as the control (the third is refused) |
-| F12 DCUtR bounds are an adapter's, not the gate's | R12.4 with R12.9 (announced == resolved for the origin on both nodes, zero unattributed — every punch dial, not merely one) and R12.5 (both ends dial and EXACTLY ONE reports the result, so a node's dial count tells it neither how many attempts are open nor whether one failed) |
-| F13 §5's dedupe is ours | R12.7 (two `ConnectionEstablished` for one logical peer) with R12.8 and R12.10 (one relayed and one direct connection OPEN AT ONCE, by connection id and endpoint — not a peer present in a set) |
+| F12 DCUtR bounds are an adapter's, not the gate's | R12.4 (announced == resolved for the origin on both nodes, zero unattributed — every punch dial, not merely one) and R12.5 (one punch, a dial at BOTH ends, so no single gate sees the attempt). R12.9 and R12.13 are notes recording the counts behind them |
+| F13 §5's dedupe is ours | R12.7 (two `ConnectionEstablished` for one logical peer) with R12.8 (one relayed and one direct connection OPEN AT ONCE, by connection id and endpoint — not a peer present in a set; R12.10 is the note recording the pair) |
 | ADR-0036's relayed end-PeerId clause | R7.12 (the path went through the relay), R7.9/R7.10 (two distinct authenticated identities), R7.11 (Identify completed with the destination through the circuit) |
 | F3, again | R5.11 — no relay-behaviour dial targeted the destination, which origin counts alone cannot show |
 | F7 advertised control protocols | R1.6/R1.7 (Identify arrived and names all four) with R1.8 (and NOTHING else — the list is exact, since it is what a restriction must leave intact). **Scoped**: the harness has no data-plane behaviours, so it says nothing about isolation |

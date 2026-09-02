@@ -1427,10 +1427,10 @@ data-plane origin, against the infrastructure the stage exists to use.
 8. DCUtR — **the crate has no knobs**, so §13's four-concurrent,
    one-per-peer and five-minute cooldown must be built here. **They do
    not belong to the dial gate alone.** The gate sees independent dials
-   and is handed no attempt outcome: the spike measured that both ends
-   dial for one punch and exactly one of them is told the result, so
-   the node that dialled may never learn how its own attempt ended and
-   a cooldown keyed on dials would never start. So the ATTEMPT
+   and is handed no attempt outcome: the spike measured that one punch
+   produces a dial at BOTH ends, so no single gate sees the attempt —
+   only its own half — and the outcome reaches the DCUtR behaviour
+   rather than the gate. So the ATTEMPT
    lifecycle is the DCUtR adapter's to track — open, candidates,
    outcome — and what reaches the gate is a token for that attempt,
    which the gate admits or refuses as a unit. (Candidate multiplicity

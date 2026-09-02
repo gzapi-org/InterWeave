@@ -691,7 +691,7 @@ pub async fn r4_autonat_server_dial_back(report: &mut Report) {
     );
     report.require(
         "R4.10",
-        server_pending.iter().all(|n| *n == 1),
+        !server_pending.is_empty() && server_pending.iter().all(|n| *n == 1),
         &format!(
             "the dial-back candidate is present at the pending hook, BEFORE any socket \
              opens — so an address check there precedes contact, which one at the \
@@ -938,7 +938,7 @@ pub async fn r5_circuit_is_not_a_reservation(report: &mut Report) {
         "the source established the outbound circuit, so R5.6's negative covers the whole \
          path and not only the dial that opens it",
     );
-    // THE RELAY'S OWN LIMITS, recorded because CONNECTIVITY.md §9 sets
+    // THE RELAY'S OWN LIMITS, recorded because RELAY.md §8 sets
     // ours and a reader should be able to compare them with what the
     // crate's defaults actually offer.
     report.note(
@@ -1000,10 +1000,18 @@ pub async fn r6_production_gate_refuses_the_reservation(report: &mut Report) {
     // THE SUBJECT: the relay is authorized for reachability and
     // nothing else, which is what a relay is under ADR-0036.
     let mut node = ProductionNode::new(&[relay_id]);
-    // THE CONTROL: identical in every way except the class the relay
-    // is authorized under. Built here, beside the subject, so a reader
-    // can see that the single difference is the trust set.
-    let mut control = ProductionNode::with_trust(&[relay_node.identity.clone()], &[]);
+    // THE CONTROL, varying exactly ONE thing. Review finding on PR
+    // #69: the earlier version moved the relay from the infrastructure
+    // set INTO the data-plane allowlist, which is two changes, while
+    // the prose said "change nothing else". The relay stays
+    // infrastructure here and data-plane trust is ADDED beside it, so
+    // the single difference is whether the destination is also a
+    // data-plane peer. R3.4 is why that resolves the way it does:
+    // data-plane trust wins when a peer is in both sets.
+    let mut control = ProductionNode::with_trust(
+        std::slice::from_ref(&relay_node.identity),
+        std::slice::from_ref(&relay_node.identity),
+    );
 
     for target in [&mut node, &mut control] {
         let _ = target.listen().await;
@@ -1880,7 +1888,7 @@ pub async fn r9_relayed_preauth_bucket(report: &mut Report, observed: Option<Rel
 /// R10 — reservations are held on several relays at once, and the
 /// address one contributes is withdrawn when that relay is lost.
 ///
-/// `contracts/CONNECTIVITY.md` §8 keys reservation targets to
+/// `transport/libp2p/CONNECTIVITY.md` §8 keys reservation targets to
 /// reachability state (2 while Unknown or NotVerified, 1 when
 /// VerifiedPublic, 4 at most) and requires reservation-derived
 /// addresses to be advertised while live and withdrawn immediately on
@@ -2295,7 +2303,7 @@ pub async fn r11_relay_server_budgets(report: &mut Report) {
 /// R12 — DCUtR has no bounds of its own, and a successful punch is a
 /// second connection to a peer already connected.
 ///
-/// `DCUTR.md` and `CONNECTIVITY.md` §13 set three bounds: at most four
+/// `DCUTR.md` and `transport/libp2p/CONNECTIVITY.md` §13 set three bounds: at most four
 /// concurrent hole punches, one per peer, and a five-minute cooldown
 /// after failure. None of them is a knob. `dcutr::Behaviour::new` takes
 /// a `PeerId` and nothing else, and the crate's own ceiling —
@@ -2481,32 +2489,46 @@ pub async fn r12_dcutr_bounds(report: &mut Report) {
     // sees a hole-punch dial for a punch its own DCUtR may never
     // report, because the peer that reports the result is whichever
     // one's dial won.
-    // EXACTLY ONE END REPORTS, which is the shape the conclusion rests
-    // on. Review finding on PR #69: "fewer results than dials" is
-    // satisfied by two source dials, one destination dial and a result
-    // from each side — a run in which every node DOES learn its own
-    // attempt's outcome, and the conclusion that the cooldown cannot
-    // live at the gate would not follow. So the claim is the asymmetry
-    // itself: both ends dial, one reports, the other learns nothing.
+    // ONE PUNCH IS TWO DIALS AT TWO NODES, and that is the whole of
+    // what this asserts.
     //
-    // AND THAT IS ALL IT CLAIMS. A second review finding: each endpoint
-    // dialled exactly ONCE here, so this run says nothing about sibling
-    // candidate dials for one punch — loopback offers a single address,
-    // and the crate dialling every observed candidate is read from the
-    // source rather than measured. The conclusion carried forward is
-    // therefore the OUTCOME one: a node's gate may never learn how its
-    // own attempt ended, so a cooldown cannot be keyed there.
+    // An earlier version required that EXACTLY ONE end reported the
+    // result, having seen that in several runs. It is not true: run it
+    // enough times and both ends report. The claim was a shape three
+    // runs happened to have, which is the same mistake as measuring a
+    // fixture — so it is gone, and the per-node result counts are a
+    // note (R12.13) rather than a requirement.
+    //
+    // What holds every time is the split. A logical hole punch is ONE
+    // attempt and produces a dial at each end, so no single node's gate
+    // ever sees the attempt — it sees its own half. A per-peer "one
+    // hole punch" rule counted at one gate is counting half of
+    // something, and the outcome that would start a cooldown is
+    // delivered to the DCUtR behaviour rather than to the gate, whether
+    // or not both ends happen to get it.
+    //
+    // Candidate multiplicity is NOT measured either: each endpoint
+    // dialled once, because loopback offers one address.
     let source_events = source.observed.details("dcutr").len();
     let dest_events = dest.observed.details("dcutr").len();
     report.require(
         "R12.5",
-        source_dials > 0 && dest_dials > 0 && ((source_events > 0) != (dest_events > 0)),
+        source_dials > 0 && dest_dials > 0,
         &format!(
-            "BOTH ends dial for one punch (source {source_dials}, destination \
-             {dest_dials}) and EXACTLY ONE reports the result (source {source_events}, \
-             destination {dest_events}) — so a node's own dial count tells it neither how \
-             many attempts are open nor whether one failed, which is why §13's bounds \
-             cannot be a gate counting dials"
+            "ONE hole punch produces a dial at BOTH ends (source {source_dials}, \
+             destination {dest_dials}), so no single node's gate sees the attempt — only \
+             its own half. A per-peer attempt ceiling counted at one gate counts half of \
+             something, which is why §13's bounds cannot be a gate counting dials"
+        ),
+    );
+    report.note(
+        "R12.13",
+        format!(
+            "results reported per node this run: source {source_events}, destination \
+             {dest_events}. NOT asserted — an earlier version required exactly one end to \
+             report, and a later run had both. Whether a node learns its own attempt's \
+             outcome is not a property this harness can pin, which is itself a reason a \
+             cooldown cannot be keyed on it at the gate"
         ),
     );
 

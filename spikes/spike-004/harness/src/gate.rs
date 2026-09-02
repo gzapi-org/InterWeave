@@ -78,7 +78,7 @@ struct LedgerInner {
     established_addresses: Vec<String>,
     /// `(local, remote)` as the PENDING INBOUND hook was handed them —
     /// the only pre-authentication view of an arriving connection, and
-    /// therefore the only place `CONNECTIVITY.md` §10's pre-Noise
+    /// therefore the only place `contracts/CONNECTIVITY.md` §10's pre-Noise
     /// accounting can key on anything.
     pending_inbound: Vec<(String, String)>,
     /// `(peer, local, remote)` once the remote identity is
@@ -206,7 +206,7 @@ impl NetworkBehaviour for InstrumentedGate {
     /// RECORDED, not decided. Pre-authentication admission is a
     /// separate mechanism from the dial gate and Stage 11 does not
     /// build it here; what this hook can answer is the question
-    /// `CONNECTIVITY.md` §10 turns on — what an arriving relayed
+    /// `contracts/CONNECTIVITY.md` §10 turns on — what an arriving relayed
     /// connection actually presents before anything is authenticated.
     fn handle_pending_inbound_connection(
         &mut self,

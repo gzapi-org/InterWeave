@@ -20,11 +20,13 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   behaviours; a gate refusal of a behaviour dial is INVISIBLE, so the
   gate must record its own refusals; `AUTONAT.md` §7 must be implemented
   here at the PENDING hook; `RelayCircuit` is a command-path origin;
-  `RELAY.md` §8's budgets are none of the crate's defaults and every
-  per-peer ceiling admits one more than it says; DCUtR has no knobs, so
+  `RELAY.md` §8's budgets are not the crate's defaults in any row that
+  matters, and a per-peer ceiling admits one more than it says
+  (measured for circuits, read for reservations); DCUtR has no knobs, so
   §13's bounds must be built by an adapter tracking the attempt
-  lifecycle — the node that dials a punch may not be the one told how
-  it ended, so a cooldown at the gate would never start; and `contracts/CONNECTIVITY.md` §5's "no second
+  lifecycle — one punch is a dial at both ends, so no single gate sees
+  the attempt and the outcome reaches the behaviour rather than the
+  gate; and `contracts/CONNECTIVITY.md` §5's "no second
   `PeerConnected`" is work, because the Swarm reports a second
   connection for a peer already connected. **Three of them are
   violations sitting in already-shipped code, none reachable in a
