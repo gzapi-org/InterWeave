@@ -254,7 +254,20 @@ fails here rather than passing silently.
 > destination-class check this paragraph reaches for, expressed where
 > the policy already keys on the destination. What Stage 11 still
 > decides is the fix; what it no longer has to weigh is an objection
-> the shipped code does not support. The paragraph is left as written
+> the shipped code does not support.
+>
+> **What is READ rather than measured**: that a hole punch names the far
+> end as its dial peer. R12.4 measured that every punch dial reaches the
+> gate attributed under `DcutrHolePunch` — on both nodes, none
+> unattributed — but did not assert which PeerId that dial carries, and
+> on loopback both ends were trusted, so the infrastructure-only
+> destination case is R3.5's synthetic policy call rather than a real
+> punch. The half of this correction about the shipped policy is pinned
+> by `a_trusted_destination_is_admitted_under_every_origin`; the half
+> about the crate is pinned by nothing, and Stage 11 should confirm the
+> dial's peer when the behaviour is enabled.
+>
+> The paragraph is left as written
 > because a spike record is read for what it found.
 
 This was found because an earlier version of R3 *required* the
@@ -735,6 +748,14 @@ membership would switch `autonat`, `relay` and `dcutr` on inside
 the production crates they path-depend on. A refactor of
 `OutboundAdmission::new` or `PreAuthLimitsBuilder` breaks the harness
 with no signal at all.
+
+**That has now happened.** `OutboundAdmission::new` gained a
+`DialAttribution` parameter in Stage 11 step 1, and
+`harness/src/production.rs` still passes three arguments, so the harness
+does not compile against current `main` (`error[E0061]`). Nothing
+reported it, exactly as this paragraph predicted. Until it is repaired a
+re-run cannot emit any claim string, corrected or original, which is why
+this README rather than the harness is the record to trust.
 
 So where a divergence has to fail something CI runs, the pin lives in
 production:

@@ -440,11 +440,13 @@ pub fn r3_infrastructure_cannot_reach_the_data_plane(report: &mut Report) {
          because DialOrigin::is_data_plane omits it and the policy therefore treats a \
          hole-punch as control-plane traffic",
         "ADR-0036 protocol-admission matrix (DCUtR with that peer as application \
-         destination: no) and architecture/transport/libp2p/DCUTR.md §2. Adding \
-         DcutrHolePunch to is_data_plane IS the destination-class check, corrected \
-         2026-09-03: both consumers read the predicate only in the \
-         ConnectivityInfrastructureOnly arm and the class is the DIALLED peer's, so a \
-         hole-punch THROUGH infrastructure toward a trusted peer never reaches it",
+         destination: no) and architecture/transport/libp2p/DCUTR.md §2. Stage 11 must \
+         either add DcutrHolePunch to is_data_plane or gate it on the DESTINATION's class \
+         — the two are not the same rule, since a hole-punch THROUGH infrastructure toward \
+         a trusted peer is legitimate. [CORRECTED 2026-09-03: they ARE the same rule. Both \
+         consumers read the predicate only in the ConnectivityInfrastructureOnly arm and \
+         the class is the DIALLED peer's, so the trusted case never reaches it. That the \
+         punch dial names the far end is read from the crate, not measured here.]",
     );
     for origin in [
         DialOrigin::KademliaQuery,
