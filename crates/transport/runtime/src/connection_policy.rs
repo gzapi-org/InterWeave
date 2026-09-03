@@ -119,6 +119,27 @@ impl DialOrigin {
     /// The reachability origins are not, which is what lets an
     /// infrastructure-only peer be dialed for a relay reservation while
     /// staying unauthorized for a Kademlia query to the same address.
+    ///
+    /// # Two of the four are on the wrong side (D1, D2)
+    ///
+    /// `RelayReservation` and `AutonatProbe` name the infrastructure
+    /// peer as the party the exchange is WITH, and belong here.
+    /// `RelayCircuit` and `DcutrHolePunch` name it as the
+    /// DESTINATION, which is application traffic — SPIKE-004 recorded
+    /// both as divergences from ADR-0036 and
+    /// `spikes/spike-004/README.md` carries the argument.
+    ///
+    /// **They are pinned in their current shape rather than endorsed.**
+    /// Neither is reachable in a shipped build — nothing constructs
+    /// either origin and no relay or DCUtR feature is compiled — so
+    /// both are latent until Stage 11 enables those paths, and both are
+    /// on its list to fix before it does. D1 is a code fix; **D2 is a
+    /// document conflict first**, because
+    /// `transport/libp2p/CONNECTIVITY.md` §4's matrix reads "Relay v2
+    /// control | eligible | eligible" and §11 excludes only
+    /// `direct-user-command` and `kademlia-query`, so an accepted
+    /// document arguably permits today's answer. Clarify the matrix,
+    /// then change this.
     #[must_use]
     pub const fn is_data_plane(self) -> bool {
         matches!(
@@ -740,6 +761,16 @@ mod tests {
         // for anything carrying application traffic. Putting a data-plane
         // origin on the reachability side is precisely how it would
         // acquire that authority by accident.
+        //
+        // THIS PINS TODAY'S ANSWER, IT DOES NOT ENDORSE IT. SPIKE-004
+        // found `RelayCircuit` (D2) and `DcutrHolePunch` (D1) on the
+        // wrong side: both name the infrastructure peer as the
+        // DESTINATION of application traffic, which ADR-0036 forbids,
+        // and `is_data_plane` treats them as control-plane. Moving
+        // either fails here, which is the point — the change is Stage
+        // 11's and must arrive with its reasoning, not as a quiet edit.
+        // See `is_data_plane`'s own note for which of the two needs an
+        // architecture clarification first.
         for origin in DialOrigin::ALL {
             let expected = match origin {
                 DialOrigin::Manual
