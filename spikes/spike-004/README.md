@@ -70,11 +70,13 @@ unused. A review caught it.
 **`R6` closes that gap.** It runs the real `OutboundAdmission`,
 unmodified and by path, in front of a real `relay::client::Behaviour`,
 and measures what the shipped gate answers when the relay client asks
-to dial its relay. With the relay authorized as infrastructure only the
-gate refuses — `kademlia dial refused: NotAuthorizedForDataPlane`, for a
-dial no Kademlia made. Move that same relay into the data-plane
-allowlist, change nothing else, and the identical dial is admitted and
-connects. F1 is measured, not read.
+to dial its relay. At phase A's close, with the relay authorized as
+infrastructure only, the gate refused — `kademlia dial refused:
+NotAuthorizedForDataPlane`, for a dial no Kademlia made. Move that same
+relay into the data-plane allowlist, change nothing else, and the
+identical dial was admitted and connected. F1 is measured, not read.
+Stage 11 step 1 has since fixed it, and R6 was rebuilt around the gate
+that shipped — see F1's own note below.
 
 Getting there took two corrections worth recording, because both are
 the same mistake in different clothes — **an experiment whose subject
@@ -105,16 +107,28 @@ a `ConnectionId`, an `Option<PeerId>` and an address slice whose
 contents depend on the ORIGIN — empty for a Kademlia query, one
 candidate for a relay reservation (R2.9) or an AutoNAT dial-back
 (R4.10), and F2's pre-socket check needs that last one. **What none of
-them carries is which behaviour asked**, so the hook today infers
-`DialOrigin::KademliaQuery` because Kademlia is the only behaviour that
-can dial. `KademliaQuery.is_data_plane()` is true, and R3.2 shows a
-data-plane origin is refused for an infrastructure-only peer — so
-without attribution **every relay reservation and every AutoNAT probe
-would be refused against exactly the infrastructure the stack exists to
-use.** R6 runs that: the shipped gate refuses a real relay client's
-reservation dial toward an infrastructure-only relay with `kademlia
-dial refused: NotAuthorizedForDataPlane`, and admits the same dial when
-the only change is the relay's trust class (R6.5–R6.8).
+them carries is which behaviour asked**, so at phase A's close the hook
+inferred `DialOrigin::KademliaQuery` because Kademlia was the only
+behaviour that could dial. `KademliaQuery.is_data_plane()` is true, and
+R3.2 shows a data-plane origin is refused for an infrastructure-only
+peer — so without attribution **every relay reservation and every
+AutoNAT probe would be refused against exactly the infrastructure the
+stack exists to use.** R6 ran that: the shipped gate refused a real
+relay client's reservation dial toward an infrastructure-only relay with
+`kademlia dial refused: NotAuthorizedForDataPlane`, and admitted the
+same dial when the only change was the relay's trust class.
+
+> **FIXED 2026-09-03 by Stage 11 step 1, and R6 now measures the fix.**
+> The pending hook resolves an announced `ConnectionId -> DialOrigin`
+> note instead of assuming one, and refuses a dial it has no note for.
+> A reservation dial announced as `RelayReservation` is not data-plane,
+> so it is ADMITTED (R6.5) and the node reaches the relay (R6.8). The
+> class check still runs: the same dial toward the same relay announced
+> under a data-plane origin is refused `KademliaQuery dial refused:
+> NotAuthorizedForDataPlane` (R6.6), which is what stops R6.5 reading as
+> "the gate stopped looking". **F1 is therefore history — the record of
+> why attribution was required and of what happened without it — rather
+> than a live description of the gate.**
 
 It fails closed and it fails **silently** — not "as an ordinary dial
 failure", which an earlier version of this sentence claimed and which
@@ -456,7 +470,7 @@ Two smaller edges of the same finding:
 - `DialError::Denied`'s `Display` is the bare string `"Dial error"` —
   the `print_error_chain` the other variants use is not reached for it.
 - `ConnectionDenied`'s `Display` is `"connection denied"`. Everything
-  `OutboundAdmission` writes about *why* — `kademlia dial refused:
+  `OutboundAdmission` writes about *why* — `KademliaQuery dial refused:
   NotAuthorizedForDataPlane` — lives in `Error::source`, so a refusal
   logged the obvious way says nothing. R6 walks the chain deliberately;
   that it must is part of this finding.
@@ -749,13 +763,17 @@ the production crates they path-depend on. A refactor of
 `OutboundAdmission::new` or `PreAuthLimitsBuilder` breaks the harness
 with no signal at all.
 
-**That has now happened.** `OutboundAdmission::new` gained a
-`DialAttribution` parameter in Stage 11 step 1, and
-`harness/src/production.rs` still passes three arguments, so the harness
-does not compile against current `main` (`error[E0061]`). Nothing
-reported it, exactly as this paragraph predicted. Until it is repaired a
-re-run cannot emit any claim string, corrected or original, which is why
-this README rather than the harness is the record to trust.
+**That happened, and was repaired on 2026-09-03.**
+`OutboundAdmission::new` gained a `DialAttribution` parameter in Stage
+11 step 1 and `harness/src/production.rs` went on passing three
+arguments, so the harness stopped compiling against `main`
+(`error[E0061]`) and nothing reported it — exactly as this paragraph
+predicted. The repair was not the missing argument: step 1 also made an
+unattributed dial REFUSED, so the module now wires the relay client
+through `Attributing` as production does, and R6 was rebuilt around the
+gate step 1 shipped. A run is green again — 86 required observations, 0
+failed, 3 divergences. **The gap this paragraph describes has not
+closed**: nothing in CI would catch the next such break either.
 
 So where a divergence has to fail something CI runs, the pin lives in
 production:
@@ -814,7 +832,7 @@ mentioned it is labelled as one — a note is printed, never checked.
 | Finding | What must hold |
 | --- | --- |
 | F1 attribution | R2.6–R2.8: zero unattributed, resolved AS `RelayReservation` |
-| F1 why it is needed | R6.4–R6.8: the SHIPPED gate refuses a real relay client's reservation dial as `NotAuthorizedForDataPlane`, and admits it when the relay's trust class is the only thing changed |
+| F1 why it is needed | R6.4–R6.8. As measured at phase A close: the shipped gate refused a real relay client's reservation dial as `NotAuthorizedForDataPlane`. Since step 1 fixed it, R6.5 asserts the dial is ADMITTED under its own origin, R6.6 that a data-plane origin toward the same relay is still refused, and R6.8 that the attributed node reaches the relay where a misattributed one does not |
 | F8 the refusal is silent | R6.9 (no `Dialing`, no `OutgoingConnectionError`), R6.11 (the admitted dial IS reported — the positive control), R6.10 (the only trace is a listener closing successfully) |
 | F2 dial-back crosses the gate | R4.6–R4.8: admitted as `AutonatProbe`, the probe completed, and an untrusting server's is REFUSED *on trust* (R4.8 checks the denial reason, since an empty allow-list also holds for an unattributed or nameless dial) |
 | F2 the check is MISSING | R4.12: the candidate the server dialled back to is a LOOPBACK address, which §7 requires be rejected even from an authorized peer. This is the finding measured rather than read — R4.1 is a note, and a note cannot fail. **Scoped**: only §7's special-use rule is reached; the source-equality and unrelated-public-IP cases need a second interface and are phase B |
