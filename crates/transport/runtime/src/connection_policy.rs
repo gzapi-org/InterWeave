@@ -137,13 +137,20 @@ impl DialOrigin {
     /// Neither is reachable in a shipped build — nothing constructs
     /// either origin and no relay or DCUtR feature is compiled — so
     /// both are latent until Stage 11 enables those paths, and both are
-    /// on its list to fix before it does. D1 is a code fix; **D2 is a
-    /// document conflict first**, because
-    /// `transport/libp2p/CONNECTIVITY.md` §4's matrix reads "Relay v2
-    /// control | eligible | eligible" and §11 excludes only
+    /// on its list to fix before it does. **Both are now code fixes.**
+    /// D2 was a document conflict first — `transport/libp2p/`
+    /// `CONNECTIVITY.md` §4's matrix read "Relay v2 control | eligible
+    /// | eligible" with no row for a circuit whose DESTINATION is the
+    /// infrastructure-only peer, and §11 excluded only
     /// `direct-user-command` and `kademlia-query`, so an accepted
-    /// document arguably permits today's answer. Clarify the matrix,
-    /// then change this.
+    /// document arguably permitted today's answer. ADR-0036's
+    /// Amendment 2026-09-03 added the row and both sections inherited
+    /// it, so the clarification is done and this is what changes next.
+    ///
+    /// The fix is per-origin, not per-pair: `RelayCircuit` and
+    /// `DcutrHolePunch` move, `RelayReservation` and `AutonatProbe`
+    /// stay. A reservation is the reachability purpose itself, and
+    /// making it data-plane refuses every relay the stack needs.
     #[must_use]
     pub const fn is_data_plane(self) -> bool {
         matches!(
@@ -778,8 +785,10 @@ mod tests {
         // and `is_data_plane` treats them as control-plane. Moving
         // either fails here, which is the point — the change is Stage
         // 11's and must arrive with its reasoning, not as a quiet edit.
-        // See `is_data_plane`'s own note for which of the two needs an
-        // architecture clarification first.
+        // D2's architecture clarification landed on 2026-09-03
+        // (ADR-0036's amendment), so both are code fixes now; see
+        // `is_data_plane`'s own note for which origins move and which
+        // must not.
         for origin in DialOrigin::ALL {
             let expected = match origin {
                 DialOrigin::Manual
