@@ -375,15 +375,15 @@ A denied behaviour-originated dial must not reset normal peer backoff. Diagnosti
 
 Infrastructure-only PeerIds are dialable only for permitted connectivity origins, and the origins above divide exhaustively. The list is `DialOrigin`'s variants; that enum is canonical and this section follows it rather than restating a set of its own.
 
-**Permitted: `relay-reservation` and `autonat-probe`.** Each is an exchange *with* the infrastructure peer for the purpose it was authorized for.
+**Permitted: `relay-reservation` and `autonat-probe`, and only those.** Each is an exchange *with* the infrastructure peer for the purpose it was authorized for.
 
-**Refused: the other six.** `direct-user-command` and `kademlia-query` carry application traffic and routing outright. `relay-circuit` and `dcutr-hole-punch` name that peer as the DESTINATION of a data-plane path, which §4's matrix refuses. And `connection-reconcile` and `discovery-reconnect` are refused because both are *reconnection loops for peers this node wants a data-plane connection to* — neither may be the mechanism that re-establishes infrastructure.
+**Refused: every other variant.** `direct-user-command` and `kademlia-query` carry application traffic and routing outright. `relay-circuit` and `dcutr-hole-punch` name that peer as the DESTINATION of a data-plane path, which §4's matrix refuses. And `connection-reconcile` and `discovery-reconnect` are refused because both are *reconnection loops for peers this node wants a data-plane connection to* — neither may be the mechanism that re-establishes infrastructure.
 
 **An infrastructure connection is re-established by the purpose that authorized it, and §8 already owns that path**: a lost reservation goes `failure -> Backoff -> Candidate -> DialingControlConnection`, and that control dial carries `relay-reservation`. AutoNAT is the same shape — the next probe cycle (§5) dials under `autonat-probe`.
 
 **The gate enforces this and the runtime does not retry against it.** A reconnection-loop dial toward an infrastructure-only peer is refused `NotAuthorizedForDataPlane` at the root gate before a socket opens, and an authorization refusal settles the PEER rather than the address: the retry claim is cleared and the entry removed, because waiting does not make an unauthorized peer authorized. The residue is one refused attempt and one diagnostic per underlying failure, not a loop. (A refused *behaviour*-originated dial is the different case: the Swarm discards that denial with no `Dialing` and no `OutgoingConnectionError`, which is why the gate must record its own refusals.)
 
-(The `relay-circuit` and `dcutr-hole-punch` refusals are ADR-0036's Amendment 2026-09-03. The rest of this split states what the shipped classification has always done, and is not part of that amendment.)
+(Only the `relay-circuit` refusal is ADR-0036's Amendment 2026-09-03. `dcutr-hole-punch` was already refused by a matrix row that predates it — that row is what the amendment was modelled on. The rest of this split states what the shipped classification has always done.)
 
 ## 12. Path-aware peer dialing
 

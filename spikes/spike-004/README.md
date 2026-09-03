@@ -57,10 +57,17 @@ The dependency runs spike → product, the direction CLAUDE.md §4 permits.
 matters.** `InstrumentedGate` asks `ConnectionManager::admit` through a
 real `SnapshotHandle`, so every trust, class, backoff, quarantine and
 ceiling decision here is the shipped one. The gate *behaviour* around it
-is this harness's own, because production's
-`OutboundAdmission::handle_pending_outbound_connection` hardcodes
-`DialOrigin::KademliaQuery` — which is the thing under test. A spike
-measuring a change cannot use the code the change replaces.
+is this harness's own, because at the time these experiments were run
+production's `OutboundAdmission::handle_pending_outbound_connection`
+hardcoded `DialOrigin::KademliaQuery` — which was the thing under test.
+A spike measuring a change cannot use the code the change replaces.
+
+> **Since 2026-09-03 that hook is no longer the one described here.**
+> Stage 11 step 1 (PR #71) built the mechanism this harness proposed:
+> the hook resolves an announced `ConnectionId -> DialOrigin` note and
+> refuses a dial it has no note for. `production.rs` measures the
+> shipped gate and was rewired accordingly; `InstrumentedGate` is kept
+> as the record of what was proposed and measured.
 
 An earlier version of this section said the harness ran "the production
 root gate", full stop, while no source file referenced

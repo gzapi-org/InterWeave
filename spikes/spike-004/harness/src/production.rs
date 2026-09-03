@@ -226,11 +226,27 @@ pub struct ProductionBehaviour {
     pub outbound: Observing<OutboundAdmission>,
     pub identify: identify::Behaviour,
     /// ATTRIBUTED, because since Stage 11 step 1 the gate refuses a
-    /// dial it has no note for. On the pinned crate this behaviour
-    /// emits exactly one kind of dial -- the reservation control dial
-    /// -- so `always(RelayReservation)` is the whole classifier. R5.6
-    /// is why: a `/p2p-circuit` address is dialled by the relay
-    /// TRANSPORT, so no wrapper here ever sees a circuit dial.
+    /// dial it has no note for.
+    ///
+    /// `always(RelayReservation)` is the whole classifier, and the
+    /// reason is WHO is dialled rather than how many dials there are.
+    /// `libp2p-relay 0.21.1` emits `ToSwarm::Dial` TWICE --
+    /// `priv_client.rs:334` for a reservation, and `:373` to establish
+    /// the relay connection a circuit request needs -- and both name
+    /// the RELAY. R5.10 measures exactly that: every relay-behaviour
+    /// dial targets the relay, never the destination. What the
+    /// behaviour never emits is a dial toward the DESTINATION (R5.6),
+    /// because a `/p2p-circuit` address is dialled by the relay
+    /// TRANSPORT; that is the dial no wrapper here can see.
+    ///
+    /// So both dials the behaviour does emit are exchanges WITH the
+    /// relay -- control plane, in ADR-0036's terms -- and one
+    /// control-plane origin answers both. **Labelling the second one
+    /// `RelayCircuit` would be the mistake**: once Stage 11 step 2
+    /// makes that origin data-plane, a circuit through an
+    /// infrastructure-only relay would be refused at the dial that
+    /// sets up the relay connection, and relaying would stop working
+    /// for exactly the peers relaying exists for.
     pub relay_client: Attributing<relay::client::Behaviour>,
 }
 

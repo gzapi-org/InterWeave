@@ -1403,8 +1403,22 @@ data-plane origin, against the infrastructure the stage exists to use.
 1. **dial attribution**: every behaviour-originated dial reaches the
    root gate under its own `DialOrigin`, and the map that carries it
    drops a note for a dial the Swarm refuses before the pending hook;
-   `GatedSwarm::dial` sets `RelayCircuit` from the address, since the
-   transport rather than the behaviour dials a circuit. **The gate
+   the COMMAND PATH sets `RelayCircuit`, since the transport rather
+   than the behaviour dials a circuit: `attempt_dial` builds the
+   `DialRequest` carrying the origin and admission runs there, and
+   `GatedSwarm::dial` then enforces the address/origin PAIRING both
+   ways on the already-admitted dial. **Landed in PR #71.**
+   **One label decides whether relaying works at all**, and step 2's
+   `is_data_plane` change is what arms it: `relay::client::Behaviour`
+   emits two dials of its own (`libp2p-relay 0.21.1`
+   `priv_client.rs:334` and `:373`) — a reservation, and the dial that
+   establishes the relay connection a circuit request needs — and BOTH
+   name the relay rather than the destination (R5.10). Both are
+   exchanges *with* the relay and must carry a control-plane origin.
+   Label the second `RelayCircuit` and, once that origin becomes
+   data-plane, every circuit through an infrastructure-only relay is
+   refused at its set-up dial — relaying broken for exactly the peers
+   it exists to reach. **The gate
    records its own refusals here**: the Swarm discards the denial of a
    behaviour dial, so a refusal that is not written down at the hook is
    written down nowhere;
