@@ -151,6 +151,15 @@ impl DialOrigin {
     /// `DcutrHolePunch` move, `RelayReservation` and `AutonatProbe`
     /// stay. A reservation is the reachability purpose itself, and
     /// making it data-plane refuses every relay the stack needs.
+    ///
+    /// Moving the two costs nothing for the legitimate case, which is
+    /// the objection SPIKE-004 raised against this shape and later
+    /// corrected. `admit` reads this function in ONE arm —
+    /// `ConnectivityInfrastructureOnly`; `DataPlaneTrusted` falls
+    /// through with no origin check — and the class is that of the peer
+    /// the dial NAMES. A circuit or hole punch toward a trusted peer
+    /// *through* infrastructure names the trusted peer, so it is never
+    /// tested against the origin's plane.
     #[must_use]
     pub const fn is_data_plane(self) -> bool {
         matches!(
