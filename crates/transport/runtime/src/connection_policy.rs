@@ -161,7 +161,12 @@ impl DialOrigin {
     /// through with no origin check. The class is that of the peer the
     /// dial NAMES, so a circuit or hole punch toward a trusted peer
     /// *through* infrastructure names the trusted peer and is never
-    /// tested against the origin's plane, at either site.
+    /// tested against the origin's plane, at either site. That much is
+    /// pinned by `a_trusted_destination_is_admitted_under_every_origin`
+    /// and its counterpart in `connection_manager`. That the punch
+    /// dial names the far end rather than the relay is read from the
+    /// crate rather than measured, and Stage 11 confirms it when DCUtR
+    /// is enabled.
     #[must_use]
     pub const fn is_data_plane(self) -> bool {
         matches!(
