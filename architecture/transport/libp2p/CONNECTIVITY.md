@@ -353,6 +353,7 @@ All outbound attempts are tagged conceptually with one origin:
 ```text
 direct-user-command
 connection-reconcile
+discovery-reconnect
 kademlia-query
 relay-reservation
 relay-circuit
@@ -372,11 +373,15 @@ The root `DialAdmissionGate` evaluates:
 
 A denied behaviour-originated dial must not reset normal peer backoff. Diagnostics preserve origin so Phase-9 behaviour cannot become invisible dial load.
 
-Infrastructure-only PeerIds are dialable only for permitted connectivity origins, and the seven origins above divide exhaustively.
+Infrastructure-only PeerIds are dialable only for permitted connectivity origins, and the eight origins above divide exhaustively.
 
 **Permitted: `relay-reservation` and `autonat-probe`.** Each is an exchange *with* the infrastructure peer for the purpose it was authorized for.
 
-**Refused: the other five.** `direct-user-command` and `kademlia-query` carry application traffic and routing outright. `relay-circuit` and `dcutr-hole-punch` name that peer as the DESTINATION of a data-plane path, which §4's matrix refuses. And `connection-reconcile` is refused for the same reason as the first two: the reconcile loop re-dials peers this node wants a data-plane connection to, so it must not be the mechanism that re-establishes infrastructure. **An infrastructure connection is re-established by the purpose that authorized it, and §8 already owns that path**: a lost reservation goes `failure -> Backoff -> Candidate -> DialingControlConnection`, and that control dial carries `relay-reservation`. AutoNAT is the same shape — the next probe cycle (§5) dials under `autonat-probe`. Neither is a reconcile redial. A stack that leans on the reconcile loop to restore its relays will silently stop restoring them, because a refused behaviour dial produces no `Dialing` and no `OutgoingConnectionError` for anything to notice.
+**Refused: the other six.** `direct-user-command` and `kademlia-query` carry application traffic and routing outright. `relay-circuit` and `dcutr-hole-punch` name that peer as the DESTINATION of a data-plane path, which §4's matrix refuses. And `connection-reconcile` and `discovery-reconnect` are refused because both are *reconnection loops for peers this node wants a data-plane connection to* — neither may be the mechanism that re-establishes infrastructure.
+
+**An infrastructure connection is re-established by the purpose that authorized it, and §8 already owns that path**: a lost reservation goes `failure -> Backoff -> Candidate -> DialingControlConnection`, and that control dial carries `relay-reservation`. AutoNAT is the same shape — the next probe cycle (§5) dials under `autonat-probe`.
+
+**The failure mode if a reconnection loop is used instead is a refused retry that never converges**, not a silent one: the root gate answers `NotAuthorizedForDataPlane` for every attempt, the refusal is reported as a diagnostic, and the loop reschedules on its own backoff for a dial that can never be admitted under that origin. An operator sees a peer retrying forever rather than nothing at all. (This is distinct from a refused *behaviour*-originated dial, which the Swarm discards with no `Dialing` and no `OutgoingConnectionError` — that invisibility is why the gate records its own refusals, and it is not what happens here.)
 
 (ADR-0036 Amendment 2026-09-03.)
 
