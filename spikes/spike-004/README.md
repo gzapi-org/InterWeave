@@ -546,10 +546,9 @@ been satisfied by one admitted dial per node while the rest bypassed the
 gate — which is precisely the regression F12's conclusion depends on not
 happening, and a review on PR #69 said so.
 **But the gate cannot read "one attempt" off its own dial count.** Both
-ends dial for a single punch — source one, destination one — and only
-one of them reports a result, because the peer that reports is whichever
-dial won. A per-peer rule counting dials would therefore be counting
-something else.
+ends dial for a single punch — source one, destination one — so a
+per-peer rule counting dials at either gate counts half of an attempt
+that spans two nodes.
 
 **F13 — a successful punch is a second connection to a peer that is
 already connected.** `contracts/CONNECTIVITY.md` §5 says a successful hole punch
@@ -709,9 +708,9 @@ So where a divergence has to fail something CI runs, the pin lives in
 production:
 
 - **D1 and D2** are pinned by `connection_policy.rs`'s
-  `the_split_is_by_origin_and_every_origin_is_listed`, which matches
-  `DialOrigin::ALL` exhaustively — adding either origin to
-  `is_data_plane` fails it.
+  `every_origin_is_classified_and_the_classification_is_pinned`, which
+  matches `DialOrigin::ALL` exhaustively and hardcodes the expected side
+  per origin — adding either origin to `is_data_plane` fails it.
 - **D3** had no counterpart, so this change adds one: four tests beside
   `source_label` in `preauth_gate.rs`, including
   `two_relayed_sources_over_one_relay_get_different_buckets`. That file
@@ -720,6 +719,20 @@ production:
   long as it did.
 
 Everything else here is evidence, and evidence is re-run by hand.
+
+**And it has to be deterministic to be evidence at all.** Twice now a
+required observation has failed on roughly one run in ten while passing
+on the others, and both times the flake was the finding rather than the
+fixture: the first was R12.5 asserting that exactly one end reports a
+hole punch's result, which several runs had shown and a later one
+disproved. The second was never captured, and rather than keep sampling
+for it the experiments that assert an OUTCOME now wait for that outcome
+instead of for a fixed time budget — R5 and R7 for a circuit accepted
+and established, R11 for the relay to answer each circuit request
+before the next is made, R12 for a hole-punch result with both
+connections open. A `pump` of *n* seconds followed by an assertion is a
+statement about this machine's load; `pump_until` the thing you are
+about to assert is a statement about the crate.
 
 **The harness's dependency graph is also outside `cargo deny`.** Its
 3,790-line lock — `libp2p-autonat`, `libp2p-relay`, `libp2p-dcutr` and
@@ -795,7 +808,7 @@ only for `kademlia`.
 | --- | --- |
 | subject's relay moved to the data-plane allowlist | R6.5, R6.8, R6.9, R6.10, R6.11 |
 | control's relay moved to the infrastructure set | R6.7, R6.8, R6.11 |
-| `ProductionNode` drops its `ConnectionManager` (bug 9, reintroduced) | R6.7, R6.8, R6.11 |
+| `ProductionNode` drops its `ConnectionManager` (bug 9, reintroduced) | R6.6, R6.7, R6.8, R6.11 |
 | the circuit listen removed, so nothing dials | R6.4, R6.5, R6.7, R6.8, R6.10, R6.11 |
 
 The FIRST of those is the one worth reading: it left R6.6 passing,
@@ -847,7 +860,6 @@ R10's, R11's and R12's:
 | the client never listens on the second relay's circuit | R10.2, R10.3, R10.5 |
 | per-source circuit ceiling left at the crate default | R11.7, R11.9 |
 | DCUtR disabled at the source | R12.4, R12.5, R12.7, R12.8 |
-| the production node drops its `ConnectionManager` (against the tightened R6.6) | R6.6, R6.7, R6.8, R6.11 |
 | the permissive AutoNAT server trusts nobody | R4.6, R4.7 |
 | R3.7 built with a non-default policy | R3.7 |
 | DCUtR dials are never announced | R5.5, R12.4, R12.5, R12.7 |

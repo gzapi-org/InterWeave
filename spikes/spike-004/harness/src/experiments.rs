@@ -824,9 +824,25 @@ pub async fn r5_circuit_is_not_a_reservation(report: &mut Report) {
         "the circuit dial was accepted by the swarm rather than refused synchronously",
     );
 
+    // WAIT FOR THE OUTCOME, not for a budget. R5.7 and R5.12 assert
+    // that the circuit was accepted and established, so pumping a fixed
+    // twelve seconds makes those assertions a statement about this
+    // machine's load rather than about the crate — and an occasional
+    // failure is then indistinguishable from a real one.
     {
         let mut nodes = [&mut dest, &mut relay_node, &mut source];
-        pump(&mut nodes, Duration::from_secs(12)).await;
+        pump_until(&mut nodes, Duration::from_secs(30), |n| {
+            n[1].observed
+                .details("relay-server")
+                .iter()
+                .any(|d| d.contains("CircuitReqAccepted"))
+                && n[2]
+                    .observed
+                    .details("relay-circuit-outbound")
+                    .iter()
+                    .any(|d| d.contains("OutboundCircuitEstablished"))
+        })
+        .await;
     }
 
     let resolved = source.attribution.resolved();
@@ -1377,9 +1393,20 @@ pub async fn r7_relayed_path_trust(report: &mut Report) {
          synchronously",
     );
 
+    // AGAIN THE OUTCOME. R7.9 through R7.12 assert a completed relayed
+    // path with Identify across it; a fixed budget makes them a load
+    // measurement.
     {
         let mut nodes = [&mut dest, &mut relay_node, &mut source];
-        pump(&mut nodes, Duration::from_secs(12)).await;
+        pump_until(&mut nodes, Duration::from_secs(30), |n| {
+            n[1].observed
+                .details("relay-server")
+                .iter()
+                .any(|d| d.contains("CircuitReqAccepted"))
+                && n[2].observed.connected.contains(&dest_peer)
+                && n[2].observed.identify_protocols.contains_key(&dest_peer)
+        })
+        .await;
     }
 
     report.note(
@@ -2234,6 +2261,16 @@ pub async fn r11_relay_server_budgets(report: &mut Report) {
         .await;
     }
 
+    /// Circuit requests this relay has answered — accepted or denied.
+    fn answered(relay: &Node) -> usize {
+        relay
+            .observed
+            .details("relay-server")
+            .iter()
+            .filter(|d| d.contains("CircuitReqAccepted") || d.contains("CircuitReqDenied"))
+            .count()
+    }
+
     // ONE AT A TIME, with the first settled before the second is
     // asked for. Two circuit dials issued together do not test a
     // ceiling: the relay counts circuits it has ACCEPTED, so a second
@@ -2245,6 +2282,13 @@ pub async fn r11_relay_server_budgets(report: &mut Report) {
             .parse()
             .expect("a circuit address naming a destination");
         dial_results.push(format!("{:?}", source.dial_circuit(dest, via).is_ok()));
+        // WAIT FOR THE RELAY TO ANSWER THIS ONE. The ceiling counts
+        // circuits the relay has ACCEPTED, so a request still in flight
+        // is counted against nothing — which is how the first version
+        // of this experiment concluded the ceiling held. A fixed budget
+        // makes that a race rather than a sequence, so the wait is for
+        // the answer: one more accept-or-deny than before the dial.
+        let answered_before = answered(&relay_node);
         let mut nodes = [
             &mut dest_a,
             &mut dest_b,
@@ -2252,7 +2296,10 @@ pub async fn r11_relay_server_budgets(report: &mut Report) {
             &mut relay_node,
             &mut source,
         ];
-        pump(&mut nodes, Duration::from_secs(8)).await;
+        pump_until(&mut nodes, Duration::from_secs(20), |n| {
+            answered(n[3]) > answered_before
+        })
+        .await;
     }
     report.note(
         "R11.8",
@@ -2363,11 +2410,26 @@ pub async fn r12_dcutr_bounds(report: &mut Report) {
     let _ = source.dial_circuit(dest_peer, via_relay);
     {
         let mut nodes = [&mut dest, &mut relay_node, &mut source];
-        pump_until(&mut nodes, Duration::from_secs(25), |n| {
-            !n[0].observed.details("dcutr").is_empty() || !n[2].observed.details("dcutr").is_empty()
+        // WAIT FOR WHAT R12.7 AND R12.8 ASSERT: a dcutr result at
+        // either end AND both connections open at the source. Waiting
+        // for the event and then pumping a fixed eight seconds makes
+        // those two a statement about scheduling.
+        pump_until(&mut nodes, Duration::from_secs(35), |n| {
+            let punched = !n[0].observed.details("dcutr").is_empty()
+                || !n[2].observed.details("dcutr").is_empty();
+            let relayed = n[2]
+                .observed
+                .open_connections
+                .values()
+                .any(|(peer, relayed)| *peer == dest_peer && *relayed);
+            let direct = n[2]
+                .observed
+                .open_connections
+                .values()
+                .any(|(peer, relayed)| *peer == dest_peer && !*relayed);
+            punched && relayed && direct
         })
         .await;
-        pump(&mut nodes, Duration::from_secs(8)).await;
     }
 
     let punches: Vec<String> = source
@@ -2484,11 +2546,6 @@ pub async fn r12_dcutr_bounds(report: &mut Report) {
             "EVERY hole-punch dial reached a gate under `dcutr-hole-punch` — announced {announced_punches}, resolved {resolved_punches}, {unattributed} dial(s) of any origin met the gate with no note — so §13's bounds have somewhere to be enforced at all"
         ),
     );
-    // BOTH ENDS DIAL, and only one reports. That is the shape §13's
-    // "one hole punch per peer" has to reckon with: a node's own gate
-    // sees a hole-punch dial for a punch its own DCUtR may never
-    // report, because the peer that reports the result is whichever
-    // one's dial won.
     // ONE PUNCH IS TWO DIALS AT TWO NODES, and that is the whole of
     // what this asserts.
     //

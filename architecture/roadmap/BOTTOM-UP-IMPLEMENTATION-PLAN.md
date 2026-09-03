@@ -1407,12 +1407,20 @@ data-plane origin, against the infrastructure the stage exists to use.
    records its own refusals here**: the Swarm discards the denial of a
    behaviour dial, so a refusal that is not written down at the hook is
    written down nowhere;
-2. **resolve D1, D2 and D3**: `DcutrHolePunch` and `RelayCircuit` are
-   both admitted for a `ConnectivityInfrastructureOnly` peer, which
-   ADR-0036's matrix and its enforcement clause forbid; and
-   `PreAuthAdmission` buckets a relayed inbound by the source PeerId
-   the circuit carries, which `CONNECTIVITY.md` §10 forbids by name.
-   Before DCUtR or relayed paths are built, not after;
+2. **resolve D1, D2 and D3.** `DcutrHolePunch` is admitted for a
+   `ConnectivityInfrastructureOnly` peer, which
+   `transport/libp2p/CONNECTIVITY.md` §4's matrix forbids unqualified
+   ("DCUtR as destination peer | no"); and `PreAuthAdmission` buckets a
+   relayed inbound by the source PeerId the circuit carries, which
+   `contracts/CONNECTIVITY.md` §10 forbids by name. Both are code
+   fixes. **D2 is not yet a code fix**: `RelayCircuit` is likewise
+   admitted, but §4's matrix says "Relay v2 control | eligible |
+   eligible" and §11 excludes only `direct-user-command` and
+   `kademlia-query`, so an accepted document arguably permits today's
+   behaviour. Amend or clarify the matrix first — it has no row for a
+   circuit whose DESTINATION is the infrastructure-only peer — and
+   change the code to match, in that order (CLAUDE.md §2). All three
+   land before DCUtR or relayed paths are built, not after;
 3. AutoNAT v2 client;
 4. AutoNAT v2 server role — including `AUTONAT.md` §7's dial-back
    restriction, which the crate does not implement, at the PENDING hook
