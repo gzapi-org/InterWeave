@@ -45,7 +45,7 @@ If a PeerId belongs to both sets, `DataPlaneTrusted` wins and the peer may also 
 | Noise/Yamux transport | yes | yes |
 | Identify / bounded ping | yes | yes |
 | AutoNAT v2 probe control | yes when eligible | yes when eligible |
-| Circuit Relay v2 reservation/circuit control | yes when eligible | yes when eligible |
+| Circuit Relay v2 reservation, and circuit control *with that peer* | yes when eligible | yes when eligible |
 | Relay v2 circuit with that peer as application destination | yes | **no** |
 | DCUtR with that peer as application destination | yes | **no** |
 | GossipSub | yes | **no** |

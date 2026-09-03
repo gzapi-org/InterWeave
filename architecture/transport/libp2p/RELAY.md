@@ -19,6 +19,8 @@ Identify/discovery can provide reachability/protocol evidence but cannot add aut
 
 A relay PeerId's authorization never authorizes the application peer at the other end of a relayed connection. The remote application PeerId is Noise-authenticated and evaluated independently under normal data-plane trust.
 
+**Nor does it authorize the relay as a circuit DESTINATION.** Authorizing a peer `ConnectivityInfrastructureOnly` buys reservation and circuit control *with* it; a circuit whose far end IS that peer uses it as an application destination and is refused, exactly as DCUtR toward it is (`DCUTR.md` §2). A relay may carry a circuit without becoming a party a circuit may terminate at. Who an exchange is with is a different question from who it is for (ADR-0036 Amendment 2026-09-03, and `CONNECTIVITY.md` §4's matrix).
+
 ## 3. Candidate sources
 
 Initial sources:

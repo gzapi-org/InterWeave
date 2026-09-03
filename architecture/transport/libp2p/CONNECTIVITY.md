@@ -373,7 +373,7 @@ The root `DialAdmissionGate` evaluates:
 
 A denied behaviour-originated dial must not reset normal peer backoff. Diagnostics preserve origin so Phase-9 behaviour cannot become invisible dial load.
 
-Infrastructure-only PeerIds are dialable only for permitted connectivity origins, and the eight origins above divide exhaustively.
+Infrastructure-only PeerIds are dialable only for permitted connectivity origins, and the origins above divide exhaustively. The list is `DialOrigin`'s variants; that enum is canonical and this section follows it rather than restating a set of its own.
 
 **Permitted: `relay-reservation` and `autonat-probe`.** Each is an exchange *with* the infrastructure peer for the purpose it was authorized for.
 
@@ -383,7 +383,7 @@ Infrastructure-only PeerIds are dialable only for permitted connectivity origins
 
 **The gate enforces this and the runtime does not retry against it.** A reconnection-loop dial toward an infrastructure-only peer is refused `NotAuthorizedForDataPlane` at the root gate before a socket opens, and an authorization refusal settles the PEER rather than the address: the retry claim is cleared and the entry removed, because waiting does not make an unauthorized peer authorized. The residue is one refused attempt and one diagnostic per underlying failure, not a loop. (A refused *behaviour*-originated dial is the different case: the Swarm discards that denial with no `Dialing` and no `OutgoingConnectionError`, which is why the gate must record its own refusals.)
 
-(ADR-0036 Amendment 2026-09-03.)
+(The `relay-circuit` and `dcutr-hole-punch` refusals are ADR-0036's Amendment 2026-09-03. The rest of this split states what the shipped classification has always done, and is not part of that amendment.)
 
 ## 12. Path-aware peer dialing
 
