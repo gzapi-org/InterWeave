@@ -117,6 +117,8 @@ AutoNAT-server and Circuit Relay-server roles use the same standard admission cl
 
 ## Amendments
 
+Full notes: [`history/0036-amendments.md`](./history/0036-amendments.md).
+
 | Date | Amendment | Effect |
 |---|---|---|
 | 2026-09-03 | Relay circuit toward an infrastructure-only destination | The protocol-admission matrix now answers the case it was silent on: a circuit whose far end is the infrastructure-only peer is refused, as DCUtR toward that peer already was. A dial gate may no longer read the "reservation/circuit control" row as permitting it. |
