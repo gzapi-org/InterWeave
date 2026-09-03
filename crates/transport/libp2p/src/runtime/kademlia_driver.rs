@@ -2396,13 +2396,19 @@ mod tests {
             interweave_transport_runtime::ConnectionPolicy::default(),
             8,
         );
+        let attribution = crate::attribution::DialAttribution::default();
         let outbound = crate::outbound_gate::OutboundAdmission::new(
             manager.handle(),
             crate::outbound_gate::InFlightTickets::default(),
+            attribution.clone(),
             tokio::time::Instant::now(),
         );
         let kad = libp2p::swarm::behaviour::toggle::Toggle::from(Some(
-            build_behaviour(settings, local_pid).expect("buildable"),
+            crate::attribution::Attributing::new(
+                build_behaviour(settings, local_pid).expect("buildable"),
+                crate::attribution::always(interweave_transport_runtime::DialOrigin::KademliaQuery),
+                attribution,
+            ),
         ));
         let swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()

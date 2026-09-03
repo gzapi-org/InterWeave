@@ -64,18 +64,22 @@
 
 #![forbid(unsafe_code)]
 
+pub mod attribution;
 pub mod behaviour;
 pub mod direct_codec;
 pub mod endpoints_codec;
 pub mod gated_swarm;
 pub mod outbound_gate;
 pub mod preauth_gate;
+pub mod refusals;
 pub mod runtime;
 
+pub use attribution::{Attributing, Classifier, DialAttribution, always};
 pub use behaviour::{IDENTIFY_PROTOCOL, SubstrateBehaviour};
 pub use gated_swarm::{AdmittedDial, GatedSwarm};
 pub use outbound_gate::{AdmittedDials, OutboundAdmission};
 pub use preauth_gate::PreAuthAdmission;
+pub use refusals::{DialRefusals, RECENT_CAPACITY, Refusal};
 pub use runtime::{
     BroadcastChannels, DEFAULT_COMMAND_CAPACITY, DEFAULT_EVENT_CAPACITY, DialRefusal,
     MAX_CONFIGURED_CAPACITY, SubstrateConfig, SubstrateError, SwarmCommand, SwarmEvent,

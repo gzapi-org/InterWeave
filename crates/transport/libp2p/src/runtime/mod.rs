@@ -48,6 +48,7 @@ use interweave_transport_runtime::{
 use libp2p::{PeerId, noise, tcp, yamux};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::attribution::{Attributing, DialAttribution, always};
 use crate::behaviour::SubstrateBehaviour;
 use crate::gated_swarm::{GatedSwarm, mesh_admits};
 use crate::outbound_gate::{InFlightTickets, OutboundAdmission};
@@ -473,7 +474,17 @@ impl SwarmRuntime {
         // behaviour dial's ticket in its pending hook and re-binds it
         // at establishment.
         let in_flight = InFlightTickets::default();
-        let outbound = OutboundAdmission::new(manager.handle(), in_flight.clone(), started);
+        // WHICH BEHAVIOUR ASKED, shared between the wrappers that write
+        // it and the gate that reads it. One map per Swarm: a
+        // `ConnectionId` is unique within a Swarm and means nothing
+        // outside one.
+        let attribution = DialAttribution::default();
+        let outbound = OutboundAdmission::new(
+            manager.handle(),
+            in_flight.clone(),
+            attribution.clone(),
+            started,
+        );
 
         // The Kademlia behaviour exists only when configured: a profile
         // with no enabled kademlia entry advertises nothing, answers
@@ -482,10 +493,12 @@ impl SwarmRuntime {
         let local_pid = libp2p::PeerId::from_public_key(&keypair.public());
         let (kad_toggle, mut kademlia_state) = match &config.kademlia {
             Some(settings) => (
-                libp2p::swarm::behaviour::toggle::Toggle::from(Some(
+                libp2p::swarm::behaviour::toggle::Toggle::from(Some(Attributing::new(
                     kademlia_driver::build_behaviour(settings, local_pid)
                         .map_err(SubstrateError::Kademlia)?,
-                )),
+                    always(DialOrigin::KademliaQuery),
+                    attribution.clone(),
+                ))),
                 Some(kademlia_driver::KademliaState::new(settings)),
             ),
             None => (libp2p::swarm::behaviour::toggle::Toggle::from(None), None),

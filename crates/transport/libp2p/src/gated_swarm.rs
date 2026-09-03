@@ -41,7 +41,7 @@ use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
 use libp2p::swarm::{ConnectionId, DialError, Swarm, SwarmEvent};
 use libp2p::{Multiaddr, PeerId, TransportError};
 
-use interweave_transport_runtime::DialTicket;
+use interweave_transport_runtime::{DialOrigin, DialTicket};
 
 use crate::behaviour::{SubstrateBehaviour, SubstrateBehaviourEvent};
 use crate::outbound_gate::AdmittedDials;
@@ -111,6 +111,47 @@ impl AdmittedDial {
             let reason = format!("admitted address {} is not a multiaddr", ticket.address());
             return Err(Box::new(UndialableAdmission { reason, ticket }));
         };
+
+        // A CIRCUIT IS DIALLED BY THE COMMAND PATH, so the command path
+        // is where its origin is checked.
+        //
+        // SPIKE-004 measured that `relay::client::Behaviour` emits no
+        // `ToSwarm::Dial` for `/…/p2p-circuit/p2p/<dest>`: the relay
+        // TRANSPORT handles that address, so no wrapper sees the dial
+        // and `DialOrigin::RelayCircuit` cannot be announced from a
+        // behaviour's `poll` the way a reservation's is. The caller
+        // dialling through a relay is the party that knows, and its
+        // ticket carries what it claimed.
+        //
+        // So the pairing is enforced BOTH ways, because each direction
+        // is a different mistake. A circuit address admitted under some
+        // other origin was judged against the wrong rule — the
+        // destination's class, not the relay's. And `RelayCircuit` on
+        // an address with no circuit in it claims a purpose the dial
+        // does not have. Neither is reachable today, since no relay
+        // feature is compiled; both become reachable the moment one is,
+        // and refusing here costs a string comparison.
+        let circuit_address = address
+            .iter()
+            .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2pCircuit));
+        let claims_circuit = ticket.origin() == DialOrigin::RelayCircuit;
+        if circuit_address != claims_circuit {
+            let reason = if circuit_address {
+                format!(
+                    "admitted address {} is a relay circuit but the admission claims \
+                     {:?}; a circuit is judged against the DESTINATION's class and must \
+                     be admitted as RelayCircuit",
+                    ticket.address(),
+                    ticket.origin()
+                )
+            } else {
+                format!(
+                    "admission claims RelayCircuit but address {} carries no /p2p-circuit",
+                    ticket.address()
+                )
+            };
+            return Err(Box::new(UndialableAdmission { reason, ticket }));
+        }
 
         // BOUND TO THE EXPECTED IDENTITY. Dialling a bare address tells
         // libp2p nothing about who should be there, so a server at that
@@ -415,7 +456,14 @@ impl GatedSwarm {
     pub(crate) fn kademlia_mut(
         &mut self,
     ) -> Option<&mut libp2p::kad::Behaviour<libp2p::kad::store::MemoryStore>> {
-        self.inner.behaviour_mut().kad.as_mut()
+        // Through the attribution wrapper, which forwards everything
+        // and decides nothing: the driver drives the behaviour it
+        // always drove.
+        self.inner
+            .behaviour_mut()
+            .kad
+            .as_mut()
+            .map(crate::attribution::Attributing::inner_mut)
     }
 
     /// Close one connection by id.
@@ -509,16 +557,103 @@ mod tests {
     }
 
     fn ticket_for(manager: &ConnectionManager, peer: Option<&str>, address: &str) -> DialTicket {
+        ticket_as(manager, peer, address, DialOrigin::Manual)
+    }
+
+    fn ticket_as(
+        manager: &ConnectionManager,
+        peer: Option<&str>,
+        address: &str,
+        origin: DialOrigin,
+    ) -> DialTicket {
         let request = DialRequest {
             peer: peer.map(|p| TransportIdentity::parse(p).expect("canonical")),
             address: address.to_owned(),
-            origin: DialOrigin::Manual,
+            origin,
         };
         manager
             .handle()
             .load()
             .admit(&request, 0)
             .expect("a fresh policy admits")
+    }
+
+    /// A circuit address naming a relay and a destination.
+    fn circuit() -> String {
+        format!("/ip4/192.0.2.1/tcp/4001/p2p/{OTHER}/p2p-circuit/p2p/{ADMITTED}")
+    }
+
+    #[test]
+    fn a_circuit_address_must_be_admitted_as_a_circuit() {
+        // SPIKE-004 F3: the relay TRANSPORT dials a
+        // `/…/p2p-circuit/p2p/<dest>` address, so no behaviour emits
+        // `ToSwarm::Dial` for it and no attribution wrapper can see it.
+        // The caller is the only party that knows, which makes the
+        // command path the place the claim is checked.
+        //
+        // Admitted as `Manual` — a data-plane origin — the dial is
+        // judged against the wrong rule: `Manual` weighs the peer named
+        // in the ticket, while a circuit's authority question is the
+        // DESTINATION's class. Refusing here is fail-closed and costs a
+        // string comparison.
+        let manager = manager();
+        let refused = AdmittedDial::from_ticket(ticket_as(
+            &manager,
+            Some(ADMITTED),
+            &circuit(),
+            DialOrigin::Manual,
+        ));
+        let err = refused.expect_err("a circuit admitted as Manual is refused");
+        assert!(
+            err.reason.contains("RelayCircuit"),
+            "the refusal says what the admission should have claimed: {}",
+            err.reason
+        );
+
+        // THE CONTROL: the same address, the same peer, admitted as
+        // what it is.
+        assert!(
+            AdmittedDial::from_ticket(ticket_as(
+                &manager,
+                Some(ADMITTED),
+                &circuit(),
+                DialOrigin::RelayCircuit,
+            ))
+            .is_ok(),
+            "so the refusal is the origin and not the address"
+        );
+    }
+
+    #[test]
+    fn a_relay_circuit_claim_needs_a_circuit_in_the_address() {
+        // The other direction, and a different mistake: claiming
+        // `RelayCircuit` for an ordinary address asks to be judged as
+        // control-plane traffic for a dial that is nothing of the kind.
+        let manager = manager();
+        let err = AdmittedDial::from_ticket(ticket_as(
+            &manager,
+            Some(ADMITTED),
+            "/ip4/192.0.2.1/tcp/4001",
+            DialOrigin::RelayCircuit,
+        ))
+        .expect_err("a RelayCircuit claim on a direct address is refused");
+        assert!(
+            err.reason.contains("carries no /p2p-circuit"),
+            "the refusal says which half is missing: {}",
+            err.reason
+        );
+
+        // AND THE ORDINARY PATH IS UNTOUCHED — without this the two
+        // assertions above would also pass for a constructor that
+        // refused everything.
+        assert!(
+            AdmittedDial::from_ticket(ticket_for(
+                &manager,
+                Some(ADMITTED),
+                "/ip4/192.0.2.1/tcp/4001",
+            ))
+            .is_ok()
+        );
     }
 
     #[test]
