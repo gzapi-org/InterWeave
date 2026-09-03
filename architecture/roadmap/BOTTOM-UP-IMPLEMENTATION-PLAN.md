@@ -1424,7 +1424,28 @@ data-plane origin, against the infrastructure the stage exists to use.
    remains for D2 is the code change — and it separates the two relay
    origins rather than moving both, because `RelayReservation` must stay
    non-data-plane or every relay the stack needs is refused. All three
-   land before DCUtR or relayed paths are built, not after;
+   land before DCUtR or relayed paths are built, not after.
+
+   **Two design items this step must settle, found while propagating
+   the amendment.** First, `an_infrastructure_peer_cannot_reach_the_`
+   `data_plane_by_any_origin` in `tests/transport-contract` derives
+   both of its loops from the predicate under test
+   (`ALL.filter(|o| o.is_data_plane())` and its negation), so it passes
+   for ANY definition of `is_data_plane` — moving an origin only moves
+   it between the loops. It cannot catch a misclassification, while its
+   name claims it can; the real pin is `connection_policy.rs`'s
+   `every_origin_is_classified_and_the_classification_is_pinned`, which
+   hardcodes the expected side. Give the contract test an explicit
+   expected table, or state in its name and body that it asserts
+   agreement rather than correctness — `connection_manager.rs`'s
+   equivalent already says exactly that about itself. Second, **the
+   predicate's NAME is the defect's root**: `is_data_plane` describes
+   traffic, while the rule it decides is ADR-0036's WITH/FOR question —
+   does this origin name the peer as an application DESTINATION.
+   SPIKE-004 misread it in precisely that gap, twice, and
+   `KademliaQuery` sits in the set today although routing is not
+   application data. Renaming it to say what it decides is a decision
+   for this step, not a cleanup to defer;
 3. AutoNAT v2 client;
 4. AutoNAT v2 server role — including `AUTONAT.md` §7's dial-back
    restriction, which the crate does not implement, at the PENDING hook

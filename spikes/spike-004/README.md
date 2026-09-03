@@ -238,12 +238,17 @@ the origin alone. R3.5 asserts today's behaviour so that changing it
 fails here rather than passing silently.
 
 > **CORRECTED 2026-09-03 — the two fixes are not in tension, and this
-> paragraph read them as if they were.** `ConnectionPolicy::admit`
-> (`connection_policy.rs:512-523`) consults `is_data_plane` in ONE arm,
-> `ConnectivityInfrastructureOnly`; `DataPlaneTrusted` falls through
-> with no origin check at all. The class it switches on is the class of
+> paragraph read them as if they were.** The predicate has two
+> production consumers and both key on the class the same way:
+> `ConnectionPolicy::admit` (`connection_policy.rs:512-523`) and
+> `ConnectionManager::authorizes_for` (`connection_manager.rs:1350-1359`)
+> each consult `is_data_plane` in ONE arm,
+> `ConnectivityInfrastructureOnly`, and let `DataPlaneTrusted` through
+> with no origin check at all. The class they switch on is the class of
 > the peer the dial NAMES, and a hole punch toward a trusted peer
-> through a relay names the trusted peer. So adding the origin to
+> through a relay names the trusted peer. (`authorizes_for` exists to
+> AGREE with admission — its own note says fixing the classification
+> there fixes it here — so the two cannot drift apart.) So adding the origin to
 > `is_data_plane` cannot refuse that punch — it *is* the
 > destination-class check this paragraph reaches for, expressed where
 > the policy already keys on the destination. What Stage 11 still
