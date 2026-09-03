@@ -381,7 +381,7 @@ Infrastructure-only PeerIds are dialable only for permitted connectivity origins
 
 **An infrastructure connection is re-established by the purpose that authorized it, and §8 already owns that path**: a lost reservation goes `failure -> Backoff -> Candidate -> DialingControlConnection`, and that control dial carries `relay-reservation`. AutoNAT is the same shape — the next probe cycle (§5) dials under `autonat-probe`.
 
-**The failure mode if a reconnection loop is used instead is a refused retry that never converges**, not a silent one: the root gate answers `NotAuthorizedForDataPlane` for every attempt, the refusal is reported as a diagnostic, and the loop reschedules on its own backoff for a dial that can never be admitted under that origin. An operator sees a peer retrying forever rather than nothing at all. (This is distinct from a refused *behaviour*-originated dial, which the Swarm discards with no `Dialing` and no `OutgoingConnectionError` — that invisibility is why the gate records its own refusals, and it is not what happens here.)
+**The gate enforces this and the runtime does not retry against it.** A reconnection-loop dial toward an infrastructure-only peer is refused `NotAuthorizedForDataPlane` at the root gate before a socket opens, and an authorization refusal settles the PEER rather than the address: the retry claim is cleared and the entry removed, because waiting does not make an unauthorized peer authorized. The residue is one refused attempt and one diagnostic per underlying failure, not a loop. (A refused *behaviour*-originated dial is the different case: the Swarm discards that denial with no `Dialing` and no `OutgoingConnectionError`, which is why the gate must record its own refusals.)
 
 (ADR-0036 Amendment 2026-09-03.)
 

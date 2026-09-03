@@ -1455,28 +1455,25 @@ data-plane origin, against the infrastructure the stage exists to use.
    whether to do it is a decision for this step, not a cleanup to
    defer.
 
-   **And a third item, which is a divergence rather than a choice:
-   nothing stops the reconnect scheduler re-dialling an
-   infrastructure-only peer under a refused origin.**
-   `CONNECTIVITY.md` §11 now says the reconnection loops must not be
-   what re-establishes infrastructure, and the shipped scheduler is
-   exactly that. `ConnectionManager::learn_address` refuses only
-   `Unauthorized`, so an infrastructure-only peer's addresses enter the
-   book; `record_failure` schedules a peer retry for any ticket
-   carrying a non-empty address, with no class or origin filter; and
-   the retry tick in `runtime/mod.rs` re-dials every due peer under
-   `DialOrigin::ConnectionManager`, which `admit` refuses
-   `NotAuthorizedForDataPlane` for that class. So the first
-   `relay-reservation` dial that fails on a known address starts a
-   retry loop that can never be admitted — refused each time, reported
-   each time, rescheduled each time. It is unreachable today for the
-   same reason D1-D3 are (no relay feature compiled, nothing
-   constructs the origins), and it becomes live with the relay client.
-   The fix is one of two shapes and this step picks: exclude
-   non-`DataPlaneTrusted` peers from the retry table, or let §8's
-   reservation state machine own their retries and keep the scheduler
-   for the data plane. SPIKE-004 recorded no divergence for this — it
-   was found while propagating the amendment, not in the harness;
+   **A third item was raised here and DISPROVED; it is recorded so it
+   is not raised again.** The concern was that the reconnect scheduler
+   re-dials an infrastructure-only peer under a refused origin
+   forever — `learn_address` admits such a peer's addresses to the
+   book, `record_failure` schedules a retry with no class filter, and
+   the tick dials under `DialOrigin::ConnectionManager`, which `admit`
+   refuses `NotAuthorizedForDataPlane`. The first three are true and
+   the conclusion does not follow. `refusal_settles_the_peer` counts
+   `NotAuthorizedForDataPlane`, so `retry_claim` returns `Cleared` and
+   `clear_retry_claim` REMOVES the retry entry outright rather than
+   rescheduling it; `authorization_failures_clear_the_claim` pins that,
+   and its own note says why — "re-offering it every tick is a busy
+   loop against a decision that will not change on its own". So the
+   gate enforces `CONNECTIVITY.md` §11's rule and the scheduler does
+   not fight it. What remains is one refused dial and one diagnostic
+   per underlying failure, after which the peer leaves the retry table.
+   **That is not a divergence and needs no fix**; whether the scheduler
+   should skip offering a non-`DataPlaneTrusted` peer even once is a
+   cheap tidy-up, not stage work;
 3. AutoNAT v2 client;
 4. AutoNAT v2 server role — including `AUTONAT.md` §7's dial-back
    restriction, which the crate does not implement, at the PENDING hook
