@@ -144,7 +144,7 @@ A data-plane trusted peer may also serve relay/AutoNAT roles. An infrastructure-
 | Kademlia routing | trusted policy only | no |
 | DCUtR as destination peer | yes | no |
 
-Relay and DCUtR each appear twice, and the pair is the distinction the table turns on: **who an exchange is WITH is a different question from who it is FOR.** Reserving or renewing a slot on a relay is an exchange with that peer for the purpose it was authorized for. A circuit whose far end *is* that peer, or a hole punch toward it, uses it as an application destination and is refused — a circuit carries the data plane by construction. A relay may carry a circuit without becoming a party the circuit may terminate at. (ADR-0036 Amendment 2026-09-03.)
+Relay is the one protocol with two rows, and that pair is the distinction the table turns on: **who an exchange is WITH is a different question from who it is FOR.** Reserving or renewing a slot on a relay is an exchange with that peer for the purpose it was authorized for. A circuit whose far end *is* that peer uses it as an application destination and is refused — a circuit carries the data plane by construction. A relay may carry a circuit without becoming a party the circuit may terminate at. DCUtR has a single row and it is already the destination one, so the circuit row says for circuits what that row has always said for hole punches. (ADR-0036 Amendment 2026-09-03.)
 
 GossipSub must blacklist/exclude infrastructure-only PeerIds. Direct/endpoint managers reject their application requests. Kademlia manual insertion rejects them. No network content can modify either allowlist.
 

@@ -24,8 +24,10 @@ only connections are therefore control-plane connections, not data-plane
 membership". The circuit-destination case simply had no row.
 
 The amendment adds it, `| Relay v2 circuit with that peer as application
-destination | yes | **no** |`, and states the principle the two pairs of rows
-share: who an exchange is *with* is a different question from who it is *for*.
+destination | yes | **no** |`, and states the principle the resulting pair of
+relay rows turns on: who an exchange is *with* is a different question from who
+it is *for*. DCUtR needs no second row — its only row is already the
+destination one.
 A reservation is an exchange with the infrastructure peer for the purpose it
 was authorized for; a circuit terminating at that peer uses it as an
 application destination, and a circuit carries the data plane by construction.

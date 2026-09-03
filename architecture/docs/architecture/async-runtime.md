@@ -83,7 +83,7 @@ Kademlia driver/provider interaction uses bounded control channels and all behav
 
 AutoNAT-v2, Circuit Relay v2, and DCUtR behaviours are standard-v1 Swarm components. Their events are normalized into bounded manager inputs; no behaviour callback mutates trust, endpoint leases, or application state directly.
 
-All behaviour-originated dials cross `DialAdmissionGate` with an origin (`autonat-probe`, `relay-reservation`, `relay-circuit`, `dcutr-hole-punch`). Infrastructure-only PeerIds are admitted only for their control-plane origins — `autonat-probe` and `relay-reservation`. `relay-circuit` and `dcutr-hole-punch` name that peer as the DESTINATION of a data-plane path and are refused for it (ADR-0036 Amendment 2026-09-03), even though the same two origins are control-plane when the destination is a trusted peer reached *through* infrastructure.
+All behaviour-originated dials cross `DialAdmissionGate` with an origin (`autonat-probe`, `relay-reservation`, `relay-circuit`, `dcutr-hole-punch`). Infrastructure-only PeerIds are admitted only for their control-plane origins — `autonat-probe` and `relay-reservation`. `relay-circuit` and `dcutr-hole-punch` are **data-plane origins and stay so regardless of destination**: each names the far end of an application path, so one toward an infrastructure-only peer is refused (ADR-0036 Amendment 2026-09-03), and one toward a trusted peer reached *through* infrastructure is admitted on that trusted destination's class. What varies is the destination's class, never the origin's plane.
 
 Relay reservation events update the address registry synchronously inside the Swarm ownership domain, then emit bounded reachability-state changes upward. A reservation close removes its relay-derived listen address immediately.
 

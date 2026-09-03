@@ -56,7 +56,7 @@ If a PeerId belongs to both sets, `DataPlaneTrusted` wins and the peer may also 
 
 Infrastructure-only connections are therefore **control-plane connections**, not data-plane membership.
 
-Relay and DCUtR each appear twice above, and the pair of rows is the distinction the matrix turns on: **who the exchange is WITH is a different question from who it is FOR.** Reserving a slot on a relay, or renewing that reservation, is an exchange *with* the infrastructure peer for the purpose it was authorized for — eligible. Opening a circuit whose far end *is* that peer, or hole-punching toward it, uses it as an application destination and is refused, because a circuit carries the data plane by construction. A relay may carry a circuit; it does not thereby become a party the circuit may terminate at.
+Relay is the one protocol with two rows above, and that pair is the distinction the matrix turns on: **who the exchange is WITH is a different question from who it is FOR.** Reserving a slot on a relay, or renewing that reservation, is an exchange *with* the infrastructure peer for the purpose it was authorized for — eligible. Opening a circuit whose far end *is* that peer uses it as an application destination and is refused, because a circuit carries the data plane by construction. A relay may carry a circuit; it does not thereby become a party the circuit may terminate at. DCUtR has a single row and it is already the destination one — there is no DCUtR control exchange with an infrastructure peer for a second row to describe — so the new relay row states for circuits exactly what that row has always stated for hole punches.
 
 ### Enforcement
 
