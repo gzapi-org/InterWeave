@@ -82,7 +82,11 @@ pub enum ConnectionClass {
 /// There is deliberately **no** `Exempt` or `Internal` variant. Every
 /// origin is attributable and every origin is gated; a value meaning
 /// "skip the gate" would recreate the hole the gate exists to close.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Ord` is derived so an origin can key an ordered map, which the
+/// gate's refusal record needs; the ordering carries no meaning beyond
+/// declaration order and nothing may depend on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DialOrigin {
     /// A person or an admin API asked for this exact peer.
     ///
@@ -185,7 +189,12 @@ pub struct DialRequest {
 ///
 /// Ordered as the gate evaluates them, and each is distinct because an
 /// operator debugging a connection needs to know which bound they hit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Ord` is derived so a denial can key an ordered map — the gate's own
+/// refusal record counts per `(origin, denial)`, and a bounded,
+/// deterministically ordered report is what makes a refusal readable.
+/// The ordering carries no meaning beyond declaration order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DialDenial {
     /// The runtime is draining or shutting down.
     ShuttingDown,

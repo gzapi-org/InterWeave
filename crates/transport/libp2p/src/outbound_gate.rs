@@ -16,13 +16,41 @@
 //! so synchronously inside `Swarm::dial`. Until Stage 10 this behaviour
 //! refused every dial without a ticket outright, which was correct
 //! while nothing behaviour-originated dialled. Kademlia is the change
-//! that makes something dial, so an unticketed dial is now admitted
-//! through the SAME root admission an ordinary dial passes —
-//! `SnapshotHandle::admit` under `DialOrigin::KademliaQuery` — and its
-//! ticket is deposited with the runtime's in-flight set so the ordinary
-//! settlement path owns the outcome. Trust, peer backoff, drain state
-//! and both ceilings all bind (SPIKE-003 F1/F7/F8); nothing is admitted
-//! that the policy would refuse, and nothing dials unaccounted.
+//! that makes something dial, so an unticketed dial is admitted through
+//! the SAME root admission an ordinary dial passes —
+//! `SnapshotHandle::admit` — and its ticket is deposited with the
+//! runtime's in-flight set so the ordinary settlement path owns the
+//! outcome. Trust, peer backoff, drain state and both ceilings all bind
+//! (SPIKE-003 F1/F7/F8); nothing is admitted that the policy would
+//! refuse, and nothing dials unaccounted.
+//!
+//! # Under WHICH origin is read, never inferred
+//!
+//! Stage 10 could infer it: Kademlia was the only dialling behaviour
+//! compiled, so "no ticket" and "Kademlia" named the same set. Stage 11
+//! adds three more and the inference then fails in the direction that
+//! breaks the stack — `KademliaQuery` is data-plane, and a data-plane
+//! origin toward a `ConnectivityInfrastructureOnly` peer is refused, so
+//! every relay reservation and AutoNAT probe would be denied against
+//! exactly the infrastructure the reachability stack exists to use.
+//! SPIKE-004 measured that against a real relay client.
+//!
+//! So the origin comes from [`crate::attribution`]: a wrapper around
+//! each dialling behaviour writes `ConnectionId -> DialOrigin` before
+//! the Swarm acts on the dial, and this hook reads and consumes the
+//! note. **A dial nobody claimed is refused** — fail-closed, and the
+//! only signal that a dialling behaviour was added without a wrapper.
+//!
+//! # And every refusal is written down
+//!
+//! The Swarm DISCARDS the denial of a behaviour-originated dial:
+//! `if let Ok(()) = self.dial(opts)` (libp2p-swarm 0.47.1
+//! `lib.rs:1098`), so there is no `Dialing` and no
+//! `OutgoingConnectionError`, and `ConnectionDenied`'s `Display` is the
+//! bare string `connection denied`. A refusal not recorded here is
+//! recorded nowhere, which is why every `Err` out of the pending hook
+//! goes through [`OutboundAdmission::refuse`] and into
+//! [`crate::refusals::DialRefusals`].
 //!
 //! # What each hook can decide (F9)
 //!
@@ -48,8 +76,9 @@
 //! one direction especially: `AUTONAT.md` §7's dial-back restriction
 //! is an SSRF check on a requester-chosen address, and deferring it to
 //! the established hook means performing the connect the check exists
-//! to prevent. Stage 11 must read the slice here rather than inherit
-//! the assumption above.
+//! to prevent. The behaviour that adds those origins is the one that
+//! must read the slice here; attribution (see [`crate::attribution`])
+//! is what lets this hook tell which dial it is looking at.
 //!
 //! # What it is not
 //!
@@ -71,10 +100,30 @@ use libp2p::swarm::{
 };
 
 use interweave_transport_api::TransportIdentity;
-use interweave_transport_runtime::{DialOrigin, DialRequest, DialTicket, SnapshotHandle};
+use interweave_transport_runtime::{
+    DialDenial, DialOrigin, DialRequest, DialTicket, SnapshotHandle,
+};
+
+use crate::attribution::DialAttribution;
+use crate::refusals::{DialRefusals, Refusal};
 
 /// What a refused behaviour dial is told when it names no peer.
 const NO_PEER: &str = "a behaviour dial that names no peer cannot be classified";
+
+/// A dial no behaviour claimed.
+///
+/// Reachable exactly two ways: a dialling behaviour was added without
+/// an [`crate::Attributing`] wrapper, or a wrapper announced under a
+/// different `ConnectionId` than the Swarm used. Both are bugs in this
+/// crate rather than conditions a peer can provoke, and both fail
+/// closed here.
+const NO_ATTRIBUTION: &str = "a behaviour dial with no attribution cannot be classified; the dialling behaviour is      not wrapped";
+
+/// The peer id is well-formed for libp2p and not for the neutral crates.
+const NOT_NEUTRAL_IDENTITY: &str = "behaviour dial names an identity outside the neutral grammar";
+
+/// The root admission said no.
+const POLICY_REFUSED: &str = "the root admission refused this dial";
 
 /// Connection ids the root admission has issued a ticket for.
 ///
@@ -225,6 +274,16 @@ pub fn strip_own_suffix(address: &Multiaddr, peer: &PeerId) -> String {
 #[derive(Debug)]
 pub struct OutboundAdmission {
     admitted: AdmittedDials,
+    /// Which behaviour asked, written by [`crate::Attributing`] before
+    /// the Swarm acts on the dial.
+    ///
+    /// Read and CONSUMED here. A dial with no note is refused: nothing
+    /// claimed it, so nothing can classify it, and guessing is what
+    /// SPIKE-004 measured breaking the reachability stack.
+    attribution: DialAttribution,
+    /// Refusals this gate made, because nothing downstream records
+    /// them — see [`crate::refusals`].
+    refusals: DialRefusals,
     /// The root admission, through the non-blocking handle: this runs
     /// synchronously inside the Swarm poll, and ADR-0011 forbids the
     /// gate blocking on the policy there. The handle also retries a
@@ -247,10 +306,13 @@ impl OutboundAdmission {
     pub fn new(
         admission: SnapshotHandle,
         in_flight: InFlightTickets,
+        attribution: DialAttribution,
         started: tokio::time::Instant,
     ) -> Self {
         Self {
             admitted: AdmittedDials::default(),
+            attribution,
+            refusals: DialRefusals::default(),
             admission,
             in_flight,
             started,
@@ -261,6 +323,44 @@ impl OutboundAdmission {
     #[must_use]
     pub fn admitted(&self) -> AdmittedDials {
         self.admitted.clone()
+    }
+
+    /// A handle to the attribution map this gate reads.
+    ///
+    /// Symmetric with [`Self::admitted`]: the composed behaviour's
+    /// wrappers write here and this gate consumes.
+    #[must_use]
+    pub fn attribution(&self) -> DialAttribution {
+        self.attribution.clone()
+    }
+
+    /// A handle to this gate's refusal record.
+    ///
+    /// The only place a denied behaviour dial is reported: the Swarm
+    /// discards the denial, so a caller that wants to know reads this.
+    #[must_use]
+    pub fn refusals(&self) -> DialRefusals {
+        self.refusals.clone()
+    }
+
+    /// Refuse, recording the refusal first.
+    ///
+    /// Every `Err` out of the pending hook goes through here, so
+    /// "the gate records its own refusals" is one path rather than a
+    /// discipline applied at four return sites.
+    fn refuse(
+        &self,
+        origin: Option<DialOrigin>,
+        denial: Option<DialDenial>,
+        detail: &'static str,
+        rendered: String,
+    ) -> ConnectionDenied {
+        self.refusals.record(Refusal {
+            origin,
+            denial,
+            detail,
+        });
+        ConnectionDenied::new(std::io::Error::other(rendered))
     }
 
     /// Milliseconds since the runtime's clock origin.
@@ -293,17 +393,29 @@ impl NetworkBehaviour for OutboundAdmission {
             return Ok(Vec::new());
         }
         // NO TICKET means no root admission issued this dial, which is
-        // the definition of behaviour-originated. Every one of those is
-        // a Kademlia iterative-query dial today — the only dialling
-        // behaviour Stage 10 activates — so the origin names it, and a
-        // denial an operator reads says which subsystem asked.
+        // the definition of behaviour-originated. WHICH behaviour is
+        // read from the note the wrapper left, never inferred: Stage 10
+        // could infer Kademlia because it was the only dialling
+        // behaviour compiled, and SPIKE-004 measured what that
+        // inference does to a relay reservation once there are four.
+        //
+        // An unattributed dial is refused. That is fail-closed and it
+        // is also the signal that a dialling behaviour was added
+        // without an `Attributing` wrapper, which nothing else would
+        // report.
+        let Some(origin) = self.attribution.resolve(connection_id) else {
+            return Err(self.refuse(None, None, NO_ATTRIBUTION, NO_ATTRIBUTION.to_owned()));
+        };
         let Some(peer) = peer else {
-            return Err(ConnectionDenied::new(std::io::Error::other(NO_PEER)));
+            return Err(self.refuse(Some(origin), None, NO_PEER, NO_PEER.to_owned()));
         };
         let Ok(identity) = TransportIdentity::parse(peer.to_base58()) else {
-            return Err(ConnectionDenied::new(std::io::Error::other(format!(
-                "behaviour dial names an identity outside the neutral grammar: {peer}"
-            ))));
+            return Err(self.refuse(
+                Some(origin),
+                None,
+                NOT_NEUTRAL_IDENTITY,
+                format!("behaviour dial names an identity outside the neutral grammar: {peer}"),
+            ));
         };
         // THE EMPTY PLACEHOLDER, deliberately (F9): a Kademlia dial
         // reaches this hook with no addresses, so peer-scoped and
@@ -311,11 +423,16 @@ impl NetworkBehaviour for OutboundAdmission {
         // decided here, and the address decision waits for the
         // established hook, where an address exists.
         //
-        // `_addresses` is ignored because it is always empty for the
-        // only behaviour that can dial today. SPIKE-004 measured a
-        // relay reservation and an AutoNAT dial-back arriving here with
-        // one candidate each, so Stage 11 must read the slice rather
-        // than inherit this — see the module note.
+        // `_addresses` is still ignored, and now that is a CHOICE
+        // rather than an inheritance: attribution names the origin, so
+        // this hook could branch on it, and Kademlia — the only
+        // behaviour wired to dial today — supplies nothing to branch
+        // on. SPIKE-004 measured a relay reservation and an AutoNAT
+        // dial-back arriving here with one candidate each, so the
+        // behaviour that reads the slice is the one that adds them:
+        // `AUTONAT.md` §7's dial-back restriction is an SSRF check on a
+        // requester-chosen address and cannot wait for the established
+        // hook, which runs after the connect it exists to prevent.
         //
         // F16's cost is accepted knowingly: the reservation cannot be
         // separated from the admission, so an address table full of
@@ -324,7 +441,7 @@ impl NetworkBehaviour for OutboundAdmission {
         let request = DialRequest {
             peer: Some(identity),
             address: String::new(),
-            origin: DialOrigin::KademliaQuery,
+            origin,
         };
         match self.admission.admit(&request, self.now_ms()) {
             Ok(ticket) => {
@@ -335,9 +452,12 @@ impl NetworkBehaviour for OutboundAdmission {
                 self.in_flight.deposit(connection_id, ticket);
                 Ok(Vec::new())
             }
-            Err(denial) => Err(ConnectionDenied::new(std::io::Error::other(format!(
-                "kademlia dial refused: {denial:?}"
-            )))),
+            Err(denial) => Err(self.refuse(
+                Some(origin),
+                Some(denial),
+                POLICY_REFUSED,
+                format!("{origin:?} dial refused: {denial:?}"),
+            )),
         }
     }
 
@@ -421,6 +541,7 @@ mod tests {
     #![allow(clippy::expect_used, clippy::panic)]
 
     use super::*;
+    use crate::refusals::RECENT_CAPACITY;
     use interweave_transport_runtime::{ConnectionManager, ConnectionPolicy, TrustSources};
     use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
     use libp2p::swarm::ConnectionId;
@@ -444,18 +565,41 @@ mod tests {
     }
 
     fn gate(m: &ConnectionManager) -> (OutboundAdmission, InFlightTickets) {
+        let (gate, in_flight, _) = attributed_gate(m);
+        (gate, in_flight)
+    }
+
+    /// The gate with its attribution map, for tests that need to say
+    /// which behaviour asked.
+    fn attributed_gate(
+        m: &ConnectionManager,
+    ) -> (OutboundAdmission, InFlightTickets, DialAttribution) {
         let in_flight = InFlightTickets::default();
+        let attribution = DialAttribution::default();
         (
-            OutboundAdmission::new(m.handle(), in_flight.clone(), tokio::time::Instant::now()),
+            OutboundAdmission::new(
+                m.handle(),
+                in_flight.clone(),
+                attribution.clone(),
+                tokio::time::Instant::now(),
+            ),
             in_flight,
+            attribution,
         )
     }
 
+    /// A behaviour dial, ANNOUNCED the way `Attributing` announces one.
+    ///
+    /// The announcement is not optional dressing: the gate refuses a
+    /// dial nobody claimed, so a test that skipped this would measure
+    /// the refusal path and call it the admission path.
     fn behaviour_dial(
         gate: &mut OutboundAdmission,
         id: usize,
         peer: &str,
     ) -> Result<Vec<Multiaddr>, ConnectionDenied> {
+        gate.attribution()
+            .announce(ConnectionId::new_unchecked(id), DialOrigin::KademliaQuery);
         gate.handle_pending_outbound_connection(
             ConnectionId::new_unchecked(id),
             Some(peer.parse().expect("valid PeerId")),
@@ -480,44 +624,265 @@ mod tests {
     }
 
     #[test]
-    fn kademlia_is_still_the_only_behaviour_that_can_originate_a_dial() {
-        // THE COMMENT IN THE PENDING HOOK OWES THIS TEST. It reads "every
-        // one of those is a Kademlia iterative-query dial today", and on
-        // that basis every unticketed dial is admitted under
-        // `DialOrigin::KademliaQuery`.
+    fn a_dial_no_behaviour_claimed_is_refused() {
+        // THE FAIL-CLOSED INVARIANT, and the replacement for a guard
+        // that used to parse the root manifest.
         //
-        // The moment a second dialling behaviour is enabled the sentence
-        // is false and the origin is a lie — and the failure is quiet in
-        // the worst direction. `KademliaQuery.is_data_plane()` is true,
-        // so a relay reservation to an infrastructure-only peer would be
-        // refused by `authorizes_for`: fail-closed, but presenting as
-        // "relay reservations mysteriously stopped working" rather than
-        // as a classification bug. ADR-0036 keeps those two authorities
-        // apart precisely so one cannot be spent as the other.
+        // That guard asserted `autonat`, `relay` and `dcutr` were off,
+        // because the hook ASSUMED every unticketed dial was Kademlia's
+        // and the assumption dies when a second dialling behaviour
+        // appears. The hook no longer assumes: it reads the note
+        // `Attributing` leaves, and a dial with no note is refused
+        // here. So the condition that guard protected is now enforced
+        // by the code rather than by a feature list, and the failure
+        // mode it feared — a relay reservation admitted as a
+        // data-plane Kademlia query — cannot occur without an explicit
+        // announcement saying so.
         //
-        // Read from the manifest rather than from `cfg!`, because a
-        // dependency's enabled features are not visible to a dependent's
-        // conditional compilation — the fact that needs guarding lives
-        // in the feature list, so that is what is inspected.
-        let manifest = include_str!("../../../../Cargo.toml");
-        let features = manifest
-            .split_once("libp2p = { version")
-            .expect("the workspace pins libp2p")
-            .1
-            .split_once("] }")
-            .expect("the feature list closes")
-            .0;
-        for dialling in ["autonat", "relay", "dcutr"] {
-            assert!(
-                !features.contains(&format!("\"{dialling}\"")),
-                "{dialling} is enabled, so a behaviour other than Kademlia can now \
-                 originate a dial — the pending hook must classify by origin instead \
-                 of assuming DialOrigin::KademliaQuery"
+        // What remains true is that a dialling behaviour must be
+        // WRAPPED. That is what this test pins: forget the wrapper and
+        // every dial that behaviour makes is refused, loudly and in the
+        // refusal record, rather than misclassified in silence.
+        let m = manager(&[TRUSTED]);
+        let (mut gate, in_flight, _attribution) = attributed_gate(&m);
+
+        let refused = gate.handle_pending_outbound_connection(
+            ConnectionId::new_unchecked(1),
+            Some(TRUSTED.parse().expect("valid PeerId")),
+            &[],
+            Endpoint::Dialer,
+        );
+        assert!(
+            refused.is_err(),
+            "an unattributed dial must be refused even for a fully trusted peer"
+        );
+        assert_eq!(
+            in_flight.outstanding(),
+            0,
+            "and must reserve nothing, or a refusal would leak a pending-dial slot"
+        );
+
+        // THE CONTROL: the same peer, the same gate, one announcement.
+        gate.attribution()
+            .announce(ConnectionId::new_unchecked(2), DialOrigin::KademliaQuery);
+        assert!(
+            gate.handle_pending_outbound_connection(
+                ConnectionId::new_unchecked(2),
+                Some(TRUSTED.parse().expect("valid PeerId")),
+                &[],
+                Endpoint::Dialer,
+            )
+            .is_ok(),
+            "so the refusal above is the missing attribution and not the peer or the policy"
+        );
+    }
+
+    #[test]
+    fn the_gate_admits_under_the_origin_it_was_told() {
+        // The point of the mechanism, stated as the difference it
+        // makes: one peer, authorized for REACHABILITY only, and two
+        // dials that differ in nothing but the announced origin.
+        //
+        // Under the old hook both were `KademliaQuery` — data-plane —
+        // and both were refused. SPIKE-004 measured exactly that
+        // against a real relay client, which is why this is step one of
+        // Stage 11 rather than a refinement of it.
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        let _ = m.set_trust(
+            TrustSources::new(
+                PeerTrustPolicy::new([]).expect("empty"),
+                InfrastructureSet::new([ident(TRUSTED)]).expect("small"),
+            ),
+            &[],
+        );
+        let (mut gate, _in_flight, _a) = attributed_gate(&m);
+
+        gate.attribution()
+            .announce(ConnectionId::new_unchecked(1), DialOrigin::RelayReservation);
+        assert!(
+            gate.handle_pending_outbound_connection(
+                ConnectionId::new_unchecked(1),
+                Some(TRUSTED.parse().expect("valid PeerId")),
+                &[],
+                Endpoint::Dialer,
+            )
+            .is_ok(),
+            "a reservation with an infrastructure-only peer is what that class exists for"
+        );
+
+        gate.attribution()
+            .announce(ConnectionId::new_unchecked(2), DialOrigin::KademliaQuery);
+        assert!(
+            gate.handle_pending_outbound_connection(
+                ConnectionId::new_unchecked(2),
+                Some(TRUSTED.parse().expect("valid PeerId")),
+                &[],
+                Endpoint::Dialer,
+            )
+            .is_err(),
+            "and a data-plane origin toward the same peer is refused — the class split is \
+             decided by the origin the gate was TOLD"
+        );
+    }
+
+    #[test]
+    fn a_note_is_consumed_so_it_cannot_attribute_the_next_dial() {
+        // A `ConnectionId` names one dial attempt. libp2p reuses ids
+        // across a Swarm's lifetime, so a note that outlived its dial
+        // would classify whatever came next — and the origin it carried
+        // would be one nobody announced for that dial.
+        let m = manager(&[TRUSTED]);
+        let (mut gate, _in_flight, attribution) = attributed_gate(&m);
+
+        attribution.announce(ConnectionId::new_unchecked(7), DialOrigin::KademliaQuery);
+        assert_eq!(attribution.outstanding(), 1);
+        assert!(
+            gate.handle_pending_outbound_connection(
+                ConnectionId::new_unchecked(7),
+                Some(TRUSTED.parse().expect("valid PeerId")),
+                &[],
+                Endpoint::Dialer,
+            )
+            .is_ok()
+        );
+        assert_eq!(attribution.outstanding(), 0, "reading the note consumes it");
+
+        assert!(
+            gate.handle_pending_outbound_connection(
+                ConnectionId::new_unchecked(7),
+                Some(TRUSTED.parse().expect("valid PeerId")),
+                &[],
+                Endpoint::Dialer,
+            )
+            .is_err(),
+            "a second dial reusing the id inherits nothing and is refused"
+        );
+    }
+
+    #[test]
+    fn every_refusal_is_recorded_because_nothing_downstream_records_it() {
+        // The Swarm discards the denial of a behaviour-originated dial
+        // — `if let Ok(()) = self.dial(opts)` — so a refusal not
+        // written down here is written down nowhere. SPIKE-004's F8.
+        //
+        // Both refusal shapes are exercised: one the gate makes before
+        // asking the policy, and one the policy makes.
+        let m = manager(&[]);
+        let (mut gate, _in_flight, _a) = attributed_gate(&m);
+        let refusals = gate.refusals();
+        assert_eq!(refusals.total(), 0);
+
+        // No attribution: refused before the policy is consulted.
+        let _ = gate.handle_pending_outbound_connection(
+            ConnectionId::new_unchecked(1),
+            Some(TRUSTED.parse().expect("valid PeerId")),
+            &[],
+            Endpoint::Dialer,
+        );
+        // Attributed, and refused BY the policy: nobody is trusted.
+        gate.attribution()
+            .announce(ConnectionId::new_unchecked(2), DialOrigin::KademliaQuery);
+        let _ = gate.handle_pending_outbound_connection(
+            ConnectionId::new_unchecked(2),
+            Some(TRUSTED.parse().expect("valid PeerId")),
+            &[],
+            Endpoint::Dialer,
+        );
+
+        assert_eq!(refusals.total(), 2, "both refusals are recorded");
+        let recent = refusals.recent();
+        assert_eq!(recent.len(), 2);
+        assert_eq!(
+            recent[0].origin, None,
+            "the unattributed refusal names no origin, because there was none"
+        );
+        assert_eq!(recent[0].denial, None, "and the policy was never asked");
+        assert_eq!(
+            recent[1].origin,
+            Some(DialOrigin::KademliaQuery),
+            "the policy refusal names the origin it was decided under"
+        );
+        assert_eq!(
+            recent[1].denial,
+            Some(DialDenial::Unauthorized),
+            "and the reason, which `ConnectionDenied`'s own Display does not carry"
+        );
+        assert_eq!(
+            refusals.counts().get(&(
+                Some(DialOrigin::KademliaQuery),
+                Some(DialDenial::Unauthorized)
+            )),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn a_refusal_handle_taken_before_the_gate_moves_still_reads_it() {
+        // `SwarmRuntime` clones `outbound.refusals()` and then moves
+        // the gate into `SubstrateBehaviour`, inside a private
+        // `GatedSwarm`, inside the Swarm task — after which nothing can
+        // reach the gate again. The handle taken beforehand is the only
+        // path to the record, so it has to be a VIEW of it.
+        //
+        // Review finding on PR #71: the record existed and the runtime
+        // kept no handle, which left a denied behaviour dial exactly as
+        // invisible as before.
+        let m = manager(&[]);
+        let (gate, _in_flight, _a) = attributed_gate(&m);
+        let taken_before = gate.refusals();
+
+        // The gate is CONSUMED here, the way `SubstrateBehaviour::new`
+        // consumes it — it does not come back, and neither does any
+        // path to its record except the handle above.
+        fn swallow_the_gate(mut gate: OutboundAdmission) {
+            gate.attribution()
+                .announce(ConnectionId::new_unchecked(1), DialOrigin::KademliaQuery);
+            let _ = gate.handle_pending_outbound_connection(
+                ConnectionId::new_unchecked(1),
+                Some(TRUSTED.parse().expect("valid PeerId")),
+                &[],
+                Endpoint::Dialer,
             );
         }
-        assert!(
-            features.contains("\"kad\""),
-            "and the guard is only meaningful while kad itself is on"
+        swallow_the_gate(gate);
+
+        assert_eq!(
+            taken_before.total(),
+            1,
+            "the handle reads refusals made after it was taken"
+        );
+        assert_eq!(
+            taken_before.recent()[0].denial,
+            Some(DialDenial::Unauthorized)
+        );
+    }
+
+    #[test]
+    fn the_refusal_ring_is_bounded() {
+        // An attacker chooses how many refusals to provoke. The counts
+        // are a product of two small enums and bounded by
+        // construction; the verbatim ring is not, so it is capped and
+        // drops oldest-first.
+        let m = manager(&[]);
+        let (mut gate, _in_flight, _a) = attributed_gate(&m);
+        let refusals = gate.refusals();
+        for id in 0..(RECENT_CAPACITY * 3) {
+            let _ = gate.handle_pending_outbound_connection(
+                ConnectionId::new_unchecked(id),
+                Some(TRUSTED.parse().expect("valid PeerId")),
+                &[],
+                Endpoint::Dialer,
+            );
+        }
+        assert_eq!(
+            refusals.recent().len(),
+            RECENT_CAPACITY,
+            "the ring holds at most its capacity however many refusals arrive"
+        );
+        assert_eq!(
+            refusals.total(),
+            (RECENT_CAPACITY * 3) as u64,
+            "while the total still counts every one"
         );
     }
 

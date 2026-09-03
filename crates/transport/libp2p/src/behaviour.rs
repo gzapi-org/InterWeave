@@ -34,6 +34,7 @@ use interweave_transport_api::{MAX_PAYLOAD_BYTES, broadcast_v1};
 use interweave_transport_runtime::mesh_id::gossipsub_message_id_v1;
 use interweave_transport_runtime::preauth::PreAuthLimits;
 
+use crate::attribution::Attributing;
 use crate::direct_codec::{DIRECT_PROTOCOL, DirectCodec};
 use crate::endpoints_codec::{ENDPOINTS_PROTOCOL, EndpointsCodec};
 use crate::outbound_gate::OutboundAdmission;
@@ -177,11 +178,19 @@ pub struct SubstrateBehaviour {
     /// ordering rule: this is the first behaviour that dials
     /// AUTONOMOUSLY — an iterative query asks the Swarm to dial with no
     /// caller anywhere — so it joins a Swarm whose outbound gate
-    /// already decides such dials by root policy. `Toggle` rather than
+    /// already decides such dials by root policy, under the origin the
+    /// wrapper announces. `Toggle` rather than
     /// an always-on field because a profile without a kademlia entry
     /// must not even advertise the protocol (§13: `enabled: false`
     /// means zero activity).
-    pub kad: Toggle<kad::Behaviour<MemoryStore>>,
+    /// Wrapped so the gate is TOLD this is a Kademlia query rather
+    /// than inferring it. Stage 10 could infer it — Kademlia was the
+    /// only dialling behaviour compiled — and Stage 11 adds three more,
+    /// at which point the inference refuses every relay reservation and
+    /// AutoNAT probe against the infrastructure the stack needs
+    /// (SPIKE-004 F1, measured). The wrapper decides nothing; it writes
+    /// `ConnectionId -> DialOrigin` before the Swarm acts on the dial.
+    pub kad: Toggle<Attributing<kad::Behaviour<MemoryStore>>>,
 }
 
 // EVERY DATA-PLANE BEHAVIOUR ABOVE IS INSTALLED UNIFORMLY, on every
@@ -240,7 +249,7 @@ impl SubstrateBehaviour {
         keypair: &identity::Keypair,
         preauth: PreAuthLimits,
         outbound: OutboundAdmission,
-        kad: Toggle<kad::Behaviour<MemoryStore>>,
+        kad: Toggle<Attributing<kad::Behaviour<MemoryStore>>>,
     ) -> Result<Self, &'static str> {
         let broadcast_config = gossipsub::ConfigBuilder::default()
             // STRICT, which is what makes the mesh id computable at all:

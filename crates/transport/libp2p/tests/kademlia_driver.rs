@@ -19,7 +19,7 @@ use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::TransportIdentity;
 use interweave_transport_libp2p::runtime::kademlia_driver::KademliaSettings;
 use interweave_transport_libp2p::{SubstrateConfig, SwarmEvent, SwarmRuntime};
-use interweave_transport_runtime::TrustSources;
+use interweave_transport_runtime::{DialDenial, DialOrigin, TrustSources};
 use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 use libp2p::Multiaddr;
 
@@ -437,6 +437,47 @@ async fn the_gate_refuses_the_walks_dial_to_a_stranger() {
         |e| matches!(e, SwarmEvent::Connected { peer } if *peer == other_peer),
     )
     .await;
+
+    // AND THE REFUSAL IS READABLE, which is the part that did not exist
+    // before Stage 11 step 1.
+    //
+    // Everything asserted above is an ABSENCE: no connection, no
+    // routing seat. That is exactly the problem — libp2p handles a
+    // behaviour-emitted dial as `if let Ok(()) = self.dial(opts)` and
+    // discards the denial, so there is no `Dialing`, no
+    // `OutgoingConnectionError`, and nothing on this event stream. An
+    // operator watching a node that never reaches anyone saw silence
+    // and could not tell a refusal from an unreachable network.
+    //
+    // The gate records its own refusals and the runtime keeps the
+    // handle, so the same event that produced the silence above is now
+    // a readable fact with the origin that asked and the reason it was
+    // told no.
+    let refusals = asker.dial_refusals();
+    assert!(
+        refusals.total() > 0,
+        "the gate's refusal of the walk's dial is recorded, not merely absent"
+    );
+    let recent = refusals.recent();
+    assert!(
+        recent.iter().any(|r| {
+            r.origin == Some(DialOrigin::KademliaQuery)
+                && r.denial == Some(DialDenial::Unauthorized)
+        }),
+        "and it names WHO asked and WHY it was refused: {recent:?}"
+    );
+    assert_eq!(
+        refusals
+            .counts()
+            .get(&(
+                Some(DialOrigin::KademliaQuery),
+                Some(DialDenial::Unauthorized)
+            ))
+            .copied()
+            .unwrap_or(0),
+        refusals.total(),
+        "every refusal in this run is that one kind, so nothing else is being counted"
+    );
 
     hub.shutdown().await.expect("stops");
     other.shutdown().await.expect("stops");

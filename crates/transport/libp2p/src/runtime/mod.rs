@@ -48,9 +48,11 @@ use interweave_transport_runtime::{
 use libp2p::{PeerId, noise, tcp, yamux};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::attribution::{Attributing, DialAttribution, always};
 use crate::behaviour::SubstrateBehaviour;
 use crate::gated_swarm::{GatedSwarm, mesh_admits};
 use crate::outbound_gate::{InFlightTickets, OutboundAdmission};
+use crate::refusals::DialRefusals;
 
 mod broadcast;
 mod commands;
@@ -412,6 +414,17 @@ pub struct SwarmRuntime {
     events: mpsc::Receiver<SwarmEvent>,
     task: Option<tokio::task::JoinHandle<()>>,
     local_peer: TransportIdentity,
+    /// What the outbound gate refused, kept HERE because nowhere else
+    /// can reach it.
+    ///
+    /// The gate is moved into `SubstrateBehaviour`, which lives inside
+    /// a private `GatedSwarm` inside the Swarm task, so once the
+    /// runtime starts there is no path back to it. Cloning the handle
+    /// before the move is what makes the record readable at all — and
+    /// a record nobody can read leaves a denied behaviour dial exactly
+    /// as invisible as it was, which is the defect this whole
+    /// mechanism exists to close.
+    refusals: DialRefusals,
 }
 
 impl SwarmRuntime {
@@ -473,7 +486,22 @@ impl SwarmRuntime {
         // behaviour dial's ticket in its pending hook and re-binds it
         // at establishment.
         let in_flight = InFlightTickets::default();
-        let outbound = OutboundAdmission::new(manager.handle(), in_flight.clone(), started);
+        // WHICH BEHAVIOUR ASKED, shared between the wrappers that write
+        // it and the gate that reads it. One map per Swarm: a
+        // `ConnectionId` is unique within a Swarm and means nothing
+        // outside one.
+        let attribution = DialAttribution::default();
+        let outbound = OutboundAdmission::new(
+            manager.handle(),
+            in_flight.clone(),
+            attribution.clone(),
+            started,
+        );
+        // CLONED BEFORE THE MOVE. `outbound` is about to disappear into
+        // the behaviour, and the Swarm discards a denied behaviour
+        // dial, so this handle is the only way anything outside the
+        // Swarm task learns a dial was refused.
+        let refusals = outbound.refusals();
 
         // The Kademlia behaviour exists only when configured: a profile
         // with no enabled kademlia entry advertises nothing, answers
@@ -482,10 +510,12 @@ impl SwarmRuntime {
         let local_pid = libp2p::PeerId::from_public_key(&keypair.public());
         let (kad_toggle, mut kademlia_state) = match &config.kademlia {
             Some(settings) => (
-                libp2p::swarm::behaviour::toggle::Toggle::from(Some(
+                libp2p::swarm::behaviour::toggle::Toggle::from(Some(Attributing::new(
                     kademlia_driver::build_behaviour(settings, local_pid)
                         .map_err(SubstrateError::Kademlia)?,
-                )),
+                    always(DialOrigin::KademliaQuery),
+                    attribution.clone(),
+                ))),
                 Some(kademlia_driver::KademliaState::new(settings)),
             ),
             None => (libp2p::swarm::behaviour::toggle::Toggle::from(None), None),
@@ -1257,6 +1287,7 @@ impl SwarmRuntime {
             events: event_rx,
             task: Some(task),
             local_peer,
+            refusals,
         })
     }
 
@@ -1264,6 +1295,19 @@ impl SwarmRuntime {
     #[must_use]
     pub const fn local_peer(&self) -> &TransportIdentity {
         &self.local_peer
+    }
+
+    /// Dials the outbound gate refused, and why.
+    ///
+    /// The ONLY observation of a denied behaviour-originated dial.
+    /// libp2p handles a behaviour-emitted dial as
+    /// `if let Ok(()) = self.dial(opts)` and discards the denial, so
+    /// there is no `Dialing` event, no `OutgoingConnectionError`, and
+    /// nothing on this runtime's event stream. A caller that wants to
+    /// know why Kademlia is not reaching anyone reads this.
+    #[must_use]
+    pub fn dial_refusals(&self) -> DialRefusals {
+        self.refusals.clone()
     }
 }
 
