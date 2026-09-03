@@ -72,7 +72,13 @@ const REFUSAL: &str = "connection refused";
 /// requires the opposite: charge the relay transport connection and
 /// relay PeerId, and "MUST NOT create unbounded pseudo-source buckets
 /// from circuit metadata". The relay's PeerId is present in
-/// `local_addr` and is not read here.
+/// `local_addr` -- libp2p-relay 0.21.1 builds it as
+/// `relay_addr.with(Protocol::P2pCircuit)` from the established relay
+/// connection (`priv_client/transport.rs:404`) and the Swarm appends
+/// `/p2p/<peer>` to a dialled address -- and this function is not given
+/// it. That the shape holds on the pinned crate is read from those two
+/// sources; what the tests below pin is what this function does with
+/// the address it IS given.
 ///
 /// The risk §10 names is proliferation, not merging, which is why the
 /// memory-transport reasoning does not carry over. Unreachable today --
@@ -312,23 +318,36 @@ mod tests {
     /// property that makes the per-source ceiling escapable.
     #[test]
     fn two_relayed_sources_over_one_relay_get_different_buckets() {
+        // The local address both connections arrive on, as SPIKE-004
+        // measured it: one relay connection, named by the relay's own
+        // PeerId, shared by every circuit riding it.
         let local = addr(&format!("/ip4/127.0.0.1/tcp/4001/p2p/{RELAY}/p2p-circuit"));
+        assert!(
+            local.to_string().contains("p2p-circuit"),
+            "the shared connection is a circuit, which is what makes §10's rule apply"
+        );
         let one = source_label(&addr(&format!("/p2p/{SOURCE_A}")));
         let two = source_label(&addr(&format!("/p2p/{SOURCE_B}")));
         assert_ne!(
             one, two,
             "two sources over ONE relay connection get separate pre-auth budgets"
         );
-        // AND THE RELAY IS RIGHT THERE, unread. §10 names it as the
-        // bucket both of those connections should have shared.
+
+        // AND NEITHER BUCKET IS THE RELAY'S IDENTITY, which is the one
+        // §10 says both connections should have shared.
+        //
+        // Asserted against the relay's PeerId rather than against
+        // `source_label(&local)`: that call returns `127.0.0.1`, the
+        // relay's IP, so comparing with it would pass for reasons
+        // having nothing to do with identity. The bucket §10 names is
+        // the relay PeerId, so that is what must be absent.
         assert!(
-            local.to_string().contains(RELAY),
-            "the relay's identity is present in the local address the hook is also handed"
+            !one.contains(RELAY) && !two.contains(RELAY),
+            "neither bucket names the relay ({one}, {two}), so the connection they share              is not what either was charged to"
         );
-        assert_ne!(
-            one,
-            source_label(&local),
-            "and it is not what either connection was charged to"
+        assert!(
+            one.contains(SOURCE_A) && two.contains(SOURCE_B),
+            "each bucket is its own SOURCE's identity, which is the metadata §10 forbids              bucketing on ({one}, {two})"
         );
     }
 }
