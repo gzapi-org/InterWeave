@@ -237,6 +237,20 @@ so the check likely belongs on the destination's class rather than on
 the origin alone. R3.5 asserts today's behaviour so that changing it
 fails here rather than passing silently.
 
+> **CORRECTED 2026-09-03 — the two fixes are not in tension, and this
+> paragraph read them as if they were.** `ConnectionPolicy::admit`
+> (`connection_policy.rs:512-523`) consults `is_data_plane` in ONE arm,
+> `ConnectivityInfrastructureOnly`; `DataPlaneTrusted` falls through
+> with no origin check at all. The class it switches on is the class of
+> the peer the dial NAMES, and a hole punch toward a trusted peer
+> through a relay names the trusted peer. So adding the origin to
+> `is_data_plane` cannot refuse that punch — it *is* the
+> destination-class check this paragraph reaches for, expressed where
+> the policy already keys on the destination. What Stage 11 still
+> decides is the fix; what it no longer has to weigh is an objection
+> the shipped code does not support. The paragraph is left as written
+> because a spike record is read for what it found.
+
 This was found because an earlier version of R3 *required* the
 admission — recording the violation as evidence that the split held.
 
