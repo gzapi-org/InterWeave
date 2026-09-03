@@ -262,30 +262,42 @@ be set by the caller, and the peer that caller names is the
 **destination**. Two origins that look adjacent in the enum name
 different parties.
 
-**But D2 is a document CONFLICT before it is a code defect, and Stage 11
-must resolve it in that order.** A review on PR #69 was right to hold
-this to CLAUDE.md §2. ADR-0036's enforcement clause forbids the
-admission; two accepted rows appear to permit it:
+**But D2 was a document CONFLICT before it was a code defect, and Stage
+11 had to resolve it in that order.** A review on PR #69 was right to
+hold this to CLAUDE.md §2. ADR-0036's enforcement clause forbids the
+admission; at the time this was written, two accepted rows appeared to
+permit it:
 
-- `transport/libp2p/CONNECTIVITY.md` §4's protocol matrix reads
+- `transport/libp2p/CONNECTIVITY.md` §4's protocol matrix read
   *"Relay v2 control | eligible | eligible"*, and ADR-0036's own matrix
-  says the same for reservation/circuit control;
-- §11 says infrastructure-only PeerIds are dialable "only for permitted
-  connectivity origins" and then names exactly two that never use the
+  said the same for reservation/circuit control;
+- §11 said infrastructure-only PeerIds are dialable "only for permitted
+  connectivity origins" and then named exactly two that never use the
   infrastructure set — `direct-user-command` and `kademlia-query`.
-  `relay-circuit` is in the origin list and is not among them.
+  `relay-circuit` was in the origin list and among neither.
 
-The spike's reading is that a circuit *toward* a destination is not
-"relay control *with*" that peer, and that the matrix already draws
+The spike's reading was that a circuit *toward* a destination is not
+"relay control *with*" that peer, and that the matrix already drew
 exactly this distinction one row down — *"DCUtR as destination peer |
-no"* — which is why D1 has no such ambiguity and D2 does. The matrix
-simply has no row for a circuit whose DESTINATION is the
+no"* — which is why D1 had no such ambiguity and D2 did. The matrix
+simply had no row for a circuit whose DESTINATION is the
 infrastructure-only peer.
 
-That reading is a recommendation, not a verdict. **The architecture is
-amended or clarified first — a row for the destination case — and the
-code follows it.** Changing `is_data_plane` against a contract that
-arguably permits today's behaviour is precisely what §2 forbids.
+That reading was a recommendation, not a verdict. The architecture was
+to be amended first — a row for the destination case — and the code to
+follow it; changing `is_data_plane` against a contract that arguably
+permitted the behaviour is precisely what §2 forbids.
+
+> **RESOLVED 2026-09-03 — the spike's reading was adopted.** ADR-0036's
+> Amendment 2026-09-03 added the row the matrix lacked, `| Relay v2
+> circuit with that peer as application destination | yes | **no** |`,
+> and `transport/libp2p/CONNECTIVITY.md` §4 and §11 inherited it. **The
+> conflict is gone and D2 is now an ordinary code fix** — do not stop
+> for the architecture decision, it has been taken. The fix stays
+> per-origin, as this section argues above: `RelayCircuit` moves,
+> `RelayReservation` does not. The finding above is left as it was
+> measured, because what a spike recorded is the thing a later reader
+> comes here for.
 
 The positive half of ADR-0036's relayed clause holds and is measured:
 the source ends up connected to the destination's own authenticated
