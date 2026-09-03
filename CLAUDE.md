@@ -36,10 +36,13 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   circuit carries (D3), which `contracts/CONNECTIVITY.md` §10 forbids by
   name. Nothing constructs either origin and no relay feature is
   compiled, so all three are latent until this stage enables the paths
-  they govern, and all three must be fixed before it does. **D2 is a
+  they govern, and all three must be fixed before it does. **D2 was a
   document conflict first**: `transport/libp2p/CONNECTIVITY.md` §4's
-  matrix and §11 arguably permit what ADR-0036's enforcement clause
-  forbids, so the architecture is clarified before the code moves (§2). Read the verdict in
+  matrix and §11 arguably permitted what ADR-0036's enforcement clause
+  forbids. ADR-0036's Amendment 2026-09-03 settled it — a circuit whose
+  far end IS the infrastructure-only peer has a row of its own now — and
+  both sections inherited it, so what remains for D2 is the code fix
+  (§2). Read the verdict in
   `architecture/roadmap/SPIKES.md` before extending the stage. Read `[workspace].members` for the current roster and `[workspace.metadata.interweave].status` for the open stage rather than trusting either written here. **What each completed stage proved is in its `Met.` block in the canonical plan** — including, for Stages 6 through 9, the clauses met by scope and the limits their tests cannot reach. Read the block before extending that stage; it is the record, and this file does not mirror it. Stage 9's block matters more than most: it records that the mDNS multicast MECHANISM was never built, so the stage proved the provider and not LAN discovery.
 - Three facts about the built code are **not** derivable from it, and are recorded here because nothing else would say them at the moment they matter. **The reservation map's waiter ACCOUNTING is inert today and must NOT be removed as dead weight** — SPIKE-002/A11 measured the unbounded version as a memory-exhaustion vector, 40 copies attaching 39 waiters with zero refusals, and it binds in every stage. **The Stage 6 P1 about binding the source endpoint to the caller's lease was carried to Stage 8 by an explicit decision on PR #38 and closed there** — a direct send now takes the `EndpointLease` `claim_endpoint` returns, and `EndpointRegistry::holds_lease` verifies its epoch against the live lease, so a caller sends only as an endpoint it actually claimed (the plan's Stage 8 `Met.` block records this). And **broadcast and direct must remain independently functional and must never substitute for each other**, which is a standing constraint rather than a stage's exit gate.
 - Stage 10 closed Kademlia, activating `crates/api/kademlia-control-api` and `crates/discovery/kademlia` with the Swarm-owned driver in `crates/transport/libp2p`; Stage 9 activated `crates/discovery/{static,cache,mdns}`. The Stage-1 contract crates under `crates/api/` remain types and validation only — no I/O, no runtime, no backend — and the Stage-2 crates remain pure state machines.

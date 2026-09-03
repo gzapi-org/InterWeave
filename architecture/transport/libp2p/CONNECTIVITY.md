@@ -137,11 +137,14 @@ A data-plane trusted peer may also serve relay/AutoNAT roles. An infrastructure-
 | Identify / bounded ping | yes | yes |
 | AutoNAT v2 | eligible | eligible |
 | Relay v2 control | eligible | eligible |
+| Relay v2 circuit as destination peer | yes | no |
 | GossipSub | yes | no |
 | direct v2 | yes | no |
 | endpoint directory | yes | no |
 | Kademlia routing | trusted policy only | no |
 | DCUtR as destination peer | yes | no |
+
+Relay and DCUtR each appear twice, and the pair is the distinction the table turns on: **who an exchange is WITH is a different question from who it is FOR.** Reserving or renewing a slot on a relay is an exchange with that peer for the purpose it was authorized for. A circuit whose far end *is* that peer, or a hole punch toward it, uses it as an application destination and is refused — a circuit carries the data plane by construction. A relay may carry a circuit without becoming a party the circuit may terminate at. (ADR-0036 Amendment 2026-09-03.)
 
 GossipSub must blacklist/exclude infrastructure-only PeerIds. Direct/endpoint managers reject their application requests. Kademlia manual insertion rejects them. No network content can modify either allowlist.
 
@@ -369,7 +372,7 @@ The root `DialAdmissionGate` evaluates:
 
 A denied behaviour-originated dial must not reset normal peer backoff. Diagnostics preserve origin so Phase-9 behaviour cannot become invisible dial load.
 
-Infrastructure-only PeerIds are dialable only for permitted connectivity origins. `direct-user-command` and `kademlia-query` never use the infrastructure-only authorization set.
+Infrastructure-only PeerIds are dialable only for permitted connectivity origins. `direct-user-command`, `kademlia-query`, `relay-circuit` and `dcutr-hole-punch` never use the infrastructure-only authorization set: the first two carry application traffic outright, and the last two name that peer as the DESTINATION of a data-plane path, which §4's matrix refuses. `relay-reservation` and `autonat-probe` are the permitted origins — each is an exchange *with* the infrastructure peer for the purpose it was authorized for. (ADR-0036 Amendment 2026-09-03.)
 
 ## 12. Path-aware peer dialing
 

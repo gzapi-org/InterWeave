@@ -1410,16 +1410,19 @@ data-plane origin, against the infrastructure the stage exists to use.
 2. **resolve D1, D2 and D3.** `DcutrHolePunch` is admitted for a
    `ConnectivityInfrastructureOnly` peer, which
    `transport/libp2p/CONNECTIVITY.md` §4's matrix forbids unqualified
-   ("DCUtR as destination peer | no"); and `PreAuthAdmission` buckets a
-   relayed inbound by the source PeerId the circuit carries, which
-   `contracts/CONNECTIVITY.md` §10 forbids by name. Both are code
-   fixes. **D2 is not yet a code fix**: `RelayCircuit` is likewise
-   admitted, but §4's matrix says "Relay v2 control | eligible |
-   eligible" and §11 excludes only `direct-user-command` and
-   `kademlia-query`, so an accepted document arguably permits today's
-   behaviour. Amend or clarify the matrix first — it has no row for a
-   circuit whose DESTINATION is the infrastructure-only peer — and
-   change the code to match, in that order (CLAUDE.md §2). All three
+   ("DCUtR as destination peer | no"); `RelayCircuit` is admitted for
+   that same destination, which §4 now forbids by a row of its own; and
+   `PreAuthAdmission` buckets a relayed inbound by the source PeerId the
+   circuit carries, which `contracts/CONNECTIVITY.md` §10 forbids by
+   name. All three are code fixes. **D2 was a document conflict
+   first**: §4's matrix had no row for a circuit whose DESTINATION is
+   the infrastructure-only peer, and §11 excluded only
+   `direct-user-command` and `kademlia-query`, so an accepted document
+   arguably permitted the behaviour. ADR-0036's Amendment 2026-09-03
+   added the row and both sections inherited it (CLAUDE.md §2), so what
+   remains for D2 is the code change — and it separates the two relay
+   origins rather than moving both, because `RelayReservation` must stay
+   non-data-plane or every relay the stack needs is refused. All three
    land before DCUtR or relayed paths are built, not after;
 3. AutoNAT v2 client;
 4. AutoNAT v2 server role — including `AUTONAT.md` §7's dial-back
