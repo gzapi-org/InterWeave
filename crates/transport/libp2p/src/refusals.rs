@@ -117,3 +117,76 @@ impl DialRefusals {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    fn refusal(origin: Option<DialOrigin>) -> Refusal {
+        Refusal {
+            origin,
+            denial: Some(DialDenial::Unauthorized),
+            detail: "test",
+        }
+    }
+
+    /// THE PROPERTY THE RUNTIME DEPENDS ON.
+    ///
+    /// `SwarmRuntime` clones this handle and then moves the gate into
+    /// the behaviour, where nothing can reach it again. That is only
+    /// correct if a clone taken BEFORE a refusal still sees it — an
+    /// eagerly-copied snapshot would leave the runtime reading a record
+    /// frozen at start-up, which looks exactly like "no refusals".
+    #[test]
+    fn a_clone_taken_early_sees_refusals_recorded_later() {
+        let held = DialRefusals::default();
+        let taken_before = held.clone();
+        assert_eq!(taken_before.total(), 0);
+
+        held.record(refusal(Some(DialOrigin::KademliaQuery)));
+
+        assert_eq!(
+            taken_before.total(),
+            1,
+            "the clone is a view of one record, not a copy of an empty one"
+        );
+        assert_eq!(taken_before.recent().len(), 1);
+        assert_eq!(
+            taken_before.recent()[0].origin,
+            Some(DialOrigin::KademliaQuery)
+        );
+    }
+
+    #[test]
+    fn the_ring_drops_oldest_first_while_the_total_keeps_counting() {
+        let r = DialRefusals::default();
+        for _ in 0..RECENT_CAPACITY {
+            r.record(refusal(Some(DialOrigin::KademliaQuery)));
+        }
+        // One more, distinguishable from every entry before it.
+        r.record(refusal(None));
+
+        let recent = r.recent();
+        assert_eq!(recent.len(), RECENT_CAPACITY);
+        assert_eq!(
+            recent[RECENT_CAPACITY - 1].origin,
+            None,
+            "the newest is kept"
+        );
+        assert!(
+            recent
+                .iter()
+                .take(RECENT_CAPACITY - 1)
+                .all(|e| e.origin == Some(DialOrigin::KademliaQuery)),
+            "and the one dropped was the oldest"
+        );
+        assert_eq!(r.total(), (RECENT_CAPACITY + 1) as u64);
+        assert_eq!(
+            r.counts().values().sum::<u64>(),
+            (RECENT_CAPACITY + 1) as u64,
+            "the counts are unbounded in value and bounded in KEYS, so they lose nothing"
+        );
+    }
+}

@@ -817,6 +817,47 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_handle_taken_before_the_gate_moves_still_reads_it() {
+        // `SwarmRuntime` clones `outbound.refusals()` and then moves
+        // the gate into `SubstrateBehaviour`, inside a private
+        // `GatedSwarm`, inside the Swarm task — after which nothing can
+        // reach the gate again. The handle taken beforehand is the only
+        // path to the record, so it has to be a VIEW of it.
+        //
+        // Review finding on PR #71: the record existed and the runtime
+        // kept no handle, which left a denied behaviour dial exactly as
+        // invisible as before.
+        let m = manager(&[]);
+        let (gate, _in_flight, _a) = attributed_gate(&m);
+        let taken_before = gate.refusals();
+
+        // The gate is CONSUMED here, the way `SubstrateBehaviour::new`
+        // consumes it — it does not come back, and neither does any
+        // path to its record except the handle above.
+        fn swallow_the_gate(mut gate: OutboundAdmission) {
+            gate.attribution()
+                .announce(ConnectionId::new_unchecked(1), DialOrigin::KademliaQuery);
+            let _ = gate.handle_pending_outbound_connection(
+                ConnectionId::new_unchecked(1),
+                Some(TRUSTED.parse().expect("valid PeerId")),
+                &[],
+                Endpoint::Dialer,
+            );
+        }
+        swallow_the_gate(gate);
+
+        assert_eq!(
+            taken_before.total(),
+            1,
+            "the handle reads refusals made after it was taken"
+        );
+        assert_eq!(
+            taken_before.recent()[0].denial,
+            Some(DialDenial::Unauthorized)
+        );
+    }
+
+    #[test]
     fn the_refusal_ring_is_bounded() {
         // An attacker chooses how many refusals to provoke. The counts
         // are a product of two small enums and bounded by

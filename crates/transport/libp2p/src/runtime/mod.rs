@@ -52,6 +52,7 @@ use crate::attribution::{Attributing, DialAttribution, always};
 use crate::behaviour::SubstrateBehaviour;
 use crate::gated_swarm::{GatedSwarm, mesh_admits};
 use crate::outbound_gate::{InFlightTickets, OutboundAdmission};
+use crate::refusals::DialRefusals;
 
 mod broadcast;
 mod commands;
@@ -413,6 +414,17 @@ pub struct SwarmRuntime {
     events: mpsc::Receiver<SwarmEvent>,
     task: Option<tokio::task::JoinHandle<()>>,
     local_peer: TransportIdentity,
+    /// What the outbound gate refused, kept HERE because nowhere else
+    /// can reach it.
+    ///
+    /// The gate is moved into `SubstrateBehaviour`, which lives inside
+    /// a private `GatedSwarm` inside the Swarm task, so once the
+    /// runtime starts there is no path back to it. Cloning the handle
+    /// before the move is what makes the record readable at all — and
+    /// a record nobody can read leaves a denied behaviour dial exactly
+    /// as invisible as it was, which is the defect this whole
+    /// mechanism exists to close.
+    refusals: DialRefusals,
 }
 
 impl SwarmRuntime {
@@ -485,6 +497,11 @@ impl SwarmRuntime {
             attribution.clone(),
             started,
         );
+        // CLONED BEFORE THE MOVE. `outbound` is about to disappear into
+        // the behaviour, and the Swarm discards a denied behaviour
+        // dial, so this handle is the only way anything outside the
+        // Swarm task learns a dial was refused.
+        let refusals = outbound.refusals();
 
         // The Kademlia behaviour exists only when configured: a profile
         // with no enabled kademlia entry advertises nothing, answers
@@ -1270,6 +1287,7 @@ impl SwarmRuntime {
             events: event_rx,
             task: Some(task),
             local_peer,
+            refusals,
         })
     }
 
@@ -1277,6 +1295,19 @@ impl SwarmRuntime {
     #[must_use]
     pub const fn local_peer(&self) -> &TransportIdentity {
         &self.local_peer
+    }
+
+    /// Dials the outbound gate refused, and why.
+    ///
+    /// The ONLY observation of a denied behaviour-originated dial.
+    /// libp2p handles a behaviour-emitted dial as
+    /// `if let Ok(()) = self.dial(opts)` and discards the denial, so
+    /// there is no `Dialing` event, no `OutgoingConnectionError`, and
+    /// nothing on this runtime's event stream. A caller that wants to
+    /// know why Kademlia is not reaching anyone reads this.
+    #[must_use]
+    pub fn dial_refusals(&self) -> DialRefusals {
+        self.refusals.clone()
     }
 }
 
