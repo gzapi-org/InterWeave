@@ -834,6 +834,37 @@ mod tests {
         }
     }
 
+    /// THE INVARIANT THE D1/D2 FIX SHAPE RESTS ON, AND IT HAD NO TEST.
+    ///
+    /// `is_data_plane` is read in one arm only, so a trusted
+    /// destination is admitted whatever the origin. That is the whole
+    /// reason moving `RelayCircuit` and `DcutrHolePunch` into the
+    /// predicate costs the legitimate case nothing: a circuit or hole
+    /// punch toward a TRUSTED peer reached *through* infrastructure
+    /// names the trusted peer, so the origin's plane is never consulted
+    /// for it.
+    ///
+    /// Three documents and a doc comment explain why that cannot break
+    /// -- SPIKE-004's record, `SPIKES.md`, the Stage 11 plan and
+    /// `is_data_plane`'s own note. None of them was enforced by
+    /// anything. Adding an origin check to `admit`'s `DataPlaneTrusted`
+    /// arm fails HERE, which is what makes the explanation load-bearing
+    /// rather than merely written down.
+    #[test]
+    fn a_trusted_destination_is_admitted_under_every_origin() {
+        let p = policy();
+        // From the enum, not from a list: the claim is about EVERY
+        // origin, including ones added after this was written.
+        for origin in DialOrigin::ALL {
+            assert_eq!(
+                p.admit(&request(origin, A1), ConnectionClass::DataPlaneTrusted, 0),
+                Ok(()),
+                "{origin:?} was refused for a TRUSTED destination, so the origin's plane \
+                 is being consulted where ADR-0036 says only the class decides"
+            );
+        }
+    }
+
     #[test]
     fn an_infrastructure_peer_is_dialable_for_reachability_and_not_for_data() {
         // ADR-0036's whole point: the same peer, the same address, the

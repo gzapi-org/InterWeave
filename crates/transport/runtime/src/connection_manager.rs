@@ -2703,6 +2703,36 @@ mod tests {
         );
     }
 
+    /// The same invariant at the OTHER consumer, which also had no test.
+    ///
+    /// `authorizes_for` reads `is_data_plane` only for
+    /// `ConnectivityInfrastructureOnly`; `DataPlaneTrusted` is `true`
+    /// unconditionally. So revalidating an established connection to a
+    /// trusted peer never consults the origin -- which is why moving
+    /// `RelayCircuit` and `DcutrHolePunch` into the predicate cannot
+    /// start tearing down a hole punch or circuit toward a trusted peer
+    /// reached through infrastructure.
+    ///
+    /// The claim is stated in `DialOrigin::is_data_plane`'s note "at
+    /// either site". This is the second site, and it is asserted here
+    /// rather than inferred from the first: adding an origin check to
+    /// the `DataPlaneTrusted` arm fails this test and not that one.
+    #[test]
+    fn a_trusted_peer_keeps_its_connection_under_every_origin() {
+        let mut m = untrusting(8);
+        let _ = m.set_trust(trusting(&[P1], &[]), &[]);
+        let class = m.classify(&peer(P1));
+        assert_eq!(class, ConnectionClass::DataPlaneTrusted);
+
+        for origin in DialOrigin::ALL {
+            assert!(
+                m.authorizes_for(class, origin),
+                "{origin:?} lost a TRUSTED peer's connection, so the origin's plane is \
+                 being consulted where only the class should decide"
+            );
+        }
+    }
+
     #[test]
     fn an_infrastructure_peer_keeps_a_reachability_connection_and_loses_a_data_plane_one() {
         // ADR-0036's separation is an origin/class PAIR, and
