@@ -1453,7 +1453,30 @@ data-plane origin, against the infrastructure the stage exists to use.
    which is the exact failure ADR-0036 exists to prevent. A rename
    changes what the code SAYS, never which origins are in the set;
    whether to do it is a decision for this step, not a cleanup to
-   defer;
+   defer.
+
+   **And a third item, which is a divergence rather than a choice:
+   nothing stops the reconnect scheduler re-dialling an
+   infrastructure-only peer under a refused origin.**
+   `CONNECTIVITY.md` §11 now says the reconnection loops must not be
+   what re-establishes infrastructure, and the shipped scheduler is
+   exactly that. `ConnectionManager::learn_address` refuses only
+   `Unauthorized`, so an infrastructure-only peer's addresses enter the
+   book; `record_failure` schedules a peer retry for any ticket
+   carrying a non-empty address, with no class or origin filter; and
+   the retry tick in `runtime/mod.rs` re-dials every due peer under
+   `DialOrigin::ConnectionManager`, which `admit` refuses
+   `NotAuthorizedForDataPlane` for that class. So the first
+   `relay-reservation` dial that fails on a known address starts a
+   retry loop that can never be admitted — refused each time, reported
+   each time, rescheduled each time. It is unreachable today for the
+   same reason D1-D3 are (no relay feature compiled, nothing
+   constructs the origins), and it becomes live with the relay client.
+   The fix is one of two shapes and this step picks: exclude
+   non-`DataPlaneTrusted` peers from the retry table, or let §8's
+   reservation state machine own their retries and keep the scheduler
+   for the data plane. SPIKE-004 recorded no divergence for this — it
+   was found while propagating the amendment, not in the harness;
 3. AutoNAT v2 client;
 4. AutoNAT v2 server role — including `AUTONAT.md` §7's dial-back
    restriction, which the crate does not implement, at the PENDING hook
