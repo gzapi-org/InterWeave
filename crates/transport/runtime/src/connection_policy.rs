@@ -138,8 +138,8 @@ impl DialOrigin {
     /// either origin and no relay or DCUtR feature is compiled — so
     /// both are latent until Stage 11 enables those paths, and both are
     /// on its list to fix before it does. **Both are now code fixes.**
-    /// D2 was a document conflict first — `transport/libp2p/`
-    /// `CONNECTIVITY.md` §4's matrix read "Relay v2 control | eligible
+    /// D2 was a document conflict first — the libp2p transport's
+    /// `CONNECTIVITY.md` §4 matrix read "Relay v2 control | eligible
     /// | eligible" with no row for a circuit whose DESTINATION is the
     /// infrastructure-only peer, and §11 excluded only
     /// `direct-user-command` and `kademlia-query`, so an accepted
