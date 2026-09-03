@@ -145,6 +145,15 @@ spikes/**/Cargo.lock
 # patch-release-visible detail of `libp2p-kad`, and Stage 10 is built on
 # them.
 !spikes/spike-003/harness/Cargo.lock
+# SPIKE-004 for the same reason again, and it is the most
+# version-sensitive of the three: its central findings ARE the library's
+# behaviour — that libp2p-autonat's v2 server prices a mismatched
+# dial-back candidate instead of refusing it, that the dial-back is an
+# ordinary `ToSwarm::Dial` and so crosses the root gate, that a relay
+# reservation dial arrives at the pending hook carrying an address where
+# a Kademlia dial does not. Stage 11's design rests on all three, and a
+# patch release may move any of them.
+!spikes/spike-004/harness/Cargo.lock
 
 # cargo-mutants writes its report tree into the working directory when
 # `--output` is not given. It is build output, and a `git add -A` swept

@@ -144,7 +144,7 @@ Spikes are **just-in-time implementation gates**, not a large front-loaded phase
 |---|---|---|
 | SPIKE-002 | Stage 6 direct v2 | **CLOSED 2026-08-24, PASS** — rust-libp2p request/response scheduling, concurrent same-key retries, negotiation/failure behavior |
 | SPIKE-003 | Stage 10 Kademlia | **CLOSED 2026-08-30, PASS for the stage; v1 release gate still open** — driver behavior, autonomous dials, client/server mode, private namespace, routing/query behavior |
-| SPIKE-004 | Stage 11 mandatory connectivity | AutoNAT v2, Relay v2, DCUtR, infrastructure class, dial admission, deployment/NAT matrix |
+| SPIKE-004 | Stage 11 mandatory connectivity | **PHASE A CLOSED 2026-09-01, PASS for implementation; the NAT matrix is NOT run and phase B is required before stage closure** — AutoNAT v2, Relay v2, DCUtR, infrastructure class, dial admission, deployment/NAT matrix |
 | SPIKE-006 | identity recovery implementation in Stage 3 | **CLOSED 2026-08-19, PASS** — exact 32-byte Ed25519 secret import/export and same-PeerId restore |
 | SPIKE-001 | Stage 16 Claude bridge | current Claude Code Channel/MCP packaging and runtime contract |
 | SPIKE-005 | admin hardening when enabled | stronger same-user local admin boundary |
@@ -1099,10 +1099,12 @@ the work:
 > inferring it. Turning `kad` on before the gate can admit a
 > behaviour-originated dial *through* `PolicySnapshot::admit` under
 > `DialOrigin::KademliaQuery` produces a subsystem whose every query dies
-> at the first hop it lacks a connection for, silently, because a refused
-> behaviour dial surfaces as an ordinary dial failure. Extend the gate
-> first; the spike's `PolicyAdmit` mode is a measured proposal, not
-> production code.
+> at the first hop it lacks a connection for, silently. (SPIKE-003 wrote
+> "surfaces as an ordinary dial failure"; SPIKE-004 measured that it
+> surfaces as nothing — the Swarm discards the denial of a
+> behaviour-originated dial, so Stage 11 owes a record at the gate.)
+> Extend the gate first; the spike's `PolicyAdmit` mode is a measured
+> proposal, not production code.
 
 Two more that reading the design would not predict. A **routing insertion
 starts one query nobody asked for**, and it dials — so the provider's
@@ -1319,29 +1321,134 @@ the clauses this stage met and the one that moved.
 
 ### Prerequisite
 
-Run and close **SPIKE-004**. It has **not run**, and this stage being
-the open one does not change that.
+Run and close **SPIKE-004**. **Phase A closed 2026-09-01: PASS FOR
+IMPLEMENTATION.** The work below is authorized. What is NOT authorized
+is calling the stage complete — phase A ran on one machine over
+loopback, so the exit gate's NAT/relay/hole-punch matrix is unmet and
+**phase B is required before stage closure**: real and carrier NAT, two
+independently operated relay/probe services, interface change,
+hole-punch success rates, measured resource cost.
 
-**So the open stage authorizes the spike and nothing else.** CLAUDE.md
-§3 makes the open stage the answer to "which packages may I create", and
-read without this paragraph it would say AutoNAT, Relay and DCUtR — the
-exact retrofit the hard sequencing rule forbids, one layer up from where
-Stage 10 met it. No package here may be created, and no production code
-anywhere may assume server-mode reachability evidence exists, until
-SPIKE-004 closes. Stage 10's `Met.` block says the same thing from the
-other side: its §14 rule was never exercised, because AutoNAT and Relay
-are absent from the libp2p feature list.
+The verdict and its binding findings are in
+[`SPIKES.md`](./SPIKES.md); the record is
+[`spikes/spike-004/`](../../spikes/spike-004/README.md), numbered F1
+through F13 there. These change the order or the content of the work
+below and are repeated where they bite:
+
+- **Attribution comes before the features.** Enabling AutoNAT, Relay or
+  DCUtR without it means every reservation and probe is refused as
+  `KademliaQuery` against the infrastructure the stack needs. The spike
+  ran the shipped gate in front of a real relay client and measured
+  exactly that, with the relay's trust class as the only variable. This
+  is the same shape as SPIKE-003's "do not begin by enabling the
+  feature", and it is why the ordered list below now begins with
+  attribution rather than with AutoNAT.
+- **A gate refusal of a behaviour dial is invisible.** The Swarm
+  discards the `Err` from a denied pending hook, so there is no
+  `Dialing` and no `OutgoingConnectionError`; only the originating
+  behaviour is told, and an observer sees its reaction instead — in the
+  spike, a relay listener closing *successfully*. Whatever this stage
+  builds at the gate must record its own refusals, because nothing
+  downstream will.
+- **`AUTONAT.md` §7 is not implemented by the crate**, and the check
+  must run at the PENDING hook: the established hook runs after the
+  socket is open, which is after the target has been contacted.
+- **D1, D2 and D3 sit in already-shipped code**, not in this stage's
+  work, and none is reachable in a shipped build today — nothing
+  constructs `DcutrHolePunch` or `RelayCircuit`, and no relay feature
+  is compiled — so all three are latent until this stage enables the
+  paths they govern. `DcutrHolePunch` and `RelayCircuit` are both
+  admitted for a `ConnectivityInfrastructureOnly` peer; the fix is not
+  "add both to `is_data_plane`", because `RelayReservation` must stay
+  non-data-plane and D2 differs from it precisely in naming the
+  DESTINATION rather than the relay. And `PreAuthAdmission` buckets a
+  relayed inbound by the source PeerId the circuit carries, which is
+  the "unbounded pseudo-source bucket" `contracts/CONNECTIVITY.md` §10
+  forbids by name. **D2 needs an architecture clarification before its
+  code change** — see step 2. All three land before DCUtR or relayed
+  paths are built rather than after.
+- **ADR-0036's inbound relayed clause has no implementation site.** The
+  shipped gate is outbound-only, so a relayed inbound is never
+  evaluated against the authenticated end PeerId at all. The spike
+  measured that the end PeerId and the relay's are both available at
+  the destination's established hook, which is where the decision
+  belongs; Phase 5 owes the decision itself.
+
+**And one thing phase A does NOT unlock: the protocol-isolation
+correction.** The exposure invariant below is about what an
+infrastructure-only connection is OFFERED — four data-plane protocols
+installed uniformly — and the phase-A harness carries none of them. Its
+`SpikeBehaviour` is Identify plus the three connectivity behaviours, so
+it can show which control protocols such a peer advertises and nothing
+about whether ours are withheld from it. That correction needs a node
+carrying the data-plane behaviours beside a real infrastructure-only
+connection; treat it as evidence still owed, not as a step the verdict
+authorized.
+
+Server-mode reachability evidence for ADR-0034's v1 release gate — the
+item SPIKE-003 could not supply — is still outstanding and belongs to
+phase B. Stage 10's `Met.` block says the same from the other side: its
+§14 rule was never exercised, because AutoNAT and Relay were absent from
+the libp2p feature list.
 
 ### Implement in this order
 
-1. AutoNAT v2 client;
-2. AutoNAT v2 server role;
-3. Circuit Relay v2 client reservations;
-4. Relay server role;
-5. relayed inbound/outbound peer paths;
-6. DCUtR;
-7. direct-versus-relayed path preference/stability;
-8. network-change invalidation/recovery.
+**Steps 1 and 2 are SPIKE-004's, and they come before any behaviour is
+enabled.** The list below used to begin at what is now step 3, and
+following it would have enabled a dialling behaviour while every
+unticketed dial was still classified `KademliaQuery` — refused, as a
+data-plane origin, against the infrastructure the stage exists to use.
+
+1. **dial attribution**: every behaviour-originated dial reaches the
+   root gate under its own `DialOrigin`, and the map that carries it
+   drops a note for a dial the Swarm refuses before the pending hook;
+   `GatedSwarm::dial` sets `RelayCircuit` from the address, since the
+   transport rather than the behaviour dials a circuit. **The gate
+   records its own refusals here**: the Swarm discards the denial of a
+   behaviour dial, so a refusal that is not written down at the hook is
+   written down nowhere;
+2. **resolve D1, D2 and D3.** `DcutrHolePunch` is admitted for a
+   `ConnectivityInfrastructureOnly` peer, which
+   `transport/libp2p/CONNECTIVITY.md` §4's matrix forbids unqualified
+   ("DCUtR as destination peer | no"); and `PreAuthAdmission` buckets a
+   relayed inbound by the source PeerId the circuit carries, which
+   `contracts/CONNECTIVITY.md` §10 forbids by name. Both are code
+   fixes. **D2 is not yet a code fix**: `RelayCircuit` is likewise
+   admitted, but §4's matrix says "Relay v2 control | eligible |
+   eligible" and §11 excludes only `direct-user-command` and
+   `kademlia-query`, so an accepted document arguably permits today's
+   behaviour. Amend or clarify the matrix first — it has no row for a
+   circuit whose DESTINATION is the infrastructure-only peer — and
+   change the code to match, in that order (CLAUDE.md §2). All three
+   land before DCUtR or relayed paths are built, not after;
+3. AutoNAT v2 client;
+4. AutoNAT v2 server role — including `AUTONAT.md` §7's dial-back
+   restriction, which the crate does not implement, at the PENDING hook
+   because the established one runs after the target is contacted;
+5. Circuit Relay v2 client reservations;
+6. Relay server role — **`relay::Config::default()` is not `RELAY.md`
+   §8**, in both directions (128 KiB and 120s per circuit against 64 MiB
+   and 1h; reservation ceilings looser than §8's), `max_pending_control`
+   has no field in the struct, and every per-peer ceiling admits one
+   more than it says because the crate refuses on `>` rather than `>=`;
+7. relayed inbound/outbound peer paths;
+8. DCUtR — **the crate has no knobs**, so §13's four-concurrent,
+   one-per-peer and five-minute cooldown must be built here. **They do
+   not belong to the dial gate alone.** The gate sees independent dials
+   and is handed no attempt outcome: the spike measured that one punch
+   produces a dial at BOTH ends, so no single gate sees the attempt —
+   only its own half — and the outcome reaches the DCUtR behaviour
+   rather than the gate. So the ATTEMPT
+   lifecycle is the DCUtR adapter's to track — open, candidates,
+   outcome — and what reaches the gate is a token for that attempt,
+   which the gate admits or refuses as a unit. (Candidate multiplicity
+   is a further reason to expect the same, and is NOT measured: on
+   loopback each endpoint dialled once.);
+9. direct-versus-relayed path preference/stability — including
+   `contracts/CONNECTIVITY.md` §5's "no second `PeerConnected`", which the Swarm does NOT give:
+   it reports a second `ConnectionEstablished` for the same peer when
+   the punch succeeds, and the relayed connection survives beside it;
+10. network-change invalidation/recovery.
 
 ### Mandatory invariants
 

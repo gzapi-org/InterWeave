@@ -668,3 +668,13 @@ SPIKE-004 must validate the actual rust-libp2p dependency selected for productio
 - resource/bandwidth costs under target defaults.
 
 Failure blocks standard-v1 release or triggers a new ADR. It no longer authorizes removing Phase 9 from the standard product.
+
+### Phase A (2026-09-01): what this gate has and has not received
+
+SPIKE-004 ran in two phases and only the first is closed. Phase A is loopback on one machine; the verdict and its findings are in [`SPIKES.md`](../../roadmap/SPIKES.md) and the record is [`spikes/spike-004/`](../../../spikes/spike-004/README.md). Against the nine items above (two of them split — the second because reservation obtain and address generation are answered while refresh and expiry are not, and the third because the relayed transport is answered while the data-plane protocols over it are not):
+
+- **answered by phase A**: AutoNAT v2 client/server event and API behaviour with per-scenario server selection; Circuit Relay v2 reservation lifecycle for obtain, multi-relay hold and withdrawal-on-loss, with address generation; the relay client transport over Noise/Yamux to a completed circuit; DCUtR success events and connection coexistence; root dial-gate visibility for every behaviour-originated AutoNAT, relay and DCUtR dial.
+- **not answered, and not by loopback**: reservation refresh and expiry (the crate's default reservation lasts an hour); DCUtR failure and its cooldown (a loopback punch succeeds); direct-versus-relay racing and cancellation semantics (never exercised); network-change behaviour; resource and bandwidth cost under target defaults.
+- **not answered, and blocked on this stage's own work rather than on the environment**: `direct`/GossipSub over a relayed connection, and protocol-admission enforcement for infrastructure-only peers including GossipSub exclusion. The phase-A harness carries Identify plus the three connectivity behaviours and no data-plane behaviour at all, so it can say which control protocols such a peer advertises and nothing about which are withheld. That evidence needs the composed `SubstrateBehaviour`, which is §4's exclusion work itself.
+
+**This gate is therefore not met**, and phase B — the real-NAT matrix — is required before it can be.

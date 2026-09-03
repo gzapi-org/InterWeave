@@ -1338,7 +1338,11 @@ impl ConnectionManager {
     /// predicate therefore closed connections admission had correctly
     /// permitted: a relay reservation, a relay circuit, an AutoNAT
     /// probe or a DCUtR hole punch to an infrastructure peer completed
-    /// its handshake and was immediately dropped. The inbound path has
+    /// its handshake and was immediately dropped. (Two of those four
+    /// should not be permitted at all — see `DialOrigin::is_data_plane`
+    /// for D1 and D2. This function's job is to AGREE with admission,
+    /// so fixing them there fixes it here; the bug it was written for
+    /// is the disagreement, not the classification.) The inbound path has
     /// no origin to consult and no such pair to honour, which is why it
     /// keeps the stricter predicate and why applying that one to
     /// outbound was wrong rather than merely conservative.
@@ -2710,6 +2714,13 @@ mod tests {
         // punch to an infrastructure peer completed its handshake and
         // was closed immediately -- admission permitted it and
         // establishment threw it away.
+        //
+        // WHAT THIS ASSERTS IS AGREEMENT, not correctness. `kept ==
+        // !origin.is_data_plane()` is true by construction of the
+        // function under test, which is deliberate: the defect was the
+        // two predicates disagreeing. Whether the classification itself
+        // is right is `is_data_plane`'s own pinning test, and SPIKE-004
+        // found two origins on the wrong side of it (D1, D2).
         let mut m = untrusting(8);
         let _ = m.set_trust(trusting(&[], &[P1]), &[]);
         let class = m.classify(&peer(P1));
