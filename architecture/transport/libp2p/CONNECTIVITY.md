@@ -372,7 +372,13 @@ The root `DialAdmissionGate` evaluates:
 
 A denied behaviour-originated dial must not reset normal peer backoff. Diagnostics preserve origin so Phase-9 behaviour cannot become invisible dial load.
 
-Infrastructure-only PeerIds are dialable only for permitted connectivity origins. `direct-user-command`, `kademlia-query`, `relay-circuit` and `dcutr-hole-punch` never use the infrastructure-only authorization set: the first two carry application traffic outright, and the last two name that peer as the DESTINATION of a data-plane path, which §4's matrix refuses. `relay-reservation` and `autonat-probe` are the permitted origins — each is an exchange *with* the infrastructure peer for the purpose it was authorized for. (ADR-0036 Amendment 2026-09-03.)
+Infrastructure-only PeerIds are dialable only for permitted connectivity origins, and the seven origins above divide exhaustively.
+
+**Permitted: `relay-reservation` and `autonat-probe`.** Each is an exchange *with* the infrastructure peer for the purpose it was authorized for.
+
+**Refused: the other five.** `direct-user-command` and `kademlia-query` carry application traffic and routing outright. `relay-circuit` and `dcutr-hole-punch` name that peer as the DESTINATION of a data-plane path, which §4's matrix refuses. And `connection-reconcile` is refused for the same reason as the first two: the reconcile loop re-dials peers this node wants a data-plane connection to, so it must not be the mechanism that re-establishes infrastructure. **An infrastructure connection is re-established by the purpose that authorized it** — a reservation refresh under `relay-reservation` (§8), or the next probe cycle under `autonat-probe` (§5) — never by a reconcile redial. A stack that leans on the reconcile loop to restore its relays will silently stop restoring them, because a refused behaviour dial produces no `Dialing` and no `OutgoingConnectionError` for anything to notice.
+
+(ADR-0036 Amendment 2026-09-03.)
 
 ## 12. Path-aware peer dialing
 
