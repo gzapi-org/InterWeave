@@ -240,9 +240,10 @@ fails here rather than passing silently.
 > **CORRECTED 2026-09-03 — the two fixes are not in tension, and this
 > paragraph read them as if they were.** The predicate has two
 > production consumers and both key on the class the same way:
-> `ConnectionPolicy::admit` (`connection_policy.rs:512-523`) and
-> `ConnectionManager::authorizes_for` (`connection_manager.rs:1350-1359`)
-> each consult `is_data_plane` in ONE arm,
+> `ConnectionPolicy::admit` (`connection_policy.rs`, the `match class`
+> in `admit`) and
+> `ConnectionManager::authorizes_for` (the `match class` in that
+> function) each consult `is_data_plane` in ONE arm,
 > `ConnectivityInfrastructureOnly`, and let `DataPlaneTrusted` through
 > with no origin check at all. The class they switch on is the class of
 > the peer the dial NAMES, and a hole punch toward a trusted peer
@@ -297,7 +298,7 @@ permit it:
 
 The spike's reading was that a circuit *toward* a destination is not
 "relay control *with*" that peer, and that the matrix already drew
-exactly this distinction one row down — *"DCUtR as destination peer |
+exactly this distinction for DCUtR — *"DCUtR as destination peer |
 no"* — which is why D1 had no such ambiguity and D2 did. The matrix
 simply had no row for a circuit whose DESTINATION is the
 infrastructure-only peer.

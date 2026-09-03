@@ -1,4 +1,4 @@
-# ADR-0036 amendments
+# ADR-0036 — amendment history
 
 ### Amendment 2026-09-03 — Relay circuit toward an infrastructure-only destination
 
