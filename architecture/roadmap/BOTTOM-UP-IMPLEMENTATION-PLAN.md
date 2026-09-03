@@ -1364,9 +1364,10 @@ below and are repeated where they bite:
   DESTINATION rather than the relay. And `PreAuthAdmission` buckets a
   relayed inbound by the source PeerId the circuit carries, which is
   the "unbounded pseudo-source bucket" `contracts/CONNECTIVITY.md` §10
-  forbids by name. **D2 needs an architecture clarification before its
-  code change** — see step 2. All three land before DCUtR or relayed
-  paths are built rather than after.
+  forbids by name. **D2's architecture clarification landed on
+  2026-09-03** — ADR-0036's amendment gave the matrix the row it lacked
+  — so all three are now code fixes; see step 2. All three land before
+  DCUtR or relayed paths are built rather than after.
 - **ADR-0036's inbound relayed clause has no implementation site.** The
   shipped gate is outbound-only, so a relayed inbound is never
   evaluated against the authenticated end PeerId at all. The spike
