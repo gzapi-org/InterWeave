@@ -154,12 +154,14 @@ impl DialOrigin {
     ///
     /// Moving the two costs nothing for the legitimate case, which is
     /// the objection SPIKE-004 raised against this shape and later
-    /// corrected. `admit` reads this function in ONE arm —
+    /// corrected. Both consumers — `admit` here and
+    /// `ConnectionManager::authorizes_for`, which exists to agree with
+    /// it — read this function in ONE arm,
     /// `ConnectivityInfrastructureOnly`; `DataPlaneTrusted` falls
-    /// through with no origin check — and the class is that of the peer
-    /// the dial NAMES. A circuit or hole punch toward a trusted peer
-    /// *through* infrastructure names the trusted peer, so it is never
-    /// tested against the origin's plane.
+    /// through with no origin check. The class is that of the peer the
+    /// dial NAMES, so a circuit or hole punch toward a trusted peer
+    /// *through* infrastructure names the trusted peer and is never
+    /// tested against the origin's plane, at either site.
     #[must_use]
     pub const fn is_data_plane(self) -> bool {
         matches!(
