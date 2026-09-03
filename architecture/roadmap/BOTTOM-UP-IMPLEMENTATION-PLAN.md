@@ -1427,8 +1427,9 @@ data-plane origin, against the infrastructure the stage exists to use.
    land before DCUtR or relayed paths are built, not after.
 
    **Two design items this step must settle, found while propagating
-   the amendment.** First, `an_infrastructure_peer_cannot_reach_the_`
-   `data_plane_by_any_origin` in `tests/transport-contract` derives
+   the amendment.** First,
+   `an_infrastructure_peer_cannot_reach_the_data_plane_by_any_origin`
+   (`tests/transport-contract/tests/stage2_exit_gate.rs`) derives
    both of its loops from the predicate under test
    (`ALL.filter(|o| o.is_data_plane())` and its negation), so it passes
    for ANY definition of `is_data_plane` — moving an origin only moves
@@ -1444,8 +1445,15 @@ data-plane origin, against the infrastructure the stage exists to use.
    does this origin name the peer as an application DESTINATION.
    SPIKE-004 misread it in precisely that gap, twice, and
    `KademliaQuery` sits in the set today although routing is not
-   application data. Renaming it to say what it decides is a decision
-   for this step, not a cleanup to defer;
+   application data. **That last observation is about the NAME and must
+   not move the origin**: `KademliaQuery` stays refused for an
+   infrastructure-only peer whatever the predicate ends up called —
+   ADR-0036's matrix row, `CONNECTIVITY.md` §4 and §11 and the digest
+   all say so, and letting it out would widen the infrastructure set,
+   which is the exact failure ADR-0036 exists to prevent. A rename
+   changes what the code SAYS, never which origins are in the set;
+   whether to do it is a decision for this step, not a cleanup to
+   defer;
 3. AutoNAT v2 client;
 4. AutoNAT v2 server role — including `AUTONAT.md` §7's dial-back
    restriction, which the crate does not implement, at the PENDING hook
