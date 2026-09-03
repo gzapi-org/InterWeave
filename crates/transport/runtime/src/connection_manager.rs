@@ -1331,8 +1331,13 @@ impl ConnectionManager {
     /// infrastructure-only peer is dialable for reachability and
     /// refused for the data plane, on the same address in the same
     /// moment. `ConnectionPolicy::admit` has always decided it that
-    /// way -- `origin.is_data_plane()` is the discriminator, and
-    /// `tests/transport-contract` pins every origin/class pair.
+    /// way -- `origin.is_data_plane()` is the discriminator. What pins
+    /// it is split across three places, and none of them alone covers
+    /// the grid: `tests/transport-contract`'s exit gate asserts every
+    /// origin against `ConnectivityInfrastructureOnly`, while
+    /// `connection_policy`'s own tests cover the other two classes --
+    /// `an_unauthorized_peer_is_refused_whatever_the_origin` and
+    /// `a_trusted_destination_is_admitted_under_every_origin`.
     ///
     /// Revalidating an established connection with the data-plane-only
     /// predicate therefore closed connections admission had correctly
@@ -2738,7 +2743,12 @@ mod tests {
         // ADR-0036's separation is an origin/class PAIR, and
         // `ConnectionPolicy::admit` has always decided it that way --
         // `tests/transport-contract/tests/stage2_exit_gate.rs` pins
-        // every combination. Revalidating an established connection
+        // every ORIGIN against the infrastructure-only class, and
+        // `connection_policy`'s own tests pin the other two classes.
+        // (That contract test derived its expectation from
+        // `is_data_plane` until 2026-09-03, so "pins" overstated it;
+        // it asserts a hardcoded table now.) Revalidating an
+        // established connection
         // with the data-plane-only predicate ignored the pair, so a
         // relay reservation, relay circuit, AutoNAT probe or DCUtR hole
         // punch to an infrastructure peer completed its handshake and
