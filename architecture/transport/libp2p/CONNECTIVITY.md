@@ -665,7 +665,8 @@ At minimum:
 16. Model-B direct EndpointId routing is identical on direct and relayed connections;
 17. GossipSub broadcast works over admitted relayed data-plane connection without adding relay infrastructure peer to the mesh;
 18. application operation timeout/failure semantics remain transport-v2 compliant during path failure;
-19. runtime infrastructure-only/data-plane class transition reconciles GossipSub/Kademlia/application state atomically or closes/reopens the connection before privilege changes.
+19. runtime infrastructure-only/data-plane class transition reconciles GossipSub/Kademlia/application state atomically or closes/reopens the connection before privilege changes;
+20. a Relay v2 circuit whose far end IS an infrastructure-only peer is refused, and a DCUtR hole punch toward such a peer is refused, while a reservation with that same peer and a circuit *through* it toward a trusted destination are both admitted — the pair is the assertion, since either half alone passes for a gate that refuses everything or one that refuses nothing (ADR-0036 Amendment 2026-09-03; §4's matrix, §11's origin split).
 
 ## 26. SPIKE-004 release gate
 

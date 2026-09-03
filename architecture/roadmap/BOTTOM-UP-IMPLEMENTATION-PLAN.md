@@ -1440,20 +1440,16 @@ data-plane origin, against the infrastructure the stage exists to use.
    non-data-plane or every relay the stack needs is refused. All three
    land before DCUtR or relayed paths are built, not after.
 
-   **Two design items this step must settle, found while propagating
-   the amendment.** First,
+   **One design item this step must settle, and one already handled.**
    `an_infrastructure_peer_cannot_reach_the_data_plane_by_any_origin`
-   (`tests/transport-contract/tests/stage2_exit_gate.rs`) derives
-   both of its loops from the predicate under test
-   (`ALL.filter(|o| o.is_data_plane())` and its negation), so it passes
-   for ANY definition of `is_data_plane` — moving an origin only moves
-   it between the loops. It cannot catch a misclassification, while its
-   name claims it can; the real pin is `connection_policy.rs`'s
-   `every_origin_is_classified_and_the_classification_is_pinned`, which
-   hardcodes the expected side. Give the contract test an explicit
-   expected table, or state in its name and body that it asserts
-   agreement rather than correctness — `connection_manager.rs`'s
-   equivalent already says exactly that about itself. Second, **the
+   (`tests/transport-contract/tests/stage2_exit_gate.rs`) used to derive
+   both of its loops from the predicate under test, so it passed for ANY
+   definition of `is_data_plane` and could not catch the
+   misclassification its name claims. **Fixed 2026-09-03**: it now
+   asserts an explicit origin/outcome table, with a length check against
+   `DialOrigin::ALL`. Two rows are pinned wrong on purpose — the D1 and
+   D2 admissions — so **this table is one of the places step 2 must
+   change** when it moves the two origins. The remaining item is **the
    predicate's NAME is the defect's root**: `is_data_plane` describes
    traffic, while the rule it decides is ADR-0036's WITH/FOR question —
    does this origin name the peer as an application DESTINATION.
@@ -1525,6 +1521,14 @@ data-plane origin, against the infrastructure the stage exists to use.
 - statically configured infrastructure is preferred; Identify-learned relay/probe promotion remains explicit opt-in;
 - relayed pre-Noise accounting is charged to authenticated relay connection/PeerId plus global limits when original IP is unavailable;
 - relayed destination trust is evaluated against the authenticated end PeerId, not the relay;
+- a Relay v2 circuit or a DCUtR hole punch whose far end IS an
+  infrastructure-only peer is refused, while a reservation with that
+  peer and a circuit *through* it toward a trusted destination are
+  admitted. A relay may carry a circuit without becoming a party a
+  circuit may terminate at; who an exchange is WITH is a different
+  question from who it is FOR (ADR-0036 Amendment 2026-09-03). **Not met
+  today** — `DialOrigin::is_data_plane` omits both origins, which is D2
+  and D1, and step 2 is where it is met;
 - DCUtR upgrade emits path change, not false logical reconnect;
 - relay path remains fallback until direct stability rules permit preference switch.
 
