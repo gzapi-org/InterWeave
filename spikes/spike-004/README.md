@@ -203,9 +203,13 @@ count is not itself evidence: the harness announced its own dial that
 way. What R5.11 rules out is the classifier having relabelled a real
 behaviour-originated circuit dial as a reservation, which origin counts
 alone cannot show.)
-The conclusion for Stage 11: **`GatedSwarm::dial` sets `RelayCircuit`
-from the address it was handed**, because the caller dialling through a
-relay is the party that knows. The classifier still earns its place for
+The conclusion for Stage 11: **`RelayCircuit` comes from the CALLER**,
+because the caller dialling through a relay is the party that knows.
+*(Correction, 2026-09-04: as written this named the wrong function.
+In shipped code `attempt_dial` carries the origin the caller supplied
+into admission, and `GatedSwarm::dial` ENFORCES the pairing against the
+address — refusing a `/p2p-circuit` address not admitted as
+`RelayCircuit`, and the reverse. It validates; it does not set.)* The classifier still earns its place for
 the reservation-vs-circuit split if a future crate version dials
 circuits from the behaviour; it is not what produces the variant today.
 

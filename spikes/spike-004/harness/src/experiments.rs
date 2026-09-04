@@ -888,8 +888,12 @@ pub async fn r5_circuit_is_not_a_reservation(report: &mut Report) {
     //
     // So `RelayCircuit` is not a behaviour-originated origin at all —
     // it is a COMMAND-PATH one. The caller dialling a peer through a
-    // relay knows it is doing so, and production's `GatedSwarm::dial`
-    // is where that origin gets set, from the address it was handed.
+    // relay knows it is doing so, and in production `attempt_dial`
+    // carries that origin into admission while `GatedSwarm::dial`
+    // ENFORCES the pairing against the address it was handed —
+    // refusing a `/p2p-circuit` address not admitted as `RelayCircuit`,
+    // and a `RelayCircuit` ticket on an address that has no circuit
+    // component. It validates the pairing; it does not choose it.
     // The classifier still matters for the reservation/circuit split
     // IF a future crate version dials circuits from the behaviour; it
     // is not what produces `RelayCircuit` today.
