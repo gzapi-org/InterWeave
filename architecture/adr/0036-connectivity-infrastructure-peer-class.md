@@ -45,7 +45,8 @@ If a PeerId belongs to both sets, `DataPlaneTrusted` wins and the peer may also 
 | Noise/Yamux transport | yes | yes |
 | Identify / bounded ping | yes | yes |
 | AutoNAT v2 probe control | yes when eligible | yes when eligible |
-| Circuit Relay v2 reservation/circuit control | yes when eligible | yes when eligible |
+| Circuit Relay v2 reservation, and circuit control *with that peer* | yes when eligible | yes when eligible |
+| Relay v2 circuit with that peer as application destination | yes | **no** |
 | DCUtR with that peer as application destination | yes | **no** |
 | GossipSub | yes | **no** |
 | direct `/direct/2.0.0` | yes | **no** |
@@ -54,6 +55,8 @@ If a PeerId belongs to both sets, `DataPlaneTrusted` wins and the peer may also 
 | Channel/application trust | yes subject to higher policy | **no** |
 
 Infrastructure-only connections are therefore **control-plane connections**, not data-plane membership.
+
+Relay is the one protocol with two rows above, and that pair is the distinction the matrix turns on: **who the exchange is WITH is a different question from who it is FOR.** Reserving a slot on a relay, or renewing that reservation, is an exchange *with* the infrastructure peer for the purpose it was authorized for — eligible. Opening a circuit whose far end *is* that peer uses it as an application destination and is refused, because a circuit carries the data plane by construction. A relay may carry a circuit; it does not thereby become a party the circuit may terminate at. DCUtR has a single row and it is already the destination one — there is no DCUtR control exchange with an infrastructure peer for a second row to describe — so the new relay row states for circuits exactly what that row has always stated for hole punches.
 
 ### Enforcement
 
@@ -111,3 +114,11 @@ Revisit if rust-libp2p gains a stronger generic protocol-gating abstraction, if 
 ## Standard service admission
 
 AutoNAT-server and Circuit Relay-server roles use the same standard admission classes: only `DataPlaneTrusted` or `ConnectivityInfrastructureOnly` peers receive project service. Open anonymous relay/probe service is not implied by enabling a server role and would require a separate deployment/security policy. AutoNAT dial-back additionally applies the observed-source-IP/special-address restriction in `transport/libp2p/AUTONAT.md`.
+
+## Amendments
+
+Full notes: [`history/0036-amendments.md`](./history/0036-amendments.md).
+
+| Date | Amendment | Effect |
+|---|---|---|
+| 2026-09-03 | Relay circuit toward an infrastructure-only destination | The protocol-admission matrix now answers the case it was silent on: a circuit whose far end is the infrastructure-only peer is refused, as DCUtR toward that peer already was. A dial gate may no longer read the "reservation/circuit control" row as permitting it. |

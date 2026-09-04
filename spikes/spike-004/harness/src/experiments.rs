@@ -146,11 +146,13 @@ pub async fn r1_crate_semantics(report: &mut Report) {
 /// slice whose contents depend on the origin — empty for a Kademlia
 /// query, one candidate for a relay reservation (R2.9) or an AutoNAT
 /// dial-back (R4.10). None of them names the behaviour that asked, so
-/// the hook today infers `KademliaQuery` because Kademlia is the only
-/// behaviour that can dial. With three more, that inference
-/// is wrong for every one of them — and wrong in the direction that
-/// fails closed against the infrastructure the stack needs, because
-/// `KademliaQuery.is_data_plane()` is true.
+/// the hook inferred `KademliaQuery` at phase A's close, because
+/// Kademlia was the only behaviour that could dial. With three more,
+/// that inference is wrong for every one of them — and wrong in the
+/// direction that fails closed against the infrastructure the stack
+/// needs, because `KademliaQuery.is_data_plane()` is true. Stage 11
+/// step 1 replaced the inference with the mechanism below; this
+/// experiment measured the mechanism before it shipped.
 ///
 /// The mechanism under test announces `ConnectionId -> DialOrigin` from
 /// the originating behaviour's own `poll`. What this measures is
@@ -443,7 +445,10 @@ pub fn r3_infrastructure_cannot_reach_the_data_plane(report: &mut Report) {
          destination: no) and architecture/transport/libp2p/DCUTR.md §2. Stage 11 must \
          either add DcutrHolePunch to is_data_plane or gate it on the DESTINATION's class \
          — the two are not the same rule, since a hole-punch THROUGH infrastructure toward \
-         a trusted peer is legitimate",
+         a trusted peer is legitimate. [CORRECTED 2026-09-03: they ARE the same rule. Both \
+         consumers read the predicate only in the ConnectivityInfrastructureOnly arm and \
+         the class is the DIALLED peer's, so the trusted case never reaches it. That the \
+         punch dial names the far end is read from the crate, not measured here.]",
     );
     for origin in [
         DialOrigin::KademliaQuery,
@@ -883,8 +888,12 @@ pub async fn r5_circuit_is_not_a_reservation(report: &mut Report) {
     //
     // So `RelayCircuit` is not a behaviour-originated origin at all —
     // it is a COMMAND-PATH one. The caller dialling a peer through a
-    // relay knows it is doing so, and production's `GatedSwarm::dial`
-    // is where that origin gets set, from the address it was handed.
+    // relay knows it is doing so, and in production `attempt_dial`
+    // carries that origin into admission while `GatedSwarm::dial`
+    // ENFORCES the pairing against the address it was handed —
+    // refusing a `/p2p-circuit` address not admitted as `RelayCircuit`,
+    // and a `RelayCircuit` ticket on an address that has no circuit
+    // component. It validates the pairing; it does not choose it.
     // The classifier still matters for the reservation/circuit split
     // IF a future crate version dials circuits from the behaviour; it
     // is not what produces `RelayCircuit` today.
@@ -966,7 +975,7 @@ pub async fn r5_circuit_is_not_a_reservation(report: &mut Report) {
     );
 }
 
-/// R6 — the SHIPPED gate, refusing the reservation.
+/// R6 — the SHIPPED gate, and what step 1 changed about its answer.
 ///
 /// Every other experiment runs `InstrumentedGate`, which is the gate
 /// Stage 11 would have to build. Measuring a proposal proves the
@@ -974,11 +983,15 @@ pub async fn r5_circuit_is_not_a_reservation(report: &mut Report) {
 /// path, unmodified — in front of a real `relay::client::Behaviour`
 /// and records what it does.
 ///
-/// F1 is otherwise a chain of reading: the pending hook builds its
-/// `DialRequest` with `origin: DialOrigin::KademliaQuery`,
-/// `is_data_plane()` is true for it, and `ConnectionPolicy::admit`
-/// refuses a data-plane origin for a `ConnectivityInfrastructureOnly`
-/// peer. Three files. This runs the chain instead of arguing it.
+/// At phase A's close this measured a REFUSAL, and F1 is that record:
+/// the pending hook built every unticketed behaviour dial with
+/// `origin: DialOrigin::KademliaQuery`, `is_data_plane()` is true for
+/// it, and `ConnectionPolicy::admit` refuses a data-plane origin for a
+/// `ConnectivityInfrastructureOnly` peer. Stage 11 step 1 gave the hook
+/// real attribution, so the same dial now arrives as `RelayReservation`
+/// and is ADMITTED. What still runs the chain rather than arguing it is
+/// the `misattributed` node below, which announces the same dial under
+/// a data-plane origin and is refused for the class.
 ///
 /// # Why it is measured at the gate and not at the Swarm
 ///
@@ -996,7 +1009,7 @@ pub async fn r5_circuit_is_not_a_reservation(report: &mut Report) {
 /// So the instrument moved to where the decision is made:
 /// [`crate::production::Observing`] forwards every call to the real
 /// gate and records the verdict the real gate returned.
-pub async fn r6_production_gate_refuses_the_reservation(report: &mut Report) {
+pub async fn r6_production_gate_answers_the_reservation_dial(report: &mut Report) {
     use crate::production::ProductionNode;
 
     let mut relay_node = Node::new(Roles::infrastructure(), &[], &[]);
@@ -1029,7 +1042,24 @@ pub async fn r6_production_gate_refuses_the_reservation(report: &mut Report) {
         std::slice::from_ref(&relay_node.identity),
     );
 
-    for target in [&mut node, &mut control] {
+    // THE THIRD NODE, and Stage 11 step 1 is why it exists. R6 used to
+    // measure the gate refusing this reservation dial because the
+    // pending hook called every unticketed behaviour dial
+    // `KademliaQuery`. Step 1 replaced that assumption with real
+    // attribution, so the dial is now admitted -- which is the fix
+    // working, and which leaves F8's "a refused behaviour dial is
+    // invisible" with no refusal to observe. This node announces a
+    // data-plane origin for a reservation dial, which is a lie to the
+    // gate and produces exactly the refusal step 1 removed. F8 is a
+    // finding about the SWARM discarding a denial, so any refused
+    // behaviour dial demonstrates it.
+    let mut misattributed = ProductionNode::with_trust_and_origin(
+        &[],
+        std::slice::from_ref(&relay_node.identity),
+        DialOrigin::KademliaQuery,
+    );
+
+    for target in [&mut node, &mut control, &mut misattributed] {
         let _ = target.listen().await;
         target
             .swarm
@@ -1053,6 +1083,7 @@ pub async fn r6_production_gate_refuses_the_reservation(report: &mut Report) {
             futures::future::poll_fn(|cx| {
                 node.drain(cx);
                 control.drain(cx);
+                misattributed.drain(cx);
                 let mut progressed = false;
                 while let std::task::Poll::Ready(Some(_)) =
                     futures::StreamExt::poll_next_unpin(&mut relay_node.swarm, cx)
@@ -1120,38 +1151,63 @@ pub async fn r6_production_gate_refuses_the_reservation(report: &mut Report) {
         ),
     );
 
-    // THE CLAIM F1 RESTS ON: the shipped gate refuses the reservation
-    // dial toward an infrastructure-only peer, and the refusal names
-    // Kademlia — the origin the hook assumed, for a dial no Kademlia
-    // made.
+    // WHAT F1 MEASURED, AND WHAT STAGE 11 STEP 1 CHANGED. F1 recorded
+    // the shipped gate refusing this reservation dial because the
+    // pending hook called every unticketed behaviour dial
+    // `KademliaQuery`, whose `is_data_plane()` is true. Step 1 gave the
+    // hook real attribution, so the same dial now arrives as
+    // `RelayReservation` and is ADMITTED — a reservation is the
+    // reachability purpose, not the data plane. R6.5 asserts the fix
+    // rather than the defect; the original finding is F1's, and it is
+    // history rather than a live divergence.
     report.require(
         "R6.5",
-        subject.iter().all(|d| d.refusal.is_some()) && !subject.is_empty(),
+        !subject.is_empty() && subject.iter().all(|d| d.refusal.is_none()),
         &format!(
-            "every reservation dial toward the infrastructure-only relay was refused: {:?}",
+            "the reservation dial toward an infrastructure-only relay is ADMITTED now \
+             that it carries its own origin ({} decision(s), refusals {:?})",
+            subject.len(),
             node.decisions.refusals()
         ),
     );
+    // AND THE CLASS CHECK STILL RUNS, which is what stops R6.5 reading
+    // as "the gate stopped looking". The same dial toward the same
+    // relay, announced under a data-plane origin, is refused for the
+    // CLASS — so R6.5 is the ORIGIN being right, not the destination
+    // going unchecked. `kademlia` alone would match every denial the
+    // gate renders, which is how a PolicySuperseded run once read as a
+    // class refusal, so both halves are required.
+    //
+    // The needle is `KademliaQuery` rather than `kademlia` because step
+    // 1 renders the origin with `{origin:?}`. Matching the rendering is
+    // the point -- this assertion is about WHICH origin the gate named,
+    // and a rendering that stops naming it should fail here.
     report.require(
         "R6.6",
-        !node.decisions.refusals().is_empty()
-            && node
+        !misattributed.decisions.refusals().is_empty()
+            && misattributed
                 .decisions
                 .refusals()
                 .iter()
-                .all(|r| r.contains("kademlia") && r.contains("NotAuthorizedForDataPlane")),
+                .all(|r| r.contains("KademliaQuery") && r.contains("NotAuthorizedForDataPlane")),
         &format!(
-            "the refusal attributes the relay's dial to Kademlia AND names the CLASS as \
-             the reason — `kademlia` alone matches every denial the gate renders, which \
-             is how a PolicySuperseded run once read as a class refusal: {:?}",
-            node.decisions.refusals()
+            "a reservation dial announced under a DATA-PLANE origin toward the same \
+             infrastructure-only relay is refused, and the refusal names the origin AND \
+             the class: {:?}",
+            misattributed.decisions.refusals()
         ),
     );
 
-    // THE CONTROL, and it is what makes R6.5 mean anything. One change
-    // — the relay moved from the infrastructure set to the data-plane
-    // allowlist — and the same dial is admitted. So the refusal is the
-    // CLASS, not the network, the addresses or the fixture.
+    // THE CONTROL, which since step 1 is a REGRESSION GUARD rather than
+    // a contrast. Its variable no longer changes the outcome: the
+    // subject is admitted too, because `RelayReservation` is not a
+    // data-plane origin and `admit` reads `is_data_plane` only in the
+    // `ConnectivityInfrastructureOnly` arm. What discriminates now is
+    // `misattributed` at R6.6 — same relay, same class, data-plane
+    // origin, refused. An experiment whose control agrees with its
+    // subject has measured neither, so the naming is deliberate: this
+    // row asserts the trusted path did not break, and R6.6 carries the
+    // contrast R6.5 needs to mean anything.
     report.require(
         "R6.7",
         control.decisions.admissions() > 0,
@@ -1164,10 +1220,11 @@ pub async fn r6_production_gate_refuses_the_reservation(report: &mut Report) {
     );
     report.require(
         "R6.8",
-        control.connected > node.connected,
+        node.connected > misattributed.connected,
         &format!(
-            "control reaches the relay and the subject does not ({} vs {} connection(s))",
-            control.connected, node.connected
+            "the attributed subject reaches the relay and the misattributed node does \
+             not ({} vs {} connection(s)); the control reaches it too ({})",
+            node.connected, misattributed.connected, control.connected
         ),
     );
 
@@ -1180,38 +1237,39 @@ pub async fn r6_production_gate_refuses_the_reservation(report: &mut Report) {
     // NORMAL close.
     report.require(
         "R6.9",
-        node.dialing == 0 && node.outgoing_errors == 0,
+        misattributed.dialing == 0 && misattributed.outgoing_errors == 0,
         &format!(
             "a gate refusal of a behaviour dial emits no Dialing and no \
              OutgoingConnectionError — counted by EVENT VARIANT, not matched against a \
              rendering that could change (dialing {}, outgoing errors {}, swarm events \
              {:?})",
-            node.dialing, node.outgoing_errors, node.failures
+            misattributed.dialing, misattributed.outgoing_errors, misattributed.failures
         ),
     );
     // THE POSITIVE CONTROL FOR F8, without which R6.9 is an assertion
     // that nothing happened in a fixture where nothing happens. The
-    // control's dial is admitted and the Swarm reports it: one
-    // `Dialing`, one `ConnectionEstablished`. So the subject's silence
-    // is the refusal being invisible, not this node being unable to
-    // report a dial.
+    // SUBJECT's dial is admitted and the Swarm reports it: one
+    // `Dialing`, one `ConnectionEstablished`. So the MISATTRIBUTED
+    // node's silence is the refusal being invisible, not that node
+    // being unable to report a dial.
     report.require(
         "R6.11",
-        control.dialing >= 1 && node.dialing == 0,
+        node.dialing >= 1 && misattributed.dialing == 0,
         &format!(
-            "an ADMITTED behaviour dial is visible as `Dialing` and a REFUSED one is not (control {} vs subject {})",
-            control.dialing, node.dialing
+            "an ADMITTED behaviour dial is visible as `Dialing` and a REFUSED one is not (admitted {} vs refused {})",
+            node.dialing, misattributed.dialing
         ),
     );
     report.require(
         "R6.10",
-        node.failures
+        misattributed
+            .failures
             .iter()
             .any(|f| f.contains("listener closed: Ok")),
         &format!(
             "the only outward trace of the refusal is the relay listener closing \
              SUCCESSFULLY: {:?}",
-            node.failures
+            misattributed.failures
         ),
     );
 }

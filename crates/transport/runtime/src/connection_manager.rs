@@ -1331,8 +1331,13 @@ impl ConnectionManager {
     /// infrastructure-only peer is dialable for reachability and
     /// refused for the data plane, on the same address in the same
     /// moment. `ConnectionPolicy::admit` has always decided it that
-    /// way -- `origin.is_data_plane()` is the discriminator, and
-    /// `tests/transport-contract` pins every origin/class pair.
+    /// way -- `origin.is_data_plane()` is the discriminator. What pins
+    /// it is split across three places, and none of them alone covers
+    /// the grid: `tests/transport-contract`'s exit gate asserts every
+    /// origin against `ConnectivityInfrastructureOnly`, while
+    /// `connection_policy`'s own tests cover the other two classes --
+    /// `an_unauthorized_peer_is_refused_whatever_the_origin` and
+    /// `a_trusted_destination_is_admitted_under_every_origin`.
     ///
     /// Revalidating an established connection with the data-plane-only
     /// predicate therefore closed connections admission had correctly
@@ -2703,13 +2708,75 @@ mod tests {
         );
     }
 
+    /// The same invariant at the OTHER consumer, which also had no test.
+    ///
+    /// `authorizes_for` reads `is_data_plane` only for
+    /// `ConnectivityInfrastructureOnly`; `DataPlaneTrusted` is `true`
+    /// unconditionally. So revalidating an established connection to a
+    /// trusted peer never consults the origin -- which is why moving
+    /// `RelayCircuit` and `DcutrHolePunch` into the predicate cannot
+    /// start tearing down a hole punch or circuit toward a trusted peer
+    /// reached through infrastructure.
+    ///
+    /// The claim is stated in `DialOrigin::is_data_plane`'s note "at
+    /// either site". This is the second site, and it is asserted here
+    /// rather than inferred from the first: adding an origin check to
+    /// the `DataPlaneTrusted` arm fails this test and not that one.
+    #[test]
+    fn a_trusted_peer_keeps_its_connection_under_every_origin() {
+        let mut m = untrusting(8);
+        let _ = m.set_trust(trusting(&[P1], &[]), &[]);
+        let class = m.classify(&peer(P1));
+        assert_eq!(class, ConnectionClass::DataPlaneTrusted);
+
+        for origin in DialOrigin::ALL {
+            assert!(
+                m.authorizes_for(class, origin),
+                "{origin:?} lost a TRUSTED peer's connection, so the origin's plane is \
+                 being consulted where only the class should decide"
+            );
+        }
+    }
+
+    /// The OTHER half of the same "only" claim.
+    ///
+    /// `a_trusted_peer_keeps_its_connection_under_every_origin` pins the
+    /// `DataPlaneTrusted` arm; without this one the `Unauthorized` arm
+    /// is unpinned and a mutation survives. `authorizes` -- the
+    /// single-argument wrapper the rest of the tests use -- hardcodes
+    /// `DialOrigin::Manual`, and `Manual.is_data_plane()` is true, so
+    /// rewriting `Unauthorized => false` as `=> !origin.is_data_plane()`
+    /// leaves every existing assertion green while making the comment's
+    /// "only" false. `ConnectionPolicy::admit`'s matching claim is
+    /// pinned by `an_unauthorized_peer_is_refused_whatever_the_origin`;
+    /// this is that test's counterpart at the second consumer.
+    #[test]
+    fn an_unauthorized_peer_keeps_nothing_under_any_origin() {
+        let m = untrusting(8);
+        let class = m.classify(&peer(P1));
+        assert_eq!(class, ConnectionClass::Unauthorized);
+
+        for origin in DialOrigin::ALL {
+            assert!(
+                !m.authorizes_for(class, origin),
+                "{origin:?} RETAINED an unauthorized peer's connection, so the origin's \
+                 plane is being consulted where the class alone must refuse"
+            );
+        }
+    }
+
     #[test]
     fn an_infrastructure_peer_keeps_a_reachability_connection_and_loses_a_data_plane_one() {
         // ADR-0036's separation is an origin/class PAIR, and
         // `ConnectionPolicy::admit` has always decided it that way --
         // `tests/transport-contract/tests/stage2_exit_gate.rs` pins
-        // every combination. Revalidating an established connection
-        // with the data-plane-only predicate ignored the pair, so a
+        // every ORIGIN against the infrastructure-only class, and
+        // `connection_policy`'s own tests pin the other two classes.
+        // (That contract test derived its expectation from
+        // `is_data_plane` until 2026-09-03, so "pins" overstated it;
+        // it asserts a hardcoded table now.) Revalidating an
+        // established connection with the data-plane-only predicate
+        // ignored the pair, so a
         // relay reservation, relay circuit, AutoNAT probe or DCUtR hole
         // punch to an infrastructure peer completed its handshake and
         // was closed immediately -- admission permitted it and

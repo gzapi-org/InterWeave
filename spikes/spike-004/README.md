@@ -57,10 +57,17 @@ The dependency runs spike → product, the direction CLAUDE.md §4 permits.
 matters.** `InstrumentedGate` asks `ConnectionManager::admit` through a
 real `SnapshotHandle`, so every trust, class, backoff, quarantine and
 ceiling decision here is the shipped one. The gate *behaviour* around it
-is this harness's own, because production's
-`OutboundAdmission::handle_pending_outbound_connection` hardcodes
-`DialOrigin::KademliaQuery` — which is the thing under test. A spike
-measuring a change cannot use the code the change replaces.
+is this harness's own, because at the time these experiments were run
+production's `OutboundAdmission::handle_pending_outbound_connection`
+hardcoded `DialOrigin::KademliaQuery` — which was the thing under test.
+A spike measuring a change cannot use the code the change replaces.
+
+> **Since 2026-09-03 that hook is no longer the one described here.**
+> Stage 11 step 1 (PR #71) built the mechanism this harness proposed:
+> the hook resolves an announced `ConnectionId -> DialOrigin` note and
+> refuses a dial it has no note for. `production.rs` measures the
+> shipped gate and was rewired accordingly; `InstrumentedGate` is kept
+> as the record of what was proposed and measured.
 
 An earlier version of this section said the harness ran "the production
 root gate", full stop, while no source file referenced
@@ -70,11 +77,13 @@ unused. A review caught it.
 **`R6` closes that gap.** It runs the real `OutboundAdmission`,
 unmodified and by path, in front of a real `relay::client::Behaviour`,
 and measures what the shipped gate answers when the relay client asks
-to dial its relay. With the relay authorized as infrastructure only the
-gate refuses — `kademlia dial refused: NotAuthorizedForDataPlane`, for a
-dial no Kademlia made. Move that same relay into the data-plane
-allowlist, change nothing else, and the identical dial is admitted and
-connects. F1 is measured, not read.
+to dial its relay. At phase A's close, with the relay authorized as
+infrastructure only, the gate refused — `kademlia dial refused:
+NotAuthorizedForDataPlane`, for a dial no Kademlia made. Move that same
+relay into the data-plane allowlist, change nothing else, and the
+identical dial was admitted and connected. F1 is measured, not read.
+Stage 11 step 1 has since fixed it, and R6 was rebuilt around the gate
+that shipped — see F1's own note below.
 
 Getting there took two corrections worth recording, because both are
 the same mistake in different clothes — **an experiment whose subject
@@ -105,16 +114,28 @@ a `ConnectionId`, an `Option<PeerId>` and an address slice whose
 contents depend on the ORIGIN — empty for a Kademlia query, one
 candidate for a relay reservation (R2.9) or an AutoNAT dial-back
 (R4.10), and F2's pre-socket check needs that last one. **What none of
-them carries is which behaviour asked**, so the hook today infers
-`DialOrigin::KademliaQuery` because Kademlia is the only behaviour that
-can dial. `KademliaQuery.is_data_plane()` is true, and R3.2 shows a
-data-plane origin is refused for an infrastructure-only peer — so
-without attribution **every relay reservation and every AutoNAT probe
-would be refused against exactly the infrastructure the stack exists to
-use.** R6 runs that: the shipped gate refuses a real relay client's
-reservation dial toward an infrastructure-only relay with `kademlia
-dial refused: NotAuthorizedForDataPlane`, and admits the same dial when
-the only change is the relay's trust class (R6.5–R6.8).
+them carries is which behaviour asked**, so at phase A's close the hook
+inferred `DialOrigin::KademliaQuery` because Kademlia was the only
+behaviour that could dial. `KademliaQuery.is_data_plane()` is true, and
+R3.2 shows a data-plane origin is refused for an infrastructure-only
+peer — so without attribution **every relay reservation and every
+AutoNAT probe would be refused against exactly the infrastructure the
+stack exists to use.** R6 ran that: the shipped gate refused a real
+relay client's reservation dial toward an infrastructure-only relay with
+`kademlia dial refused: NotAuthorizedForDataPlane`, and admitted the
+same dial when the only change was the relay's trust class.
+
+> **FIXED 2026-09-03 by Stage 11 step 1, and R6 now measures the fix.**
+> The pending hook resolves an announced `ConnectionId -> DialOrigin`
+> note instead of assuming one, and refuses a dial it has no note for.
+> A reservation dial announced as `RelayReservation` is not data-plane,
+> so it is ADMITTED (R6.5) and the node reaches the relay (R6.8). The
+> class check still runs: the same dial toward the same relay announced
+> under a data-plane origin is refused `KademliaQuery dial refused:
+> NotAuthorizedForDataPlane` (R6.6), which is what stops R6.5 reading as
+> "the gate stopped looking". **F1 is therefore history — the record of
+> why attribution was required and of what happened without it — rather
+> than a live description of the gate.**
 
 It fails closed and it fails **silently** — not "as an ordinary dial
 failure", which an earlier version of this sentence claimed and which
@@ -182,9 +203,13 @@ count is not itself evidence: the harness announced its own dial that
 way. What R5.11 rules out is the classifier having relabelled a real
 behaviour-originated circuit dial as a reservation, which origin counts
 alone cannot show.)
-The conclusion for Stage 11: **`GatedSwarm::dial` sets `RelayCircuit`
-from the address it was handed**, because the caller dialling through a
-relay is the party that knows. The classifier still earns its place for
+The conclusion for Stage 11: **`RelayCircuit` comes from the CALLER**,
+because the caller dialling through a relay is the party that knows.
+*(Correction, 2026-09-04: as written this named the wrong function.
+In shipped code `attempt_dial` carries the origin the caller supplied
+into admission, and `GatedSwarm::dial` ENFORCES the pairing against the
+address — refusing a `/p2p-circuit` address not admitted as
+`RelayCircuit`, and the reverse. It validates; it does not set.)* The classifier still earns its place for
 the reservation-vs-circuit split if a future crate version dials
 circuits from the behaviour; it is not what produces the variant today.
 
@@ -237,6 +262,39 @@ so the check likely belongs on the destination's class rather than on
 the origin alone. R3.5 asserts today's behaviour so that changing it
 fails here rather than passing silently.
 
+> **CORRECTED 2026-09-03 — the two fixes are not in tension, and this
+> paragraph read them as if they were.** The predicate has two
+> production consumers and both key on the class the same way:
+> `ConnectionPolicy::admit` (`connection_policy.rs`, the `match class`
+> in `admit`) and
+> `ConnectionManager::authorizes_for` (the `match class` in that
+> function) each consult `is_data_plane` in ONE arm,
+> `ConnectivityInfrastructureOnly`, and let `DataPlaneTrusted` through
+> with no origin check at all. The class they switch on is the class of
+> the peer the dial NAMES, and a hole punch toward a trusted peer
+> through a relay names the trusted peer. (`authorizes_for` exists to
+> AGREE with admission — its own note says fixing the classification
+> there fixes it here — so the two cannot drift apart.) So adding the origin to
+> `is_data_plane` cannot refuse that punch — it *is* the
+> destination-class check this paragraph reaches for, expressed where
+> the policy already keys on the destination. What Stage 11 still
+> decides is the fix; what it no longer has to weigh is an objection
+> the shipped code does not support.
+>
+> **What is READ rather than measured**: that a hole punch names the far
+> end as its dial peer. R12.4 measured that every punch dial reaches the
+> gate attributed under `DcutrHolePunch` — on both nodes, none
+> unattributed — but did not assert which PeerId that dial carries, and
+> on loopback both ends were trusted, so the infrastructure-only
+> destination case is R3.5's synthetic policy call rather than a real
+> punch. The half of this correction about the shipped policy is pinned
+> by `a_trusted_destination_is_admitted_under_every_origin`; the half
+> about the crate is pinned by nothing, and Stage 11 should confirm the
+> dial's peer when the behaviour is enabled.
+>
+> The paragraph is left as written
+> because a spike record is read for what it found.
+
 This was found because an earlier version of R3 *required* the
 admission — recording the violation as evidence that the split held.
 
@@ -262,30 +320,42 @@ be set by the caller, and the peer that caller names is the
 **destination**. Two origins that look adjacent in the enum name
 different parties.
 
-**But D2 is a document CONFLICT before it is a code defect, and Stage 11
-must resolve it in that order.** A review on PR #69 was right to hold
-this to CLAUDE.md §2. ADR-0036's enforcement clause forbids the
-admission; two accepted rows appear to permit it:
+**But D2 was a document CONFLICT before it was a code defect, and Stage
+11 had to resolve it in that order.** A review on PR #69 was right to
+hold this to CLAUDE.md §2. ADR-0036's enforcement clause forbids the
+admission; at the time this was written, two accepted rows appeared to
+permit it:
 
-- `transport/libp2p/CONNECTIVITY.md` §4's protocol matrix reads
+- `transport/libp2p/CONNECTIVITY.md` §4's protocol matrix read
   *"Relay v2 control | eligible | eligible"*, and ADR-0036's own matrix
-  says the same for reservation/circuit control;
-- §11 says infrastructure-only PeerIds are dialable "only for permitted
-  connectivity origins" and then names exactly two that never use the
+  said the same for reservation/circuit control;
+- §11 said infrastructure-only PeerIds are dialable "only for permitted
+  connectivity origins" and then named exactly two that never use the
   infrastructure set — `direct-user-command` and `kademlia-query`.
-  `relay-circuit` is in the origin list and is not among them.
+  `relay-circuit` was in the origin list and among neither.
 
-The spike's reading is that a circuit *toward* a destination is not
-"relay control *with*" that peer, and that the matrix already draws
-exactly this distinction one row down — *"DCUtR as destination peer |
-no"* — which is why D1 has no such ambiguity and D2 does. The matrix
-simply has no row for a circuit whose DESTINATION is the
+The spike's reading was that a circuit *toward* a destination is not
+"relay control *with*" that peer, and that the matrix already drew
+exactly this distinction for DCUtR — *"DCUtR as destination peer |
+no"* — which is why D1 had no such ambiguity and D2 did. The matrix
+simply had no row for a circuit whose DESTINATION is the
 infrastructure-only peer.
 
-That reading is a recommendation, not a verdict. **The architecture is
-amended or clarified first — a row for the destination case — and the
-code follows it.** Changing `is_data_plane` against a contract that
-arguably permits today's behaviour is precisely what §2 forbids.
+That reading was a recommendation, not a verdict. The architecture was
+to be amended first — a row for the destination case — and the code to
+follow it; changing `is_data_plane` against a contract that arguably
+permitted the behaviour is precisely what §2 forbids.
+
+> **RESOLVED 2026-09-03 — the spike's reading was adopted.** ADR-0036's
+> Amendment 2026-09-03 added the row the matrix lacked, `| Relay v2
+> circuit with that peer as application destination | yes | **no** |`,
+> and `transport/libp2p/CONNECTIVITY.md` §4 and §11 inherited it. **The
+> conflict is gone and D2 is now an ordinary code fix** — do not stop
+> for the architecture decision, it has been taken. The fix stays
+> per-origin, as this section argues above: `RelayCircuit` moves,
+> `RelayReservation` does not. The finding above is left as it was
+> measured, because what a spike recorded is the thing a later reader
+> comes here for.
 
 The positive half of ADR-0036's relayed clause holds and is measured:
 the source ends up connected to the destination's own authenticated
@@ -411,7 +481,7 @@ Two smaller edges of the same finding:
 - `DialError::Denied`'s `Display` is the bare string `"Dial error"` —
   the `print_error_chain` the other variants use is not reached for it.
 - `ConnectionDenied`'s `Display` is `"connection denied"`. Everything
-  `OutboundAdmission` writes about *why* — `kademlia dial refused:
+  `OutboundAdmission` writes about *why* — `KademliaQuery dial refused:
   NotAuthorizedForDataPlane` — lives in `Error::source`, so a refusal
   logged the obvious way says nothing. R6 walks the chain deliberately;
   that it must is part of this finding.
@@ -704,6 +774,18 @@ the production crates they path-depend on. A refactor of
 `OutboundAdmission::new` or `PreAuthLimitsBuilder` breaks the harness
 with no signal at all.
 
+**That happened, and was repaired on 2026-09-03.**
+`OutboundAdmission::new` gained a `DialAttribution` parameter in Stage
+11 step 1 and `harness/src/production.rs` went on passing three
+arguments, so the harness stopped compiling against `main`
+(`error[E0061]`) and nothing reported it — exactly as this paragraph
+predicted. The repair was not the missing argument: step 1 also made an
+unattributed dial REFUSED, so the module now wires the relay client
+through `Attributing` as production does, and R6 was rebuilt around the
+gate step 1 shipped. A run is green again — 86 required observations, 0
+failed, 3 divergences. **The gap this paragraph describes has not
+closed**: nothing in CI would catch the next such break either.
+
 So where a divergence has to fail something CI runs, the pin lives in
 production:
 
@@ -761,7 +843,7 @@ mentioned it is labelled as one — a note is printed, never checked.
 | Finding | What must hold |
 | --- | --- |
 | F1 attribution | R2.6–R2.8: zero unattributed, resolved AS `RelayReservation` |
-| F1 why it is needed | R6.4–R6.8: the SHIPPED gate refuses a real relay client's reservation dial as `NotAuthorizedForDataPlane`, and admits it when the relay's trust class is the only thing changed |
+| F1 why it is needed | R6.4–R6.8. As measured at phase A close: the shipped gate refused a real relay client's reservation dial as `NotAuthorizedForDataPlane`. Since step 1 fixed it, R6.5 asserts the dial is ADMITTED under its own origin, R6.6 that a data-plane origin toward the same relay is still refused, and R6.8 that the attributed node reaches the relay where a misattributed one does not |
 | F8 the refusal is silent | R6.9 (no `Dialing`, no `OutgoingConnectionError`), R6.11 (the admitted dial IS reported — the positive control), R6.10 (the only trace is a listener closing successfully) |
 | F2 dial-back crosses the gate | R4.6–R4.8: admitted as `AutonatProbe`, the probe completed, and an untrusting server's is REFUSED *on trust* (R4.8 checks the denial reason, since an empty allow-list also holds for an unattributed or nameless dial) |
 | F2 the check is MISSING | R4.12: the candidate the server dialled back to is a LOOPBACK address, which §7 requires be rejected even from an authorized peer. This is the finding measured rather than read — R4.1 is a note, and a note cannot fail. **Scoped**: only §7's special-use rule is reached; the source-equality and unrelated-public-IP cases need a second interface and are phase B |
@@ -797,21 +879,46 @@ The claims that carry the mechanism are mutation-checked:
   rule from the other side, and is now also asserted in its own right by
   R3.4 rather than existing only as a mutation someone ran by hand.
 
-R6's four, run as a batch, each asserting the patch applied before
-trusting the result. The first row is also the one that caught R6.6's
-own weakness: before the predicate named `NotAuthorizedForDataPlane`,
-this mutation left R6.6 GREEN, because `OutboundAdmission` renders every
-denial as `kademlia dial refused: {denial:?}` and the old check looked
-only for `kademlia`.
+R6's mutations, run as a batch, each asserting the patch applied before
+trusting the result. **Re-measured 2026-09-04**, after Stage 11 step 1
+inverted R6.5 from a refusal to an admission and added the
+`misattributed` node — the previous table was derived against the
+pre-step-1 wiring and two of its rows had silently become empty claims.
+Baseline for this batch: 86 required, 0 failed, exit 0, confirmed stable
+over two consecutive clean runs.
 
 | Mutation | Fails |
 | --- | --- |
-| subject's relay moved to the data-plane allowlist | R6.5, R6.8, R6.9, R6.10, R6.11 |
-| control's relay moved to the infrastructure set | R6.7, R6.8, R6.11 |
-| `ProductionNode` drops its `ConnectionManager` (bug 9, reintroduced) | R6.6, R6.7, R6.8, R6.11 |
-| the circuit listen removed, so nothing dials | R6.4, R6.5, R6.7, R6.8, R6.10, R6.11 |
+| subject's relay moved to the data-plane allowlist | **nothing** — exit 0 |
+| control's relay moved to the infrastructure set | no R6 row (R4.7 only) |
+| `misattributed` announces `RelayReservation` instead of a data-plane origin | R6.6, R6.8, R6.9, R6.10, R6.11 |
+| `ProductionNode` drops its `ConnectionManager` (bug 9, reintroduced) | R6.5, R6.6, R6.7, R6.8, R6.11 |
+| the circuit listen removed, so nothing dials | R6.4, R6.5, R6.6, R6.7, R6.8, R6.10, R6.11 |
 
-The FIRST of those is the one worth reading: it left R6.6 passing,
+**The first two rows are the result worth reading, and they are
+negative.** Since step 1 the subject's dial is admitted, so making the
+subject into the control changes no verdict; and the control's dial is
+admitted whichever set its relay is in, because `RelayReservation` is
+not a data-plane origin and `admit` reads `is_data_plane` only in the
+`ConnectivityInfrastructureOnly` arm. Neither mutation can fail
+anything. The discriminating variable moved to `misattributed` — row
+three is the one that now carries what row one used to.
+
+That is this record's own bug 8 arriving a second time by a different
+route: an experiment whose control agrees with its subject has measured
+neither. The first time it was written that way; this time a code change
+made it so, and the table went on asserting the old result. A mutation
+table is evidence with a shelf life — it expires when the experiment is
+rewired, and nothing fails when it does.
+
+Historical note on the old first row: before R6.6's predicate named
+`NotAuthorizedForDataPlane`, that mutation left R6.6 GREEN, because
+`OutboundAdmission` then rendered every denial as
+`kademlia dial refused: {denial:?}` and the check looked only for
+`kademlia`. Step 1 replaced that rendering with `{origin:?}`, which is
+why R6.6's needle is `KademliaQuery` today.
+
+The old first row was the one worth reading then: it left R6.6 passing,
 because with no refusal at all `refusals().iter().all(..)` is vacuously
 true. R6.6 now requires the list to be non-empty as well, so it stands
 without leaning on R6.5.

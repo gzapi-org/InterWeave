@@ -1364,9 +1364,10 @@ below and are repeated where they bite:
   DESTINATION rather than the relay. And `PreAuthAdmission` buckets a
   relayed inbound by the source PeerId the circuit carries, which is
   the "unbounded pseudo-source bucket" `contracts/CONNECTIVITY.md` §10
-  forbids by name. **D2 needs an architecture clarification before its
-  code change** — see step 2. All three land before DCUtR or relayed
-  paths are built rather than after.
+  forbids by name. **D2's architecture clarification landed on
+  2026-09-03** — ADR-0036's amendment gave the matrix the row it lacked
+  — so all three are now code fixes; see step 2. All three land before
+  DCUtR or relayed paths are built rather than after.
 - **ADR-0036's inbound relayed clause has no implementation site.** The
   shipped gate is outbound-only, so a relayed inbound is never
   evaluated against the authenticated end PeerId at all. The spike
@@ -1402,25 +1403,94 @@ data-plane origin, against the infrastructure the stage exists to use.
 1. **dial attribution**: every behaviour-originated dial reaches the
    root gate under its own `DialOrigin`, and the map that carries it
    drops a note for a dial the Swarm refuses before the pending hook;
-   `GatedSwarm::dial` sets `RelayCircuit` from the address, since the
-   transport rather than the behaviour dials a circuit. **The gate
+   the COMMAND PATH sets `RelayCircuit`, since the transport rather
+   than the behaviour dials a circuit: `attempt_dial` builds the
+   `DialRequest` carrying the origin and admission runs there, and
+   `GatedSwarm::dial` then enforces the address/origin PAIRING both
+   ways on the already-admitted dial. **The attribution and the pairing
+   enforcement landed in PR #71**; no caller supplies `RelayCircuit`
+   yet, because no relay feature is compiled — every `attempt_dial` call
+   site today passes `Manual` (`runtime/commands.rs`) or comes from the
+   retry tick. The mechanism is there and its first user is Phase 4.
+   **One label decides whether relaying works at all**, and step 2's
+   `is_data_plane` change is what arms it: `relay::client::Behaviour`
+   emits two dials of its own (`libp2p-relay 0.21.1`
+   `priv_client.rs:334` and `:373`) — a reservation, and the dial that
+   establishes the relay connection a circuit request needs — and BOTH
+   name the relay rather than the destination — read from the two call
+   sites, and pinned from the other side by R5.11, which requires that
+   no behaviour-made dial targeted the destination (R5.10 prints the
+   targets and is a note, so it cannot fail). Both are
+   exchanges *with* the relay and must carry a control-plane origin.
+   Label the second `RelayCircuit` and, once that origin becomes
+   data-plane, every circuit through an infrastructure-only relay is
+   refused at its set-up dial — relaying broken for exactly the peers
+   it exists to reach. **The gate
    records its own refusals here**: the Swarm discards the denial of a
    behaviour dial, so a refusal that is not written down at the hook is
    written down nowhere;
 2. **resolve D1, D2 and D3.** `DcutrHolePunch` is admitted for a
    `ConnectivityInfrastructureOnly` peer, which
    `transport/libp2p/CONNECTIVITY.md` §4's matrix forbids unqualified
-   ("DCUtR as destination peer | no"); and `PreAuthAdmission` buckets a
-   relayed inbound by the source PeerId the circuit carries, which
-   `contracts/CONNECTIVITY.md` §10 forbids by name. Both are code
-   fixes. **D2 is not yet a code fix**: `RelayCircuit` is likewise
-   admitted, but §4's matrix says "Relay v2 control | eligible |
-   eligible" and §11 excludes only `direct-user-command` and
-   `kademlia-query`, so an accepted document arguably permits today's
-   behaviour. Amend or clarify the matrix first — it has no row for a
-   circuit whose DESTINATION is the infrastructure-only peer — and
-   change the code to match, in that order (CLAUDE.md §2). All three
-   land before DCUtR or relayed paths are built, not after;
+   ("DCUtR as destination peer | no"); `RelayCircuit` is admitted for
+   that same destination, which §4 now forbids by a row of its own; and
+   `PreAuthAdmission` buckets a relayed inbound by the source PeerId the
+   circuit carries, which `contracts/CONNECTIVITY.md` §10 forbids by
+   name. All three are code fixes. **D2 was a document conflict
+   first**: §4's matrix had no row for a circuit whose DESTINATION is
+   the infrastructure-only peer, and §11 excluded only
+   `direct-user-command` and `kademlia-query`, so an accepted document
+   arguably permitted the behaviour. ADR-0036's Amendment 2026-09-03
+   added the row and both sections inherited it (CLAUDE.md §2), so what
+   remains for D2 is the code change — and it separates the two relay
+   origins rather than moving both, because `RelayReservation` must stay
+   non-data-plane or every relay the stack needs is refused. All three
+   land before DCUtR or relayed paths are built, not after.
+
+   **One design item this step must settle, and one already handled.**
+   `an_infrastructure_peer_reaches_the_data_plane_only_where_this_table_says`
+   (`tests/transport-contract/tests/stage2_exit_gate.rs`) used to derive
+   both of its loops from the predicate under test, so it passed for ANY
+   definition of `is_data_plane` and could not catch the
+   misclassification its name claims. **Fixed 2026-09-03**: it now
+   asserts an explicit origin/outcome table, with a length check against
+   `DialOrigin::ALL`. Two rows are pinned wrong on purpose — the D1 and
+   D2 admissions — so **this table is one of the places step 2 must
+   change** when it moves the two origins. The remaining item is **the
+   predicate's NAME is the defect's root**: `is_data_plane` describes
+   traffic, while the rule it decides is ADR-0036's WITH/FOR question —
+   does this origin name the peer as an application DESTINATION.
+   SPIKE-004 misread it in precisely that gap, twice, and
+   `KademliaQuery` sits in the set today although routing is not
+   application data. **That last observation is about the NAME and must
+   not move the origin**: `KademliaQuery` stays refused for an
+   infrastructure-only peer whatever the predicate ends up called —
+   ADR-0036's matrix row, `CONNECTIVITY.md` §4 and §11 and the digest
+   all say so, and letting it out would widen the infrastructure set,
+   which is the exact failure ADR-0036 exists to prevent. A rename
+   changes what the code SAYS, never which origins are in the set;
+   whether to do it is a decision for this step, not a cleanup to
+   defer.
+
+   **A third item was raised here and DISPROVED; it is recorded so it
+   is not raised again.** The concern was that the reconnect scheduler
+   re-dials an infrastructure-only peer under a refused origin
+   forever — `learn_address` admits such a peer's addresses to the
+   book, `record_failure` schedules a retry with no class filter, and
+   the tick dials under `DialOrigin::ConnectionManager`, which `admit`
+   refuses `NotAuthorizedForDataPlane`. The first three are true and
+   the conclusion does not follow. `refusal_settles_the_peer` counts
+   `NotAuthorizedForDataPlane`, so `retry_claim` returns `Cleared` and
+   `clear_retry_claim` REMOVES the retry entry outright rather than
+   rescheduling it; `authorization_failures_clear_the_claim` pins that,
+   and its own note says why — "re-offering it every tick is a busy
+   loop against a decision that will not change on its own". So the
+   gate enforces `CONNECTIVITY.md` §11's rule and the scheduler does
+   not fight it. What remains is one refused dial and one diagnostic
+   per underlying failure, after which the peer leaves the retry table.
+   **That is not a divergence and needs no fix**; whether the scheduler
+   should skip offering a non-`DataPlaneTrusted` peer even once is a
+   cheap tidy-up, not stage work;
 3. AutoNAT v2 client;
 4. AutoNAT v2 server role — including `AUTONAT.md` §7's dial-back
    restriction, which the crate does not implement, at the PENDING hook
@@ -1458,6 +1528,14 @@ data-plane origin, against the infrastructure the stage exists to use.
 - statically configured infrastructure is preferred; Identify-learned relay/probe promotion remains explicit opt-in;
 - relayed pre-Noise accounting is charged to authenticated relay connection/PeerId plus global limits when original IP is unavailable;
 - relayed destination trust is evaluated against the authenticated end PeerId, not the relay;
+- a Relay v2 circuit or a DCUtR hole punch whose far end IS an
+  infrastructure-only peer is refused, while a reservation with that
+  peer and a circuit *through* it toward a trusted destination are
+  admitted. A relay may carry a circuit without becoming a party a
+  circuit may terminate at; who an exchange is WITH is a different
+  question from who it is FOR (ADR-0036 Amendment 2026-09-03). **Not met
+  today** — `DialOrigin::is_data_plane` omits both origins, which is D2
+  and D1, and step 2 is where it is met;
 - DCUtR upgrade emits path change, not false logical reconnect;
 - relay path remains fallback until direct stability rules permit preference switch.
 

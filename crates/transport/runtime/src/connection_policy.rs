@@ -137,13 +137,36 @@ impl DialOrigin {
     /// Neither is reachable in a shipped build — nothing constructs
     /// either origin and no relay or DCUtR feature is compiled — so
     /// both are latent until Stage 11 enables those paths, and both are
-    /// on its list to fix before it does. D1 is a code fix; **D2 is a
-    /// document conflict first**, because
-    /// `transport/libp2p/CONNECTIVITY.md` §4's matrix reads "Relay v2
-    /// control | eligible | eligible" and §11 excludes only
+    /// on its list to fix before it does. **Both are now code fixes.**
+    /// D2 was a document conflict first — the libp2p transport's
+    /// `CONNECTIVITY.md` §4 matrix read "Relay v2 control | eligible
+    /// | eligible" with no row for a circuit whose DESTINATION is the
+    /// infrastructure-only peer, and §11 excluded only
     /// `direct-user-command` and `kademlia-query`, so an accepted
-    /// document arguably permits today's answer. Clarify the matrix,
-    /// then change this.
+    /// document arguably permitted today's answer. ADR-0036's
+    /// Amendment 2026-09-03 added the row and both sections inherited
+    /// it, so the clarification is done and this is what changes next.
+    ///
+    /// The fix is per-origin, not per-pair: `RelayCircuit` and
+    /// `DcutrHolePunch` move, `RelayReservation` and `AutonatProbe`
+    /// stay. A reservation is the reachability purpose itself, and
+    /// making it data-plane refuses every relay the stack needs.
+    ///
+    /// Moving the two costs nothing for the legitimate case, which is
+    /// the objection SPIKE-004 raised against this shape and later
+    /// corrected. Both consumers — `admit` here and
+    /// `ConnectionManager::authorizes_for`, which exists to agree with
+    /// it — read this function in ONE arm,
+    /// `ConnectivityInfrastructureOnly`; `DataPlaneTrusted` falls
+    /// through with no origin check. The class is that of the peer the
+    /// dial NAMES, so a circuit or hole punch toward a trusted peer
+    /// *through* infrastructure names the trusted peer and is never
+    /// tested against the origin's plane, at either site. That much is
+    /// pinned by `a_trusted_destination_is_admitted_under_every_origin`
+    /// and its counterpart in `connection_manager`. That the punch
+    /// dial names the far end rather than the relay is read from the
+    /// crate rather than measured, and Stage 11 confirms it when DCUtR
+    /// is enabled.
     #[must_use]
     pub const fn is_data_plane(self) -> bool {
         matches!(
@@ -778,8 +801,10 @@ mod tests {
         // and `is_data_plane` treats them as control-plane. Moving
         // either fails here, which is the point — the change is Stage
         // 11's and must arrive with its reasoning, not as a quiet edit.
-        // See `is_data_plane`'s own note for which of the two needs an
-        // architecture clarification first.
+        // D2's architecture clarification landed on 2026-09-03
+        // (ADR-0036's amendment), so both are code fixes now; see
+        // `is_data_plane`'s own note for which origins move and which
+        // must not.
         for origin in DialOrigin::ALL {
             let expected = match origin {
                 DialOrigin::Manual
@@ -810,6 +835,37 @@ mod tests {
                 p.admit(&request(origin, A1), ConnectionClass::Unauthorized, 0),
                 Err(DialDenial::Unauthorized),
                 "{origin:?} should be refused"
+            );
+        }
+    }
+
+    /// THE INVARIANT THE D1/D2 FIX SHAPE RESTS ON, AND IT HAD NO TEST.
+    ///
+    /// `is_data_plane` is read in one arm only, so a trusted
+    /// destination is admitted whatever the origin. That is the whole
+    /// reason moving `RelayCircuit` and `DcutrHolePunch` into the
+    /// predicate costs the legitimate case nothing: a circuit or hole
+    /// punch toward a TRUSTED peer reached *through* infrastructure
+    /// names the trusted peer, so the origin's plane is never consulted
+    /// for it.
+    ///
+    /// Three documents and a doc comment explain why that cannot break
+    /// -- SPIKE-004's record, `SPIKES.md`, the Stage 11 plan and
+    /// `is_data_plane`'s own note. None of them was enforced by
+    /// anything. Adding an origin check to `admit`'s `DataPlaneTrusted`
+    /// arm fails HERE, which is what makes the explanation load-bearing
+    /// rather than merely written down.
+    #[test]
+    fn a_trusted_destination_is_admitted_under_every_origin() {
+        let p = policy();
+        // From the enum, not from a list: the claim is about EVERY
+        // origin, including ones added after this was written.
+        for origin in DialOrigin::ALL {
+            assert_eq!(
+                p.admit(&request(origin, A1), ConnectionClass::DataPlaneTrusted, 0),
+                Ok(()),
+                "{origin:?} was refused for a TRUSTED destination, so the origin's plane \
+                 is being consulted where ADR-0036 says only the class decides"
             );
         }
     }

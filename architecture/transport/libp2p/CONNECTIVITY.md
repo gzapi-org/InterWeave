@@ -136,12 +136,15 @@ A data-plane trusted peer may also serve relay/AutoNAT roles. An infrastructure-
 |---|---:|---:|
 | Identify / bounded ping | yes | yes |
 | AutoNAT v2 | eligible | eligible |
-| Relay v2 control | eligible | eligible |
+| Relay v2 reservation, and circuit control *with that peer* | eligible | eligible |
+| Relay v2 circuit as destination peer | yes | no |
 | GossipSub | yes | no |
 | direct v2 | yes | no |
 | endpoint directory | yes | no |
 | Kademlia routing | trusted policy only | no |
 | DCUtR as destination peer | yes | no |
+
+Relay is the one protocol with two rows, and that pair is the distinction the table turns on: **who an exchange is WITH is a different question from who it is FOR.** Reserving or renewing a slot on a relay is an exchange with that peer for the purpose it was authorized for. A circuit whose far end *is* that peer uses it as an application destination and is refused — a circuit carries the data plane by construction. A relay may carry a circuit without becoming a party the circuit may terminate at. DCUtR has a single row and it is already the destination one, so the circuit row says for circuits what that row has always said for hole punches. (ADR-0036 Amendment 2026-09-03.)
 
 GossipSub must blacklist/exclude infrastructure-only PeerIds. Direct/endpoint managers reject their application requests. Kademlia manual insertion rejects them. No network content can modify either allowlist.
 
@@ -350,6 +353,7 @@ All outbound attempts are tagged conceptually with one origin:
 ```text
 direct-user-command
 connection-reconcile
+discovery-reconnect
 kademlia-query
 relay-reservation
 relay-circuit
@@ -369,7 +373,28 @@ The root `DialAdmissionGate` evaluates:
 
 A denied behaviour-originated dial must not reset normal peer backoff. Diagnostics preserve origin so Phase-9 behaviour cannot become invisible dial load.
 
-Infrastructure-only PeerIds are dialable only for permitted connectivity origins. `direct-user-command` and `kademlia-query` never use the infrastructure-only authorization set.
+Infrastructure-only PeerIds are dialable only for permitted connectivity origins, and the origins above divide exhaustively. The list corresponds one-to-one with `DialOrigin`'s variants; that enum is canonical and this section follows it rather than restating a set of its own. Two of the vocabulary names do not resemble their variant, so the correspondence is written out rather than left to be inferred:
+
+| this section | `DialOrigin` |
+|---|---|
+| `direct-user-command` | `Manual` |
+| `connection-reconcile` | `ConnectionManager` |
+| `discovery-reconnect` | `DiscoveryReconnect` |
+| `kademlia-query` | `KademliaQuery` |
+| `relay-reservation` | `RelayReservation` |
+| `relay-circuit` | `RelayCircuit` |
+| `autonat-probe` | `AutonatProbe` |
+| `dcutr-hole-punch` | `DcutrHolePunch` |
+
+**Permitted: `relay-reservation` and `autonat-probe`, and only those.** Each is an exchange *with* the infrastructure peer for the purpose it was authorized for.
+
+**Refused: every other variant.** `direct-user-command` and `kademlia-query` carry application traffic and routing outright. `relay-circuit` and `dcutr-hole-punch` name that peer as the DESTINATION of a data-plane path, which §4's matrix refuses. And `connection-reconcile` and `discovery-reconnect` are refused because both are *reconnection loops for peers this node wants a data-plane connection to* — neither may be the mechanism that re-establishes infrastructure.
+
+**An infrastructure connection is re-established by the purpose that authorized it, and §8 already owns that path**: a lost reservation goes `failure -> Backoff -> Candidate -> DialingControlConnection`, and that control dial carries `relay-reservation`. AutoNAT is the same shape — the next probe cycle (§5) dials under `autonat-probe`.
+
+**The gate enforces this and the runtime does not retry against it.** A reconnection-loop dial toward an infrastructure-only peer is refused `NotAuthorizedForDataPlane` at the root gate before a socket opens, and an authorization refusal settles the PEER rather than the address: the retry claim is cleared and the entry removed, because waiting does not make an unauthorized peer authorized. The residue is one refused attempt and one diagnostic per underlying failure, not a loop. (A refused *behaviour*-originated dial is the different case: the Swarm discards that denial with no `Dialing` and no `OutgoingConnectionError`, which is why the gate must record its own refusals.)
+
+(Only the `relay-circuit` refusal is ADR-0036's Amendment 2026-09-03. `dcutr-hole-punch` was already refused by a matrix row that predates it — that row is what the amendment was modelled on. The rest of this split states what the shipped classification has always done.)
 
 ## 12. Path-aware peer dialing
 
@@ -651,7 +676,8 @@ At minimum:
 16. Model-B direct EndpointId routing is identical on direct and relayed connections;
 17. GossipSub broadcast works over admitted relayed data-plane connection without adding relay infrastructure peer to the mesh;
 18. application operation timeout/failure semantics remain transport-v2 compliant during path failure;
-19. runtime infrastructure-only/data-plane class transition reconciles GossipSub/Kademlia/application state atomically or closes/reopens the connection before privilege changes.
+19. runtime infrastructure-only/data-plane class transition reconciles GossipSub/Kademlia/application state atomically or closes/reopens the connection before privilege changes;
+20. a Relay v2 circuit whose far end IS an infrastructure-only peer is refused, and a DCUtR hole punch toward such a peer is refused, while a reservation with that same peer and a circuit *through* it toward a trusted destination are both admitted — the pair is the assertion, since either half alone passes for a gate that refuses everything or one that refuses nothing (ADR-0036 Amendment 2026-09-03; §4's matrix, §11's origin split).
 
 ## 26. SPIKE-004 release gate
 

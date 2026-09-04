@@ -39,7 +39,7 @@ All ADRs are **Accepted** architecture decisions unless later superseded.
 | [0033](./0033-identity-recovery-mnemonic.md) | Use Ed25519 software identities with optional offline 24-word BIP-39 entropy encoding of the exact secret seed for same-PeerId recovery; no wallet PBKDF2 or IPC exposure. |
 | [0034](./0034-kademlia-default-enabled.md) | Standard v1 includes Kademlia support and configured Kademlia entries default enabled; operators may explicitly opt out. |
 | [0035](./0035-mandatory-internet-reachability.md) | Standard v1 requires AutoNAT v2 client, Circuit Relay v2 client/reservations, and DCUtR; Phase 9 is a release requirement. |
-| [0036](./0036-connectivity-infrastructure-peer-class.md) | Authorize relay/AutoNAT infrastructure through a protocol-scoped connection class that does not grant application data-plane trust. |
+| [0036](./0036-connectivity-infrastructure-peer-class.md) | Authorize relay/AutoNAT infrastructure through a protocol-scoped connection class that does not grant application data-plane trust; a circuit or hole punch terminating at such a peer is refused. |
 | [0037](./0037-split-local-admin-socket.md) | Split IPC data-plane and administrative authority onto separate local sockets; client.kind never grants admin authority. |
 | [0038](./0038-optional-encrypted-identity-at-rest.md) | Keep v1 filesystem-only key storage while defining a SPIKE-007-gated audited passphrase-encrypted key envelope as an explicit v2.x option. |
 | [0039](./0039-rust-human-client-slint.md) | First-party human clients share a Rust core and use Slint as the reference desktop/Android UI. |

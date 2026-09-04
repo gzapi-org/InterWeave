@@ -13,13 +13,31 @@
 //! in front of a real `relay::client::Behaviour`. Whatever it does to
 //! the reservation dial is what production does today.
 //!
-//! F1 says the answer is "refuses it", and says so from reading:
-//! the pending hook builds its `DialRequest` with
-//! `origin: DialOrigin::KademliaQuery` because Kademlia is the only
-//! behaviour that can currently dial, `KademliaQuery.is_data_plane()`
-//! is true, and `ConnectionPolicy::admit` refuses a data-plane origin
-//! for a `ConnectivityInfrastructureOnly` peer. R6 is that chain run
+//! **At phase A's close (2026-09-01) the answer was "refuses it"**, and
+//! F1 said so from reading: the pending hook built its `DialRequest`
+//! with `origin: DialOrigin::KademliaQuery` because Kademlia was the
+//! only behaviour that could dial, `KademliaQuery.is_data_plane()` is
+//! true, and `ConnectionPolicy::admit` refuses a data-plane origin for
+//! a `ConnectivityInfrastructureOnly` peer. R6 was that chain run
 //! rather than argued.
+//!
+//! **Stage 11 step 1 replaced the assumption with attribution, so the
+//! answer is now "admits it".** The hook resolves an announced
+//! `ConnectionId -> DialOrigin` note and refuses a dial it has no note
+//! for; a reservation dial announced as `RelayReservation` is not
+//! data-plane and is admitted. This module therefore wires the relay
+//! client through `Attributing` exactly as production does, and R6
+//! asserts the fix rather than the defect. F1 is history: the finding
+//! that attribution is required, and the record of what happened
+//! without it.
+//!
+//! **One node in R6 still lies to the gate on purpose.** F8 — a
+//! refusal of a behaviour dial is invisible, because the Swarm
+//! discards the denial — is a finding about the SWARM and is still
+//! true, but it needs a refused dial to observe and step 1 removed the
+//! accidental one. `with_trust_and_origin` announces a data-plane
+//! origin for a reservation dial, reproducing the same
+//! `NotAuthorizedForDataPlane` refusal honestly.
 
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -28,7 +46,8 @@ use std::time::Duration;
 use interweave_transport_api::TransportIdentity;
 use interweave_transport_libp2p::OutboundAdmission;
 use interweave_transport_libp2p::outbound_gate::InFlightTickets;
-use interweave_transport_runtime::{ConnectionManager, ConnectionPolicy, TrustSources};
+use interweave_transport_libp2p::{Attributing, DialAttribution, always};
+use interweave_transport_runtime::{ConnectionManager, ConnectionPolicy, DialOrigin, TrustSources};
 use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 use libp2p::core::Endpoint;
 use libp2p::core::transport::PortUse;
@@ -206,7 +225,32 @@ pub struct ProductionBehaviour {
     /// `Observing` wrapper forwards every call and decides nothing.
     pub outbound: Observing<OutboundAdmission>,
     pub identify: identify::Behaviour,
-    pub relay_client: relay::client::Behaviour,
+    /// ATTRIBUTED, because since Stage 11 step 1 the gate refuses a
+    /// dial it has no note for.
+    ///
+    /// `always(RelayReservation)` is the whole classifier, and the
+    /// reason is WHO is dialled rather than how many dials there are.
+    /// `libp2p-relay 0.21.1` emits `ToSwarm::Dial` TWICE --
+    /// `priv_client.rs:334` for a reservation, and `:373` to establish
+    /// the relay connection a circuit request needs -- and both name
+    /// the RELAY -- READ from those two call sites, both of which build
+    /// `DialOpts::peer_id(relay_peer_id)`, not measured here. What is
+    /// measured is the negative: R5.11 REQUIRES that no dial the relay
+    /// behaviour made was aimed at the destination. R5.10 prints the
+    /// target list beside it and is a `note`, so it cannot fail. What the
+    /// behaviour never emits is a dial toward the DESTINATION (R5.6),
+    /// because a `/p2p-circuit` address is dialled by the relay
+    /// TRANSPORT; that is the dial no wrapper here can see.
+    ///
+    /// So both dials the behaviour does emit are exchanges WITH the
+    /// relay -- control plane, in ADR-0036's terms -- and one
+    /// control-plane origin answers both. **Labelling the second one
+    /// `RelayCircuit` would be the mistake**: once Stage 11 step 2
+    /// makes that origin data-plane, a circuit through an
+    /// infrastructure-only relay would be refused at the dial that
+    /// sets up the relay connection, and relaying would stop working
+    /// for exactly the peers relaying exists for.
+    pub relay_client: Attributing<relay::client::Behaviour>,
 }
 
 /// A node running the shipped gate.
@@ -264,6 +308,25 @@ impl ProductionNode {
         data_plane: &[TransportIdentity],
         infrastructure: &[TransportIdentity],
     ) -> Self {
+        Self::with_trust_and_origin(data_plane, infrastructure, DialOrigin::RelayReservation)
+    }
+
+    /// The same node again, announcing its relay dials under `origin`.
+    ///
+    /// `RelayReservation` is the truthful answer and what
+    /// [`Self::with_trust`] uses. The parameter exists for ONE case:
+    /// producing a dial the gate refuses, now that the gate no longer
+    /// refuses reservations by accident. Announcing a data-plane origin
+    /// for a reservation dial is a deliberate lie to the gate, and it
+    /// reproduces exactly the refusal Stage 11 step 1 removed --
+    /// `NotAuthorizedForDataPlane` for an infrastructure-only relay --
+    /// which F8's invisibility claim needs as its subject.
+    #[must_use]
+    pub fn with_trust_and_origin(
+        data_plane: &[TransportIdentity],
+        infrastructure: &[TransportIdentity],
+        origin: DialOrigin,
+    ) -> Self {
         let keypair = identity::Keypair::generate_ed25519();
 
         let mut manager = ConnectionManager::new(ConnectionPolicy::new(32, 32), 32);
@@ -275,10 +338,15 @@ impl ProductionNode {
             &[],
         );
         let decisions = Decisions::default();
+        // ONE map, shared: the wrapper announces into it and the gate
+        // resolves out of it. Two instances would leave every dial
+        // unattributed, which the gate now refuses.
+        let attribution = DialAttribution::default();
         let outbound = Observing::new(
             OutboundAdmission::new(
                 manager.handle(),
                 InFlightTickets::default(),
+                attribution.clone(),
                 tokio::time::Instant::now(),
             ),
             decisions.clone(),
@@ -300,7 +368,7 @@ impl ProductionNode {
                     "/interweave-spike/1.0.0".to_owned(),
                     key.public(),
                 )),
-                relay_client,
+                relay_client: Attributing::new(relay_client, always(origin), attribution),
             })
             .expect("behaviour")
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(30)))

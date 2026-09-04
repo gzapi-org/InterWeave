@@ -164,39 +164,57 @@ fn every_local_route_failure_is_one_coarse_answer_on_the_wire() {
 }
 
 #[test]
-fn an_infrastructure_peer_cannot_reach_the_data_plane_by_any_origin() {
+fn an_infrastructure_peer_reaches_the_data_plane_only_where_this_table_says() {
     // Spans trust-api's InfrastructureSet concept and the runtime gate:
     // reachability authorization is not a weaker data-plane trust.
+    //
+    // THE EXPECTATION IS HARDCODED, and that is the whole point. This
+    // test used to derive both halves from `is_data_plane()` itself --
+    // `ALL.filter(|o| o.is_data_plane())` refused, its negation
+    // permitted -- which passes for ANY definition of the predicate,
+    // including one that returns `true` for everything or `false` for
+    // everything. Moving an origin only moved it between the loops. A
+    // test written from the same belief as the code agrees with it for
+    // free; the table below disagrees when the code changes, which is
+    // what a contract test is for.
+    //
+    // Two of these rows are WRONG and pinned deliberately.
+    // `RelayCircuit` and `DcutrHolePunch` name the infrastructure peer
+    // as an application DESTINATION, which ADR-0036's matrix refuses,
+    // and `is_data_plane` omits both -- SPIKE-004's D2 and D1. Stage 11
+    // step 2 moves them, and this table is one of the places that must
+    // change with them.
     let policy = ConnectionPolicy::new(16, 64);
     let address = "/ip4/192.0.2.1/tcp/4001".to_owned();
 
-    for origin in DialOrigin::ALL.into_iter().filter(|o| o.is_data_plane()) {
-        let request = DialRequest {
-            peer: Some(peer(P2)),
-            address: address.clone(),
-            origin,
-        };
-        assert!(
-            policy
-                .admit(&request, ConnectionClass::ConnectivityInfrastructureOnly, 0)
-                .is_err(),
-            "{origin:?} reached the data plane on an infrastructure-only class"
-        );
-    }
+    let expected = [
+        (DialOrigin::Manual, false),
+        (DialOrigin::ConnectionManager, false),
+        (DialOrigin::DiscoveryReconnect, false),
+        (DialOrigin::KademliaQuery, false),
+        (DialOrigin::RelayReservation, true),
+        (DialOrigin::AutonatProbe, true),
+        // D2 and D1: admitted today, refused once step 2 lands.
+        (DialOrigin::RelayCircuit, true),
+        (DialOrigin::DcutrHolePunch, true),
+    ];
+    assert_eq!(
+        expected.len(),
+        DialOrigin::ALL.len(),
+        "an origin was added to the enum and not to this table"
+    );
 
-    // The reachability origins do work, so the refusals above are about
-    // the data plane and not about the peer being unreachable.
-    for origin in DialOrigin::ALL.into_iter().filter(|o| !o.is_data_plane()) {
+    for (origin, admitted) in expected {
         let request = DialRequest {
             peer: Some(peer(P2)),
             address: address.clone(),
             origin,
         };
-        assert!(
-            policy
-                .admit(&request, ConnectionClass::ConnectivityInfrastructureOnly, 0)
-                .is_ok(),
-            "{origin:?} should be permitted for an infrastructure peer"
+        let answer = policy.admit(&request, ConnectionClass::ConnectivityInfrastructureOnly, 0);
+        assert_eq!(
+            answer.is_ok(),
+            admitted,
+            "{origin:?} on an infrastructure-only peer: expected admitted={admitted}, got {answer:?}"
         );
     }
 }

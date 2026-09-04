@@ -307,10 +307,12 @@ impl Node {
     /// Identical to [`Self::dial`] but for the origin announced. R5
     /// established that `relay::client::Behaviour` emits no
     /// `ToSwarm::Dial` for a circuit — the relay transport handles the
-    /// address — so `RelayCircuit` can only come from the caller, which
-    /// in production is `GatedSwarm::dial` reading the `/p2p-circuit`
-    /// component of the address it was handed. This models exactly
-    /// that, so what the gate then does with the origin is measurable.
+    /// address — so `RelayCircuit` can only come from the caller. In
+    /// production the caller passes it to `attempt_dial`, which carries
+    /// it into admission, and `GatedSwarm::dial` then enforces it
+    /// against the `/p2p-circuit` component of the address rather than
+    /// deriving it. This models exactly that, so what the gate then
+    /// does with the origin is measurable.
     pub fn dial_circuit(
         &mut self,
         peer: PeerId,
