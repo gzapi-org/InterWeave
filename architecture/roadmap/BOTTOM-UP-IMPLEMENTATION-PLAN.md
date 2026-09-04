@@ -1407,7 +1407,11 @@ data-plane origin, against the infrastructure the stage exists to use.
    than the behaviour dials a circuit: `attempt_dial` builds the
    `DialRequest` carrying the origin and admission runs there, and
    `GatedSwarm::dial` then enforces the address/origin PAIRING both
-   ways on the already-admitted dial. **Landed in PR #71.**
+   ways on the already-admitted dial. **The attribution and the pairing
+   enforcement landed in PR #71**; no caller supplies `RelayCircuit`
+   yet, because no relay feature is compiled — every `attempt_dial` call
+   site today passes `Manual` (`runtime/commands.rs`) or comes from the
+   retry tick. The mechanism is there and its first user is Phase 4.
    **One label decides whether relaying works at all**, and step 2's
    `is_data_plane` change is what arms it: `relay::client::Behaviour`
    emits two dials of its own (`libp2p-relay 0.21.1`
