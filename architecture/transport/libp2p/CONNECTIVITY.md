@@ -373,7 +373,18 @@ The root `DialAdmissionGate` evaluates:
 
 A denied behaviour-originated dial must not reset normal peer backoff. Diagnostics preserve origin so Phase-9 behaviour cannot become invisible dial load.
 
-Infrastructure-only PeerIds are dialable only for permitted connectivity origins, and the origins above divide exhaustively. The list is `DialOrigin`'s variants; that enum is canonical and this section follows it rather than restating a set of its own.
+Infrastructure-only PeerIds are dialable only for permitted connectivity origins, and the origins above divide exhaustively. The list corresponds one-to-one with `DialOrigin`'s variants; that enum is canonical and this section follows it rather than restating a set of its own. Two of the vocabulary names do not resemble their variant, so the correspondence is written out rather than left to be inferred:
+
+| this section | `DialOrigin` |
+|---|---|
+| `direct-user-command` | `Manual` |
+| `connection-reconcile` | `ConnectionManager` |
+| `discovery-reconnect` | `DiscoveryReconnect` |
+| `kademlia-query` | `KademliaQuery` |
+| `relay-reservation` | `RelayReservation` |
+| `relay-circuit` | `RelayCircuit` |
+| `autonat-probe` | `AutonatProbe` |
+| `dcutr-hole-punch` | `DcutrHolePunch` |
 
 **Permitted: `relay-reservation` and `autonat-probe`, and only those.** Each is an exchange *with* the infrastructure peer for the purpose it was authorized for.
 
