@@ -1373,7 +1373,8 @@ below and are repeated where they bite:
   evaluated against the authenticated end PeerId at all. The spike
   measured that the end PeerId and the relay's are both available at
   the destination's established hook, which is where the decision
-  belongs; Phase 5 owes the decision itself.
+  belongs; step 7, which builds relayed peer paths, owes the decision
+  itself.
 
 **And one thing phase A does NOT unlock: the protocol-isolation
 correction.** The exposure invariant below is about what an
@@ -1411,7 +1412,8 @@ data-plane origin, against the infrastructure the stage exists to use.
    enforcement landed in PR #71**; no caller supplies `RelayCircuit`
    yet, because no relay feature is compiled — every `attempt_dial` call
    site today passes `Manual` (`runtime/commands.rs`) or comes from the
-   retry tick. The mechanism is there and its first user is Phase 4.
+   retry tick. The mechanism is there and its first user is step 5, where the relay
+   feature is compiled.
    **One label decides whether relaying works at all**, and step 2's
    `is_data_plane` change is what arms it: `relay::client::Behaviour`
    emits two dials of its own (`libp2p-relay 0.21.1`
