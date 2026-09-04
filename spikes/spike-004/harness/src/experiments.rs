@@ -971,7 +971,7 @@ pub async fn r5_circuit_is_not_a_reservation(report: &mut Report) {
     );
 }
 
-/// R6 — the SHIPPED gate, refusing the reservation.
+/// R6 — the SHIPPED gate, and what step 1 changed about its answer.
 ///
 /// Every other experiment runs `InstrumentedGate`, which is the gate
 /// Stage 11 would have to build. Measuring a proposal proves the
@@ -979,11 +979,15 @@ pub async fn r5_circuit_is_not_a_reservation(report: &mut Report) {
 /// path, unmodified — in front of a real `relay::client::Behaviour`
 /// and records what it does.
 ///
-/// F1 is otherwise a chain of reading: the pending hook builds its
-/// `DialRequest` with `origin: DialOrigin::KademliaQuery`,
-/// `is_data_plane()` is true for it, and `ConnectionPolicy::admit`
-/// refuses a data-plane origin for a `ConnectivityInfrastructureOnly`
-/// peer. Three files. This runs the chain instead of arguing it.
+/// At phase A's close this measured a REFUSAL, and F1 is that record:
+/// the pending hook built every unticketed behaviour dial with
+/// `origin: DialOrigin::KademliaQuery`, `is_data_plane()` is true for
+/// it, and `ConnectionPolicy::admit` refuses a data-plane origin for a
+/// `ConnectivityInfrastructureOnly` peer. Stage 11 step 1 gave the hook
+/// real attribution, so the same dial now arrives as `RelayReservation`
+/// and is ADMITTED. What still runs the chain rather than arguing it is
+/// the `misattributed` node below, which announces the same dial under
+/// a data-plane origin and is refused for the class.
 ///
 /// # Why it is measured at the gate and not at the Swarm
 ///
@@ -1001,7 +1005,7 @@ pub async fn r5_circuit_is_not_a_reservation(report: &mut Report) {
 /// So the instrument moved to where the decision is made:
 /// [`crate::production::Observing`] forwards every call to the real
 /// gate and records the verdict the real gate returned.
-pub async fn r6_production_gate_refuses_the_reservation(report: &mut Report) {
+pub async fn r6_production_gate_answers_the_reservation_dial(report: &mut Report) {
     use crate::production::ProductionNode;
 
     let mut relay_node = Node::new(Roles::infrastructure(), &[], &[]);
@@ -1190,10 +1194,16 @@ pub async fn r6_production_gate_refuses_the_reservation(report: &mut Report) {
         ),
     );
 
-    // THE CONTROL, and it is what makes R6.5 mean anything. One change
-    // — the relay moved from the infrastructure set to the data-plane
-    // allowlist — and the same dial is admitted. So the refusal is the
-    // CLASS, not the network, the addresses or the fixture.
+    // THE CONTROL, which since step 1 is a REGRESSION GUARD rather than
+    // a contrast. Its variable no longer changes the outcome: the
+    // subject is admitted too, because `RelayReservation` is not a
+    // data-plane origin and `admit` reads `is_data_plane` only in the
+    // `ConnectivityInfrastructureOnly` arm. What discriminates now is
+    // `misattributed` at R6.6 — same relay, same class, data-plane
+    // origin, refused. An experiment whose control agrees with its
+    // subject has measured neither, so the naming is deliberate: this
+    // row asserts the trusted path did not break, and R6.6 carries the
+    // contrast R6.5 needs to mean anything.
     report.require(
         "R6.7",
         control.decisions.admissions() > 0,
@@ -1234,10 +1244,10 @@ pub async fn r6_production_gate_refuses_the_reservation(report: &mut Report) {
     );
     // THE POSITIVE CONTROL FOR F8, without which R6.9 is an assertion
     // that nothing happened in a fixture where nothing happens. The
-    // control's dial is admitted and the Swarm reports it: one
-    // `Dialing`, one `ConnectionEstablished`. So the subject's silence
-    // is the refusal being invisible, not this node being unable to
-    // report a dial.
+    // SUBJECT's dial is admitted and the Swarm reports it: one
+    // `Dialing`, one `ConnectionEstablished`. So the MISATTRIBUTED
+    // node's silence is the refusal being invisible, not that node
+    // being unable to report a dial.
     report.require(
         "R6.11",
         node.dialing >= 1 && misattributed.dialing == 0,

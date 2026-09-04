@@ -33,7 +33,7 @@ async fn main() {
     experiments::r3_infrastructure_cannot_reach_the_data_plane(&mut report);
     experiments::r4_autonat_server_dial_back(&mut report).await;
     experiments::r5_circuit_is_not_a_reservation(&mut report).await;
-    experiments::r6_production_gate_refuses_the_reservation(&mut report).await;
+    experiments::r6_production_gate_answers_the_reservation_dial(&mut report).await;
     experiments::r7_relayed_path_trust(&mut report).await;
     let relayed = experiments::r8_relayed_inbound_accounting(&mut report).await;
     experiments::r9_relayed_preauth_bucket(&mut report, relayed).await;
