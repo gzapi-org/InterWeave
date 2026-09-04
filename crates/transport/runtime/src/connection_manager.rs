@@ -2738,6 +2738,33 @@ mod tests {
         }
     }
 
+    /// The OTHER half of the same "only" claim.
+    ///
+    /// `a_trusted_peer_keeps_its_connection_under_every_origin` pins the
+    /// `DataPlaneTrusted` arm; without this one the `Unauthorized` arm
+    /// is unpinned and a mutation survives. `authorizes` -- the
+    /// single-argument wrapper the rest of the tests use -- hardcodes
+    /// `DialOrigin::Manual`, and `Manual.is_data_plane()` is true, so
+    /// rewriting `Unauthorized => false` as `=> !origin.is_data_plane()`
+    /// leaves every existing assertion green while making the comment's
+    /// "only" false. `ConnectionPolicy::admit`'s matching claim is
+    /// pinned by `an_unauthorized_peer_is_refused_whatever_the_origin`;
+    /// this is that test's counterpart at the second consumer.
+    #[test]
+    fn an_unauthorized_peer_keeps_nothing_under_any_origin() {
+        let m = untrusting(8);
+        let class = m.classify(&peer(P1));
+        assert_eq!(class, ConnectionClass::Unauthorized);
+
+        for origin in DialOrigin::ALL {
+            assert!(
+                !m.authorizes_for(class, origin),
+                "{origin:?} RETAINED an unauthorized peer's connection, so the origin's \
+                 plane is being consulted where the class alone must refuse"
+            );
+        }
+    }
+
     #[test]
     fn an_infrastructure_peer_keeps_a_reachability_connection_and_loses_a_data_plane_one() {
         // ADR-0036's separation is an origin/class PAIR, and
@@ -2748,8 +2775,8 @@ mod tests {
         // (That contract test derived its expectation from
         // `is_data_plane` until 2026-09-03, so "pins" overstated it;
         // it asserts a hardcoded table now.) Revalidating an
-        // established connection
-        // with the data-plane-only predicate ignored the pair, so a
+        // established connection with the data-plane-only predicate
+        // ignored the pair, so a
         // relay reservation, relay circuit, AutoNAT probe or DCUtR hole
         // punch to an infrastructure peer completed its handshake and
         // was closed immediately -- admission permitted it and
