@@ -49,11 +49,21 @@ terms that rode in with copied material.
 **Phase 4 — opening**
 
 ```
-17. gh pr create --base main --head "$BRANCH"
-18. gh pr merge <n> --auto                     # ONLY when done — nothing asks
-19. tools/gh/wait-merged.sh <n> &              # background; its exit is the callback
-19b. tools/gh/pr-review-status.sh <n> --wait 30m --automated-only &
+17.  gh pr create --base main --head "$BRANCH"
+17a. gh pr comment <n> --body "@codex review"  # BOTH reviewers, every time
+17b. Agent(description: "review PR <n> …", model: "opus")   # ← same breath
+17c. tools/gh/pr-review-status.sh <n> --wait 30m --automated-only &
+18.  gh pr merge <n> --auto     # ONLY when done, and AFTER 17b reported —
+                                #   nothing asks. See CLAUDE.md §9 for which
+                                #   exit codes of 17c let the subagent's
+                                #   review satisfy the gate on its own.
+19.  tools/gh/wait-merged.sh <n> &      # background; its exit is the callback
 ```
+
+**17a and 17b are both steps, not one with a fallback** — the subagent is
+the half that is guaranteed to answer, and CLAUDE.md §9 says why. **18 sits
+below them deliberately**: arming is standing consent, so it belongs after
+the gate rather than above it.
 
 Drop `--delete-branch`: the queue owns branch cleanup and `gh` rejects the
 flag.
@@ -169,17 +179,17 @@ different hosts. **Isolation is required**, and the model is **one full
 task that merely looks parallelisable is not an invitation. The isolation
 contract governs **how** to dispatch, never **whether**.
 
-**ONE EXCEPTION: a review the automated reviewer declined.** When
-`@codex review` answers "You have reached your Codex usage limits", the
-gate in `CLAUDE.md` §9 reads as satisfied while nothing has been
-reviewed — `pr-review-status.sh` counts a refusal as "already answered".
-Dispatch a reviewer without being asked, one per PR, and read §9's
-"When the reviewer declines" for the rest: no session context passed,
-and the findings posted to the PR and answered there rather than
-reported into the transcript — including when there are none, since a
-clean review that leaves no comment is indistinguishable from the
-refusal that preceded it. The model is `opus` by the standing rule
-below, not by anything special about this path.
+**ONE EXCEPTION: code review.** Every review dispatches a subagent
+reviewer WITHOUT being asked, one per PR, alongside the `@codex review`
+request rather than as its fallback — read §9's "Every review runs BOTH
+reviewers, in parallel" for why the fallback shape was wrong and for the rest of the
+contract: no session context passed, the brief scoped to the PR's
+`base..head` range, and the findings posted to the PR and answered
+there rather than reported into the transcript — including when there
+are none, since a clean review that leaves no comment is
+indistinguishable from a review that never happened. The model is
+`opus` by the standing rule below, not by anything special about this
+path.
 
 The `PreToolUse` hook in `.claude/settings.json` denies a dispatch missing
 `model` or `isolation` and states why at the moment of the call, so those
@@ -206,8 +216,8 @@ ask is answered by the user, not by the rule. So:
   that model" — the hook's own text says the inheritance is the failure
   mode, not the default. **CODE REVIEW IS THE STANDING EXCEPTION** and
   needs no per-dispatch authorisation: every review subagent runs on
-  `opus`, whether the automated reviewer declined, a review was asked
-  for directly, or merged code is being audited. `CLAUDE.md` §9 carries
+  `opus` — the one standing beside the automated reviewer, one asked
+  for directly, or an audit of merged code. `CLAUDE.md` §9 carries
   the rule and why — a review's failure mode is not a retry, it is a
   green PR that merges.
 - **Choose the cheapest tier that can do the job**: `haiku` for mechanical,
