@@ -169,21 +169,22 @@ fn an_infrastructure_peer_reaches_the_data_plane_only_where_this_table_says() {
     // reachability authorization is not a weaker data-plane trust.
     //
     // THE EXPECTATION IS HARDCODED, and that is the whole point. This
-    // test used to derive both halves from `is_data_plane()` itself --
+    // test used to derive both halves from the predicate itself --
     // `ALL.filter(|o| o.is_data_plane())` refused, its negation
-    // permitted -- which passes for ANY definition of the predicate,
-    // including one that returns `true` for everything or `false` for
-    // everything. Moving an origin only moved it between the loops. A
-    // test written from the same belief as the code agrees with it for
-    // free; the table below disagrees when the code changes, which is
-    // what a contract test is for.
+    // permitted -- which passes for ANY definition of it, including one
+    // that returns `true` for everything or `false` for everything.
+    // Moving an origin only moved it between the loops. A test written
+    // from the same belief as the code agrees with it for free; the
+    // table below disagrees when the code changes, which is what a
+    // contract test is for.
     //
-    // Two of these rows are WRONG and pinned deliberately.
-    // `RelayCircuit` and `DcutrHolePunch` name the infrastructure peer
-    // as an application DESTINATION, which ADR-0036's matrix refuses,
-    // and `is_data_plane` omits both -- SPIKE-004's D2 and D1. Stage 11
-    // step 2 moves them, and this table is one of the places that must
-    // change with them.
+    // AND IT DID DISAGREE. Two rows were pinned WRONG on purpose until
+    // Stage 11 step 2 -- `RelayCircuit` and `DcutrHolePunch` admitted
+    // for an infrastructure-only peer, SPIKE-004's D2 and D1. Step 2
+    // moved both origins, and this table is one of the places that had
+    // to change with them. Every row now says `false`: an
+    // infrastructure-only peer is reachable for the two purposes it was
+    // authorized for and for nothing else.
     let policy = ConnectionPolicy::new(16, 64);
     let address = "/ip4/192.0.2.1/tcp/4001".to_owned();
 
@@ -192,11 +193,16 @@ fn an_infrastructure_peer_reaches_the_data_plane_only_where_this_table_says() {
         (DialOrigin::ConnectionManager, false),
         (DialOrigin::DiscoveryReconnect, false),
         (DialOrigin::KademliaQuery, false),
+        // The two purposes an infrastructure-only peer IS authorized
+        // for: both name it as the party the exchange is WITH.
         (DialOrigin::RelayReservation, true),
         (DialOrigin::AutonatProbe, true),
-        // D2 and D1: admitted today, refused once step 2 lands.
-        (DialOrigin::RelayCircuit, true),
-        (DialOrigin::DcutrHolePunch, true),
+        // D2 and D1, refused since Stage 11 step 2. Each names that
+        // peer as the DESTINATION of an application path -- a circuit
+        // carries application traffic by construction, and a hole punch
+        // opens a direct path to the peer it names.
+        (DialOrigin::RelayCircuit, false),
+        (DialOrigin::DcutrHolePunch, false),
     ];
     assert_eq!(
         expected.len(),
