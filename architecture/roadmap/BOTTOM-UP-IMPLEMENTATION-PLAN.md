@@ -1535,9 +1535,16 @@ data-plane origin, against the infrastructure the stage exists to use.
   peer and a circuit *through* it toward a trusted destination are
   admitted. A relay may carry a circuit without becoming a party a
   circuit may terminate at; who an exchange is WITH is a different
-  question from who it is FOR (ADR-0036 Amendment 2026-09-03). **Not met
-  today** — `DialOrigin::is_data_plane` omits both origins, which is D2
-  and D1, and step 2 is where it is met;
+  question from who it is FOR (ADR-0036 Amendment 2026-09-03). **Met by
+  step 2** (2026-09-04): `DialOrigin::names_application_destination`
+  names both origins, closing D1 and D2. The REFUSED half is pinned by
+  the contract test's table and by the spike harness at R3.5, R3.6 and
+  R7.4; the ADMITTED half — a circuit *through* infrastructure toward a
+  trusted destination — is pinned by
+  `a_trusted_destination_is_admitted_under_every_origin`, which is why
+  moving the origins costs the legitimate case nothing. Both halves are
+  needed: either alone passes for a gate that refuses everything or one
+  that refuses nothing;
 - DCUtR upgrade emits path change, not false logical reconnect;
 - relay path remains fallback until direct stability rules permit preference switch.
 

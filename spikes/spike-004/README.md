@@ -244,6 +244,17 @@ and ADR-0036 says it must not be.** The one finding here that is a
 defect in THIS project rather than in a dependency, and the reason the
 harness has a "divergence" category at all.
 
+> **RESOLVED 2026-09-04, Stage 11 step 2.** The origin is named by the
+> admission predicate — renamed `names_application_destination` in the
+> same change — so a hole punch terminating at an infrastructure-only
+> peer is refused. R3.5 asserted the admission in the defect's shape so
+> that a fix would fail there rather than pass silently, and it did:
+> R3.5 was one of three observations that failed on the fixing commit.
+> It now asserts the refusal, and asserts it carries
+> `NotAuthorizedForDataPlane` rather than merely that something was
+> refused. The record below is left as written; this note is the
+> correction.
+
 ADR-0036's protocol-admission matrix reads *"DCUtR with that peer as
 application destination | DataPlaneTrusted: yes |
 ConnectivityInfrastructureOnly: **no**"*, and `DCUTR.md` §2 says never
@@ -300,6 +311,15 @@ admission — recording the violation as evidence that the split held.
 
 **D2 — `RelayCircuit` is admitted for an infrastructure-only
 DESTINATION, and a circuit is application traffic by construction.**
+
+> **RESOLVED 2026-09-04, Stage 11 step 2**, together with D1 and by the
+> same two-word change. `RelayReservation` did NOT move, for the reason
+> this section argues below. R3.6 and R7.4 now assert the refusal;
+> R7.4's control changed meaning with it, since both origins are
+> refused now and R7.2 carries the discrimination — a stranger is
+> refused `Unauthorized` rather than for the data plane. The record
+> below is left as written; this note is the correction.
+
 The same omission from `is_data_plane`, one origin over, and it is the
 more consequential of the two: a relayed circuit exists to carry the
 data plane. ADR-0036's enforcement clause is explicit — *"the root dial
@@ -350,8 +370,9 @@ permitted the behaviour is precisely what §2 forbids.
 > Amendment 2026-09-03 added the row the matrix lacked, `| Relay v2
 > circuit with that peer as application destination | yes | **no** |`,
 > and `transport/libp2p/CONNECTIVITY.md` §4 and §11 inherited it. **The
-> conflict is gone and D2 is now an ordinary code fix** — do not stop
-> for the architecture decision, it has been taken. The fix stays
+> conflict is gone and D2 became an ordinary code fix**, made on
+> 2026-09-04 — do not stop for the architecture decision, it has been
+> taken, and do not re-make the code change either. The fix stays
 > per-origin, as this section argues above: `RelayCircuit` moves,
 > `RelayReservation` does not. The finding above is left as it was
 > measured, because what a spike recorded is the thing a later reader
@@ -851,10 +872,10 @@ mentioned it is labelled as one — a note is printed, never checked.
 | F2 where the check runs | R4.10: the candidate is at the pending hook, before any socket |
 | F4 pending-hook address count | R2.9: exactly one, where Kademlia's is zero |
 | F6 class split and precedence | R3.1/R3.2 by denial REASON, and R3.4 flips all four when the peer is in both sets |
-| D1 DCUtR divergence | R3.5 pins today's behaviour, so a fix fails here rather than passing silently |
-| D2, pinned rather than endorsed | R3.6 — the same admission R3.1 used to list under "the matrix permits", split out so that fixing D2 does not fail an experiment claiming the matrix allows it |
+| D1 DCUtR divergence, FIXED 2026-09-04 | R3.5 pinned the admission so a fix would fail here rather than pass silently — it did, and now asserts the refusal by denial REASON |
+| D2, FIXED 2026-09-04 | R3.6 — the same admission R3.1 used to list under "the matrix permits", split out so that fixing D2 does not fail an experiment claiming the matrix allows it |
 | F5 default policy refuses everything | R3.7: `ConnectionPolicy::default()` refuses a fully TRUSTED peer with `ConnectionLimitReached`, so a fixture taking the default measures nothing about class |
-| D2 relayed-circuit divergence | R7.4 pins today's behaviour, R7.5 is the control (same destination, data-plane origin, refused), R7.2 shows the class check runs on the destination at all |
+| D2 relayed-circuit divergence, FIXED 2026-09-04 | R7.4 pinned the admission and now asserts the refusal by denial REASON; R7.2 carries the discrimination the control used to (a stranger is refused `Unauthorized`, not for the data plane), so R7.5 is now a regression guard rather than a contrast |
 | D3 relayed pre-auth bucket | R9.3 pins today's behaviour, R9.2 is the control (direct inbounds from one IP — the second refused), R9.4 shows the global cap is what remains, and R9.6 requires the two sources to differ only in identity — the fixture being R8's MEASURED address with one substitution, which R9.5 records as a note |
 | §10's premise and its capability | R8.4 (no source IP on a relayed remote), R8.11 (the remote IS the source's PeerId — D3's whole force), R8.5 (the relay's PeerId IS available at the pending hook), R8.7 the control (a direct inbound does carry an IP), R8.8 (the two are distinguishable there) |
 | ADR-0036's inbound relayed clause | R8.9/R8.10: the destination's established hook names the SOURCE's authenticated PeerId on a relayed local address, and never the relay's |
