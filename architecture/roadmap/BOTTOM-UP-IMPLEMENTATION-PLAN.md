@@ -1413,7 +1413,10 @@ data-plane origin, against the infrastructure the stage exists to use.
    emits two dials of its own (`libp2p-relay 0.21.1`
    `priv_client.rs:334` and `:373`) — a reservation, and the dial that
    establishes the relay connection a circuit request needs — and BOTH
-   name the relay rather than the destination (R5.10). Both are
+   name the relay rather than the destination — read from the two call
+   sites, and pinned from the other side by R5.11, which requires that
+   no behaviour-made dial targeted the destination (R5.10 prints the
+   targets and is a note, so it cannot fail). Both are
    exchanges *with* the relay and must carry a control-plane origin.
    Label the second `RelayCircuit` and, once that origin becomes
    data-plane, every circuit through an infrastructure-only relay is

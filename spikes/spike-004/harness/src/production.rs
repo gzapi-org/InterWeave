@@ -233,8 +233,11 @@ pub struct ProductionBehaviour {
     /// `libp2p-relay 0.21.1` emits `ToSwarm::Dial` TWICE --
     /// `priv_client.rs:334` for a reservation, and `:373` to establish
     /// the relay connection a circuit request needs -- and both name
-    /// the RELAY. R5.10 measures exactly that: every relay-behaviour
-    /// dial targets the relay, never the destination. What the
+    /// the RELAY -- READ from those two call sites, both of which build
+    /// `DialOpts::peer_id(relay_peer_id)`, not measured here. What is
+    /// measured is the negative: R5.11 REQUIRES that no dial the relay
+    /// behaviour made was aimed at the destination. R5.10 prints the
+    /// target list beside it and is a `note`, so it cannot fail. What the
     /// behaviour never emits is a dial toward the DESTINATION (R5.6),
     /// because a `/p2p-circuit` address is dialled by the relay
     /// TRANSPORT; that is the dial no wrapper here can see.
