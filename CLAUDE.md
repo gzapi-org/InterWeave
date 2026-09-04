@@ -472,9 +472,12 @@ changes are not on that list and should not wait.
 
 The mechanics, and the step that is easy to miss: **a push does not
 re-trigger automated review, so waiting for one you never asked for is
-waiting forever.** Open the PR, request a review explicitly, and only then
-run `tools/gh/pr-review-status.sh <n> --wait --automated-only` in the
-background, arming once it reports a review of the current head.
+waiting forever.** Open the PR, request a review explicitly **and dispatch
+the subagent reviewer in the same breath** (both, every time — see below),
+and only then run `tools/gh/pr-review-status.sh <n> --wait --automated-only`
+in the background. Arm once BOTH have reported on the current head: the
+script sees the automated one, and the subagent's findings reach the PR as
+a comment you post.
 
 **`--automated-only` is part of the instruction, not a refinement of it —
 the bare command does not satisfy this gate.** Without the flag, coverage
@@ -494,29 +497,52 @@ Zero unresolved P1 or P2 findings is also a precondition for declaring a
 stage complete. Nothing enforces that; it is the same class of obligation
 as the follow-up phase, which no red check announces either.
 
-#### When the reviewer declines, dispatch one — this is the exception
+#### Every review runs BOTH reviewers, in parallel
 
-`@codex review` can come back **"You have reached your Codex usage limits
-for code reviews."** That is not coverage, and `pr-review-status.sh`
-counts the refusal as "already answered" — so the gate above reads as
-satisfied while nothing has been reviewed. It has already let two PRs
-merge with their final heads unreviewed (#58 and #59; #59 merged four
-hours after the refusal, carrying a 265-line rewrite of the conformance
-suite).
+**Request `@codex review` and dispatch the subagent reviewer at the same
+time, on every review.** Not one as the other's fallback, and not
+conditional on anything the automated reviewer does or fails to do. Two
+reports on the same head is the intended outcome.
 
-So when the reviewer declines for usage limits, **dispatch a subagent to
-do the review instead**. The rules that normally govern dispatch are
-relaxed here, deliberately, and only here:
+The earlier rule fired only on **"You have reached your Codex usage limits
+for code reviews."** That trigger was too narrow, because there are at
+least three ways the automated reviewer leaves a head uncovered and only
+one of them says so:
+
+- **It refuses on usage limits.** `pr-review-status.sh` counts the refusal
+  as "already answered", so the gate above reads as satisfied while nothing
+  has been reviewed. This already let two PRs merge with their final heads
+  unreviewed (#58 and #59; #59 merged four hours after the refusal,
+  carrying a 265-line rewrite of the conformance suite).
+- **It reviews an earlier commit.** A push does not re-trigger it, so a
+  review object exists and names a tree that is no longer the head.
+- **It goes silent.** On #72 a request sat in flight past nine minutes with
+  neither a review nor a refusal — a state no refusal-keyed trigger
+  detects, because nothing was ever said.
+
+Running both unconditionally removes the trigger rather than widening it,
+and the only cost is tokens.
+
+The rules that normally govern dispatch are relaxed for the subagent half,
+deliberately, and only here:
 
 - **Reviewing is an exception to the opt-in rule.** §9 and the
   `pr-lifecycle` skill say fan-out happens only when the user asks. A
-  review after a declined request does not need asking — the alternative
-  is landing unreviewed code.
+  review does not need asking — the alternative is landing unreviewed code.
 - **`model: "opus"`**, per the standing rule below — no per-dispatch
   authorisation needed.
 - **One agent per PR, with NO context from the session.** Pass the PR's
   tree and diff and nothing else. An agent told what the author expects
   confirms it; the whole value is that it does not know.
+- **Scope the brief to the DIFF, not to the repository.** Name the exact
+  `base..head` range, and state the test a finding must pass: *if this PR
+  were reverted, would the problem go away?* Require every finding to quote
+  the hunk that causes it, and put anything pre-existing in a separate
+  labelled section so it can be triaged apart from the PR. Without this the
+  agent reads the whole tree and reports the repository's standing debt as
+  though this change introduced it. It still needs to READ widely — stale
+  prose and enum exhaustiveness cannot be checked from a diff alone — so
+  the limit is on what may be REPORTED, not on what may be read.
 - **No worktree — a review reads the session tree directly.** Isolation
   exists to keep an agent's WRITES out of the clone, and a review writes
   nothing, so a worktree buys nothing here and costs something real:
@@ -540,12 +566,17 @@ relaxed here, deliberately, and only here:
 - **A CLEAN review is posted too.** Say what was read and that nothing
   was found. This is the case the rule most needs, and the easiest to
   skip: there is no finding to write up, so the natural move is to arm
-  the merge and move on. But `pr-review-status.sh` has already counted
-  the usage-limit refusal as an answered request, so the gate reads as
-  satisfied — and with nothing on the PR, the record shows a review
-  that was declined and no evidence any other one happened. A clean
-  comment is the only thing separating "reviewed, nothing found" from
-  "never reviewed".
+  the merge and move on. But a refusal or a silence leaves the gate
+  reading as satisfied — and with nothing on the PR, the record shows a
+  review that never landed and no evidence any other one happened. A
+  clean comment is the only thing separating "reviewed, nothing found"
+  from "never reviewed".
+
+**Where the two disagree, that is signal — do not average them.** Keep both
+reports, and verify the contested claim against the source yourself. A
+finding one reviewer raises and the other misses is the normal case and
+carries no penalty; a direct contradiction means at least one of them
+reasoned from something false, and which one matters.
 
 Everything else still applies: the findings are input rather than
 verdicts, a disagreement is stated with its reasoning rather than
@@ -560,9 +591,9 @@ premium-tier rule's "unless the user's prompt explicitly asks for that
 tier" clause once, here, for the whole class. Do not ask again, and do
 not fall back to `sonnet` because a particular review looks small.
 
-It applies to any review dispatch, not only the declined-reviewer path
-above: a review requested directly, a second opinion on a change already
-reviewed, an audit of merged code. If the job is *reviewing*, the tier
+It applies to every review dispatch: the standing one that runs beside
+the automated reviewer above, a review requested directly, a second
+opinion on a change already reviewed, an audit of merged code. If the job is *reviewing*, the tier
 is settled.
 
 The reasoning is the asymmetry. Everywhere else, the cheapest tier that
