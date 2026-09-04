@@ -453,8 +453,9 @@ there is no trade to make.
 
 #### A security-boundary change waits for its review
 
-**Do not arm `--auto` on a change to a security boundary until the
-automated review has reported on the current head.** Green checks are not a
+**Do not arm `--auto` on a change to a security boundary until a review
+has reported on the current head** — see below for which reviewer, since
+both are requested and only one of them is guaranteed to answer. Green checks are not a
 review: §9 already says the merge is not evidence that anything was
 reviewed, and the queue lands a PR the moment the last check passes.
 
@@ -475,9 +476,25 @@ re-trigger automated review, so waiting for one you never asked for is
 waiting forever.** Open the PR, request a review explicitly **and dispatch
 the subagent reviewer in the same breath** (both, every time — see below),
 and only then run `tools/gh/pr-review-status.sh <n> --wait 30m --automated-only`
-in the background. Arm once BOTH have reported on the current head: the
-script sees the automated one, and the subagent's findings reach the PR as
-a comment you post.
+in the background.
+
+**What satisfies the gate.** Both are requested, but only the subagent is
+guaranteed to answer, so the terminating condition is stated in terms of
+the one you control:
+
+- `pr-review-status.sh` exits **0** — the automated reviewer covered this
+  head. Together with the subagent's posted review, arm.
+- It exits **1, 2 or 5** — refused, silent, or reviewing an older commit.
+  **The posted subagent review of the current head satisfies the gate on
+  its own.** Say so on the PR: name the exit code, the head it covers, and
+  that the automated half did not report. Then arm.
+- Neither has reported on this head — do not arm. That is the only state
+  that blocks, and it is one you can always leave by dispatching.
+
+The subagent is what makes this terminate. Without it a refused or silent
+reviewer means "never arm", which is the state the old fallback rule
+existed to avoid and which making the dispatch unconditional must not
+quietly reintroduce.
 
 **`--automated-only` is part of the instruction, not a refinement of it —
 the bare command does not satisfy this gate.** Without the flag, coverage
@@ -509,16 +526,19 @@ for code reviews."** That trigger was too narrow, because there are at
 least three ways the automated reviewer leaves a head uncovered and only
 one of them says so:
 
-- **It refuses on usage limits.** `pr-review-status.sh` counts the refusal
-  as "already answered", so the gate above reads as satisfied while nothing
-  has been reviewed. This already let two PRs merge with their final heads
-  unreviewed (#58 and #59; #59 merged four hours after the refusal,
+- **It refuses on usage limits.** The script has no notion of a refusal —
+  `grep -n 'reached your\|usage limit' tools/gh/pr-review-status.sh` returns
+  nothing — so the refusal never becomes a verdict and the gate correctly
+  reports "not covered". What failed was the READER: a refusal looks like
+  an answer, and two PRs merged with their final heads unreviewed on the
+  strength of it (#58 and #59; #59 merged four hours after the refusal,
   carrying a 265-line rewrite of the conformance suite).
 - **It reviews an earlier commit.** A push does not re-trigger it, so a
   review object exists and names a tree that is no longer the head.
-- **It goes silent.** On #72 a request sat in flight past nine minutes with
-  neither a review nor a refusal — a state no refusal-keyed trigger
-  detects, because nothing was ever said.
+- **It goes silent.** On #72 a request sat in flight for over forty minutes
+  with neither a review nor a refusal — a state no refusal-keyed trigger
+  detects, because nothing was ever said. The gate reports this correctly
+  too: it burns the whole `--wait` and exits 1.
 
 Running both unconditionally removes the trigger rather than widening it,
 and the only cost is tokens.
@@ -545,7 +565,8 @@ deliberately, and only here:
   the limit is on what may be REPORTED, not on what may be read.
 - **No worktree — a review reads the session tree directly.** Isolation
   exists to keep an agent's WRITES out of the clone, and a review writes
-  nothing, so a worktree buys nothing here and costs something real:
+  nothing, so a worktree is pure setup cost for no benefit. It also costs
+  something real when the brief is not range-scoped:
   `worktree.baseRef` is `head`, so an isolation worktree shows the last
   COMMIT and a reviewer inside one cannot see uncommitted work at all.
   Omit `isolation`, give the agent the repository path, and tell it the
@@ -566,11 +587,12 @@ deliberately, and only here:
 - **A CLEAN review is posted too.** Say what was read and that nothing
   was found. This is the case the rule most needs, and the easiest to
   skip: there is no finding to write up, so the natural move is to arm
-  the merge and move on. But a refusal or a silence leaves the gate
-  reading as satisfied — and with nothing on the PR, the record shows a
-  review that never landed and no evidence any other one happened. A
-  clean comment is the only thing separating "reviewed, nothing found"
-  from "never reviewed".
+  the merge and move on. But when the automated half refused or went
+  silent, the subagent's review is the ONLY coverage this head has — and
+  with nothing on the PR the record shows a review that never landed and
+  no evidence any other one happened. A clean comment is the only thing
+  separating "reviewed, nothing found" from "never reviewed", and under
+  the arming rule above it is also what licenses the merge.
 
 **Where the two disagree, that is signal — do not average them.** Keep both
 reports, and verify the contested claim against the source yourself. A
@@ -593,8 +615,8 @@ not fall back to `sonnet` because a particular review looks small.
 
 It applies to every review dispatch: the standing one that runs beside
 the automated reviewer above, a review requested directly, a second
-opinion on a change already reviewed, an audit of merged code. If the job is *reviewing*, the tier
-is settled.
+opinion on a change already reviewed, an audit of merged code. If the
+job is *reviewing*, the tier is settled.
 
 The reasoning is the asymmetry. Everywhere else, the cheapest tier that
 can do the job is right because a weaker answer costs a retry. A review

@@ -49,11 +49,21 @@ terms that rode in with copied material.
 **Phase 4 — opening**
 
 ```
-17. gh pr create --base main --head "$BRANCH"
-18. gh pr merge <n> --auto                     # ONLY when done — nothing asks
-19. tools/gh/wait-merged.sh <n> &              # background; its exit is the callback
-19b. tools/gh/pr-review-status.sh <n> --wait 30m --automated-only &
+17.  gh pr create --base main --head "$BRANCH"
+17a. gh pr comment <n> --body "@codex review"  # BOTH reviewers, every time
+17b. Agent(description: "review PR <n> …", model: "opus")   # ← same breath
+17c. tools/gh/pr-review-status.sh <n> --wait 30m --automated-only &
+18.  gh pr merge <n> --auto     # ONLY when done, and AFTER 17b reported —
+                                #   nothing asks. See CLAUDE.md §9 for which
+                                #   exit codes of 17c let the subagent's
+                                #   review satisfy the gate on its own.
+19.  tools/gh/wait-merged.sh <n> &      # background; its exit is the callback
 ```
+
+**17a and 17b are both steps, not one with a fallback** — the subagent is
+the half that is guaranteed to answer, and CLAUDE.md §9 says why. **18 sits
+below them deliberately**: arming is standing consent, so it belongs after
+the gate rather than above it.
 
 Drop `--delete-branch`: the queue owns branch cleanup and `gh` rejects the
 flag.
@@ -172,7 +182,7 @@ contract governs **how** to dispatch, never **whether**.
 **ONE EXCEPTION: code review.** Every review dispatches a subagent
 reviewer WITHOUT being asked, one per PR, alongside the `@codex review`
 request rather than as its fallback — read §9's "Every review runs BOTH
-reviewers" for why the fallback shape was wrong and for the rest of the
+reviewers, in parallel" for why the fallback shape was wrong and for the rest of the
 contract: no session context passed, the brief scoped to the PR's
 `base..head` range, and the findings posted to the PR and answered
 there rather than reported into the transcript — including when there
