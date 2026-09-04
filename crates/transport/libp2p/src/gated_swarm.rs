@@ -89,12 +89,18 @@ impl AdmittedDial {
     /// Build the dial this admission authorizes.
     ///
     /// # Errors
-    /// Returns [`UndialableAdmission`], carrying the ticket back, when
-    /// the admitted peer or address is not something libp2p can dial:
-    /// a ticket with no peer, a peer that is not a `PeerId`, or an
-    /// address that is not a `Multiaddr`. Those are refusals rather
-    /// than panics because the strings reach the policy layer from
-    /// configuration and from discovery.
+    /// Returns [`UndialableAdmission`], carrying the ticket back, in
+    /// two cases. The admitted peer or address may not be something
+    /// libp2p can dial — a ticket with no peer, a peer that is not a
+    /// `PeerId`, or an address that is not a `Multiaddr`. Those are
+    /// refusals rather than panics because the strings reach the policy
+    /// layer from configuration and from discovery.
+    ///
+    /// Or the address and the admitted origin may DISAGREE about
+    /// whether this is a relay circuit, in either direction. **This is
+    /// where that pairing is enforced** — not in
+    /// [`GatedSwarm::dial`], which only registers the `ConnectionId`
+    /// and forwards to the inner Swarm.
     pub fn from_ticket(ticket: DialTicket) -> Result<Self, Box<UndialableAdmission>> {
         let Some(peer) = ticket.peer() else {
             return Err(Box::new(UndialableAdmission {

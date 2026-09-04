@@ -1407,8 +1407,9 @@ data-plane origin, against the infrastructure the stage exists to use.
    the COMMAND PATH sets `RelayCircuit`, since the transport rather
    than the behaviour dials a circuit: `attempt_dial` builds the
    `DialRequest` carrying the origin and admission runs there, and
-   `GatedSwarm::dial` then enforces the address/origin PAIRING both
-   ways on the already-admitted dial. **The attribution and the pairing
+   `AdmittedDial::from_ticket` — called by `attempt_dial` immediately
+   after admission, before the Swarm is touched — enforces the
+   address/origin PAIRING both ways. **The attribution and the pairing
    enforcement landed in PR #71**; no caller supplies `RelayCircuit`
    yet, because no relay feature is compiled — every `attempt_dial` call
    site today passes `Manual` (`runtime/commands.rs`) or comes from the

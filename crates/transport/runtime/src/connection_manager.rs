@@ -1339,19 +1339,24 @@ impl ConnectionManager {
     /// `an_unauthorized_peer_is_refused_whatever_the_origin` and
     /// `a_trusted_destination_is_admitted_under_every_origin`.
     ///
-    /// Revalidating an established connection with the data-plane-only
+    /// Revalidating an established connection with the destination-only
     /// predicate therefore closed connections admission had correctly
-    /// permitted: a relay reservation, a relay circuit, an AutoNAT
-    /// probe or a DCUtR hole punch to an infrastructure peer completed
-    /// its handshake and was immediately dropped. (Two of those four
-    /// were D1 and D2, and step 2 refused them at the predicate — see
-    /// `DialOrigin::names_application_destination`. This function's job
-    /// is to AGREE with admission, so fixing them there fixed it here;
-    /// the bug it was written for is the disagreement, not the
-    /// classification.) The inbound path has
-    /// no origin to consult and no such pair to honour, which is why it
-    /// keeps the stricter predicate and why applying that one to
-    /// outbound was wrong rather than merely conservative.
+    /// permitted: a relay reservation or an AutoNAT probe to an
+    /// infrastructure peer completed its handshake and was immediately
+    /// dropped.
+    ///
+    /// It closed relay circuits and DCUtR hole punches to such a peer
+    /// too — but admission should never have permitted those, which is
+    /// D2 and D1, refused at the predicate since Stage 11 step 2 (see
+    /// `DialOrigin::names_application_destination`). This function's
+    /// job is to AGREE with admission, so fixing them there fixed them
+    /// here; the bug it was written for is the disagreement, not the
+    /// classification.
+    ///
+    /// The inbound path has no origin to consult and no such pair to
+    /// honour, which is why it keeps the stricter predicate and why
+    /// applying that one to outbound was wrong rather than merely
+    /// conservative.
     #[must_use]
     pub fn authorizes_for(&self, class: ConnectionClass, origin: DialOrigin) -> bool {
         if self.shutting_down.load(Ordering::Acquire) {

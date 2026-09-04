@@ -207,9 +207,14 @@ The conclusion for Stage 11: **`RelayCircuit` comes from the CALLER**,
 because the caller dialling through a relay is the party that knows.
 *(Correction, 2026-09-04: as written this named the wrong function.
 In shipped code `attempt_dial` carries the origin the caller supplied
-into admission, and `GatedSwarm::dial` ENFORCES the pairing against the
-address — refusing a `/p2p-circuit` address not admitted as
-`RelayCircuit`, and the reverse. It validates; it does not set.)* The classifier still earns its place for
+into admission, and `AdmittedDial::from_ticket` — reached from
+`attempt_dial`, before the Swarm is touched — ENFORCES the pairing
+against the address, refusing a `/p2p-circuit` address not admitted as
+`RelayCircuit` and the reverse. `GatedSwarm::dial` does neither: it
+destructures an already-built `AdmittedDial`, registers the id and
+forwards to the inner Swarm, with no address inspection and no refusal
+path. Second correction, 2026-09-04: the first one named the wrong
+function too.)* The classifier still earns its place for
 the reservation-vs-circuit split if a future crate version dials
 circuits from the behaviour; it is not what produces the variant today.
 
