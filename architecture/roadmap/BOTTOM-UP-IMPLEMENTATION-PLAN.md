@@ -1444,7 +1444,7 @@ data-plane origin, against the infrastructure the stage exists to use.
    land before DCUtR or relayed paths are built, not after.
 
    **One design item this step must settle, and one already handled.**
-   `an_infrastructure_peer_cannot_reach_the_data_plane_by_any_origin`
+   `an_infrastructure_peer_reaches_the_data_plane_only_where_this_table_says`
    (`tests/transport-contract/tests/stage2_exit_gate.rs`) used to derive
    both of its loops from the predicate under test, so it passed for ANY
    definition of `is_data_plane` and could not catch the

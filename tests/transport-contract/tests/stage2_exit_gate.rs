@@ -164,7 +164,7 @@ fn every_local_route_failure_is_one_coarse_answer_on_the_wire() {
 }
 
 #[test]
-fn an_infrastructure_peer_cannot_reach_the_data_plane_by_any_origin() {
+fn an_infrastructure_peer_reaches_the_data_plane_only_where_this_table_says() {
     // Spans trust-api's InfrastructureSet concept and the runtime gate:
     // reachability authorization is not a weaker data-plane trust.
     //
