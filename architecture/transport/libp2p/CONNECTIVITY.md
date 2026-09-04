@@ -136,7 +136,7 @@ A data-plane trusted peer may also serve relay/AutoNAT roles. An infrastructure-
 |---|---:|---:|
 | Identify / bounded ping | yes | yes |
 | AutoNAT v2 | eligible | eligible |
-| Relay v2 control | eligible | eligible |
+| Relay v2 reservation, and circuit control *with that peer* | eligible | eligible |
 | Relay v2 circuit as destination peer | yes | no |
 | GossipSub | yes | no |
 | direct v2 | yes | no |
