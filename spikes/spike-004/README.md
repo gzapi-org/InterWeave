@@ -879,21 +879,46 @@ The claims that carry the mechanism are mutation-checked:
   rule from the other side, and is now also asserted in its own right by
   R3.4 rather than existing only as a mutation someone ran by hand.
 
-R6's four, run as a batch, each asserting the patch applied before
-trusting the result. The first row is also the one that caught R6.6's
-own weakness: before the predicate named `NotAuthorizedForDataPlane`,
-this mutation left R6.6 GREEN, because `OutboundAdmission` renders every
-denial as `kademlia dial refused: {denial:?}` and the old check looked
-only for `kademlia`.
+R6's mutations, run as a batch, each asserting the patch applied before
+trusting the result. **Re-measured 2026-09-04**, after Stage 11 step 1
+inverted R6.5 from a refusal to an admission and added the
+`misattributed` node — the previous table was derived against the
+pre-step-1 wiring and two of its rows had silently become empty claims.
+Baseline for this batch: 86 required, 0 failed, exit 0, confirmed stable
+over two consecutive clean runs.
 
 | Mutation | Fails |
 | --- | --- |
-| subject's relay moved to the data-plane allowlist | R6.5, R6.8, R6.9, R6.10, R6.11 |
-| control's relay moved to the infrastructure set | R6.7, R6.8, R6.11 |
-| `ProductionNode` drops its `ConnectionManager` (bug 9, reintroduced) | R6.6, R6.7, R6.8, R6.11 |
-| the circuit listen removed, so nothing dials | R6.4, R6.5, R6.7, R6.8, R6.10, R6.11 |
+| subject's relay moved to the data-plane allowlist | **nothing** — exit 0 |
+| control's relay moved to the infrastructure set | no R6 row (R4.7 only) |
+| `misattributed` announces `RelayReservation` instead of a data-plane origin | R6.6, R6.8, R6.9, R6.10, R6.11 |
+| `ProductionNode` drops its `ConnectionManager` (bug 9, reintroduced) | R6.5, R6.6, R6.7, R6.8, R6.11 |
+| the circuit listen removed, so nothing dials | R6.4, R6.5, R6.6, R6.7, R6.8, R6.10, R6.11 |
 
-The FIRST of those is the one worth reading: it left R6.6 passing,
+**The first two rows are the result worth reading, and they are
+negative.** Since step 1 the subject's dial is admitted, so making the
+subject into the control changes no verdict; and the control's dial is
+admitted whichever set its relay is in, because `RelayReservation` is
+not a data-plane origin and `admit` reads `is_data_plane` only in the
+`ConnectivityInfrastructureOnly` arm. Neither mutation can fail
+anything. The discriminating variable moved to `misattributed` — row
+three is the one that now carries what row one used to.
+
+That is this record's own bug 8 arriving a second time by a different
+route: an experiment whose control agrees with its subject has measured
+neither. The first time it was written that way; this time a code change
+made it so, and the table went on asserting the old result. A mutation
+table is evidence with a shelf life — it expires when the experiment is
+rewired, and nothing fails when it does.
+
+Historical note on the old first row: before R6.6's predicate named
+`NotAuthorizedForDataPlane`, that mutation left R6.6 GREEN, because
+`OutboundAdmission` then rendered every denial as
+`kademlia dial refused: {denial:?}` and the check looked only for
+`kademlia`. Step 1 replaced that rendering with `{origin:?}`, which is
+why R6.6's needle is `KademliaQuery` today.
+
+The old first row was the one worth reading then: it left R6.6 passing,
 because with no refusal at all `refusals().iter().all(..)` is vacuously
 true. R6.6 now requires the list to be non-empty as well, so it stands
 without leaning on R6.5.
