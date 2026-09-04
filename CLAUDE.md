@@ -474,7 +474,7 @@ The mechanics, and the step that is easy to miss: **a push does not
 re-trigger automated review, so waiting for one you never asked for is
 waiting forever.** Open the PR, request a review explicitly **and dispatch
 the subagent reviewer in the same breath** (both, every time — see below),
-and only then run `tools/gh/pr-review-status.sh <n> --wait --automated-only`
+and only then run `tools/gh/pr-review-status.sh <n> --wait 30m --automated-only`
 in the background. Arm once BOTH have reported on the current head: the
 script sees the automated one, and the subagent's findings reach the PR as
 a comment you post.
