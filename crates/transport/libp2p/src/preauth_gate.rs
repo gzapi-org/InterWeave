@@ -413,6 +413,68 @@ mod tests {
         );
     }
 
+    /// The HOOK, not the helper -- so the argument order is pinned.
+    ///
+    /// Every other test here calls `source_label` directly, which
+    /// proves the function and says nothing about how the hook calls
+    /// it. The two parameters are adjacent `&Multiaddr`s, so swapping
+    /// them compiles, and no test in the workspace noticed: the
+    /// end-to-end one in `tests/connectivity` listens on
+    /// `/ip4/127.0.0.1/tcp/0` and dials from `127.0.0.1`, so local and
+    /// remote yield the SAME label there.
+    ///
+    /// What a swap would cost: a node listening on `/ip4/0.0.0.0/...`
+    /// would scan its LISTEN address for an IP first and charge every
+    /// inbound connection on the Internet to the bucket `0.0.0.0`,
+    /// collapsing `max_pending_per_source` into a second global cap.
+    /// So this drives the hook with `max_pending_per_source: 1` and
+    /// two DIFFERENT remotes on ONE local address: they are distinct
+    /// sources and both must be admitted. Under a swap they are one
+    /// source and the second is refused. Review finding on PR #74.
+    #[test]
+    fn the_hook_buckets_on_the_remote_and_not_on_its_own_listen_address() {
+        use interweave_transport_runtime::preauth::PreAuthLimitsBuilder;
+
+        let limits = PreAuthLimitsBuilder {
+            max_pending_per_source: 1,
+            max_pending_total: 8,
+            ..PreAuthLimitsBuilder::default()
+        }
+        .build()
+        .expect("limits");
+        let mut gate = PreAuthAdmission::new(limits);
+
+        let local = addr("/ip4/0.0.0.0/tcp/4001");
+        let first = gate.handle_pending_inbound_connection(
+            ConnectionId::new_unchecked(1),
+            &local,
+            &addr("/ip4/198.51.100.7/tcp/5001"),
+        );
+        let second = gate.handle_pending_inbound_connection(
+            ConnectionId::new_unchecked(2),
+            &local,
+            &addr("/ip4/203.0.113.9/tcp/5002"),
+        );
+
+        assert!(first.is_ok(), "the first inbound is admitted");
+        assert!(
+            second.is_ok(),
+            "a second inbound from a DIFFERENT remote is a different source and must be              admitted; refusing it means the bucket came from the local address"
+        );
+
+        // AND THE CEILING STILL BITES on the source that is real, so
+        // this cannot pass by the gate refusing nothing at all.
+        let third = gate.handle_pending_inbound_connection(
+            ConnectionId::new_unchecked(3),
+            &local,
+            &addr("/ip4/198.51.100.7/tcp/5003"),
+        );
+        assert!(
+            third.is_err(),
+            "a second inbound from the SAME remote exceeds max_pending_per_source: 1"
+        );
+    }
+
     /// A DIRECT connection is never charged to a relay bucket.
     ///
     /// The discriminator is the local address, so this pins the
