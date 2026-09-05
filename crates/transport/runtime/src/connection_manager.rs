@@ -2785,15 +2785,18 @@ mod tests {
         // `is_data_plane` until 2026-09-03, so "pins" overstated it;
         // it asserts a hardcoded table now.) Revalidating an
         // established connection with the data-plane-only predicate
-        // ignored the pair, so a
-        // relay reservation, relay circuit, AutoNAT probe or DCUtR hole
-        // punch to an infrastructure peer completed its handshake and
-        // was closed immediately -- admission permitted it and
-        // establishment threw it away.
+        // ignored the pair, so a relay reservation or an AutoNAT probe
+        // to an infrastructure peer completed its handshake and was
+        // closed immediately -- admission permitted it and
+        // establishment threw it away. A relay circuit or a DCUtR hole
+        // punch to that peer belonged on the same list until Stage 11
+        // step 2; both are refused at admission now, so neither
+        // reaches establishment to be thrown away.
         //
         // WHAT THIS ASSERTS IS AGREEMENT, not correctness. `kept ==
-        // !origin.names_application_destination()` is true by construction of the
-        // function under test, which is deliberate: the defect was the
+        // !origin.names_application_destination()` is true by
+        // construction of the function under test, which is
+        // deliberate: the defect was the
         // two predicates disagreeing. Whether the classification itself
         // is right is the predicate's own pinning test, and SPIKE-004
         // found two origins on the wrong side of it (D1, D2).

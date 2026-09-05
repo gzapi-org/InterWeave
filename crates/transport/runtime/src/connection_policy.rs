@@ -251,7 +251,8 @@ pub enum DialDenial {
     ShuttingDown,
     /// The peer is not authorized for anything.
     Unauthorized,
-    /// The peer is authorized for reachability only, and this is data-plane.
+    /// The peer is authorized for reachability only, and this origin
+    /// names it as an application destination.
     NotAuthorizedForDataPlane,
     /// The peer is in punitive backoff.
     PeerBackoff,
