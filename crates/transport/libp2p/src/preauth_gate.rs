@@ -102,14 +102,21 @@ const REFUSAL: &str = "connection refused";
 /// address holds neither, returns the local address whole -- see the
 /// terminal `return` in the body.
 ///
-/// Both fallbacks are prefixed `relay:` so a relayed bucket can never
-/// collide with a direct peer's IP bucket -- otherwise a direct
+/// All THREE relay cases are prefixed `relay:` so a relayed bucket can
+/// never collide with a direct peer's IP bucket -- otherwise a direct
 /// connection from the relay's own address would share the budget of
-/// every circuit riding it. That "never" is pinned by
-/// `a_relay_bucket_never_collides_with_a_direct_bucket_at_the_same_ip`;
-/// the prefix cannot be forged, because every non-relay return is
-/// either a bare IP or a `Multiaddr`, whose rendering always starts
-/// with `/`.
+/// every circuit riding it. That "never" is pinned three times over:
+/// `a_relayed_inbound_is_charged_to_the_relay_not_the_source` and
+/// `a_circuit_with_no_relay_identity_still_avoids_the_source_bucket`
+/// assert the first two labels exactly, the third case's test asserts
+/// the prefix, and
+/// `a_relay_bucket_never_collides_with_a_direct_bucket_at_the_same_ip`
+/// puts a direct connection and a circuit at ONE address and requires
+/// the two labels to differ. The prefix cannot be forged: a non-relay
+/// return is either a bare IP or a `Multiaddr` rendering, and neither
+/// form can produce one -- an IP has no colon before its first digit
+/// group that could read as `relay:`, and a non-empty `Multiaddr`
+/// starts with `/` while an empty one renders empty.
 fn source_label(local_addr: &Multiaddr, remote_addr: &Multiaddr) -> String {
     use libp2p::multiaddr::Protocol;
 
@@ -349,13 +356,15 @@ mod tests {
         );
     }
 
-    /// D3, PINNED RATHER THAN ENDORSED.
+    /// D3, ASSERTED — this test was the defect's pin and is now the
+    /// fix's guard.
     ///
     /// SPIKE-004 measured what a relayed inbound connection presents
     /// before Noise: a remote address of `/p2p/<source>` with no IP
     /// anywhere, while the relay's own PeerId sits in the LOCAL
-    /// address. `source_label` reads only the remote, finds no IP, and
-    /// returns it as written — so the bucket is the SOURCE's PeerId.
+    /// address. `source_label` USED TO read only the remote, find no
+    /// IP, and return it as written — so the bucket was the SOURCE's
+    /// PeerId, one per identity and identities free to mint.
     ///
     /// `contracts/CONNECTIVITY.md` §10 requires the opposite: charge
     /// the authenticated relay transport connection and relay PeerId
@@ -380,12 +389,14 @@ mod tests {
         );
     }
 
-    /// The fallback, so the function stays total.
+    /// The IP fallback: no relay identity, but an address to charge.
     ///
     /// A circuit whose local address carries no relay identity is
     /// charged to the relay's IP rather than falling through to the
     /// source. Falling through is the one outcome §10 forbids, so the
-    /// absence of a PeerId must not produce it.
+    /// absence of a PeerId must not produce it. This is the SECOND of
+    /// three relay cases, not the one that makes the function total —
+    /// that is the terminal return the test below covers.
     #[test]
     fn a_circuit_with_no_relay_identity_still_avoids_the_source_bucket() {
         let local = addr("/ip4/127.0.0.1/tcp/4001/p2p-circuit");
@@ -421,6 +432,14 @@ mod tests {
         // asks for rather than merely "not the source": a label that
         // avoided SOURCE_A while still varying per identity would
         // satisfy the assertion above and none of the requirement.
+        // AND IT CARRIES THE PREFIX. The other two relay cases have
+        // exact-string assertions that pin theirs; this one had none,
+        // so `relay:` could have been dropped here alone and every
+        // test in the workspace would still have passed.
+        assert!(
+            label.starts_with("relay:"),
+            "the third relay case takes the same namespace as the other two; got {label}"
+        );
         let other = source_label(&local, &addr(&format!("/p2p/{SOURCE_B}")));
         assert_eq!(
             label, other,
