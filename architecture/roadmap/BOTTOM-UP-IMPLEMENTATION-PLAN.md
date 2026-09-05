@@ -1356,18 +1356,21 @@ below and are repeated where they bite:
 - **D1, D2 and D3 sit in already-shipped code**, not in this stage's
   work, and none is reachable in a shipped build today — nothing
   constructs `DcutrHolePunch` or `RelayCircuit`, and no relay feature
-  is compiled — so all three are latent until this stage enables the
-  paths they govern. `DcutrHolePunch` and `RelayCircuit` are both
-  admitted for a `ConnectivityInfrastructureOnly` peer; the fix is not
-  "add both to `is_data_plane`", because `RelayReservation` must stay
-  non-data-plane and D2 differs from it precisely in naming the
-  DESTINATION rather than the relay. And `PreAuthAdmission` buckets a
+  is compiled — so all three were latent until this stage enables the
+  paths they govern. `DcutrHolePunch` and `RelayCircuit` were both
+  admitted for a `ConnectivityInfrastructureOnly` peer; the fix was not
+  "add both to the data-plane predicate", because `RelayReservation`
+  must stay outside it and D2 differs from it precisely in naming the
+  DESTINATION rather than the relay. And `PreAuthAdmission` bucketed a
   relayed inbound by the source PeerId the circuit carries, which is
   the "unbounded pseudo-source bucket" `contracts/CONNECTIVITY.md` §10
   forbids by name. **D2's architecture clarification landed on
   2026-09-03** — ADR-0036's amendment gave the matrix the row it lacked
-  — so all three are now code fixes; see step 2. All three land before
-  DCUtR or relayed paths are built rather than after.
+  — and **all three code fixes landed in step 2 on 2026-09-04**, before
+  DCUtR or relayed paths are built rather than after. The description
+  above is kept in the past tense on purpose: it is what a reader needs
+  to understand why step 2 exists, and it stops being true the moment
+  step 2 is read as a record of work already done.
 - **ADR-0036's inbound relayed clause has no implementation site.** The
   shipped gate is outbound-only, so a relayed inbound is never
   evaluated against the authenticated end PeerId at all. The spike
@@ -1416,7 +1419,8 @@ data-plane origin, against the infrastructure the stage exists to use.
    retry tick. The mechanism is there and its first user is step 5, where the relay
    feature is compiled.
    **One label decides whether relaying works at all**, and step 2's
-   `is_data_plane` change is what arms it: `relay::client::Behaviour`
+   move of `RelayCircuit` into `names_application_destination` is what
+   armed it: `relay::client::Behaviour`
    emits two dials of its own (`libp2p-relay 0.21.1`
    `priv_client.rs:334` and `:373`) — a reservation, and the dial that
    establishes the relay connection a circuit request needs — and BOTH
@@ -1432,48 +1436,59 @@ data-plane origin, against the infrastructure the stage exists to use.
    records its own refusals here**: the Swarm discards the denial of a
    behaviour dial, so a refusal that is not written down at the hook is
    written down nowhere;
-2. **resolve D1, D2 and D3.** `DcutrHolePunch` is admitted for a
-   `ConnectivityInfrastructureOnly` peer, which
+2. **resolve D1, D2 and D3 — DONE 2026-09-04.** `DcutrHolePunch` was
+   admitted for a `ConnectivityInfrastructureOnly` peer, which
    `transport/libp2p/CONNECTIVITY.md` §4's matrix forbids unqualified
-   ("DCUtR as destination peer | no"); `RelayCircuit` is admitted for
+   ("DCUtR as destination peer | no"); `RelayCircuit` was admitted for
    that same destination, which §4 now forbids by a row of its own; and
-   `PreAuthAdmission` buckets a relayed inbound by the source PeerId the
-   circuit carries, which `contracts/CONNECTIVITY.md` §10 forbids by
-   name. All three are code fixes. **D2 was a document conflict
+   `PreAuthAdmission` bucketed a relayed inbound by the source PeerId
+   the circuit carries, which `contracts/CONNECTIVITY.md` §10 forbids
+   by name. All three were code fixes. **D2 was a document conflict
    first**: §4's matrix had no row for a circuit whose DESTINATION is
    the infrastructure-only peer, and §11 excluded only
    `direct-user-command` and `kademlia-query`, so an accepted document
    arguably permitted the behaviour. ADR-0036's Amendment 2026-09-03
-   added the row and both sections inherited it (CLAUDE.md §2), so what
-   remains for D2 is the code change — and it separates the two relay
-   origins rather than moving both, because `RelayReservation` must stay
-   non-data-plane or every relay the stack needs is refused. All three
-   land before DCUtR or relayed paths are built, not after.
+   added the row and both sections inherited it (CLAUDE.md §2), which
+   left D2 a code change — and it separated the two relay origins
+   rather than moving both, because `RelayReservation` must stay
+   outside the predicate or every relay the stack needs is refused.
+   D1 and D2 moved `DcutrHolePunch` and `RelayCircuit` into
+   `names_application_destination` (renamed from `is_data_plane` in the
+   same commit); D3 charges a relayed inbound to the relay rather than
+   to the source PeerId the circuit asserts. All three landed before
+   DCUtR or relayed paths are built, not after, and the spike harness
+   reports zero divergences.
 
-   **One design item this step must settle, and one already handled.**
-   `an_infrastructure_peer_reaches_the_data_plane_only_where_this_table_says`
-   (`tests/transport-contract/tests/stage2_exit_gate.rs`) used to derive
-   both of its loops from the predicate under test, so it passed for ANY
-   definition of `is_data_plane` and could not catch the
-   misclassification its name claims. **Fixed 2026-09-03**: it now
-   asserts an explicit origin/outcome table, with a length check against
-   `DialOrigin::ALL`. Two rows are pinned wrong on purpose — the D1 and
-   D2 admissions — so **this table is one of the places step 2 must
-   change** when it moves the two origins. The remaining item is **the
-   predicate's NAME is the defect's root**: `is_data_plane` describes
-   traffic, while the rule it decides is ADR-0036's WITH/FOR question —
-   does this origin name the peer as an application DESTINATION.
-   SPIKE-004 misread it in precisely that gap, twice, and
-   `KademliaQuery` sits in the set today although routing is not
-   application data. **That last observation is about the NAME and must
-   not move the origin**: `KademliaQuery` stays refused for an
-   infrastructure-only peer whatever the predicate ends up called —
+   **Two design items sat under this step, and step 2 settled both.**
+   The first was the exit-gate test's shape.
+   `tests/transport-contract/tests/stage2_exit_gate.rs` carried a test
+   called `an_infrastructure_peer_cannot_reach_the_data_plane_by_any_origin`,
+   and it derived both of its loops from the predicate under test — so
+   it passed for ANY definition of that predicate and could not catch
+   the misclassification the name it then carried claimed. **Fixed
+   2026-09-03**: it asserts an explicit origin/outcome table with a
+   length check against `DialOrigin::ALL`, and is now called
+   `an_infrastructure_peer_reaches_the_data_plane_only_where_this_table_says`,
+   which is what a table-driven test can honestly claim. Two rows were
+   pinned wrong on purpose — the D1 and D2 admissions — so the table
+   was one of the places step 2 had to change, and **on 2026-09-04 step
+   2 flipped both to `false`**.
+
+   The second was **the predicate's NAME being the defect's root**:
+   `is_data_plane` described traffic, while the rule it decides is
+   ADR-0036's WITH/FOR question — does this origin name the peer as an
+   application DESTINATION. SPIKE-004 misread it in precisely that gap,
+   twice. **Renamed to `names_application_destination` on 2026-09-04**,
+   in the same commit that moved `RelayCircuit` and `DcutrHolePunch`
+   into it. `KademliaQuery` stays in the set although routing is not
+   application data, and **that was always an observation about the
+   NAME rather than a reason to move the origin**: it stays refused for
+   an infrastructure-only peer whatever the predicate is called —
    ADR-0036's matrix row, `CONNECTIVITY.md` §4 and §11 and the digest
    all say so, and letting it out would widen the infrastructure set,
-   which is the exact failure ADR-0036 exists to prevent. A rename
-   changes what the code SAYS, never which origins are in the set;
-   whether to do it is a decision for this step, not a cleanup to
-   defer.
+   which is the exact failure ADR-0036 exists to prevent. The rename
+   changed what the code SAYS and moved no origin on its own; the two
+   origins that moved did so on the matrix's authority, not the name's.
 
    **A third item was raised here and DISPROVED; it is recorded so it
    is not raised again.** The concern was that the reconnect scheduler
