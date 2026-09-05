@@ -7,6 +7,17 @@ Do not treat experiments placed here as production implementation.
 Evidence and the final decision are recorded against
 [`architecture/roadmap/SPIKES.md`](../../architecture/roadmap/SPIKES.md).
 
+**One name below no longer exists, and is left as written on purpose.**
+This record measures dated states of the production code, so it names
+`DialOrigin::is_data_plane` throughout. Stage 11 step 2 renamed that
+predicate `names_application_destination` on 2026-09-04, in the commit
+that also moved `RelayCircuit` and `DcutrHolePunch` into it — the
+rename and the fix are the same change, because the old name described
+traffic while the rule decides ADR-0036's WITH/FOR question. Rewriting
+the narrative to the new name would make phase A's measurements read as
+though they were taken against code that did not exist yet; the dated
+`RESOLVED` notes say what changed instead.
+
 ## What this phase does and does not cover
 
 SPIKE-004's brief asks for an environment matrix — public VM, home NAT,
