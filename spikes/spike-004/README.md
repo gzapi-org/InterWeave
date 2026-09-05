@@ -940,17 +940,21 @@ made it so, and the table went on asserting the old result. A mutation
 table is evidence with a shelf life — it expires when the experiment is
 rewired, and nothing fails when it does.
 
-Historical note on the old first row: before R6.6's predicate named
-`NotAuthorizedForDataPlane`, that mutation left R6.6 GREEN, because
-`OutboundAdmission` then rendered every denial as
-`kademlia dial refused: {denial:?}` and the check looked only for
-`kademlia`. Step 1 replaced that rendering with `{origin:?}`, which is
-why R6.6's needle is `KademliaQuery` today.
-
-The old first row was the one worth reading then: it left R6.6 passing,
-because with no refusal at all `refusals().iter().all(..)` is vacuously
-true. R6.6 now requires the list to be non-empty as well, so it stands
+Historical note on the old first row. It was the row worth reading
+then, and the mechanism was vacuous truth: moving the subject's relay
+into the data-plane allowlist got its dial ADMITTED, so there were no
+refusals at all and `refusals().iter().all(..)` held over an empty
+list. R6.6 now requires the list to be non-empty as well, so it stands
 without leaning on R6.5.
+
+A second change to R6.6 in the same period is easy to mistake for that
+one, and it is not another explanation of it. R6.6's needle used to be
+`kademlia`, because `OutboundAdmission` rendered every denial as
+`kademlia dial refused: {denial:?}`; step 1 replaced that rendering
+with `{origin:?}`, which is why the needle is `KademliaQuery` today.
+That governs what R6.6 MATCHES when there is a refusal to match, and
+says nothing about why the mutation left it green — an empty list
+passes any needle.
 
 R7's three:
 
