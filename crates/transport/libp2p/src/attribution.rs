@@ -13,8 +13,10 @@
 //! "Kademlia" were the same set.
 //!
 //! Stage 11 adds three more, and the inference then fails in the
-//! direction that breaks the stack: `KademliaQuery.is_data_plane()` is
-//! true, and `ConnectionPolicy::admit` refuses a data-plane origin for a
+//! direction that breaks the stack:
+//! `KademliaQuery.names_application_destination()` is true (the
+//! predicate was called `is_data_plane` until Stage 11 step 2), and
+//! `ConnectionPolicy::admit` refuses such an origin for a
 //! `ConnectivityInfrastructureOnly` peer — so every relay reservation
 //! and every AutoNAT probe would be refused against exactly the
 //! infrastructure the reachability stack exists to use. SPIKE-004 ran
