@@ -248,11 +248,14 @@ pub struct ProductionBehaviour {
     /// So both dials the behaviour does emit are exchanges WITH the
     /// relay -- control plane, in ADR-0036's terms -- and one
     /// control-plane origin answers both. **Labelling the second one
-    /// `RelayCircuit` would be the mistake**: once Stage 11 step 2
-    /// makes that origin data-plane, a circuit through an
+    /// `RelayCircuit` is now the mistake, not would be**: Stage 11
+    /// step 2 moved that origin into
+    /// `names_application_destination`, so a circuit through an
     /// infrastructure-only relay would be refused at the dial that
     /// sets up the relay connection, and relaying would stop working
-    /// for exactly the peers relaying exists for.
+    /// for exactly the peers relaying exists for. The hazard is armed
+    /// rather than hypothetical, and step 5 is where it gets its first
+    /// chance to fire.
     pub relay_client: Attributing<relay::client::Behaviour>,
 }
 

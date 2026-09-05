@@ -16,7 +16,9 @@ rename and the fix are the same change, because the old name described
 traffic while the rule decides ADR-0036's WITH/FOR question. Rewriting
 the narrative to the new name would make phase A's measurements read as
 though they were taken against code that did not exist yet; the dated
-`RESOLVED` notes say what changed instead.
+`RESOLVED` notes say what changed instead. **The same applies to the
+harness sources**, which measure those same dated states: where a
+comment there explains what phase A found, it keeps the old name.
 
 ## What this phase does and does not cover
 
@@ -471,13 +473,15 @@ split WAS D1 and D2. Adding the same peer to the data-plane allowlist
 flips the refusals to admissions, which is ADR-0036's "data-plane trust
 wins" observed rather than restated.
 
-**Two of the four admissions are the divergences, not the finding.**
-`RelayReservation` and `AutonatProbe` are what the split exists to
-permit. `DcutrHolePunch` is D1 and `RelayCircuit` is D2, and what F6
-establishes is that the MECHANISM works — the policy reads the
-destination's class and the origin's purpose and combines them — which
-is why the two wrong answers are a question of which origins are on
-which side rather than of whether the split is enforced.
+**Two of phase A's four admissions were the divergences, not the
+finding.** `RelayReservation` and `AutonatProbe` are what the split
+exists to permit, and they are the two that remain. `DcutrHolePunch`
+was D1 and `RelayCircuit` was D2, and what F6 established is that the
+MECHANISM works — the policy reads the destination's class and the
+origin's purpose and combines them — which is why the two wrong
+answers were a question of which origins sat on which side rather than
+of whether the split is enforced. Step 2 moved them; the mechanism
+F6 measured is what carried the fix without further change.
 
 **F7 — an infrastructure node advertises its control protocols, and
 this harness cannot say anything about the data-plane ones.** R1.5 and
@@ -858,12 +862,15 @@ production:
   fails if either origin is taken back OUT of
   `names_application_destination`**, which is the direction that
   matters from here.
-- **D3** had no counterpart, so step 2 adds one: four tests beside
-  `source_label` in `preauth_gate.rs`, including
-  `two_relayed_sources_over_one_relay_get_different_buckets`. That file
-  previously had no test module at all, which is why the comment above
+- **D3** had no counterpart, so the PR that RECORDED it added four
+  tests beside `source_label` in `preauth_gate.rs` — that file had no
+  test module at all before, which is why the comment above
   `source_label` could argue the relayed case was fail-closed for as
-  long as it did.
+  long as it did. Step 2 flipped two of them (the D3 pin is now
+  `two_relayed_sources_over_one_relay_share_one_bucket`, which asserted
+  the opposite while the defect stood) and PR #74's review added three
+  more, for six: the circuit branch's third case, the hook's argument
+  order, and the `relay:` prefix's no-collision claim.
 
 Everything else here is evidence, and evidence is re-run by hand.
 
@@ -920,7 +927,7 @@ mentioned it is labelled as one — a note is printed, never checked.
 | D2, FIXED 2026-09-04 | R3.6 — the same admission R3.1 used to list under "the matrix permits", split out so that fixing D2 does not fail an experiment claiming the matrix allows it |
 | F5 default policy refuses everything | R3.7: `ConnectionPolicy::default()` refuses a fully TRUSTED peer with `ConnectionLimitReached`, so a fixture taking the default measures nothing about class |
 | D2 relayed-circuit divergence, FIXED 2026-09-04 | R7.4 pinned the admission and now asserts the refusal by denial REASON; R7.2 carries the discrimination the control used to (a stranger is refused `Unauthorized`, not for the data plane), so R7.5 is now a regression guard rather than a contrast |
-| D3 relayed pre-auth bucket | R9.3 pins today's behaviour, R9.2 is the control (direct inbounds from one IP — the second refused), R9.4 shows the global cap is what remains, and R9.6 requires the two sources to differ only in identity — the fixture being R8's MEASURED address with one substitution, which R9.5 records as a note |
+| D3 relayed pre-auth bucket, FIXED 2026-09-04 | R9.3 pinned the source-named bucket and now asserts the relay-named one; R9.2 is the control (direct inbounds from one IP — the second refused); R9.4 was "the global cap is all that remains" and now asserts the PER-SOURCE cap bounds it, at 1 admission where 32 identities used to buy 8; R9.6 requires the two sources to differ only in identity — the fixture being R8's MEASURED address with one substitution, which R9.5 records as a note |
 | §10's premise and its capability | R8.4 (no source IP on a relayed remote), R8.11 (the remote IS the source's PeerId — D3's whole force), R8.5 (the relay's PeerId IS available at the pending hook), R8.7 the control (a direct inbound does carry an IP), R8.8 (the two are distinguishable there) |
 | ADR-0036's inbound relayed clause | R8.9/R8.10: the destination's established hook names the SOURCE's authenticated PeerId on a relayed local address, and never the relay's |
 | F9 reservations and withdrawal | R10.2/R10.3 (two relays, each recording its own acceptance), R10.5 (both addresses advertised), R10.9 (the loss was observed) and R10.10 (withdrawn within a second of it), R10.7 with R10.8 as the control (the survivor stays) |

@@ -390,8 +390,8 @@ pub fn r3_infrastructure_cannot_reach_the_data_plane(report: &mut Report) {
         );
     }
 
-    // AND `RelayCircuit`, WHICH IS NOT ONE OF THEM — pinned in its
-    // current shape rather than approved, exactly as R3.5 pins D1.
+    // AND `RelayCircuit`, WHICH IS NOT ONE OF THEM.
+    //
     // D2, FIXED BY STAGE 11 STEP 2. This assertion used to pin the
     // opposite — RelayCircuit admitted, "pinned and NOT endorsed" —
     // and it was written that way deliberately so the fix would fail
@@ -1426,8 +1426,9 @@ pub async fn r7_relayed_path_trust(report: &mut Report) {
             ask(&infra_dest, DialOrigin::Manual),
             Err(DialDenial::NotAuthorizedForDataPlane)
         ),
-        "the same infrastructure-only destination IS refused under a data-plane origin, so \
-         R7.4 is the origin's classification and not a broken class check",
+        "the same infrastructure-only destination IS refused under a data-plane origin — a \
+         regression guard since step 2 made R7.4 agree with it; R7.2 is what now shows the \
+         refusal is the class rather than a gate refusing everything",
     );
 
     // THE POSITIVE HALF: the end identity survives the relayed path.
@@ -1726,8 +1727,9 @@ pub async fn r8_relayed_inbound_accounting(report: &mut Report) -> Option<Relaye
                 .iter()
                 .all(|(_, remote)| remote.contains(&source_peer.to_string())),
         &format!(
-            "the relayed remote address IS the source's PeerId, so the bucket \
-             `source_label` derives from it is one per identity: {:?}",
+            "the relayed remote address IS the source's PeerId — the shape D3 rested \
+             on, since a bucket derived from the remote alone is one per identity, and \
+             the shape `source_label` must therefore not read alone: {:?}",
             relayed.iter().map(|(_, r)| r).collect::<Vec<_>>()
         ),
     );
