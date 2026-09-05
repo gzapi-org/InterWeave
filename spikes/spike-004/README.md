@@ -946,10 +946,14 @@ The claims that carry the mechanism are mutation-checked:
 - deleting the `DialFailure` cleanup fails R2.10 with `after 1`;
 - R4.6/R4.7/R4.8 fail on a run where the probe reaches the wrong server,
   which is how the lucky-run bug above was caught;
-- adding the infrastructure peer to the data-plane allowlist fails all
-  four R3.2 refusals with `got None` — which is ADR-0036's precedence
-  rule from the other side, and is now also asserted in its own right by
-  R3.4 rather than existing only as a mutation someone ran by hand.
+- adding the infrastructure peer to the data-plane allowlist fails
+  R3.2, R3.5 and R3.6 — six refusals across three observation ids —
+  which is ADR-0036's precedence rule from the other side, and is now
+  also asserted in its own right by R3.4 rather than existing only as a
+  mutation someone ran by hand. **Re-measured 2026-09-05**: it used to
+  say "all four R3.2 refusals", which was true while D1 and D2 were
+  live and R3.5/R3.6 pinned the admissions. Step 2 made both of them
+  refusals too, so the same mutation now takes two more with it.
 
 R6's mutations, run as a batch, each asserting the patch applied before
 trusting the result. **Re-measured 2026-09-04**, after Stage 11 step 1
@@ -1014,7 +1018,7 @@ R7's three:
 
 | Mutation | Fails |
 | --- | --- |
-| the infrastructure-only destination added to the data-plane allowlist too | R7.5 |
+| the infrastructure-only destination added to the data-plane allowlist too | R7.4, R7.5 |
 | the source stops trusting the destination | R7.6, R7.8, R7.9, R7.10, R7.11, R7.12 |
 | the circuit dial announced as `Manual` rather than `RelayCircuit` | R7.8 |
 
@@ -1032,8 +1036,8 @@ R8's three and R9's three:
 | the direct control node never dials | *nothing* — see below |
 | the destination stops trusting the source | *nothing* — see below |
 | the relayed remote address carries an IP after all | R9.3, R9.4 |
-| per-source ceiling raised to two | R9.2 |
-| global ceiling lowered to four | R9.4 |
+| per-source ceiling raised to two | R9.2, R9.3, R9.4 |
+| global ceiling lowered to four | *nothing* — see below |
 
 **Two of R8's mutations changed nothing, and both are worth stating.**
 The separate direct-control node is redundant: DCUtR upgrades the
@@ -1045,6 +1049,21 @@ and the production gate is outbound-only. That is not in tension with
 R7's mutation, which removes trust in the other direction and refuses an
 outbound dial. R8 measures what an inbound decision could read, never a
 decision being made.
+
+**And a third now changes nothing, which is a shelf-life expiry rather
+than a design note.** Lowering the global ceiling to four used to fail
+R9.4, because R9.4 asserted 8 — the global cap was the only thing left
+bounding a relayed inbound once each minted identity bought its own
+bucket. Since step 2 those 32 identities share the relay's bucket and
+R9.4 asserts 1, which a per-source ceiling of 1 produces whatever the
+global cap is. The global cap has stopped being the binding constraint,
+so a mutation to it measures nothing. **Re-measured 2026-09-05**,
+raised by the PR #74 re-review: three rows around it were stale in the
+same way, all in the direction of understating what the mutation
+takes. The one row that survived re-measurement unchanged is "the
+relayed remote address carries an IP after all" — R9.3 and R9.4 both
+still fail, provided the injected IP varies per source, which is what
+an IP would do if a circuit carried one.
 
 R10's, R11's and R12's:
 
