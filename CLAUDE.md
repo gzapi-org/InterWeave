@@ -30,16 +30,21 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   `PeerConnected`" is work, because the Swarm reports a second
   connection for a peer already connected. It found **three
   violations sitting in already-shipped code, none ever reachable in a
-  shipped build**, and **step 2 fixed two of them**. `DcutrHolePunch`
-  (D1) and `RelayCircuit` (D2) were both admitted for an
-  infrastructure-only peer; the admission predicate now names them, so
-  a circuit or hole punch terminating at such a peer is refused.
-  **D3 is open**: `PreAuthAdmission` buckets a relayed inbound by the
-  source PeerId the circuit carries, which
-  `contracts/CONNECTIVITY.md` §10 forbids by name, and its fix needs a
-  signature change rather than a predicate one — the relay's own PeerId
-  is in the LOCAL address, which `preauth_gate.rs` discards. It must
-  land before step 5 compiles the relay feature. **D2 was a document
+  shipped build**, and **step 2 fixed all three (2026-09-04); the
+  harness reports zero divergences.** `DcutrHolePunch` (D1) and
+  `RelayCircuit` (D2) were both admitted for an infrastructure-only
+  peer; the admission predicate — renamed `names_application_destination`
+  in the same commit, because the old name described traffic while the
+  rule decides ADR-0036's WITH/FOR question — now names them, so a
+  circuit or hole punch terminating at such a peer is refused. D3 was
+  `PreAuthAdmission` bucketing a relayed inbound by the source PeerId
+  the circuit carries, which `contracts/CONNECTIVITY.md` §10 forbids by
+  name; `source_label` now reads the remote for an IP first and charges
+  a `/p2p-circuit` inbound to the relay instead — by the relay's PeerId
+  from the LOCAL address, which the old signature discarded. **The
+  `relay:` bucket prefix is a namespace that fix introduced**, so a
+  relay's circuits cannot collide with a direct inbound from the
+  relay's own IP. **D2 was a document
   conflict first**: `transport/libp2p/CONNECTIVITY.md` §4's matrix and
   §11 arguably permitted what ADR-0036's enforcement clause forbids.
   ADR-0036's Amendment 2026-09-03 settled it — a circuit whose far end
