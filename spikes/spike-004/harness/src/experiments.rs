@@ -1929,43 +1929,43 @@ pub async fn r9_relayed_preauth_bucket(report: &mut Report, observed: Option<Rel
         ),
     );
 
-    // THE DIVERGENCE. The same ceiling, the same gate, one relay
-    // connection — and each source PeerId gets a bucket of its own.
-    // PeerIds are free to mint, so the bucket count is chosen by
-    // whoever is attacking, which is what "unbounded pseudo-source
-    // buckets from circuit metadata" names.
+    // WHAT WAS D3, AND IS NOW ITS REGRESSION GUARD. The same ceiling,
+    // the same gate, one relay connection — and each source PeerId used
+    // to get a bucket of its own. PeerIds are free to mint, so the
+    // bucket count was chosen by whoever was attacking, which is what
+    // §10's "unbounded pseudo-source buckets from circuit metadata"
+    // names.
+    //
+    // Stage 11 step 2 gave `source_label` the LOCAL address, where the
+    // relay's identity is, so both circuits are charged to the relay
+    // and the SECOND is refused by the same per-source ceiling that
+    // refuses the second direct inbound at R9.2. This assertion was
+    // written in the defect's shape on purpose so the fix would fail
+    // here rather than pass silently, and it did.
     report.require(
         "R9.3",
-        first.is_ok() && second.is_ok(),
+        first.is_ok() && second.is_err(),
         &format!(
-            "TODAY'S BEHAVIOUR, pinned so a fix fails here rather than passing silently: two \
-             relayed inbounds over one relay each get their own bucket (first={:?}, \
-             second={:?})",
+            "two relayed inbounds over ONE relay share a bucket, so the second is refused \
+             by the per-source ceiling — the relay is charged, not the source identity \
+             the circuit carries (first={:?}, second={:?})",
             first.is_ok(),
             second.is_ok()
         ),
     );
-    if first.is_ok() && second.is_ok() {
-        report.divergence(
-            "D3",
-            "PreAuthAdmission buckets a relayed inbound by the SOURCE PeerId carried in \
-             the circuit's remote address. `source_label` returns the multiaddr as \
-             written when it holds no IP, and R8 measured that address to be \
-             `/p2p/<source>` — so one relay connection yields one bucket per source \
-             identity, and identities are free to mint. The relay's own PeerId is present \
-             in the LOCAL address (R8.5) and is not read",
-            "contracts/CONNECTIVITY.md §10, which requires charging the authenticated \
-             relay transport connection / relay PeerId plus the global caps and says the \
-             destination MUST NOT create unbounded pseudo-source buckets from circuit \
-             metadata. Not reachable in a shipped build today — no relay feature is \
-             compiled — and live the moment Stage 11's Phase 4 lands, which is why it is \
-             recorded against the code rather than against the stage",
-        );
-    }
 
-    // AND THE GLOBAL CAP IS THE ONLY THING LEFT STANDING. Worth
-    // measuring rather than assuming: if it too were per-bucket, there
-    // would be no bound at all.
+    // AND THE PER-SOURCE CEILING NOW BOUNDS IT, which is the whole
+    // point of the fix and is measured rather than argued.
+    //
+    // This used to assert 8 — the GLOBAL ceiling, the only thing left
+    // standing when every minted identity bought its own bucket. Thirty
+    // two fresh source identities over one relay now buy ONE admission
+    // between them, because they share the relay's bucket and
+    // `max_pending_per_source` is 1. The distance between 8 and 1 is
+    // the defect's whole cost: it is how much pre-auth work an attacker
+    // could extract per relay connection by minting identities, and it
+    // grew with the global cap rather than with anything they had to
+    // spend.
     let mut exhaust = PreAuthAdmission::new(limits);
     let mut admitted = 0_usize;
     for i in 0..32_usize {
@@ -1987,11 +1987,11 @@ pub async fn r9_relayed_preauth_bucket(report: &mut Report, observed: Option<Rel
     }
     report.require(
         "R9.4",
-        admitted == 8,
+        admitted == 1,
         &format!(
-            "the GLOBAL ceiling still bounds the total ({admitted} of 32 admitted against \
-             max_pending_total 8), so the failure is the bucket's granularity and not the \
-             absence of any bound"
+            "32 minted source identities over ONE relay buy {admitted} admission(s), not \
+             8 — the PER-SOURCE ceiling bounds them because they share the relay's \
+             bucket, so minting identities no longer buys pre-auth work"
         ),
     );
 }
