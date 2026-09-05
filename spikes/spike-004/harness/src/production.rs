@@ -290,7 +290,7 @@ pub struct ProductionNode {
     /// exactly how this experiment first misread itself.
     #[expect(
         dead_code,
-        reason = "held so the gate's snapshot stays current; R6.7 and R6.8 fail if it is dropped"
+        reason = "held so the gate's snapshot stays current; R6.5, R6.6, R6.7, R6.8 and R6.11 fail if it is dropped"
     )]
     pub manager: ConnectionManager,
 }

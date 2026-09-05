@@ -772,7 +772,10 @@ same shape a Stage 11 test could take.
    time with the instrument in the right place. Production's behaviour
    here is deliberate and pinned by
    `a_handle_that_outlives_its_manager_admits_nothing`. The node now
-   holds its manager, and R6.7/R6.8 fail if it stops.
+   holds its manager, and the 2026-09-04 re-measurement of this
+   mutation fails R6.5, R6.6, R6.7, R6.8 and R6.11 -- see the table
+   below, which is the measured list. R6.7/R6.8 was the pair recorded
+   when the bug was first found, against the pre-step-1 wiring.
 10. **The relay had no external address, so no circuit could ever
     complete.** A relay server builds a reservation's address list from
     its own `ExternalAddresses` (libp2p-relay 0.21.1
