@@ -414,7 +414,8 @@ mod tests {
         let label = source_label(&local, &remote);
         assert!(
             !label.contains(SOURCE_A),
-            "a circuit with no relay identity and no relay IP must still not bucket on              the source; got {label}"
+            "a circuit with no relay identity and no relay IP must still not bucket on \
+             the source; got {label}"
         );
         // AND THE TWO SOURCES SHARE IT, which is the property §10
         // asks for rather than merely "not the source": a label that
@@ -423,7 +424,8 @@ mod tests {
         let other = source_label(&local, &addr(&format!("/p2p/{SOURCE_B}")));
         assert_eq!(
             label, other,
-            "two identities over one relay must share one bucket whatever the relay's              address looks like"
+            "two identities over one relay must share one bucket whatever the relay's \
+             address looks like"
         );
     }
 
@@ -473,7 +475,8 @@ mod tests {
         assert!(first.is_ok(), "the first inbound is admitted");
         assert!(
             second.is_ok(),
-            "a second inbound from a DIFFERENT remote is a different source and must be              admitted; refusing it means the bucket came from the local address"
+            "a second inbound from a DIFFERENT remote is a different source and must be \
+             admitted; refusing it means the bucket came from the local address"
         );
 
         // AND THE CEILING STILL BITES on the source that is real, so
@@ -514,7 +517,8 @@ mod tests {
         assert_eq!(relayed, "relay:203.0.113.5");
         assert_ne!(
             direct, relayed,
-            "one host reached directly and the same host acting as a relay must not              share a pre-auth budget"
+            "one host reached directly and the same host acting as a relay must not \
+             share a pre-auth budget"
         );
     }
 
