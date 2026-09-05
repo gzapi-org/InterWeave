@@ -41,6 +41,20 @@ impl Report {
     /// under its own heading, counted, and is the spike's primary
     /// output: work the stage must do, with the document it violates
     /// named so a reader can check the claim.
+    ///
+    /// UNCALLED since Stage 11 step 2 fixed D1, D2 and D3 — the three
+    /// divergences phase A found — and that is the whole result, so
+    /// the summary still prints `0 divergence(s)` from a live count
+    /// rather than from a deleted mechanism. Keep it: phase B measures
+    /// against a real NAT and has no other vocabulary for a
+    /// disagreement with an accepted document. Without it the next one
+    /// gets recorded as a `note`, which is "something observed"
+    /// rather than "something WRONG", or as a failure, which would
+    /// make the harness unrunnable until production changed.
+    #[expect(
+        dead_code,
+        reason = "phase A's divergences are all fixed; phase B has no other way to record one"
+    )]
     pub fn divergence(&mut self, id: &str, measured: &str, violates: &str) {
         let line = format!("DIVERGES {id}  {measured}\n           violates: {violates}");
         self.divergences.push(line.clone());

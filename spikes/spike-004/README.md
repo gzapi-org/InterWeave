@@ -919,7 +919,7 @@ over two consecutive clean runs.
 | Mutation | Fails |
 | --- | --- |
 | subject's relay moved to the data-plane allowlist | **nothing** — exit 0 |
-| control's relay moved to the infrastructure set | no R6 row (R4.7 only) |
+| control's relay moved to the infrastructure set | **nothing** — exit 0 |
 | `misattributed` announces `RelayReservation` instead of a data-plane origin | R6.6, R6.8, R6.9, R6.10, R6.11 |
 | `ProductionNode` drops its `ConnectionManager` (bug 9, reintroduced) | R6.5, R6.6, R6.7, R6.8, R6.11 |
 | the circuit listen removed, so nothing dials | R6.4, R6.5, R6.6, R6.7, R6.8, R6.10, R6.11 |
@@ -927,11 +927,22 @@ over two consecutive clean runs.
 **The first two rows are the result worth reading, and they are
 negative.** Since step 1 the subject's dial is admitted, so making the
 subject into the control changes no verdict; and the control's dial is
-admitted whichever set its relay is in, because `RelayReservation` is
-not a data-plane origin and `admit` reads `is_data_plane` only in the
+admitted whichever set its relay is in, because `RelayReservation` does
+not name an application destination and `admit` reads
+`names_application_destination` only in the
 `ConnectivityInfrastructureOnly` arm. Neither mutation can fail
 anything. The discriminating variable moved to `misattributed` — row
 three is the one that now carries what row one used to.
+
+**Row two said `no R6 row (R4.7 only)` until 2026-09-04, and that was a
+flake read as a measurement.** R4.7 could not have been the mutation's
+doing: `main` runs R4 before R6, and R6's control does not exist while
+R4 is being measured. It was R4's own missing pump predicate, which
+made it fail about one run in three; the root cause is fixed and the
+reasoning is written up at its site in `experiments.rs`. Re-measured
+after that fix, with the baseline above and the patch asserted to have
+applied, the mutation fails nothing and the harness exits 0 — so row
+two now says what row one says, for the same reason.
 
 That is this record's own bug 8 arriving a second time by a different
 route: an experiment whose control agrees with its subject has measured
