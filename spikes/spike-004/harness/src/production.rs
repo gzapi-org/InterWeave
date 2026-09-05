@@ -233,23 +233,29 @@ pub struct ProductionBehaviour {
     /// `libp2p-relay 0.21.1` emits `ToSwarm::Dial` TWICE --
     /// `priv_client.rs:334` for a reservation, and `:373` to establish
     /// the relay connection a circuit request needs -- and both name
-    /// the RELAY -- READ from those two call sites, both of which build
-    /// `DialOpts::peer_id(relay_peer_id)`, not measured here. What is
-    /// measured is the negative: R5.11 REQUIRES that no dial the relay
-    /// behaviour made was aimed at the destination. R5.10 prints the
-    /// target list beside it and is a `note`, so it cannot fail. What the
-    /// behaviour never emits is a dial toward the DESTINATION (R5.6),
-    /// because a `/p2p-circuit` address is dialled by the relay
-    /// TRANSPORT; that is the dial no wrapper here can see.
+    /// the RELAY. That last part is READ, not measured here, and it is
+    /// read one branch UP from each emission rather than at it: `:315`
+    /// and `:359` are where the two `DialOpts::peer_id(relay_peer_id)`
+    /// builds are, so the peer is fixed before the `ToSwarm::Dial` that
+    /// carries it. What is measured is the negative: R5.11 REQUIRES
+    /// that no dial the relay behaviour made was aimed at the
+    /// destination. R5.10 prints the target list beside it and is a
+    /// `note`, so it cannot fail. What the behaviour never emits is a
+    /// dial toward the DESTINATION (R5.6), because a `/p2p-circuit`
+    /// address is dialled by the relay TRANSPORT; that is the dial no
+    /// wrapper here can see.
     ///
     /// So both dials the behaviour does emit are exchanges WITH the
     /// relay -- control plane, in ADR-0036's terms -- and one
     /// control-plane origin answers both. **Labelling the second one
-    /// `RelayCircuit` would be the mistake**: once Stage 11 step 2
-    /// makes that origin data-plane, a circuit through an
+    /// `RelayCircuit` is now the mistake, not would be**: Stage 11
+    /// step 2 moved that origin into
+    /// `names_application_destination`, so a circuit through an
     /// infrastructure-only relay would be refused at the dial that
     /// sets up the relay connection, and relaying would stop working
-    /// for exactly the peers relaying exists for.
+    /// for exactly the peers relaying exists for. The hazard is armed
+    /// rather than hypothetical, and step 5 is where it gets its first
+    /// chance to fire.
     pub relay_client: Attributing<relay::client::Behaviour>,
 }
 
@@ -287,7 +293,7 @@ pub struct ProductionNode {
     /// exactly how this experiment first misread itself.
     #[expect(
         dead_code,
-        reason = "held so the gate's snapshot stays current; R6.7 and R6.8 fail if it is dropped"
+        reason = "held so the gate's snapshot stays current; R6.5, R6.6, R6.7, R6.8 and R6.11 fail if it is dropped"
     )]
     pub manager: ConnectionManager,
 }

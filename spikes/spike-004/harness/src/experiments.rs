@@ -390,26 +390,27 @@ pub fn r3_infrastructure_cannot_reach_the_data_plane(report: &mut Report) {
         );
     }
 
-    // AND `RelayCircuit`, WHICH IS NOT ONE OF THEM — pinned in its
-    // current shape rather than approved, exactly as R3.5 pins D1.
-    // Review finding on PR #69: this origin sat in the loop above under
-    // the heading "the matrix permits", while D2 records the same
-    // admission as a violation. A spike that asserts today's behaviour
-    // is CORRECT cannot find a bug in it, which is fixture bug 5, and
-    // leaving it there would have failed this experiment on the commit
-    // that fixed D2 — telling the implementer the matrix permits what
-    // they had just correctly forbidden.
+    // AND `RelayCircuit`, WHICH IS NOT ONE OF THEM.
     //
-    // R7.4 is where D2 is recorded, with its control. This assertion
-    // exists so that R3 does not silently disagree with it.
+    // D2, FIXED BY STAGE 11 STEP 2. This assertion used to pin the
+    // opposite — RelayCircuit admitted, "pinned and NOT endorsed" —
+    // and it was written that way deliberately so the fix would fail
+    // here rather than pass silently. It did: this was one of three
+    // observations that failed on the commit moving the origin, which
+    // is the whole reason a divergence is asserted in its current
+    // shape rather than merely described.
+    //
+    // A circuit names the DESTINATION, so this is not the matrix's
+    // "relay control" row. The relay a circuit goes THROUGH is a
+    // different peer from the one it terminates at, and only the
+    // second is what this asks about.
     let circuit = ask(DialOrigin::RelayCircuit);
     report.require(
         "R3.6",
-        circuit.is_ok(),
+        circuit.as_ref().err() == Some(&DialDenial::NotAuthorizedForDataPlane),
         &format!(
-            "TODAY'S BEHAVIOUR, pinned and NOT endorsed: RelayCircuit is admitted for an \
-             infrastructure-only peer ({circuit:?}). See D2 — a circuit names the \
-             DESTINATION, so this is not the \"relay control\" row of the matrix"
+            "RelayCircuit is REFUSED for an infrastructure-only peer, and for the class \
+             rather than by accident ({circuit:?}) — ADR-0036 Amendment 2026-09-03"
         ),
     );
 
@@ -421,34 +422,35 @@ pub fn r3_infrastructure_cannot_reach_the_data_plane(report: &mut Report) {
     // as application destination | DataPlaneTrusted: yes |
     // ConnectivityInfrastructureOnly: **no**", and DCUTR.md §2 says
     // never to initiate DCUtR merely with an infrastructure-only peer
-    // as the destination. But `DialOrigin::is_data_plane` lists only
-    // Manual, ConnectionManager, DiscoveryReconnect and KademliaQuery,
-    // so `DcutrHolePunch` is treated as control-plane and admitted.
+    // as the destination. But the predicate -- then called
+    // `is_data_plane` -- listed only Manual, ConnectionManager,
+    // DiscoveryReconnect and KademliaQuery, so `DcutrHolePunch` was
+    // treated as control-plane and admitted.
     //
     // The earlier version of this experiment REQUIRED that admission,
     // which recorded the violation as evidence that the split holds.
-    // It is recorded as a divergence instead, and asserted in its
-    // current shape so that fixing it is noticed here.
+    // It was recorded as a divergence instead and asserted in its
+    // current shape so that fixing it would be noticed here — and it
+    // was. D1 is FIXED by Stage 11 step 2; this observation is now the
+    // regression guard for the fix rather than the record of the bug.
+    //
+    // The correction the divergence carried is what made the fix a
+    // two-word one: adding the origin to the predicate and gating on
+    // the DESTINATION's class are the SAME rule, because both
+    // consumers read the predicate only in the
+    // ConnectivityInfrastructureOnly arm and the class is the DIALLED
+    // peer's — so a hole punch THROUGH infrastructure toward a trusted
+    // peer never reaches it. That the punch dial names the far end
+    // rather than the relay is still READ from the crate rather than
+    // measured here, and Stage 11 confirms it when DCUtR is enabled.
     let dcutr = ask(DialOrigin::DcutrHolePunch);
     report.require(
         "R3.5",
-        dcutr.is_ok(),
-        "DcutrHolePunch is TODAY admitted for an infrastructure-only peer — asserted so \
-         that changing it fails this observation rather than passing silently",
-    );
-    report.divergence(
-        "D1",
-        "DialOrigin::DcutrHolePunch is admitted for a ConnectivityInfrastructureOnly peer, \
-         because DialOrigin::is_data_plane omits it and the policy therefore treats a \
-         hole-punch as control-plane traffic",
-        "ADR-0036 protocol-admission matrix (DCUtR with that peer as application \
-         destination: no) and architecture/transport/libp2p/DCUTR.md §2. Stage 11 must \
-         either add DcutrHolePunch to is_data_plane or gate it on the DESTINATION's class \
-         — the two are not the same rule, since a hole-punch THROUGH infrastructure toward \
-         a trusted peer is legitimate. [CORRECTED 2026-09-03: they ARE the same rule. Both \
-         consumers read the predicate only in the ConnectivityInfrastructureOnly arm and \
-         the class is the DIALLED peer's, so the trusted case never reaches it. That the \
-         punch dial names the far end is read from the crate, not measured here.]",
+        dcutr.as_ref().err() == Some(&DialDenial::NotAuthorizedForDataPlane),
+        &format!(
+            "DcutrHolePunch is REFUSED for an infrastructure-only peer, for the class \
+             rather than by accident ({dcutr:?}) — ADR-0036's matrix row and DCUTR.md §2"
+        ),
     );
     for origin in [
         DialOrigin::KademliaQuery,
@@ -580,14 +582,36 @@ pub async fn r4_autonat_server_dial_back(report: &mut Report) {
         .expect("dial accepted");
 
     {
+        // WAITS FOR R4.7's CONDITION, NOT ONLY R4.6's, and that is the
+        // fix for a flake rather than a tidy-up. This waited on the
+        // dial-back being ADMITTED, then R4.7 asserted the probe had
+        // COMPLETED -- a strictly later event with nothing waiting for
+        // it. So R4.7 failed on roughly one run in three, which the
+        // README's own determinism rule forbids: an observation has to
+        // be deterministic to be evidence at all. It converted R5, R7,
+        // R11 and R12 for exactly this reason and did not reach R4.
+        //
+        // The measured cost of getting this wrong was worse than a red
+        // run: a mutation batch on 2026-09-04 recorded the resulting
+        // R4.7 failure as the RESULT of a mutation to R6's control,
+        // which cannot reach R4 at all -- R4 has emitted its verdicts
+        // before any of R6's nodes exist. A flake read as a measurement
+        // is how a mutation table acquires a row that means nothing.
         let mut nodes = [&mut client_a, &mut permissive];
         pump_until(&mut nodes, Duration::from_secs(20), |n| {
-            n[1].ledger
+            let admitted = n[1]
+                .ledger
                 .allowed_by_origin()
                 .get("autonat-probe")
                 .copied()
                 .unwrap_or(0)
-                > 0
+                > 0;
+            let completed = n[0]
+                .observed
+                .details("autonat-client")
+                .iter()
+                .any(|d| d.contains("result=Ok(())"));
+            admitted && completed
         })
         .await;
     }
@@ -889,11 +913,13 @@ pub async fn r5_circuit_is_not_a_reservation(report: &mut Report) {
     // So `RelayCircuit` is not a behaviour-originated origin at all —
     // it is a COMMAND-PATH one. The caller dialling a peer through a
     // relay knows it is doing so, and in production `attempt_dial`
-    // carries that origin into admission while `GatedSwarm::dial`
-    // ENFORCES the pairing against the address it was handed —
-    // refusing a `/p2p-circuit` address not admitted as `RelayCircuit`,
-    // and a `RelayCircuit` ticket on an address that has no circuit
-    // component. It validates the pairing; it does not choose it.
+    // carries that origin into admission and then calls
+    // `AdmittedDial::from_ticket`, which ENFORCES the pairing against
+    // the address — refusing a `/p2p-circuit` address not admitted as
+    // `RelayCircuit`, and a `RelayCircuit` ticket on an address that
+    // has no circuit component. Both halves therefore happen at
+    // `attempt_dial`, before the Swarm is touched. It validates the
+    // pairing; it does not choose it.
     // The classifier still matters for the reservation/circuit split
     // IF a future crate version dials circuits from the behaviour; it
     // is not what produces `RelayCircuit` today.
@@ -1358,11 +1384,22 @@ pub async fn r7_relayed_path_trust(report: &mut Report) {
          check runs on the destination rather than on the relay",
     );
 
-    // THE DIVERGENCE. `RelayCircuit` is absent from
-    // `DialOrigin::is_data_plane`, so an infrastructure-only
+    // WHAT WAS D2, AND IS NOW ITS REGRESSION GUARD. `RelayCircuit` was
+    // absent from the admission predicate, so an infrastructure-only
     // destination — a peer authorized for reachability and nothing
-    // else — is dialable as a circuit. A circuit is application
-    // traffic by construction.
+    // else — was dialable as a circuit, and a circuit is application
+    // traffic by construction. Stage 11 step 2 moved the origin.
+    //
+    // The assertion was written in the defect's shape ON PURPOSE so
+    // that fixing it would fail here rather than pass silently, and
+    // that is exactly what happened: this was one of three observations
+    // that failed on the commit which moved the origin.
+    //
+    // The fix was NOT the same as D1's in one respect worth keeping:
+    // `RelayReservation` stays out of the predicate, because a
+    // reservation IS the reachability purpose while a circuit names the
+    // destination rather than the relay. R5.6 is why, and it is the two
+    // origins' whole difference.
     let infra_circuit = ask(&infra_dest, DialOrigin::RelayCircuit);
     report.note(
         "R7.3",
@@ -1370,37 +1407,28 @@ pub async fn r7_relayed_path_trust(report: &mut Report) {
     );
     report.require(
         "R7.4",
-        infra_circuit.is_ok(),
-        "TODAY'S BEHAVIOUR, pinned so a fix fails here rather than passing silently: a \
-         RelayCircuit dial toward an infrastructure-only destination is ADMITTED",
+        infra_circuit.as_ref().err() == Some(&DialDenial::NotAuthorizedForDataPlane),
+        &format!(
+            "a RelayCircuit dial toward an infrastructure-only DESTINATION is REFUSED, \
+             and for the class rather than by accident ({infra_circuit:?})"
+        ),
     );
-    if infra_circuit.is_ok() {
-        report.divergence(
-            "D2",
-            "DialOrigin::RelayCircuit is admitted for a ConnectivityInfrastructureOnly \
-             destination, because is_data_plane omits it — so a peer authorized for \
-             reachability alone is reachable over a relayed circuit, which carries \
-             application traffic by construction",
-            "ADR-0036 enforcement (\"the root dial gate evaluates both requested dial \
-             purpose and destination class; it must not authorize a generic application \
-             dial merely because the PeerId is an infrastructure peer\"). The fix is not \
-             the same as D1's: RelayReservation must stay non-data-plane, since a \
-             reservation IS the reachability purpose, while RelayCircuit names the \
-             destination and not the relay — R5.6 is why, and it is the two origins' \
-             whole difference",
-        );
-    }
-    // AND THE CONTROL FOR THE CLAIM THAT THIS IS ABOUT THE ORIGIN, not
-    // about the class check being broken: the same destination, the
-    // same policy, a data-plane origin — refused.
+    // AND THE CONTROL, which since step 2 checks that the refusal is
+    // about the CLASS rather than about the origin having become
+    // universally refused: the same destination, the same policy, a
+    // data-plane origin — refused the same way. Before step 2 this was
+    // the contrast that made R7.4 mean something; now both are refused
+    // and R7.2 above carries the discrimination, since a stranger is
+    // refused as `Unauthorized` rather than for the data plane.
     report.require(
         "R7.5",
         matches!(
             ask(&infra_dest, DialOrigin::Manual),
             Err(DialDenial::NotAuthorizedForDataPlane)
         ),
-        "the same infrastructure-only destination IS refused under a data-plane origin, so \
-         R7.4 is the origin's classification and not a broken class check",
+        "the same infrastructure-only destination IS refused under a data-plane origin — a \
+         regression guard since step 2 made R7.4 agree with it; R7.2 is what now shows the \
+         refusal is the class rather than a gate refusing everything",
     );
 
     // THE POSITIVE HALF: the end identity survives the relayed path.
@@ -1699,8 +1727,9 @@ pub async fn r8_relayed_inbound_accounting(report: &mut Report) -> Option<Relaye
                 .iter()
                 .all(|(_, remote)| remote.contains(&source_peer.to_string())),
         &format!(
-            "the relayed remote address IS the source's PeerId, so the bucket \
-             `source_label` derives from it is one per identity: {:?}",
+            "the relayed remote address IS the source's PeerId — the shape D3 rested \
+             on, since a bucket derived from the remote alone is one per identity, and \
+             the shape `source_label` must therefore not read alone: {:?}",
             relayed.iter().map(|(_, r)| r).collect::<Vec<_>>()
         ),
     );
@@ -1903,43 +1932,43 @@ pub async fn r9_relayed_preauth_bucket(report: &mut Report, observed: Option<Rel
         ),
     );
 
-    // THE DIVERGENCE. The same ceiling, the same gate, one relay
-    // connection — and each source PeerId gets a bucket of its own.
-    // PeerIds are free to mint, so the bucket count is chosen by
-    // whoever is attacking, which is what "unbounded pseudo-source
-    // buckets from circuit metadata" names.
+    // WHAT WAS D3, AND IS NOW ITS REGRESSION GUARD. The same ceiling,
+    // the same gate, one relay connection — and each source PeerId used
+    // to get a bucket of its own. PeerIds are free to mint, so the
+    // bucket count was chosen by whoever was attacking, which is what
+    // §10's "unbounded pseudo-source buckets from circuit metadata"
+    // names.
+    //
+    // Stage 11 step 2 gave `source_label` the LOCAL address, where the
+    // relay's identity is, so both circuits are charged to the relay
+    // and the SECOND is refused by the same per-source ceiling that
+    // refuses the second direct inbound at R9.2. This assertion was
+    // written in the defect's shape on purpose so the fix would fail
+    // here rather than pass silently, and it did.
     report.require(
         "R9.3",
-        first.is_ok() && second.is_ok(),
+        first.is_ok() && second.is_err(),
         &format!(
-            "TODAY'S BEHAVIOUR, pinned so a fix fails here rather than passing silently: two \
-             relayed inbounds over one relay each get their own bucket (first={:?}, \
-             second={:?})",
+            "two relayed inbounds over ONE relay share a bucket, so the second is refused \
+             by the per-source ceiling — the relay is charged, not the source identity \
+             the circuit carries (first={:?}, second={:?})",
             first.is_ok(),
             second.is_ok()
         ),
     );
-    if first.is_ok() && second.is_ok() {
-        report.divergence(
-            "D3",
-            "PreAuthAdmission buckets a relayed inbound by the SOURCE PeerId carried in \
-             the circuit's remote address. `source_label` returns the multiaddr as \
-             written when it holds no IP, and R8 measured that address to be \
-             `/p2p/<source>` — so one relay connection yields one bucket per source \
-             identity, and identities are free to mint. The relay's own PeerId is present \
-             in the LOCAL address (R8.5) and is not read",
-            "contracts/CONNECTIVITY.md §10, which requires charging the authenticated \
-             relay transport connection / relay PeerId plus the global caps and says the \
-             destination MUST NOT create unbounded pseudo-source buckets from circuit \
-             metadata. Not reachable in a shipped build today — no relay feature is \
-             compiled — and live the moment Stage 11's Phase 4 lands, which is why it is \
-             recorded against the code rather than against the stage",
-        );
-    }
 
-    // AND THE GLOBAL CAP IS THE ONLY THING LEFT STANDING. Worth
-    // measuring rather than assuming: if it too were per-bucket, there
-    // would be no bound at all.
+    // AND THE PER-SOURCE CEILING NOW BOUNDS IT, which is the whole
+    // point of the fix and is measured rather than argued.
+    //
+    // This used to assert 8 — the GLOBAL ceiling, the only thing left
+    // standing when every minted identity bought its own bucket. Thirty
+    // two fresh source identities over one relay now buy ONE admission
+    // between them, because they share the relay's bucket and
+    // `max_pending_per_source` is 1. The distance between 8 and 1 is
+    // the defect's whole cost: it is how much pre-auth work an attacker
+    // could extract per relay connection by minting identities, and it
+    // grew with the global cap rather than with anything they had to
+    // spend.
     let mut exhaust = PreAuthAdmission::new(limits);
     let mut admitted = 0_usize;
     for i in 0..32_usize {
@@ -1961,11 +1990,11 @@ pub async fn r9_relayed_preauth_bucket(report: &mut Report, observed: Option<Rel
     }
     report.require(
         "R9.4",
-        admitted == 8,
+        admitted == 1,
         &format!(
-            "the GLOBAL ceiling still bounds the total ({admitted} of 32 admitted against \
-             max_pending_total 8), so the failure is the bucket's granularity and not the \
-             absence of any bound"
+            "32 minted source identities over ONE relay buy {admitted} admission(s), not \
+             8 — the PER-SOURCE ceiling bounds them because they share the relay's \
+             bucket, so minting identities no longer buys pre-auth work"
         ),
     );
 }

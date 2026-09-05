@@ -1331,7 +1331,8 @@ impl ConnectionManager {
     /// infrastructure-only peer is dialable for reachability and
     /// refused for the data plane, on the same address in the same
     /// moment. `ConnectionPolicy::admit` has always decided it that
-    /// way -- `origin.is_data_plane()` is the discriminator. What pins
+    /// way -- `origin.names_application_destination()` is the
+    /// discriminator. What pins
     /// it is split across three places, and none of them alone covers
     /// the grid: `tests/transport-contract`'s exit gate asserts every
     /// origin against `ConnectivityInfrastructureOnly`, while
@@ -1339,18 +1340,24 @@ impl ConnectionManager {
     /// `an_unauthorized_peer_is_refused_whatever_the_origin` and
     /// `a_trusted_destination_is_admitted_under_every_origin`.
     ///
-    /// Revalidating an established connection with the data-plane-only
+    /// Revalidating an established connection with the destination-only
     /// predicate therefore closed connections admission had correctly
-    /// permitted: a relay reservation, a relay circuit, an AutoNAT
-    /// probe or a DCUtR hole punch to an infrastructure peer completed
-    /// its handshake and was immediately dropped. (Two of those four
-    /// should not be permitted at all — see `DialOrigin::is_data_plane`
-    /// for D1 and D2. This function's job is to AGREE with admission,
-    /// so fixing them there fixes it here; the bug it was written for
-    /// is the disagreement, not the classification.) The inbound path has
-    /// no origin to consult and no such pair to honour, which is why it
-    /// keeps the stricter predicate and why applying that one to
-    /// outbound was wrong rather than merely conservative.
+    /// permitted: a relay reservation or an AutoNAT probe to an
+    /// infrastructure peer completed its handshake and was immediately
+    /// dropped.
+    ///
+    /// It closed relay circuits and DCUtR hole punches to such a peer
+    /// too — but admission should never have permitted those, which is
+    /// D2 and D1, refused at the predicate since Stage 11 step 2 (see
+    /// `DialOrigin::names_application_destination`). This function's
+    /// job is to AGREE with admission, so fixing them there fixed them
+    /// here; the bug it was written for is the disagreement, not the
+    /// classification.
+    ///
+    /// The inbound path has no origin to consult and no such pair to
+    /// honour, which is why it keeps the stricter predicate and why
+    /// applying that one to outbound was wrong rather than merely
+    /// conservative.
     #[must_use]
     pub fn authorizes_for(&self, class: ConnectionClass, origin: DialOrigin) -> bool {
         if self.shutting_down.load(Ordering::Acquire) {
@@ -1359,7 +1366,9 @@ impl ConnectionManager {
         match class {
             ConnectionClass::Unauthorized => false,
             ConnectionClass::DataPlaneTrusted => true,
-            ConnectionClass::ConnectivityInfrastructureOnly => !origin.is_data_plane(),
+            ConnectionClass::ConnectivityInfrastructureOnly => {
+                !origin.names_application_destination()
+            }
         }
     }
 
@@ -2710,7 +2719,7 @@ mod tests {
 
     /// The same invariant at the OTHER consumer, which also had no test.
     ///
-    /// `authorizes_for` reads `is_data_plane` only for
+    /// `authorizes_for` reads `names_application_destination` only for
     /// `ConnectivityInfrastructureOnly`; `DataPlaneTrusted` is `true`
     /// unconditionally. So revalidating an established connection to a
     /// trusted peer never consults the origin -- which is why moving
@@ -2718,7 +2727,8 @@ mod tests {
     /// start tearing down a hole punch or circuit toward a trusted peer
     /// reached through infrastructure.
     ///
-    /// The claim is stated in `DialOrigin::is_data_plane`'s note "at
+    /// The claim is stated in
+    /// `DialOrigin::names_application_destination`'s note "at
     /// either site". This is the second site, and it is asserted here
     /// rather than inferred from the first: adding an origin check to
     /// the `DataPlaneTrusted` arm fails this test and not that one.
@@ -2744,8 +2754,10 @@ mod tests {
     /// `DataPlaneTrusted` arm; without this one the `Unauthorized` arm
     /// is unpinned and a mutation survives. `authorizes` -- the
     /// single-argument wrapper the rest of the tests use -- hardcodes
-    /// `DialOrigin::Manual`, and `Manual.is_data_plane()` is true, so
-    /// rewriting `Unauthorized => false` as `=> !origin.is_data_plane()`
+    /// `DialOrigin::Manual`, and
+    /// `Manual.names_application_destination()` is true, so
+    /// rewriting `Unauthorized => false` as
+    /// `=> !origin.names_application_destination()`
     /// leaves every existing assertion green while making the comment's
     /// "only" false. `ConnectionPolicy::admit`'s matching claim is
     /// pinned by `an_unauthorized_peer_is_refused_whatever_the_origin`;
@@ -2776,17 +2788,20 @@ mod tests {
         // `is_data_plane` until 2026-09-03, so "pins" overstated it;
         // it asserts a hardcoded table now.) Revalidating an
         // established connection with the data-plane-only predicate
-        // ignored the pair, so a
-        // relay reservation, relay circuit, AutoNAT probe or DCUtR hole
-        // punch to an infrastructure peer completed its handshake and
-        // was closed immediately -- admission permitted it and
-        // establishment threw it away.
+        // ignored the pair, so a relay reservation or an AutoNAT probe
+        // to an infrastructure peer completed its handshake and was
+        // closed immediately -- admission permitted it and
+        // establishment threw it away. A relay circuit or a DCUtR hole
+        // punch to that peer belonged on the same list until Stage 11
+        // step 2; both are refused at admission now, so neither
+        // reaches establishment to be thrown away.
         //
         // WHAT THIS ASSERTS IS AGREEMENT, not correctness. `kept ==
-        // !origin.is_data_plane()` is true by construction of the
-        // function under test, which is deliberate: the defect was the
+        // !origin.names_application_destination()` is true by
+        // construction of the function under test, which is
+        // deliberate: the defect was the
         // two predicates disagreeing. Whether the classification itself
-        // is right is `is_data_plane`'s own pinning test, and SPIKE-004
+        // is right is the predicate's own pinning test, and SPIKE-004
         // found two origins on the wrong side of it (D1, D2).
         let mut m = untrusting(8);
         let _ = m.set_trust(trusting(&[], &[P1]), &[]);
@@ -2797,7 +2812,7 @@ mod tests {
             let kept = m.authorizes_for(class, origin);
             assert_eq!(
                 kept,
-                !origin.is_data_plane(),
+                !origin.names_application_destination(),
                 "{origin:?} on an infrastructure peer: kept must match what admission permits"
             );
         }

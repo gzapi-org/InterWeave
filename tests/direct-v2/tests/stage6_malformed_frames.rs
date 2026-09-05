@@ -356,7 +356,8 @@ async fn a_bad_field_is_answered_malformed() {
 // Neither an unknown peer nor an infrastructure-only one can hold an
 // INBOUND connection at all: `settle_outcome` admits inbound with
 // `manager.authorizes(class)`, which is `authorizes_for(class,
-// DialOrigin::Manual)`, and `Manual.is_data_plane()` is true — so
+// DialOrigin::Manual)`, and `Manual.names_application_destination()` is
+// true — so
 // `ConnectivityInfrastructureOnly` is refused and the socket closes.
 // Both were tried here and both produced `ConnectionClosed` before a
 // request could be sent, which is the connection layer doing its job.

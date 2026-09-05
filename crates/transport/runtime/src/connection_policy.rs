@@ -118,60 +118,88 @@ pub enum DialOrigin {
 }
 
 impl DialOrigin {
-    /// Whether this origin is application data-plane traffic.
+    /// Whether this origin names the dialled peer as the DESTINATION
+    /// of application traffic.
     ///
-    /// The reachability origins are not, which is what lets an
+    /// ADR-0036's question is WITH or FOR: is this exchange *with* the
+    /// peer, for the reachability purpose it was authorized for, or is
+    /// the peer the far end of an application path? The reachability
+    /// origins are the first kind, which is what lets an
     /// infrastructure-only peer be dialed for a relay reservation while
     /// staying unauthorized for a Kademlia query to the same address.
     ///
-    /// # Two of the four are on the wrong side (D1, D2)
+    /// # The four connectivity origins split two and two
     ///
     /// `RelayReservation` and `AutonatProbe` name the infrastructure
-    /// peer as the party the exchange is WITH, and belong here.
-    /// `RelayCircuit` and `DcutrHolePunch` name it as the
-    /// DESTINATION, which is application traffic — SPIKE-004 recorded
-    /// both as divergences from ADR-0036 and
-    /// `spikes/spike-004/README.md` carries the argument.
+    /// peer as the party the exchange is WITH. A reservation IS the
+    /// reachability purpose, and making it a destination origin would
+    /// refuse every relay the stack needs.
     ///
-    /// **They are pinned in their current shape rather than endorsed.**
-    /// Neither is reachable in a shipped build — nothing constructs
-    /// either origin and no relay or DCUtR feature is compiled — so
-    /// both are latent until Stage 11 enables those paths, and both are
-    /// on its list to fix before it does. **Both are now code fixes.**
-    /// D2 was a document conflict first — the libp2p transport's
-    /// `CONNECTIVITY.md` §4 matrix read "Relay v2 control | eligible
-    /// | eligible" with no row for a circuit whose DESTINATION is the
+    /// `RelayCircuit` and `DcutrHolePunch` name it as the DESTINATION.
+    /// A circuit exists to carry application traffic, and a hole punch
+    /// names the far end of the path it is opening. **Both were
+    /// admitted for an infrastructure-only peer until Stage 11 step 2**
+    /// — SPIKE-004's D1 and D2, latent because nothing constructed
+    /// either origin and no relay or DCUtR feature was compiled.
+    /// Neither was ever reachable in a shipped build, and both are
+    /// refused now, before the paths they govern are built.
+    ///
+    /// D2 was a document conflict first: the libp2p transport's
+    /// `CONNECTIVITY.md` §4 matrix read "Relay v2 control | eligible |
+    /// eligible" with no row for a circuit whose DESTINATION is the
     /// infrastructure-only peer, and §11 excluded only
     /// `direct-user-command` and `kademlia-query`, so an accepted
-    /// document arguably permitted today's answer. ADR-0036's
+    /// document arguably permitted the old answer. ADR-0036's
     /// Amendment 2026-09-03 added the row and both sections inherited
-    /// it, so the clarification is done and this is what changes next.
+    /// it; this is the code catching up.
     ///
-    /// The fix is per-origin, not per-pair: `RelayCircuit` and
-    /// `DcutrHolePunch` move, `RelayReservation` and `AutonatProbe`
-    /// stay. A reservation is the reachability purpose itself, and
-    /// making it data-plane refuses every relay the stack needs.
+    /// # Why moving them costs the legitimate case nothing
     ///
-    /// Moving the two costs nothing for the legitimate case, which is
-    /// the objection SPIKE-004 raised against this shape and later
-    /// corrected. Both consumers — `admit` here and
+    /// This is the objection SPIKE-004 raised against this shape and
+    /// later corrected. Both consumers — `admit` here and
     /// `ConnectionManager::authorizes_for`, which exists to agree with
     /// it — read this function in ONE arm,
     /// `ConnectivityInfrastructureOnly`; `DataPlaneTrusted` falls
     /// through with no origin check. The class is that of the peer the
     /// dial NAMES, so a circuit or hole punch toward a trusted peer
     /// *through* infrastructure names the trusted peer and is never
-    /// tested against the origin's plane, at either site. That much is
-    /// pinned by `a_trusted_destination_is_admitted_under_every_origin`
-    /// and its counterpart in `connection_manager`. That the punch
-    /// dial names the far end rather than the relay is read from the
-    /// crate rather than measured, and Stage 11 confirms it when DCUtR
-    /// is enabled.
+    /// tested against this predicate, at either site. That is pinned by
+    /// `a_trusted_destination_is_admitted_under_every_origin` and its
+    /// counterpart in `connection_manager`. That the punch dial names
+    /// the far end rather than the relay is read from the crate rather
+    /// than measured, and Stage 11 confirms it when DCUtR is enabled.
+    ///
+    /// # The name is deliberate, and `KademliaQuery` is why
+    ///
+    /// This was called `is_data_plane` until step 2. That name
+    /// describes TRAFFIC, while the rule it decides is the WITH/FOR
+    /// question above, and SPIKE-004 misread it in precisely that gap
+    /// twice — once concluding a circuit toward a trusted destination
+    /// would be refused, once that the two origins could not move
+    /// without breaking relaying. Both readings came from arguing about
+    /// what counts as "data plane" instead of asking who the dial
+    /// names.
+    ///
+    /// `KademliaQuery` is the case that proves the old name wrong:
+    /// routing is not application data, so it sits awkwardly in a set
+    /// called "data plane" — but it names the peer as the destination
+    /// of a query it will answer, so it belongs here without argument
+    /// under the question this function actually asks. **The rename
+    /// moves no origin.** `KademliaQuery` stays refused for an
+    /// infrastructure-only peer, as ADR-0036's matrix, `CONNECTIVITY.md`
+    /// §4 and §11 and the digest all require; letting it out would
+    /// widen the infrastructure set, which is the exact failure
+    /// ADR-0036 exists to prevent.
     #[must_use]
-    pub const fn is_data_plane(self) -> bool {
+    pub const fn names_application_destination(self) -> bool {
         matches!(
             self,
-            Self::Manual | Self::ConnectionManager | Self::DiscoveryReconnect | Self::KademliaQuery
+            Self::Manual
+                | Self::ConnectionManager
+                | Self::DiscoveryReconnect
+                | Self::KademliaQuery
+                | Self::RelayCircuit
+                | Self::DcutrHolePunch
         )
     }
 
@@ -223,7 +251,8 @@ pub enum DialDenial {
     ShuttingDown,
     /// The peer is not authorized for anything.
     Unauthorized,
-    /// The peer is authorized for reachability only, and this is data-plane.
+    /// The peer is authorized for reachability only, and this origin
+    /// names it as an application destination.
     NotAuthorizedForDataPlane,
     /// The peer is in punitive backoff.
     PeerBackoff,
@@ -531,7 +560,7 @@ impl ConnectionPolicy {
                 // The rule ADR-0036 exists for: an infrastructure peer is
                 // dialable for reachability and refused for the data
                 // plane, on the same address, in the same moment.
-                if request.origin.is_data_plane() {
+                if request.origin.names_application_destination() {
                     return Err(DialDenial::NotAuthorizedForDataPlane);
                 }
             }
@@ -783,7 +812,8 @@ mod tests {
 
     #[test]
     fn every_origin_is_classified_and_the_classification_is_pinned() {
-        // Driving the other tests off `is_data_plane()` makes them blind
+        // Driving the other tests off `names_application_destination()`
+        // makes them blind
         // to it being WRONG: a misclassified origin simply moves to the
         // other loop, where it also passes. So the split is asserted
         // here, on its own terms, origin by origin.
@@ -794,32 +824,33 @@ mod tests {
         // origin on the reachability side is precisely how it would
         // acquire that authority by accident.
         //
-        // THIS PINS TODAY'S ANSWER, IT DOES NOT ENDORSE IT. SPIKE-004
-        // found `RelayCircuit` (D2) and `DcutrHolePunch` (D1) on the
-        // wrong side: both name the infrastructure peer as the
-        // DESTINATION of application traffic, which ADR-0036 forbids,
-        // and `is_data_plane` treats them as control-plane. Moving
-        // either fails here, which is the point — the change is Stage
-        // 11's and must arrive with its reasoning, not as a quiet edit.
-        // D2's architecture clarification landed on 2026-09-03
-        // (ADR-0036's amendment), so both are code fixes now; see
-        // `is_data_plane`'s own note for which origins move and which
-        // must not.
+        // SPIKE-004 found `RelayCircuit` (D2) and `DcutrHolePunch`
+        // (D1) on the wrong side of this split: both name the
+        // infrastructure peer as the DESTINATION of an application
+        // path, which ADR-0036 forbids, and the predicate treated them
+        // as reachability. Stage 11 step 2 moved both, and the arms
+        // below moved with them. Only `RelayReservation` and
+        // `AutonatProbe` remain on the reachability side, which is the
+        // pair ADR-0036 authorizes an infrastructure-only peer for.
+        //
+        // THE `match` IS EXHAUSTIVE ON PURPOSE. Adding a variant to
+        // `DialOrigin` without deciding its side fails to compile here,
+        // which is the property worth having when the rule is "no
+        // origin skips the gate".
         for origin in DialOrigin::ALL {
             let expected = match origin {
                 DialOrigin::Manual
                 | DialOrigin::ConnectionManager
                 | DialOrigin::DiscoveryReconnect
-                | DialOrigin::KademliaQuery => true,
-                DialOrigin::RelayReservation
+                | DialOrigin::KademliaQuery
                 | DialOrigin::RelayCircuit
-                | DialOrigin::AutonatProbe
-                | DialOrigin::DcutrHolePunch => false,
+                | DialOrigin::DcutrHolePunch => true,
+                DialOrigin::RelayReservation | DialOrigin::AutonatProbe => false,
             };
             assert_eq!(
-                origin.is_data_plane(),
+                origin.names_application_destination(),
                 expected,
-                "{origin:?} is on the wrong side of the data-plane split"
+                "{origin:?} is on the wrong side of the WITH/FOR split"
             );
         }
     }
@@ -841,17 +872,17 @@ mod tests {
 
     /// THE INVARIANT THE D1/D2 FIX SHAPE RESTS ON, AND IT HAD NO TEST.
     ///
-    /// `is_data_plane` is read in one arm only, so a trusted
-    /// destination is admitted whatever the origin. That is the whole
-    /// reason moving `RelayCircuit` and `DcutrHolePunch` into the
-    /// predicate costs the legitimate case nothing: a circuit or hole
+    /// `names_application_destination` is read in one arm only, so a
+    /// trusted destination is admitted whatever the origin. That is the
+    /// whole reason moving `RelayCircuit` and `DcutrHolePunch` into the
+    /// predicate cost the legitimate case nothing: a circuit or hole
     /// punch toward a TRUSTED peer reached *through* infrastructure
-    /// names the trusted peer, so the origin's plane is never consulted
-    /// for it.
+    /// names the trusted peer, so the origin is never consulted for
+    /// it. Step 2 made that move; this test is why it was safe to.
     ///
     /// Three documents and a doc comment explain why that cannot break
-    /// -- SPIKE-004's record, `SPIKES.md`, the Stage 11 plan and
-    /// `is_data_plane`'s own note. None of them was enforced by
+    /// -- SPIKE-004's record, `SPIKES.md`, the Stage 11 plan and the
+    /// predicate's own note. None of them was enforced by
     /// anything. Adding an origin check to `admit`'s `DataPlaneTrusted`
     /// arm fails HERE, which is what makes the explanation load-bearing
     /// rather than merely written down.

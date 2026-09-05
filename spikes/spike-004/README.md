@@ -7,6 +7,19 @@ Do not treat experiments placed here as production implementation.
 Evidence and the final decision are recorded against
 [`architecture/roadmap/SPIKES.md`](../../architecture/roadmap/SPIKES.md).
 
+**One name below no longer exists, and is left as written on purpose.**
+This record measures dated states of the production code, so it names
+`DialOrigin::is_data_plane` throughout. Stage 11 step 2 renamed that
+predicate `names_application_destination` on 2026-09-04, in the commit
+that also moved `RelayCircuit` and `DcutrHolePunch` into it — the
+rename and the fix are the same change, because the old name described
+traffic while the rule decides ADR-0036's WITH/FOR question. Rewriting
+the narrative to the new name would make phase A's measurements read as
+though they were taken against code that did not exist yet; the dated
+`RESOLVED` notes say what changed instead. **The same applies to the
+harness sources**, which measure those same dated states: where a
+comment there explains what phase A found, it keeps the old name.
+
 ## What this phase does and does not cover
 
 SPIKE-004's brief asks for an environment matrix — public VM, home NAT,
@@ -207,9 +220,14 @@ The conclusion for Stage 11: **`RelayCircuit` comes from the CALLER**,
 because the caller dialling through a relay is the party that knows.
 *(Correction, 2026-09-04: as written this named the wrong function.
 In shipped code `attempt_dial` carries the origin the caller supplied
-into admission, and `GatedSwarm::dial` ENFORCES the pairing against the
-address — refusing a `/p2p-circuit` address not admitted as
-`RelayCircuit`, and the reverse. It validates; it does not set.)* The classifier still earns its place for
+into admission, and `AdmittedDial::from_ticket` — reached from
+`attempt_dial`, before the Swarm is touched — ENFORCES the pairing
+against the address, refusing a `/p2p-circuit` address not admitted as
+`RelayCircuit` and the reverse. `GatedSwarm::dial` does neither: it
+destructures an already-built `AdmittedDial`, registers the id and
+forwards to the inner Swarm, with no address inspection and no refusal
+path. Second correction, 2026-09-04: the first one named the wrong
+function too.)* The classifier still earns its place for
 the reservation-vs-circuit split if a future crate version dials
 circuits from the behaviour; it is not what produces the variant today.
 
@@ -243,6 +261,17 @@ worth stating because Stage 11's own tests will construct managers.
 and ADR-0036 says it must not be.** The one finding here that is a
 defect in THIS project rather than in a dependency, and the reason the
 harness has a "divergence" category at all.
+
+> **RESOLVED 2026-09-04, Stage 11 step 2.** The origin is named by the
+> admission predicate — renamed `names_application_destination` in the
+> same change — so a hole punch terminating at an infrastructure-only
+> peer is refused. R3.5 asserted the admission in the defect's shape so
+> that a fix would fail there rather than pass silently, and it did:
+> R3.5 was one of three observations that failed on the fixing commit.
+> It now asserts the refusal, and asserts it carries
+> `NotAuthorizedForDataPlane` rather than merely that something was
+> refused. The record below is left as written; this note is the
+> correction.
 
 ADR-0036's protocol-admission matrix reads *"DCUtR with that peer as
 application destination | DataPlaneTrusted: yes |
@@ -300,6 +329,15 @@ admission — recording the violation as evidence that the split held.
 
 **D2 — `RelayCircuit` is admitted for an infrastructure-only
 DESTINATION, and a circuit is application traffic by construction.**
+
+> **RESOLVED 2026-09-04, Stage 11 step 2**, together with D1 and by the
+> same two-word change. `RelayReservation` did NOT move, for the reason
+> this section argues below. R3.6 and R7.4 now assert the refusal;
+> R7.4's control changed meaning with it, since both origins are
+> refused now and R7.2 carries the discrimination — a stranger is
+> refused `Unauthorized` rather than for the data plane. The record
+> below is left as written; this note is the correction.
+
 The same omission from `is_data_plane`, one origin over, and it is the
 more consequential of the two: a relayed circuit exists to carry the
 data plane. ADR-0036's enforcement clause is explicit — *"the root dial
@@ -350,8 +388,9 @@ permitted the behaviour is precisely what §2 forbids.
 > Amendment 2026-09-03 added the row the matrix lacked, `| Relay v2
 > circuit with that peer as application destination | yes | **no** |`,
 > and `transport/libp2p/CONNECTIVITY.md` §4 and §11 inherited it. **The
-> conflict is gone and D2 is now an ordinary code fix** — do not stop
-> for the architecture decision, it has been taken. The fix stays
+> conflict is gone and D2 became an ordinary code fix**, made on
+> 2026-09-04 — do not stop for the architecture decision, it has been
+> taken, and do not re-make the code change either. The fix stays
 > per-origin, as this section argues above: `RelayCircuit` moves,
 > `RelayReservation` does not. The finding above is left as it was
 > measured, because what a spike recorded is the thing a later reader
@@ -403,23 +442,50 @@ here: §10's risk is not merging, it is proliferation. An unenforced
 claim about a case nobody had run — which is the shape this repository's
 own rule about comments is written against.
 
+> **RESOLVED 2026-09-05, Stage 11 step 2.** `source_label` reads the
+> REMOTE address for an IP first, and falls back to the relay in
+> THREE cases whenever the local address holds `/p2p-circuit`: by the
+> relay's PeerId where that address carries one, else by the relay's
+> IP, else by the whole local address. The third is terminal, so the
+> function cannot fall through to the remote — it did until the PR #74
+> review, for a circuit whose local address carried neither, which was
+> D3 surviving in one address shape. So a relayed
+> inbound is charged to the relay, which is what §10 asks for, and the
+> source PeerId the circuit asserts no longer names a bucket. The
+> `relay:` prefix on those buckets is a namespace this fix introduces:
+> it keeps a relay's circuits from colliding with a direct inbound from
+> the relay's own IP. R9.3 and R9.4 were flipped to assert the fix and
+> failed on the commit that made it — R9.4 is the number worth
+> reading, because 32 minted identities over one relay bought 8
+> admissions under the global cap before and buy 1 now. The comment
+> above `source_label` was rewritten with the tests it lacked.
+
 **F6 — the infrastructure/data-plane split holds against the real
 policy, in both directions.** R3 asks the production
 `ConnectionManager::admit` for one peer authorized ONLY as
-infrastructure: `RelayReservation`, `RelayCircuit`, `AutonatProbe` and
-`DcutrHolePunch` are admitted; `KademliaQuery`, `ConnectionManager`,
-`Manual` and `DiscoveryReconnect` are refused, and refused specifically
-as `NotAuthorizedForDataPlane`. Adding the same peer to the data-plane
-allowlist flips all four refusals to admissions, which is ADR-0036's
-"data-plane trust wins" observed rather than restated.
+infrastructure. **Updated 2026-09-04**, because step 2 moved two
+origins across the line and R3 measures the gate rather than describing
+it: `RelayReservation` and `AutonatProbe` are admitted (R3.1) — the two
+the matrix's control rows name — and the other SIX are refused, and
+refused specifically as `NotAuthorizedForDataPlane`. Four of the six
+are R3.2 (`KademliaQuery`, `ConnectionManager`, `Manual`,
+`DiscoveryReconnect`); `RelayCircuit` is R3.6 and `DcutrHolePunch` is
+R3.5, held separately because each began as a divergence pinned in the
+defect's own shape and became a regression guard when step 2 flipped
+it. Phase A measured four admitted and four refused; that four/four
+split WAS D1 and D2. Adding the same peer to the data-plane allowlist
+flips the refusals to admissions, which is ADR-0036's "data-plane trust
+wins" observed rather than restated.
 
-**Two of the four admissions are the divergences, not the finding.**
-`RelayReservation` and `AutonatProbe` are what the split exists to
-permit. `DcutrHolePunch` is D1 and `RelayCircuit` is D2, and what F6
-establishes is that the MECHANISM works — the policy reads the
-destination's class and the origin's purpose and combines them — which
-is why the two wrong answers are a question of which origins are on
-which side rather than of whether the split is enforced.
+**Two of phase A's four admissions were the divergences, not the
+finding.** `RelayReservation` and `AutonatProbe` are what the split
+exists to permit, and they are the two that remain. `DcutrHolePunch`
+was D1 and `RelayCircuit` was D2, and what F6 established is that the
+MECHANISM works — the policy reads the destination's class and the
+origin's purpose and combines them — which is why the two wrong
+answers were a question of which origins sat on which side rather than
+of whether the split is enforced. Step 2 moved them; the mechanism
+F6 measured is what carried the fix without further change.
 
 **F7 — an infrastructure node advertises its control protocols, and
 this harness cannot say anything about the data-plane ones.** R1.5 and
@@ -746,7 +812,10 @@ same shape a Stage 11 test could take.
    time with the instrument in the right place. Production's behaviour
    here is deliberate and pinned by
    `a_handle_that_outlives_its_manager_admits_nothing`. The node now
-   holds its manager, and R6.7/R6.8 fail if it stops.
+   holds its manager, and the 2026-09-04 re-measurement of this
+   mutation fails R6.5, R6.6, R6.7, R6.8 and R6.11 -- see the table
+   below, which is the measured list. R6.7/R6.8 was the pair recorded
+   when the bug was first found, against the pre-step-1 wiring.
 10. **The relay had no external address, so no circuit could ever
     complete.** A relay server builds a reservation's address list from
     its own `ExternalAddresses` (libp2p-relay 0.21.1
@@ -792,13 +861,21 @@ production:
 - **D1 and D2** are pinned by `connection_policy.rs`'s
   `every_origin_is_classified_and_the_classification_is_pinned`, which
   matches `DialOrigin::ALL` exhaustively and hardcodes the expected side
-  per origin — adding either origin to `is_data_plane` fails it.
-- **D3** had no counterpart, so this change adds one: four tests beside
-  `source_label` in `preauth_gate.rs`, including
-  `two_relayed_sources_over_one_relay_get_different_buckets`. That file
-  previously had no test module at all, which is why the comment above
+  per origin. It pinned the divergence while the divergence stood, and
+  step 2 flipped its two arms rather than deleting it — so **it now
+  fails if either origin is taken back OUT of
+  `names_application_destination`**, which is the direction that
+  matters from here.
+- **D3** had no counterpart, so the PR that RECORDED it added four
+  tests beside `source_label` in `preauth_gate.rs` — that file had no
+  test module at all before, which is why the comment above
   `source_label` could argue the relayed case was fail-closed for as
-  long as it did.
+  long as it did. Step 2 flipped two of them (the D3 pin is now
+  `two_relayed_sources_over_one_relay_share_one_bucket`, which asserted
+  the opposite while the defect stood) and added two of its own, and
+  PR #74's review added three more, for NINE: the circuit branch's
+  third case, the hook's argument order, and the `relay:` prefix's
+  no-collision claim.
 
 Everything else here is evidence, and evidence is re-run by hand.
 
@@ -851,11 +928,11 @@ mentioned it is labelled as one — a note is printed, never checked.
 | F2 where the check runs | R4.10: the candidate is at the pending hook, before any socket |
 | F4 pending-hook address count | R2.9: exactly one, where Kademlia's is zero |
 | F6 class split and precedence | R3.1/R3.2 by denial REASON, and R3.4 flips all four when the peer is in both sets |
-| D1 DCUtR divergence | R3.5 pins today's behaviour, so a fix fails here rather than passing silently |
-| D2, pinned rather than endorsed | R3.6 — the same admission R3.1 used to list under "the matrix permits", split out so that fixing D2 does not fail an experiment claiming the matrix allows it |
+| D1 DCUtR divergence, FIXED 2026-09-04 | R3.5 pinned the admission so a fix would fail here rather than pass silently — it did, and now asserts the refusal by denial REASON |
+| D2, FIXED 2026-09-04 | R3.6 — the same admission R3.1 used to list under "the matrix permits", split out so that fixing D2 does not fail an experiment claiming the matrix allows it |
 | F5 default policy refuses everything | R3.7: `ConnectionPolicy::default()` refuses a fully TRUSTED peer with `ConnectionLimitReached`, so a fixture taking the default measures nothing about class |
-| D2 relayed-circuit divergence | R7.4 pins today's behaviour, R7.5 is the control (same destination, data-plane origin, refused), R7.2 shows the class check runs on the destination at all |
-| D3 relayed pre-auth bucket | R9.3 pins today's behaviour, R9.2 is the control (direct inbounds from one IP — the second refused), R9.4 shows the global cap is what remains, and R9.6 requires the two sources to differ only in identity — the fixture being R8's MEASURED address with one substitution, which R9.5 records as a note |
+| D2 relayed-circuit divergence, FIXED 2026-09-04 | R7.4 pinned the admission and now asserts the refusal by denial REASON; R7.2 carries the discrimination the control used to (a stranger is refused `Unauthorized`, not for the data plane), so R7.5 is now a regression guard rather than a contrast |
+| D3 relayed pre-auth bucket, FIXED 2026-09-04 | R9.3 pinned the source-named bucket and now asserts the relay-named one; R9.2 is the control (direct inbounds from one IP — the second refused); R9.4 was "the global cap is all that remains" and now asserts the PER-SOURCE cap bounds it, at 1 admission where 32 identities used to buy 8; R9.6 requires the two sources to differ only in identity — the fixture being R8's MEASURED address with one substitution, which R9.5 records as a note |
 | §10's premise and its capability | R8.4 (no source IP on a relayed remote), R8.11 (the remote IS the source's PeerId — D3's whole force), R8.5 (the relay's PeerId IS available at the pending hook), R8.7 the control (a direct inbound does carry an IP), R8.8 (the two are distinguishable there) |
 | ADR-0036's inbound relayed clause | R8.9/R8.10: the destination's established hook names the SOURCE's authenticated PeerId on a relayed local address, and never the relay's |
 | F9 reservations and withdrawal | R10.2/R10.3 (two relays, each recording its own acceptance), R10.5 (both addresses advertised), R10.9 (the loss was observed) and R10.10 (withdrawn within a second of it), R10.7 with R10.8 as the control (the survivor stays) |
@@ -874,10 +951,14 @@ The claims that carry the mechanism are mutation-checked:
 - deleting the `DialFailure` cleanup fails R2.10 with `after 1`;
 - R4.6/R4.7/R4.8 fail on a run where the probe reaches the wrong server,
   which is how the lucky-run bug above was caught;
-- adding the infrastructure peer to the data-plane allowlist fails all
-  four R3.2 refusals with `got None` — which is ADR-0036's precedence
-  rule from the other side, and is now also asserted in its own right by
-  R3.4 rather than existing only as a mutation someone ran by hand.
+- adding the infrastructure peer to the data-plane allowlist fails
+  R3.2, R3.5 and R3.6 — six refusals across three observation ids —
+  which is ADR-0036's precedence rule from the other side, and is now
+  also asserted in its own right by R3.4 rather than existing only as a
+  mutation someone ran by hand. **Re-measured 2026-09-05**: it used to
+  say "all four R3.2 refusals", which was true while D1 and D2 were
+  live and R3.5/R3.6 pinned the admissions. Step 2 made both of them
+  refusals too, so the same mutation now takes two more with it.
 
 R6's mutations, run as a batch, each asserting the patch applied before
 trusting the result. **Re-measured 2026-09-04**, after Stage 11 step 1
@@ -890,7 +971,7 @@ over two consecutive clean runs.
 | Mutation | Fails |
 | --- | --- |
 | subject's relay moved to the data-plane allowlist | **nothing** — exit 0 |
-| control's relay moved to the infrastructure set | no R6 row (R4.7 only) |
+| control's relay moved to the infrastructure set | **nothing** — exit 0 |
 | `misattributed` announces `RelayReservation` instead of a data-plane origin | R6.6, R6.8, R6.9, R6.10, R6.11 |
 | `ProductionNode` drops its `ConnectionManager` (bug 9, reintroduced) | R6.5, R6.6, R6.7, R6.8, R6.11 |
 | the circuit listen removed, so nothing dials | R6.4, R6.5, R6.6, R6.7, R6.8, R6.10, R6.11 |
@@ -898,11 +979,22 @@ over two consecutive clean runs.
 **The first two rows are the result worth reading, and they are
 negative.** Since step 1 the subject's dial is admitted, so making the
 subject into the control changes no verdict; and the control's dial is
-admitted whichever set its relay is in, because `RelayReservation` is
-not a data-plane origin and `admit` reads `is_data_plane` only in the
+admitted whichever set its relay is in, because `RelayReservation` does
+not name an application destination and `admit` reads
+`names_application_destination` only in the
 `ConnectivityInfrastructureOnly` arm. Neither mutation can fail
 anything. The discriminating variable moved to `misattributed` — row
 three is the one that now carries what row one used to.
+
+**Row two said `no R6 row (R4.7 only)` until 2026-09-04, and that was a
+flake read as a measurement.** R4.7 could not have been the mutation's
+doing: `main` runs R4 before R6, and R6's control does not exist while
+R4 is being measured. It was R4's own missing pump predicate, which
+made it fail about one run in three; the root cause is fixed and the
+reasoning is written up at its site in `experiments.rs`. Re-measured
+after that fix, with the baseline above and the patch asserted to have
+applied, the mutation fails nothing and the harness exits 0 — so row
+two now says what row one says, for the same reason.
 
 That is this record's own bug 8 arriving a second time by a different
 route: an experiment whose control agrees with its subject has measured
@@ -911,23 +1003,27 @@ made it so, and the table went on asserting the old result. A mutation
 table is evidence with a shelf life — it expires when the experiment is
 rewired, and nothing fails when it does.
 
-Historical note on the old first row: before R6.6's predicate named
-`NotAuthorizedForDataPlane`, that mutation left R6.6 GREEN, because
-`OutboundAdmission` then rendered every denial as
-`kademlia dial refused: {denial:?}` and the check looked only for
-`kademlia`. Step 1 replaced that rendering with `{origin:?}`, which is
-why R6.6's needle is `KademliaQuery` today.
-
-The old first row was the one worth reading then: it left R6.6 passing,
-because with no refusal at all `refusals().iter().all(..)` is vacuously
-true. R6.6 now requires the list to be non-empty as well, so it stands
+Historical note on the old first row. It was the row worth reading
+then, and the mechanism was vacuous truth: moving the subject's relay
+into the data-plane allowlist got its dial ADMITTED, so there were no
+refusals at all and `refusals().iter().all(..)` held over an empty
+list. R6.6 now requires the list to be non-empty as well, so it stands
 without leaning on R6.5.
+
+A second change to R6.6 in the same period is easy to mistake for that
+one, and it is not another explanation of it. R6.6's needle used to be
+`kademlia`, because `OutboundAdmission` rendered every denial as
+`kademlia dial refused: {denial:?}`; step 1 replaced that rendering
+with `{origin:?}`, which is why the needle is `KademliaQuery` today.
+That governs what R6.6 MATCHES when there is a refusal to match, and
+says nothing about why the mutation left it green — an empty list
+passes any needle.
 
 R7's three:
 
 | Mutation | Fails |
 | --- | --- |
-| the infrastructure-only destination added to the data-plane allowlist too | R7.5 |
+| the infrastructure-only destination added to the data-plane allowlist too | R7.4, R7.5 |
 | the source stops trusting the destination | R7.6, R7.8, R7.9, R7.10, R7.11, R7.12 |
 | the circuit dial announced as `Manual` rather than `RelayCircuit` | R7.8 |
 
@@ -945,8 +1041,8 @@ R8's three and R9's three:
 | the direct control node never dials | *nothing* — see below |
 | the destination stops trusting the source | *nothing* — see below |
 | the relayed remote address carries an IP after all | R9.3, R9.4 |
-| per-source ceiling raised to two | R9.2 |
-| global ceiling lowered to four | R9.4 |
+| per-source ceiling raised to two | R9.2, R9.3, R9.4 |
+| global ceiling lowered to four | *nothing* — see below |
 
 **Two of R8's mutations changed nothing, and both are worth stating.**
 The separate direct-control node is redundant: DCUtR upgrades the
@@ -958,6 +1054,21 @@ and the production gate is outbound-only. That is not in tension with
 R7's mutation, which removes trust in the other direction and refuses an
 outbound dial. R8 measures what an inbound decision could read, never a
 decision being made.
+
+**And a third now changes nothing, which is a shelf-life expiry rather
+than a design note.** Lowering the global ceiling to four used to fail
+R9.4, because R9.4 asserted 8 — the global cap was the only thing left
+bounding a relayed inbound once each minted identity bought its own
+bucket. Since step 2 those 32 identities share the relay's bucket and
+R9.4 asserts 1, which a per-source ceiling of 1 produces whatever the
+global cap is. The global cap has stopped being the binding constraint,
+so a mutation to it measures nothing. **Re-measured 2026-09-05**,
+raised by the PR #74 re-review: three rows around it were stale in the
+same way, all in the direction of understating what the mutation
+takes. The one row that survived re-measurement unchanged is "the
+relayed remote address carries an IP after all" — R9.3 and R9.4 both
+still fail, provided the injected IP varies per source, which is what
+an IP would do if a circuit carried one.
 
 R10's, R11's and R12's:
 
