@@ -422,9 +422,10 @@ pub fn r3_infrastructure_cannot_reach_the_data_plane(report: &mut Report) {
     // as application destination | DataPlaneTrusted: yes |
     // ConnectivityInfrastructureOnly: **no**", and DCUTR.md §2 says
     // never to initiate DCUtR merely with an infrastructure-only peer
-    // as the destination. But `DialOrigin::is_data_plane` lists only
-    // Manual, ConnectionManager, DiscoveryReconnect and KademliaQuery,
-    // so `DcutrHolePunch` is treated as control-plane and admitted.
+    // as the destination. But the predicate -- then called
+    // `is_data_plane` -- listed only Manual, ConnectionManager,
+    // DiscoveryReconnect and KademliaQuery, so `DcutrHolePunch` was
+    // treated as control-plane and admitted.
     //
     // The earlier version of this experiment REQUIRED that admission,
     // which recorded the violation as evidence that the split holds.

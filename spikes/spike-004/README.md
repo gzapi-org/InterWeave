@@ -429,15 +429,36 @@ here: §10's risk is not merging, it is proliferation. An unenforced
 claim about a case nobody had run — which is the shape this repository's
 own rule about comments is written against.
 
+> **RESOLVED 2026-09-04, Stage 11 step 2.** `source_label` reads the
+> REMOTE address for an IP first, and falls back to the relay — by
+> PeerId where the local address carries one, else by the relay's IP —
+> whenever that local address holds `/p2p-circuit`. So a relayed
+> inbound is charged to the relay, which is what §10 asks for, and the
+> source PeerId the circuit asserts no longer names a bucket. The
+> `relay:` prefix on those buckets is a namespace this fix introduces:
+> it keeps a relay's circuits from colliding with a direct inbound from
+> the relay's own IP. R9.3 and R9.4 were flipped to assert the fix and
+> failed on the commit that made it — R9.4 is the number worth
+> reading, because 32 minted identities over one relay bought 8
+> admissions under the global cap before and buy 1 now. The comment
+> above `source_label` was rewritten with the tests it lacked.
+
 **F6 — the infrastructure/data-plane split holds against the real
 policy, in both directions.** R3 asks the production
 `ConnectionManager::admit` for one peer authorized ONLY as
-infrastructure: `RelayReservation`, `RelayCircuit`, `AutonatProbe` and
-`DcutrHolePunch` are admitted; `KademliaQuery`, `ConnectionManager`,
-`Manual` and `DiscoveryReconnect` are refused, and refused specifically
-as `NotAuthorizedForDataPlane`. Adding the same peer to the data-plane
-allowlist flips all four refusals to admissions, which is ADR-0036's
-"data-plane trust wins" observed rather than restated.
+infrastructure. **Updated 2026-09-04**, because step 2 moved two
+origins across the line and R3 measures the gate rather than describing
+it: `RelayReservation` and `AutonatProbe` are admitted (R3.1) — the two
+the matrix's control rows name — and the other SIX are refused, and
+refused specifically as `NotAuthorizedForDataPlane`. Four of the six
+are R3.2 (`KademliaQuery`, `ConnectionManager`, `Manual`,
+`DiscoveryReconnect`); `RelayCircuit` is R3.6 and `DcutrHolePunch` is
+R3.5, held separately because each began as a divergence pinned in the
+defect's own shape and became a regression guard when step 2 flipped
+it. Phase A measured four admitted and four refused; that four/four
+split WAS D1 and D2. Adding the same peer to the data-plane allowlist
+flips the refusals to admissions, which is ADR-0036's "data-plane trust
+wins" observed rather than restated.
 
 **Two of the four admissions are the divergences, not the finding.**
 `RelayReservation` and `AutonatProbe` are what the split exists to
@@ -821,8 +842,12 @@ production:
 - **D1 and D2** are pinned by `connection_policy.rs`'s
   `every_origin_is_classified_and_the_classification_is_pinned`, which
   matches `DialOrigin::ALL` exhaustively and hardcodes the expected side
-  per origin — adding either origin to `is_data_plane` fails it.
-- **D3** had no counterpart, so this change adds one: four tests beside
+  per origin. It pinned the divergence while the divergence stood, and
+  step 2 flipped its two arms rather than deleting it — so **it now
+  fails if either origin is taken back OUT of
+  `names_application_destination`**, which is the direction that
+  matters from here.
+- **D3** had no counterpart, so step 2 adds one: four tests beside
   `source_label` in `preauth_gate.rs`, including
   `two_relayed_sources_over_one_relay_get_different_buckets`. That file
   previously had no test module at all, which is why the comment above
