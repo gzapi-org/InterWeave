@@ -182,9 +182,9 @@ fn an_infrastructure_peer_reaches_the_data_plane_only_where_this_table_says() {
     // Stage 11 step 2 -- `RelayCircuit` and `DcutrHolePunch` admitted
     // for an infrastructure-only peer, SPIKE-004's D2 and D1. Step 2
     // moved both origins, and this table is one of the places that had
-    // to change with them. Every row now says `false`: an
-    // infrastructure-only peer is reachable for the two purposes it was
-    // authorized for and for nothing else.
+    // to change with them. Six of the eight rows say `false` now: an
+    // infrastructure-only peer is reachable for the two purposes it
+    // was authorized for and for nothing else.
     let policy = ConnectionPolicy::new(16, 64);
     let address = "/ip4/192.0.2.1/tcp/4001".to_owned();
 
