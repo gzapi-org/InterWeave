@@ -57,45 +57,76 @@ const REFUSAL: &str = "connection refused";
 /// neutral crate has no business knowing it. So the translation happens
 /// here, in the crate that does.
 ///
-/// A multiaddr with no IP component -- a memory transport, a relayed
-/// address -- yields the address as written.
+/// The pre-authentication bucket a connection is charged to.
 ///
-/// For the memory transport that is the fail-closed direction: it
-/// cannot merge two peers into one bucket, only fail to merge two
-/// addresses that belong together.
+/// The ordinary case is the remote's IP, which is what an anonymous
+/// party cannot mint more of cheaply. A multiaddr with no IP component
+/// -- a memory transport -- yields the address as written; for that
+/// transport it is the fail-closed direction, since it cannot merge two
+/// peers into one bucket, only fail to merge two addresses that belong
+/// together.
 ///
-/// **For a relayed address it is the wrong direction, and SPIKE-004
-/// measured it.** A relayed inbound arrives with `remote_addr` of
-/// `/p2p/<source>` and no IP anywhere, so the bucket becomes the source
-/// PeerId -- one bucket per identity, over one relay connection, and
-/// identities are free to mint. `contracts/CONNECTIVITY.md` §10
-/// requires the opposite: charge the relay transport connection and
-/// relay PeerId, and "MUST NOT create unbounded pseudo-source buckets
-/// from circuit metadata". The relay's PeerId is present in
-/// `local_addr` -- libp2p-relay 0.21.1 builds it as
+/// # A relayed inbound is charged to the RELAY
+///
+/// SPIKE-004 measured what one presents before Noise: a `remote_addr`
+/// of `/p2p/<source>` with no IP anywhere, while the relay's own
+/// identity sits in the LOCAL address. Reading only the remote made the
+/// bucket the SOURCE's PeerId -- one bucket per identity over one relay
+/// connection, and identities are free to mint. That was divergence D3,
+/// against `contracts/CONNECTIVITY.md` §10, which requires charging the
+/// authenticated relay transport connection and relay PeerId plus the
+/// global caps and says a destination "MUST NOT create unbounded
+/// pseudo-source buckets from circuit metadata". **Fixed in Stage 11
+/// step 2**, before any relay feature is compiled.
+///
+/// The discriminator is the LOCAL address, and that is what makes this
+/// safe: `local_addr` is this node's own listen address as the
+/// transport built it, never anything the remote supplies, so a source
+/// cannot make an ordinary connection look relayed and escape its IP
+/// bucket. libp2p-relay 0.21.1 builds it as
 /// `relay_addr.with(Protocol::P2pCircuit)` from the established relay
-/// connection (`priv_client/transport.rs:404`) and the Swarm appends
-/// `/p2p/<peer>` to a dialled address -- and this function is not given
-/// it. That the shape holds on the pinned crate is read from those two
-/// sources; what the tests below pin is what this function does with
-/// the address it IS given.
+/// connection (`priv_client/transport.rs:404`), so the `/p2p-circuit`
+/// component is present exactly when the connection rode a circuit.
 ///
-/// The risk §10 names is proliferation, not merging, which is why the
-/// memory-transport reasoning does not carry over. Unreachable today --
-/// no relay feature is compiled, so no relayed inbound can arrive --
-/// and Stage 11 must fix it before the relay client lands. Recorded as
-/// divergence D3 in `spikes/spike-004/README.md`.
-fn source_label(address: &Multiaddr) -> String {
+/// The relay's PeerId is preferred over its IP because §10 names the
+/// relay PeerId and because it is the AUTHENTICATED half: the relay
+/// connection completed Noise before it could carry a circuit. The IP
+/// is the fallback for a circuit whose local address somehow carries no
+/// relay identity, which keeps the function total. Both are prefixed
+/// `relay:` so a relayed bucket can never collide with a direct peer's
+/// IP bucket -- otherwise a direct connection from the relay's own
+/// address would share the budget of every circuit riding it.
+fn source_label(local_addr: &Multiaddr, remote_addr: &Multiaddr) -> String {
     use libp2p::multiaddr::Protocol;
 
-    for component in address {
+    // THE REMOTE IP FIRST, because a relayed connection has none and a
+    // direct one is the overwhelmingly common case. A direct connection
+    // is never charged to a relay bucket, whatever its local address
+    // says, because this returns before the circuit check runs.
+    for component in remote_addr {
         match component {
             Protocol::Ip4(ip) => return ip.to_string(),
             Protocol::Ip6(ip) => return ip.to_string(),
             _ => {}
         }
     }
-    address.to_string()
+
+    if local_addr.iter().any(|c| matches!(c, Protocol::P2pCircuit)) {
+        let mut relay_ip = None;
+        for component in local_addr {
+            match component {
+                Protocol::P2p(peer) => return format!("relay:{peer}"),
+                Protocol::Ip4(ip) => relay_ip.get_or_insert(ip.to_string()),
+                Protocol::Ip6(ip) => relay_ip.get_or_insert(ip.to_string()),
+                _ => continue,
+            };
+        }
+        if let Some(ip) = relay_ip {
+            return format!("relay:{ip}");
+        }
+    }
+
+    remote_addr.to_string()
 }
 
 /// The pre-authentication funnel, as a `NetworkBehaviour`.
@@ -155,7 +186,7 @@ impl NetworkBehaviour for PreAuthAdmission {
     fn handle_pending_inbound_connection(
         &mut self,
         connection_id: ConnectionId,
-        _local_addr: &Multiaddr,
+        local_addr: &Multiaddr,
         remote_addr: &Multiaddr,
     ) -> Result<(), ConnectionDenied> {
         let now = self.now_ms();
@@ -166,7 +197,7 @@ impl NetworkBehaviour for PreAuthAdmission {
         // handshake that says nothing is the transport's connection
         // timeout, configured from these same limits; the listen
         // failure that follows releases the slot below.
-        match self.gate.admit(&source_label(remote_addr), now) {
+        match self.gate.admit(&source_label(local_addr, remote_addr), now) {
             Ok(slot) => {
                 self.in_flight.insert(connection_id, slot);
                 Ok(())
@@ -259,16 +290,25 @@ mod tests {
     #[test]
     fn a_direct_inbound_buckets_on_its_source_ip() {
         assert_eq!(
-            source_label(&addr("/ip4/198.51.100.7/tcp/5001")),
+            source_label(
+                &addr("/ip4/203.0.113.1/tcp/4001"),
+                &addr("/ip4/198.51.100.7/tcp/5001")
+            ),
             "198.51.100.7"
         );
         assert_eq!(
-            source_label(&addr("/ip4/198.51.100.7/tcp/5002")),
+            source_label(
+                &addr("/ip4/203.0.113.1/tcp/4001"),
+                &addr("/ip4/198.51.100.7/tcp/5002")
+            ),
             "198.51.100.7",
             "a different port is the same host and must not be a second bucket"
         );
         assert_eq!(
-            source_label(&addr("/ip6/2001:db8::1/tcp/5001")),
+            source_label(
+                &addr("/ip4/203.0.113.1/tcp/4001"),
+                &addr("/ip6/2001:db8::1/tcp/5001")
+            ),
             "2001:db8::1"
         );
     }
@@ -277,7 +317,10 @@ mod tests {
     /// `source_label` states it as a rule.
     #[test]
     fn an_address_with_no_ip_buckets_on_itself() {
-        assert_eq!(source_label(&addr("/memory/42")), "/memory/42");
+        assert_eq!(
+            source_label(&addr("/memory/1"), &addr("/memory/42")),
+            "/memory/42"
+        );
     }
 
     /// D3, PINNED RATHER THAN ENDORSED.
@@ -293,31 +336,71 @@ mod tests {
     /// plus the global caps, and "MUST NOT create unbounded
     /// pseudo-source buckets from circuit metadata".
     ///
-    /// This test exists so that the fix FAILS here rather than passing
-    /// silently, and so that the claim in the comment above
-    /// `source_label` is enforced rather than merely written down. It
-    /// is unreachable in a shipped build today — no relay feature is
-    /// compiled — and becomes live the moment the relay client lands.
+    /// This test was written in the DEFECT's shape so that the fix
+    /// would fail here rather than pass silently. Stage 11 step 2 made
+    /// the fix, and it did fail; it now asserts the required
+    /// behaviour. Still unreachable in a shipped build — no relay
+    /// feature is compiled — and live the moment the relay client
+    /// lands, which is why it was fixed before that rather than after.
     #[test]
-    fn a_relayed_inbound_buckets_on_the_source_peer_id_which_ss10_forbids() {
+    fn a_relayed_inbound_is_charged_to_the_relay_not_the_source() {
+        let local = addr(&format!("/ip4/127.0.0.1/tcp/4001/p2p/{RELAY}/p2p-circuit"));
         let remote = addr(&format!("/p2p/{SOURCE_A}"));
         assert_eq!(
-            source_label(&remote),
-            format!("/p2p/{SOURCE_A}"),
-            "the relayed remote carries no IP, so the bucket is the source's own identity"
+            source_label(&local, &remote),
+            format!("relay:{RELAY}"),
+            "a relayed inbound is charged to the authenticated relay PeerId, which §10 \
+             names, and never to the source identity the circuit carries"
         );
     }
 
-    /// The defect's SHAPE, not merely its value: one relay connection,
-    /// two source identities, two different buckets.
+    /// The fallback, so the function stays total.
+    ///
+    /// A circuit whose local address carries no relay identity is
+    /// charged to the relay's IP rather than falling through to the
+    /// source. Falling through is the one outcome §10 forbids, so the
+    /// absence of a PeerId must not produce it.
+    #[test]
+    fn a_circuit_with_no_relay_identity_still_avoids_the_source_bucket() {
+        let local = addr("/ip4/127.0.0.1/tcp/4001/p2p-circuit");
+        let remote = addr(&format!("/p2p/{SOURCE_A}"));
+        let label = source_label(&local, &remote);
+        assert_eq!(label, "relay:127.0.0.1");
+        assert!(
+            !label.contains(SOURCE_A),
+            "the source identity must never become the bucket, PeerId present or not"
+        );
+    }
+
+    /// A DIRECT connection is never charged to a relay bucket.
+    ///
+    /// The discriminator is the local address, so this pins the
+    /// direction that would be a regression rather than a defect: an
+    /// ordinary inbound whose local address happens to carry a circuit
+    /// component must still be charged to the remote's own IP, because
+    /// the remote IP branch returns first.
+    #[test]
+    fn a_direct_inbound_keeps_its_ip_bucket_whatever_the_local_address_says() {
+        let local = addr(&format!("/ip4/127.0.0.1/tcp/4001/p2p/{RELAY}/p2p-circuit"));
+        assert_eq!(
+            source_label(&local, &addr("/ip4/198.51.100.7/tcp/5001")),
+            "198.51.100.7",
+            "a remote with an IP is charged to it, and the local address does not override"
+        );
+    }
+
+    /// The FIX's shape, not merely its value: one relay connection,
+    /// two source identities, ONE bucket.
     ///
     /// §10's concern is proliferation — identities are free to mint, so
-    /// the number of buckets is chosen by whoever is attacking. A test
-    /// asserting one bucket's string would still pass if the second
-    /// source somehow shared it; this asserts they differ, which is the
-    /// property that makes the per-source ceiling escapable.
+    /// the number of buckets was chosen by whoever was attacking. This
+    /// asserted the two buckets DIFFERED, which was the property that
+    /// made the per-source ceiling escapable; it now asserts they are
+    /// the same, which is the property that closes it. Asserting one
+    /// bucket's string alone would not: the point is that the count of
+    /// buckets does not grow with the count of identities.
     #[test]
-    fn two_relayed_sources_over_one_relay_get_different_buckets() {
+    fn two_relayed_sources_over_one_relay_share_one_bucket() {
         // The local address both connections arrive on, as SPIKE-004
         // measured it: one relay connection, named by the relay's own
         // PeerId, shared by every circuit riding it.
@@ -326,28 +409,27 @@ mod tests {
             local.to_string().contains("p2p-circuit"),
             "the shared connection is a circuit, which is what makes §10's rule apply"
         );
-        let one = source_label(&addr(&format!("/p2p/{SOURCE_A}")));
-        let two = source_label(&addr(&format!("/p2p/{SOURCE_B}")));
-        assert_ne!(
+        let one = source_label(&local, &addr(&format!("/p2p/{SOURCE_A}")));
+        let two = source_label(&local, &addr(&format!("/p2p/{SOURCE_B}")));
+        assert_eq!(
             one, two,
-            "two sources over ONE relay connection get separate pre-auth budgets"
+            "two sources over ONE relay connection share one pre-auth budget"
         );
 
-        // AND NEITHER BUCKET IS THE RELAY'S IDENTITY, which is the one
-        // §10 says both connections should have shared.
-        //
-        // Asserted against the relay's PeerId rather than against
-        // `source_label(&local)`: that call returns `127.0.0.1`, the
-        // relay's IP, so comparing with it would pass for reasons
-        // having nothing to do with identity. The bucket §10 names is
-        // the relay PeerId, so that is what must be absent.
+        // AND THE SHARED BUCKET IS THE RELAY'S IDENTITY, which is the
+        // one §10 says both connections should have shared. Without
+        // this the test would pass for a function that returned a
+        // constant, which shares a bucket by erasing every distinction
+        // rather than by charging the right party.
         assert!(
-            !one.contains(RELAY) && !two.contains(RELAY),
-            "neither bucket names the relay ({one}, {two}), so the connection they share              is not what either was charged to"
+            one.contains(RELAY),
+            "the shared bucket names the relay ({one}), so it is the connection they \
+             actually share rather than an accident of collapsing every label"
         );
         assert!(
-            one.contains(SOURCE_A) && two.contains(SOURCE_B),
-            "each bucket is its own SOURCE's identity, which is the metadata §10 forbids              bucketing on ({one}, {two})"
+            !one.contains(SOURCE_A) && !one.contains(SOURCE_B),
+            "neither source identity appears in the bucket ({one}), which is the metadata \
+             §10 forbids bucketing on"
         );
     }
 }
