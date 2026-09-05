@@ -75,7 +75,7 @@ const REFUSAL: &str = "connection refused";
 /// authenticated relay transport connection and relay PeerId plus the
 /// global caps and says a destination "MUST NOT create unbounded
 /// pseudo-source buckets from circuit metadata". **Fixed in Stage 11
-/// step 2**, before any relay feature is compiled.
+/// step 2 (2026-09-05)**, before any relay feature is compiled.
 ///
 /// The discriminator is the LOCAL address, and that is what makes this
 /// safe: `local_addr` is this node's own listen address as the

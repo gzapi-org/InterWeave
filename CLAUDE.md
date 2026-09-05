@@ -30,7 +30,8 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   `PeerConnected`" is work, because the Swarm reports a second
   connection for a peer already connected. It found **three
   violations sitting in already-shipped code, none ever reachable in a
-  shipped build**, and **step 2 fixed all three (2026-09-04); the
+  shipped build**, and **step 2 fixed all three (D1 and D2 on 2026-09-04, D3 on
+  2026-09-05); the
   harness reports zero divergences.** `DcutrHolePunch` (D1) and
   `RelayCircuit` (D2) were both admitted for an infrastructure-only
   peer; the admission predicate — renamed `names_application_destination`
@@ -41,7 +42,11 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   the circuit carries, which `contracts/CONNECTIVITY.md` §10 forbids by
   name; `source_label` now reads the remote for an IP first and charges
   a `/p2p-circuit` inbound to the relay instead — by the relay's PeerId
-  from the LOCAL address, which the old signature discarded. **The
+  from the LOCAL address, which the old signature discarded, else by
+  the relay's IP, else by that whole local address. **The third case is
+  terminal on purpose**: while it fell through, a circuit carrying
+  neither still bucketed on the source, which is D3 in one address
+  shape. **The
   `relay:` bucket prefix is a namespace that fix introduced**, so a
   relay's circuits cannot collide with a direct inbound from the
   relay's own IP. **D2 was a document

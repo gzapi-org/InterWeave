@@ -1366,7 +1366,8 @@ below and are repeated where they bite:
   the "unbounded pseudo-source bucket" `contracts/CONNECTIVITY.md` §10
   forbids by name. **D2's architecture clarification landed on
   2026-09-03** — ADR-0036's amendment gave the matrix the row it lacked
-  — and **all three code fixes landed in step 2 on 2026-09-04**, before
+  — and **all three code fixes landed in step 2** (D1 and D2 on
+  2026-09-04, D3 on 2026-09-05), before
   DCUtR or relayed paths are built rather than after. The description
   above is kept in the past tense on purpose: it is what a reader needs
   to understand why step 2 exists, and it stops being true the moment
@@ -1436,7 +1437,8 @@ data-plane origin, against the infrastructure the stage exists to use.
    records its own refusals here**: the Swarm discards the denial of a
    behaviour dial, so a refusal that is not written down at the hook is
    written down nowhere;
-2. **resolve D1, D2 and D3 — DONE 2026-09-04.** `DcutrHolePunch` was
+2. **resolve D1, D2 and D3 — DONE: D1 and D2 on 2026-09-04, D3 on
+   2026-09-05.** `DcutrHolePunch` was
    admitted for a `ConnectivityInfrastructureOnly` peer, which
    `transport/libp2p/CONNECTIVITY.md` §4's matrix forbids unqualified
    ("DCUtR as destination peer | no"); `RelayCircuit` was admitted for

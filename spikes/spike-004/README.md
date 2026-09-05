@@ -442,10 +442,14 @@ here: §10's risk is not merging, it is proliferation. An unenforced
 claim about a case nobody had run — which is the shape this repository's
 own rule about comments is written against.
 
-> **RESOLVED 2026-09-04, Stage 11 step 2.** `source_label` reads the
-> REMOTE address for an IP first, and falls back to the relay — by
-> PeerId where the local address carries one, else by the relay's IP —
-> whenever that local address holds `/p2p-circuit`. So a relayed
+> **RESOLVED 2026-09-05, Stage 11 step 2.** `source_label` reads the
+> REMOTE address for an IP first, and falls back to the relay in
+> THREE cases whenever the local address holds `/p2p-circuit`: by the
+> relay's PeerId where that address carries one, else by the relay's
+> IP, else by the whole local address. The third is terminal, so the
+> function cannot fall through to the remote — it did until the PR #74
+> review, for a circuit whose local address carried neither, which was
+> D3 surviving in one address shape. So a relayed
 > inbound is charged to the relay, which is what §10 asks for, and the
 > source PeerId the circuit asserts no longer names a bucket. The
 > `relay:` prefix on those buckets is a namespace this fix introduces:
@@ -868,9 +872,10 @@ production:
   `source_label` could argue the relayed case was fail-closed for as
   long as it did. Step 2 flipped two of them (the D3 pin is now
   `two_relayed_sources_over_one_relay_share_one_bucket`, which asserted
-  the opposite while the defect stood) and PR #74's review added three
-  more, for six: the circuit branch's third case, the hook's argument
-  order, and the `relay:` prefix's no-collision claim.
+  the opposite while the defect stood) and added two of its own, and
+  PR #74's review added three more, for NINE: the circuit branch's
+  third case, the hook's argument order, and the `relay:` prefix's
+  no-collision claim.
 
 Everything else here is evidence, and evidence is re-run by hand.
 
