@@ -57,8 +57,6 @@ const REFUSAL: &str = "connection refused";
 /// neutral crate has no business knowing it. So the translation happens
 /// here, in the crate that does.
 ///
-/// The pre-authentication bucket a connection is charged to.
-///
 /// The ordinary case is the remote's IP, which is what an anonymous
 /// party cannot mint more of cheaply. A multiaddr with no IP component
 /// -- a memory transport -- yields the address as written; for that
@@ -90,12 +88,28 @@ const REFUSAL: &str = "connection refused";
 ///
 /// The relay's PeerId is preferred over its IP because §10 names the
 /// relay PeerId and because it is the AUTHENTICATED half: the relay
-/// connection completed Noise before it could carry a circuit. The IP
-/// is the fallback for a circuit whose local address somehow carries no
-/// relay identity, which keeps the function total. Both are prefixed
-/// `relay:` so a relayed bucket can never collide with a direct peer's
-/// IP bucket -- otherwise a direct connection from the relay's own
-/// address would share the budget of every circuit riding it.
+/// connection completed Noise before it could carry a circuit.
+///
+/// **The IP fallback is an ordinary path, not an anomaly.** It is
+/// reached whenever the relay connection was INBOUND -- the relay
+/// dialled us: libp2p-relay 0.21.1 then builds the handler with the
+/// inbound `remote_addr` (`priv_client.rs:176`), and an inbound
+/// `send_back_addr` carries no `/p2p/` component, so the `local_addr`
+/// derived from it has no relay identity to read. READ from the crate
+/// rather than measured; SPIKE-004 exercised the outbound direction,
+/// where `libp2p-swarm 0.47.1` appends `/p2p/<relay>` before dialling
+/// and the PeerId is present. A third case, a circuit whose local
+/// address holds neither, returns the local address whole -- see the
+/// terminal `return` in the body.
+///
+/// Both fallbacks are prefixed `relay:` so a relayed bucket can never
+/// collide with a direct peer's IP bucket -- otherwise a direct
+/// connection from the relay's own address would share the budget of
+/// every circuit riding it. That "never" is pinned by
+/// `a_relay_bucket_never_collides_with_a_direct_bucket_at_the_same_ip`;
+/// the prefix cannot be forged, because every non-relay return is
+/// either a bare IP or a `Multiaddr`, whose rendering always starts
+/// with `/`.
 fn source_label(local_addr: &Multiaddr, remote_addr: &Multiaddr) -> String {
     use libp2p::multiaddr::Protocol;
 
@@ -472,6 +486,35 @@ mod tests {
         assert!(
             third.is_err(),
             "a second inbound from the SAME remote exceeds max_pending_per_source: 1"
+        );
+    }
+
+    /// The `relay:` prefix's own claim: no collision at one IP.
+    ///
+    /// The doc comment says a relayed bucket "can never collide with a
+    /// direct peer's IP bucket", and until this test that sentence was
+    /// enforced by nothing -- the prefix could have been dropped and
+    /// every other test would still pass, because none of them puts a
+    /// direct connection and a circuit at the SAME address. Without
+    /// the prefix, a direct inbound from the relay's own host would
+    /// share one budget with every circuit riding that relay: fill the
+    /// bucket with circuits and the relay operator cannot reach the
+    /// node directly. Review finding on PR #74.
+    #[test]
+    fn a_relay_bucket_never_collides_with_a_direct_bucket_at_the_same_ip() {
+        let direct = source_label(
+            &addr("/ip4/10.0.0.1/tcp/4001"),
+            &addr("/ip4/203.0.113.5/tcp/5001"),
+        );
+        let relayed = source_label(
+            &addr("/ip4/203.0.113.5/tcp/4001/p2p-circuit"),
+            &addr(&format!("/p2p/{SOURCE_A}")),
+        );
+        assert_eq!(direct, "203.0.113.5");
+        assert_eq!(relayed, "relay:203.0.113.5");
+        assert_ne!(
+            direct, relayed,
+            "one host reached directly and the same host acting as a relay must not              share a pre-auth budget"
         );
     }
 
