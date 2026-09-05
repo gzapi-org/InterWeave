@@ -351,7 +351,8 @@ impl Node {
     /// In production `attempt_dial` admits the dial first, and
     /// `GatedSwarm::dial` registers its `ConnectionId` in
     /// `AdmittedDials`, so the gate's pending hook recognises it as
-    /// ticketed rather than behaviour-originated. The spike models the same ordering with
+    /// ticketed rather than behaviour-originated. The spike models the
+    /// same ordering with
     /// the attribution map — the caller knows its own origin, which is
     /// the whole point of the mechanism — so a harness dial is
     /// `Manual` and is not counted as a behaviour dial by accident.

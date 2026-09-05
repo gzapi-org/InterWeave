@@ -1331,7 +1331,8 @@ impl ConnectionManager {
     /// infrastructure-only peer is dialable for reachability and
     /// refused for the data plane, on the same address in the same
     /// moment. `ConnectionPolicy::admit` has always decided it that
-    /// way -- `origin.names_application_destination()` is the discriminator. What pins
+    /// way -- `origin.names_application_destination()` is the
+    /// discriminator. What pins
     /// it is split across three places, and none of them alone covers
     /// the grid: `tests/transport-contract`'s exit gate asserts every
     /// origin against `ConnectivityInfrastructureOnly`, while
@@ -2753,8 +2754,10 @@ mod tests {
     /// `DataPlaneTrusted` arm; without this one the `Unauthorized` arm
     /// is unpinned and a mutation survives. `authorizes` -- the
     /// single-argument wrapper the rest of the tests use -- hardcodes
-    /// `DialOrigin::Manual`, and `Manual.names_application_destination()` is true, so
-    /// rewriting `Unauthorized => false` as `=> !origin.names_application_destination()`
+    /// `DialOrigin::Manual`, and
+    /// `Manual.names_application_destination()` is true, so
+    /// rewriting `Unauthorized => false` as
+    /// `=> !origin.names_application_destination()`
     /// leaves every existing assertion green while making the comment's
     /// "only" false. `ConnectionPolicy::admit`'s matching claim is
     /// pinned by `an_unauthorized_peer_is_refused_whatever_the_origin`;

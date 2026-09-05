@@ -150,7 +150,8 @@ pub(super) fn settle_undialable(
 /// permitted. (It closed relay circuits and DCUtR hole punches too,
 /// but those were admitted WRONGLY — SPIKE-004's D2 and D1, refused at
 /// admission since Stage 11 step 2, so revalidation no longer sees
-/// them for such a peer at all.) `authorizes_for` takes the ticket's own origin,
+/// them for such a peer at all.) `authorizes_for` takes the ticket's
+/// own origin,
 /// so a `KademliaQuery` connection is revalidated by the SAME line that
 /// revalidates every other — the genericity
 /// `a_revoked_kademlia_dial_is_refused_at_establishment` proves rather
