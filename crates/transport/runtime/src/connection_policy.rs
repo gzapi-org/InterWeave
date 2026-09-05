@@ -811,7 +811,8 @@ mod tests {
 
     #[test]
     fn every_origin_is_classified_and_the_classification_is_pinned() {
-        // Driving the other tests off `is_data_plane()` makes them blind
+        // Driving the other tests off `names_application_destination()`
+        // makes them blind
         // to it being WRONG: a misclassified origin simply moves to the
         // other loop, where it also passes. So the split is asserted
         // here, on its own terms, origin by origin.
@@ -879,8 +880,8 @@ mod tests {
     /// it. Step 2 made that move; this test is why it was safe to.
     ///
     /// Three documents and a doc comment explain why that cannot break
-    /// -- SPIKE-004's record, `SPIKES.md`, the Stage 11 plan and
-    /// `is_data_plane`'s own note. None of them was enforced by
+    /// -- SPIKE-004's record, `SPIKES.md`, the Stage 11 plan and the
+    /// predicate's own note. None of them was enforced by
     /// anything. Adding an origin check to `admit`'s `DataPlaneTrusted`
     /// arm fails HERE, which is what makes the explanation load-bearing
     /// rather than merely written down.
