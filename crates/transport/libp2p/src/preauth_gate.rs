@@ -124,6 +124,18 @@ fn source_label(local_addr: &Multiaddr, remote_addr: &Multiaddr) -> String {
         if let Some(ip) = relay_ip {
             return format!("relay:{ip}");
         }
+        // THE CIRCUIT BRANCH IS TERMINAL, and that is a third case
+        // rather than a tidy-up. Falling through from here returns the
+        // REMOTE, which on a circuit is `/p2p/<source>` -- D3
+        // verbatim, one bucket per identity and identities free to
+        // mint. The shape that reaches it is a circuit whose local
+        // address carries neither a relay PeerId nor an IP, such as
+        // `/memory/1/p2p-circuit`. The whole local address is the
+        // coarsest label available here that the SOURCE does not
+        // choose, so it is what the connection is charged to.
+        // `a_circuit_with_neither_a_relay_identity_nor_an_ip_is_still_not_the_source`
+        // fails if this returns anything derived from the remote.
+        return format!("relay:{local_addr}");
     }
 
     remote_addr.to_string()
@@ -369,6 +381,35 @@ mod tests {
         assert!(
             !label.contains(SOURCE_A),
             "the source identity must never become the bucket, PeerId present or not"
+        );
+    }
+
+    /// The claim above says "PeerId present or not", and this is the
+    /// input that makes it true rather than lucky.
+    ///
+    /// The test above feeds the one no-PeerId shape that still carries
+    /// an IP, so it agrees with the code for free: it never reaches
+    /// the end of the circuit branch. A local address with a circuit
+    /// component and NEITHER a relay identity NOR an IP does, and
+    /// while the branch fell through it returned the remote --
+    /// `/p2p/<source>`, which is D3 exactly. Review finding on PR #74.
+    #[test]
+    fn a_circuit_with_neither_a_relay_identity_nor_an_ip_is_still_not_the_source() {
+        let local = addr("/memory/1/p2p-circuit");
+        let remote = addr(&format!("/p2p/{SOURCE_A}"));
+        let label = source_label(&local, &remote);
+        assert!(
+            !label.contains(SOURCE_A),
+            "a circuit with no relay identity and no relay IP must still not bucket on              the source; got {label}"
+        );
+        // AND THE TWO SOURCES SHARE IT, which is the property §10
+        // asks for rather than merely "not the source": a label that
+        // avoided SOURCE_A while still varying per identity would
+        // satisfy the assertion above and none of the requirement.
+        let other = source_label(&local, &addr(&format!("/p2p/{SOURCE_B}")));
+        assert_eq!(
+            label, other,
+            "two identities over one relay must share one bucket whatever the relay's              address looks like"
         );
     }
 
