@@ -43,7 +43,8 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   name; `source_label` now reads the LOCAL address FIRST and charges a
   `/p2p-circuit` inbound to the relay — by the relay's PeerId from
   that address, which the old signature discarded, else by the relay's
-  IP collapsed to its /64, else by that whole local address. **The
+  IP collapsed to its /64, else by that address truncated at the
+  circuit component. **The
   circuit component decides, and it is consulted before the remote's
   IP**: an interim shape asked the remote for an IP first, which made
   the rule "no IP means relayed" and pinned the fix to

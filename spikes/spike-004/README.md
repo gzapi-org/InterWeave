@@ -446,7 +446,8 @@ own rule about comments is written against.
 > LOCAL address first and charges the relay in THREE cases whenever
 > that address holds `/p2p-circuit`: by the relay's PeerId where it
 > carries one, else by the relay's IP collapsed to its /64, else by the
-> whole local address. The third is terminal, so the function cannot
+> local address truncated at the circuit component. The third is
+> terminal, so the function cannot
 > fall through to the remote — it did until the PR #74 review, for a
 > circuit whose local address carried neither, which was D3 surviving
 > in one address shape. **The order was itself corrected on
