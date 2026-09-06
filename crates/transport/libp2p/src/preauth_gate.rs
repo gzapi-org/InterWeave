@@ -147,6 +147,16 @@ const REFUSAL: &str = "connection refused";
 /// form can produce one -- an IP has no colon before its first digit
 /// group that could read as `relay:`, and a non-empty `Multiaddr`
 /// starts with `/` while an empty one renders empty.
+/// TWO MUTATIONS OF THIS FUNCTION ARE KNOWN TO SURVIVE the tests
+/// below, recorded here rather than in a commit message so the next
+/// reader to mutation-test it does not rediscover them as findings.
+/// Both need an address shape libp2p does not build, and neither is
+/// chosen by the source: `relay_ip.get_or_insert(..)` could be
+/// `= Some(..)` (last IP before the marker instead of first), and the
+/// non-circuit scan could take only the remote's first component.
+/// Every other mutation tried -- widened and narrowed guards, dropped
+/// arms, dropped prefixes, a branch replaced by a constant, a
+/// reordered scan, swapped operands -- fails at least one test.
 fn source_label(local_addr: &Multiaddr, remote_addr: &Multiaddr) -> String {
     use libp2p::multiaddr::Protocol;
 
@@ -754,8 +764,12 @@ mod tests {
             // `the_hook_buckets_on_the_remote_and_not_on_its_own_listen_address`
             // kept passing under the mutation -- and an earlier
             // version of this comment claimed the opposite, which its
-            // own "passed all twelve tests" contradicted. Review
-            // findings on PR #74.
+            // own "passed all twelve tests" contradicted.
+            //
+            // Which makes this hardening rather than a live defect:
+            // `local_addr` at the pending hook is the transport's
+            // listen address, and libp2p's TCP listener does not put a
+            // `/p2p/` in one. Review findings on PR #74.
             (
                 addr(&format!("/ip4/10.0.0.1/tcp/4001/p2p/{RELAY}")),
                 addr("/ip4/203.0.113.5/tcp/5001"),

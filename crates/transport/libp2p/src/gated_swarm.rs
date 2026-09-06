@@ -682,7 +682,8 @@ mod tests {
         // does not refuse. An infrastructure-only DESTINATION reached
         // over a circuit is therefore admitted for an application
         // path, which violates ADR-0036's enforcement clause and is
-        // the rule D2 broke. The pairing check is what refuses it, and until now
+        // the rule D2 broke. The pairing check is what refuses it,
+        // and until now
         // only the harmless `Manual` direction was exercised.
         //
         // The destination here IS infrastructure-only, built by

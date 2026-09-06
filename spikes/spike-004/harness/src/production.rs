@@ -23,13 +23,13 @@
 //!
 //! **Stage 11 step 1 replaced the assumption with attribution, so the
 //! answer is now "admits it".** The hook resolves an announced
-//! `ConnectionId -> DialOrigin` note and refuses a dial it has no note
-//! for; a reservation dial announced as `RelayReservation` does not
-//! name an application destination and is admitted. This module therefore wires the relay
-//! client through `Attributing` exactly as production does, and R6
-//! asserts the fix rather than the defect. F1 is history: the finding
-//! that attribution is required, and the record of what happened
-//! without it.
+//! `ConnectionId -> DialOrigin` note and refuses a dial it has no
+//! note for; a reservation dial announced as `RelayReservation` does
+//! not name an application destination and is admitted. This module
+//! therefore wires the relay client through `Attributing` exactly as
+//! production does, and R6 asserts the fix rather than the defect. F1
+//! is history: the finding that attribution is required, and the
+//! record of what happened without it.
 //!
 //! **One node in R6 still lies to the gate on purpose.** F8 — a
 //! refusal of a behaviour dial is invisible, because the Swarm
@@ -323,8 +323,9 @@ impl ProductionNode {
     /// `RelayReservation` is the truthful answer and what
     /// [`Self::with_trust`] uses. The parameter exists for ONE case:
     /// producing a dial the gate refuses, now that the gate no longer
-    /// refuses reservations by accident. Announcing a data-plane origin
-    /// for a reservation dial is a deliberate lie to the gate, and it
+    /// refuses reservations by accident. Announcing an origin that
+    /// names an application destination for a reservation dial is a
+    /// deliberate lie to the gate, and it
     /// reproduces exactly the refusal Stage 11 step 1 removed --
     /// `NotAuthorizedForDataPlane` for an infrastructure-only relay --
     /// which F8's invisibility claim needs as its subject.
