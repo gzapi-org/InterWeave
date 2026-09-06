@@ -744,11 +744,18 @@ mod tests {
             (addr("/memory/1"), addr("/dns4/relay.example.com/tcp/5001")),
             // AN IDENTITY IN THE LOCAL ADDRESS IS NOT A CIRCUIT. Only
             // the marker means relayed; widening the guard to
-            // `P2pCircuit | P2p(_)` passed all twelve tests and would
-            // have labelled every direct inbound `relay:<our own id>`
-            // -- one bucket for all of them, which is
-            // `max_pending_per_source` turned into a second global
-            // cap. Review finding on PR #74.
+            // `P2pCircuit | P2p(_)` passed all twelve tests.
+            //
+            // It would misfire on any inbound whose LOCAL address
+            // carried a `/p2p/` component, charging it to a `relay:`
+            // bucket named by that identity. Not every direct inbound:
+            // a listen address of `/ip4/0.0.0.0/tcp/4001` has no
+            // identity in it, which is why
+            // `the_hook_buckets_on_the_remote_and_not_on_its_own_listen_address`
+            // kept passing under the mutation -- and an earlier
+            // version of this comment claimed the opposite, which its
+            // own "passed all twelve tests" contradicted. Review
+            // findings on PR #74.
             (
                 addr(&format!("/ip4/10.0.0.1/tcp/4001/p2p/{RELAY}")),
                 addr("/ip4/203.0.113.5/tcp/5001"),

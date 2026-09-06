@@ -24,8 +24,8 @@
 //! **Stage 11 step 1 replaced the assumption with attribution, so the
 //! answer is now "admits it".** The hook resolves an announced
 //! `ConnectionId -> DialOrigin` note and refuses a dial it has no note
-//! for; a reservation dial announced as `RelayReservation` is not
-//! data-plane and is admitted. This module therefore wires the relay
+//! for; a reservation dial announced as `RelayReservation` does not
+//! name an application destination and is admitted. This module therefore wires the relay
 //! client through `Attributing` exactly as production does, and R6
 //! asserts the fix rather than the defect. F1 is history: the finding
 //! that attribution is required, and the record of what happened
