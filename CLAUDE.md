@@ -40,10 +40,15 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   circuit or hole punch terminating at such a peer is refused. D3 was
   `PreAuthAdmission` bucketing a relayed inbound by the source PeerId
   the circuit carries, which `contracts/CONNECTIVITY.md` §10 forbids by
-  name; `source_label` now reads the remote for an IP first and charges
-  a `/p2p-circuit` inbound to the relay instead — by the relay's PeerId
-  from the LOCAL address, which the old signature discarded, else by
-  the relay's IP, else by that whole local address. **The third case is
+  name; `source_label` now reads the LOCAL address FIRST and charges a
+  `/p2p-circuit` inbound to the relay — by the relay's PeerId from
+  that address, which the old signature discarded, else by the relay's
+  IP collapsed to its /64, else by that whole local address. **The
+  circuit component decides, and it is consulted before the remote's
+  IP**: an interim shape asked the remote for an IP first, which made
+  the rule "no IP means relayed" and pinned the fix to
+  `libp2p-relay 0.21.1` putting no address in a circuit's
+  `send_back_addr`. **The third case is
   terminal on purpose**: while it fell through, a circuit carrying
   neither still bucketed on the source, which is D3 in one address
   shape. **The

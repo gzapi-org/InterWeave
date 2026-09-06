@@ -443,13 +443,18 @@ claim about a case nobody had run — which is the shape this repository's
 own rule about comments is written against.
 
 > **RESOLVED 2026-09-05, Stage 11 step 2.** `source_label` reads the
-> REMOTE address for an IP first, and falls back to the relay in
-> THREE cases whenever the local address holds `/p2p-circuit`: by the
-> relay's PeerId where that address carries one, else by the relay's
-> IP, else by the whole local address. The third is terminal, so the
-> function cannot fall through to the remote — it did until the PR #74
-> review, for a circuit whose local address carried neither, which was
-> D3 surviving in one address shape. So a relayed
+> LOCAL address first and charges the relay in THREE cases whenever
+> that address holds `/p2p-circuit`: by the relay's PeerId where it
+> carries one, else by the relay's IP collapsed to its /64, else by the
+> whole local address. The third is terminal, so the function cannot
+> fall through to the remote — it did until the PR #74 review, for a
+> circuit whose local address carried neither, which was D3 surviving
+> in one address shape. **The order was itself corrected on
+> 2026-09-06**: the first shape asked the REMOTE for an IP first, which
+> made the operative rule "no IP means relayed" and rested the whole
+> fix on `libp2p-relay 0.21.1` putting no address in a circuit's
+> `send_back_addr` — see the R9 mutation table, where the row that
+> measured that dependency now measures nothing. So a relayed
 > inbound is charged to the relay, which is what §10 asks for, and the
 > source PeerId the circuit asserts no longer names a bucket. The
 > `relay:` prefix on those buckets is a namespace this fix introduces:
@@ -1040,7 +1045,7 @@ R8's three and R9's three:
 | the destination never listens on the circuit | R8.3, R8.4, R8.5, R8.8, R8.9, R8.10 |
 | the direct control node never dials | *nothing* — see below |
 | the destination stops trusting the source | *nothing* — see below |
-| the relayed remote address carries an IP after all | R9.3, R9.4 |
+| the relayed remote address carries an IP after all | *nothing* — see below |
 | per-source ceiling raised to two | R9.2, R9.3, R9.4 |
 | global ceiling lowered to four | *nothing* — see below |
 
@@ -1065,10 +1070,34 @@ global cap is. The global cap has stopped being the binding constraint,
 so a mutation to it measures nothing. **Re-measured 2026-09-05**,
 raised by the PR #74 re-review: three rows around it were stale in the
 same way, all in the direction of understating what the mutation
-takes. The one row that survived re-measurement unchanged is "the
-relayed remote address carries an IP after all" — R9.3 and R9.4 both
-still fail, provided the injected IP varies per source, which is what
-an IP would do if a circuit carried one.
+takes.
+
+**And a fourth changed on 2026-09-06, in the other direction — this
+one is the fix improving, not the record decaying.** "The relayed
+remote address carries an IP after all" used to fail R9.3 and R9.4,
+and that was the correct measurement twice: on 2026-09-05 it was
+re-measured and defended against a re-review that reported it as
+failing nothing. Both readings were right about the code they were
+looking at. `source_label` decided relayed-versus-direct by asking
+whether the REMOTE carried an IP, so injecting one moved every circuit
+back onto a per-source bucket and the two observations failed.
+
+That is what made the row worth having and also what made it a
+warning: the whole D3 fix rested on `libp2p-relay 0.21.1` choosing to
+put no address in a circuit's `send_back_addr`, a patch bump away,
+with nothing in the tree measuring the dependency. The PR #74
+re-review named it, and step 2 now reads the LOCAL address's
+`/p2p-circuit` component first, so the origin of the answer is a
+component the relay transport controls rather than one the remote
+supplies.
+
+**Measured 2026-09-06** with all three of R9's relayed remotes
+carrying a per-source IP (`198.51.100.1`, `.2`, and `.10`–`.41` across
+the minting loop): R9.3 and R9.4 both still PASS, 86 required
+observations, 0 failed, exit 0. The mutation now fails nothing because
+there is no longer anything for it to reach — which is the outcome the
+reorder was for, and is why this row reads *nothing* rather than
+being deleted.
 
 R10's, R11's and R12's:
 
