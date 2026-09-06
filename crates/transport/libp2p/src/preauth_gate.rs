@@ -26,11 +26,13 @@
 //!
 //! # The source is not an identity
 //!
-//! The bucket comes from the remote multiaddr the socket layer reports.
-//! It is unauthenticated, shared by everything behind one NAT, and
-//! cheap for an attacker with address space to change. It buys exactly
-//! one thing -- that one bucket cannot spend the whole budget -- and
-//! nothing here reads it for any other purpose.
+//! The bucket comes from the LOCAL address when it carries
+//! `/p2p-circuit`, and from the remote multiaddr the socket layer
+//! reports otherwise -- [`source_label`] is where that is decided, and
+//! why. Either way it is unauthenticated, shared by everything behind
+//! one NAT, and cheap for an attacker with address space to change. It
+//! buys exactly one thing -- that one bucket cannot spend the whole
+//! budget -- and nothing here reads it for any other purpose.
 
 use std::collections::HashMap;
 use std::task::{Context, Poll};
@@ -93,6 +95,16 @@ const REFUSAL: &str = "connection refused";
 /// was correct on the pinned version and pinned to it; review finding
 /// on PR #74.
 ///
+/// **The libp2p-relay version these citations read is not locked.**
+/// `relay` is absent from the workspace feature list, so `Cargo.lock`
+/// resolves no `libp2p-relay` at all; 0.21.1 is what `libp2p 0.56`
+/// selects and what SPIKE-004's own harness pinned, read from the
+/// registry rather than fixed by this tree. Enabling the feature may
+/// resolve a different one, and every line number below is then a
+/// citation into a file that has moved. The code does not depend on
+/// any of it -- that is the point of reading the local address first
+/// and truncating it at the circuit component -- but the PROSE does.
+///
 /// libp2p-relay 0.21.1 builds the local address as
 /// `relay_addr.with(Protocol::P2pCircuit)` from the established relay
 /// connection (`priv_client/transport.rs:404`), and SPIKE-004's R8.8
@@ -114,8 +126,8 @@ const REFUSAL: &str = "connection refused";
 /// rather than measured; SPIKE-004 exercised the outbound direction,
 /// where `libp2p-swarm 0.47.1` appends `/p2p/<relay>` before dialling
 /// and the PeerId is present. A third case, a circuit whose local
-/// address holds neither, returns the local address whole -- see the
-/// terminal `return` in the body.
+/// address holds neither, returns that address truncated at the
+/// circuit component -- see the terminal `return` in the body.
 ///
 /// All THREE relay cases are prefixed `relay:` so a relayed bucket can
 /// never collide with a direct peer's IP bucket -- otherwise a direct
@@ -141,7 +153,7 @@ fn source_label(local_addr: &Multiaddr, remote_addr: &Multiaddr) -> String {
     // true on the pinned crate and true only there. libp2p-relay
     // 0.21.1 builds a circuit's `send_back_addr` as
     // `Protocol::P2p(src_peer_id).into()`
-    // (`priv_client/transport.rs:404`), with no address in it; a
+    // (`priv_client/transport.rs:405`), with no address in it; a
     // version that carried the source's observed address instead would
     // have sent every circuit back to a bucket derived from that
     // address, which is D3 again in a different component. The whole
@@ -155,12 +167,36 @@ fn source_label(local_addr: &Multiaddr, remote_addr: &Multiaddr) -> String {
     // whose local address carries `/p2p-circuit` -- is not
     // constructible: only the relay client transport builds a
     // `p2p-circuit` local address. And if it somehow were, this order
-    // charges it to the relay bucket, which is COARSER. §10 forbids
-    // unbounded pseudo-source buckets; sharing one is the safe
-    // failure, minting them is the defect.
+    // charges it to the relay bucket, which is COARSER. That is the
+    // safer failure rather than a free one: it trades a bucket-minting
+    // escape for a direct party able to spend a relay's per-source
+    // allowance and deny the circuits riding it. §10 forbids unbounded
+    // pseudo-source buckets, so that is the direction to fail in.
     if local_addr.iter().any(|c| matches!(c, Protocol::P2pCircuit)) {
+        // EVERYTHING AFTER `/p2p-circuit` DESCRIBES THE FAR END, so
+        // only what precedes it may name the bucket. The canonical
+        // way to write a circuit address is
+        // `/ip4/<relay>/tcp/<port>/p2p-circuit/p2p/<destination>`, and
+        // scanning the whole address would have returned that trailing
+        // identity: `relay:<source>`, one bucket per identity,
+        // identities free to mint. D3 wearing a `relay:` prefix.
+        //
+        // libp2p-relay 0.21.1 does not build it that way -- its
+        // `local_addr` is `relay_addr.with(Protocol::P2pCircuit)`, so
+        // the circuit component is last and nothing follows it
+        // (`priv_client/transport.rs:404`). Which is exactly the
+        // reasoning this function has already been wrong to rely on
+        // once: the order of these branches used to depend on the same
+        // crate putting no address in `send_back_addr`. Truncating
+        // costs nothing on the shape the crate builds and does not
+        // care what a later one builds. Review finding on PR #74.
+        let relay_part: Multiaddr = local_addr
+            .iter()
+            .take_while(|c| !matches!(c, Protocol::P2pCircuit))
+            .collect();
+
         let mut relay_ip = None;
-        for component in local_addr {
+        for component in &relay_part {
             match component {
                 Protocol::P2p(peer) => return format!("relay:{peer}"),
                 Protocol::Ip4(ip) => relay_ip.get_or_insert(ip.to_string()),
@@ -188,12 +224,15 @@ fn source_label(local_addr: &Multiaddr, remote_addr: &Multiaddr) -> String {
         // verbatim, one bucket per identity and identities free to
         // mint. The shape that reaches it is a circuit whose local
         // address carries neither a relay PeerId nor an IP, such as
-        // `/memory/1/p2p-circuit`. The whole local address is the
+        // `/memory/1/p2p-circuit`. The relay-side prefix is the
         // coarsest label available here that the SOURCE does not
-        // choose, so it is what the connection is charged to.
+        // choose, so it is what the connection is charged to. It can
+        // be empty, if the local address begins with the circuit
+        // component; `relay:` alone is then one bucket for every such
+        // connection, which is coarse and bounded rather than wrong.
         // `a_circuit_with_neither_a_relay_identity_nor_an_ip_is_still_not_the_source`
         // fails if this returns anything derived from the remote.
-        return format!("relay:{local_addr}");
+        return format!("relay:{relay_part}");
     }
 
     // NOT A CIRCUIT, so the remote is the source and its IP is the
@@ -678,6 +717,76 @@ mod tests {
                 "a direct label must not enter the relay namespace: {label}"
             );
         }
+    }
+
+    /// THE CIRCUIT COMPONENT ENDS THE RELAY HALF of the local address.
+    ///
+    /// A circuit multiaddr is canonically written
+    /// `/ip4/<relay>/tcp/<port>/p2p-circuit/p2p/<far end>`, so an
+    /// identity can appear AFTER the circuit component as well as
+    /// before it. Scanning the whole address returned that trailing
+    /// one -- `relay:<source>`, a bucket per identity and identities
+    /// free to mint, which is D3 wearing the prefix meant to prevent
+    /// it. The trailing address is the far end's, and the far end is
+    /// the party being accounted.
+    ///
+    /// `libp2p-relay 0.21.1` puts the circuit component last and so
+    /// never builds this shape. That is the same reasoning this
+    /// function was already wrong to rest on once, which is why the
+    /// truncation is here rather than a note saying it cannot happen.
+    /// Review finding on PR #74.
+    #[test]
+    fn a_circuit_component_ends_the_relay_half_of_the_local_address() {
+        // The IP case: the relay is before the marker, the source
+        // after it.
+        let one = source_label(
+            &addr(&format!(
+                "/ip4/198.51.100.1/tcp/4001/p2p-circuit/p2p/{SOURCE_A}"
+            )),
+            &addr(&format!("/p2p/{SOURCE_A}")),
+        );
+        let two = source_label(
+            &addr(&format!(
+                "/ip4/198.51.100.1/tcp/4001/p2p-circuit/p2p/{SOURCE_B}"
+            )),
+            &addr(&format!("/p2p/{SOURCE_B}")),
+        );
+        assert_eq!(
+            one, "relay:198.51.100.1",
+            "the relay is what precedes the marker"
+        );
+        assert!(
+            !one.contains(SOURCE_A),
+            "the far end must not name the bucket"
+        );
+        assert_eq!(one, two, "two far ends over one relay share one bucket");
+
+        // The PeerId case: a relay identity before the marker still
+        // wins over anything after it.
+        let named = source_label(
+            &addr(&format!(
+                "/ip4/198.51.100.1/tcp/4001/p2p/{RELAY}/p2p-circuit/p2p/{SOURCE_A}"
+            )),
+            &addr(&format!("/p2p/{SOURCE_A}")),
+        );
+        assert_eq!(named, format!("relay:{RELAY}"));
+
+        // And the third case, where truncation is all that stands
+        // between the far end and the label: no IP and no identity
+        // before the marker.
+        let bare_a = source_label(
+            &addr(&format!("/memory/1/p2p-circuit/p2p/{SOURCE_A}")),
+            &addr(&format!("/p2p/{SOURCE_A}")),
+        );
+        let bare_b = source_label(
+            &addr(&format!("/memory/1/p2p-circuit/p2p/{SOURCE_B}")),
+            &addr(&format!("/p2p/{SOURCE_B}")),
+        );
+        assert!(
+            !bare_a.contains(SOURCE_A),
+            "not even the whole-address case may carry it"
+        );
+        assert_eq!(bare_a, bare_b, "and it does not vary with the far end");
     }
 
     /// A RELAYED connection is charged to the relay even when its
