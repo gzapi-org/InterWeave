@@ -134,11 +134,17 @@ impl AdmittedDial {
         // ticket carries what it claimed.
         //
         // So the pairing is enforced BOTH ways, because each direction
-        // is a different mistake. A circuit address admitted under some
-        // other origin was judged against the wrong rule — the
-        // destination's class, not the relay's. And `RelayCircuit` on
-        // an address with no circuit in it claims a purpose the dial
-        // does not have. Neither is reachable today, since no relay
+        // is a different mistake, and it is worth being exact about
+        // which. The ticket names the DESTINATION either way, so the
+        // class the gate evaluates is the destination's in both
+        // directions; what the origin decides is which SIDE of
+        // `names_application_destination` the dial is judged on. A
+        // circuit address admitted under a reachability origin is
+        // therefore judged as reachability traffic, and an
+        // infrastructure-only destination would be admitted for what
+        // is an application path — ADR-0036's enforcement clause
+        // exactly. And `RelayCircuit` on an address with no circuit in
+        // it claims a purpose the dial does not have. Neither is reachable today, since no relay
         // feature is compiled; both become reachable the moment one is,
         // and refusing here costs a string comparison.
         let circuit_address = address
@@ -637,8 +643,12 @@ mod tests {
     #[test]
     fn a_relay_circuit_claim_needs_a_circuit_in_the_address() {
         // The other direction, and a different mistake: claiming
-        // `RelayCircuit` for an ordinary address asks to be judged as
-        // control-plane traffic for a dial that is nothing of the kind.
+        // `RelayCircuit` for an ordinary address claims a purpose the
+        // dial does not have. It buys no weaker class check —
+        // `RelayCircuit` has named an application destination since
+        // Stage 11 step 2, the same side as `Manual` — so the refusal
+        // is for the mislabelling itself, not for the class it would
+        // escape.
         let manager = manager();
         let err = AdmittedDial::from_ticket(ticket_as(
             &manager,

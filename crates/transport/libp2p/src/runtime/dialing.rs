@@ -128,10 +128,12 @@ pub(super) fn attempt_dial(
 /// The CIRCUIT PAIRING case is the one to be careful with, because a
 /// mislabelling here is not free. `from_ticket` refuses both
 /// directions of the disagreement -- a `/p2p-circuit` address admitted
-/// under some other origin was judged against the relay's class rather
-/// than the destination's, and `RelayCircuit` on an address with no
-/// circuit in it claims a purpose the dial does not have -- and both
-/// arrive here. `record_permanent_failure` then FORGETS THE ADDRESS
+/// under some other origin, and `RelayCircuit` on an address with no
+/// circuit in it -- and both arrive here. `from_ticket`'s own comment
+/// says which mistake each one is; this said it a second time and said
+/// it differently, naming the relay's class as what the first was
+/// judged against when the ticket names the destination in both
+/// directions. `record_permanent_failure` then FORGETS THE ADDRESS
 /// (`connection_manager.rs`, `known.remove(ticket.address())`), which
 /// is right for an address that cannot be dialled and wrong for a good
 /// circuit address that a caller labelled badly. Permanent is still
