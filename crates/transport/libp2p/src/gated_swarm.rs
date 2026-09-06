@@ -607,11 +607,19 @@ mod tests {
         // The caller is the only party that knows, which makes the
         // command path the place the claim is checked.
         //
-        // Admitted as `Manual` — a data-plane origin — the dial is
-        // judged against the wrong rule: `Manual` weighs the peer named
-        // in the ticket, while a circuit's authority question is the
-        // DESTINATION's class. Refusing here is fail-closed and costs a
-        // string comparison.
+        // `Manual` IS THE HARMLESS DIRECTION, and saying so is the
+        // point of the case below it. `admit` reads `request.peer` for
+        // every origin, and a circuit's ticket names the destination,
+        // so there is no second peer for one origin to weigh instead
+        // of another. `Manual` and `RelayCircuit` are also on the same
+        // side of `names_application_destination` since Stage 11
+        // step 2, so the class check comes out identical. What the
+        // refusal protects is the LABEL: the origin is what the
+        // attribution layer, `authorizes_for` and every later reader
+        // take the dial's purpose from.
+        //
+        // The direction that would actually escape is a REACHABILITY
+        // origin, and it is asserted at the end of this test.
         let manager = manager();
         let refused = AdmittedDial::from_ticket(ticket_as(
             &manager,
@@ -637,6 +645,27 @@ mod tests {
             ))
             .is_ok(),
             "so the refusal is the origin and not the address"
+        );
+
+        // AND THE ORIGIN THAT WOULD ACTUALLY ESCAPE. `RelayReservation`
+        // is on the reachability side, so `ConnectionPolicy::admit`
+        // never consults `names_application_destination` for it and an
+        // infrastructure-only DESTINATION reached over a circuit would
+        // be admitted for an application path -- ADR-0036's enforcement
+        // clause, and the rule D2 broke. The pairing check is what
+        // refuses it, and until now only the harmless `Manual`
+        // direction was exercised. Review finding on PR #74.
+        let escaping = AdmittedDial::from_ticket(ticket_as(
+            &manager,
+            Some(ADMITTED),
+            &circuit(),
+            DialOrigin::RelayReservation,
+        ));
+        let err = escaping.expect_err("a circuit admitted under a reachability origin is refused");
+        assert!(
+            err.reason.contains("RelayCircuit"),
+            "and the refusal names the origin it should have carried: {}",
+            err.reason
         );
     }
 
