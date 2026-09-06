@@ -682,9 +682,8 @@ mod tests {
         // does not refuse. An infrastructure-only DESTINATION reached
         // over a circuit is therefore admitted for an application
         // path, which violates ADR-0036's enforcement clause and is
-        // the rule D2 broke. The pairing check is what refuses it,
-        // and until now
-        // only the harmless `Manual` direction was exercised.
+        // the rule D2 broke. The pairing check is what refuses it, and
+        // until now only the harmless `Manual` direction was exercised.
         //
         // The destination here IS infrastructure-only, built by
         // `infra_only_manager`. Reusing `manager()` would have put the
@@ -786,11 +785,13 @@ mod tests {
         // enum", which was false — `DialOrigin::ALL` constructs it, and
         // so do tests, the spike harness and CONNECTIVITY.md. What is
         // checkable, and what the argument needs, is that nothing
-        // originates a dial with it. `ConnectionManager::learn_address`
-        // stores whatever arrives, verbatim, so a widened guard here
-        // would refuse a
-        // good address as "a relay circuit",
-        // and `settle_undialable` routes that to
+        // originates a dial with it:
+        // `grep -rn 'DialOrigin::DiscoveryReconnect' crates/ apps/`
+        // returns only the enum, two match arms and `ALL`.
+        //
+        // `ConnectionManager::learn_address` stores whatever arrives,
+        // verbatim, so a widened guard here would refuse a good address
+        // as "a relay circuit", and `settle_undialable` routes that to
         // `record_permanent_failure`, which FORGETS it. A live route
         // discarded for a component that means nothing here. Review
         // finding on PR #74.

@@ -155,13 +155,18 @@ const REFUSAL: &str = "connection refused";
 /// tells the mutant from the original. The fourth is different and is
 /// marked. None is chosen by the source.
 ///
-/// The two REVERSALS are not one-token edits: `multiaddr 0.18.2`'s
-/// `Iter` is `Iterator` and not `DoubleEndedIterator`, so neither is
-/// expressible as `.rev()` -- both need the loop rewritten through a
-/// `Vec`, and no generator produces them. The other two are: the
-/// first-component one is `_ => {}` to `_ => break` in the non-circuit
-/// scan, which is behaviourally identical to `.take(1)`. Expect a
-/// generator to find that one.
+/// THREE of the four are not one-token edits. The two reversals need
+/// the loop rewritten through a `Vec`, because `multiaddr 0.18.2`'s
+/// `Iter` is `Iterator` and not `DoubleEndedIterator`, so `.rev()` is
+/// unavailable; and `relay_ip.get_or_insert(..)` to `= Some(..)`
+/// restructures the arm's type from `&mut String` to `()`. The one an
+/// ordinary generator could reach is the first-component one, `_ => {}`
+/// to `_ => break` in the non-circuit scan, behaviourally identical to
+/// `.take(1)`.
+///
+/// Stated as reachability rather than prediction: this tree runs no
+/// mutation tooling, so what a generator WOULD find here has not been
+/// measured and is not a claim this comment makes.
 ///
 /// - `relay_ip.get_or_insert(..)` could be `= Some(..)`, taking the
 ///   last IP before the marker instead of the first.

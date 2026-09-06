@@ -837,7 +837,16 @@ mod tests {
         // from an empty map -- which is what the previous version of
         // this test did while its comment claimed the scheduler was
         // covered. One is scheduled here so the assertion after the
-        // refusal has something to lose. Review finding on PR #74.
+        // refusal has something to lose.
+        //
+        // It pins EXISTENCE, not shape: `scheduled_retries()` is
+        // `retries.len()` and this fixture has one peer, so a mutant
+        // that re-scheduled -- resetting `due_at_ms`, bumping
+        // `attempts` -- would survive here. That one dies in
+        // `a_ticket_libp2p_cannot_dial_is_settled_permanently`, whose
+        // retry map is empty, so the property is covered by the pair
+        // rather than by this assertion alone. Review findings on
+        // PR #74.
         let other: DialTicket = m
             .handle()
             .load()
