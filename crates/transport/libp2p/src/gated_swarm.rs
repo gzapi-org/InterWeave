@@ -575,10 +575,18 @@ mod tests {
 
     /// A manager whose only known peer is INFRASTRUCTURE-ONLY.
     ///
-    /// `classify` checks `PeerTrustPolicy` first, so a peer in both
-    /// sets is `DataPlaneTrusted` and the infrastructure arm of
+    /// `classify` checks the LOCAL peer, then `PeerTrustPolicy`, then
+    /// `InfrastructureSet` — so a remote peer in both sets is
+    /// `DataPlaneTrusted` and the infrastructure arm of
     /// `ConnectionPolicy::admit` never runs. A test about that arm has
     /// to leave the peer policy empty.
+    ///
+    /// That precedence is pinned, but only sideways:
+    /// `partial_revocation_keeps_the_reachability_it_still_authorizes`
+    /// (`runtime/dialing.rs`) starts from a peer in both sets and
+    /// requires one revocation, which an infrastructure-first
+    /// `classify` would make zero. Worth naming here because a reader
+    /// of this comment would not find it.
     fn infra_only_manager() -> ConnectionManager {
         let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
         let _ = m.set_trust(
@@ -673,8 +681,8 @@ mod tests {
         // else -- and `RelayReservation` answers `false`, so that arm
         // does not refuse. An infrastructure-only DESTINATION reached
         // over a circuit is therefore admitted for an application
-        // path, which is ADR-0036's enforcement clause and the rule D2
-        // broke. The pairing check is what refuses it, and until now
+        // path, which violates ADR-0036's enforcement clause and is
+        // the rule D2 broke. The pairing check is what refuses it, and until now
         // only the harmless `Manual` direction was exercised.
         //
         // The destination here IS infrastructure-only, built by
@@ -743,6 +751,27 @@ mod tests {
                 "/ip4/192.0.2.1/tcp/4001",
             ))
             .is_ok()
+        );
+
+        // AND AN IDENTITY IN THE ADDRESS IS NOT A CIRCUIT. Only the
+        // marker is. `source_label` had the same guard and the same
+        // gap, closed one commit ago; this one is the twin, and it
+        // matters more, because a `/p2p/`-suffixed multiaddr is an
+        // ORDINARY form. Identify hands them over and
+        // `record_learned_address` keeps them verbatim, so a widened
+        // guard here would refuse a good address as "a relay circuit",
+        // and `settle_undialable` routes that to
+        // `record_permanent_failure`, which FORGETS it. A live route
+        // discarded for a component that means nothing here. Review
+        // finding on PR #74.
+        assert!(
+            AdmittedDial::from_ticket(ticket_for(
+                &manager,
+                Some(ADMITTED),
+                &format!("/ip4/192.0.2.1/tcp/4001/p2p/{ADMITTED}"),
+            ))
+            .is_ok(),
+            "an identity in the address is not a circuit; only the marker is"
         );
     }
 
