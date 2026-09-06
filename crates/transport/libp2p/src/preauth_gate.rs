@@ -173,10 +173,15 @@ const REFUSAL: &str = "connection refused";
 /// `Iterator` and not `DoubleEndedIterator`. The `get_or_insert` one
 /// does not compile unless BOTH IP arms change together, since the
 /// arm's type goes from `&mut String` to `()`. The first-component
-/// one is a single node.
+/// one is a single node, and so the only one of the four a person
+/// could produce while editing for some other reason -- which makes
+/// it the one to watch.
 ///
-/// This tree runs no mutation tooling; every mutation recorded here
-/// was applied by hand.
+/// No mutation tooling runs in CI or `xtask`; every mutation recorded
+/// here was applied by hand. (`cargo-mutants` HAS been run in this
+/// working directory -- `.gitignore` carries a rule for its output
+/// because a `git add -A` once swept twenty-two of its files into a
+/// commit -- so "this tree runs none" would be false.)
 ///
 /// Everything else tried dies: widening the guard with the remote or
 /// with `P2p(_)`, NARROWING it with the remote, dropped arms, dropped
