@@ -236,10 +236,24 @@ impl InFlightTickets {
 ///
 /// A behaviour dial's address arrives with the peer appended — a query
 /// result carries it — while the address book and the quarantine map
-/// are keyed by the bare transport address, which is what
-/// `AdmittedDial` binds. Passing the suffixed form to the policy looks
-/// up an address it has never seen, so every quarantine silently
-/// misses. Only the TRAILING components go: a `/p2p/` in the middle of
+/// are keyed by whatever the ticket carries. Passing the suffixed form
+/// to the policy looks up an address it has never seen, so every
+/// quarantine silently misses.
+///
+/// **`AdmittedDial` does NOT bind the bare address**, and this comment
+/// said it did until PR #74's review. It binds `ticket.address()`
+/// verbatim, and `attempt_dial` copies the caller's string into the
+/// `DialRequest` unchanged — so the BEHAVIOUR path is stripped here
+/// while the COMMAND and SCHEDULER paths are not. One physical route
+/// reached both ways therefore occupies two `(peer, address)` entries:
+/// a quarantine earned on one does not suppress the other, and both
+/// spend `max_addresses` in a map whose bound is the point. That is
+/// F10's failure mode on the command path.
+///
+/// **Not fixed here, and not this PR's to fix**: stripping in
+/// `attempt_dial` would change what admission and quarantine are keyed
+/// by, which is a security boundary and a different change from
+/// resolving D1/D2/D3. Recorded rather than left for rediscovery. Only the TRAILING components go: a `/p2p/` in the middle of
 /// the address is a relay path's inner hop, part of the route rather
 /// than a claim about who answers.
 #[must_use]

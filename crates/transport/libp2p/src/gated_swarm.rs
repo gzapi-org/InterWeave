@@ -765,11 +765,19 @@ mod tests {
 
         // AND AN IDENTITY IN THE ADDRESS IS NOT A CIRCUIT. Only the
         // marker is. `source_label` had the same guard and the same
-        // gap, closed one commit ago; this one is the twin, and it
-        // matters more, because a `/p2p/`-suffixed multiaddr is an
-        // ORDINARY form. Identify hands them over and
-        // `record_learned_address` keeps them verbatim, so a widened
-        // guard here would refuse a good address as "a relay circuit",
+        // gap, closed by
+        // `no_direct_label_can_begin_with_the_relay_prefix`'s last
+        // case; this one is the twin, and it matters more, because a
+        // `/p2p/`-suffixed multiaddr is an ORDINARY form. The
+        // provable paths are `commands.rs`'s `AddAddress` and `Dial`,
+        // where an operator pastes the canonical
+        // `/ip4/…/tcp/…/p2p/<id>` form — that IS the shareable one —
+        // and `discovery/kademlia`'s `normalize`, which keeps a
+        // consistent suffix as-is by test. Identify supplies them too,
+        // but that depends on remote behaviour this tree does not
+        // control. `ConnectionManager::learn_address` stores whatever
+        // arrives, verbatim, so a widened guard here would refuse a
+        // good address as "a relay circuit",
         // and `settle_undialable` routes that to
         // `record_permanent_failure`, which FORGETS it. A live route
         // discarded for a component that means nothing here. Review
