@@ -716,6 +716,11 @@ mod tests {
             "and the refusal names the origin the ticket DID carry: {}",
             err.reason
         );
+        assert!(
+            err.reason.contains("192.0.2.1"),
+            "and the address, which is what an operator reads: {}",
+            err.reason
+        );
     }
 
     #[test]
@@ -738,6 +743,11 @@ mod tests {
         assert!(
             err.reason.contains("carries no /p2p-circuit"),
             "the refusal says which half is missing: {}",
+            err.reason
+        );
+        assert!(
+            err.reason.contains("192.0.2.1"),
+            "and which address was judged: {}",
             err.reason
         );
 
@@ -834,6 +844,17 @@ mod tests {
         let refused = AdmittedDial::from_ticket(ticket_for(&manager, Some(ADMITTED), "127.0.0.1"))
             .expect_err("not a multiaddr");
         assert!(refused.reason.contains("not a multiaddr"), "{refused:?}");
+        // AND IT NAMES THE ADDRESS. `settle_undialable` returns this
+        // string verbatim as `DialRefusal::Backend`, so it is what an
+        // operator reads; without this the `{}` and its argument can
+        // be deleted from the message and every assertion here stays
+        // green. Same defect the origin field had, three messages over.
+        // Review finding on PR #74.
+        assert!(
+            refused.reason.contains("127.0.0.1"),
+            "the refusal names the address it could not parse: {}",
+            refused.reason
+        );
         assert_eq!(
             handle.load().pending_dials(),
             1,
