@@ -721,8 +721,8 @@ mod tests {
                 Endpoint::Dialer,
             )
             .is_err(),
-            "and a data-plane origin toward the same peer is refused — the class split is \
-             decided by the origin the gate was TOLD"
+            "and an origin that names an application destination is refused toward the \
+             same peer — the class split is decided by the origin the gate was TOLD"
         );
     }
 

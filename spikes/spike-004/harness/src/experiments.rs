@@ -1226,11 +1226,11 @@ pub async fn r6_production_gate_answers_the_reservation_dial(report: &mut Report
 
     // THE CONTROL, which since step 1 is a REGRESSION GUARD rather than
     // a contrast. Its variable no longer changes the outcome: the
-    // subject is admitted too, because `RelayReservation` is not a
-    // data-plane origin and `admit` reads `is_data_plane` only in the
-    // `ConnectivityInfrastructureOnly` arm. What discriminates now is
-    // `misattributed` at R6.6 — same relay, same class, data-plane
-    // origin, refused. An experiment whose control agrees with its
+    // subject is admitted too, because `RelayReservation` does not
+    // name an application destination and `admit` reads that predicate
+    // only in the `ConnectivityInfrastructureOnly` arm. What
+    // discriminates now is `misattributed` at R6.6 — same relay, same
+    // class, an origin that DOES name one, refused. An experiment whose control agrees with its
     // subject has measured neither, so the naming is deliberate: this
     // row asserts the trusted path did not break, and R6.6 carries the
     // contrast R6.5 needs to mean anything.
