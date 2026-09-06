@@ -784,6 +784,58 @@ mod tests {
         );
     }
 
+    /// A CIRCUIT PAIRING REFUSAL FORGETS THE ADDRESS, which is the
+    /// consequence two comments assert and no test drove.
+    ///
+    /// `from_ticket` has four failure modes and only the malformed
+    /// address one was ever settled through here. The pairing mode is
+    /// the one whose blast radius is a good route rather than a bad
+    /// string: `record_permanent_failure` removes the address from the
+    /// peer's book, so a caller that labels a real circuit with the
+    /// wrong origin loses it. Both `settle_undialable`'s doc and
+    /// `gated_swarm`'s guard comment say so; this is what says it if
+    /// it stops being true. Review finding on PR #74.
+    #[test]
+    fn a_circuit_pairing_refusal_forgets_the_address_it_refused() {
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        m.set_trust(trust(&[RELAY], &[]), &[]);
+        let circuit = format!("/ip4/192.0.2.1/tcp/4001/p2p-circuit/p2p/{RELAY}");
+        m.learn_address(&ident(RELAY), &circuit, 0);
+        assert_eq!(
+            m.known_addresses(&ident(RELAY)),
+            1,
+            "the route is in the book before the refusal"
+        );
+
+        // Admitted under the WRONG origin: a circuit address must claim
+        // `RelayCircuit`, and `ConnectionManager` is what the scheduler
+        // supplies.
+        let ticket: DialTicket = m
+            .handle()
+            .load()
+            .admit(
+                &DialRequest {
+                    peer: Some(ident(RELAY)),
+                    address: circuit.clone(),
+                    origin: DialOrigin::ConnectionManager,
+                },
+                0,
+            )
+            .expect("a trusted peer with a fresh policy is admitted");
+        let undialable = AdmittedDial::from_ticket(ticket)
+            .expect_err("a circuit address under another origin is refused");
+        let reason = settle_undialable(&mut m, *undialable, 0);
+        assert!(
+            reason.contains("RelayCircuit"),
+            "it says what the admission should have claimed: {reason}"
+        );
+        assert_eq!(
+            m.known_addresses(&ident(RELAY)),
+            0,
+            "and the route is GONE — a caller-side mislabelling costs the address"
+        );
+    }
+
     #[test]
     fn every_identity_the_neutral_grammar_accepts_libp2p_accepts() {
         // What makes `from_ticket`'s PeerId branch unreachable, and the
