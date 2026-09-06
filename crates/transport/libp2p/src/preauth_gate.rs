@@ -543,6 +543,20 @@ mod tests {
             "two identities over one relay must share one bucket whatever the relay's \
              address looks like"
         );
+
+        // AND TWO SUCH RELAYS ARE TWO BUCKETS. Everything above holds
+        // just as well if this case returned a CONSTANT -- the label
+        // would still avoid the source, still carry the prefix, still
+        // not vary with the identity. §10 asks for the relay
+        // CONNECTION to be charged, so collapsing every identity-less
+        // relay into one bucket would let one relay's circuits spend
+        // another's allowance. Review finding on PR #74: the third
+        // case was pinned by nothing that reads `relay_part` at all.
+        assert_ne!(
+            label,
+            source_label(&addr("/memory/2/p2p-circuit"), &remote),
+            "two relay connections with no identity and no IP are still two buckets"
+        );
     }
 
     /// The HOOK, not the helper -- so the argument order is pinned.
@@ -820,6 +834,24 @@ mod tests {
         assert_eq!(
             empty_a, empty_b,
             "and it does not vary with the far end either"
+        );
+
+        // AND A NESTED CIRCUIT CHARGES THE OUTERMOST RELAY, which the
+        // comment beside the truncation asserts and nothing fed it.
+        // `libp2p-relay 0.21.1` refuses a doubled marker as
+        // `MultipleCircuitRelayProtocolsUnsupported`, so this is not
+        // constructible there -- but "coarser than any nested reading"
+        // is a claim about THIS code, and stopping at the first marker
+        // is what makes it true. Review finding on PR #74.
+        assert_eq!(
+            source_label(
+                &addr(&format!(
+                    "/ip4/198.51.100.1/tcp/4001/p2p-circuit/p2p/{RELAY}/p2p-circuit/p2p/{SOURCE_A}"
+                )),
+                &addr(&format!("/p2p/{SOURCE_A}")),
+            ),
+            "relay:198.51.100.1",
+            "a nested circuit is charged to the outermost relay, not an inner one"
         );
     }
 
