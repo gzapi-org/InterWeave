@@ -788,9 +788,7 @@ mod tests {
         // `DialRequest` with the variant — `stage5_dial_admission.rs`,
         // `stage2_exit_gate.rs` and `spike-004`'s `experiments.rs` all
         // pass it to `admit` — so an unscoped "nothing builds one with
-        // it" is simply false, and an earlier version of this
-        // paragraph said exactly that while conceding two sentences
-        // above that tests use the variant.
+        // it" would be simply false.
         //
         // Under `crates/` and `apps/`, every CODE site is in
         // `connection_policy.rs`: the variant declaration, `ALL`, one

@@ -841,33 +841,46 @@ mod tests {
         //
         // It pins EXISTENCE, not shape: `scheduled_retries()` is
         // `retries.len()` and this fixture has one peer, so a mutant
-        // that re-scheduled -- resetting `due_at_ms`, bumping
-        // `attempts` -- would survive here. That one dies in
+        // that re-scheduled RELAY -- moving `due_at_ms`, bumping
+        // `attempts` -- leaves the length alone and survives here. If
+        // it re-schedules by INSERTING it dies in
         // `a_ticket_libp2p_cannot_dial_is_settled_permanently`, whose
-        // retry map is empty, so EXISTENCE is covered by the pair
-        // rather than by this assertion alone. SHAPE is covered by
-        // neither: a mutant that reset `due_at_ms` and `attempts` IN
-        // PLACE leaves the length at one here and zero there. That one
-        // is only PARTLY covered, and it is worth being exact about
-        // which part.
+        // retry map is empty so any insert shows, whichever direction
+        // it moves the due time.
         //
-        // Every test that reads a released retry back reads it through
-        // `take_due_retries(30_000, 8)`. So a reset that moves
-        // `due_at_ms` LATER dies -- in
-        // `a_claim_denied_by_a_recoverable_reason_is_released_unchanged`
-        // if it sits in `release_retry_claim`, and in
+        // What follows is about the other kind: a mutant that edits
+        // the existing entry IN PLACE, through `get_mut`. That one
+        // leaves the length at one here and zero there, so neither
+        // `scheduled_retries()` assertion sees it, and it is covered
+        // only in part.
+        //
+        // `settle_undialable` calls `record_permanent_failure`, and an
+        // in-place mutant THERE that moves `due_at_ms` LATER dies in
         // `a_claimed_permanent_failure_releases_rather_than_strands_the_claim`
-        // or `a_later_candidate_starting_takes_the_claim_back` if it
-        // sits in `record_permanent_failure`, both of which drive that
-        // function with a claim-owning ticket and then read the retry.
+        // and `a_later_candidate_starting_takes_the_claim_back` -- both
+        // in `crates/transport/runtime/src/connection_manager.rs`,
+        // which is a different crate from this one -- because both read
+        // the retry back through `take_due_retries(30_000, 8)`, and a
+        // later due time makes the peer not due.
         //
-        // A reset to an EARLIER time, or to `attempts` alone, dies
-        // nowhere: no test reads `attempts`, and no test follows a
-        // release with a second `record_failure` whose backoff would
-        // expose a reset counter. `release_retry_claim`'s doc claims
-        // both fields are "left exactly as they were"; only the one is
-        // pinned.
-        // Review findings on PR #74.
+        // A move EARLIER, or a change to `attempts`, dies in no CALLER
+        // OF `release_retry_claim`: none of them reads `attempts`
+        // afterwards, and none follows one with a second
+        // `record_failure` whose backoff would expose a reset counter.
+        // (`record_failure` itself releases a scheduler-owned claim by
+        // re-scheduling it unclaimed, and
+        // `a_transient_failure_reschedules_and_keeps_attempts` DOES
+        // read `attempts` back through `is_retry_due` on that path --
+        // which is why this names the callers rather than saying
+        // "after a release".)
+        //
+        // `release_retry_claim` cannot host the in-place mutant at all:
+        // its body only sets `claimed = false`. Its doc claims
+        // `due_at_ms` and `attempts` are "left exactly as they were",
+        // and only `due_at_ms` is pinned -- only against moving
+        // LATER, since every test that reads it back does so through
+        // `take_due_retries`, which is blind to a move earlier.
+        // Review findings on PR #74 and #75.
         let other: DialTicket = m
             .handle()
             .load()
