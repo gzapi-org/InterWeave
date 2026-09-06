@@ -638,6 +638,48 @@ mod tests {
         );
     }
 
+    /// THE `relay:` PREFIX CANNOT BE FORGED, asserted rather than
+    /// argued from types.
+    ///
+    /// The whole no-collision property rests on it: a non-relay label
+    /// must never begin with `relay:`, or a direct peer could land in
+    /// a relay's budget. The reasoning is that a non-relay return is
+    /// either a bare IP or a `Multiaddr` rendering, and an IP has no
+    /// colon before its first digit group while a non-empty
+    /// `Multiaddr` starts with `/`. That was written down and pinned
+    /// by nothing; review finding on PR #74.
+    ///
+    /// So this walks both non-relay exits with the most adversarial
+    /// inputs the transports can hand them, including a peer whose
+    /// address literally contains the word.
+    #[test]
+    fn no_direct_label_can_begin_with_the_relay_prefix() {
+        let cases = [
+            // The IP exit, v4 and v6.
+            (
+                addr("/ip4/10.0.0.1/tcp/4001"),
+                addr("/ip4/203.0.113.5/tcp/5001"),
+            ),
+            (
+                addr("/ip6/2001:db8::1/tcp/4001"),
+                addr("/ip6/2001:db8::2/tcp/5001"),
+            ),
+            // The whole-address exit: no IP anywhere, no circuit.
+            (addr("/memory/1"), addr("/memory/2")),
+            (addr("/memory/1"), addr(&format!("/p2p/{SOURCE_A}"))),
+            // A DNS name is a string the remote side chose, and it is
+            // rendered into the label verbatim by the second exit.
+            (addr("/memory/1"), addr("/dns4/relay.example.com/tcp/5001")),
+        ];
+        for (local, remote) in cases {
+            let label = source_label(&local, &remote);
+            assert!(
+                !label.starts_with("relay:"),
+                "a direct label must not enter the relay namespace: {label}"
+            );
+        }
+    }
+
     /// A RELAYED connection is charged to the relay even when its
     /// remote address carries an IP.
     ///
