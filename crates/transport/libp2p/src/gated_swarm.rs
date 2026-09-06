@@ -573,6 +573,25 @@ mod tests {
         m
     }
 
+    /// A manager whose only known peer is INFRASTRUCTURE-ONLY.
+    ///
+    /// `classify` checks `PeerTrustPolicy` first, so a peer in both
+    /// sets is `DataPlaneTrusted` and the infrastructure arm of
+    /// `ConnectionPolicy::admit` never runs. A test about that arm has
+    /// to leave the peer policy empty.
+    fn infra_only_manager() -> ConnectionManager {
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        let _ = m.set_trust(
+            TrustSources::new(
+                PeerTrustPolicy::new([]).expect("empty"),
+                InfrastructureSet::new([TransportIdentity::parse(ADMITTED).expect("canonical")])
+                    .expect("one"),
+            ),
+            &[],
+        );
+        m
+    }
+
     fn ticket_for(manager: &ConnectionManager, peer: Option<&str>, address: &str) -> DialTicket {
         ticket_as(manager, peer, address, DialOrigin::Manual)
     }
@@ -648,16 +667,26 @@ mod tests {
             "so the refusal is the origin and not the address"
         );
 
-        // AND THE ORIGIN THAT WOULD ACTUALLY ESCAPE. `RelayReservation`
-        // is on the reachability side, so `ConnectionPolicy::admit`
-        // never consults `names_application_destination` for it and an
-        // infrastructure-only DESTINATION reached over a circuit would
-        // be admitted for an application path -- ADR-0036's enforcement
-        // clause, and the rule D2 broke. The pairing check is what
-        // refuses it, and until now only the harmless `Manual`
-        // direction was exercised. Review finding on PR #74.
+        // AND THE ORIGIN THAT WOULD ACTUALLY ESCAPE. `admit` consults
+        // `names_application_destination` for EVERY origin -- it is
+        // read in the `ConnectivityInfrastructureOnly` arm and nowhere
+        // else -- and `RelayReservation` answers `false`, so that arm
+        // does not refuse. An infrastructure-only DESTINATION reached
+        // over a circuit is therefore admitted for an application
+        // path, which is ADR-0036's enforcement clause and the rule D2
+        // broke. The pairing check is what refuses it, and until now
+        // only the harmless `Manual` direction was exercised.
+        //
+        // The destination here IS infrastructure-only, built by
+        // `infra_only_manager`. Reusing `manager()` would have put the
+        // peer in `PeerTrustPolicy`, `classify` gives that precedence,
+        // and the arm above would never run -- the test would then
+        // prove the pairing refusal for a TRUSTED destination while
+        // its comment talked about an infrastructure-only one.
+        // Review findings on PR #74.
+        let infra = infra_only_manager();
         let escaping = AdmittedDial::from_ticket(ticket_as(
-            &manager,
+            &infra,
             Some(ADMITTED),
             &circuit(),
             DialOrigin::RelayReservation,
@@ -665,7 +694,18 @@ mod tests {
         let err = escaping.expect_err("a circuit admitted under a reachability origin is refused");
         assert!(
             err.reason.contains("RelayCircuit"),
-            "and the refusal names the origin it should have carried: {}",
+            "the refusal says what the admission should have claimed: {}",
+            err.reason
+        );
+        // AND IT NAMES THE ORIGIN THE TICKET DID CARRY. Without this,
+        // the assertion above is the SAME predicate as the `Manual`
+        // case forty lines up: "must be admitted as RelayCircuit" is
+        // the message's constant tail, present whatever the origin
+        // was. Deleting `ticket.origin()` from the format string left
+        // both green while the message claimed otherwise.
+        assert!(
+            err.reason.contains("RelayReservation"),
+            "and the refusal names the origin the ticket DID carry: {}",
             err.reason
         );
     }
