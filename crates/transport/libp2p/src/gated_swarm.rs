@@ -146,8 +146,8 @@ impl AdmittedDial {
         // exactly. And `RelayCircuit` on an address with no circuit in
         // it claims a purpose the dial does not have. Neither is
         // reachable today, since no relay feature is compiled; both
-        // become reachable the moment one is,
-        // and refusing here costs a string comparison.
+        // become reachable the moment one is, and refusing here costs
+        // a string comparison.
         let circuit_address = address
             .iter()
             .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2pCircuit));

@@ -1367,11 +1367,11 @@ below and are repeated where they bite:
   forbids by name. **D2's architecture clarification landed on
   2026-09-03** — ADR-0036's amendment gave the matrix the row it lacked
   — and **all three code fixes landed in step 2** (D1 and D2 on
-  2026-09-04, D3 on 2026-09-05), before
-  DCUtR or relayed paths are built rather than after. The description
-  above is kept in the past tense on purpose: it is what a reader needs
-  to understand why step 2 exists, and it stops being true the moment
-  step 2 is read as a record of work already done.
+  2026-09-04, D3 on 2026-09-05), before DCUtR or relayed paths are built
+  rather than after. The description above is kept in the past tense on
+  purpose: it is what a reader needs to understand why step 2 exists,
+  and it stops being true the moment step 2 is read as a record of work
+  already done.
 - **ADR-0036's inbound relayed clause has no implementation site.** The
   shipped gate is outbound-only, so a relayed inbound is never
   evaluated against the authenticated end PeerId at all. The spike
@@ -1421,40 +1421,39 @@ data-plane origin, against the infrastructure the stage exists to use.
    feature is compiled.
    **One label decides whether relaying works at all**, and step 2's
    move of `RelayCircuit` into `names_application_destination` is what
-   armed it: `relay::client::Behaviour`
-   emits two dials of its own (`libp2p-relay 0.21.1`
-   `priv_client.rs:334` and `:373`) — a reservation, and the dial that
-   establishes the relay connection a circuit request needs — and BOTH
-   name the relay rather than the destination — read from the two call
-   sites, and pinned from the other side by R5.11, which requires that
-   no behaviour-made dial targeted the destination (R5.10 prints the
-   targets and is a note, so it cannot fail). Both are
-   exchanges *with* the relay and must carry a reachability origin.
-   Label the second `RelayCircuit` and, now that the origin names an
-   application destination, every circuit through an
+   armed it: `relay::client::Behaviour` emits two dials of its own
+   (`libp2p-relay 0.21.1` `priv_client.rs:334` and `:373`) — a
+   reservation, and the dial that establishes the relay connection a
+   circuit request needs — and BOTH name the relay rather than the
+   destination — read from the two call sites, and pinned from the other
+   side by R5.11, which requires that no behaviour-made dial targeted
+   the destination (R5.10 prints the targets and is a note, so it cannot
+   fail). Both are exchanges *with* the relay and must carry a
+   reachability origin. Label the second `RelayCircuit` and, now that
+   the origin names an application destination, every circuit through an
    infrastructure-only relay is refused at its set-up dial — relaying
    broken for exactly the peers it exists to reach.
    **The gate records its own refusals here**: the Swarm discards the
    denial of a behaviour dial, so a refusal that is not written down
    at the hook is written down nowhere;
 2. **resolve D1, D2 and D3 — DONE: D1 and D2 on 2026-09-04, D3 on
-   2026-09-05.** `DcutrHolePunch` was
-   admitted for a `ConnectivityInfrastructureOnly` peer, which
+   2026-09-05.** `DcutrHolePunch` was admitted for a
+   `ConnectivityInfrastructureOnly` peer, which
    `transport/libp2p/CONNECTIVITY.md` §4's matrix forbids unqualified
    ("DCUtR as destination peer | no"); `RelayCircuit` was admitted for
    that same destination, which §4 now forbids by a row of its own; and
    `PreAuthAdmission` bucketed a relayed inbound by the source PeerId
-   the circuit carries, which `contracts/CONNECTIVITY.md` §10 forbids
-   by name. All three were code fixes. **D2 was a document conflict
+   the circuit carries, which `contracts/CONNECTIVITY.md` §10 forbids by
+   name. All three were code fixes. **D2 was a document conflict
    first**: §4's matrix had no row for a circuit whose DESTINATION is
    the infrastructure-only peer, and §11 excluded only
    `direct-user-command` and `kademlia-query`, so an accepted document
    arguably permitted the behaviour. ADR-0036's Amendment 2026-09-03
    added the row and both sections inherited it (CLAUDE.md §2), which
-   left D2 a code change — and it separated the two relay origins
-   rather than moving both, because `RelayReservation` must stay
-   outside the predicate or every relay the stack needs is refused.
-   D1 and D2 moved `DcutrHolePunch` and `RelayCircuit` into
+   left D2 a code change — and it separated the two relay origins rather
+   than moving both, because `RelayReservation` must stay outside the
+   predicate or every relay the stack needs is refused. D1 and D2 moved
+   `DcutrHolePunch` and `RelayCircuit` into
    `names_application_destination` (renamed from `is_data_plane` in the
    same commit); D3 charges a relayed inbound to the relay rather than
    to the source PeerId the circuit asserts. All three landed before
