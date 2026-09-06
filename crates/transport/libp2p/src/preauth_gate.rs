@@ -180,8 +180,8 @@ const REFUSAL: &str = "connection refused";
 /// No mutation tooling runs in CI or `xtask`; every mutation recorded
 /// here was applied by hand. (`cargo-mutants` HAS been run in this
 /// working directory -- `.gitignore` carries a rule for its output
-/// because a `git add -A` once swept twenty-two of its files into a
-/// commit -- so "this tree runs none" would be false.)
+/// because a `git add -A` once swept its report tree into a commit --
+/// so "this tree runs none" would be false.)
 ///
 /// Everything else tried dies: widening the guard with the remote or
 /// with `P2p(_)`, NARROWING it with the remote, dropped arms, dropped
