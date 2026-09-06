@@ -879,9 +879,19 @@ production:
   long as it did. Step 2 flipped two of them (the D3 pin is now
   `two_relayed_sources_over_one_relay_share_one_bucket`, which asserted
   the opposite while the defect stood) and added two of its own, and
-  PR #74's review added three more, for NINE: the circuit branch's
-  third case, the hook's argument order, and the `relay:` prefix's
-  no-collision claim.
+  PR #74's review added six more, for TWELVE: the circuit branch's
+  third case, the hook's argument order, the `relay:` prefix's
+  no-collision claim, the relay IP's /64 collapse, that no direct
+  label can enter the `relay:` namespace, and that the relay half of
+  a circuit address ends at the marker. A seventh was inverted rather
+  than added — `a_relayed_inbound_is_charged_to_the_relay_even_when_the_remote_has_an_ip`
+  replaced the test that pinned the old branch order.
+
+  **The count is stated because it kept going stale.** It read NINE
+  from the third review round to the sixth while three more tests
+  landed, in a file the fifth round edited four hundred lines above
+  this paragraph. If it drifts again, prefer deleting the number to
+  carrying a wrong one: the classes are the useful part.
 
 Everything else here is evidence, and evidence is re-run by hand.
 
