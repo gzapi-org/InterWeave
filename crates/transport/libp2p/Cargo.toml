@@ -32,7 +32,7 @@
 name = "interweave-transport-libp2p"
 version = "0.0.0"
 publish = false
-description = "InterWeave libp2p transport substrate: TCP, Noise, Yamux, Identify, direct v2, GossipSub."
+description = "InterWeave libp2p transport substrate: TCP, Noise, Yamux, Identify, direct v2, GossipSub, Kademlia."
 license.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -24,12 +24,16 @@
 //! Dials that a `NetworkBehaviour` originates from inside the Swarm.
 //! Those never pass through this API at all; libp2p routes them through
 //! `NetworkBehaviour::handle_pending_outbound_connection`, and that hook
-//! is where the same ticket has to be required. Stage 4's behaviour set
-//! is TCP, Noise, Yamux and Identify — none of which dials — so there is
-//! nothing to gate there yet, and the honest statement is that this
-//! closes the command path and the behaviour path is closed when the
-//! first dialing behaviour arrives. Kademlia must not be enabled before
-//! it is.
+//! is where the same ticket has to be required. At Stage 4 the
+//! behaviour set was TCP, Noise, Yamux and Identify — none of which
+//! dials — so there was nothing to gate there and this type closed the
+//! command path alone. **The behaviour path is closed now**: Stage 10
+//! brought the first dialing behaviour and `OutboundAdmission` gates
+//! it at `handle_pending_outbound_connection`, which is what let
+//! Kademlia be enabled at all. Stage 11 step 1 extended the same hook
+//! to attribute a dial to the behaviour that asked
+//! (`attribution.rs`), because inferring the origin stops working the
+//! moment a second behaviour can dial.
 //!
 //! [`PolicySnapshot::admit`]: interweave_transport_runtime::PolicySnapshot::admit
 
