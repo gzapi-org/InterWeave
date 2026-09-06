@@ -174,22 +174,33 @@ fn source_label(local_addr: &Multiaddr, remote_addr: &Multiaddr) -> String {
     // pseudo-source buckets, so that is the direction to fail in.
     if local_addr.iter().any(|c| matches!(c, Protocol::P2pCircuit)) {
         // EVERYTHING AFTER `/p2p-circuit` DESCRIBES THE FAR END, so
-        // only what precedes it may name the bucket. The canonical
-        // way to write a circuit address is
-        // `/ip4/<relay>/tcp/<port>/p2p-circuit/p2p/<destination>`, and
+        // only what precedes it may name the bucket. A circuit address
+        // is written
+        // `/ip4/<relay>/tcp/<port>/p2p-circuit/p2p/<far end>`, and
         // scanning the whole address would have returned that trailing
-        // identity: `relay:<source>`, one bucket per identity,
-        // identities free to mint. D3 wearing a `relay:` prefix.
+        // identity: on an inbound, `relay:<source>` -- one bucket per
+        // identity, identities free to mint. D3 wearing a `relay:`
+        // prefix.
         //
-        // libp2p-relay 0.21.1 does not build it that way -- its
-        // `local_addr` is `relay_addr.with(Protocol::P2pCircuit)`, so
-        // the circuit component is last and nothing follows it
-        // (`priv_client/transport.rs:404`). Which is exactly the
+        // THE SPLIT IS THE PROTOCOL'S, not this file's reading of one
+        // crate's formatting. `parse_relayed_multiaddr` carries a
+        // `before_circuit` flag and assigns a `/p2p/` to
+        // `relay_peer_id` while it is set and to `dst_peer_id` after
+        // (`priv_client/transport.rs:266`), which is the same rule
+        // this loop applies. A second `/p2p-circuit` is refused there
+        // as `MultipleCircuitRelayProtocolsUnsupported`; truncating at
+        // the FIRST marker charges the outermost relay, which is
+        // coarser than any nested reading and so safe if that ever
+        // becomes expressible.
+        //
+        // Worth doing even though libp2p-relay 0.21.1 builds
+        // `local_addr` as `relay_addr.with(Protocol::P2pCircuit)`,
+        // putting the marker last with nothing after it
+        // (`priv_client/transport.rs:404`). That is exactly the
         // reasoning this function has already been wrong to rely on
-        // once: the order of these branches used to depend on the same
-        // crate putting no address in `send_back_addr`. Truncating
-        // costs nothing on the shape the crate builds and does not
-        // care what a later one builds. Review finding on PR #74.
+        // once -- the order of these branches used to depend on the
+        // same crate putting no address in `send_back_addr`. Review
+        // finding on PR #74.
         let relay_part: Multiaddr = local_addr
             .iter()
             .take_while(|c| !matches!(c, Protocol::P2pCircuit))
@@ -787,6 +798,29 @@ mod tests {
             "not even the whole-address case may carry it"
         );
         assert_eq!(bare_a, bare_b, "and it does not vary with the far end");
+
+        // AND THE PREFIX CAN BE EMPTY, which the comment above the
+        // terminal `return` claims is one bucket rather than the far
+        // end. It said so and nothing checked it: every other case
+        // here leaves at least one component before the marker, so
+        // reverting the fallback to name the remote when the prefix is
+        // empty would have passed the whole suite.
+        let empty_a = source_label(
+            &addr(&format!("/p2p-circuit/p2p/{SOURCE_A}")),
+            &addr(&format!("/p2p/{SOURCE_A}")),
+        );
+        let empty_b = source_label(
+            &addr(&format!("/p2p-circuit/p2p/{SOURCE_B}")),
+            &addr(&format!("/p2p/{SOURCE_B}")),
+        );
+        assert_eq!(
+            empty_a, "relay:",
+            "an empty relay prefix is one bucket, not the far end's identity"
+        );
+        assert_eq!(
+            empty_a, empty_b,
+            "and it does not vary with the far end either"
+        );
     }
 
     /// A RELAYED connection is charged to the relay even when its
