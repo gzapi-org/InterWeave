@@ -231,8 +231,12 @@ impl InFlightTickets {
     }
 }
 
-/// Strip TRAILING `/p2p/<peer>` components, leaving the address the
-/// policy is keyed by (F10).
+/// Strip TRAILING `/p2p/<peer>` components from an address before it
+/// is scored (SPIKE-003's F10).
+///
+/// Only the TRAILING components go: a `/p2p/` in the middle of the
+/// address is a relay path's inner hop, part of the route rather than
+/// a claim about who answers.
 ///
 /// A behaviour dial's address arrives with the peer appended — a query
 /// result carries it — while the address book and the quarantine map
@@ -243,19 +247,19 @@ impl InFlightTickets {
 /// **`AdmittedDial` does NOT bind the bare address**, and this comment
 /// said it did until PR #74's review. It binds `ticket.address()`
 /// verbatim, and `attempt_dial` copies the caller's string into the
-/// `DialRequest` unchanged — so the BEHAVIOUR path is stripped here
-/// while the COMMAND and SCHEDULER paths are not. One physical route
-/// reached both ways therefore occupies two `(peer, address)` entries:
-/// a quarantine earned on one does not suppress the other, and both
-/// spend `max_addresses` in a map whose bound is the point. That is
-/// F10's failure mode on the command path.
+/// `DialRequest` unchanged. The BEHAVIOUR path is stripped by
+/// [`strip_own_suffix`] at its call site below — NOT by this function,
+/// whose only production caller is `settle_failed_dial`'s peerless arm
+/// — while the COMMAND and SCHEDULER paths are stripped by neither.
+/// One physical route reached both ways therefore occupies two
+/// `(peer, address)` entries: a quarantine earned on one does not
+/// suppress the other, and both spend `max_addresses` in a map whose
+/// bound is the point. That is F10's failure mode on the command path.
 ///
 /// **Not fixed here, and not this PR's to fix**: stripping in
 /// `attempt_dial` would change what admission and quarantine are keyed
 /// by, which is a security boundary and a different change from
-/// resolving D1/D2/D3. Recorded rather than left for rediscovery. Only the TRAILING components go: a `/p2p/` in the middle of
-/// the address is a relay path's inner hop, part of the route rather
-/// than a claim about who answers.
+/// resolving D1/D2/D3. Recorded rather than left for rediscovery.
 #[must_use]
 pub fn strip_peer_suffix(address: &Multiaddr) -> String {
     let mut parts: Vec<_> = address.iter().collect();
