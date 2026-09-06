@@ -786,8 +786,14 @@ mod tests {
         // so do tests, the spike harness and CONNECTIVITY.md. What is
         // checkable, and what the argument needs, is that nothing
         // originates a dial with it:
-        // `grep -rn 'DialOrigin::DiscoveryReconnect' crates/ apps/`
-        // returns only the enum, two match arms and `ALL`.
+        // `grep -rn 'DiscoveryReconnect' crates/ apps/` returns the
+        // enum, `ALL`, ONE production match arm
+        // (`names_application_destination`), one test arm, and this
+        // comment. **Unqualified on purpose**: the enum, `ALL` and the
+        // production arm all write `Self::`, so searching for
+        // `DialOrigin::DiscoveryReconnect` — as an earlier version of
+        // this line did — returns the test arm and this comment
+        // quoting itself, and nothing else.
         //
         // `ConnectionManager::learn_address` stores whatever arrives,
         // verbatim, so a widened guard here would refuse a good address

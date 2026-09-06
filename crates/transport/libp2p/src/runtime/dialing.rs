@@ -844,9 +844,14 @@ mod tests {
         // that re-scheduled -- resetting `due_at_ms`, bumping
         // `attempts` -- would survive here. That one dies in
         // `a_ticket_libp2p_cannot_dial_is_settled_permanently`, whose
-        // retry map is empty, so the property is covered by the pair
-        // rather than by this assertion alone. Review findings on
-        // PR #74.
+        // retry map is empty, so EXISTENCE is covered by the pair
+        // rather than by this assertion alone. SHAPE is covered by
+        // neither: a mutant that reset `due_at_ms` and `attempts` IN
+        // PLACE leaves the length at one here and zero there. That one
+        // dies in `a_claim_denied_by_a_recoverable_reason_is_released_unchanged`
+        // (`connection_manager.rs`), which is where
+        // `release_retry_claim`'s "left exactly as they were" lives.
+        // Review findings on PR #74.
         let other: DialTicket = m
             .handle()
             .load()
@@ -868,8 +873,14 @@ mod tests {
         let undialable = AdmittedDial::from_ticket(ticket)
             .expect_err("a circuit address under another origin is refused");
         let reason = settle_undialable(&mut m, *undialable, 0);
+        // `contains("RelayCircuit")` would NOT discriminate: both of
+        // `from_ticket`'s circuit messages carry that word — one says
+        // "must be admitted as RelayCircuit", the other "admission
+        // claims RelayCircuit but address … carries no /p2p-circuit" —
+        // so a branch swap would pass it while printing the message
+        // for the other input shape. Review finding on PR #74.
         assert!(
-            reason.contains("RelayCircuit"),
+            reason.contains("is a relay circuit"),
             "it says what the admission should have claimed: {reason}"
         );
         // THE SURVIVOR IS NAMED, not counted. An earlier version of

@@ -159,8 +159,9 @@ const REFUSAL: &str = "connection refused";
 /// the loop rewritten through a `Vec`, because `multiaddr 0.18.2`'s
 /// `Iter` is `Iterator` and not `DoubleEndedIterator`, so `.rev()` is
 /// unavailable; and `relay_ip.get_or_insert(..)` to `= Some(..)`
-/// restructures the arm's type from `&mut String` to `()`. The one an
-/// ordinary generator could reach is the first-component one, `_ => {}`
+/// restructures the arm's type from `&mut String` to `()` -- and both
+/// IP arms must change together or the match does not typecheck. The
+/// one that IS a one-token edit is the first-component one, `_ => {}`
 /// to `_ => break` in the non-circuit scan, behaviourally identical to
 /// `.take(1)`.
 ///
