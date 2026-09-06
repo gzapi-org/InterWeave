@@ -43,7 +43,9 @@ use libp2p::swarm::{
     THandlerOutEvent, ToSwarm, dummy,
 };
 
-use interweave_transport_runtime::preauth::{HandshakeSlot, PreAuthGate, PreAuthLimits};
+use interweave_transport_runtime::preauth::{
+    HandshakeSlot, PreAuthGate, PreAuthLimits, source_bucket,
+};
 
 /// What the peer is told when it is refused.
 ///
@@ -167,7 +169,18 @@ fn source_label(local_addr: &Multiaddr, remote_addr: &Multiaddr) -> String {
             };
         }
         if let Some(ip) = relay_ip {
-            return format!("relay:{ip}");
+            // NORMALIZED BEFORE THE PREFIX, or the prefix undoes the
+            // /64 rule. `PreAuthGate::admit` normalizes what it is
+            // handed, but `source_bucket` only rewrites a string that
+            // PARSES as an address -- `relay:2001:db8::1` parses as
+            // neither, so it would pass through whole and every
+            // address in one /64 would buy its own relay bucket. The
+            // direct path is collapsed and this one was not.
+            // Applying the rule here and prefixing the result keeps
+            // the two paths on the same grammar. IPv4 is returned
+            // unchanged, so the exact-string assertions below are
+            // unaffected. Review finding on PR #74.
+            return format!("relay:{}", source_bucket(&ip));
         }
         // THE CIRCUIT BRANCH IS TERMINAL, and that is a third case
         // rather than a tidy-up. Falling through from here returns the
@@ -572,6 +585,56 @@ mod tests {
             direct, relayed,
             "one host reached directly and the same host acting as a relay must not \
              share a pre-auth budget"
+        );
+    }
+
+    /// A RELAY'S IPv6 ADDRESS IS BUCKETED BY /64, like every other.
+    ///
+    /// `PreAuthGate::admit` normalizes the label it is handed, but
+    /// `source_bucket` rewrites only a string that parses as an
+    /// address, and `relay:2001:db8::1` parses as neither an `IpAddr`
+    /// nor a `SocketAddr`. So the `relay:` prefix -- added to stop a
+    /// relay bucket colliding with a direct one -- also carried the
+    /// relay IP past the one rule that makes per-source accounting
+    /// mean anything: `ipv6_is_bucketed_by_prefix_so_an_address_range_
+    /// is_not_free` says keying on the full address hands one party
+    /// 2^64 buckets. The direct path was collapsed and this one was
+    /// not.
+    ///
+    /// This pins the two paths to the same grammar. Removing the
+    /// `source_bucket` call fails it. Review finding on PR #74.
+    #[test]
+    fn a_relayed_bucket_collapses_an_ipv6_relay_to_its_64() {
+        let one = source_label(
+            &addr("/ip6/2001:db8:0:1::1/tcp/4001/p2p-circuit"),
+            &addr(&format!("/p2p/{SOURCE_A}")),
+        );
+        let two = source_label(
+            &addr("/ip6/2001:db8:0:1::2/tcp/4002/p2p-circuit"),
+            &addr(&format!("/p2p/{SOURCE_A}")),
+        );
+        assert_eq!(
+            one, "relay:2001:db8:0:1::/64",
+            "a relay's IPv6 address is charged to its /64"
+        );
+        assert_eq!(one, two, "one /64 is one relay bucket");
+
+        // AND A DIFFERENT /64 IS STILL A DIFFERENT BUCKET, so this is
+        // the rule and not a collapse of every relay into one.
+        let elsewhere = source_label(
+            &addr("/ip6/2001:db8:0:2::1/tcp/4001/p2p-circuit"),
+            &addr(&format!("/p2p/{SOURCE_A}")),
+        );
+        assert_ne!(one, elsewhere, "a different /64 is a different bucket");
+
+        // IPv4 IS UNCHANGED, which is why the exact-string assertions
+        // elsewhere in this module still read as they did.
+        assert_eq!(
+            source_label(
+                &addr("/ip4/203.0.113.5/tcp/4001/p2p-circuit"),
+                &addr(&format!("/p2p/{SOURCE_A}")),
+            ),
+            "relay:203.0.113.5"
         );
     }
 
