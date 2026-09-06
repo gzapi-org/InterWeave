@@ -77,14 +77,27 @@ const REFUSAL: &str = "connection refused";
 /// pseudo-source buckets from circuit metadata". **Fixed in Stage 11
 /// step 2 (2026-09-05)**, before any relay feature is compiled.
 ///
-/// The discriminator is the LOCAL address, and that is what makes this
-/// safe: `local_addr` is this node's own listen address as the
-/// transport built it, never anything the remote supplies, so a source
-/// cannot make an ordinary connection look relayed and escape its IP
-/// bucket. libp2p-relay 0.21.1 builds it as
+/// The discriminator is the LOCAL address, and it is read FIRST --
+/// both halves of that sentence are load-bearing. `local_addr` is this
+/// node's own listen address as the transport built it, never anything
+/// the remote supplies, so a source cannot make an ordinary connection
+/// look relayed and escape its IP bucket. Reading it first closes the
+/// other direction: a relayed connection cannot look ordinary either,
+/// whatever its remote address turns out to carry. An earlier shape
+/// checked the remote's IP first and so decided the question on
+/// `send_back_addr`, which for a circuit is built from circuit
+/// metadata -- the exact input §10 says must not choose a bucket.
+/// libp2p-relay 0.21.1 happens to put no address there, so that shape
+/// was correct on the pinned version and pinned to it; review finding
+/// on PR #74.
+///
+/// libp2p-relay 0.21.1 builds the local address as
 /// `relay_addr.with(Protocol::P2pCircuit)` from the established relay
-/// connection (`priv_client/transport.rs:404`), so the `/p2p-circuit`
-/// component is present exactly when the connection rode a circuit.
+/// connection (`priv_client/transport.rs:404`), and SPIKE-004's R8.8
+/// measured that relayed and direct inbound connections are told apart
+/// at the pending hook by the local address alone -- so the
+/// `/p2p-circuit` component is present exactly when the connection
+/// rode a circuit.
 ///
 /// The relay's PeerId is preferred over its IP because §10 names the
 /// relay PeerId and because it is the AUTHENTICATED half: the relay
@@ -120,18 +133,29 @@ const REFUSAL: &str = "connection refused";
 fn source_label(local_addr: &Multiaddr, remote_addr: &Multiaddr) -> String {
     use libp2p::multiaddr::Protocol;
 
-    // THE REMOTE IP FIRST, because a relayed connection has none and a
-    // direct one is the overwhelmingly common case. A direct connection
-    // is never charged to a relay bucket, whatever its local address
-    // says, because this returns before the circuit check runs.
-    for component in remote_addr {
-        match component {
-            Protocol::Ip4(ip) => return ip.to_string(),
-            Protocol::Ip6(ip) => return ip.to_string(),
-            _ => {}
-        }
-    }
-
+    // THE CIRCUIT CHECK FIRST, because the local address is the half
+    // the remote does not supply. Reading the remote first made the
+    // rule "a relayed connection has no IP, so an IP means direct" --
+    // true on the pinned crate and true only there. libp2p-relay
+    // 0.21.1 builds a circuit's `send_back_addr` as
+    // `Protocol::P2p(src_peer_id).into()`
+    // (`priv_client/transport.rs:404`), with no address in it; a
+    // version that carried the source's observed address instead would
+    // have sent every circuit back to a bucket derived from that
+    // address, which is D3 again in a different component. The whole
+    // fix rested on a dependency's internal choice, and nothing here
+    // would have failed when it changed.
+    //
+    // Deciding on the circuit component removes that dependency: a
+    // relayed connection is charged to the relay whatever its remote
+    // carries. The order is safe in the other direction too, because
+    // the shape it now decides differently -- a DIRECT connection
+    // whose local address carries `/p2p-circuit` -- is not
+    // constructible: only the relay client transport builds a
+    // `p2p-circuit` local address. And if it somehow were, this order
+    // charges it to the relay bucket, which is COARSER. §10 forbids
+    // unbounded pseudo-source buckets; sharing one is the safe
+    // failure, minting them is the defect.
     if local_addr.iter().any(|c| matches!(c, Protocol::P2pCircuit)) {
         let mut relay_ip = None;
         for component in local_addr {
@@ -157,6 +181,16 @@ fn source_label(local_addr: &Multiaddr, remote_addr: &Multiaddr) -> String {
         // `a_circuit_with_neither_a_relay_identity_nor_an_ip_is_still_not_the_source`
         // fails if this returns anything derived from the remote.
         return format!("relay:{local_addr}");
+    }
+
+    // NOT A CIRCUIT, so the remote is the source and its IP is the
+    // bucket. Reached only after the circuit component is ruled out.
+    for component in remote_addr {
+        match component {
+            Protocol::Ip4(ip) => return ip.to_string(),
+            Protocol::Ip6(ip) => return ip.to_string(),
+            _ => {}
+        }
     }
 
     remote_addr.to_string()
@@ -541,20 +575,34 @@ mod tests {
         );
     }
 
-    /// A DIRECT connection is never charged to a relay bucket.
+    /// A RELAYED connection is charged to the relay even when its
+    /// remote address carries an IP.
     ///
-    /// The discriminator is the local address, so this pins the
-    /// direction that would be a regression rather than a defect: an
-    /// ordinary inbound whose local address happens to carry a circuit
-    /// component must still be charged to the remote's own IP, because
-    /// the remote IP branch returns first.
+    /// This is the ordering, not the labelling. The fix for D3 rests
+    /// on a circuit's remote address being `/p2p/<source>` with no
+    /// address in it -- true of libp2p-relay 0.21.1 and true only
+    /// because that crate chose it. Read the remote first and a
+    /// version that filled `send_back_addr` with the source's observed
+    /// address would put every circuit back on a bucket derived from
+    /// circuit metadata, silently, with every test still green.
+    ///
+    /// So the local address decides, and this feeds the function the
+    /// shape that tells the two orders apart: a circuit whose remote
+    /// DOES carry an IP. Under the old order the label was
+    /// `198.51.100.7`; under this one it is the relay.
+    ///
+    /// The direction this replaces -- a direct inbound whose local
+    /// address carries a circuit component -- is not constructible,
+    /// because only the relay client transport builds such a local
+    /// address, and if it were, charging it to the relay is the
+    /// coarser and therefore safe answer. Review finding on PR #74.
     #[test]
-    fn a_direct_inbound_keeps_its_ip_bucket_whatever_the_local_address_says() {
+    fn a_relayed_inbound_is_charged_to_the_relay_even_when_the_remote_has_an_ip() {
         let local = addr(&format!("/ip4/127.0.0.1/tcp/4001/p2p/{RELAY}/p2p-circuit"));
         assert_eq!(
             source_label(&local, &addr("/ip4/198.51.100.7/tcp/5001")),
-            "198.51.100.7",
-            "a remote with an IP is charged to it, and the local address does not override"
+            format!("relay:{RELAY}"),
+            "a circuit is charged to the relay whatever its remote address carries"
         );
     }
 
