@@ -249,8 +249,11 @@ impl InFlightTickets {
 /// verbatim, and `attempt_dial` copies the caller's string into the
 /// `DialRequest` unchanged. The BEHAVIOUR path is stripped by
 /// [`strip_own_suffix`] at its call site below — NOT by this function,
-/// whose only production caller is `settle_failed_dial`'s peerless arm
-/// — while the COMMAND and SCHEDULER paths are stripped by neither.
+/// whose only call site is `settle_failed_dial`'s peerless arm, itself
+/// unreachable through admission: a ticket naming no peer is refused,
+/// and a named one always parses. So this function runs in no
+/// production path at all today. The COMMAND and SCHEDULER paths are
+/// stripped by neither.
 /// One physical route reached both ways therefore occupies two
 /// `(peer, address)` entries: a quarantine earned on one does not
 /// suppress the other, and both spend `max_addresses` in a map whose

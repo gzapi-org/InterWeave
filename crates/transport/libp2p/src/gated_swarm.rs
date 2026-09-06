@@ -781,8 +781,10 @@ mod tests {
         // suffix — `an_inconsistent_suffix_rejects_the_address_not_the_peer`
         // asserts it — which is evidence the form is ordinary rather
         // than a third path: nothing wires those addresses to a dial
-        // yet, and `DialOrigin::DiscoveryReconnect` has no use outside
-        // its own enum. `ConnectionManager::learn_address` stores whatever
+        // yet, and no PRODUCTION code constructs
+        // `DialOrigin::DiscoveryReconnect` — tests, the spike harness
+        // and CONNECTIVITY.md all name it, which is why the narrower
+        // claim is the checkable one. `ConnectionManager::learn_address` stores whatever
         // arrives, verbatim, so a widened guard here would refuse a
         // good address as "a relay circuit",
         // and `settle_undialable` routes that to
@@ -813,9 +815,22 @@ mod tests {
     /// `DiscoveryReconnect`, `KademliaQuery` and `AutonatProbe` were
     /// the same story.
     ///
-    /// Iterating `DialOrigin::ALL` is what makes a ninth variant
-    /// arrive here rather than in the first relayed deployment.
-    /// Review finding on PR #74.
+    /// Iterating `DialOrigin::ALL` is what brings a ninth variant here
+    /// rather than to the first relayed deployment — **provided it is
+    /// added to `ALL`**. That array is `[Self; 8]` and its own doc
+    /// says so in capitals: forgetting it there compiles cleanly. What
+    /// the compiler forces is CLASSIFICATION, via the wildcard-free
+    /// match in
+    /// `every_origin_is_classified_and_the_classification_is_pinned`,
+    /// not membership. An earlier version of this sentence claimed the
+    /// array was the guard, which is the exact error that doc was
+    /// written to correct.
+    ///
+    /// This also does not subsume
+    /// `a_relay_circuit_claim_needs_a_circuit_in_the_address`: it pins
+    /// the ORIGIN half of the pairing, and mutating the ADDRESS half
+    /// (`P2pCircuit` to `P2pCircuit | P2p(_)`) passes here and dies
+    /// only there. Review findings on PR #74.
     #[test]
     fn only_relay_circuit_pairs_with_a_circuit_address_across_every_origin() {
         let manager = manager();
