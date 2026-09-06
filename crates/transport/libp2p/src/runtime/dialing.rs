@@ -840,31 +840,29 @@ mod tests {
         // refusal has something to lose.
         //
         // It pins EXISTENCE, not shape: `scheduled_retries()` is
-        // `retries.len()` and this fixture has one peer, so a mutant
-        // that re-scheduled -- resetting `due_at_ms`, bumping
-        // `attempts` -- would survive here. That one dies in
-        // `a_ticket_libp2p_cannot_dial_is_settled_permanently`, whose
-        // retry map is empty, so EXISTENCE is covered by the pair
-        // rather than by this assertion alone. SHAPE is covered by
-        // neither: a mutant that reset `due_at_ms` and `attempts` IN
-        // PLACE leaves the length at one here and zero there. That one
-        // is only PARTLY covered, and it is worth being exact about
-        // which part.
+        // `retries.len()`, so a mutant that re-scheduled -- moving
+        // `due_at_ms`, bumping `attempts` -- survives this assertion.
+        // `a_ticket_libp2p_cannot_dial_is_settled_permanently` catches
+        // it for existence, since its retry map is empty and any
+        // insert shows.
         //
-        // A reset that moves `due_at_ms` LATER dies, because the
-        // tests that read a released retry back read it through
-        // `take_due_retries`, and a later due time makes the peer not
-        // due. `record_permanent_failure` and `record_identity_mismatch`
-        // both CALL `release_retry_claim`, so a mutation inside that
-        // function fires on every one of those paths and several tests
-        // in `connection_manager.rs` catch it.
+        // Shape is covered only in part, and elsewhere.
+        // `settle_undialable` calls `record_permanent_failure`, and a
+        // mutant THERE that moves `due_at_ms` LATER dies in
+        // `a_claimed_permanent_failure_releases_rather_than_strands_the_claim`
+        // and `a_later_candidate_starting_takes_the_claim_back`, both
+        // of which read the retry back through
+        // `take_due_retries(30_000, 8)`.
         //
-        // A reset to an EARLIER time, or to `attempts` alone, dies
-        // nowhere: no test reads `attempts`, and none follows a release
-        // with a second `record_failure` whose backoff would expose a
-        // reset counter. `release_retry_claim`'s doc claims both fields
-        // are "left exactly as they were"; only the one is pinned.
-        // Review findings on PR #74.
+        // A move EARLIER, or a change to `attempts`, dies on no
+        // release path: no test reads `attempts` after a release, and
+        // none follows one with a second `record_failure` whose
+        // backoff would expose a reset counter.
+        // `release_retry_claim` cannot host that mutant at all -- its
+        // body only sets `claimed = false` -- though its doc claims
+        // `due_at_ms` and `attempts` are "left exactly as they were",
+        // and only the first is pinned anywhere.
+        // Review findings on PR #74 and #75.
         let other: DialTicket = m
             .handle()
             .load()

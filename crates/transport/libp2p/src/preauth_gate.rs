@@ -168,18 +168,15 @@ const REFUSAL: &str = "connection refused";
 ///   would mislead whoever next decides whether a new test closes the
 ///   set.
 ///
-/// What each costs to WRITE decides whether a tool or a careless edit
-/// could produce it. The two reversals need the loop rewritten through
-/// a `Vec`, since `multiaddr 0.18.2`'s `Iter` is `Iterator` and not
-/// `DoubleEndedIterator`, so `.rev()` is unavailable. The
-/// `get_or_insert` one does not compile on its own: it restructures
-/// the arm from `&mut String` to `()`, so both IP arms have to change
-/// together. Only the first-component one is a single node, and it is
-/// the only one an ordinary edit would reach.
+/// What each costs to write: the two reversals need the loop
+/// rewritten through a `Vec`, since `multiaddr 0.18.2`'s `Iter` is
+/// `Iterator` and not `DoubleEndedIterator`. The `get_or_insert` one
+/// does not compile unless BOTH IP arms change together, since the
+/// arm's type goes from `&mut String` to `()`. The first-component
+/// one is a single node.
 ///
-/// No prediction is offered about tooling: this tree runs no mutation
-/// tooling, so what a generator would find here has never been
-/// measured. The costs above are properties of the source.
+/// This tree runs no mutation tooling; every mutation recorded here
+/// was applied by hand.
 ///
 /// Everything else tried dies: widening the guard with the remote or
 /// with `P2p(_)`, NARROWING it with the remote, dropped arms, dropped
