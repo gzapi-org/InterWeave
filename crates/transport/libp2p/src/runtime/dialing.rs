@@ -801,10 +801,17 @@ mod tests {
         m.set_trust(trust(&[RELAY], &[]), &[]);
         let circuit = format!("/ip4/192.0.2.1/tcp/4001/p2p-circuit/p2p/{RELAY}");
         m.learn_address(&ident(RELAY), &circuit, 0);
+        // A SECOND ROUTE THE REFUSAL MUST NOT TOUCH. With one address
+        // in the book, "gone" and "the whole peer was dropped" are the
+        // same number, and `record_permanent_failure`'s own comment
+        // says peer-scoped removal is a regression it already shipped
+        // once. Two addresses make the assertion below say which of
+        // the two happened. Review finding on PR #74.
+        m.learn_address(&ident(RELAY), "/ip4/198.51.100.9/tcp/4001", 0);
         assert_eq!(
             m.known_addresses(&ident(RELAY)),
-            1,
-            "the route is in the book before the refusal"
+            2,
+            "both routes are in the book before the refusal"
         );
 
         // Admitted under the WRONG origin: a circuit address must claim
@@ -831,8 +838,14 @@ mod tests {
         );
         assert_eq!(
             m.known_addresses(&ident(RELAY)),
-            0,
-            "and the route is GONE — a caller-side mislabelling costs the address"
+            1,
+            "and the refused route is GONE — a caller-side mislabelling costs the address"
+        );
+        assert!(
+            m.handle()
+                .load()
+                .address_dialable(&ident(RELAY), "/ip4/198.51.100.9/tcp/4001", 0),
+            "and ONLY it: the failure is address-scoped, so the peer's other route survives"
         );
     }
 

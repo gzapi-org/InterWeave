@@ -794,6 +794,56 @@ mod tests {
         );
     }
 
+    /// THE PAIRING IS EXACT ACROSS THE WHOLE ENUM, not merely for the
+    /// four origins the other tests happen to use.
+    ///
+    /// `claims_circuit` is `origin == RelayCircuit`, and until this
+    /// test the predicate was exercised with `Manual`, `RelayCircuit`,
+    /// `RelayReservation` and `ConnectionManager` only. Widening it to
+    /// `matches!(origin, RelayCircuit | DcutrHolePunch)` compiled and
+    /// passed the whole workspace — while silently refusing every
+    /// hole-punch dial to a direct address, which is the origin D1 was
+    /// about and the one this stage is about to build an adapter for.
+    /// `DiscoveryReconnect`, `KademliaQuery` and `AutonatProbe` were
+    /// the same story.
+    ///
+    /// Iterating `DialOrigin::ALL` is what makes a ninth variant
+    /// arrive here rather than in the first relayed deployment.
+    /// Review finding on PR #74.
+    #[test]
+    fn only_relay_circuit_pairs_with_a_circuit_address_across_every_origin() {
+        let manager = manager();
+        for origin in DialOrigin::ALL {
+            let direct = AdmittedDial::from_ticket(ticket_as(
+                &manager,
+                Some(ADMITTED),
+                "/ip4/192.0.2.1/tcp/4001",
+                origin,
+            ));
+            let circuit =
+                AdmittedDial::from_ticket(ticket_as(&manager, Some(ADMITTED), &circuit(), origin));
+            if origin == DialOrigin::RelayCircuit {
+                assert!(
+                    direct.is_err(),
+                    "{origin:?} claims a circuit, so a direct address is refused"
+                );
+                assert!(
+                    circuit.is_ok(),
+                    "{origin:?} is what a circuit address must be admitted as"
+                );
+            } else {
+                assert!(
+                    direct.is_ok(),
+                    "{origin:?} does not claim a circuit, so a direct address is admitted"
+                );
+                assert!(
+                    circuit.is_err(),
+                    "{origin:?} does not claim a circuit, so a circuit address is refused"
+                );
+            }
+        }
+    }
+
     #[test]
     fn the_dial_names_the_peer_the_admission_named() {
         // THE BINDING. The earlier constructor took the options from
