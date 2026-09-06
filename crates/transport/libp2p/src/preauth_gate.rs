@@ -892,6 +892,27 @@ mod tests {
             format!("relay:{RELAY}"),
             "a circuit is charged to the relay whatever its remote address carries"
         );
+
+        // AND THE REMOTE GETS NO VOTE THE OTHER WAY EITHER. The doc
+        // says `local_addr` is "never anything the remote supplies, so
+        // a source cannot make an ordinary connection look relayed and
+        // escape its IP bucket" -- a `cannot` that only the swap was
+        // pinning. Widening the guard to
+        // `local.any(P2pCircuit) || remote.any(P2pCircuit)` passed all
+        // twelve tests: a far end that gets `/p2p-circuit` into its own
+        // address would then be bucketed on OUR listen IP, one bucket
+        // shared by every such peer, which turns the per-source ceiling
+        // into a second global cap. Review finding on PR #74.
+        assert_eq!(
+            source_label(
+                &addr("/ip4/203.0.113.1/tcp/4001"),
+                &addr(&format!(
+                    "/ip4/198.51.100.7/tcp/5001/p2p-circuit/p2p/{SOURCE_A}"
+                )),
+            ),
+            "198.51.100.7",
+            "only the LOCAL address may decide that a connection is relayed"
+        );
     }
 
     /// The FIX's shape, not merely its value: one relay connection,
