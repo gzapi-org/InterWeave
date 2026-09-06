@@ -161,13 +161,15 @@ const REFUSAL: &str = "connection refused";
 /// unavailable; and `relay_ip.get_or_insert(..)` to `= Some(..)`
 /// restructures the arm's type from `&mut String` to `()` -- and both
 /// IP arms must change together or the match does not typecheck. The
-/// one that IS a one-token edit is the first-component one, `_ => {}`
-/// to `_ => break` in the non-circuit scan, behaviourally identical to
-/// `.take(1)`.
+/// SMALLEST of the four is the first-component one, `_ => {}` to
+/// `_ => break` in the non-circuit scan, behaviourally identical to
+/// `.take(1)`. One node, though two tokens on the left -- which is the
+/// same arithmetic that rules out `get_or_insert`, so it is stated as
+/// size rather than as a token count.
 ///
-/// Stated as reachability rather than prediction: this tree runs no
-/// mutation tooling, so what a generator WOULD find here has not been
-/// measured and is not a claim this comment makes.
+/// No prediction is offered about tooling: this tree runs no mutation
+/// tooling, so what a generator would find here has never been
+/// measured. The sizes above are properties of the source.
 ///
 /// - `relay_ip.get_or_insert(..)` could be `= Some(..)`, taking the
 ///   last IP before the marker instead of the first.

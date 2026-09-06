@@ -848,9 +848,15 @@ mod tests {
         // rather than by this assertion alone. SHAPE is covered by
         // neither: a mutant that reset `due_at_ms` and `attempts` IN
         // PLACE leaves the length at one here and zero there. That one
-        // dies in `a_claim_denied_by_a_recoverable_reason_is_released_unchanged`
-        // (`connection_manager.rs`), which is where
-        // `release_retry_claim`'s "left exactly as they were" lives.
+        // dies in one of two places, depending where it sits. Inside
+        // `release_retry_claim`, in
+        // `a_claim_denied_by_a_recoverable_reason_is_released_unchanged`,
+        // which is where that function's "left exactly as they were"
+        // invariant lives. Inside `record_permanent_failure` itself,
+        // in
+        // `a_claimed_permanent_failure_releases_rather_than_strands_the_claim`,
+        // which is the only test that drives that function with a
+        // claim-owning ticket and then reads the retry back.
         // Review findings on PR #74.
         let other: DialTicket = m
             .handle()
@@ -881,7 +887,8 @@ mod tests {
         // for the other input shape. Review finding on PR #74.
         assert!(
             reason.contains("is a relay circuit"),
-            "it says what the admission should have claimed: {reason}"
+            "it names the ADDRESS as the circuit, which is the direction \
+             refused here: {reason}"
         );
         // THE SURVIVOR IS NAMED, not counted. An earlier version of
         // this asked `address_dialable` for the other route, which is

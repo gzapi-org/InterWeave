@@ -785,15 +785,20 @@ mod tests {
         // enum", which was false — `DialOrigin::ALL` constructs it, and
         // so do tests, the spike harness and CONNECTIVITY.md. What is
         // checkable, and what the argument needs, is that nothing
-        // originates a dial with it:
-        // `grep -rn 'DiscoveryReconnect' crates/ apps/` returns the
-        // enum, `ALL`, ONE production match arm
-        // (`names_application_destination`), one test arm, and this
-        // comment. **Unqualified on purpose**: the enum, `ALL` and the
-        // production arm all write `Self::`, so searching for
-        // `DialOrigin::DiscoveryReconnect` — as an earlier version of
-        // this line did — returns the test arm and this comment
-        // quoting itself, and nothing else.
+        // originates a dial with it. Every CODE site is in
+        // `connection_policy.rs`: the variant declaration, `ALL`, one
+        // arm of `names_application_destination`, and one arm in its
+        // test module. No `DialRequest` anywhere is built with it.
+        //
+        // Check it with `grep -rn 'DiscoveryReconnect' crates/ apps/`
+        // and read the non-comment hits; do NOT count them, and do not
+        // qualify the pattern. Two earlier versions of this sentence
+        // got that wrong in both directions — one searched
+        // `DialOrigin::DiscoveryReconnect`, which misses `ALL`, the
+        // production arm (both write `Self::`) and the declaration
+        // (which carries no path at all), and the next enumerated the
+        // hit count, which goes stale the moment anyone writes the
+        // word in a comment. It already had, in this file.
         //
         // `ConnectionManager::learn_address` stores whatever arrives,
         // verbatim, so a widened guard here would refuse a good address
