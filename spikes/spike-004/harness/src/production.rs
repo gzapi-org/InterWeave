@@ -248,9 +248,9 @@ pub struct ProductionBehaviour {
     /// So both dials the behaviour does emit are exchanges WITH the
     /// relay -- control plane, in ADR-0036's terms -- and one
     /// reachability origin answers both: the side
-    /// `names_application_destination` returns `false` for. **Labelling the second one
-    /// `RelayCircuit` is now the mistake, not would be**: Stage 11
-    /// step 2 moved that origin into
+    /// `names_application_destination` returns `false` for.
+    /// **Labelling the second one `RelayCircuit` is now the mistake,
+    /// not would be**: Stage 11 step 2 moved that origin into
     /// `names_application_destination`, so a circuit through an
     /// infrastructure-only relay would be refused at the dial that
     /// sets up the relay connection, and relaying would stop working
