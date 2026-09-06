@@ -309,10 +309,10 @@ impl Node {
     /// `ToSwarm::Dial` for a circuit — the relay transport handles the
     /// address — so `RelayCircuit` can only come from the caller. In
     /// production the caller passes it to `attempt_dial`, which carries
-    /// it into admission, and `GatedSwarm::dial` then enforces it
-    /// against the `/p2p-circuit` component of the address rather than
-    /// deriving it. This models exactly that, so what the gate then
-    /// does with the origin is measurable.
+    /// it into admission and then has `AdmittedDial::from_ticket`
+    /// enforce it against the `/p2p-circuit` component of the address
+    /// rather than deriving it. This models exactly that, so what the
+    /// gate then does with the origin is measurable.
     pub fn dial_circuit(
         &mut self,
         peer: PeerId,
@@ -348,10 +348,11 @@ impl Node {
 
     /// Dial as the COMMAND PATH does.
     ///
-    /// Production's `GatedSwarm::dial` admits the dial first and
-    /// registers its `ConnectionId` in `AdmittedDials`, so the gate's
-    /// pending hook recognises it as ticketed rather than
-    /// behaviour-originated. The spike models the same ordering with
+    /// In production `attempt_dial` admits the dial first, and
+    /// `GatedSwarm::dial` registers its `ConnectionId` in
+    /// `AdmittedDials`, so the gate's pending hook recognises it as
+    /// ticketed rather than behaviour-originated. The spike models the
+    /// same ordering with
     /// the attribution map — the caller knows its own origin, which is
     /// the whole point of the mechanism — so a harness dial is
     /// `Manual` and is not counted as a behaviour dial by accident.

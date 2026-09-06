@@ -1396,7 +1396,9 @@ mod expired_address_tests {
         // shape of a query refused before it was ever registered.
         assert!(
             buffer_kademlia_event(&mut outbox, 2, 1, settlement()),
-            "the command in hand is itself an outstanding query: the provider bound              a permit before sending it, and only this completion releases it"
+            "the command in hand is itself an outstanding query: the provider \
+             bound a permit before sending it, and only this completion \
+             releases it"
         );
         assert!(
             !buffer_kademlia_event(&mut outbox, 2, 1, settlement()),

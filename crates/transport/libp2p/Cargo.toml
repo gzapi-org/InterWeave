@@ -5,12 +5,20 @@
 # stages have earned.
 #
 # TCP, Noise, Yamux and Identify from Stage 4; direct v2 over
-# request-response from Stage 6; signed GossipSub from Stage 7. No
-# Kademlia, no AutoNAT, no Relay, no DCUtR — and those are absent from the
-# feature list rather than merely unused, so a stray `use` cannot switch
-# one on. CLAUDE.md §3 forbids enabling autonomous libp2p behaviour and
-# retrofitting admission policy afterwards; a behaviour that is not
-# compiled cannot be enabled by accident.
+# request-response from Stage 6; signed GossipSub from Stage 7; Kademlia
+# from Stage 10, peer routing only. No AutoNAT, no Relay, no DCUtR — and
+# those three are absent from the workspace feature list rather than
+# merely unused, so a stray `use` cannot switch one on. CLAUDE.md §3
+# forbids enabling autonomous libp2p behaviour and retrofitting admission
+# policy afterwards; a behaviour that is not compiled cannot be enabled by
+# accident.
+#
+# This paragraph said "No Kademlia" for a stage and a half after Stage 10
+# added `kad` to the workspace features and built a driver on it. It is
+# the file a reader consults to check exactly the claim it was getting
+# wrong, which is why the correction is worth a commit of its own:
+# SPIKE-004's D1, D2 and D3 are all latent BECAUSE relay and dcutr are
+# uncompiled, and this is the evidence for that.
 #
 # This header claimed "no direct v2" for a full stage after direct v2
 # shipped, which is why the rule about prose describing changed behaviour
@@ -24,7 +32,7 @@
 name = "interweave-transport-libp2p"
 version = "0.0.0"
 publish = false
-description = "InterWeave libp2p transport substrate: TCP, Noise, Yamux, Identify, direct v2, GossipSub."
+description = "InterWeave libp2p transport substrate: TCP, Noise, Yamux, Identify, direct v2, GossipSub, Kademlia."
 license.workspace = true
 edition.workspace = true
 rust-version.workspace = true

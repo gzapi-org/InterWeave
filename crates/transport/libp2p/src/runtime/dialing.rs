@@ -105,9 +105,10 @@ pub(super) fn attempt_dial(
 ///
 /// PERMANENT, not transient. Every way `AdmittedDial::from_ticket`
 /// fails is a deterministic property of the ticket itself -- it names
-/// no peer, its peer is not a libp2p `PeerId`, or its address is not a
-/// multiaddr -- so the same ticket converts the same way every time,
-/// whatever the network does. `record_failure` reschedules, so a
+/// no peer, its peer is not a libp2p `PeerId`, its address is not a
+/// multiaddr, or its origin and its address disagree about whether the
+/// dial is a circuit -- so the same ticket converts the same way every
+/// time, whatever the network does. `record_failure` reschedules, so a
 /// trusted peer with a remembered address retried that identical
 /// conversion failure forever once the scheduler became active.
 ///
@@ -123,6 +124,24 @@ pub(super) fn attempt_dial(
 /// is what says the two agree. The branch stays as a fail-closed guard on
 /// a conversion this module does not own; it is unreachable rather than
 /// untested.
+///
+/// The CIRCUIT PAIRING case is the one to be careful with, because a
+/// mislabelling here is not free. `from_ticket` refuses both
+/// directions of the disagreement -- a `/p2p-circuit` address admitted
+/// under some other origin, and `RelayCircuit` on an address with no
+/// circuit in it -- and both arrive here. `from_ticket`'s own comment
+/// says which mistake each one is; this said it a second time and said
+/// it differently, naming the relay's class as what the first was
+/// judged against when the ticket names the destination in both
+/// directions. `record_permanent_failure` then FORGETS THE ADDRESS
+/// (`connection_manager.rs`, `known.remove(ticket.address())`), which
+/// is right for an address that cannot be dialled and wrong for a good
+/// circuit address that a caller labelled badly. Permanent is still
+/// the correct class, since the pairing is a property of the ticket
+/// and would fail identically on every retry; the note is that the
+/// blast radius of a caller-side bug is a forgotten route, not a
+/// refused dial. Neither direction is reachable today -- no relay
+/// feature is compiled. Review finding on PR #74.
 pub(super) fn settle_undialable(
     manager: &mut ConnectionManager,
     undialable: UndialableAdmission,
@@ -143,11 +162,15 @@ pub(super) fn settle_undialable(
 /// open under authority that no longer exists.
 ///
 /// THE ORIGIN IS PART OF THE QUESTION. An infrastructure-only peer is
-/// authorized for reachability and refused for the data plane, so
-/// asking only what the peer is authorized FOR — the inbound predicate,
-/// which has no origin to consult — closed relay reservations, relay
-/// circuits, AutoNAT probes and DCUtR hole punches that admission had
-/// correctly permitted. `authorizes_for` takes the ticket's own origin,
+/// authorized for reachability and refused as an application
+/// destination, so asking only what the peer is authorized FOR — the
+/// inbound predicate, which has no origin to consult — closed relay
+/// reservations and AutoNAT probes that admission had correctly
+/// permitted. (It closed relay circuits and DCUtR hole punches too,
+/// but those were admitted WRONGLY — SPIKE-004's D2 and D1, refused at
+/// admission since Stage 11 step 2, so revalidation no longer sees
+/// them for such a peer at all.) `authorizes_for` takes the ticket's
+/// own origin,
 /// so a `KademliaQuery` connection is revalidated by the SAME line that
 /// revalidates every other — the genericity
 /// `a_revoked_kademlia_dial_is_refused_at_establishment` proves rather
@@ -761,6 +784,159 @@ mod tests {
         );
     }
 
+    /// A CIRCUIT PAIRING REFUSAL FORGETS THE ADDRESS, which is the
+    /// consequence two comments assert and no test drove.
+    ///
+    /// `from_ticket` has four failure modes and only the malformed
+    /// address one was ever settled through here. The pairing mode is
+    /// the one whose blast radius is a good route rather than a bad
+    /// string: `record_permanent_failure` removes the address from the
+    /// peer's book, so a caller that labels a real circuit with the
+    /// wrong origin loses it. Both `settle_undialable`'s doc and
+    /// `gated_swarm`'s guard comment say so; this is what says it if
+    /// it stops being true. Review finding on PR #74.
+    #[test]
+    fn a_circuit_pairing_refusal_forgets_the_address_it_refused() {
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        m.set_trust(trust(&[RELAY], &[]), &[]);
+        let circuit = format!("/ip4/192.0.2.1/tcp/4001/p2p-circuit/p2p/{RELAY}");
+        m.learn_address(&ident(RELAY), &circuit, 0);
+        // A SECOND ROUTE THE REFUSAL MUST NOT TOUCH. With one address
+        // in the book, "gone" and "the whole peer was dropped" are the
+        // same number. Review findings on PR #74.
+        m.learn_address(&ident(RELAY), "/ip4/198.51.100.9/tcp/4001", 0);
+        assert_eq!(
+            m.known_addresses(&ident(RELAY)),
+            2,
+            "both routes are in the book before the refusal"
+        );
+
+        // Admitted under the WRONG origin: a circuit address must claim
+        // `RelayCircuit`, and `ConnectionManager` is what the scheduler
+        // supplies.
+        let ticket: DialTicket = m
+            .handle()
+            .load()
+            .admit(
+                &DialRequest {
+                    peer: Some(ident(RELAY)),
+                    address: circuit.clone(),
+                    origin: DialOrigin::ConnectionManager,
+                },
+                0,
+            )
+            .expect("a trusted peer with a fresh policy is admitted");
+
+        // AND A SCHEDULED RETRY THE REFUSAL MUST NOT CANCEL.
+        // `record_permanent_failure`'s own comment records the
+        // regression: it used to remove the peer's whole RETRY entry,
+        // so a manual dial to one bad address cancelled the reconnect
+        // that would have tried the others. That is a different map
+        // from the book, and asserting `scheduled_retries() == 0` on a
+        // fixture that never schedules one cannot observe a removal
+        // from an empty map -- which is what the previous version of
+        // this test did while its comment claimed the scheduler was
+        // covered. One is scheduled here so the assertion after the
+        // refusal has something to lose.
+        //
+        // It pins EXISTENCE, not shape: `scheduled_retries()` is
+        // `retries.len()` and this fixture has one peer, so a mutant
+        // that re-scheduled -- resetting `due_at_ms`, bumping
+        // `attempts` -- would survive here. That one dies in
+        // `a_ticket_libp2p_cannot_dial_is_settled_permanently`, whose
+        // retry map is empty, so EXISTENCE is covered by the pair
+        // rather than by this assertion alone. SHAPE is covered by
+        // neither: a mutant that reset `due_at_ms` and `attempts` IN
+        // PLACE leaves the length at one here and zero there. That one
+        // is only PARTLY covered, and it is worth being exact about
+        // which part.
+        //
+        // Every test that reads a released retry back reads it through
+        // `take_due_retries(30_000, 8)`. So a reset that moves
+        // `due_at_ms` LATER dies -- in
+        // `a_claim_denied_by_a_recoverable_reason_is_released_unchanged`
+        // if it sits in `release_retry_claim`, and in
+        // `a_claimed_permanent_failure_releases_rather_than_strands_the_claim`
+        // or `a_later_candidate_starting_takes_the_claim_back` if it
+        // sits in `record_permanent_failure`, both of which drive that
+        // function with a claim-owning ticket and then read the retry.
+        //
+        // A reset to an EARLIER time, or to `attempts` alone, dies
+        // nowhere: no test reads `attempts`, and no test follows a
+        // release with a second `record_failure` whose backoff would
+        // expose a reset counter. `release_retry_claim`'s doc claims
+        // both fields are "left exactly as they were"; only the one is
+        // pinned.
+        // Review findings on PR #74.
+        let other: DialTicket = m
+            .handle()
+            .load()
+            .admit(
+                &DialRequest {
+                    peer: Some(ident(RELAY)),
+                    address: "/ip4/198.51.100.9/tcp/4001".to_owned(),
+                    origin: DialOrigin::ConnectionManager,
+                },
+                0,
+            )
+            .expect("a trusted peer with a fresh policy is admitted");
+        m.record_failure(other, 0);
+        assert_eq!(
+            m.scheduled_retries(),
+            1,
+            "the peer has a reconnect scheduled before the refusal"
+        );
+        let undialable = AdmittedDial::from_ticket(ticket)
+            .expect_err("a circuit address under another origin is refused");
+        let reason = settle_undialable(&mut m, *undialable, 0);
+        // `contains("RelayCircuit")` would NOT discriminate: both of
+        // `from_ticket`'s circuit messages carry that word — one says
+        // "must be admitted as RelayCircuit", the other "admission
+        // claims RelayCircuit but address … carries no /p2p-circuit" —
+        // so a branch swap would pass it while printing the message
+        // for the other input shape. Review finding on PR #74.
+        assert!(
+            reason.contains("is a relay circuit"),
+            "it names the ADDRESS as the circuit, which is the direction \
+             refused here: {reason}"
+        );
+        // THE SURVIVOR IS NAMED, not counted. An earlier version of
+        // this asked `address_dialable` for the other route, which is
+        // `is_none_or` over the quarantine map -- and nothing in this
+        // test ever writes that map, so it answered `true` for any
+        // string, including the address just proved gone. It could not
+        // fail. Counting is not enough either: `known.remove(..)` as
+        // `known.pop_last()` drops the SURVIVOR and keeps the refused
+        // circuit, and both the count and the dialable check stay
+        // green. Review finding on PR #74.
+        assert_eq!(
+            m.dial_candidates(&ident(RELAY), 0),
+            vec!["/ip4/198.51.100.9/tcp/4001".to_owned()],
+            "the refused circuit is gone and ONLY the peer's other route survives"
+        );
+        // BOTH QUESTIONS, because they are different ones and the doc
+        // above claims both. `dial_candidates` is book MINUS
+        // quarantine, so on its own it cannot tell "removed from the
+        // book" from "still there and suppressed" -- swapping
+        // `record_permanent_failure` for `record_identity_mismatch`,
+        // which quarantines and RELEASES rather than removing, passes
+        // it while the address goes on spending `max_addresses` and
+        // returns when the quarantine expires. An earlier version of
+        // this test replaced the count with the candidates rather than
+        // adding it, and lost exactly that. Review finding on PR #74.
+        assert_eq!(
+            m.known_addresses(&ident(RELAY)),
+            1,
+            "and it is GONE FROM THE BOOK, not merely undialable"
+        );
+        assert_eq!(
+            m.scheduled_retries(),
+            1,
+            "and the peer's reconnect SURVIVES: the failure is address-scoped, \
+             so one bad label does not cancel the retry that would try the rest"
+        );
+    }
+
     #[test]
     fn every_identity_the_neutral_grammar_accepts_libp2p_accepts() {
         // What makes `from_ticket`'s PeerId branch unreachable, and the
@@ -920,7 +1096,8 @@ mod tests {
         assert_eq!(
             m.known_addresses(&peer),
             2,
-            "BOTH exhausted addresses were scored and learned, not only              the one the ticket settled"
+            "BOTH exhausted addresses were scored and learned, not only the \
+             one the ticket settled"
         );
         assert_eq!(
             m.handle().load().pending_dials(),
@@ -946,7 +1123,8 @@ mod tests {
             !m.handle()
                 .load()
                 .address_dialable(&peer, "/ip4/192.0.2.1/tcp/1", 0),
-            "the quarantine binds to the REAL address, stripped of its              suffix — settled on the placeholder it would bind to nothing"
+            "the quarantine binds to the REAL address, stripped of its suffix \
+             — settled on the placeholder it would bind to nothing"
         );
         assert!(
             m.handle()

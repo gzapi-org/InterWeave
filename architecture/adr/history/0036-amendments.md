@@ -41,9 +41,14 @@ and one who admitted it was reading a control row as a destination rule.
 wrong.** Anything citing "ADR-0036's relay row" to justify dialling a circuit
 toward an infrastructure-only peer should be re-read against both rows.
 
-The code that prompted this is unchanged by the amendment and remains
-divergent until Stage 11 step 2 fixes it: `DialOrigin::is_data_plane` omits
-`RelayCircuit`, so `ConnectionPolicy::admit` treats such a dial as
-control-plane. `RelayReservation` must stay non-data-plane — a reservation is
-the reachability purpose itself — so the fix distinguishes the two origins
-rather than moving both.
+The code that prompted this was unchanged by the amendment and stayed
+divergent until Stage 11 step 2: `DialOrigin::is_data_plane` omitted
+`RelayCircuit`, so `ConnectionPolicy::admit` treated such a dial as
+control-plane. `RelayReservation` had to stay outside the predicate — a
+reservation is the reachability purpose itself — so the fix distinguished the
+two origins rather than moving both.
+
+**Fixed 2026-09-04.** Step 2 moved `RelayCircuit` (and `DcutrHolePunch`, the
+same defect one origin over) into the predicate, which it renamed
+`names_application_destination` in the same commit because the old name
+described traffic while the rule decides this amendment's WITH/FOR question.

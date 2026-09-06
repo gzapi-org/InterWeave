@@ -24,10 +24,11 @@
 //! Stage 11 adds three. Without attribution every AutoNAT probe, relay
 //! reservation and hole-punch would be admitted as
 //! `DialOrigin::KademliaQuery`, which is data-plane — so an
-//! infrastructure-only relay would be refused (`is_data_plane()` is
-//! true for KademliaQuery and `ConnectionPolicy::admit` refuses a
-//! data-plane origin for that class), and the whole reachability stack
-//! would fail closed against exactly the peers it exists to use.
+//! infrastructure-only relay would be refused
+//! (`KademliaQuery.names_application_destination()` is true, and
+//! `ConnectionPolicy::admit` refuses such an origin for that class),
+//! and the whole reachability stack would fail closed against exactly
+//! the peers it exists to use.
 //!
 //! # The mechanism under test
 //!

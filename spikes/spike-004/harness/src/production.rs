@@ -23,21 +23,21 @@
 //!
 //! **Stage 11 step 1 replaced the assumption with attribution, so the
 //! answer is now "admits it".** The hook resolves an announced
-//! `ConnectionId -> DialOrigin` note and refuses a dial it has no note
-//! for; a reservation dial announced as `RelayReservation` is not
-//! data-plane and is admitted. This module therefore wires the relay
-//! client through `Attributing` exactly as production does, and R6
-//! asserts the fix rather than the defect. F1 is history: the finding
-//! that attribution is required, and the record of what happened
-//! without it.
+//! `ConnectionId -> DialOrigin` note and refuses a dial it has no
+//! note for; a reservation dial announced as `RelayReservation` does
+//! not name an application destination and is admitted. This module
+//! therefore wires the relay client through `Attributing` exactly as
+//! production does, and R6 asserts the fix rather than the defect. F1
+//! is history: the finding that attribution is required, and the
+//! record of what happened without it.
 //!
 //! **One node in R6 still lies to the gate on purpose.** F8 — a
 //! refusal of a behaviour dial is invisible, because the Swarm
 //! discards the denial — is a finding about the SWARM and is still
 //! true, but it needs a refused dial to observe and step 1 removed the
-//! accidental one. `with_trust_and_origin` announces a data-plane
-//! origin for a reservation dial, reproducing the same
-//! `NotAuthorizedForDataPlane` refusal honestly.
+//! accidental one. `with_trust_and_origin` announces an origin that
+//! names an application destination for a reservation dial,
+//! reproducing the same `NotAuthorizedForDataPlane` refusal honestly.
 
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -233,23 +233,30 @@ pub struct ProductionBehaviour {
     /// `libp2p-relay 0.21.1` emits `ToSwarm::Dial` TWICE --
     /// `priv_client.rs:334` for a reservation, and `:373` to establish
     /// the relay connection a circuit request needs -- and both name
-    /// the RELAY -- READ from those two call sites, both of which build
-    /// `DialOpts::peer_id(relay_peer_id)`, not measured here. What is
-    /// measured is the negative: R5.11 REQUIRES that no dial the relay
-    /// behaviour made was aimed at the destination. R5.10 prints the
-    /// target list beside it and is a `note`, so it cannot fail. What the
-    /// behaviour never emits is a dial toward the DESTINATION (R5.6),
-    /// because a `/p2p-circuit` address is dialled by the relay
-    /// TRANSPORT; that is the dial no wrapper here can see.
+    /// the RELAY. That last part is READ, not measured here, and it is
+    /// read one branch UP from each emission rather than at it: `:315`
+    /// and `:359` are where the two `DialOpts::peer_id(relay_peer_id)`
+    /// builds are, so the peer is fixed before the `ToSwarm::Dial` that
+    /// carries it. What is measured is the negative: R5.11 REQUIRES
+    /// that no dial the relay behaviour made was aimed at the
+    /// destination. R5.10 prints the target list beside it and is a
+    /// `note`, so it cannot fail. What the behaviour never emits is a
+    /// dial toward the DESTINATION (R5.6), because a `/p2p-circuit`
+    /// address is dialled by the relay TRANSPORT; that is the dial no
+    /// wrapper here can see.
     ///
     /// So both dials the behaviour does emit are exchanges WITH the
     /// relay -- control plane, in ADR-0036's terms -- and one
-    /// control-plane origin answers both. **Labelling the second one
-    /// `RelayCircuit` would be the mistake**: once Stage 11 step 2
-    /// makes that origin data-plane, a circuit through an
+    /// reachability origin answers both: the side
+    /// `names_application_destination` returns `false` for.
+    /// **Labelling the second one `RelayCircuit` is now the mistake,
+    /// not would be**: Stage 11 step 2 moved that origin into
+    /// `names_application_destination`, so a circuit through an
     /// infrastructure-only relay would be refused at the dial that
     /// sets up the relay connection, and relaying would stop working
-    /// for exactly the peers relaying exists for.
+    /// for exactly the peers relaying exists for. The hazard is armed
+    /// rather than hypothetical, and step 5 is where it gets its first
+    /// chance to fire.
     pub relay_client: Attributing<relay::client::Behaviour>,
 }
 
@@ -287,7 +294,7 @@ pub struct ProductionNode {
     /// exactly how this experiment first misread itself.
     #[expect(
         dead_code,
-        reason = "held so the gate's snapshot stays current; R6.7 and R6.8 fail if it is dropped"
+        reason = "held so the gate's snapshot stays current; R6.5, R6.6, R6.7, R6.8 and R6.11 fail if it is dropped"
     )]
     pub manager: ConnectionManager,
 }
@@ -316,8 +323,9 @@ impl ProductionNode {
     /// `RelayReservation` is the truthful answer and what
     /// [`Self::with_trust`] uses. The parameter exists for ONE case:
     /// producing a dial the gate refuses, now that the gate no longer
-    /// refuses reservations by accident. Announcing a data-plane origin
-    /// for a reservation dial is a deliberate lie to the gate, and it
+    /// refuses reservations by accident. Announcing an origin that
+    /// names an application destination for a reservation dial is a
+    /// deliberate lie to the gate, and it
     /// reproduces exactly the refusal Stage 11 step 1 removed --
     /// `NotAuthorizedForDataPlane` for an infrastructure-only relay --
     /// which F8's invisibility claim needs as its subject.

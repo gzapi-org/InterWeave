@@ -24,12 +24,16 @@
 //! Dials that a `NetworkBehaviour` originates from inside the Swarm.
 //! Those never pass through this API at all; libp2p routes them through
 //! `NetworkBehaviour::handle_pending_outbound_connection`, and that hook
-//! is where the same ticket has to be required. Stage 4's behaviour set
-//! is TCP, Noise, Yamux and Identify — none of which dials — so there is
-//! nothing to gate there yet, and the honest statement is that this
-//! closes the command path and the behaviour path is closed when the
-//! first dialing behaviour arrives. Kademlia must not be enabled before
-//! it is.
+//! is where the same ticket has to be required. At Stage 4 the
+//! behaviour set was TCP, Noise, Yamux and Identify — none of which
+//! dials — so there was nothing to gate there and this type closed the
+//! command path alone. **The behaviour path is closed now**: Stage 10
+//! brought the first dialing behaviour and `OutboundAdmission` gates
+//! it at `handle_pending_outbound_connection`, which is what let
+//! Kademlia be enabled at all. Stage 11 step 1 extended the same hook
+//! to attribute a dial to the behaviour that asked
+//! (`attribution.rs`), because inferring the origin stops working the
+//! moment a second behaviour can dial.
 //!
 //! [`PolicySnapshot::admit`]: interweave_transport_runtime::PolicySnapshot::admit
 
@@ -89,12 +93,18 @@ impl AdmittedDial {
     /// Build the dial this admission authorizes.
     ///
     /// # Errors
-    /// Returns [`UndialableAdmission`], carrying the ticket back, when
-    /// the admitted peer or address is not something libp2p can dial:
-    /// a ticket with no peer, a peer that is not a `PeerId`, or an
-    /// address that is not a `Multiaddr`. Those are refusals rather
-    /// than panics because the strings reach the policy layer from
-    /// configuration and from discovery.
+    /// Returns [`UndialableAdmission`], carrying the ticket back, in
+    /// two cases. The admitted peer or address may not be something
+    /// libp2p can dial — a ticket with no peer, a peer that is not a
+    /// `PeerId`, or an address that is not a `Multiaddr`. Those are
+    /// refusals rather than panics because the strings reach the policy
+    /// layer from configuration and from discovery.
+    ///
+    /// Or the address and the admitted origin may DISAGREE about
+    /// whether this is a relay circuit, in either direction. **This is
+    /// where that pairing is enforced** — not in
+    /// [`GatedSwarm::dial`], which only registers the `ConnectionId`
+    /// and forwards to the inner Swarm.
     pub fn from_ticket(ticket: DialTicket) -> Result<Self, Box<UndialableAdmission>> {
         let Some(peer) = ticket.peer() else {
             return Err(Box::new(UndialableAdmission {
@@ -124,13 +134,20 @@ impl AdmittedDial {
         // ticket carries what it claimed.
         //
         // So the pairing is enforced BOTH ways, because each direction
-        // is a different mistake. A circuit address admitted under some
-        // other origin was judged against the wrong rule — the
-        // destination's class, not the relay's. And `RelayCircuit` on
-        // an address with no circuit in it claims a purpose the dial
-        // does not have. Neither is reachable today, since no relay
-        // feature is compiled; both become reachable the moment one is,
-        // and refusing here costs a string comparison.
+        // is a different mistake, and it is worth being exact about
+        // which. The ticket names the DESTINATION either way, so the
+        // class the gate evaluates is the destination's in both
+        // directions; what the origin decides is which SIDE of
+        // `names_application_destination` the dial is judged on. A
+        // circuit address admitted under a reachability origin is
+        // therefore judged as reachability traffic, and an
+        // infrastructure-only destination would be admitted for what
+        // is an application path — ADR-0036's enforcement clause
+        // exactly. And `RelayCircuit` on an address with no circuit in
+        // it claims a purpose the dial does not have. Neither is
+        // reachable today, since no relay feature is compiled; both
+        // become reachable the moment one is, and refusing here costs
+        // a string comparison.
         let circuit_address = address
             .iter()
             .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2pCircuit));
@@ -556,6 +573,33 @@ mod tests {
         m
     }
 
+    /// A manager whose only known peer is INFRASTRUCTURE-ONLY.
+    ///
+    /// `classify` checks the LOCAL peer, then `PeerTrustPolicy`, then
+    /// `InfrastructureSet` — so a remote peer in both sets is
+    /// `DataPlaneTrusted` and the infrastructure arm of
+    /// `ConnectionPolicy::admit` never runs. A test about that arm has
+    /// to leave the peer policy empty.
+    ///
+    /// That precedence is pinned, but only sideways:
+    /// `partial_revocation_keeps_the_reachability_it_still_authorizes`
+    /// (`runtime/dialing.rs`) starts from a peer in both sets and
+    /// requires one revocation, which an infrastructure-first
+    /// `classify` would make zero. Worth naming here because a reader
+    /// of this comment would not find it.
+    fn infra_only_manager() -> ConnectionManager {
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        let _ = m.set_trust(
+            TrustSources::new(
+                PeerTrustPolicy::new([]).expect("empty"),
+                InfrastructureSet::new([TransportIdentity::parse(ADMITTED).expect("canonical")])
+                    .expect("one"),
+            ),
+            &[],
+        );
+        m
+    }
+
     fn ticket_for(manager: &ConnectionManager, peer: Option<&str>, address: &str) -> DialTicket {
         ticket_as(manager, peer, address, DialOrigin::Manual)
     }
@@ -591,11 +635,19 @@ mod tests {
         // The caller is the only party that knows, which makes the
         // command path the place the claim is checked.
         //
-        // Admitted as `Manual` — a data-plane origin — the dial is
-        // judged against the wrong rule: `Manual` weighs the peer named
-        // in the ticket, while a circuit's authority question is the
-        // DESTINATION's class. Refusing here is fail-closed and costs a
-        // string comparison.
+        // `Manual` IS THE HARMLESS DIRECTION, and saying so is the
+        // point of the case below it. `admit` reads `request.peer` for
+        // every origin, and a circuit's ticket names the destination,
+        // so there is no second peer for one origin to weigh instead
+        // of another. `Manual` and `RelayCircuit` are also on the same
+        // side of `names_application_destination` since Stage 11
+        // step 2, so the class check comes out identical. What the
+        // refusal protects is the LABEL: the origin is what the
+        // attribution layer, `authorizes_for` and every later reader
+        // take the dial's purpose from.
+        //
+        // The direction that would actually escape is a REACHABILITY
+        // origin, and it is asserted at the end of this test.
         let manager = manager();
         let refused = AdmittedDial::from_ticket(ticket_as(
             &manager,
@@ -622,13 +674,64 @@ mod tests {
             .is_ok(),
             "so the refusal is the origin and not the address"
         );
+
+        // AND THE ORIGIN THAT WOULD ACTUALLY ESCAPE. `admit` consults
+        // `names_application_destination` for EVERY origin -- it is
+        // read in the `ConnectivityInfrastructureOnly` arm and nowhere
+        // else -- and `RelayReservation` answers `false`, so that arm
+        // does not refuse. An infrastructure-only DESTINATION reached
+        // over a circuit is therefore admitted for an application
+        // path, which violates ADR-0036's enforcement clause and is
+        // the rule D2 broke. The pairing check is what refuses it, and
+        // until now only the harmless `Manual` direction was exercised.
+        //
+        // The destination here IS infrastructure-only, built by
+        // `infra_only_manager`. Reusing `manager()` would have put the
+        // peer in `PeerTrustPolicy`, `classify` gives that precedence,
+        // and the arm above would never run -- the test would then
+        // prove the pairing refusal for a TRUSTED destination while
+        // its comment talked about an infrastructure-only one.
+        // Review findings on PR #74.
+        let infra = infra_only_manager();
+        let escaping = AdmittedDial::from_ticket(ticket_as(
+            &infra,
+            Some(ADMITTED),
+            &circuit(),
+            DialOrigin::RelayReservation,
+        ));
+        let err = escaping.expect_err("a circuit admitted under a reachability origin is refused");
+        assert!(
+            err.reason.contains("RelayCircuit"),
+            "the refusal says what the admission should have claimed: {}",
+            err.reason
+        );
+        // AND IT NAMES THE ORIGIN THE TICKET DID CARRY. Without this,
+        // the assertion above is the SAME predicate as the `Manual`
+        // case forty lines up: "must be admitted as RelayCircuit" is
+        // the message's constant tail, present whatever the origin
+        // was. Deleting `ticket.origin()` from the format string left
+        // both green while the message claimed otherwise.
+        assert!(
+            err.reason.contains("RelayReservation"),
+            "and the refusal names the origin the ticket DID carry: {}",
+            err.reason
+        );
+        assert!(
+            err.reason.contains("192.0.2.1"),
+            "and the address, which is what an operator reads: {}",
+            err.reason
+        );
     }
 
     #[test]
     fn a_relay_circuit_claim_needs_a_circuit_in_the_address() {
         // The other direction, and a different mistake: claiming
-        // `RelayCircuit` for an ordinary address asks to be judged as
-        // control-plane traffic for a dial that is nothing of the kind.
+        // `RelayCircuit` for an ordinary address claims a purpose the
+        // dial does not have. It buys no weaker class check —
+        // `RelayCircuit` has named an application destination since
+        // Stage 11 step 2, the same side as `Manual` — so the refusal
+        // is for the mislabelling itself, not for the class it would
+        // escape.
         let manager = manager();
         let err = AdmittedDial::from_ticket(ticket_as(
             &manager,
@@ -640,6 +743,11 @@ mod tests {
         assert!(
             err.reason.contains("carries no /p2p-circuit"),
             "the refusal says which half is missing: {}",
+            err.reason
+        );
+        assert!(
+            err.reason.contains("192.0.2.1"),
+            "and which address was judged: {}",
             err.reason
         );
 
@@ -654,6 +762,126 @@ mod tests {
             ))
             .is_ok()
         );
+
+        // AND AN IDENTITY IN THE ADDRESS IS NOT A CIRCUIT. Only the
+        // marker is. `source_label` had the same guard and the same
+        // gap, closed by
+        // `no_direct_label_can_begin_with_the_relay_prefix`'s last
+        // case; this one is the twin, and it matters more, because a
+        // `/p2p/`-suffixed multiaddr is an ORDINARY form. The
+        // provable path is `commands.rs`'s `AddAddress` and `Dial`,
+        // where an operator pastes the canonical
+        // `/ip4/…/tcp/…/p2p/<id>` form — that IS the shareable one —
+        // and both arms take an arbitrary `Multiaddr`. Identify
+        // supplies them too (`dialing.rs` learns the address
+        // verbatim), though that depends on remote behaviour this tree
+        // neither controls nor tests. `discovery/kademlia`'s
+        // `normalized_addresses` deliberately KEEPS a consistent
+        // suffix — `an_inconsistent_suffix_rejects_the_address_not_the_peer`
+        // asserts it — which is evidence the form is ordinary rather
+        // than a third path: nothing wires those addresses to a dial
+        // yet, and no PRODUCTION code originates one under
+        // `DialOrigin::DiscoveryReconnect`.
+        //
+        // The scope of that claim is `crates/` and `apps/`, and it is
+        // load-bearing. Tests and the spike harness DO build a
+        // `DialRequest` with the variant — `stage5_dial_admission.rs`,
+        // `stage2_exit_gate.rs` and `spike-004`'s `experiments.rs` all
+        // pass it to `admit` — so an unscoped "nothing builds one with
+        // it" is simply false, and an earlier version of this
+        // paragraph said exactly that while conceding two sentences
+        // above that tests use the variant.
+        //
+        // Under `crates/` and `apps/`, every CODE site is in
+        // `connection_policy.rs`: the variant declaration, `ALL`, one
+        // arm of `names_application_destination`, and one arm in its
+        // test module. Check with
+        // `grep -rn 'DiscoveryReconnect' crates/ apps/`, read the
+        // non-comment hits, and do not qualify the pattern — searching
+        // `DialOrigin::DiscoveryReconnect` misses `ALL` and the
+        // production arm (both write `Self::`) and the declaration
+        // (which carries no path at all). Do not restate the hit count
+        // either: a previous version did, and it went stale against
+        // another comment in this same file.
+        //
+        // `ConnectionManager::learn_address` stores whatever arrives,
+        // verbatim, so a widened guard here would refuse a good address
+        // as "a relay circuit", and `settle_undialable` routes that to
+        // `record_permanent_failure`, which FORGETS it. A live route
+        // discarded for a component that means nothing here. Review
+        // finding on PR #74.
+        assert!(
+            AdmittedDial::from_ticket(ticket_for(
+                &manager,
+                Some(ADMITTED),
+                &format!("/ip4/192.0.2.1/tcp/4001/p2p/{ADMITTED}"),
+            ))
+            .is_ok(),
+            "an identity in the address is not a circuit; only the marker is"
+        );
+    }
+
+    /// THE PAIRING IS EXACT ACROSS THE WHOLE ENUM, not merely for the
+    /// four origins the other tests happen to use.
+    ///
+    /// `claims_circuit` is `origin == RelayCircuit`, and until this
+    /// test the predicate was exercised with `Manual`, `RelayCircuit`,
+    /// `RelayReservation` and `ConnectionManager` only. Widening it to
+    /// `matches!(origin, RelayCircuit | DcutrHolePunch)` compiled and
+    /// passed the whole workspace — while silently refusing every
+    /// hole-punch dial to a direct address, which is the origin D1 was
+    /// about and the one this stage is about to build an adapter for.
+    /// `DiscoveryReconnect`, `KademliaQuery` and `AutonatProbe` were
+    /// the same story.
+    ///
+    /// Iterating `DialOrigin::ALL` is what brings a ninth variant here
+    /// rather than to the first relayed deployment — **provided it is
+    /// added to `ALL`**. That array is `[Self; 8]` and its own doc
+    /// says so in capitals: forgetting it there compiles cleanly. What
+    /// the compiler forces is CLASSIFICATION, via the wildcard-free
+    /// match in
+    /// `every_origin_is_classified_and_the_classification_is_pinned`,
+    /// not membership. An earlier version of this sentence claimed the
+    /// array was the guard, which is the exact error that doc was
+    /// written to correct.
+    ///
+    /// This also does not subsume
+    /// `a_relay_circuit_claim_needs_a_circuit_in_the_address`: it pins
+    /// the ORIGIN half of the pairing, and mutating the ADDRESS half
+    /// (`P2pCircuit` to `P2pCircuit | P2p(_)`) passes here and dies
+    /// only there. Review findings on PR #74.
+    #[test]
+    fn only_relay_circuit_pairs_with_a_circuit_address_across_every_origin() {
+        let manager = manager();
+        for origin in DialOrigin::ALL {
+            let direct = AdmittedDial::from_ticket(ticket_as(
+                &manager,
+                Some(ADMITTED),
+                "/ip4/192.0.2.1/tcp/4001",
+                origin,
+            ));
+            let circuit =
+                AdmittedDial::from_ticket(ticket_as(&manager, Some(ADMITTED), &circuit(), origin));
+            if origin == DialOrigin::RelayCircuit {
+                assert!(
+                    direct.is_err(),
+                    "{origin:?} claims a circuit, so a direct address is refused"
+                );
+                assert!(
+                    circuit.is_ok(),
+                    "{origin:?} is what a circuit address must be admitted as"
+                );
+            } else {
+                assert!(
+                    direct.is_ok(),
+                    "{origin:?} does not claim a circuit, so a direct address is admitted"
+                );
+                assert!(
+                    circuit.is_err(),
+                    "{origin:?} does not claim a circuit, so a circuit address is refused"
+                );
+            }
+        }
     }
 
     #[test]
@@ -715,6 +943,17 @@ mod tests {
         let refused = AdmittedDial::from_ticket(ticket_for(&manager, Some(ADMITTED), "127.0.0.1"))
             .expect_err("not a multiaddr");
         assert!(refused.reason.contains("not a multiaddr"), "{refused:?}");
+        // AND IT NAMES THE ADDRESS. `settle_undialable` returns this
+        // string verbatim as `DialRefusal::Backend`, so it is what an
+        // operator reads; without this the `{}` and its argument can
+        // be deleted from the message and every assertion here stays
+        // green. Same defect the origin field had, three messages over.
+        // Review finding on PR #74.
+        assert!(
+            refused.reason.contains("127.0.0.1"),
+            "the refusal names the address it could not parse: {}",
+            refused.reason
+        );
         assert_eq!(
             handle.load().pending_dials(),
             1,

@@ -211,4 +211,3 @@ PreAuthLimits::rate_window_ms                    stage-13  pre-auth admission co
 PreAuthLimitsBuilder                             stage-13  pre-auth admission counters, surfaced by `admin.*` status
 RequestedCapability::as_admin                    stage-13  handshake authority domain, needs two real sockets
 RequestedCapability::as_data                     stage-13  handshake authority domain, needs two real sockets
-source_bucket                                    stage-13  pre-auth admission counters, surfaced by `admin.*` status

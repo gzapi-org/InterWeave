@@ -117,7 +117,8 @@ const NO_PEER: &str = "a behaviour dial that names no peer cannot be classified"
 /// different `ConnectionId` than the Swarm used. Both are bugs in this
 /// crate rather than conditions a peer can provoke, and both fail
 /// closed here.
-const NO_ATTRIBUTION: &str = "a behaviour dial with no attribution cannot be classified; the dialling behaviour is      not wrapped";
+const NO_ATTRIBUTION: &str = "a behaviour dial with no attribution cannot be \
+     classified; the dialling behaviour is not wrapped";
 
 /// The peer id is well-formed for libp2p and not for the neutral crates.
 const NOT_NEUTRAL_IDENTITY: &str = "behaviour dial names an identity outside the neutral grammar";
@@ -230,17 +231,43 @@ impl InFlightTickets {
     }
 }
 
-/// Strip TRAILING `/p2p/<peer>` components, leaving the address the
-/// policy is keyed by (F10).
+/// Strip TRAILING `/p2p/<peer>` components from an address before it
+/// is scored (SPIKE-003's F10).
+///
+/// Only the TRAILING components go: a `/p2p/` in the middle of the
+/// address is a relay path's inner hop, part of the route rather than
+/// a claim about who answers.
 ///
 /// A behaviour dial's address arrives with the peer appended — a query
 /// result carries it — while the address book and the quarantine map
-/// are keyed by the bare transport address, which is what
-/// `AdmittedDial` binds. Passing the suffixed form to the policy looks
-/// up an address it has never seen, so every quarantine silently
-/// misses. Only the TRAILING components go: a `/p2p/` in the middle of
-/// the address is a relay path's inner hop, part of the route rather
-/// than a claim about who answers.
+/// are keyed by whatever the ticket carries. Passing the suffixed form
+/// to the policy looks up an address it has never seen, so every
+/// quarantine silently misses.
+///
+/// **`AdmittedDial` does NOT bind the bare address**, and this comment
+/// said it did until PR #74's review. It binds `ticket.address()`
+/// verbatim, and `attempt_dial` copies the caller's string into the
+/// `DialRequest` unchanged. The BEHAVIOUR path is stripped by
+/// [`strip_own_suffix`] at its call site below — NOT by this function,
+/// whose only PRODUCTION call site is `settle_failed_dial`'s peerless
+/// arm (the tests below call it directly), itself unreachable through
+/// admission: a ticket naming no peer is refused
+/// (`a_dial_that_names_no_peer_is_never_admitted`) and a named one
+/// always parses
+/// (`every_identity_the_neutral_grammar_accepts_libp2p_accepts`). So
+/// this function runs in no production path at all today — those two
+/// tests are what would say so if either premise stopped holding.
+///
+/// The COMMAND and SCHEDULER paths are stripped by neither.
+/// One physical route reached both ways therefore occupies two
+/// `(peer, address)` entries: a quarantine earned on one does not
+/// suppress the other, and both spend `max_addresses` in a map whose
+/// bound is the point. That is F10's failure mode on the command path.
+///
+/// **Not fixed here, and not this PR's to fix**: stripping in
+/// `attempt_dial` would change what admission and quarantine are keyed
+/// by, which is a security boundary and a different change from
+/// resolving D1/D2/D3. Recorded rather than left for rediscovery.
 #[must_use]
 pub fn strip_peer_suffix(address: &Multiaddr) -> String {
     let mut parts: Vec<_> = address.iter().collect();
@@ -720,8 +747,8 @@ mod tests {
                 Endpoint::Dialer,
             )
             .is_err(),
-            "and a data-plane origin toward the same peer is refused — the class split is \
-             decided by the origin the gate was TOLD"
+            "and an origin that names an application destination is refused toward the \
+             same peer — the class split is decided by the origin the gate was TOLD"
         );
     }
 
