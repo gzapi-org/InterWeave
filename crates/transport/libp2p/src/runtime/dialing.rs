@@ -105,9 +105,10 @@ pub(super) fn attempt_dial(
 ///
 /// PERMANENT, not transient. Every way `AdmittedDial::from_ticket`
 /// fails is a deterministic property of the ticket itself -- it names
-/// no peer, its peer is not a libp2p `PeerId`, or its address is not a
-/// multiaddr -- so the same ticket converts the same way every time,
-/// whatever the network does. `record_failure` reschedules, so a
+/// no peer, its peer is not a libp2p `PeerId`, its address is not a
+/// multiaddr, or its origin and its address disagree about whether the
+/// dial is a circuit -- so the same ticket converts the same way every
+/// time, whatever the network does. `record_failure` reschedules, so a
 /// trusted peer with a remembered address retried that identical
 /// conversion failure forever once the scheduler became active.
 ///
@@ -123,6 +124,22 @@ pub(super) fn attempt_dial(
 /// is what says the two agree. The branch stays as a fail-closed guard on
 /// a conversion this module does not own; it is unreachable rather than
 /// untested.
+///
+/// The CIRCUIT PAIRING case is the one to be careful with, because a
+/// mislabelling here is not free. `from_ticket` refuses both
+/// directions of the disagreement -- a `/p2p-circuit` address admitted
+/// under some other origin was judged against the relay's class rather
+/// than the destination's, and `RelayCircuit` on an address with no
+/// circuit in it claims a purpose the dial does not have -- and both
+/// arrive here. `record_permanent_failure` then FORGETS THE ADDRESS
+/// (`connection_manager.rs`, `known.remove(ticket.address())`), which
+/// is right for an address that cannot be dialled and wrong for a good
+/// circuit address that a caller labelled badly. Permanent is still
+/// the correct class, since the pairing is a property of the ticket
+/// and would fail identically on every retry; the note is that the
+/// blast radius of a caller-side bug is a forgotten route, not a
+/// refused dial. Neither direction is reachable today -- no relay
+/// feature is compiled. Review finding on PR #74.
 pub(super) fn settle_undialable(
     manager: &mut ConnectionManager,
     undialable: UndialableAdmission,
