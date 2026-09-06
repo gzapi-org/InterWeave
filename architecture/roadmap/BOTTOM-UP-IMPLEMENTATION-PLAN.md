@@ -1429,10 +1429,10 @@ data-plane origin, against the infrastructure the stage exists to use.
    sites, and pinned from the other side by R5.11, which requires that
    no behaviour-made dial targeted the destination (R5.10 prints the
    targets and is a note, so it cannot fail). Both are
-   exchanges *with* the relay and must carry a control-plane origin.
-   Label the second `RelayCircuit` and, once that origin becomes
-   data-plane, every circuit through an infrastructure-only relay is
-   refused at its set-up dial — relaying broken for exactly the peers
+   exchanges *with* the relay and must carry a reachability origin.
+   Label the second `RelayCircuit` and, now that the origin names an
+   application destination, every circuit through an
+   infrastructure-only relay is refused at its set-up dial — relaying broken for exactly the peers
    it exists to reach. **The gate
    records its own refusals here**: the Swarm discards the denial of a
    behaviour dial, so a refusal that is not written down at the hook is
