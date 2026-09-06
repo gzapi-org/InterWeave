@@ -492,10 +492,17 @@ impl NetworkBehaviour for InstrumentedGate {
         // candidate arrives as `/ip4/…/tcp/…/p2p/<peer>` — a query
         // result carries the peer component — while the address book and
         // the quarantine map are keyed by the bare transport address,
-        // which is what `AdmittedDial` binds. Passing the suffixed form
-        // to `admit` looks up an address the policy has never seen, so
-        // every quarantine silently misses and the dial is admitted on a
-        // route the policy had suppressed. Finding F10.
+        // Passing the suffixed form to `admit` looks up an address the
+        // policy has never seen, so every quarantine silently misses
+        // and the dial is admitted on a route the policy had
+        // suppressed. Finding F10.
+        //
+        // This used to add "which is what `AdmittedDial` binds", which
+        // was never true: it binds `ticket.address()` verbatim.
+        // Corrected 2026-09-06 by PR #74, which found the same clause
+        // in the production doc and in this spike's README. The
+        // measurement is unaffected -- the harness normalizes here
+        // either way -- so only the explanation changed.
         let candidates: Vec<String> = if addresses.is_empty() {
             vec![String::new()]
         } else {
