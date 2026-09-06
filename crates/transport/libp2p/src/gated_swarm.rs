@@ -780,25 +780,29 @@ mod tests {
         // suffix — `an_inconsistent_suffix_rejects_the_address_not_the_peer`
         // asserts it — which is evidence the form is ordinary rather
         // than a third path: nothing wires those addresses to a dial
-        // yet, and no production code DIALS under
-        // `DialOrigin::DiscoveryReconnect`. Not "no use outside its own
-        // enum", which was false — `DialOrigin::ALL` constructs it, and
-        // so do tests, the spike harness and CONNECTIVITY.md. What is
-        // checkable, and what the argument needs, is that nothing
-        // originates a dial with it. Every CODE site is in
+        // yet, and no PRODUCTION code originates one under
+        // `DialOrigin::DiscoveryReconnect`.
+        //
+        // The scope of that claim is `crates/` and `apps/`, and it is
+        // load-bearing. Tests and the spike harness DO build a
+        // `DialRequest` with the variant — `stage5_dial_admission.rs`,
+        // `stage2_exit_gate.rs` and `spike-004`'s `experiments.rs` all
+        // pass it to `admit` — so an unscoped "nothing builds one with
+        // it" is simply false, and an earlier version of this
+        // paragraph said exactly that while conceding two sentences
+        // above that tests use the variant.
+        //
+        // Under `crates/` and `apps/`, every CODE site is in
         // `connection_policy.rs`: the variant declaration, `ALL`, one
         // arm of `names_application_destination`, and one arm in its
-        // test module. No `DialRequest` anywhere is built with it.
-        //
-        // Check it with `grep -rn 'DiscoveryReconnect' crates/ apps/`
-        // and read the non-comment hits; do NOT count them, and do not
-        // qualify the pattern. Two earlier versions of this sentence
-        // got that wrong in both directions — one searched
-        // `DialOrigin::DiscoveryReconnect`, which misses `ALL`, the
+        // test module. Check with
+        // `grep -rn 'DiscoveryReconnect' crates/ apps/`, read the
+        // non-comment hits, and do not qualify the pattern — searching
+        // `DialOrigin::DiscoveryReconnect` misses `ALL` and the
         // production arm (both write `Self::`) and the declaration
-        // (which carries no path at all), and the next enumerated the
-        // hit count, which goes stale the moment anyone writes the
-        // word in a comment. It already had, in this file.
+        // (which carries no path at all). Do not restate the hit count
+        // either: a previous version did, and it went stale against
+        // another comment in this same file.
         //
         // `ConnectionManager::learn_address` stores whatever arrives,
         // verbatim, so a widened guard here would refuse a good address

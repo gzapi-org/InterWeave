@@ -848,15 +848,25 @@ mod tests {
         // rather than by this assertion alone. SHAPE is covered by
         // neither: a mutant that reset `due_at_ms` and `attempts` IN
         // PLACE leaves the length at one here and zero there. That one
-        // dies in one of two places, depending where it sits. Inside
-        // `release_retry_claim`, in
-        // `a_claim_denied_by_a_recoverable_reason_is_released_unchanged`,
-        // which is where that function's "left exactly as they were"
-        // invariant lives. Inside `record_permanent_failure` itself,
-        // in
-        // `a_claimed_permanent_failure_releases_rather_than_strands_the_claim`,
-        // which is the only test that drives that function with a
-        // claim-owning ticket and then reads the retry back.
+        // is only PARTLY covered, and it is worth being exact about
+        // which part.
+        //
+        // Every test that reads a released retry back reads it through
+        // `take_due_retries(30_000, 8)`. So a reset that moves
+        // `due_at_ms` LATER dies -- in
+        // `a_claim_denied_by_a_recoverable_reason_is_released_unchanged`
+        // if it sits in `release_retry_claim`, and in
+        // `a_claimed_permanent_failure_releases_rather_than_strands_the_claim`
+        // or `a_later_candidate_starting_takes_the_claim_back` if it
+        // sits in `record_permanent_failure`, both of which drive that
+        // function with a claim-owning ticket and then read the retry.
+        //
+        // A reset to an EARLIER time, or to `attempts` alone, dies
+        // nowhere: no test reads `attempts`, and no test follows a
+        // release with a second `record_failure` whose backoff would
+        // expose a reset counter. `release_retry_claim`'s doc claims
+        // both fields are "left exactly as they were"; only the one is
+        // pinned.
         // Review findings on PR #74.
         let other: DialTicket = m
             .handle()

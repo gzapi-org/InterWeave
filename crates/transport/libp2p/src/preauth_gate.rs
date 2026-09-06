@@ -155,17 +155,22 @@ const REFUSAL: &str = "connection refused";
 /// tells the mutant from the original. The fourth is different and is
 /// marked. None is chosen by the source.
 ///
-/// THREE of the four are not one-token edits. The two reversals need
-/// the loop rewritten through a `Vec`, because `multiaddr 0.18.2`'s
-/// `Iter` is `Iterator` and not `DoubleEndedIterator`, so `.rev()` is
-/// unavailable; and `relay_ip.get_or_insert(..)` to `= Some(..)`
-/// restructures the arm's type from `&mut String` to `()` -- and both
-/// IP arms must change together or the match does not typecheck. The
-/// SMALLEST of the four is the first-component one, `_ => {}` to
-/// `_ => break` in the non-circuit scan, behaviourally identical to
-/// `.take(1)`. One node, though two tokens on the left -- which is the
-/// same arithmetic that rules out `get_or_insert`, so it is stated as
-/// size rather than as a token count.
+/// NONE of the four is a one-token edit, and they differ in how far
+/// from one they are.
+///
+/// The two reversals need the loop rewritten through a `Vec`, because
+/// `multiaddr 0.18.2`'s `Iter` is `Iterator` and not
+/// `DoubleEndedIterator`, so `.rev()` is unavailable.
+/// `relay_ip.get_or_insert(..)` to `= Some(..)` is ruled out by
+/// TYPING rather than by size: it restructures the arm from
+/// `&mut String` to `()`, and both IP arms must change together or the
+/// match does not compile. The smallest is the first-component one,
+/// `_ => {}` to `_ => break` in the non-circuit scan, behaviourally
+/// identical to `.take(1)` -- one node, two tokens.
+///
+/// The four are therefore compared by SIZE, not by a token count; an
+/// earlier version counted tokens for one of them and asserted
+/// "one-token" of another, which cannot both be right.
 ///
 /// No prediction is offered about tooling: this tree runs no mutation
 /// tooling, so what a generator would find here has never been
