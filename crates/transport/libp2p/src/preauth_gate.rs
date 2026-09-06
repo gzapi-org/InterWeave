@@ -742,6 +742,17 @@ mod tests {
             // A DNS name is a string the remote side chose, and it is
             // rendered into the label verbatim by the second exit.
             (addr("/memory/1"), addr("/dns4/relay.example.com/tcp/5001")),
+            // AN IDENTITY IN THE LOCAL ADDRESS IS NOT A CIRCUIT. Only
+            // the marker means relayed; widening the guard to
+            // `P2pCircuit | P2p(_)` passed all twelve tests and would
+            // have labelled every direct inbound `relay:<our own id>`
+            // -- one bucket for all of them, which is
+            // `max_pending_per_source` turned into a second global
+            // cap. Review finding on PR #74.
+            (
+                addr(&format!("/ip4/10.0.0.1/tcp/4001/p2p/{RELAY}")),
+                addr("/ip4/203.0.113.5/tcp/5001"),
+            ),
         ];
         for (local, remote) in cases {
             let label = source_label(&local, &remote);
