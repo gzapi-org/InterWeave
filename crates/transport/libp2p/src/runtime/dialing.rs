@@ -803,10 +803,11 @@ mod tests {
         m.learn_address(&ident(RELAY), &circuit, 0);
         // A SECOND ROUTE THE REFUSAL MUST NOT TOUCH. With one address
         // in the book, "gone" and "the whole peer was dropped" are the
-        // same number, and `record_permanent_failure`'s own comment
-        // says peer-scoped removal is a regression it already shipped
-        // once. Two addresses make the assertion below say which of
-        // the two happened. Review finding on PR #74.
+        // same number. `record_permanent_failure`'s own comment
+        // records a related regression -- it used to remove the peer's
+        // whole RETRY entry, which is a different map from the book
+        // this asserts on -- so the scheduler is checked too. Review
+        // findings on PR #74.
         m.learn_address(&ident(RELAY), "/ip4/198.51.100.9/tcp/4001", 0);
         assert_eq!(
             m.known_addresses(&ident(RELAY)),
@@ -836,16 +837,24 @@ mod tests {
             reason.contains("RelayCircuit"),
             "it says what the admission should have claimed: {reason}"
         );
+        // THE SURVIVOR IS NAMED, not counted. An earlier version of
+        // this asked `address_dialable` for the other route, which is
+        // `is_none_or` over the quarantine map -- and nothing in this
+        // test ever writes that map, so it answered `true` for any
+        // string, including the address just proved gone. It could not
+        // fail. Counting is not enough either: `known.remove(..)` as
+        // `known.pop_last()` drops the SURVIVOR and keeps the refused
+        // circuit, and both the count and the dialable check stay
+        // green. Review finding on PR #74.
         assert_eq!(
-            m.known_addresses(&ident(RELAY)),
-            1,
-            "and the refused route is GONE — a caller-side mislabelling costs the address"
+            m.dial_candidates(&ident(RELAY), 0),
+            vec!["/ip4/198.51.100.9/tcp/4001".to_owned()],
+            "the refused circuit is gone and ONLY the peer's other route survives"
         );
-        assert!(
-            m.handle()
-                .load()
-                .address_dialable(&ident(RELAY), "/ip4/198.51.100.9/tcp/4001", 0),
-            "and ONLY it: the failure is address-scoped, so the peer's other route survives"
+        assert_eq!(
+            m.scheduled_retries(),
+            0,
+            "and nothing is rescheduled: the pairing converts the same way every time"
         );
     }
 

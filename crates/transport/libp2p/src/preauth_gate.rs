@@ -150,22 +150,35 @@ const REFUSAL: &str = "connection refused";
 /// FOUR MUTATIONS OF THIS FUNCTION ARE KNOWN TO SURVIVE the tests
 /// below, recorded here rather than in a commit message so the next
 /// reader to mutation-test it does not rediscover them as findings.
-/// They are one family: each needs an address carrying TWO components
-/// of a kind where the suite only ever supplies one, so no input tells
-/// the mutant from the original. None is chosen by the source.
+/// Three are one family -- they need an address carrying TWO
+/// components of a kind where the suite supplies one, so no input
+/// tells the mutant from the original. The fourth is different and is
+/// marked. None is chosen by the source.
+///
+/// Two of them are not one-token edits: `multiaddr 0.18.2`'s `Iter` is
+/// `Iterator` and not `DoubleEndedIterator`, so neither reversal is
+/// expressible as `.rev()` -- both need the loop rewritten through a
+/// `Vec`. Worth knowing before mutation-testing this function, since
+/// no generator produces them.
 ///
 /// - `relay_ip.get_or_insert(..)` could be `= Some(..)`, taking the
 ///   last IP before the marker instead of the first.
 /// - the relay-part scan could run in reverse; with one `P2p` and one
 ///   IP before the marker, the `P2p` arm returns first either way.
-/// - the non-circuit scan could take only the remote's first
-///   component, or run in reverse: every non-circuit remote in the
-///   suite carries its IP at position zero.
+/// - the non-circuit scan could run in reverse: no remote in the suite
+///   carries two IPs.
+/// - **NOT the same family**: the non-circuit scan could take only the
+///   remote's FIRST component. That needs a remote whose single IP is
+///   not at position zero -- `/dns4/host/tcp/1/ip4/198.51.100.7` kills
+///   it -- rather than two of anything. Grouping it with the others
+///   would mislead whoever next decides whether a new test closes the
+///   set.
 ///
-/// Everything else tried dies: widened and narrowed guards, dropped
-/// arms, dropped prefixes, a branch replaced by a constant, swapped
-/// operands, and reversing the BRANCH order so the remote's IP is
-/// read before the circuit component -- that last one is what
+/// Everything else tried dies: widening the guard with the remote or
+/// with `P2p(_)`, NARROWING it with the remote, dropped arms, dropped
+/// prefixes, a branch replaced by a constant, swapped operands, and
+/// reversing the BRANCH order so the remote's IP is read before the
+/// circuit component -- that last one is what
 /// `a_relayed_inbound_is_charged_to_the_relay_even_when_the_remote_has_an_ip`
 /// exists for, and it is a different thing from reversing a scan.
 fn source_label(local_addr: &Multiaddr, remote_addr: &Multiaddr) -> String {
@@ -960,6 +973,30 @@ mod tests {
             ),
             "198.51.100.7",
             "only the LOCAL address may decide that a connection is relayed"
+        );
+
+        // AND IT CANNOT VOTE THE GUARD DOWN EITHER. The widening
+        // above is one direction; NARROWING is the other, and it is
+        // the shape a later "hardening" edit takes -- "do not treat it
+        // as relayed if the remote also claims a circuit":
+        //
+        //     local.any(P2pCircuit) && !remote.any(P2pCircuit)
+        //
+        // Nothing in the suite fed a circuit-bearing local BESIDE a
+        // circuit-bearing remote, so that mutant was green everywhere.
+        // Its effect is D3 restored: the connection falls to the
+        // non-circuit scan, a relayed remote has no IP, and the label
+        // becomes the source identity the circuit carries. Review
+        // finding on PR #74.
+        assert_eq!(
+            source_label(
+                &addr(&format!("/ip4/127.0.0.1/tcp/4001/p2p/{RELAY}/p2p-circuit")),
+                &addr(&format!(
+                    "/ip4/198.51.100.7/tcp/5001/p2p-circuit/p2p/{SOURCE_A}"
+                )),
+            ),
+            format!("relay:{RELAY}"),
+            "a remote that ALSO claims a circuit does not un-relay the connection"
         );
     }
 
