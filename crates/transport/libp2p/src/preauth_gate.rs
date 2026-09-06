@@ -155,27 +155,6 @@ const REFUSAL: &str = "connection refused";
 /// tells the mutant from the original. The fourth is different and is
 /// marked. None is chosen by the source.
 ///
-/// NONE of the four is a one-token edit, and they differ in how far
-/// from one they are.
-///
-/// The two reversals need the loop rewritten through a `Vec`, because
-/// `multiaddr 0.18.2`'s `Iter` is `Iterator` and not
-/// `DoubleEndedIterator`, so `.rev()` is unavailable.
-/// `relay_ip.get_or_insert(..)` to `= Some(..)` is ruled out by
-/// TYPING rather than by size: it restructures the arm from
-/// `&mut String` to `()`, and both IP arms must change together or the
-/// match does not compile. The smallest is the first-component one,
-/// `_ => {}` to `_ => break` in the non-circuit scan, behaviourally
-/// identical to `.take(1)` -- one node, two tokens.
-///
-/// The four are therefore compared by SIZE, not by a token count; an
-/// earlier version counted tokens for one of them and asserted
-/// "one-token" of another, which cannot both be right.
-///
-/// No prediction is offered about tooling: this tree runs no mutation
-/// tooling, so what a generator would find here has never been
-/// measured. The sizes above are properties of the source.
-///
 /// - `relay_ip.get_or_insert(..)` could be `= Some(..)`, taking the
 ///   last IP before the marker instead of the first.
 /// - the relay-part scan could run in reverse; with one `P2p` and one
@@ -188,6 +167,19 @@ const REFUSAL: &str = "connection refused";
 ///   it -- rather than two of anything. Grouping it with the others
 ///   would mislead whoever next decides whether a new test closes the
 ///   set.
+///
+/// What each costs to WRITE decides whether a tool or a careless edit
+/// could produce it. The two reversals need the loop rewritten through
+/// a `Vec`, since `multiaddr 0.18.2`'s `Iter` is `Iterator` and not
+/// `DoubleEndedIterator`, so `.rev()` is unavailable. The
+/// `get_or_insert` one does not compile on its own: it restructures
+/// the arm from `&mut String` to `()`, so both IP arms have to change
+/// together. Only the first-component one is a single node, and it is
+/// the only one an ordinary edit would reach.
+///
+/// No prediction is offered about tooling: this tree runs no mutation
+/// tooling, so what a generator would find here has never been
+/// measured. The costs above are properties of the source.
 ///
 /// Everything else tried dies: widening the guard with the remote or
 /// with `P2p(_)`, NARROWING it with the remote, dropped arms, dropped

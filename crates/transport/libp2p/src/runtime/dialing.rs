@@ -851,22 +851,19 @@ mod tests {
         // is only PARTLY covered, and it is worth being exact about
         // which part.
         //
-        // Every test that reads a released retry back reads it through
-        // `take_due_retries(30_000, 8)`. So a reset that moves
-        // `due_at_ms` LATER dies -- in
-        // `a_claim_denied_by_a_recoverable_reason_is_released_unchanged`
-        // if it sits in `release_retry_claim`, and in
-        // `a_claimed_permanent_failure_releases_rather_than_strands_the_claim`
-        // or `a_later_candidate_starting_takes_the_claim_back` if it
-        // sits in `record_permanent_failure`, both of which drive that
-        // function with a claim-owning ticket and then read the retry.
+        // A reset that moves `due_at_ms` LATER dies, because the
+        // tests that read a released retry back read it through
+        // `take_due_retries`, and a later due time makes the peer not
+        // due. `record_permanent_failure` and `record_identity_mismatch`
+        // both CALL `release_retry_claim`, so a mutation inside that
+        // function fires on every one of those paths and several tests
+        // in `connection_manager.rs` catch it.
         //
         // A reset to an EARLIER time, or to `attempts` alone, dies
-        // nowhere: no test reads `attempts`, and no test follows a
-        // release with a second `record_failure` whose backoff would
-        // expose a reset counter. `release_retry_claim`'s doc claims
-        // both fields are "left exactly as they were"; only the one is
-        // pinned.
+        // nowhere: no test reads `attempts`, and none follows a release
+        // with a second `record_failure` whose backoff would expose a
+        // reset counter. `release_retry_claim`'s doc claims both fields
+        // are "left exactly as they were"; only the one is pinned.
         // Review findings on PR #74.
         let other: DialTicket = m
             .handle()
