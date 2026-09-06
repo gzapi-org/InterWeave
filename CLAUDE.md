@@ -45,9 +45,8 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   that address, which the old signature discarded, else by the relay's
   IP collapsed to its /64, else by that address truncated at the
   marker. **The circuit component decides, and it is consulted before
-  the remote's IP**: an interim shape asked the remote for an IP
-  first, which made
-  the rule "no IP means relayed" and pinned the fix to
+  the remote's IP**: an interim shape asked the remote for an IP first,
+  which made the rule "no IP means relayed" and pinned the fix to
   `libp2p-relay 0.21.1` putting no address in a circuit's
   `send_back_addr`. **The third case is
   terminal on purpose**: while it fell through, a circuit carrying

@@ -144,8 +144,9 @@ impl AdmittedDial {
         // infrastructure-only destination would be admitted for what
         // is an application path — ADR-0036's enforcement clause
         // exactly. And `RelayCircuit` on an address with no circuit in
-        // it claims a purpose the dial does not have. Neither is reachable today, since no relay
-        // feature is compiled; both become reachable the moment one is,
+        // it claims a purpose the dial does not have. Neither is
+        // reachable today, since no relay feature is compiled; both
+        // become reachable the moment one is,
         // and refusing here costs a string comparison.
         let circuit_address = address
             .iter()

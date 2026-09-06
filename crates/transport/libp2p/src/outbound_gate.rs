@@ -117,7 +117,8 @@ const NO_PEER: &str = "a behaviour dial that names no peer cannot be classified"
 /// different `ConnectionId` than the Swarm used. Both are bugs in this
 /// crate rather than conditions a peer can provoke, and both fail
 /// closed here.
-const NO_ATTRIBUTION: &str = "a behaviour dial with no attribution cannot be classified; the dialling behaviour is      not wrapped";
+const NO_ATTRIBUTION: &str = "a behaviour dial with no attribution cannot be \
+     classified; the dialling behaviour is not wrapped";
 
 /// The peer id is well-formed for libp2p and not for the neutral crates.
 const NOT_NEUTRAL_IDENTITY: &str = "behaviour dial names an identity outside the neutral grammar";

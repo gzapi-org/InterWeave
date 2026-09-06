@@ -659,7 +659,9 @@ async fn a_poisoned_address_does_not_suppress_the_peer_s_good_route() {
     let detail = wait_dial_failed(&mut dialer).await;
     assert!(
         detail.contains("Unexpected peer ID"),
-        "the impostor must fail the IDENTITY check, not the transport -- a          connection refused or a timeout would quarantine nothing and would          make the assertions below pass for the wrong reason: {detail}"
+        "the impostor must fail the IDENTITY check, not the transport -- a \
+         connection refused or a timeout would quarantine nothing and would \
+         make the assertions below pass for the wrong reason: {detail}"
     );
 
     // THE CLAUSE. The poisoned address is refused from now on...

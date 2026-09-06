@@ -943,7 +943,8 @@ mod tests {
         assert_eq!(
             m.known_addresses(&peer),
             2,
-            "BOTH exhausted addresses were scored and learned, not only              the one the ticket settled"
+            "BOTH exhausted addresses were scored and learned, not only the \
+             one the ticket settled"
         );
         assert_eq!(
             m.handle().load().pending_dials(),
@@ -969,7 +970,8 @@ mod tests {
             !m.handle()
                 .load()
                 .address_dialable(&peer, "/ip4/192.0.2.1/tcp/1", 0),
-            "the quarantine binds to the REAL address, stripped of its              suffix — settled on the placeholder it would bind to nothing"
+            "the quarantine binds to the REAL address, stripped of its suffix \
+             — settled on the placeholder it would bind to nothing"
         );
         assert!(
             m.handle()
