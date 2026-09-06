@@ -803,11 +803,7 @@ mod tests {
         m.learn_address(&ident(RELAY), &circuit, 0);
         // A SECOND ROUTE THE REFUSAL MUST NOT TOUCH. With one address
         // in the book, "gone" and "the whole peer was dropped" are the
-        // same number. `record_permanent_failure`'s own comment
-        // records a related regression -- it used to remove the peer's
-        // whole RETRY entry, which is a different map from the book
-        // this asserts on -- so the scheduler is checked too. Review
-        // findings on PR #74.
+        // same number. Review findings on PR #74.
         m.learn_address(&ident(RELAY), "/ip4/198.51.100.9/tcp/4001", 0);
         assert_eq!(
             m.known_addresses(&ident(RELAY)),
@@ -830,6 +826,36 @@ mod tests {
                 0,
             )
             .expect("a trusted peer with a fresh policy is admitted");
+
+        // AND A SCHEDULED RETRY THE REFUSAL MUST NOT CANCEL.
+        // `record_permanent_failure`'s own comment records the
+        // regression: it used to remove the peer's whole RETRY entry,
+        // so a manual dial to one bad address cancelled the reconnect
+        // that would have tried the others. That is a different map
+        // from the book, and asserting `scheduled_retries() == 0` on a
+        // fixture that never schedules one cannot observe a removal
+        // from an empty map -- which is what the previous version of
+        // this test did while its comment claimed the scheduler was
+        // covered. One is scheduled here so the assertion after the
+        // refusal has something to lose. Review finding on PR #74.
+        let other: DialTicket = m
+            .handle()
+            .load()
+            .admit(
+                &DialRequest {
+                    peer: Some(ident(RELAY)),
+                    address: "/ip4/198.51.100.9/tcp/4001".to_owned(),
+                    origin: DialOrigin::ConnectionManager,
+                },
+                0,
+            )
+            .expect("a trusted peer with a fresh policy is admitted");
+        m.record_failure(other, 0);
+        assert_eq!(
+            m.scheduled_retries(),
+            1,
+            "the peer has a reconnect scheduled before the refusal"
+        );
         let undialable = AdmittedDial::from_ticket(ticket)
             .expect_err("a circuit address under another origin is refused");
         let reason = settle_undialable(&mut m, *undialable, 0);
@@ -851,10 +877,26 @@ mod tests {
             vec!["/ip4/198.51.100.9/tcp/4001".to_owned()],
             "the refused circuit is gone and ONLY the peer's other route survives"
         );
+        // BOTH QUESTIONS, because they are different ones and the doc
+        // above claims both. `dial_candidates` is book MINUS
+        // quarantine, so on its own it cannot tell "removed from the
+        // book" from "still there and suppressed" -- swapping
+        // `record_permanent_failure` for `record_identity_mismatch`,
+        // which quarantines and RELEASES rather than removing, passes
+        // it while the address goes on spending `max_addresses` and
+        // returns when the quarantine expires. An earlier version of
+        // this test replaced the count with the candidates rather than
+        // adding it, and lost exactly that. Review finding on PR #74.
+        assert_eq!(
+            m.known_addresses(&ident(RELAY)),
+            1,
+            "and it is GONE FROM THE BOOK, not merely undialable"
+        );
         assert_eq!(
             m.scheduled_retries(),
-            0,
-            "and nothing is rescheduled: the pairing converts the same way every time"
+            1,
+            "and the peer's reconnect SURVIVES: the failure is address-scoped, \
+             so one bad label does not cancel the retry that would try the rest"
         );
     }
 
