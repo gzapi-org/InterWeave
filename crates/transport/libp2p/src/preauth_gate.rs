@@ -139,7 +139,10 @@ const REFUSAL: &str = "connection refused";
 /// the prefix, and
 /// `a_relay_bucket_never_collides_with_a_direct_bucket_at_the_same_ip`
 /// puts a direct connection and a circuit at ONE address and requires
-/// the two labels to differ. The prefix cannot be forged: a non-relay
+/// the two labels to differ, and
+/// `no_direct_label_can_begin_with_the_relay_prefix` walks both
+/// non-relay exits and requires neither to enter the namespace. The
+/// prefix cannot be forged: a non-relay
 /// return is either a bare IP or a `Multiaddr` rendering, and neither
 /// form can produce one -- an IP has no colon before its first digit
 /// group that could read as `relay:`, and a non-empty `Multiaddr`
@@ -182,12 +185,17 @@ fn source_label(local_addr: &Multiaddr, remote_addr: &Multiaddr) -> String {
         // identity, identities free to mint. D3 wearing a `relay:`
         // prefix.
         //
-        // THE SPLIT IS THE PROTOCOL'S, not this file's reading of one
-        // crate's formatting. `parse_relayed_multiaddr` carries a
+        // libp2p's own PARSER applies the same rule, which is better
+        // evidence than its formatter without being different
+        // evidence in kind. `parse_relayed_multiaddr` carries a
         // `before_circuit` flag and assigns a `/p2p/` to
         // `relay_peer_id` while it is set and to `dst_peer_id` after
-        // (`priv_client/transport.rs:266`), which is the same rule
-        // this loop applies. A second `/p2p-circuit` is refused there
+        // (`priv_client/transport.rs:266`). That is a decoder rather
+        // than an encoder -- it constrains what the crate ACCEPTS from
+        // anywhere, not merely what one code path happens to emit --
+        // but it is still the same pinned crate, so it argues that the
+        // truncation matches the addressing rather than proving the
+        // addressing. A second `/p2p-circuit` is refused there
         // as `MultipleCircuitRelayProtocolsUnsupported`; truncating at
         // the FIRST marker charges the outermost relay, which is
         // coarser than any nested reading and so safe if that ever
