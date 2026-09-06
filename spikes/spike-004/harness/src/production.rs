@@ -35,9 +35,9 @@
 //! refusal of a behaviour dial is invisible, because the Swarm
 //! discards the denial — is a finding about the SWARM and is still
 //! true, but it needs a refused dial to observe and step 1 removed the
-//! accidental one. `with_trust_and_origin` announces a data-plane
-//! origin for a reservation dial, reproducing the same
-//! `NotAuthorizedForDataPlane` refusal honestly.
+//! accidental one. `with_trust_and_origin` announces an origin that
+//! names an application destination for a reservation dial,
+//! reproducing the same `NotAuthorizedForDataPlane` refusal honestly.
 
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};

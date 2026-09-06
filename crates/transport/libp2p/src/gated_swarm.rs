@@ -770,13 +770,19 @@ mod tests {
         // `no_direct_label_can_begin_with_the_relay_prefix`'s last
         // case; this one is the twin, and it matters more, because a
         // `/p2p/`-suffixed multiaddr is an ORDINARY form. The
-        // provable paths are `commands.rs`'s `AddAddress` and `Dial`,
+        // provable path is `commands.rs`'s `AddAddress` and `Dial`,
         // where an operator pastes the canonical
         // `/ip4/…/tcp/…/p2p/<id>` form — that IS the shareable one —
-        // and `discovery/kademlia`'s `normalize`, which keeps a
-        // consistent suffix as-is by test. Identify supplies them too,
-        // but that depends on remote behaviour this tree does not
-        // control. `ConnectionManager::learn_address` stores whatever
+        // and both arms take an arbitrary `Multiaddr`. Identify
+        // supplies them too (`dialing.rs` learns the address
+        // verbatim), though that depends on remote behaviour this tree
+        // neither controls nor tests. `discovery/kademlia`'s
+        // `normalized_addresses` deliberately KEEPS a consistent
+        // suffix — `an_inconsistent_suffix_rejects_the_address_not_the_peer`
+        // asserts it — which is evidence the form is ordinary rather
+        // than a third path: nothing wires those addresses to a dial
+        // yet, and `DialOrigin::DiscoveryReconnect` has no use outside
+        // its own enum. `ConnectionManager::learn_address` stores whatever
         // arrives, verbatim, so a widened guard here would refuse a
         // good address as "a relay circuit",
         // and `settle_undialable` routes that to
