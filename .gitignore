@@ -157,5 +157,7 @@ spikes/**/Cargo.lock
 
 # cargo-mutants writes its report tree into the working directory when
 # `--output` is not given. It is build output, and a `git add -A` swept
-# twenty-two of its files into a commit before this line existed.
+# twenty-eight of its files into a commit before this line existed --
+# 22 under `mutants.out/` and 6 under `mutants.out.old/`, which is why
+# the pattern below ends in `*` rather than matching one directory.
 mutants.out*/
