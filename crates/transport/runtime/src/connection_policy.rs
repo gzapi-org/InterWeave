@@ -206,9 +206,25 @@ impl DialOrigin {
     /// Every origin, so an exhaustive check cannot silently miss one.
     ///
     /// A test that lists origins by hand proves what its author
-    /// remembered. Adding a variant without adding it here fails to
-    /// compile, which is the property worth having when the rule being
-    /// tested is "no origin skips the gate".
+    /// remembered. Iterating this instead means a test walks the whole
+    /// enum without restating it.
+    ///
+    /// THIS ARRAY IS NOT ITSELF THE GUARD, and it reads as though it
+    /// were. It is `[Self; 8]`: adding a ninth variant and forgetting
+    /// it here compiles cleanly, and the array then silently covers
+    /// less than the enum. What actually fails to compile is the
+    /// exhaustive `match` inside
+    /// `every_origin_is_classified_and_the_classification_is_pinned`,
+    /// which has no wildcard arm, so a new variant must be given a
+    /// side there before the tests build.
+    ///
+    /// That distinction is worth the paragraph, because the direction
+    /// of the silence is fail-OPEN:
+    /// [`DialOrigin::names_application_destination`] is a `matches!`,
+    /// so a variant nobody classified answers `false` -- the
+    /// reachability side -- and is admitted toward an
+    /// infrastructure-only peer. Which is D1 and D2 exactly. Review
+    /// finding on PR #74.
     pub const ALL: [Self; 8] = [
         Self::Manual,
         Self::ConnectionManager,
