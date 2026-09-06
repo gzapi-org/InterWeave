@@ -1431,12 +1431,12 @@ data-plane origin, against the infrastructure the stage exists to use.
    targets and is a note, so it cannot fail). Both are
    exchanges *with* the relay and must carry a reachability origin.
    Label the second `RelayCircuit` and, now that the origin names an
-   application destination, every circuit through an
-   infrastructure-only relay is refused at its set-up dial — relaying broken for exactly the peers
-   it exists to reach. **The gate
-   records its own refusals here**: the Swarm discards the denial of a
-   behaviour dial, so a refusal that is not written down at the hook is
-   written down nowhere;
+    application destination, every circuit through an
+    infrastructure-only relay is refused at its set-up dial — relaying
+    broken for exactly the peers it exists to reach.
+    **The gate records its own refusals here**: the Swarm discards the
+    denial of a behaviour dial, so a refusal that is not written down
+    at the hook is written down nowhere;
 2. **resolve D1, D2 and D3 — DONE: D1 and D2 on 2026-09-04, D3 on
    2026-09-05.** `DcutrHolePunch` was
    admitted for a `ConnectivityInfrastructureOnly` peer, which
