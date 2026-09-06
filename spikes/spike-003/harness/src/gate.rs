@@ -491,7 +491,7 @@ impl NetworkBehaviour for InstrumentedGate {
         // NORMALIZED THE WAY THE POLICY IS KEYED. A behaviour dial's
         // candidate arrives as `/ip4/…/tcp/…/p2p/<peer>` — a query
         // result carries the peer component — while the address book and
-        // the quarantine map are keyed by the bare transport address,
+        // the quarantine map are keyed by the bare transport address.
         // Passing the suffixed form to `admit` looks up an address the
         // policy has never seen, so every quarantine silently misses
         // and the dial is admitted on a route the policy had

@@ -155,11 +155,13 @@ const REFUSAL: &str = "connection refused";
 /// tells the mutant from the original. The fourth is different and is
 /// marked. None is chosen by the source.
 ///
-/// Two of them are not one-token edits: `multiaddr 0.18.2`'s `Iter` is
-/// `Iterator` and not `DoubleEndedIterator`, so neither reversal is
+/// The two REVERSALS are not one-token edits: `multiaddr 0.18.2`'s
+/// `Iter` is `Iterator` and not `DoubleEndedIterator`, so neither is
 /// expressible as `.rev()` -- both need the loop rewritten through a
-/// `Vec`. Worth knowing before mutation-testing this function, since
-/// no generator produces them.
+/// `Vec`, and no generator produces them. The other two are: the
+/// first-component one is `_ => {}` to `_ => break` in the non-circuit
+/// scan, which is behaviourally identical to `.take(1)`. Expect a
+/// generator to find that one.
 ///
 /// - `relay_ip.get_or_insert(..)` could be `= Some(..)`, taking the
 ///   last IP before the marker instead of the first.

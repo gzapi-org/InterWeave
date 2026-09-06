@@ -781,11 +781,14 @@ mod tests {
         // suffix — `an_inconsistent_suffix_rejects_the_address_not_the_peer`
         // asserts it — which is evidence the form is ordinary rather
         // than a third path: nothing wires those addresses to a dial
-        // yet, and no PRODUCTION code constructs
-        // `DialOrigin::DiscoveryReconnect` — tests, the spike harness
-        // and CONNECTIVITY.md all name it, which is why the narrower
-        // claim is the checkable one. `ConnectionManager::learn_address` stores whatever
-        // arrives, verbatim, so a widened guard here would refuse a
+        // yet, and no production code DIALS under
+        // `DialOrigin::DiscoveryReconnect`. Not "no use outside its own
+        // enum", which was false — `DialOrigin::ALL` constructs it, and
+        // so do tests, the spike harness and CONNECTIVITY.md. What is
+        // checkable, and what the argument needs, is that nothing
+        // originates a dial with it. `ConnectionManager::learn_address`
+        // stores whatever arrives, verbatim, so a widened guard here
+        // would refuse a
         // good address as "a relay circuit",
         // and `settle_undialable` routes that to
         // `record_permanent_failure`, which FORGETS it. A live route
