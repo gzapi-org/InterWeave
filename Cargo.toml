@@ -135,10 +135,13 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 #
 # THE ABSENCE OF THESE THREE WAS LOAD-BEARING UNTIL THIS COMMIT, and what
 # replaced it is not a comment. While they were uncompiled, no
-# `ConnectivityInfrastructureOnly` connection could be established by any
-# means, so every rule about one was latent — which is exactly why
+# `ConnectivityInfrastructureOnly` connection could be DIALLED or
+# RETAINED, so every rule about one was latent — which is exactly why
 # SPIKE-004 found three violations in shipped code that no shipped build
-# could reach. From here the guarantee is the gate and its tests, not the
+# could reach. Not "established": such a connection is established and
+# then closed, which is a different thing and is the exposure §14 names.
+# `an_infrastructure_only_peer_gets_a_connection_established_before_it_is_refused`
+# demonstrates it, and needs no relay code to do so. From here the guarantee is the gate and its tests, not the
 # feature list, and a rule about infrastructure-only peers that has no
 # test is now a rule about a reachable state.
 #
@@ -146,14 +149,16 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 # `tests/connectivity/tests/advertised_protocol_set.rs`: it reads the
 # protocol set a default profile advertises, from a third-party Identify
 # observer over loopback, and asserts it exactly — so a behaviour
-# constructed that nobody configured fails it. Its own doc records what
+# constructed that nobody configured fails it, PROVIDED that behaviour
+# advertises on a direct inbound connection. Its own doc records what
 # that does and does not catch, measured by constructing each behaviour
 # in turn: relay server and autonat client are caught, a relay client
 # cannot even be half-installed, and DCUtR is invisible to any observer
 # on a direct connection because `libp2p-dcutr` registers its handler
 # only on a `/p2p-circuit` one.
 #
-# `mdns` IS ALSO ABSENT, and for a different reason worth stating so the
+# `mdns` IS ABSENT, and for a reason unlike any above — not stage order
+# but a dependency advisory — worth stating so the
 # next reader does not simply switch it on. Stage 9 tried: enabling it
 # pulls `libp2p-mdns 0.48`, which pins `hickory-proto 0.25.x`, which
 # carries RUSTSEC-2026-0118 (a DNSSEC validation loop that never

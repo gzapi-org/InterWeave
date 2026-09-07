@@ -40,12 +40,16 @@
 //! `/p2p-circuit` connection, which needs a relay — Phase 4's work, and
 //! recorded here so it is not mistaken for covered.
 //!
-//! The fourth row is a safeguard worth knowing: `relay::client::Behaviour`
-//! cannot be half-installed. Constructed without its paired
-//! `relay::client::Transport` on the Swarm, the first poll hits
-//! `unreachable!("`relay::Behaviour` polled after channel from
-//! `Transport` has been closed")`. A relay client therefore cannot be
-//! added without also changing the builder chain.
+//! The fourth row needs its condition stated. The panic fires when the
+//! paired `relay::client::Transport` has been DROPPED — which is what
+//! the natural mistake, `relay::client::new(pid).1`, does — and
+//! `priv_client.rs:377` says so in its own message: "never polled after
+//! `client::Transport` is dropped". A Transport constructed and kept
+//! alive but simply not installed on the Swarm does not close the
+//! channel, and then the behaviour advertises
+//! `/libp2p/circuit/relay/0.2.0/stop` on a direct inbound and the
+//! exact-set assertion catches it instead. Either way it is caught; the
+//! row records which mechanism does the catching.
 //!
 //! Read from a third-party Identify observer over loopback rather than
 //! from this crate's own types, because what a peer is TOLD is the
@@ -67,6 +71,15 @@ use libp2p::Multiaddr;
 /// How long a loopback Identify exchange may take before the test fails.
 const PATIENCE: Duration = Duration::from_secs(20);
 
+/// The observer's own idle-connection timeout.
+///
+/// Deliberately longer than [`PATIENCE`], so that a `ConnectionClosed`
+/// seen inside the test window is necessarily the SUBJECT's decision.
+/// libp2p's default is 10s, which is shorter than `PATIENCE` — and that
+/// gap made the refusal assertion below unfalsifiable until it was
+/// mutated.
+const IDLE_FAR_BEYOND_PATIENCE: Duration = Duration::from_secs(600);
+
 /// Everything a default profile advertises, and nothing else.
 ///
 /// **Every entry here is the BACKEND's, and that is the first thing this
@@ -80,7 +93,8 @@ const PATIENCE: Duration = Duration::from_secs(20);
 /// `/ipfs/id/1.0.0` and `/ipfs/id/push/1.0.0`
 /// (`libp2p-identify-0.47.0` `protocol.rs:35,37`). The three
 /// `/meshsub/` entries are GossipSub's, likewise — and there are three,
-/// not the two a reader of `PUBSUB.md` would predict.
+/// not the two `libp2p-gossipsub-0.49.5` `config.rs:572` names as the
+/// default; `protocol.rs:47,52,56` registers all three.
 ///
 /// So the two InterWeave protocols below are the only ones this project
 /// names. A test that had asserted the set it EXPECTED would have been
@@ -215,6 +229,129 @@ async fn a_default_profile_advertises_exactly_these_protocols_and_no_others() {
          possible without a manifest change. Missing entries mean a protocol \
          stopped being offered."
     );
+
+    subject.shutdown().await.expect("stops");
+}
+
+/// A profile that treats `infra` as reachability infrastructure only and
+/// trusts nobody for the data plane.
+fn infrastructure_only(infra: &TransportIdentity) -> TrustSources {
+    TrustSources::new(
+        PeerTrustPolicy::new(std::iter::empty()).expect("an empty allowlist"),
+        InfrastructureSet::new([infra.clone()]).expect("a one-peer set"),
+    )
+}
+
+#[tokio::test]
+async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_refused() {
+    // WHAT THIS CORRECTS. Three places in this repository have said that
+    // while relay, AutoNAT and DCUtR were uncompiled "no
+    // `ConnectivityInfrastructureOnly` connection could be established
+    // by any means". That is not what the code does, and the difference
+    // is the whole of `BOTTOM-UP-IMPLEMENTATION-PLAN.md` §14.
+    //
+    // Neither gate denies at the ESTABLISHED hook: `PreAuthAdmission`
+    // and `OutboundAdmission` both return `Ok(dummy::ConnectionHandler)`
+    // unconditionally (`preauth_gate.rs`, `outbound_gate.rs`), and
+    // pre-Noise admission cannot know a PeerId in any case. So the
+    // connection completes, every data-plane handler is installed, and
+    // only afterwards does the runtime classify the peer and close it
+    // (`runtime/dialing.rs`).
+    //
+    // The accurate word is RETAINED, not established. This test is what
+    // makes that word load-bearing rather than a preference: it fails if
+    // an infrastructure-only peer is ever refused before establishment,
+    // which is what the old sentence claimed already happened, and it
+    // fails if such a peer is retained, which is the security rule.
+    //
+    // **This window is the exposure `ClassGated<B>` exists to close**,
+    // and it is reachable with no relay code anywhere — an
+    // `InfrastructureSet` is fed by ordinary configuration.
+    use futures::StreamExt as _;
+
+    let observer_keys = libp2p::identity::Keypair::generate_ed25519();
+    let observer_peer = TransportIdentity::parse(observer_keys.public().to_peer_id().to_base58())
+        .expect("a canonical identity");
+
+    let subject_id = ProfileIdentity::generate();
+    let subject_peer = subject_id.transport_identity().expect("peer id");
+
+    let mut subject = SwarmRuntime::start(
+        &subject_id,
+        SubstrateConfig::default(),
+        // The observer is infrastructure, and nothing else. Under
+        // ADR-0036 that authorizes reachability control and no data
+        // plane at all.
+        infrastructure_only(&observer_peer),
+    )
+    .expect("the runtime starts");
+    let address = listening(&mut subject).await;
+
+    let mut observer = libp2p::SwarmBuilder::with_existing_identity(observer_keys)
+        .with_tokio()
+        .with_tcp(
+            libp2p::tcp::Config::default(),
+            libp2p::noise::Config::new,
+            libp2p::yamux::Config::default,
+        )
+        .expect("the same transport stack the subject uses")
+        .with_behaviour(|k| {
+            libp2p::identify::Behaviour::new(libp2p::identify::Config::new(
+                "/interweave-infra-observer/1".to_owned(),
+                k.public(),
+            ))
+        })
+        .expect("behaviour")
+        // THE OBSERVER MUST NOT CLOSE THE CONNECTION ITSELF, or this
+        // test cannot tell a refusal from a timeout. libp2p's default
+        // idle timeout is 10s and `PATIENCE` is 20s, so the first draft
+        // of this test passed for a DATA-PLANE-TRUSTED observer too --
+        // the close it observed was its own. Caught by mutating the
+        // trust source and watching the run go from 0.07s to 10.06s
+        // while still reporting success.
+        .with_swarm_config(|c| c.with_idle_connection_timeout(IDLE_FAR_BEYOND_PATIENCE))
+        .build();
+
+    let peer: libp2p::PeerId = subject_peer.as_str().parse().expect("a libp2p identity");
+    observer
+        .dial(
+            libp2p::swarm::dial_opts::DialOpts::peer_id(peer)
+                .addresses(vec![address])
+                .build(),
+        )
+        .expect("dial accepted");
+
+    // Both events are certain and ordered, so this is not a race: the
+    // transport completes the handshake before the runtime's event loop
+    // ever sees `ConnectionEstablished` to classify.
+    let mut established = false;
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "expected the connection to be established and then closed; established={established}"
+        );
+        match tokio::time::timeout(remaining, observer.select_next_some()).await {
+            Ok(libp2p::swarm::SwarmEvent::ConnectionEstablished { .. }) => established = true,
+            Ok(libp2p::swarm::SwarmEvent::ConnectionClosed { .. }) => {
+                assert!(
+                    established,
+                    "a close without an establish would mean the peer was refused earlier \
+                     than this test claims -- which would make the old 'could not be \
+                     established by any means' wording right and this one wrong"
+                );
+                // The observer cannot have caused this: its own idle
+                // timeout is well beyond the whole test window.
+                break;
+            }
+            Ok(libp2p::swarm::SwarmEvent::OutgoingConnectionError { error, .. }) => {
+                panic!("the dial failed before establishment: {error:?}");
+            }
+            Ok(_) => {}
+            Err(_) => panic!("neither establishment nor closure arrived"),
+        }
+    }
 
     subject.shutdown().await.expect("stops");
 }

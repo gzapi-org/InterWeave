@@ -53,9 +53,11 @@ validates, whether a dial carries an address at the pending hook. A
 floating `0.56` resolves a later patch, and a result that cannot be
 rebuilt is not evidence.
 
-The harness is its own workspace (an empty `[workspace]` table). That is
-what keeps `autonat`, `relay` and `dcutr` off the production feature
-list: Cargo unifies features across one build of one workspace, so as a
+The harness is its own workspace (an empty `[workspace]` table). When
+this spike ran, that is what kept `autonat`, `relay` and `dcutr` off the
+production feature list — Stage 11 has since put all three on it, so
+this paragraph is the record of why the spike ran first, not a live
+constraint. The mechanism it describes is unchanged: Cargo unifies features across one build of one workspace, so as a
 member this harness would switch all three on inside
 `interweave-transport-libp2p` invisibly — nothing in the production
 crate would have changed.

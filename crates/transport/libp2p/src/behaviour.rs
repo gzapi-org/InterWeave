@@ -222,10 +222,23 @@ pub struct SubstrateBehaviour {
 // CHANGED WHEN STAGE 11 ENABLED THE THREE FEATURES, and is now much
 // weaker. It used to be the manifest: relay, AutoNAT and DCUtR were
 // absent from the libp2p feature list, so no
-// `ConnectivityInfrastructureOnly` connection could be established by any
-// means. All three are compiled now.
+// `ConnectivityInfrastructureOnly` connection could be DIALLED or
+// RETAINED. All three are compiled now.
 //
-// What stands in their way is that NOTHING CONSTRUCTS THEM. There is no
+// THAT WAS NEVER "ESTABLISHED", and the distinction is this comment's
+// whole subject. Neither gate denies at the established hook — both
+// return `Ok(dummy::ConnectionHandler)` unconditionally, and pre-Noise
+// admission cannot know a PeerId anyway — so an inbound connection from
+// an infrastructure-only peer COMPLETES, with every handler below
+// installed and every protocol advertised, and is closed afterwards by
+// the runtime's event loop. The window is real today, needs no relay
+// code, and is reachable through ordinary configuration, because an
+// `InfrastructureSet` comes from
+// `transport.connectivity.infrastructure.allowed_peers`.
+// `tests/connectivity/tests/advertised_protocol_set.rs` pins it.
+//
+// What stands in the way of a RETAINED such connection is that NOTHING
+// CONSTRUCTS THEM. There is no
 // field for any of the three in the struct below, no constructor, and no
 // configuration path — not a disabled behaviour but an absent one. Two
 // further facts make the class unreachable rather than merely unused:
