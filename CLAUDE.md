@@ -32,6 +32,21 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   violations sitting in already-shipped code, none ever reachable in a
   shipped build**, and **step 2 fixed all three (D1 and D2 on
   2026-09-04, D3 on 2026-09-05); the harness reports zero divergences.**
+  **`autonat`, `relay` and `dcutr` are now IN the workspace libp2p
+  features**, added after step 2 in a change that constructs nothing —
+  no field in `SubstrateBehaviour`, no constructor, no configuration
+  path. That ends the era in which §3's promise was kept by the
+  compiler: a behaviour can now be switched on by writing code rather
+  than by editing a manifest, so from here the guarantee is the outbound
+  gate, the trust classification and their tests. Two consequences bind
+  anything built next. A rule about an infrastructure-only peer is a
+  rule about a state this build can reach, not a latent one. And the
+  exposure `BOTTOM-UP-IMPLEMENTATION-PLAN.md` §14 names — every
+  data-plane behaviour installed uniformly on every connection — is now
+  one commit away rather than one stage, so **the commit that gives
+  these behaviours a constructor must not land before that restriction
+  does**; the owner ruled on 2026-09-07 that it ships gated off and the
+  `ClassGated<B>` fix lands first.
   `DcutrHolePunch` (D1) and `RelayCircuit` (D2) were both admitted for
   an infrastructure-only peer; the admission predicate — renamed
   `names_application_destination` in the same commit, because the old

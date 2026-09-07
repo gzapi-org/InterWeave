@@ -7,11 +7,18 @@
 # TCP, Noise, Yamux and Identify from Stage 4; direct v2 over
 # request-response from Stage 6; signed GossipSub from Stage 7; Kademlia
 # from Stage 10, peer routing only; AutoNAT v2, Circuit Relay v2 and
-# DCUtR from Stage 11, client roles.
+# DCUtR from Stage 11. Client roles are what this stage builds first;
+# the features are not role-split, so the AutoNAT and Relay server
+# halves are compiled too and later steps own them.
 #
-# THE FEATURE LIST WITHHOLDS NOTHING THIS CRATE IS WAITING FOR — `mdns`
-# is still absent, for the dependency-advisory reason the root manifest
-# states, and must not be switched on. Every stage before this
+# THE FEATURE LIST WITHHOLDS NO BEHAVIOUR ANY STAGE IS WAITING ON. Two
+# entries are still absent and neither is stage-gated: `mdns`, for the
+# dependency-advisory reason the root manifest states, and `dns`, which
+# no stage has yet opened even though `profile-config` accepts `/dns4`
+# and `/dns6` addresses and `static-bootstrap.md` names them — so a
+# configured DNS address validates and cannot be dialled. That gap
+# predates this change; what is new is only that this paragraph must not
+# be read as denying it. Every stage before this
 # one could say a behaviour was absent from the workspace features rather
 # than merely unused, so a stray `use` could not switch it on and
 # CLAUDE.md §3's promise was kept by the compiler. From Stage 11 it is

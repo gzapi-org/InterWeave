@@ -30,7 +30,7 @@
 //! order CLAUDE.md §3 requires; Stage 10 taught it to answer with
 //! policy rather than with a flat no.
 //!
-//! # Nothing is withheld by the feature list any more
+//! # The feature list withholds no behaviour any more
 //!
 //! This section used to name GossipSub, direct v2, Kademlia, AutoNAT,
 //! Circuit Relay and DCUtR as absent from the `libp2p` feature list this
@@ -47,7 +47,8 @@
 //! state this build can now reach rather than a latent one, and a new
 //! behaviour added here is one nothing outside this crate prevents from
 //! dialling. `mdns` remains genuinely absent, for the dependency-advisory
-//! reason the root manifest states.
+//! reason the root manifest states, and so does `dns`, which leaves a
+//! `/dns4` address `profile-config` accepts undialable.
 //!
 //! # Nothing above this crate sees a libp2p type
 //!

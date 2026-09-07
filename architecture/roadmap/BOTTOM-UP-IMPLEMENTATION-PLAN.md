@@ -398,7 +398,7 @@ bounded internal command/event channels
 deterministic shutdown
 ```
 
-Do not enable GossipSub, direct v2, Kademlia, AutoNAT, Relay or DCUtR yet.
+Stage 4 does not enable GossipSub, direct v2, Kademlia, AutoNAT, Relay or DCUtR.
 
 At Stage 4 they were **absent from the `libp2p` feature list** rather than merely unused, so none could be switched on by a `use` statement or a stray builder call. A behaviour that is not compiled cannot be enabled by accident, which is the cheapest way to keep §3's promise that admission policy is never retrofitted.
 

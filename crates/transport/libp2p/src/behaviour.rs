@@ -214,7 +214,11 @@ pub struct SubstrateBehaviour {
 // and of the eight `DialOrigin` variants, only `RelayReservation` and
 // `AutonatProbe` fall outside `names_application_destination`, so they
 // are the only two under which such a connection could be dialled or
-// held open — and only these behaviours emit them. Inbound is answered
+// held open. What keeps them unused is NOT that only a behaviour can
+// supply them: `attempt_dial` takes an origin from any in-crate caller,
+// which is exactly how `RelayCircuit` is meant to arrive. It is that no
+// call site passes either one — every production site passes `Manual`,
+// `ConnectionManager` or `KademliaQuery`. Inbound is answered
 // the same way: `dialing.rs` retains an inbound connection only if
 // `ConnectionManager::authorizes`, which asks under `DialOrigin::Manual`
 // and so refuses this class outright.
