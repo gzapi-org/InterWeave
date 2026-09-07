@@ -95,15 +95,18 @@ const REFUSAL: &str = "connection refused";
 /// was correct on the pinned version and pinned to it; review finding
 /// on PR #74.
 ///
-/// **The libp2p-relay version these citations read is not locked.**
-/// `relay` is absent from the workspace feature list, so `Cargo.lock`
-/// resolves no `libp2p-relay` at all; 0.21.1 is what `libp2p 0.56`
-/// selects and what SPIKE-004's own harness pinned, read from the
-/// registry rather than fixed by this tree. Enabling the feature may
-/// resolve a different one, and every line number below is then a
-/// citation into a file that has moved. The code does not depend on
-/// any of it -- that is the point of reading the local address first
-/// and truncating it at the circuit component -- but the PROSE does.
+/// **These citations are now locked, and they read the same version.**
+/// This paragraph used to warn that they were not: `relay` was absent
+/// from the workspace feature list, so `Cargo.lock` resolved no
+/// `libp2p-relay` at all, and 0.21.1 was merely what `libp2p 0.56`
+/// selects and what SPIKE-004's harness pinned -- read from the registry
+/// rather than fixed by this tree. Stage 11's features-on step enabled
+/// `relay`, and the resolution it wrote to `Cargo.lock` is 0.21.1: the
+/// same version, so every line number below was re-read against the
+/// locked source and still says what it is quoted as saying. A future
+/// bump can still move them, and the code depends on none of it -- that
+/// is the point of reading the local address first and truncating it at
+/// the circuit component -- but the PROSE does, so re-read it then.
 ///
 /// libp2p-relay 0.21.1 builds the local address as
 /// `relay_addr.with(Protocol::P2pCircuit)` from the established relay

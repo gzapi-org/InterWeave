@@ -400,7 +400,9 @@ deterministic shutdown
 
 Do not enable GossipSub, direct v2, Kademlia, AutoNAT, Relay or DCUtR yet.
 
-They are **absent from the `libp2p` feature list** rather than merely unused, so none can be switched on by a `use` statement or a stray builder call. A behaviour that is not compiled cannot be enabled by accident, which is the cheapest way to keep §3's promise that admission policy is never retrofitted.
+At Stage 4 they were **absent from the `libp2p` feature list** rather than merely unused, so none could be switched on by a `use` statement or a stray builder call. A behaviour that is not compiled cannot be enabled by accident, which is the cheapest way to keep §3's promise that admission policy is never retrofitted.
+
+Each later stage added its own and only its own: `request-response` at Stage 6, `gossipsub` at Stage 7, `kad` at Stage 10, and `autonat`/`relay`/`dcutr` at Stage 11. **That list is now empty, so from Stage 11 on the promise is kept by the gate and its tests rather than by the compiler** — which is the reason Stage 11 spends two whole steps on attribution and on SPIKE-004's D1/D2/D3 before it touches the manifest.
 
 The dial path runs through the Stage 2 `ConnectionPolicy` from the first line of substrate code. Stage 5 owns making that gate **root** — behaviour-originated dials, the ConnectionManager, the retry scheduler, and feeding connection outcomes back into the policy so backoff has something to act on. What Stage 4 declines to do is ship a dial path with no gate and add one later.
 
@@ -1291,10 +1293,11 @@ A later stage AND a later spike. Stage 10 closing is not evidence for
 either, and no build may ship the default on until both land.
 
 What the stage did NOT establish, beyond that clause: **server-mode
-reachability evidence is not validated at all.** AutoNAT and Relay are
-absent from the libp2p feature list, so §14's
-AutoNAT-verified-or-relay-reservation rule has never been exercised.
-Nothing here should be read as evidence for it.
+reachability evidence is not validated at all.** AutoNAT and Relay were
+absent from the libp2p feature list for the whole of Stage 10, so §14's
+AutoNAT-verified-or-relay-reservation rule was never exercised here.
+Nothing in this block should be read as evidence for it. Stage 11 has
+since compiled both, which changes nothing about what Stage 10 proved.
 
 ### Why the shipping default was never reachable here
 
@@ -1542,7 +1545,7 @@ data-plane origin, against the infrastructure the stage exists to use.
 ### Mandatory invariants
 
 - all behavior-originated dials pass DialAdmissionGate;
-- connectivity-infrastructure peers never gain GossipSub/direct/endpoint/Kademlia authority merely by being connected. **Read this as EXPOSURE, not only authority.** Stages 6-9 built each data-plane entry point to classify its caller — direct ingress, the GossipSub publisher check, `build_answer`'s trust check — so authority is already refused, and an implementer who checks only that will find the invariant apparently met. What is NOT met is the other half: `SubstrateBehaviour` installs `direct`, `broadcast`, `endpoints` and — since Stage 10 — `kad` on every connection uniformly, so once an infrastructure-only connection exists, that peer can advertise and open those substreams and be refused only after the request has been parsed and accounted. **Four protocols, not three**: Kademlia's authority check is the driver's `try_admit` data-plane trust requirement, so such a peer holds no routing seat, but it can still open the DHT substream and be answered — the same exposure, and an implementer working from a list of three would leave it in place. Nothing exercises this today because relay, AutoNAT and DCUtR are absent from the libp2p feature list, so no infrastructure-only connection can be established at all — Stage 11 is the change that creates the first one, which is why the correction belongs here. The protocol set an infrastructure-only connection offers must be restricted at the connection, not merely answered at the request;
+- connectivity-infrastructure peers never gain GossipSub/direct/endpoint/Kademlia authority merely by being connected. **Read this as EXPOSURE, not only authority.** Stages 6-9 built each data-plane entry point to classify its caller — direct ingress, the GossipSub publisher check, `build_answer`'s trust check — so authority is already refused, and an implementer who checks only that will find the invariant apparently met. What is NOT met is the other half: `SubstrateBehaviour` installs `direct`, `broadcast`, `endpoints` and — since Stage 10 — `kad` on every connection uniformly, so once an infrastructure-only connection exists, that peer can advertise and open those substreams and be refused only after the request has been parsed and accounted. **Four protocols, not three**: Kademlia's authority check is the driver's `try_admit` data-plane trust requirement, so such a peer holds no routing seat, but it can still open the DHT substream and be answered — the same exposure, and an implementer working from a list of three would leave it in place. This was unreachable for as long as relay, AutoNAT and DCUtR were absent from the libp2p feature list: no infrastructure-only connection could be established at all, by any means. **Stage 11's features-on step compiled all three, so that argument is spent** — what keeps the exposure unreachable now is only that nothing constructs the three behaviours, and the step that gives them a constructor must not land before the restriction below does. The protocol set an infrastructure-only connection offers must be restricted at the connection, not merely answered at the request;
 - AutoNAT server dial-back candidate is literal IP, matches requester observed source IP, and rejects prohibited address classes;
 - statically configured infrastructure is preferred; Identify-learned relay/probe promotion remains explicit opt-in;
 - relayed pre-Noise accounting is charged to authenticated relay connection/PeerId plus global limits when original IP is unavailable;

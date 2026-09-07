@@ -19,6 +19,13 @@
 # workspace root, so it is never built by `cargo xtask ci`, never enters
 # the root `Cargo.lock`, and is one deliberate `path =` away from
 # production rather than one accident away.
+#
+# 2026-09-07: STAGE 11 HAS SINCE ENABLED ALL THREE in production, so the
+# paragraph above is the record of why this harness ran before that and
+# not a live constraint. The isolation still earns its keep for the other
+# reason: this package pins its own exact versions and its own lock, so
+# the evidence describes one resolved graph, and a production bump cannot
+# silently re-date a measurement.
 [workspace]
 
 [package]

@@ -14,12 +14,21 @@
 //!
 //! The distinction matters beyond attribution: `AUTONAT.md` §7's
 //! dial-back restriction is an SSRF check on a requester-chosen
-//! address, so it needs that candidate HERE, before the socket. Production gets away with that today
-//! because Kademlia is the only behaviour that can originate a dial, so
-//! "no ticket" and "Kademlia" are the same set — a fact a test in
-//! `outbound_gate.rs` pins by parsing the root manifest's libp2p
-//! feature list, precisely so that it FAILS when Stage 11 adds a
-//! second dialling behaviour.
+//! address, so it needs that candidate HERE, before the socket. When
+//! this spike ran, production got away with that because Kademlia was
+//! the only behaviour that could originate a dial, so "no ticket" and
+//! "Kademlia" were the same set — a fact a test in `outbound_gate.rs`
+//! pinned by parsing the root manifest's libp2p feature list, precisely
+//! so that it would FAIL when Stage 11 added a second dialling
+//! behaviour.
+//!
+//! **Both halves of that are now history, in the order this spike asked
+//! for.** Stage 11 step 1 gave the hook real attribution and retired
+//! that guard, replacing it with a fail-closed test — an unattributed
+//! dial is refused rather than assumed to be Kademlia's — and the
+//! features-on step then enabled `autonat`, `relay` and `dcutr`. The
+//! guard never fired, because the condition it watched for was removed
+//! before the condition arrived.
 //!
 //! Stage 11 adds three. Without attribution every AutoNAT probe, relay
 //! reservation and hole-punch would be admitted as

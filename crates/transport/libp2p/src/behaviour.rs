@@ -198,11 +198,18 @@ pub struct SubstrateBehaviour {
 // Stage 11.
 //
 // It is correct today because the only connections that exist are ones
-// the gated swarm admitted for the data plane: relay, AutoNAT and DCUtR
-// are absent from the libp2p feature list, so no
-// `ConnectivityInfrastructureOnly` connection can be established at all.
-// The class is modelled and gate-tested; nothing can currently produce
-// one.
+// the gated swarm admitted for the data plane. THE REASON FOR THAT
+// CHANGED WITH STAGE 11's FEATURES-ON STEP and is now much weaker. It
+// used to be the manifest: relay, AutoNAT and DCUtR were absent from the
+// libp2p feature list, so no `ConnectivityInfrastructureOnly` connection
+// could be established by any means. All three are compiled now, and
+// what stands in their way is only that nothing constructs them — the
+// `Toggle` fields below are built `None` and no configuration reaches
+// them.
+//
+// So the remaining distance to the gap is one commit, not one stage, and
+// it is the commit that gives those behaviours a constructor. That
+// commit must not land before the restriction described below.
 //
 // Stage 11 produces the first one, and then this shape is a gap. Each
 // entry point classifies its caller — direct ingress, the GossipSub

@@ -128,11 +128,19 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 # Stage 7 added GossipSub; Stage 10 added Kademlia — the first autonomous
 # behaviour, and it landed only AFTER the root gate learned to admit
 # behaviour-originated dials by policy, the order CLAUDE.md §3 requires.
-# AutoNAT, Relay and DCUtR remain absent
-# from the feature list rather than merely unused, so a stray `use` cannot
-# switch one on: CLAUDE.md §3 forbids turning on autonomous libp2p
-# behaviour and retrofitting admission policy later, and a feature that is
-# not compiled cannot be turned on by accident.
+# Stage 11 adds `autonat`, `relay` and `dcutr`, and it is the same order
+# again rather than an exception to it: dial attribution landed first
+# (step 1), then SPIKE-004's D1, D2 and D3 were fixed (step 2), and only
+# now is the code that can produce those dials compiled at all.
+#
+# THE ABSENCE OF THESE THREE WAS LOAD-BEARING UNTIL THIS COMMIT, and what
+# replaced it is not a comment. While they were uncompiled, no
+# `ConnectivityInfrastructureOnly` connection could be established by any
+# means, so every rule about one was latent — which is exactly why
+# SPIKE-004 found three violations in shipped code that no shipped build
+# could reach. From here the guarantee is the gate and its tests, not the
+# feature list, and a rule about infrastructure-only peers that has no
+# test is now a rule about a reachable state.
 #
 # `mdns` IS ALSO ABSENT, and for a different reason worth stating so the
 # next reader does not simply switch it on. Stage 9 tried: enabling it
@@ -179,6 +187,22 @@ libp2p = { version = "0.56", default-features = false, features = [
     # does need is the trust class kept in sync, which is why an
     # infrastructure-only peer is blacklisted from the mesh.
     "gossipsub",
+    # Stage 11 (ADR-0035), all three CLIENT roles. Each originates
+    # autonomous dials — an AutoNAT probe, a reservation renewal, a hole
+    # punch — so all three arrive only now that the outbound gate
+    # attributes a dial to the behaviour that started it rather than
+    # assuming Kademlia, and now that the three ADR-0036 violations
+    # SPIKE-004 found in the admission path are fixed.
+    #
+    # COMPILED IS NOT ENABLED. Every one is `Toggle`-wrapped and built
+    # `None` unless the connectivity configuration asks for it, so a
+    # default profile advertises none of the three protocols and
+    # originates none of their dials. That is the same shape `kad` has
+    # had since Stage 10, and it is what lets these land before the
+    # configuration that drives them.
+    "autonat",
+    "relay",
+    "dcutr",
 ] }
 # The async runtime the Swarm is driven on. Bounded channels only (§6).
 tokio = { version = "1", default-features = false, features = [
