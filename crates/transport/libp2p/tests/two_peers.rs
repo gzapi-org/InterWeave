@@ -138,8 +138,9 @@ async fn two_peers_connect_authenticate_identify_and_shut_down() {
             assert_eq!(peer, listener_peer);
             assert_eq!(
                 protocol_version,
-                interweave_transport_libp2p::IDENTIFY_PROTOCOL,
-                "the advertised protocol is the namespaced one (ADR-0047)"
+                interweave_transport_libp2p::IDENTIFY_PROTOCOL_VERSION,
+                "the Identify payload carries the namespaced protocol_version (ADR-0047). \
+                 It is metadata, not a negotiated protocol — see the constant's doc"
             );
         }
         other => panic!("unexpected {other:?}"),

@@ -71,9 +71,10 @@ const PATIENCE: Duration = Duration::from_secs(20);
 ///
 /// **Every entry here is the BACKEND's, and that is the first thing this
 /// test taught.** It was written asserting `/interweave/id/1.0.0` among
-/// them, on the strength of `behaviour::IDENTIFY_PROTOCOL` and its
-/// comment calling that "the Identify protocol name this profile
-/// advertises". It is not: `identify::Config::new` takes a
+/// them, on the strength of a constant then called `IDENTIFY_PROTOCOL`
+/// and documented as "the Identify protocol name this profile
+/// advertises". It is not — it is now `IDENTIFY_PROTOCOL_VERSION`,
+/// renamed because of this test: `identify::Config::new` takes a
 /// `protocol_version` string, which travels inside the Identify payload
 /// as metadata, while the negotiated names are libp2p's own hardcoded
 /// `/ipfs/id/1.0.0` and `/ipfs/id/push/1.0.0`

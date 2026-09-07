@@ -85,7 +85,7 @@ pub mod refusals;
 pub mod runtime;
 
 pub use attribution::{Attributing, Classifier, DialAttribution, always};
-pub use behaviour::{IDENTIFY_PROTOCOL, SubstrateBehaviour};
+pub use behaviour::{IDENTIFY_PROTOCOL_VERSION, SubstrateBehaviour};
 pub use gated_swarm::{AdmittedDial, GatedSwarm};
 pub use outbound_gate::{AdmittedDials, OutboundAdmission};
 pub use preauth_gate::PreAuthAdmission;

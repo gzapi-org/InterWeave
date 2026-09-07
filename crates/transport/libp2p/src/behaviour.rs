@@ -54,11 +54,31 @@ pub const DIRECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// holds, and a slow one is a slow peer rather than a slow decision.
 const ENDPOINTS_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The Identify protocol name this profile advertises.
+/// The `protocol_version` string this profile puts in its Identify
+/// payload.
+///
+/// **Not a protocol name, despite looking exactly like one.**
+/// `identify::Config::new` takes a `protocol_version`, which travels
+/// inside the Identify payload as metadata a peer may read; the
+/// protocols actually negotiated are libp2p's own hardcoded
+/// `/ipfs/id/1.0.0` and `/ipfs/id/push/1.0.0`
+/// (`libp2p-identify-0.47.0` `protocol.rs:35,37`). Setting this changes
+/// what a peer is TOLD, never what is spoken, and this node advertises
+/// no protocol under the `interweave` namespace for Identify.
+///
+/// This constant was called `IDENTIFY_PROTOCOL` and documented as "the
+/// Identify protocol name this profile advertises" from Stage 4 until
+/// Stage 11. Nothing was ever wrong with the CODE — every use passes it
+/// where a `protocol_version` belongs, and `two_peers.rs` reads it back
+/// off the `Identified` event's `protocol_version` field. Only the name
+/// and the sentence were wrong, and they were wrong in the direction
+/// that costs something: a test written from them asserted
+/// `/interweave/id/1.0.0` in the advertised protocol set, where it has
+/// never appeared.
 ///
 /// Namespaced under `interweave` per ADR-0047, and versioned so a future
 /// change is a new string rather than a silent reinterpretation.
-pub const IDENTIFY_PROTOCOL: &str = "/interweave/id/1.0.0";
+pub const IDENTIFY_PROTOCOL_VERSION: &str = "/interweave/id/1.0.0";
 
 /// What the signed GossipSub RPC adds around one application envelope.
 ///
@@ -295,7 +315,7 @@ impl SubstrateBehaviour {
             preauth: PreAuthAdmission::new(preauth),
             outbound,
             identify: identify::Behaviour::new(identify::Config::new(
-                IDENTIFY_PROTOCOL.to_owned(),
+                IDENTIFY_PROTOCOL_VERSION.to_owned(),
                 keypair.public(),
             )),
             direct: request_response::Behaviour::with_codec(
