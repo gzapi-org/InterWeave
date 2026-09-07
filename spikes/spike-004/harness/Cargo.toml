@@ -37,7 +37,8 @@ license = "Apache-2.0"
 
 [dependencies]
 # PINNED TO WHAT THE PRODUCT RESOLVES, with the lock committed beside
-# it. `autonat`, `relay` and `dcutr` are the spike-only FEATURES; every
+# it. `autonat`, `relay` and `dcutr` were the spike-only FEATURES when
+# this ran, and are production features since Stage 11; every
 # version below is the one the root Cargo.lock resolves today. A
 # floating "0.56" resolves a later patch, and most of what this spike
 # records — probe event semantics, reservation lifecycle, whether a

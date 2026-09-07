@@ -1,6 +1,6 @@
 # libp2p
 
-Concrete rust-libp2p Swarm backend: Noise, GossipSub, direct v2, endpoint directory, connection/dial admission, AutoNAT v2, Relay v2, DCUtR, Identify and Kademlia driver.
+Concrete rust-libp2p Swarm backend: Noise, GossipSub, direct v2, endpoint directory, connection/dial admission, AutoNAT v2, Relay v2, DCUtR, Identify and Kademlia driver. **That is the target, not an inventory** — the status below says what is built.
 
 **Current status:** Stage 11, active workspace member. This paragraph said "Stage 5" from Stage 6 until now, which is the drift a status line is most prone to: nothing compiles it, and each stage that lands a behaviour is looking at the behaviour.
 
@@ -8,4 +8,4 @@ What is here: TCP, Noise, Yamux and Identify from Stage 4; direct v2 over reques
 
 `autonat`, `relay` and `dcutr` are compiled as of Stage 11's features-on step; the behaviours themselves are not constructed yet.
 
-Each of those was **absent from the `libp2p` feature list** rather than merely unused until the stage that earned it, because a behaviour that is compiled in is one that can be switched on before its admission policy exists. Stage 11 spent the last three entries, so the list withholds nothing now and the guarantee rests on the outbound gate, the trust classification and their tests. (The endpoint directory is not on that list at all — it rides on the `request-response` feature direct v2 already brought in, and is withheld by having no code rather than by the manifest.)
+Each of those was **absent from the `libp2p` feature list** rather than merely unused until the stage that earned it, because a behaviour that is compiled in is one that can be switched on before its admission policy exists. Stage 11 spent the last three entries, so nothing this crate is waiting for is withheld there any more and the guarantee rests on the outbound gate, the trust classification and their tests. `mdns` is the one remaining entry, held back by two RUSTSEC advisories rather than by stage order — see the root manifest before reaching for it. (The endpoint directory is not on that list at all — it rides on the `request-response` feature direct v2 already brought in, and is withheld by having no code rather than by the manifest.)

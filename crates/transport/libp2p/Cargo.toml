@@ -9,7 +9,9 @@
 # from Stage 10, peer routing only; AutoNAT v2, Circuit Relay v2 and
 # DCUtR from Stage 11, client roles.
 #
-# THE FEATURE LIST NO LONGER WITHHOLDS ANYTHING. Every stage before this
+# THE FEATURE LIST WITHHOLDS NOTHING THIS CRATE IS WAITING FOR — `mdns`
+# is still absent, for the dependency-advisory reason the root manifest
+# states, and must not be switched on. Every stage before this
 # one could say a behaviour was absent from the workspace features rather
 # than merely unused, so a stray `use` could not switch it on and
 # CLAUDE.md §3's promise was kept by the compiler. From Stage 11 it is

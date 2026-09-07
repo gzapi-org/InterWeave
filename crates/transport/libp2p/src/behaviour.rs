@@ -199,13 +199,25 @@ pub struct SubstrateBehaviour {
 //
 // It is correct today because the only connections that exist are ones
 // the gated swarm admitted for the data plane. THE REASON FOR THAT
-// CHANGED WITH STAGE 11's FEATURES-ON STEP and is now much weaker. It
-// used to be the manifest: relay, AutoNAT and DCUtR were absent from the
-// libp2p feature list, so no `ConnectivityInfrastructureOnly` connection
-// could be established by any means. All three are compiled now, and
-// what stands in their way is only that nothing constructs them — the
-// `Toggle` fields below are built `None` and no configuration reaches
-// them.
+// CHANGED WHEN STAGE 11 ENABLED THE THREE FEATURES, and is now much
+// weaker. It used to be the manifest: relay, AutoNAT and DCUtR were
+// absent from the libp2p feature list, so no
+// `ConnectivityInfrastructureOnly` connection could be established by any
+// means. All three are compiled now.
+//
+// What stands in their way is that NOTHING CONSTRUCTS THEM. There is no
+// field for any of the three in the struct below, no constructor, and no
+// configuration path — not a disabled behaviour but an absent one. Two
+// further facts make the class unreachable rather than merely unused:
+// the Swarm is built with `with_tcp` alone, so the relay TRANSPORT is
+// not installed and a `/p2p-circuit` address cannot be dialled at all;
+// and of the eight `DialOrigin` variants, only `RelayReservation` and
+// `AutonatProbe` fall outside `names_application_destination`, so they
+// are the only two under which such a connection could be dialled or
+// held open — and only these behaviours emit them. Inbound is answered
+// the same way: `dialing.rs` retains an inbound connection only if
+// `ConnectionManager::authorizes`, which asks under `DialOrigin::Manual`
+// and so refuses this class outright.
 //
 // So the remaining distance to the gap is one commit, not one stage, and
 // it is the commit that gives those behaviours a constructor. That

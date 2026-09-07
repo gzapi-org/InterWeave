@@ -194,12 +194,13 @@ libp2p = { version = "0.56", default-features = false, features = [
     # assuming Kademlia, and now that the three ADR-0036 violations
     # SPIKE-004 found in the admission path are fixed.
     #
-    # COMPILED IS NOT ENABLED. Every one is `Toggle`-wrapped and built
-    # `None` unless the connectivity configuration asks for it, so a
-    # default profile advertises none of the three protocols and
-    # originates none of their dials. That is the same shape `kad` has
-    # had since Stage 10, and it is what lets these land before the
-    # configuration that drives them.
+    # COMPILED IS NOT CONSTRUCTED. None of the three has a field in
+    # `SubstrateBehaviour`, a constructor, or a configuration path — the
+    # code to build them is not written, so no profile advertises their
+    # protocols and none of their dials can exist. That is what lets the
+    # features land before the configuration that will drive them, and it
+    # is a stronger position than the `Toggle`-and-`None` shape `kad`
+    # has: a disabled behaviour is still a behaviour.
     "autonat",
     "relay",
     "dcutr",

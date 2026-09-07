@@ -424,9 +424,10 @@ The relayed pair escapes it. R9.4 measures what is left: the global
 `max_pending_total` still holds at 8 of 32, so this is the bucket's
 granularity failing, not the absence of any bound.
 
-**Not reachable in a shipped build today** — no relay feature is
-compiled, so no relayed inbound can arrive — and live the moment Phase 4
-lands. **The same is true of D1 and D2**, and an earlier version of this
+**Not reachable in a shipped build** — when this spike ran no relay
+feature was compiled, and since Stage 11 compiled one, nothing constructs
+the relay client — so no relayed inbound can arrive, and this goes live
+the moment that constructor lands. **The same is true of D1 and D2**, and an earlier version of this
 paragraph implied otherwise: `grep` over `crates/` shows
 `DialOrigin::DcutrHolePunch` and `DialOrigin::RelayCircuit` appear only
 in the enum definition and in `#[cfg(test)]` blocks, so nothing in

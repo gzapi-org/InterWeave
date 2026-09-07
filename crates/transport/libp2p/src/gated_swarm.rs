@@ -145,8 +145,12 @@ impl AdmittedDial {
         // is an application path — ADR-0036's enforcement clause
         // exactly. And `RelayCircuit` on an address with no circuit in
         // it claims a purpose the dial does not have. Neither is
-        // reachable today, since no relay feature is compiled; both
-        // become reachable the moment one is, and refusing here costs
+        // reachable today, though the reason has narrowed since Stage
+        // 11 compiled `relay`: the Swarm is built with `with_tcp`
+        // alone, so no relay transport is installed and a
+        // `/p2p-circuit` address cannot be dialled, and nothing
+        // constructs a behaviour that would supply either origin. Both
+        // become reachable when that changes, and refusing here costs
         // a string comparison.
         let circuit_address = address
             .iter()

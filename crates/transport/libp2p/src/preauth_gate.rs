@@ -79,7 +79,7 @@ const REFUSAL: &str = "connection refused";
 /// authenticated relay transport connection and relay PeerId plus the
 /// global caps and says a destination "MUST NOT create unbounded
 /// pseudo-source buckets from circuit metadata". **Fixed in Stage 11
-/// step 2 (2026-09-05)**, before any relay feature is compiled.
+/// step 2 (2026-09-05)**, before the relay feature was compiled.
 ///
 /// The discriminator is the LOCAL address, and it is read FIRST --
 /// both halves of that sentence are load-bearing. `local_addr` is this
@@ -525,9 +525,10 @@ mod tests {
     /// This test was written in the DEFECT's shape so that the fix
     /// would fail here rather than pass silently. Stage 11 step 2 made
     /// the fix, and it did fail; it now asserts the required
-    /// behaviour. Still unreachable in a shipped build — no relay
-    /// feature is compiled — and live the moment the relay client
-    /// lands, which is why it was fixed before that rather than after.
+    /// behaviour. Still unreachable in a shipped build — Stage 11
+    /// compiled `relay`, but nothing constructs the relay client, so no
+    /// circuit can arrive — and live the moment that constructor lands,
+    /// which is why it was fixed before it rather than after.
     #[test]
     fn a_relayed_inbound_is_charged_to_the_relay_not_the_source() {
         let local = addr(&format!("/ip4/127.0.0.1/tcp/4001/p2p/{RELAY}/p2p-circuit"));

@@ -402,7 +402,7 @@ Do not enable GossipSub, direct v2, Kademlia, AutoNAT, Relay or DCUtR yet.
 
 At Stage 4 they were **absent from the `libp2p` feature list** rather than merely unused, so none could be switched on by a `use` statement or a stray builder call. A behaviour that is not compiled cannot be enabled by accident, which is the cheapest way to keep §3's promise that admission policy is never retrofitted.
 
-Each later stage added its own and only its own: `request-response` at Stage 6, `gossipsub` at Stage 7, `kad` at Stage 10, and `autonat`/`relay`/`dcutr` at Stage 11. **That list is now empty, so from Stage 11 on the promise is kept by the gate and its tests rather than by the compiler** — which is the reason Stage 11 spends two whole steps on attribution and on SPIKE-004's D1/D2/D3 before it touches the manifest.
+Each later stage added its own and only its own: `request-response` at Stage 6, `gossipsub` at Stage 7, `kad` at Stage 10, and `autonat`/`relay`/`dcutr` at Stage 11. **That list is now empty of behaviours any stage is waiting on, so from Stage 11 on the promise is kept by the gate and its tests rather than by the compiler** (`mdns` remains absent, held back by two RUSTSEC advisories rather than by stage order) — which is the reason Stage 11 spends two whole steps on attribution and on SPIKE-004's D1/D2/D3 before it touches the manifest.
 
 The dial path runs through the Stage 2 `ConnectionPolicy` from the first line of substrate code. Stage 5 owns making that gate **root** — behaviour-originated dials, the ConnectionManager, the retry scheduler, and feeding connection outcomes back into the policy so backoff has something to act on. What Stage 4 declines to do is ship a dial path with no gate and add one later.
 
@@ -1079,8 +1079,9 @@ Three limits, stated because the tests cannot reach past them.
 **SPIKE-003 ran and closed on 2026-08-30: PASS FOR THIS STAGE.** It does
 **not** close ADR-0034's v1 release gate — two required evidence items
 are unmet, and both need infrastructure the spike does not have:
-server-mode reachability evidence is not consumed (AutoNAT and Relay are
-absent from the libp2p feature list — SPIKE-004), and single-path capture
+server-mode reachability evidence is not consumed (AutoNAT and Relay were
+absent from the libp2p feature list when the spike ran — SPIKE-004), and
+single-path capture
 is not shown to be reduced (measured against controls; no capture was
 observed at all, so the comparison cannot speak for the option).
 Implementing this stage is unlocked; shipping configured entries
@@ -1119,8 +1120,10 @@ an empty list until the provider admits the peers that dialled *it*.
 story; the inbound direction is what a bootstrap node lives on.
 
 **Server-mode reachability evidence is NOT validated.** AutoNAT and Relay
-are absent from the libp2p feature list, so the spike could not consume
-the AutoNAT-verified-or-relay-reservation rule this stage's §14 requires.
+were absent from the libp2p feature list when the spike ran, so it could
+not consume the AutoNAT-verified-or-relay-reservation rule this stage's
+§14 requires. Stage 11 has since compiled both, which changes nothing
+about what this spike established.
 SPIKE-004 is where that arrives. Do not treat it as proved.
 
 **The capability-observation mapping is DECIDED (2026-08-30). This
@@ -1358,9 +1361,10 @@ below and are repeated where they bite:
   socket is open, which is after the target has been contacted.
 - **D1, D2 and D3 sit in already-shipped code**, not in this stage's
   work, and none is reachable in a shipped build today — nothing
-  constructs `DcutrHolePunch` or `RelayCircuit`, and no relay feature
-  is compiled — so all three were latent until this stage enables the
-  paths they govern. `DcutrHolePunch` and `RelayCircuit` were both
+  constructs `DcutrHolePunch` or `RelayCircuit`. The features-on change
+  removed the second half of that reason: `relay` and `dcutr` are
+  compiled now, so absence of code is all that keeps them latent, and
+  it lasts only until this stage builds the paths they govern. `DcutrHolePunch` and `RelayCircuit` were both
   admitted for a `ConnectivityInfrastructureOnly` peer; the fix was not
   "add both to the data-plane predicate", because `RelayReservation`
   must stay outside it and D2 differs from it precisely in naming the
@@ -1408,6 +1412,15 @@ following it would have enabled a dialling behaviour while every
 unticketed dial was still classified `KademliaQuery` — refused, as a
 data-plane origin, against the infrastructure the stage exists to use.
 
+**Between step 2 and step 3 sits a change with no number: `autonat`,
+`relay` and `dcutr` entered the libp2p feature list.** It is unnumbered
+because it constructs nothing and therefore proves nothing — no field, no
+constructor, no configuration — so it is not a step anyone can be at. It
+is recorded here because the steps below were written when those features
+were absent, and several of them cited that absence as the reason a rule
+could not be violated. Those reasons are spent: from here the guarantee
+is the outbound gate, the trust classification and their tests.
+
 1. **dial attribution**: every behaviour-originated dial reaches the
    root gate under its own `DialOrigin`, and the map that carries it
    drops a note for a dial the Swarm refuses before the pending hook;
@@ -1418,10 +1431,13 @@ data-plane origin, against the infrastructure the stage exists to use.
    after admission, before the Swarm is touched — enforces the
    address/origin PAIRING both ways. **The attribution and the pairing
    enforcement landed in PR #71**; no caller supplies `RelayCircuit`
-   yet, because no relay feature is compiled — every `attempt_dial` call
-   site today passes `Manual` (`runtime/commands.rs`) or comes from the
-   retry tick. The mechanism is there and its first user is step 5, where the relay
-   feature is compiled.
+   yet, because nothing constructs `relay::client::Behaviour` — every
+   `attempt_dial` call site today passes `Manual` (`runtime/commands.rs`)
+   or comes from the retry tick. The mechanism is there and its first
+   user is step 5. **The `relay` FEATURE no longer arrives with step 5**:
+   it was compiled ahead of the ordered list below, together with
+   `autonat` and `dcutr`, in a features-on change that constructs
+   nothing. What step 5 brings is the constructor.
    **One label decides whether relaying works at all**, and step 2's
    move of `RelayCircuit` into `names_application_destination` is what
    armed it: `relay::client::Behaviour` emits two dials of its own
