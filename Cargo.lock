@@ -1542,6 +1542,7 @@ dependencies = [
 name = "interweave-connectivity-tests"
 version = "0.0.0"
 dependencies = [
+ "futures",
  "interweave-profile-identity",
  "interweave-transport-api",
  "interweave-transport-libp2p",

@@ -35,3 +35,7 @@ libp2p = { workspace = true }
 # connection and abandons it, which is the abandoned-handshake case a
 # SwarmRuntime cannot produce because it would complete the handshake.
 tokio = { workspace = true, features = ["net", "io-util", "test-util"] }
+# `advertised_protocol_set` drives a bare Identify swarm directly, which
+# is a `Stream`; the rest of this package talks to a `SwarmRuntime` and
+# never touches one.
+futures = { workspace = true }

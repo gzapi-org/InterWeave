@@ -142,6 +142,17 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 # feature list, and a rule about infrastructure-only peers that has no
 # test is now a rule about a reachable state.
 #
+# The test that replaces THIS clause is
+# `tests/connectivity/tests/advertised_protocol_set.rs`: it reads the
+# protocol set a default profile advertises, from a third-party Identify
+# observer over loopback, and asserts it exactly — so a behaviour
+# constructed that nobody configured fails it. Its own doc records what
+# that does and does not catch, measured by constructing each behaviour
+# in turn: relay server and autonat client are caught, a relay client
+# cannot even be half-installed, and DCUtR is invisible to any observer
+# on a direct connection because `libp2p-dcutr` registers its handler
+# only on a `/p2p-circuit` one.
+#
 # `mdns` IS ALSO ABSENT, and for a different reason worth stating so the
 # next reader does not simply switch it on. Stage 9 tried: enabling it
 # pulls `libp2p-mdns 0.48`, which pins `hickory-proto 0.25.x`, which
@@ -187,7 +198,10 @@ libp2p = { version = "0.56", default-features = false, features = [
     # does need is the trust class kept in sync, which is why an
     # infrastructure-only peer is blacklisted from the mesh.
     "gossipsub",
-    # Stage 11 (ADR-0035), all three CLIENT roles. Each originates
+    # Stage 11 (ADR-0035). The CLIENT roles are what this stage builds
+    # first, but the features are not role-split — `autonat` and `relay`
+    # compile their server halves too, which steps 4 and 6 own. Each
+    # originates
     # autonomous dials — an AutoNAT probe, a reservation renewal, a hole
     # punch — so all three arrive only now that the outbound gate
     # attributes a dial to the behaviour that started it rather than
@@ -270,9 +284,10 @@ overflow-checks = true
 # AutoNAT/Relay/DCUtR work this value authorizes may proceed. Its phase
 # B — the real-NAT matrix — has not run, so the stage cannot CLOSE, and
 # no production code may assume server-mode reachability evidence
-# exists. The verdict's findings bind rather than inform, and three of
-# them are live violations in already-shipped code that must be fixed
-# before the paths they govern are enabled: read
+# exists. The verdict's findings bind rather than inform. Three of them
+# were live violations in already-shipped code — D1, D2 and D3 — and all
+# three were fixed in step 2 (2026-09-04 and -09-05), before the paths
+# they govern were built rather than after: read
 # architecture/roadmap/SPIKES.md before extending the stage.
 status = "stage-11-connectivity"
 architecture_root = "architecture"
