@@ -394,3 +394,502 @@ impl<H: ConnectionHandler> ConnectionHandler for ClassGatedHandler<H> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::{Arc, Mutex};
+
+    use libp2p::swarm::dummy;
+    use libp2p::swarm::handler::UpgradeInfoSend as _;
+
+    use interweave_transport_runtime::{
+        ConnectionManager, ConnectionPolicy, DialOrigin, TrustSources,
+    };
+    use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
+
+    /// Trusted for the data plane.
+    const TRUSTED: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+    /// Infrastructure only — reachability control, no data plane.
+    const INFRA: &str = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
+    /// In neither set.
+    const STRANGER: &str = "12D3KooWLRPJAEanjW29ZTaVLZQMMTZKm1F4bXpqzYFqLzJTdgBQ";
+
+    fn ident(p: &str) -> TransportIdentity {
+        TransportIdentity::parse(p.to_owned()).expect("a canonical identity")
+    }
+
+    fn peer(p: &str) -> PeerId {
+        p.parse().expect("a libp2p identity")
+    }
+
+    fn addr() -> Multiaddr {
+        "/ip4/127.0.0.1/tcp/4001"
+            .parse()
+            .expect("a valid multiaddr")
+    }
+
+    /// A policy handle where `TRUSTED` is data-plane and `INFRA` is not.
+    fn policy() -> SnapshotHandle {
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        let _ = m.set_trust(
+            TrustSources::new(
+                PeerTrustPolicy::new([ident(TRUSTED)]).expect("small"),
+                InfrastructureSet::new([ident(INFRA)]).expect("small"),
+            ),
+            &[],
+        );
+        m.handle()
+    }
+
+    /// A behaviour that records whether it was consulted at all.
+    ///
+    /// The point of the wrapper is that a gated connection never reaches
+    /// the inner behaviour, and "never reaches" is only checkable
+    /// against something that would say so.
+    #[derive(Default)]
+    struct Recording {
+        establishes: Arc<Mutex<Vec<ConnectionId>>>,
+        swarm_events: Arc<Mutex<usize>>,
+    }
+
+    impl NetworkBehaviour for Recording {
+        type ConnectionHandler = dummy::ConnectionHandler;
+        type ToSwarm = std::convert::Infallible;
+
+        fn handle_established_inbound_connection(
+            &mut self,
+            id: ConnectionId,
+            _peer: PeerId,
+            _local: &Multiaddr,
+            _remote: &Multiaddr,
+        ) -> Result<THandler<Self>, ConnectionDenied> {
+            self.establishes.lock().expect("not poisoned").push(id);
+            Ok(dummy::ConnectionHandler)
+        }
+
+        fn handle_established_outbound_connection(
+            &mut self,
+            id: ConnectionId,
+            _peer: PeerId,
+            _addr: &Multiaddr,
+            _role: Endpoint,
+            _port: PortUse,
+        ) -> Result<THandler<Self>, ConnectionDenied> {
+            self.establishes.lock().expect("not poisoned").push(id);
+            Ok(dummy::ConnectionHandler)
+        }
+
+        fn on_swarm_event(&mut self, _event: FromSwarm<'_>) {
+            *self.swarm_events.lock().expect("not poisoned") += 1;
+        }
+
+        fn on_connection_handler_event(
+            &mut self,
+            _peer: PeerId,
+            _id: ConnectionId,
+            _event: THandlerOutEvent<Self>,
+        ) {
+        }
+
+        fn poll(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
+            Poll::Pending
+        }
+    }
+
+    /// How many protocols this handler offers on the wire.
+    ///
+    /// Read through `listen_protocol`, which is the same value
+    /// `gather_supported_protocols` reads when the Swarm builds the
+    /// connection — so this is what Identify would advertise, not a
+    /// proxy for it.
+    fn offered<H: ConnectionHandler>(handler: &ClassGatedHandler<H>) -> usize {
+        handler
+            .listen_protocol()
+            .upgrade()
+            .protocol_info()
+            .into_iter()
+            .count()
+    }
+
+    fn gated(inner: Recording) -> ClassGated<Recording> {
+        ClassGated::new(inner, policy())
+    }
+
+    #[test]
+    fn a_trusted_peer_is_offered_the_inner_behaviours_protocols() {
+        // THE CONTROL, and it has to come first: a wrapper that gated
+        // everything would pass every other test in this module.
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut g = gated(Recording {
+            establishes: Arc::clone(&seen),
+            ..Recording::default()
+        });
+
+        let handler = g
+            .handle_established_inbound_connection(
+                ConnectionId::new_unchecked(1),
+                peer(TRUSTED),
+                &addr(),
+                &addr(),
+            )
+            .expect("a trusted peer is admitted");
+
+        assert!(matches!(handler, ClassGatedHandler::Allowed(_)));
+        assert_eq!(
+            seen.lock().expect("not poisoned").len(),
+            1,
+            "the inner behaviour must be asked to build the handler"
+        );
+    }
+
+    #[test]
+    fn an_infrastructure_only_peer_is_offered_nothing_and_the_inner_behaviour_is_never_asked() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut g = gated(Recording {
+            establishes: Arc::clone(&seen),
+            ..Recording::default()
+        });
+
+        let handler = g
+            .handle_established_inbound_connection(
+                ConnectionId::new_unchecked(1),
+                peer(INFRA),
+                &addr(),
+                &addr(),
+            )
+            .expect("gating is not a refusal -- the connection still exists");
+
+        assert!(matches!(handler, ClassGatedHandler::Denied));
+        assert_eq!(
+            offered(&handler),
+            0,
+            "a gated connection must be offered no protocol at all, which is what \
+             makes Identify advertise none of them"
+        );
+        assert!(
+            seen.lock().expect("not poisoned").is_empty(),
+            "the inner behaviour must not even be asked to build a handler for a \
+             gated connection -- being asked is how it learns the connection exists"
+        );
+    }
+
+    #[test]
+    fn a_peer_in_neither_trust_set_is_gated_too() {
+        // `Unauthorized` should never reach here -- the gated swarm
+        // refuses it earlier -- so this pins the answer this wrapper
+        // gives if it ever does, rather than assuming it cannot.
+        let mut g = gated(Recording::default());
+        let handler = g
+            .handle_established_inbound_connection(
+                ConnectionId::new_unchecked(1),
+                peer(STRANGER),
+                &addr(),
+                &addr(),
+            )
+            .expect("still a connection");
+        assert!(matches!(handler, ClassGatedHandler::Denied));
+    }
+
+    #[test]
+    fn the_outbound_side_gates_on_the_same_answer() {
+        let mut g = gated(Recording::default());
+        let handler = g
+            .handle_established_outbound_connection(
+                ConnectionId::new_unchecked(1),
+                peer(INFRA),
+                &addr(),
+                Endpoint::Dialer,
+                PortUse::Reuse,
+            )
+            .expect("still a connection");
+        assert!(matches!(handler, ClassGatedHandler::Denied));
+        assert_eq!(offered(&handler), 0);
+    }
+
+    #[test]
+    fn a_gated_handler_drops_a_behaviour_event_rather_than_panicking() {
+        // THE `unreachable!()` THIS WRAPPER EXISTS NOT TO INHERIT.
+        // libp2p's `ConnectionHandler for Either<L, R>` panics on this
+        // exact pairing, and it is reachable: `kad` dispatches with
+        // `NotifyHandler::Any`, which selects a connection by PEER, so a
+        // peer holding one trusted and one gated connection can have an
+        // event routed to the gated side.
+        //
+        // `dummy::ConnectionHandler`'s `FromBehaviour` is `Infallible`,
+        // so there is no value to send it here; the property is checked
+        // one level down, on a handler whose event type is inhabited.
+        let mut denied: ClassGatedHandler<request_response_handler::Stub> =
+            ClassGatedHandler::Denied;
+        denied.on_behaviour_event(request_response_handler::Event);
+        // Reaching this line IS the assertion: the library's version
+        // would have aborted the task.
+    }
+
+    /// A minimal handler whose `FromBehaviour` is inhabited.
+    ///
+    /// `dummy::ConnectionHandler` cannot express the drop test because
+    /// its event type is `Infallible` — there is no event to drop.
+    mod request_response_handler {
+        use super::*;
+
+        #[derive(Debug)]
+        pub(super) struct Event;
+
+        pub(super) struct Stub;
+
+        impl ConnectionHandler for Stub {
+            type FromBehaviour = Event;
+            type ToBehaviour = std::convert::Infallible;
+            type InboundProtocol = DeniedUpgrade;
+            type OutboundProtocol = DeniedUpgrade;
+            type InboundOpenInfo = ();
+            type OutboundOpenInfo = ();
+
+            fn listen_protocol(
+                &self,
+            ) -> SubstreamProtocol<Self::InboundProtocol, Self::InboundOpenInfo> {
+                SubstreamProtocol::new(DeniedUpgrade, ())
+            }
+
+            fn on_behaviour_event(&mut self, _event: Self::FromBehaviour) {
+                unreachable!("the allowed side is not exercised by this test");
+            }
+
+            fn poll(
+                &mut self,
+                _cx: &mut Context<'_>,
+            ) -> Poll<
+                ConnectionHandlerEvent<
+                    Self::OutboundProtocol,
+                    Self::OutboundOpenInfo,
+                    Self::ToBehaviour,
+                >,
+            > {
+                Poll::Pending
+            }
+
+            fn on_connection_event(
+                &mut self,
+                _event: ConnectionEvent<
+                    '_,
+                    Self::InboundProtocol,
+                    Self::OutboundProtocol,
+                    Self::InboundOpenInfo,
+                    Self::OutboundOpenInfo,
+                >,
+            ) {
+            }
+        }
+    }
+
+    #[test]
+    fn an_unparseable_peer_id_is_gated_rather_than_admitted() {
+        // FAIL-CLOSED. `admits` cannot classify a PeerId the neutral
+        // grammar refuses, and the safe answer to "I cannot tell" is to
+        // offer nothing. Constructed through libp2p rather than through
+        // `TransportIdentity`, because the whole case is an id the
+        // latter would reject.
+        let mut g = gated(Recording::default());
+        let unparseable = PeerId::random();
+        let classifiable = TransportIdentity::parse(unparseable.to_base58()).is_ok();
+
+        let handler = g
+            .handle_established_inbound_connection(
+                ConnectionId::new_unchecked(1),
+                unparseable,
+                &addr(),
+                &addr(),
+            )
+            .expect("still a connection");
+
+        // A random PeerId IS parseable, so this documents the branch
+        // rather than exercising it -- and it is still gated, because a
+        // random peer is in neither trust set.
+        assert!(
+            matches!(handler, ClassGatedHandler::Denied),
+            "parseable={classifiable}: either way, an unclassifiable or untrusted \
+             peer must be gated"
+        );
+    }
+
+    #[test]
+    fn a_gated_connections_lifecycle_is_hidden_from_the_inner_behaviour() {
+        // THE CRASH THIS PREVENTS, pinned. `libp2p-request-response`
+        // records a connection in its established hook and `.expect()`s
+        // it back in `on_connection_closed`; a gated connection reaches
+        // the second and not the first, which aborts the Swarm task.
+        // Found by running the connectivity suite against the first
+        // wiring of this wrapper.
+        let events = Arc::new(Mutex::new(0));
+        let mut g = gated(Recording {
+            swarm_events: Arc::clone(&events),
+            ..Recording::default()
+        });
+
+        let id = ConnectionId::new_unchecked(1);
+        let handler = g
+            .handle_established_inbound_connection(id, peer(INFRA), &addr(), &addr())
+            .expect("still a connection");
+        assert!(matches!(handler, ClassGatedHandler::Denied));
+        assert!(
+            g.gated.contains(&id),
+            "a gated connection must be remembered, or its lifecycle cannot be hidden"
+        );
+
+        // The close arrives for every connection the Swarm established,
+        // gated or not.
+        g.on_swarm_event(FromSwarm::ConnectionClosed(
+            libp2p::swarm::behaviour::ConnectionClosed {
+                peer_id: peer(INFRA),
+                connection_id: id,
+                endpoint: &libp2p::core::ConnectedPoint::Listener {
+                    local_addr: addr(),
+                    send_back_addr: addr(),
+                },
+                remaining_established: 0,
+                cause: None,
+            },
+        ));
+
+        assert_eq!(
+            *events.lock().expect("not poisoned"),
+            0,
+            "the inner behaviour must not be told a gated connection closed -- it was \
+             never told it opened"
+        );
+        assert!(
+            !g.gated.contains(&id),
+            "and the id must be released on close, or the set grows without bound"
+        );
+    }
+
+    #[test]
+    fn a_trusted_connections_lifecycle_still_reaches_the_inner_behaviour() {
+        // The control for the test above: hiding is scoped to gated
+        // connections, not applied to everything.
+        let events = Arc::new(Mutex::new(0));
+        let mut g = gated(Recording {
+            swarm_events: Arc::clone(&events),
+            ..Recording::default()
+        });
+
+        let id = ConnectionId::new_unchecked(1);
+        let _ = g
+            .handle_established_inbound_connection(id, peer(TRUSTED), &addr(), &addr())
+            .expect("admitted");
+        g.on_swarm_event(FromSwarm::ConnectionClosed(
+            libp2p::swarm::behaviour::ConnectionClosed {
+                peer_id: peer(TRUSTED),
+                connection_id: id,
+                endpoint: &libp2p::core::ConnectedPoint::Listener {
+                    local_addr: addr(),
+                    send_back_addr: addr(),
+                },
+                remaining_established: 0,
+                cause: None,
+            },
+        ));
+
+        assert_eq!(
+            *events.lock().expect("not poisoned"),
+            1,
+            "a trusted connection's close must reach the inner behaviour, or its own \
+             bookkeeping goes stale"
+        );
+    }
+
+    #[test]
+    fn a_node_level_swarm_event_reaches_the_inner_behaviour_even_while_a_peer_is_gated() {
+        // Scoping again, from the other side. An event that is about
+        // the NODE rather than about one connection must be forwarded
+        // whatever else is gated -- a behaviour that stopped hearing
+        // about external addresses because some unrelated peer was
+        // gated would be broken far less visibly.
+        let events = Arc::new(Mutex::new(0));
+        let mut g = gated(Recording {
+            swarm_events: Arc::clone(&events),
+            ..Recording::default()
+        });
+        let _ = g
+            .handle_established_inbound_connection(
+                ConnectionId::new_unchecked(1),
+                peer(INFRA),
+                &addr(),
+                &addr(),
+            )
+            .expect("still a connection");
+
+        g.on_swarm_event(FromSwarm::NewExternalAddrCandidate(
+            libp2p::swarm::behaviour::NewExternalAddrCandidate { addr: &addr() },
+        ));
+
+        assert_eq!(
+            *events.lock().expect("not poisoned"),
+            1,
+            "a node-level event must reach the inner behaviour regardless of gating"
+        );
+    }
+
+    #[test]
+    fn the_wrapper_reads_the_live_snapshot_rather_than_one_taken_at_construction() {
+        // A class is policy and policy is republished. A wrapper that
+        // photographed the snapshot in `new` would go on offering the
+        // data plane to a peer whose trust had been withdrawn, until
+        // the process restarted.
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        let _ = m.set_trust(
+            TrustSources::new(
+                PeerTrustPolicy::new([ident(TRUSTED)]).expect("small"),
+                InfrastructureSet::default(),
+            ),
+            &[],
+        );
+        let mut g = ClassGated::new(Recording::default(), m.handle());
+
+        let before = g
+            .handle_established_inbound_connection(
+                ConnectionId::new_unchecked(1),
+                peer(TRUSTED),
+                &addr(),
+                &addr(),
+            )
+            .expect("admitted");
+        assert!(matches!(before, ClassGatedHandler::Allowed(_)));
+
+        // Withdraw it, which republishes the snapshot.
+        let _ = m.set_trust(
+            TrustSources::new(
+                PeerTrustPolicy::new([]).expect("empty"),
+                InfrastructureSet::new([ident(TRUSTED)]).expect("small"),
+            ),
+            &[],
+        );
+
+        let after = g
+            .handle_established_inbound_connection(
+                ConnectionId::new_unchecked(2),
+                peer(TRUSTED),
+                &addr(),
+                &addr(),
+            )
+            .expect("still a connection");
+        assert!(
+            matches!(after, ClassGatedHandler::Denied),
+            "a peer demoted to infrastructure-only must be gated on its NEXT \
+             connection, without restarting anything"
+        );
+
+        // NOT a claim that the EXISTING connection is re-gated. It is
+        // not: the handler was installed at establishment and is not
+        // rebuilt. Revocation closes such connections
+        // (`runtime/mod.rs`'s downgrade path), which is what makes that
+        // acceptable -- and if that ever stops being true, this comment
+        // is where the gap opens.
+        let _ = DialOrigin::Manual;
+    }
+}
