@@ -16,10 +16,11 @@ NAT_MODE=eds ./topology.sh up && EXPECT=eds ./probe.sh
 
 ## What it establishes
 
-**That the translation is real.** The peer sends from `10.89.1.3:45000`
-and the observers on the public side see `10.89.0.4` — the router's
-address. Phase A had no NAT at all, and the first thing this harness
-owes is evidence that this one does.
+**That the translation is real, in both NAT domains.** Peer A sends from
+`10.89.1.3:45000` and the observers on the public side see `10.89.0.4`;
+peer B sends from `10.89.2.3:45000` and they see `10.89.0.5` — each
+router's own address. Phase A had no NAT at all, and the first thing
+this harness owes is evidence that these ones do.
 
 **That the mapping behaviour is the one that was asked for.** The two
 rows are the two that decide whether a hole punch can work:
@@ -36,31 +37,85 @@ than a full cone. Whether a punch succeeds depends on filtering too, so
 neither row licenses a claim about DCUtR succeeding; what they license
 is a claim about the mapping it would face.
 
-Measured, not asserted from the configuration. From the recorded run
-below — the addresses are podman's default pool on one machine, so
-expect different numbers and the same shape:
+Measured, not asserted from the configuration, and **for both NAT
+domains**. The run below is complete rather than excerpted — an earlier
+version of this section showed six of its lines under the heading "the
+recorded run", and the lines it dropped were the two that name what each
+router installed, which is the only output that would reveal a router
+configured from the wrong container's interface. The addresses are
+podman's default pool on one machine, so expect different numbers and
+the same shape:
 
 ```
 == NAT_MODE=eim ==
+  router-a lan=10.89.1.2 pub=10.89.0.4
+  natm-router: snat on eth1 using: masquerade
+  router-b lan=10.89.2.2 pub=10.89.0.5
+  natm-router-b: snat on eth0 using: masquerade
+  NAT mode: eim (both domains)
   kernel : 6.17.9-1.qubes.fc37.x86_64
+  podman : podman version 5.8.4
+  nft    : nftables v1.1.3 (Commodore Bullmoose #4)
+-- natm-peer behind natm-router --
 peer private   : 10.89.1.3 45000
 router public  : 10.89.0.4
 observer 1 saw : 10.89.0.4 45000
 observer 2 saw : 10.89.0.4 45000
 VERDICT: ENDPOINT-INDEPENDENT MAPPING (one external port for both destinations)
+-- natm-peer-b behind natm-router-b --
+peer private   : 10.89.2.3 45000
+router public  : 10.89.0.5
+observer 1 saw : 10.89.0.5 45000
+observer 2 saw : 10.89.0.5 45000
+VERDICT: ENDPOINT-INDEPENDENT MAPPING (one external port for both destinations)
+
 == NAT_MODE=eds ==
-observer 1 saw : 10.89.0.4 58519
-observer 2 saw : 10.89.0.4 22699
+  router-a lan=10.89.1.2 pub=10.89.0.4
+  natm-router: snat on eth0 using: masquerade random
+  router-b lan=10.89.2.2 pub=10.89.0.5
+  natm-router-b: snat on eth0 using: masquerade random
+  NAT mode: eds (both domains)
+  kernel : 6.17.9-1.qubes.fc37.x86_64
+  podman : podman version 5.8.4
+  nft    : nftables v1.1.3 (Commodore Bullmoose #4)
+-- natm-peer behind natm-router --
+peer private   : 10.89.1.3 45000
+router public  : 10.89.0.4
+observer 1 saw : 10.89.0.4 63230
+observer 2 saw : 10.89.0.4 59359
 VERDICT: ENDPOINT-DEPENDENT MAPPING (a port per destination)
-2 matrix rows, each measured and matched, all distinct: eim eds
+-- natm-peer-b behind natm-router-b --
+peer private   : 10.89.2.3 45000
+router public  : 10.89.0.5
+observer 1 saw : 10.89.0.5 48980
+observer 2 saw : 10.89.0.5 25128
+VERDICT: ENDPOINT-DEPENDENT MAPPING (a port per destination)
+
+measured and matched: natm-peer=eim natm-peer-b=eim natm-peer=eds natm-peer-b=eds
 ```
 
-**`masquerade random` is per-flow randomisation, not per-destination
-mapping by construction.** The two are observationally identical for
-this probe and adequate for what DCUtR faces, but a real symmetric NAT
-would still preserve a mapping consistently within its lifetime toward
-one destination, and `random` does not. The row approximates the
-property that matters and nothing more.
+**Read the two `snat on` lines in the `eim` row.** Router A is on `eth1`
+and router B on `eth0` in the same run: podman numbers interfaces by
+walking each container's own network map, and the two routers are
+attached to different pairs of networks. A shared `configure_nat` that
+derived the interface from a hardcoded `natm-router` therefore gave
+router B a rule matching its LAN side, translating nothing — and the
+assertion beneath it could not see that, because it greps the container
+for the string it just wrote there. The interface is derived from the
+container being configured, which fails closed when no interface there
+carries that address.
+
+**`eds` is an approximation of a symmetric NAT, and how close is NOT
+measured here.** What the probe establishes is the property DCUtR cares
+about: one internal socket appears on a different external port to each
+of two destinations. What it does not establish is the behaviour over
+TIME toward ONE destination — the harness never sends twice to the same
+observer, so it says nothing about whether the mapping is stable for the
+life of a flow. An earlier version of this paragraph asserted that
+`random` re-randomises per flow where a real symmetric NAT would not;
+that was reasoning about netfilter internals rather than a measurement,
+and conntrack's own entry makes the opposite the more likely reading.
+Treat the row as the mapping property and nothing else.
 
 **The `eds` row is the one phase A could never reach.** On loopback every
 punch succeeds, so `DCUTR.md` §13's cooldown, retry ceiling and
@@ -69,9 +124,11 @@ mapping behaviour a failing punch depends on.
 
 **It is not yet a punch.** The topology has two NAT domains — two peers,
 each behind its own router — which is the minimum a hole punch needs,
-and an earlier version had one while claiming to be the environment a
-punch requires. What is still missing is the relay both peers reach and
-the nodes themselves; those arrive with steps 5 and 8.
+and each is measured on every row rather than merely built: an earlier
+version had one domain while claiming two, and its replacement built the
+second and probed only the first. What is still missing is the relay
+both peers reach and the nodes themselves; the relay server role is
+step 6 of Stage 11, its client reservations step 5, and DCUtR step 8.
 
 ## How the measurement works, and why it is a comparison
 
@@ -101,9 +158,15 @@ Two checks run before the verdict, and either fails the row:
   as the other class is a failure, not a footnote. With no `EXPECT` the
   probe prints `UNASSERTED` rather than passing quietly.
 
-`run.sh` adds one more across rows: the measured classes must be
-**distinct**, which fails if the topology built the same NAT twice or if
-the classifier answers the same whatever it is shown.
+`run.sh` asserts nothing across rows, and that is deliberate. The
+per-row `EXPECT` check already exits non-zero on a mismatch, so any
+tally taken afterwards compares values that equal their own modes by
+construction — two attempts at a cross-row claim have been vacuous for
+exactly that reason, one of them a count of the loop it was written
+over. What `run.sh` does check is its INPUT: `MODES` is a caller-supplied
+row filter, and `MODES=" "` is set and non-null, so it used to run zero
+rows and still print a passing summary. That check runs before the build
+and is the only one in the file that can fail.
 
 ## What it does NOT establish
 
