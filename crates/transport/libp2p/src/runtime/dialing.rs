@@ -185,7 +185,7 @@ pub(super) fn settle_established_outbound(
     peer: &TransportIdentity,
     ticket: DialTicket,
     now_ms: u64,
-) -> Option<(ConnectionSlot, DialOrigin)> {
+) -> Option<(ConnectionSlot, DialOrigin, ConnectionClass)> {
     let class = manager.classify(peer);
     if !manager.authorizes_for(class, ticket.origin()) {
         manager.record_authorization_withdrawn(ticket, now_ms);
@@ -198,7 +198,7 @@ pub(super) fn settle_established_outbound(
     let origin = ticket.origin();
     let slot = manager.record_success(ticket, now_ms);
     let _ = manager.learn_address(peer, &address, now_ms);
-    Some((slot, origin))
+    Some((slot, origin, class))
 }
 
 /// Settle one failed outbound dial against the manager.
@@ -400,13 +400,14 @@ pub(super) fn settle_outcome(
                 // Outbound: the slot was reserved when the dial was
                 // admitted, and the connection takes it over.
                 Some(ticket) => match settle_established_outbound(manager, &peer, ticket, now_ms) {
-                    Some((slot, origin)) => {
+                    Some((slot, origin, admitted_class)) => {
                         open.insert(
                             *connection_id,
                             OpenConnection {
                                 peer,
                                 slot,
                                 origin: Some(origin),
+                                admitted_class,
                             },
                         );
                     }
@@ -435,6 +436,7 @@ pub(super) fn settle_outcome(
                                     peer,
                                     slot,
                                     origin: None,
+                                    admitted_class: class,
                                 },
                             );
                         }
@@ -561,6 +563,7 @@ pub(super) fn connections_to_close<'a>(
             libp2p::swarm::ConnectionId,
             &'a TransportIdentity,
             Option<DialOrigin>,
+            ConnectionClass,
         ),
     >,
 ) -> BTreeSet<libp2p::swarm::ConnectionId> {
@@ -568,15 +571,9 @@ pub(super) fn connections_to_close<'a>(
         .iter()
         .map(|entry| (&entry.peer, entry.now))
         .collect();
-    // The PAIR, not just the new class: whether the handlers a
-    // connection already carries are stale depends on what the peer WAS.
-    let revoked_class_pair: BTreeMap<&TransportIdentity, (ConnectionClass, ConnectionClass)> =
-        revoked
-            .iter()
-            .map(|entry| (&entry.peer, (entry.was, entry.now)))
-            .collect();
+
     let mut closing = BTreeSet::new();
-    for (id, peer, origin) in open {
+    for (id, peer, origin, admitted_class) in open {
         let Some(now) = revoked_class.get(peer) else {
             continue;
         };
@@ -584,15 +581,16 @@ pub(super) fn connections_to_close<'a>(
             Some(origin) => manager.authorizes_for(*now, origin),
             None => manager.authorizes(*now),
         };
-        // AUTHORIZATION IS NOT THE ONLY REASON TO CLOSE. A connection's
-        // protocol set is decided once, by `ClassGated`, from the class
-        // the peer held at establishment -- and libp2p never rebuilds a
-        // handler. So a peer that LOSES data-plane trust keeps every
-        // data-plane handler for the connection's life even where the
-        // origin check above deliberately keeps the connection: a relay
-        // reservation or AutoNAT probe survives a downgrade by design,
-        // and would survive it carrying `/interweave/direct/2.0.0` and
-        // the rest.
+        // AUTHORIZATION IS NOT THE ONLY REASON TO CLOSE, and this is the
+        // second one: a connection's PROTOCOL SET is decided once, by
+        // `ClassGated`, from the class the peer held when the connection
+        // was admitted -- and libp2p never rebuilds a handler. A
+        // connection admitted while the peer was data-plane trusted
+        // therefore carries every data-plane protocol for its whole
+        // life, and the origin check above would keep exactly such a
+        // connection when the peer is demoted to infrastructure-only,
+        // because a reservation with an infrastructure peer is what
+        // should survive.
         //
         // ADR-0036 settles it rather than this file inventing an answer:
         // "If atomic in-place reconciliation is not safe in the pinned
@@ -601,16 +599,24 @@ pub(super) fn connections_to_close<'a>(
         // Whatever wanted the reachability connection re-establishes it,
         // correctly gated.
         //
+        // THE COMPARISON IS AGAINST `admitted_class`, NOT `Revoked::was`,
+        // and that is what keeps the origin check alive. `was` is the
+        // class before the latest change, which for a peer admitted
+        // while infrastructure-only, promoted, then demoted again says
+        // `DataPlaneTrusted` -- while the connection has carried a
+        // denying handler throughout. Judging from `was` closed that
+        // connection too, and closed every revoked connection whatever
+        // its origin, which left `OpenConnection::origin` deciding
+        // nothing at all. Review finding on PR #77.
+        //
         // DECIDED HERE rather than inside `ClassGated`, so that
         // `set_trust`'s count includes it. That count is ADR-0012's
-        // observable — "a revocation whose only effect was on the next
-        // dial would leave the revoked peer connected" — and a closure
+        // observable -- "a revocation whose only effect was on the next
+        // dial would leave the revoked peer connected" -- and a closure
         // the wrapper performed on its own would be invisible to it.
-        let entry = revoked_class_pair.get(peer);
-        let lost_data_plane = entry.is_some_and(|(was, now)| {
-            *was == ConnectionClass::DataPlaneTrusted && *now != ConnectionClass::DataPlaneTrusted
-        });
-        if !still_authorized || lost_data_plane {
+        let gating_changed = (admitted_class == ConnectionClass::DataPlaneTrusted)
+            != (*now == ConnectionClass::DataPlaneTrusted);
+        if !still_authorized || gating_changed {
             closing.insert(id);
         }
     }
@@ -626,6 +632,22 @@ pub(super) fn connections_to_close<'a>(
 pub(super) struct OpenConnection {
     pub(super) peer: TransportIdentity,
     pub(super) slot: ConnectionSlot,
+    /// The class this profile granted the peer WHEN THE CONNECTION WAS
+    /// ADMITTED, which is what its protocol set was chosen from.
+    ///
+    /// `ClassGated` decides at establishment whether a connection is
+    /// offered the data-plane behaviours, and libp2p never rebuilds a
+    /// handler — so whether a connection's protocols have gone stale is
+    /// a question about the class it was ADMITTED under, not about the
+    /// class the peer held before the latest trust change.
+    ///
+    /// Those two differ, which is the whole reason this field exists
+    /// rather than reading `Revoked::was`. A peer admitted while
+    /// infrastructure-only, promoted, then demoted again reports
+    /// `was = DataPlaneTrusted` for that last change while its
+    /// connection has carried a denying handler throughout: nothing is
+    /// stale, and closing it would drop reachability for no reason.
+    pub(super) admitted_class: ConnectionClass,
     /// Why this connection was opened, or `None` for one that arrived.
     ///
     /// ADR-0036's separation is an origin/class PAIR, so a trust change
@@ -662,10 +684,10 @@ mod tests {
     };
     use crate::gated_swarm::AdmittedDial;
     use interweave_transport_api::TransportIdentity;
+    use interweave_transport_runtime::{ConnectionClass, DialRequest, DialTicket};
     use interweave_transport_runtime::{
         ConnectionManager, ConnectionPolicy, DialOrigin, TrustSources,
     };
-    use interweave_transport_runtime::{DialRequest, DialTicket};
     use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
     use libp2p::Multiaddr;
     use libp2p::core::transport::TransportError;
@@ -727,7 +749,13 @@ mod tests {
         let closing = connections_to_close(
             &m,
             &revoked,
-            [(reservation, &peer, Some(DialOrigin::RelayReservation))].into_iter(),
+            [(
+                reservation,
+                &peer,
+                Some(DialOrigin::RelayReservation),
+                ConnectionClass::DataPlaneTrusted,
+            )]
+            .into_iter(),
         );
         assert!(
             closing.contains(&reservation),
@@ -752,7 +780,13 @@ mod tests {
         let closing = connections_to_close(
             &m,
             &revoked,
-            [(data, &peer, Some(DialOrigin::ConnectionManager))].into_iter(),
+            [(
+                data,
+                &peer,
+                Some(DialOrigin::ConnectionManager),
+                ConnectionClass::DataPlaneTrusted,
+            )]
+            .into_iter(),
         );
         assert!(
             closing.contains(&data),
@@ -769,7 +803,11 @@ mod tests {
         let revoked = m.set_trust(trust(&[], &[RELAY]), std::slice::from_ref(&peer));
 
         let inbound = ConnectionId::new_unchecked(3);
-        let closing = connections_to_close(&m, &revoked, [(inbound, &peer, None)].into_iter());
+        let closing = connections_to_close(
+            &m,
+            &revoked,
+            [(inbound, &peer, None, ConnectionClass::DataPlaneTrusted)].into_iter(),
+        );
         assert!(
             closing.contains(&inbound),
             "arriving is not an authorization: the data-plane loss closes it"
@@ -788,7 +826,13 @@ mod tests {
         let closing = connections_to_close(
             &m,
             &revoked,
-            [(ConnectionId::new_unchecked(4), &peer, None)].into_iter(),
+            [(
+                ConnectionId::new_unchecked(4),
+                &peer,
+                None,
+                ConnectionClass::DataPlaneTrusted,
+            )]
+            .into_iter(),
         );
         assert!(closing.is_empty());
     }
@@ -832,13 +876,75 @@ mod tests {
         let closing = connections_to_close(
             &m,
             &revoked,
-            [(id, &peer, Some(DialOrigin::RelayReservation))].into_iter(),
+            [(
+                id,
+                &peer,
+                Some(DialOrigin::RelayReservation),
+                ConnectionClass::DataPlaneTrusted,
+            )]
+            .into_iter(),
         );
         assert!(
             closing.contains(&id),
             "a connection established while the peer was data-plane trusted carries \
              every data-plane handler, and a handler cannot be rebuilt -- so losing \
              that trust must close it even though its origin still permits it"
+        );
+    }
+
+    /// A connection ADMITTED while the peer was infrastructure-only
+    /// survives that peer's later downgrade to... itself.
+    ///
+    /// **The case that proves the origin check still decides something.**
+    /// `Revoked::was` says `DataPlaneTrusted` here — the peer was
+    /// promoted after this connection was admitted, and demoted again —
+    /// so a rule written against `was` closes it. But this connection
+    /// has carried a DENYING handler since establishment: nothing about
+    /// it is stale, and closing it drops reachability the peer is still
+    /// trusted for, which is exactly what `OpenConnection::origin` was
+    /// added to prevent.
+    ///
+    /// An earlier version of this file judged from `was` and closed
+    /// every revoked connection whatever its origin, leaving that field
+    /// deciding nothing at all. Review finding on PR #77.
+    #[test]
+    fn a_connection_admitted_while_gated_survives_a_downgrade_its_origin_permits() {
+        // Admitted while infrastructure-only, so `ClassGated` gave it a
+        // denying handler.
+        let mut m = manager(&[RELAY], &[RELAY]);
+        let peer = ident(RELAY);
+        let revoked = m.set_trust(trust(&[], &[RELAY]), std::slice::from_ref(&peer));
+        assert_eq!(
+            revoked.len(),
+            1,
+            "the premise: this IS reported as a data-plane loss"
+        );
+        assert_eq!(
+            revoked[0].was,
+            ConnectionClass::DataPlaneTrusted,
+            "and `was` says data-plane trusted, which is what a rule written against it \
+             would close on"
+        );
+
+        let reservation = ConnectionId::new_unchecked(9);
+        let closing = connections_to_close(
+            &m,
+            &revoked,
+            [(
+                reservation,
+                &peer,
+                Some(DialOrigin::RelayReservation),
+                // ADMITTED while infrastructure-only.
+                ConnectionClass::ConnectivityInfrastructureOnly,
+            )]
+            .into_iter(),
+        );
+        assert!(
+            closing.is_empty(),
+            "a connection whose handler was denying all along has nothing stale to \
+             withdraw, and its origin still authorizes it -- closing it would drop \
+             reachability for no reason, which is the defect `OpenConnection::origin` \
+             exists to prevent"
         );
     }
 
@@ -860,7 +966,13 @@ mod tests {
         let closing = connections_to_close(
             &m,
             &revoked,
-            [(id, &peer, Some(DialOrigin::RelayReservation))].into_iter(),
+            [(
+                id,
+                &peer,
+                Some(DialOrigin::RelayReservation),
+                ConnectionClass::DataPlaneTrusted,
+            )]
+            .into_iter(),
         );
         assert!(
             closing.is_empty(),
@@ -1377,7 +1489,7 @@ mod tests {
         let mut m = admitting_manager();
         let mut ticket = placeholder_ticket(&m);
         assert!(ticket.rebind_address("/ip4/192.0.2.1/tcp/1"));
-        let (slot, origin) =
+        let (slot, origin, _class) =
             settle_established_outbound(&mut m, &peer, ticket, 5).expect("trusted and kept");
         assert_eq!(origin, DialOrigin::KademliaQuery);
         assert_eq!(

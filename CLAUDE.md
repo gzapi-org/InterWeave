@@ -109,15 +109,26 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   behaviours ship gated off and `ClassGated<B>` land first; the second
   half is done. The plan's Stage 11 section carries the ruling, because
   that is where the construction order lives.
-  **The two directions are not symmetric**, because a handler is built
-  once at establishment and libp2p never rebuilds it. A peer DEMOTED
-  while connected would keep every data-plane handler for the
-  connection's life, so `ClassGated<B>` closes such connections itself
-  when policy moves — `connections_to_close` cannot, since it keeps a
-  connection whose ORIGIN still permits, which for `RelayReservation`
-  or `AutonatProbe` it deliberately does. A peer PROMOTED while
-  connected stays gated until it reconnects: the safe direction,
-  under-privileged rather than over.
+  **A gating change closes the connection, in whichever direction it
+  moves.** A handler is chosen once at establishment and libp2p never
+  rebuilds it, so a connection whose peer crosses the data-plane
+  boundary is carrying the wrong protocol set from that moment. Losing
+  the trust is decided by `connections_to_close`, so the closure lands
+  in `set_trust`'s ADR-0012 count; gaining it is decided by
+  `ClassGated::poll`, since a promotion is not a revocation and is not
+  part of that count. Both are ADR-0036's own instruction: close and
+  re-establish "rather than allowing a transient privilege mix" — and
+  the gaining direction is not merely under-privileged, because a peer
+  holding one `Denied` and one `Allowed` handler is a pair
+  `NotifyHandler::Any` can route a `kad` query into, where it is
+  silently dropped.
+
+  **The comparison is against the class the connection was ADMITTED
+  under, not the class the peer held before the change.** That is what
+  keeps ADR-0036's origin/class separation real: a connection admitted
+  while the peer was infrastructure-only has carried a denying handler
+  all along, so nothing is stale, and its origin still decides whether
+  it survives.
   `DcutrHolePunch` (D1) and `RelayCircuit` (D2) were both admitted for
   an infrastructure-only peer; the admission predicate — renamed
   `names_application_destination` in the same commit, because the old

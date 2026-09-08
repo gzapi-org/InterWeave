@@ -248,16 +248,18 @@ pub struct SubstrateBehaviour {
 // never rebuilds it. So the two directions are not symmetric:
 //
 // - a peer DEMOTED while connected would otherwise keep every
-//   data-plane handler for the connection's life, and closing the
-//   connection is the only way to withdraw them. `ClassGated` does that
-//   itself, on the policy change, because `connections_to_close` cannot:
-//   it keeps a connection whose ORIGIN still permits, which for a
-//   reachability origin it deliberately does;
-// - a peer PROMOTED while connected stays gated until it reconnects.
-//   That is the safe direction — under-privileged rather than over — and
-//   is left alone rather than paid for with a reconnect.
+//   data-plane handler for the connection's life. `connections_to_close`
+//   ends it, so the closure lands in `set_trust`'s ADR-0012 count;
+// - a peer PROMOTED while connected would leave the peer holding a
+//   `Denied` handler beside a later `Allowed` one, which is a pair
+//   `NotifyHandler::Any` can route a `kad` query into and lose.
+//   `ClassGated::poll` ends that one, since a promotion is not a
+//   revocation and is not part of the count.
 //
-// `class_gate.rs` pins both.
+// Both compare against the class the connection was ADMITTED under, so
+// a connection that has carried a denying handler all along is left
+// alone and its origin still decides. `class_gate.rs` and `dialing.rs`
+// pin all of it.
 
 impl SubstrateBehaviour {
     /// Build the behaviour for `keypair`.
