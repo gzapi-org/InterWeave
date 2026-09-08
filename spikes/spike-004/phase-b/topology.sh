@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# Build the NAT topology SPIKE-004 phase B needs, using rootless podman.
+#
+# See README.md for what this does and does not establish. The short
+# version: it builds a real kernel NAT whose MAPPING BEHAVIOUR is chosen
+# rather than inherited, because that behaviour is what decides whether
+# a hole punch can succeed — and phase A, on loopback, had no NAT at all.
+set -euo pipefail
+
+NET_PUB="${NET_PUB:-natm-pub}"
+NET_LAN="${NET_LAN:-natm-lan}"
+IMAGE="${IMAGE:-interweave-natmatrix:1}"
+
+# The NAT class to build. `eim` gives one external port per internal
+# socket whatever the destination; `eds` allocates per destination.
+# Those are the two rows that decide a hole punch, which is why they are
+# the two this harness builds.
+NAT_MODE="${NAT_MODE:-eim}"
+
+log() { printf '  %s\n' "$*" >&2; }
+
+up() {
+  down >/dev/null 2>&1 || true
+  podman network create "$NET_PUB" >/dev/null
+  podman network create "$NET_LAN" >/dev/null
+
+  # THE OBSERVERS ARE TWO, and that is the measurement rather than
+  # redundancy: one observer cannot tell an endpoint-independent mapping
+  # from a per-destination one, because there is nothing to compare the
+  # observed port against.
+  for n in 1 2; do
+    podman run -d --name "natm-obs$n" --network "$NET_PUB" \
+      --entrypoint /bin/sh "$IMAGE" -c \
+      "socat -u UDP-RECVFROM:9000,fork SYSTEM:'echo \$SOCAT_PEERADDR \$SOCAT_PEERPORT >> /seen.txt'" >/dev/null
+  done
+
+  podman run -d --name natm-router --network "$NET_PUB" --network "$NET_LAN" \
+    --cap-add=NET_ADMIN --sysctl net.ipv4.ip_forward=1 \
+    --entrypoint /bin/sh "$IMAGE" -c 'sleep infinity' >/dev/null
+
+  podman run -d --name natm-peer --network "$NET_LAN" --cap-add=NET_ADMIN \
+    --entrypoint /bin/sh "$IMAGE" -c 'sleep infinity' >/dev/null
+
+  # Addresses are read back rather than assumed: podman picks the
+  # subnets, and a hardcoded guess here would fail as a NAT behaviour
+  # instead of as a setup error.
+  local router_lan router_pub
+  router_lan=$(addr_on natm-router "$NET_LAN")
+  router_pub=$(addr_on natm-router "$NET_PUB")
+  log "router lan=$router_lan pub=$router_pub"
+
+  # The peer's default route goes THROUGH the router, or nothing is
+  # translated and every measurement below is of a direct path.
+  #
+  # The podman-supplied default is DELETED first. `ip route replace`
+  # left both in place -- they differ by metric, so the kernel treats
+  # them as distinct routes -- and which one wins then depends on a
+  # metric this script never set.
+  podman exec natm-peer sh -c \
+    'ip route del default 2>/dev/null; while ip route del default 2>/dev/null; do :; done; true'
+  podman exec natm-peer ip route add default via "$router_lan"
+  podman exec natm-peer sh -c \
+    '[ "$(ip route show default | wc -l)" -eq 1 ] || { echo "peer has more than one default route" >&2; exit 1; }'
+
+  configure_nat "$router_pub"
+  log "NAT mode: $NAT_MODE"
+}
+
+# The interface podman gave this container on that network.
+#
+# Derived by matching the ADDRESS rather than read from a field:
+# `podman inspect`'s per-network object carries no interface name in
+# 5.8, and asking for one yields an empty string that nft then accepts
+# as `oifname ""` -- a rule matching nothing, installed without
+# complaint. That is how the first version of this script reported a
+# NAT it had not built.
+iface_on() {
+  local ctr="$1" net="$2" ip iface
+  ip=$(addr_on "$ctr" "$net")
+  [ -n "$ip" ] || { echo "no address for $ctr on $net" >&2; return 1; }
+  iface=$(podman exec "$ctr" ip -o -4 addr show \
+    | awk -v pfx="$ip/" '$4 ~ "^" pfx {print $2; exit}')
+  [ -n "$iface" ] || { echo "no interface carrying $ip in $ctr" >&2; return 1; }
+  printf '%s' "$iface"
+}
+
+addr_on() {
+  local ctr="$1" net="$2"
+  podman inspect "$ctr" --format "{{ (index .NetworkSettings.Networks \"$net\").IPAddress }}"
+}
+
+configure_nat() {
+  local snat_to="$1" rule
+  case "$NAT_MODE" in
+    eim)
+      # ENDPOINT-INDEPENDENT MAPPING. One external port per internal
+      # socket, reused for every destination — the case a hole punch is
+      # designed to work through, and the kernel's default behaviour for
+      # masquerade when it is not asked for anything else.
+      rule="masquerade"
+      ;;
+    eds)
+      # ENDPOINT-DEPENDENT (symmetric). `random` forces a fresh port
+      # allocation per flow, so the same internal socket appears on a
+      # different external port to each destination. This is the row
+      # where DCUtR must FAIL and fall back to the relay — the case
+      # loopback could never produce, because on loopback every punch
+      # succeeds.
+      rule="masquerade random"
+      ;;
+    *) echo "unknown NAT_MODE: $NAT_MODE" >&2; exit 2 ;;
+  esac
+  local oif
+  # OUTSIDE the heredoc, so a failure fails the script. Inside a command
+  # substitution in a heredoc, `set -e` does not fire and the empty
+  # result becomes a rule that matches nothing.
+  oif=$(iface_on natm-router "$NET_PUB")
+  # `-i`, or the heredoc goes nowhere: `podman exec` does not attach
+  # stdin by default, so `nft -f -` reads EOF immediately and exits 0
+  # having installed nothing. The assertion below is what turned that
+  # into a visible failure rather than a topology that quietly was not
+  # one.
+  podman exec -i natm-router nft -f - <<NFT
+table inet nat {
+  chain postrouting {
+    type nat hook postrouting priority srcnat; policy accept;
+    oifname "$oif" $rule
+  }
+}
+NFT
+  # ASSERT THE RULE LANDED. A topology harness that cannot tell whether
+  # it built the topology reports loopback-quality evidence under a
+  # phase-B heading, which is the one failure this spike exists to
+  # avoid -- and the first version of this script did exactly that.
+  podman exec natm-router nft list ruleset 2>/dev/null | grep -q "oifname \"$oif\"" \
+    || { echo "NAT rule absent after configuring it" >&2; return 1; }
+  log "snat via $snat_to using: $rule"
+}
+
+down() {
+  podman rm -f natm-obs1 natm-obs2 natm-router natm-peer >/dev/null 2>&1 || true
+  podman network rm -f "$NET_PUB" "$NET_LAN" >/dev/null 2>&1 || true
+}
+
+case "${1:-up}" in
+  up) up ;;
+  down) down ;;
+  *) echo "usage: $0 [up|down]" >&2; exit 2 ;;
+esac

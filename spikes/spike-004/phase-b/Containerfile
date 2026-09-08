@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# One image for every role in the matrix — router, peer and observer —
+# because the roles differ by what they are TOLD to do, not by what they
+# carry. A per-role image would let a probe fail for want of a tool and
+# read as a NAT behaviour.
+#
+# Pinned by digest rather than by tag: this harness's whole output is a
+# claim about what a NAT did, and a tag that moves under it invalidates
+# the record without changing a line here. The same reason SPIKE-003 and
+# SPIKE-004 phase A pin their crate versions exactly.
+FROM docker.io/library/alpine@sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1
+
+# nftables  — the NAT itself, and the only way to choose its mapping
+#              behaviour rather than accept the kernel default.
+# iproute2  — routes, and reading what address a namespace actually got.
+# socat     — the probe: it exposes the observed source as
+#              SOCAT_PEERADDR/SOCAT_PEERPORT, which is the measurement
+#              this whole harness exists to take.
+RUN apk add --no-cache nftables iproute2 socat
