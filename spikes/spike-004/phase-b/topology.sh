@@ -64,7 +64,7 @@ up() {
   local router_lan router_pub
   router_lan=$(addr_on natm-router "$NET_LAN")
   router_pub=$(addr_on natm-router "$NET_PUB")
-  log "router lan=$router_lan pub=$router_pub"
+  log "router-a lan=$router_lan pub=$router_pub"
 
   # The peer's default route goes THROUGH the router, or nothing is
   # translated and every measurement below is of a direct path.
@@ -77,8 +77,10 @@ up() {
 
   configure_nat natm-router "$NET_PUB"
 
-  local router_b_lan
+  local router_b_lan router_b_pub
   router_b_lan=$(addr_on natm-router-b "$NET_LAN_B")
+  router_b_pub=$(addr_on natm-router-b "$NET_PUB")
+  log "router-b lan=$router_b_lan pub=$router_b_pub"
   route_through natm-peer-b "$router_b_lan"
   configure_nat natm-router-b "$NET_PUB"
 
