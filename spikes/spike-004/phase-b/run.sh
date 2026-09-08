@@ -120,10 +120,13 @@ done
 # per-row assertion exits non-zero on any other value -- so a summary
 # carrying classes alone prints back its own input, which is what the
 # two tallies before it did in different words. The ports are
-# unconstrained by any assertion here: nothing in this harness decides
-# what they are, so they are what makes the line worth reading. They do
-# NOT always differ -- an `eim` row reports `45000` for both domains on
-# every run, because the source port is fixed and `masquerade` preserves
-# it, and saying they differ was a claim the transcript in the README
-# contradicts. The full measurement is `probe.sh`'s block on stderr.
+# NOT CONSTRAINED BY ANY ASSERTION HERE -- which is a statement about
+# this harness's assertions, and is the strongest true one available.
+# Two stronger ones have already failed: "they differ between runs and
+# between domains" (an `eim` row reports the bound port twice, in both
+# domains), and "nothing in this harness decides what they are" (it sets
+# the source ports, and an `eim` NAT that can preserve them reports them
+# back). What survives is that no check here requires any particular
+# value, so an unexpected one reaches the reader instead of being
+# normalised away. The full measurement is `probe.sh`'s block on stderr.
 printf '\nmeasured and matched:%s\n' "$measured"
