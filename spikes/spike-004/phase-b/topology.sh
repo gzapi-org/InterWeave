@@ -238,8 +238,9 @@ configure_nat() {
   # into a visible failure rather than a topology that quietly was not
   # one.
   #
-  # DECLARED AND FLUSHED FIRST, so the ruleset holds exactly what this
-  # heredoc says. `nft -f -` ADDS: run twice on one container with
+  # DECLARED AND FLUSHED FIRST, so the TABLE holds exactly what this
+  # heredoc says -- `flush table inet nat` is table-scoped, and calling
+  # that the ruleset was wrong by one level. `nft -f -` ADDS: run twice on one container with
   # different modes, the table would carry both rules, the whole-line
   # assertion below would find the one it asked for, and the earlier
   # rule would win at runtime. Not reachable while every row recreates
@@ -262,8 +263,13 @@ NFT
   # failure this spike exists to avoid -- and the first version of this
   # script did exactly that.
   #
-  # THE WHOLE CHAIN, COMPARED TO ONE LINE, rather than a `grep` over the
-  # ruleset. Three things follow from that and none of them held before:
+  # THE CHAIN'S RULES, COMPARED TO ONE LINE, rather than a `grep` over
+  # the ruleset. The `sed` keeps only lines beginning `oifname`, so the
+  # chain's own declaration -- `type nat hook postrouting priority
+  # srcnat; policy accept;` -- is NOT compared, and neither would a rule
+  # written some other way be. That is worth knowing before trusting
+  # this to catch a hook or policy change: it would not. Three things it
+  # does check, none of which held before:
   #
   #   * the MODE is checked, not a prefix of it. `grep -q 'oifname
   #     "eth0" masquerade'` matches the line `oifname "eth0" masquerade
@@ -274,9 +280,11 @@ NFT
   #     still finds the one it asked for, while the earlier rule wins at
   #     runtime. Comparing the whole chain to one line is what makes
   #     deleting the flush fail this assertion instead of passing it.
-  #   * the SCOPE matches the claim. `flush table inet nat` is
-  #     table-scoped while `nft list ruleset` is not, so a matching line
-  #     in any other table used to satisfy the check.
+  #   * the SCOPE is no longer wider than the thing being asserted.
+  #     `nft list ruleset` spans every table, so a matching line in any
+  #     other one used to satisfy the check. The read-back is now
+  #     narrower than the flush above it rather than wider -- chain
+  #     against table -- which is the safe direction.
   #
   # `nft`'s own failure is also distinguished from an absent rule: the
   # old form discarded stderr and reported "rule absent" for a chain it
