@@ -53,10 +53,26 @@ for target in "$obs1" "$obs2"; do
   podman exec "$PEER" sh -c \
     "echo probe | socat -t1 - UDP-DATAGRAM:$target:9000,bind=:$SRC_PORT,reuseaddr" >/dev/null 2>&1 || true
 done
-sleep 1
 
-seen1=$(podman exec natm-obs1 sh -c 'cat /seen.txt' | tail -1)
-seen2=$(podman exec natm-obs2 sh -c 'cat /seen.txt' | tail -1)
+# POLLED, NOT SLEPT ONCE. socat's `fork` hands each datagram to a
+# SYSTEM: handler that appends asynchronously, so on a loaded host the
+# write can land after any fixed wait -- and the read that followed then
+# reported NO DATA with both datagrams delivered. A false negative here
+# reads as "the topology is not a NAT", which is the most alarming
+# verdict this script has. Codex review on PR #78.
+#
+# Bounded in ATTEMPTS rather than seconds, because each one is a
+# `podman exec` and costs far more than the sleep beside it.
+seen1=""; seen2=""
+attempt=0
+while [ -z "$seen1" ] || [ -z "$seen2" ]; do
+  seen1=$(podman exec natm-obs1 sh -c 'cat /seen.txt' | tail -1)
+  seen2=$(podman exec natm-obs2 sh -c 'cat /seen.txt' | tail -1)
+  [ -n "$seen1" ] && [ -n "$seen2" ] && break
+  attempt=$((attempt + 1))
+  [ "$attempt" -le 50 ] || break
+  sleep 0.1
+done
 
 # THE REPORT GOES TO STDERR, and stdout carries the machine-readable
 # result: the class and the two ports it was derived from, one per line.
