@@ -637,7 +637,7 @@ mod tests {
     /// to leave the peer policy empty.
     ///
     /// That precedence is pinned, but only sideways:
-    /// `partial_revocation_keeps_the_reachability_it_still_authorizes`
+    /// `partial_revocation_closes_the_connection_whose_protocols_went_stale`
     /// (`runtime/dialing.rs`) starts from a peer in both sets and
     /// requires one revocation, which an infrastructure-first
     /// `classify` would make zero. Worth naming here because a reader

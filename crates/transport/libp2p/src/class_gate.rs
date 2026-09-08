@@ -45,7 +45,7 @@
 //! ordinary event and drops it. There is no mismatched pairing to be
 //! unreachable about.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::task::{Context, Poll};
 
 use either::Either;
@@ -100,38 +100,24 @@ pub struct ClassGated<B> {
     /// §6 asks that the bound not rest on that.
     ///
     /// A MAP RATHER THAN A SET, because the peer is needed to correct
-    /// the counters the Swarm computes — see [`Self::adjust`].
+    /// the counters the Swarm computes — see [`Self::hidden_for`].
     gated: HashMap<ConnectionId, PeerId>,
-    /// Connections this wrapper ALLOWED, and the peer each belongs to.
-    ///
-    /// The mirror of [`Self::gated`], and it exists for a defect the
-    /// gated set cannot cover. A handler is chosen once, at
-    /// establishment, and libp2p never rebuilds it — so a peer that was
-    /// `DataPlaneTrusted` when its connection opened keeps every
-    /// data-plane protocol for the connection's whole life, whatever
-    /// its class becomes.
-    ///
-    /// **A downgrade does not necessarily close such a connection.**
-    /// `connections_to_close` keeps one whose ORIGIN still permits, and
-    /// for a reachability origin — `RelayReservation`, `AutonatProbe` —
-    /// it does: `authorizes_for(ConnectivityInfrastructureOnly,
-    /// RelayReservation)` is true, deliberately, because a reservation
-    /// with an infrastructure peer is exactly what should survive. So
-    /// the connection lives on with handlers it should no longer have,
-    /// and the isolation invariant is defeated for as long as it does.
-    ///
-    /// Latent today, because no call site passes either origin, and live
-    /// the moment step 3 does — the same shape as SPIKE-004's D1/D2/D3,
-    /// which were fixed before the paths they governed were enabled.
-    /// Review finding on PR #77, by `@codex`.
-    ///
-    /// So [`ClassGated::poll`] closes such a connection itself when
-    /// policy moves. Only the LOSING direction: a peer promoted while
-    /// connected stays gated until it reconnects, which is
-    /// under-privileged rather than over.
     /// The revision of the snapshot `gated` was last checked against, so
     /// a re-check costs nothing while policy is unchanged.
     checked_revision: Option<u64>,
+    /// Connections already queued for closure, so the walk does not
+    /// queue one twice.
+    ///
+    /// **Separate from removing it from [`Self::gated`], and that
+    /// distinction is a crash.** An earlier version dequeued by removing
+    /// the entry at PUSH time — but the connection is still open then,
+    /// so the eventual `ConnectionClosed` found no entry, fell through
+    /// to the forwarding arm, and handed the inner behaviour a close for
+    /// a connection it was never given a handler for. That is exactly
+    /// the `libp2p-request-response` `.expect()` panic `gated` exists to
+    /// prevent, re-opened by the fix for something else. Review finding
+    /// on PR #77.
+    close_queued: HashSet<ConnectionId>,
     /// Connections to close because their peer's gating decision moved.
     ///
     /// Drained one per `poll`, which is how a `NetworkBehaviour`
@@ -147,6 +133,7 @@ impl<B> ClassGated<B> {
             policy,
             gated: HashMap::new(),
             checked_revision: None,
+            close_queued: HashSet::new(),
             closing: Vec::new(),
         }
     }
@@ -281,6 +268,7 @@ impl<B: NetworkBehaviour> NetworkBehaviour for ClassGated<B> {
             FromSwarm::ConnectionClosed(closed) => {
                 if self.gated.remove(&closed.connection_id).is_some() {
                     // REMOVED HERE, which is what keeps the map bounded.
+                    self.close_queued.remove(&closed.connection_id);
                     return;
                 }
                 // The same correction, and this is the arm where getting
@@ -315,10 +303,12 @@ impl<B: NetworkBehaviour> NetworkBehaviour for ClassGated<B> {
             // behaviours happen to refuse.
             FromSwarm::DialFailure(failure) => {
                 self.gated.remove(&failure.connection_id);
+                self.close_queued.remove(&failure.connection_id);
                 self.inner.on_swarm_event(event);
             }
             FromSwarm::ListenFailure(failure) => {
                 self.gated.remove(&failure.connection_id);
+                self.close_queued.remove(&failure.connection_id);
                 self.inner.on_swarm_event(event);
             }
             _ => self.inner.on_swarm_event(event),
@@ -375,24 +365,29 @@ impl<B: NetworkBehaviour> NetworkBehaviour for ClassGated<B> {
             // Queueing without removing was a defect once already: `pop`
             // removed only the entry it returned, so a poll queued M and
             // dequeued 1 and the next revision queued the rest again.
-            let promoted: Vec<ConnectionId> = self
+            let promoted: Vec<(ConnectionId, PeerId)> = self
                 .gated
                 .iter()
-                .filter(|(_, peer)| {
-                    TransportIdentity::parse(peer.to_base58())
-                        .is_ok_and(|i| snapshot.classify(&i) == ConnectionClass::DataPlaneTrusted)
+                .filter(|(id, peer)| {
+                    !self.close_queued.contains(*id)
+                        && TransportIdentity::parse(peer.to_base58()).is_ok_and(|i| {
+                            snapshot.classify(&i) == ConnectionClass::DataPlaneTrusted
+                        })
                 })
-                .map(|(id, _)| *id)
+                .map(|(id, peer)| (*id, *peer))
                 .collect();
-            for id in promoted {
-                if let Some(peer) = self.gated.remove(&id) {
-                    self.closing.push((peer, id));
-                }
+            for (id, peer) in promoted {
+                // THE ENTRY STAYS IN `gated` until the close actually
+                // lands. It is still a hidden connection until then --
+                // its counts must still be subtracted, and its
+                // `ConnectionClosed` must still be swallowed.
+                self.close_queued.insert(id);
+                self.closing.push((peer, id));
             }
         }
         if let Some((peer_id, id)) = self.closing.pop() {
-            // The entry left `gated` when it was queued, so a second
-            // publication before the close lands cannot queue it again.
+            // `close_queued` still holds the id, so a second publication
+            // before the close lands cannot queue it again.
             return Poll::Ready(ToSwarm::CloseConnection {
                 peer_id,
                 connection: CloseConnection::One(id),
@@ -1436,7 +1431,39 @@ mod tests {
         );
         assert!(
             matches!(g.poll(&mut cx), Poll::Pending),
-            "a connection already closed must not be queued again"
+            "a connection already queued must not be queued again"
+        );
+
+        // THE STEP THAT WOULD HAVE CAUGHT THE CRASH, and did not exist
+        // until a review found it. Queueing the close does not close the
+        // connection -- the Swarm does that later, and then reports it.
+        // An earlier version dequeued by REMOVING the entry from `gated`
+        // at queue time, so this event found nothing, fell through to
+        // the forwarding arm, and handed the inner behaviour a close for
+        // a connection it was never given a handler for: the
+        // `libp2p-request-response` `.expect()` panic this wrapper
+        // exists to prevent, re-opened by the fix for something else.
+        let events = Arc::new(Mutex::new(0));
+        g.inner_mut().swarm_events = Arc::clone(&events);
+        g.on_swarm_event(FromSwarm::ConnectionClosed(
+            libp2p::swarm::behaviour::ConnectionClosed {
+                peer_id: peer(INFRA),
+                connection_id: id,
+                endpoint: &connected_point(),
+                remaining_established: 0,
+                cause: None,
+            },
+        ));
+        assert_eq!(
+            *events.lock().expect("not poisoned"),
+            0,
+            "the close of a connection this wrapper hid must NOT reach the inner \
+             behaviour, queued for closure or not -- it was never told the connection \
+             opened"
+        );
+        assert!(
+            g.gated.is_empty() && g.close_queued.is_empty(),
+            "and both records must be released, or they grow for the life of the process"
         );
     }
 
@@ -1524,13 +1551,15 @@ mod tests {
              connection, without restarting anything"
         );
 
-        // THE PROMOTION DIRECTION, which is the one left alone. The
-        // handler was installed at establishment and is not rebuilt, so
-        // this connection stays gated until it reconnects --
-        // under-privileged rather than over, so it is not paid for with
-        // a forced reconnect. The LOSING direction is closed by
-        // `poll`, pinned by
-        // `an_allowed_connection_is_closed_when_its_peer_loses_data_plane_trust`.
+        // NOT a claim that the EXISTING connection keeps its handler
+        // forever. It does not: a gating change closes it -- the LOSING
+        // direction in `dialing::connections_to_close`, so the closure
+        // lands in `set_trust`'s count, and the GAINING direction in
+        // `ClassGated::poll`, pinned by
+        // `a_gated_connection_is_closed_when_its_peer_gains_data_plane_trust`.
+        // What this test pins is narrower: the wrapper reads the LIVE
+        // snapshot, so the next connection is decided on current
+        // policy.
         //
         // Revocation also closes such connections where it can, and that
         // now has a test of its own rather than a citation:
