@@ -38,14 +38,24 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   path. That ends the era in which §3's promise was kept by the
   compiler: a behaviour can now be switched on by writing code rather
   than by editing a manifest, so from here the guarantee is the outbound
-  gate, the trust classification and their tests. Two consequences bind
-  anything built next. A rule about an infrastructure-only peer is a
-  rule about a state this build can reach, not a latent one. And the
-  exposure `BOTTOM-UP-IMPLEMENTATION-PLAN.md` §14 names — every
-  data-plane behaviour installed uniformly on every connection — is now
-  one commit away rather than one stage, so **the commit that gives
-  these behaviours a constructor must not land before that restriction
-  does**; the owner ruled on 2026-09-07 that it ships gated off and the
+  gate, the trust classification and their tests. **Two
+  infrastructure-only states must not be confused, and enabling the
+  features changed only what guards the second.** An inbound connection
+  from such a peer has ALWAYS been ESTABLISHED and then closed — neither
+  gate denies at the established inbound hook — so it needs no relay
+  code and is reachable today through ordinary configuration;
+  `tests/connectivity/tests/advertised_protocol_set.rs` pins it, and
+  measures that nothing is advertised in that window, because the
+  refusal closes in the same loop iteration. A connection DIALLED or
+  RETAINED as infrastructure-only still cannot exist: it needs an origin
+  outside `names_application_destination`, so it needs a constructed
+  relay or AutoNAT behaviour, and nothing constructs one. Do not read
+  the feature change as evidence those paths are live. The exposure
+  `BOTTOM-UP-IMPLEMENTATION-PLAN.md` §14 names — every data-plane
+  behaviour installed uniformly on every connection — is about the
+  RETAINED case, and it is now one commit away rather than one stage,
+  so **the commit that gives these behaviours a constructor must not
+  land before that restriction does**; the owner ruled on 2026-09-07 that it ships gated off and the
   `ClassGated<B>` fix lands first.
   `DcutrHolePunch` (D1) and `RelayCircuit` (D2) were both admitted for
   an infrastructure-only peer; the admission predicate — renamed
