@@ -94,9 +94,17 @@ fi
 
 # A line with no space would make `port` the address, both would be the
 # router's, and the classifier would say `eim` for any NAT at all.
-case "$port1$port2" in
-  *[!0-9]*|"") echo "VERDICT: MALFORMED — ports were '$port1' and '$port2'" >&2; exit 1 ;;
-esac
+#
+# EACH PORT, NOT THE TWO CONCATENATED. `case "$port1$port2"` tested the
+# JOINED string, so an empty `port1` with `port2=45000` gave the subject
+# `45000` -- numeric and non-empty, so it passed -- and the comparison
+# below then read the two as different and reported an endpoint-dependent
+# mapping from one observation. Review finding on PR #78.
+for port in "$port1" "$port2"; do
+  case "$port" in
+    *[!0-9]*|"") echo "VERDICT: MALFORMED — ports were '$port1' and '$port2'" >&2; exit 1 ;;
+  esac
+done
 
 if [ "$port1" = "$port2" ]; then
   verdict="ENDPOINT-INDEPENDENT MAPPING (one external port for both destinations)"
