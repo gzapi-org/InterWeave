@@ -34,8 +34,14 @@ this harness owes is evidence that these ones do.
 one of the two things that decide whether a hole punch SUCCEEDS;
 filtering is the other, and is neither configured nor measured here — so
 these rows license a claim about the mapping a punch would face and not
-about the punch. Neither row rules an ATTEMPT out: `DCUTR.md` §2 lists
-the eligibility conditions and NAT class is not among them, and §9
+about the punch SUCCEEDING. The missing word matters, because the
+relationship is asymmetric: `eim` mapping is necessary and not
+sufficient, while `eds` mapping is sufficient for FAILURE on its own —
+filtering cannot rescue a punch aimed at a port the peer will not be
+reached on. So the rows do license a claim about the punch, in one
+direction, and the `eds` row exists to use it. Neither row rules an
+ATTEMPT out: `DCUTR.md` §2 lists the eligibility conditions and NAT
+class is not among them, and §9
 requires a NAT-induced FAILURE test, which is a punch attempted and
 failed. An earlier version of this sentence said mapping decides whether
 a punch can be attempted at all, which would leave the `eds` row with no
@@ -193,9 +199,15 @@ and conntrack's own entry makes the opposite the more likely reading.
 Treat the row as the mapping property and nothing else.
 
 **The `eds` row is the one phase A could never reach.** On loopback every
-punch succeeds, so `DCUTR.md` §13's cooldown, retry ceiling and
-fallback-on-failure have never been exercised by anything. This is the
-mapping behaviour a failing punch depends on.
+punch succeeds, so the failure cooldown (`DCUTR.md` §3 and
+`CONNECTIVITY.md` §13 both set it at 5 min) and fallback-on-failure have
+never been exercised by anything. This is the mapping behaviour a
+failing punch depends on. **The retry ceiling is not a document's**:
+`DCUTR.md` has nine sections and no §13, which this cited for ten
+rounds, and neither §3 nor `CONNECTIVITY.md` §13 sets a retry count —
+`SPIKES.md` records that the crate's `MAX_NUMBER_OF_UPGRADE_ATTEMPTS`
+is `pub(crate)`, so DCUtR has no knob for it and the bound has to be
+built by an adapter.
 
 **It is not yet a punch.** The topology has two NAT domains — two peers,
 each behind its own router — which is the minimum a hole punch needs,
@@ -268,8 +280,9 @@ reason: `class` starts at `eim` and only a disagreeing trial moves it,
 so a list naming nothing would report ENDPOINT-INDEPENDENT and exit 0
 having measured nothing. It requires at least two tokens; each numeric and in
 1–65535, because `*[!0-9]*` admits `0`, `70000` and a token that wraps
-negative, and `bind=:0` binds ANY port — which breaks the one-internal-
-tuple premise and measures a correct `eim` topology as `eds`; and
+negative, and `bind=:0` binds ANY port, which breaks the premise that
+both sockets share one internal tuple and measures a correct `eim`
+topology as `eds`; and
 distinct once normalised, since `45000` and `045000` are two spellings
 of one tuple and one trial re-opens the coincidence the trials exist to
 close.
@@ -338,8 +351,9 @@ Three things cost time to find, all of which fail silently:
   — visible only in the container's logs. The observers report space
   separated.
 
-The image is pinned by digest, and its three packages by version. But **the image is not what
-translates** — the NAT is the host kernel's netfilter, and the
+The image is pinned by digest, and its three packages by version. But
+**the image is not what translates** — the NAT is the host kernel's
+netfilter, and the
 `eim`/`eds` distinction is a `get_unique_tuple` port-selection behaviour
 that has changed across kernel releases. Pinning the image and recording
 nothing else aimed the reproducibility argument at the wrong component,

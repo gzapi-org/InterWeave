@@ -1334,7 +1334,8 @@ loopback, so the exit gate's NAT/relay/hole-punch matrix is unmet and
 **phase B is required before stage closure**: a public VM and
 home/symmetric/carrier NAT, two independently operated relay/probe
 services, **relay loss and capacity denial**, interface change,
-hole-punch success rates, measured resource cost. That is six items,
+hole-punch success rates, measured resource cost against the default
+budgets. That is six items,
 matching `SPIKES.md` in content as well as count. It did neither until
 2026-09-08: the capacity-denial row was missing entirely, so a reader
 who counted here got five, and the first item read "real and carrier

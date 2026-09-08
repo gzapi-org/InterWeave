@@ -16,8 +16,11 @@ set -euo pipefail
 NET_PUB="${NET_PUB:-natm-pub}"
 NET_LAN="${NET_LAN:-natm-lan}"
 # THE SECOND NAT DOMAIN. A hole punch needs two peers each behind their
-# OWN translation: one domain measures a mapping, two are required
-# before a punch is a thing that can be attempted at all. The first
+# OWN translation: one domain measures a mapping, and two are the
+# minimum a punch needs. (Not "before a punch can be attempted at all" --
+# `DCUTR.md` §2's eligibility list no more requires two NAT domains than
+# it requires a mapping class, and the header above says so about the
+# class.) The first
 # version of this harness built one and described itself as the
 # environment a punch needs, which was false. Review finding on PR #78.
 NET_LAN_B="${NET_LAN_B:-natm-lan-b}"
@@ -38,8 +41,11 @@ IMAGE="${IMAGE:-interweave-natmatrix:1}"
 
 # The NAT class to build. `eim` gives one external port per internal
 # socket whatever the destination; `eds` allocates per destination.
-# Those are the two rows that decide a hole punch, which is why they are
-# the two this harness builds.
+# Those are the two mapping classes, and mapping is one of the two
+# things deciding whether a punch succeeds -- filtering is the other and
+# is not measured here -- which is why these are the two rows this
+# harness builds. This said "the two rows that decide a hole punch" for
+# ten review rounds, thirty lines below the header that retracts it.
 NAT_MODE="${NAT_MODE:-eim}"
 
 log() { printf '  %s\n' "$*" >&2; }

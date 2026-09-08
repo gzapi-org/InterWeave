@@ -18,7 +18,8 @@
 #     two variables deciding whether a hole punch SUCCEEDS. Filtering is
 #     the other, and this harness neither configures nor measures it, so
 #     a row licenses a claim about the mapping a punch would face and
-#     not about the punch. It does not gate the ATTEMPT either:
+#     not about the punch SUCCEEDING. `eds` mapping IS sufficient for
+#     failure on its own, which is the asymmetry the harness relies on. It does not gate the ATTEMPT either:
 #     `DCUTR.md` §2's eligibility list does not mention NAT class.
 set -euo pipefail
 
