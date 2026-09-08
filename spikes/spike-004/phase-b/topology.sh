@@ -18,6 +18,13 @@ NET_LAN="${NET_LAN:-natm-lan}"
 # version of this harness built one and described itself as the
 # environment a punch needs, which was false. Review finding on PR #78.
 NET_LAN_B="${NET_LAN_B:-natm-lan-b}"
+
+# THE ROUTERS, NAMED ONCE. `record_environment` cannot know the topology
+# -- it only sees the arguments a caller passes -- so the protection
+# against recording half of it is that the list has a single site.
+# Adding a third NAT domain means adding it here, which reaches the
+# environment record and the teardown together.
+ROUTERS="natm-router natm-router-b"
 IMAGE="${IMAGE:-interweave-natmatrix:1}"
 
 # The NAT class to build. `eim` gives one external port per internal
@@ -85,7 +92,8 @@ up() {
   configure_nat natm-router-b "$NET_PUB"
 
   log "NAT mode: $NAT_MODE (both domains)"
-  record_environment natm-router natm-router-b
+  # shellcheck disable=SC2086
+  record_environment $ROUTERS
 }
 
 # The interface podman gave this container on that network.
@@ -143,9 +151,15 @@ route_through() {
 # whose whole job is attribution. Moving that name from the body to the
 # call site fixed one caller and left the function able to record half a
 # topology and return 0, which is exactly the unattributable run it
-# exists to prevent. The count is asserted, so a third NAT domain added
-# without touching the call site fails here rather than going
-# unrecorded.
+# exists to prevent.
+#
+# THE COUNT GUARD IS A FLOOR AND NOTHING MORE. It catches that
+# regression -- one router named, or none -- and it cannot catch a third
+# domain added without updating the caller, because two arguments still
+# satisfy it. Only `$ROUTERS` having one definition site does that, and
+# saying the guard did was this file claiming a check it does not
+# perform, one paragraph after deleting three guards for being unable to
+# fail. Review finding on PR #78.
 #
 # WHAT MAKES THIS FAIL CLOSED IS THE ASSIGNMENT, not a non-empty check.
 # A command substitution inside a `printf` argument does not fire
@@ -168,6 +182,14 @@ record_environment() {
     nft_version=$(podman exec "$ctr" nft --version)
     log "nft    : $nft_version ($ctr)"
   done
+  # SOCAT TOO, because it is what produces the measurement. The image is
+  # digest-pinned at its BASE, and `apk add` resolves whatever the
+  # mirror serves at build time -- so the versions of the three packages
+  # are a property of the build, not of the digest, and only the
+  # recorded ones are attributable.
+  local socat_version
+  socat_version=$(podman exec natm-obs1 socat -V | sed -n '2p')
+  log "socat  : $socat_version (natm-obs1)"
 }
 
 configure_nat() {
@@ -269,8 +291,9 @@ NFT
 }
 
 down() {
-  podman rm -f natm-obs1 natm-obs2 natm-router natm-peer \
-    natm-router-b natm-peer-b >/dev/null 2>&1 || true
+  # shellcheck disable=SC2086
+  podman rm -f natm-obs1 natm-obs2 natm-peer natm-peer-b $ROUTERS \
+    >/dev/null 2>&1 || true
   podman network rm -f "$NET_PUB" "$NET_LAN" "$NET_LAN_B" >/dev/null 2>&1 || true
 }
 
