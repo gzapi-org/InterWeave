@@ -168,8 +168,9 @@ route_through() {
 # statement of `up()`. Hoisting it into an assignment is the fix. A
 # `[ -n ... ]` guard on `uname -r`, `podman --version` or `nft
 # --version` would be an assertion that cannot fail -- none of the three
-# exits 0 while printing nothing -- so there is none. Review findings on
-# PR #78.
+# exits 0 while printing nothing -- so there is none. The socat line
+# below IS guarded, because it filters its output and a filter that
+# matches nothing succeeds. Review findings on PR #78.
 record_environment() {
   [ "$#" -ge 2 ] \
     || { echo "record_environment: name every router that translated" >&2; return 1; }
@@ -182,13 +183,26 @@ record_environment() {
     nft_version=$(podman exec "$ctr" nft --version)
     log "nft    : $nft_version ($ctr)"
   done
-  # SOCAT TOO, because it is what produces the measurement. The image is
-  # digest-pinned at its BASE, and `apk add` resolves whatever the
-  # mirror serves at build time -- so the versions of the three packages
-  # are a property of the build, not of the digest, and only the
-  # recorded ones are attributable.
+  # SOCAT TOO, because it is what produces the measurement, and it is
+  # read from an OBSERVER rather than from a router -- the one name
+  # written into this function rather than passed to it, because the
+  # observers are not per-domain. The log line says which.
+  #
+  # RECORDED EVEN THOUGH THE CONTAINERFILE NOW PINS IT. The pin says
+  # what should be installed; this says what was. They agreeing is the
+  # useful fact, and it is only checkable if both exist.
+  #
+  # GUARDED, UNLIKE THE THREE ABOVE, and the difference is the `sed`.
+  # `podman exec` failing is caught by the assignment, as it is for the
+  # others -- but `sed -n '2p'` exits 0 printing NOTHING whenever socat's
+  # banner has fewer than two lines or changes shape, which would log
+  # `socat  : ` and return 0 from `up()`. That is the record-half-a-
+  # topology failure this function was rewritten to close, in a narrower
+  # form. Review finding on PR #78.
   local socat_version
-  socat_version=$(podman exec natm-obs1 socat -V | sed -n '2p')
+  socat_version=$(podman exec natm-obs1 socat -V | sed -n 's/^socat version /&/p')
+  [ -n "$socat_version" ] \
+    || { echo "natm-obs1: socat printed no version line" >&2; return 1; }
   log "socat  : $socat_version (natm-obs1)"
 }
 

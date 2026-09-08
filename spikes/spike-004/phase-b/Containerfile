@@ -18,4 +18,21 @@ FROM docker.io/library/alpine@sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9b
 # socat     — the probe: it exposes the observed source as
 #              SOCAT_PEERADDR/SOCAT_PEERPORT, which is the measurement
 #              this whole harness exists to take.
-RUN apk add --no-cache nftables iproute2 socat
+#
+# PINNED BY VERSION, because the digest above does not pin these. The
+# base image is fixed, but `apk add` resolves whatever the mirror serves
+# at build time, and `run.sh` rebuilds every run -- so two machines, or
+# one machine a month apart, could run different measurement tooling
+# while every other pin in this directory held. That is the failure this
+# spike's whole output is exposed to: the harness reports what a NAT did,
+# and socat is what observes it.
+#
+# THE COST IS DELIBERATE. Alpine prunes old package versions, so when
+# this release ages out the BUILD fails loudly rather than the
+# measurement changing quietly. Bumping these is then a decision with a
+# commit behind it, which is the same trade the dependency allow-list
+# makes in CLAUDE.md §8.
+RUN apk add --no-cache \
+      nftables=1.1.3-r0 \
+      iproute2=6.15.0-r0 \
+      socat=1.8.1.3-r0
