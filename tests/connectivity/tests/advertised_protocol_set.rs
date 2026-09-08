@@ -563,9 +563,10 @@ async fn a_peer_downgraded_to_infrastructure_only_loses_its_connection() {
     // WHY THIS TEST EXISTS, and it is not coverage for its own sake.
     //
     // `ClassGated<B>` decides a connection's protocol set once, at
-    // establishment, and never rebuilds the handler. So a peer PROMOTED
-    // while connected stays gated until it reconnects, and — the half
-    // that matters — a peer DEMOTED while connected would keep the
+    // establishment, and never rebuilds the handler. So a peer whose
+    // class crosses the data-plane boundary while connected is carrying
+    // the wrong protocol set from that moment — a peer DEMOTED would
+    // keep the
     // data-plane handlers it was given. `connections_to_close` ends such
     // a connection, which is ADR-0036's own instruction: close and
     // re-establish under the new class rather than allow a transient

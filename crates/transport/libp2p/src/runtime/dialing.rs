@@ -599,6 +599,17 @@ pub(super) fn connections_to_close<'a>(
         // Whatever wanted the reachability connection re-establishes it,
         // correctly gated.
         //
+        // NOT REACHABLE YET, and the distinction matters for reading
+        // this. `now` is never `DataPlaneTrusted` here — `permits`
+        // admits every promotion — so `gating_changed` reduces to
+        // `admitted_class == DataPlaneTrusted`, and a non-DPT
+        // `admitted_class` requires a RETAINED infrastructure-only
+        // connection, which needs a reachability origin no call site
+        // passes. So today every revoked connection closes whatever its
+        // origin. What changed is that the keep branch is reachable by a
+        // TEST rather than dead code, which is the preparation step 3
+        // needs: step 3 is the first commit that creates the state.
+        //
         // THE COMPARISON IS AGAINST `admitted_class`, NOT `Revoked::was`,
         // and that is what keeps the origin check alive. `was` is the
         // class before the latest change, which for a peer admitted
@@ -747,13 +758,14 @@ mod tests {
     /// allowing a transient privilege mix". In-place reconciliation is
     /// not safe here, so the fallback applies.
     ///
-    /// **The narrowness matters.** Only the TRANSITION closes. A peer
-    /// that was already infrastructure-only keeps its reservation
-    /// through any number of republications --
-    /// `an_unchanged_infrastructure_peer_keeps_its_reachability_connection`
-    /// is that case, and it is the one the origin check was built for.
-    /// What cannot happen is a connection established under data-plane
-    /// trust being silently re-purposed as a reachability-only one.
+    /// **The narrowness matters.** Only a connection ADMITTED under
+    /// data-plane trust closes; one admitted while the peer was already
+    /// infrastructure-only keeps its reservation, which is the case the
+    /// origin check was built for and which
+    /// `a_connection_admitted_while_gated_survives_a_downgrade_its_origin_permits`
+    /// pins. What cannot happen is a connection established under
+    /// data-plane trust being silently re-purposed as a
+    /// reachability-only one.
     #[test]
     fn partial_revocation_closes_the_connection_whose_protocols_went_stale() {
         let mut m = manager(&[RELAY], &[RELAY]);
@@ -967,16 +979,33 @@ mod tests {
     /// A peer that was ALREADY infrastructure-only keeps its
     /// reachability connection.
     ///
-    /// The control for the test above, and the case the origin check was
-    /// built for: no gating decision changed, so nothing is stale and
-    /// the reservation must survive.
+    /// A peer whose class did not change produces no revoked row at all.
+    ///
+    /// **This is a guard test, not a control**, and an earlier version
+    /// claimed otherwise: it said it was "the case the origin check was
+    /// built for", which it is not -- `connections_to_close` exits at
+    /// `revoked_class.get(peer)` before reaching either the origin check
+    /// or the gating comparison, so the body could be replaced with an
+    /// unconditional `closing.insert(id)` and this would still pass.
+    /// What it actually pins is `set_trust`'s `was != now` filter.
+    /// Review finding on PR #77; the same
+    /// documented-its-branch-instead-of-exercising-it shape a commit
+    /// earlier on this branch was written to fix.
+    ///
+    /// The case the origin check WAS built for is
+    /// `a_connection_admitted_while_gated_survives_a_downgrade_its_origin_permits`,
+    /// which reaches the branch.
     #[test]
-    fn an_unchanged_infrastructure_peer_keeps_its_reachability_connection() {
+    fn a_peer_whose_class_did_not_change_produces_no_revoked_row() {
         let mut m = manager(&[], &[RELAY]);
         let peer = ident(RELAY);
-        // Republish the same classes, with an unrelated peer added so
-        // the snapshot genuinely moves.
+        // The SAME trust sources the manager already holds.
         let revoked = m.set_trust(trust(&[], &[RELAY]), std::slice::from_ref(&peer));
+        assert!(
+            revoked.is_empty(),
+            "the premise, and the whole of what this test proves: an unchanged class \
+             is filtered out before `connections_to_close` is reached"
+        );
 
         let id = ConnectionId::new_unchecked(8);
         let closing = connections_to_close(
@@ -986,14 +1015,19 @@ mod tests {
                 id,
                 &peer,
                 Some(DialOrigin::RelayReservation),
-                ConnectionClass::DataPlaneTrusted,
+                // WHAT THE CALLER ACTUALLY HOLDS. This peer is
+                // infrastructure-only, so `ClassGated::admits` returned
+                // false and the runtime recorded that class -- passing
+                // `DataPlaneTrusted` here described a state this
+                // scenario cannot produce.
+                ConnectionClass::ConnectivityInfrastructureOnly,
             )]
             .into_iter(),
         );
         assert!(
             closing.is_empty(),
-            "an infrastructure peer that stayed infrastructure has stale nothing -- \
-             closing here would churn every reservation on every republication"
+            "and so nothing is closed -- but by the filter above, not by anything this \
+             function decided"
         );
     }
 

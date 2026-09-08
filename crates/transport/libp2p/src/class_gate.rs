@@ -120,8 +120,18 @@ pub struct ClassGated<B> {
     close_queued: HashSet<ConnectionId>,
     /// Connections to close because their peer's gating decision moved.
     ///
-    /// Drained one per `poll`, which is how a `NetworkBehaviour`
-    /// returns work.
+    /// Drained one per `poll`, which is how a `NetworkBehaviour` returns
+    /// work.
+    ///
+    /// **The one collection here with no removal path**, and two facts
+    /// make that safe rather than a leak. A connection that closes
+    /// between the push and the pop leaves an entry naming a dead id —
+    /// harmless, because `CloseConnection::One` looks the id up in the
+    /// pool and does nothing when it is absent (`libp2p-swarm-0.47.1`
+    /// `lib.rs:1156`), and a `ConnectionId` is never reused. And
+    /// [`Self::close_queued`] admits each id at most once while it is
+    /// live, so this holds at most one entry per gated connection and
+    /// inherits `gated`'s bound.
     closing: Vec<(PeerId, ConnectionId)>,
 }
 
