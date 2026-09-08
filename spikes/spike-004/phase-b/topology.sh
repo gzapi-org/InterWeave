@@ -206,8 +206,17 @@ NFT
   # The MODE as well as the interface: a bare `oifname "eth0"` with no
   # statement would satisfy a check on the interface alone, and the
   # comment above says the rule landed rather than half of it.
-  podman exec "$ctr" nft list ruleset 2>/dev/null | grep -q "oifname \"$oif\" $rule" \
-    || { echo "$ctr: NAT rule absent or not '$rule' after configuring it" >&2; return 1; }
+  #
+  # WHOLE LINE, not substring. `grep -q "oifname \"eth0\" masquerade"`
+  # matches the line `oifname "eth0" masquerade random`, so an `eim`
+  # assertion was satisfied by an `eds` ruleset -- the comment claimed
+  # the mode and checked a prefix of it. `-x` against the trimmed line
+  # is what makes the two modes distinguishable here. Review finding on
+  # PR #78.
+  podman exec "$ctr" nft list ruleset 2>/dev/null \
+    | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+    | grep -qx "oifname \"$oif\" $rule" \
+    || { echo "$ctr: NAT rule absent or not exactly '$rule' after configuring it" >&2; return 1; }
   log "$ctr: snat on $oif using: $rule"
 }
 
