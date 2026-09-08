@@ -1130,13 +1130,16 @@ async fn revoking_trust_closes_the_connection_it_revoked() {
     // `open`, which is the map `connections_to_close` walks -- so this
     // is the listener's own statement that there is something to find.
     //
-    // MEASURED, not assumed: with this wait deleted the test fails as
-    // `closed == 0`, which is the shape that reads as "the revocation
-    // does not close connections". Review finding on PR #79.
+    // MEASURED, not assumed: with this wait deleted the test was
+    // observed failing `left: 0, right: 1` -- the shape that reads as
+    // "the revocation does not close connections". It is a race, so a
+    // run that happens to schedule the listener first would pass; that
+    // is the property a fixed sleep cannot give and this can.
+    // Review finding on PR #79.
     assert_eq!(
         wait_connected(&mut listener).await,
         dialer_peer,
-        "the listener records the inbound before the revocation looks for it"
+        "the inbound the listener records is the dialer's, not some other peer's"
     );
 
     let closed = listener
@@ -1860,7 +1863,7 @@ async fn revoking_a_peer_with_several_connections_counts_each_once() {
         assert_eq!(
             wait_connected(&mut listener).await,
             dialer_peer,
-            "the listener records both inbounds before the revocation looks for them"
+            "each inbound reaches the listener as a connection from the dialer"
         );
     }
 
@@ -1873,10 +1876,12 @@ async fn revoking_a_peer_with_several_connections_counts_each_once() {
     // one closure per (revoked entry x matching connection) pair, so
     // two connections to one peer reported four.
     //
-    // EXACTLY TWO, not "at most". `<= 2` passed while the listener had
-    // recorded only ONE of the inbounds, which is what the sleep this
-    // replaced could not rule out -- so the bound the test exists to
-    // check was being taken against a state it had not established.
+    // EXACTLY TWO, not "at most". `<= 2` would have passed had the
+    // listener recorded only ONE of the inbounds -- which the sleep this
+    // replaced could not rule out, so the bound the test exists to check
+    // could be taken against a state it had not established. That state
+    // was never OBSERVED here, and saying it had been would be the same
+    // overclaim this branch's other commit retracts.
     // Waiting for both events is what makes the equality safe to
     // assert, and the equality is what makes waiting for both
     // load-bearing.

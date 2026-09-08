@@ -45,9 +45,10 @@ and its filtering — can still connect: the dial toward the `eds` peer
 dies, but the `eds` peer's own dial arrives at the stable port the
 other side's mapping gives it, and endpoint-independent filtering
 forwards it whatever the source. Filtering rescues that punch, and it
-takes the mapping half to have a port worth aiming at. (A hypothetical:
-this harness's `eim` row is a port-restricted cone, not a full one, as
-the filtering note above says.)
+takes the mapping half to have a port worth aiming at. (A hypothetical
+here: this harness's `eim` row is a port-restricted cone, not a full
+one, as the filtering note BELOW says — so the rescuing pairing is not
+one these two rows can build.)
 Which is why the rows are stated as a claim about mapping and the
 harness builds both domains alike. Neither row rules an
 ATTEMPT out: `DCUTR.md` §2 lists the eligibility conditions and NAT
