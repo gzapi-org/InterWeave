@@ -886,10 +886,16 @@ mod tests {
 
         // NOT a claim that the EXISTING connection is re-gated. It is
         // not: the handler was installed at establishment and is not
-        // rebuilt. Revocation closes such connections
-        // (`runtime/mod.rs`'s downgrade path), which is what makes that
-        // acceptable -- and if that ever stops being true, this comment
-        // is where the gap opens.
+        // rebuilt. What makes that acceptable is that revocation closes
+        // such connections, and THAT now has a test of its own rather
+        // than a citation:
+        // `advertised_protocol_set::a_peer_downgraded_to_infrastructure_only_loses_its_connection`
+        // takes a trusted peer to infrastructure-only over real sockets
+        // and requires the connection to go. It was written because the
+        // claim rested on two separately-tested halves -- the manager
+        // NAMES a downgrade, and a named connection is CLOSED -- with
+        // the closing half only ever exercised for a full revocation to
+        // `Unauthorized`, which is the easier case.
         let _ = DialOrigin::Manual;
     }
 }

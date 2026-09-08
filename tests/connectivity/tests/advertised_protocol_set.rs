@@ -70,7 +70,22 @@
 //!
 //! Read from a third-party Identify observer over loopback rather than
 //! from this crate's own types, because what a peer is TOLD is the
-//! question. A test that asked `SubstrateBehaviour` what it contains
+//! question.
+//!
+//! # One assay is owed and cannot be written yet
+//!
+//! The plan asks for a NEGOTIATION assay beside this one: a raw
+//! request-response observer attempting `send_request` on a gated
+//! connection and failing at negotiation rather than at the response —
+//! a stronger claim than reading Identify, since it would catch a
+//! wrapper that hid protocols from the advertisement while still
+//! accepting substreams.
+//!
+//! It needs a RETAINED infrastructure-only connection, and nothing can
+//! produce one: the inbound arm refuses that class outright, and the two
+//! origins that would hold one open have no call site. Step 3 is the
+//! first commit that creates the state this assay requires, so the assay
+//! belongs with it. Recorded here rather than left undone silently. A test that asked `SubstrateBehaviour` what it contains
 //! would agree with any mistake made in constructing it.
 
 #![allow(clippy::expect_used, clippy::panic)]
@@ -533,6 +548,137 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
                  `ConnectionEstablished` arrived; other events are swallowed by \
                  the catch-all above."
             ),
+        }
+    }
+
+    subject.shutdown().await.expect("stops");
+}
+
+#[tokio::test]
+async fn a_peer_downgraded_to_infrastructure_only_loses_its_connection() {
+    // WHY THIS TEST EXISTS, and it is not coverage for its own sake.
+    //
+    // `ClassGated<B>` decides a connection's protocol set once, at
+    // establishment, and never rebuilds the handler. So a peer PROMOTED
+    // while connected stays gated until it reconnects, and — the half
+    // that matters — a peer DEMOTED while connected keeps the data-plane
+    // handlers it was given. That is only acceptable because something
+    // else ends the connection, and `class_gate.rs` says so in as many
+    // words: "revocation closes the connections it downgrades".
+    //
+    // That claim was resting on two separately-tested halves.
+    // `connection_manager`'s `revoking_trust_names_the_connections_that_must_go`
+    // pins that the manager NAMES a `DataPlaneTrusted` ->
+    // `ConnectivityInfrastructureOnly` transition, and
+    // `stage5_dial_admission`'s `revoking_trust_closes_the_connection_it_revoked`
+    // pins that a named connection is CLOSED — but that one revokes to
+    // `trusting_nobody()`, which makes the peer `Unauthorized`. The
+    // DOWNGRADE composition, which is the one `ClassGated`'s limitation
+    // depends on, was tested at neither end to end.
+    use futures::StreamExt as _;
+
+    let observer_keys = libp2p::identity::Keypair::generate_ed25519();
+    let observer_peer = TransportIdentity::parse(observer_keys.public().to_peer_id().to_base58())
+        .expect("a canonical identity");
+
+    let subject_id = ProfileIdentity::generate();
+    let subject_peer = subject_id.transport_identity().expect("peer id");
+
+    // Trusted to begin with, so the connection is retained and the
+    // data-plane handlers are installed.
+    let mut subject = SwarmRuntime::start(
+        &subject_id,
+        SubstrateConfig::default(),
+        trusting(&[&observer_peer]),
+    )
+    .expect("the runtime starts");
+    let address = listening(&mut subject).await;
+
+    let mut observer = libp2p::SwarmBuilder::with_existing_identity(observer_keys)
+        .with_tokio()
+        .with_tcp(
+            libp2p::tcp::Config::default(),
+            libp2p::noise::Config::new,
+            libp2p::yamux::Config::default,
+        )
+        .expect("the same transport stack the subject uses")
+        .with_behaviour(|k| {
+            libp2p::identify::Behaviour::new(libp2p::identify::Config::new(
+                "/interweave-downgrade-observer/1".to_owned(),
+                k.public(),
+            ))
+        })
+        .expect("behaviour")
+        // As elsewhere in this file: the observer must not be the one
+        // that closes, or the assertion cannot tell a downgrade from a
+        // timeout.
+        .with_swarm_config(|c| c.with_idle_connection_timeout(IDLE_FAR_BEYOND_PATIENCE))
+        .build();
+
+    let peer: libp2p::PeerId = subject_peer.as_str().parse().expect("a libp2p identity");
+    observer
+        .dial(
+            libp2p::swarm::dial_opts::DialOpts::peer_id(peer)
+                .addresses(vec![address])
+                .build(),
+        )
+        .expect("dial accepted");
+
+    // Wait for the connection to be genuinely up before changing
+    // anything, or the test could pass by never having connected.
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "the trusted connection never established"
+        );
+        match tokio::time::timeout(remaining, observer.select_next_some()).await {
+            Ok(libp2p::swarm::SwarmEvent::ConnectionEstablished { .. }) => break,
+            Ok(libp2p::swarm::SwarmEvent::OutgoingConnectionError { error, .. }) => {
+                panic!("the control failed: a trusted peer could not connect: {error:?}");
+            }
+            Ok(_) => {}
+            Err(_) => panic!("the trusted connection never established"),
+        }
+    }
+
+    // THE OBSERVER'S ESTABLISH IS NOT THE SUBJECT'S. Both ends see
+    // their own event, and the downgrade below asks the SUBJECT which
+    // connections it holds -- so without this the trust change can
+    // arrive before the subject has recorded the connection, and find
+    // nothing to close. It fails as `closed == 0`, which reads exactly
+    // like "the downgrade does not close connections" and is the first
+    // way this test was wrong. `stage5_dial_admission` waits the same
+    // way, for the same reason, in its own comment.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // THE DOWNGRADE: still authorized for reachability control, no
+    // longer for the data plane. Not a full revocation -- that case is
+    // already covered, and it is the easier one.
+    let closed = subject
+        .set_trust(infrastructure_only(&observer_peer))
+        .await
+        .expect("the runtime accepts the new trust");
+    assert_eq!(
+        closed, 1,
+        "the downgraded peer's connection must be named for closure"
+    );
+
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "a peer downgraded to infrastructure-only kept its connection. It also kept \
+             the data-plane handlers `ClassGated` installed when it was trusted, since \
+             those are built once and never rebuilt -- so this is the assumption that \
+             makes that limitation acceptable, and it no longer holds."
+        );
+        match tokio::time::timeout(remaining, observer.select_next_some()).await {
+            Ok(libp2p::swarm::SwarmEvent::ConnectionClosed { .. }) => break,
+            Ok(_) => {}
+            Err(_) => panic!("no close arrived after the downgrade"),
         }
     }
 
