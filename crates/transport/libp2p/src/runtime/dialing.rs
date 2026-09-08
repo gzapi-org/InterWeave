@@ -647,6 +647,22 @@ pub(super) struct OpenConnection {
     /// `was = DataPlaneTrusted` for that last change while its
     /// connection has carried a denying handler throughout: nothing is
     /// stale, and closing it would drop reachability for no reason.
+    ///
+    /// **THIS IS A SECOND CLASSIFICATION, and it agrees with
+    /// `ClassGated`'s only because of where the two sit in the loop.**
+    /// The wrapper classifies inside its established hook, which the
+    /// Swarm calls while `select_next_some()` is being polled; this
+    /// value is taken in the arm body that handles the
+    /// `ConnectionEstablished` the same poll returned. One `select!`
+    /// iteration, no await between them, so no `SetTrust` command can be
+    /// processed in the gap and the two readings cannot disagree.
+    ///
+    /// That is a property of the runtime loop rather than of this
+    /// struct, and it is stated here because nothing else would say it:
+    /// move the classification to a later iteration, or add an await,
+    /// and a connection could be recorded under a class it was not
+    /// gated on -- which decides wrongly at the next trust change, in
+    /// silence.
     pub(super) admitted_class: ConnectionClass,
     /// Why this connection was opened, or `None` for one that arrived.
     ///
