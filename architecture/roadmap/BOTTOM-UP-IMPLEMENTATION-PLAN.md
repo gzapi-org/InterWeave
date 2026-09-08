@@ -1331,9 +1331,28 @@ Run and close **SPIKE-004**. **Phase A closed 2026-09-01: PASS FOR
 IMPLEMENTATION.** The work below is authorized. What is NOT authorized
 is calling the stage complete — phase A ran on one machine over
 loopback, so the exit gate's NAT/relay/hole-punch matrix is unmet and
-**phase B is required before stage closure**: real and carrier NAT, two
-independently operated relay/probe services, interface change,
-hole-punch success rates, measured resource cost.
+**phase B is required before stage closure**: a public VM and
+home/symmetric/carrier NAT, two independently operated relay/probe
+services, **relay loss and capacity denial**, interface change,
+hole-punch success rates, measured resource cost against the default
+budgets. That is six items,
+matching `SPIKES.md` in content as well as count. It did neither until
+2026-09-08: the capacity-denial row was missing entirely, so a reader
+who counted here got five, and the first item read "real and carrier
+NAT" — dropping the public VM, which is the half of that item this
+stage's own deferral discussion turns on.
+
+**AN OWNER DECISION IS OPEN, and it is recorded here because
+`SPIKES.md` points at this section for it.** The ENVIRONMENT for the NAT
+rows now exists at
+[`spikes/spike-004/phase-b/`](../../spikes/spike-004/phase-b/README.md) —
+containerised, two NAT domains, mapping class configured and then
+measured. It closes none of the six. The question is whether the exit
+gate's NAT row can be satisfied by a containerised matrix with the
+population claim, the filtering half, the public VM and a carrier's
+CGNAT all explicitly deferred — the shape Stage 9 used for mDNS and
+Stage 10 for the release gate. **Nothing here answers it, and no row is
+marked met on the strength of that environment.**
 
 The verdict and its binding findings are in
 [`SPIKES.md`](./SPIKES.md); the record is
