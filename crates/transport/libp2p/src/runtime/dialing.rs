@@ -568,6 +568,13 @@ pub(super) fn connections_to_close<'a>(
         .iter()
         .map(|entry| (&entry.peer, entry.now))
         .collect();
+    // The PAIR, not just the new class: whether the handlers a
+    // connection already carries are stale depends on what the peer WAS.
+    let revoked_class_pair: BTreeMap<&TransportIdentity, (ConnectionClass, ConnectionClass)> =
+        revoked
+            .iter()
+            .map(|entry| (&entry.peer, (entry.was, entry.now)))
+            .collect();
     let mut closing = BTreeSet::new();
     for (id, peer, origin) in open {
         let Some(now) = revoked_class.get(peer) else {
@@ -577,7 +584,33 @@ pub(super) fn connections_to_close<'a>(
             Some(origin) => manager.authorizes_for(*now, origin),
             None => manager.authorizes(*now),
         };
-        if !still_authorized {
+        // AUTHORIZATION IS NOT THE ONLY REASON TO CLOSE. A connection's
+        // protocol set is decided once, by `ClassGated`, from the class
+        // the peer held at establishment -- and libp2p never rebuilds a
+        // handler. So a peer that LOSES data-plane trust keeps every
+        // data-plane handler for the connection's life even where the
+        // origin check above deliberately keeps the connection: a relay
+        // reservation or AutoNAT probe survives a downgrade by design,
+        // and would survive it carrying `/interweave/direct/2.0.0` and
+        // the rest.
+        //
+        // ADR-0036 settles it rather than this file inventing an answer:
+        // "If atomic in-place reconciliation is not safe in the pinned
+        // library, close the connection and re-establish it under the
+        // new class rather than allowing a transient privilege mix."
+        // Whatever wanted the reachability connection re-establishes it,
+        // correctly gated.
+        //
+        // DECIDED HERE rather than inside `ClassGated`, so that
+        // `set_trust`'s count includes it. That count is ADR-0012's
+        // observable — "a revocation whose only effect was on the next
+        // dial would leave the revoked peer connected" — and a closure
+        // the wrapper performed on its own would be invisible to it.
+        let entry = revoked_class_pair.get(peer);
+        let lost_data_plane = entry.is_some_and(|(was, now)| {
+            *was == ConnectionClass::DataPlaneTrusted && *now != ConnectionClass::DataPlaneTrusted
+        });
+        if !still_authorized || lost_data_plane {
             closing.insert(id);
         }
     }
@@ -659,13 +692,32 @@ mod tests {
 
     /// A peer trusted BOTH ways loses only its data-plane trust.
     ///
-    /// ADR-0036 keeps the two authorizations separate, so this peer is
-    /// still infrastructure and its relay reservation is still
-    /// authorized. Deciding from the class alone -- which is what
-    /// closing every connection to a reported peer does -- drops the
-    /// reachability the peer is still trusted for.
+    /// **This test asserted the opposite until `ClassGated` landed, and
+    /// the reversal is deliberate.** Its reasoning was, and remains,
+    /// correct about AUTHORIZATION: ADR-0036 keeps the two separate, so
+    /// this peer is still infrastructure and its reservation is still
+    /// authorized. What it could not know is that the connection also
+    /// carries a PROTOCOL SET, chosen once at establishment from the
+    /// class the peer held then, which libp2p never rebuilds. Keeping
+    /// the connection keeps every data-plane protocol advertised on it.
+    ///
+    /// ADR-0036 anticipates exactly this and orders it: remove the peer
+    /// from application protocol state before retaining any eligible
+    /// connectivity-control connection, and "if atomic in-place
+    /// reconciliation is not safe in the pinned library, close the
+    /// connection and re-establish it under the new class rather than
+    /// allowing a transient privilege mix". In-place reconciliation is
+    /// not safe here, so the fallback applies.
+    ///
+    /// **The narrowness matters.** Only the TRANSITION closes. A peer
+    /// that was already infrastructure-only keeps its reservation
+    /// through any number of republications --
+    /// `an_unchanged_infrastructure_peer_keeps_its_reachability_connection`
+    /// is that case, and it is the one the origin check was built for.
+    /// What cannot happen is a connection established under data-plane
+    /// trust being silently re-purposed as a reachability-only one.
     #[test]
-    fn partial_revocation_keeps_the_reachability_it_still_authorizes() {
+    fn partial_revocation_closes_the_connection_whose_protocols_went_stale() {
         let mut m = manager(&[RELAY], &[RELAY]);
         let peer = ident(RELAY);
         let revoked = m.set_trust(trust(&[], &[RELAY]), std::slice::from_ref(&peer));
@@ -678,8 +730,11 @@ mod tests {
             [(reservation, &peer, Some(DialOrigin::RelayReservation))].into_iter(),
         );
         assert!(
-            closing.is_empty(),
-            "an infrastructure peer keeps the connection it is still authorized for"
+            closing.contains(&reservation),
+            "the reservation is still AUTHORIZED, and is closed anyway: it carries the \
+             data-plane handlers it was given while the peer was trusted, and they \
+             cannot be withdrawn from a live connection. Re-established, it comes back \
+             correctly gated."
         );
     }
 
@@ -736,6 +791,82 @@ mod tests {
             [(ConnectionId::new_unchecked(4), &peer, None)].into_iter(),
         );
         assert!(closing.is_empty());
+    }
+
+    /// A downgrade closes a connection whose ORIGIN would keep it.
+    ///
+    /// The origin check exists so a relay reservation or AutoNAT probe
+    /// survives a peer losing only its data-plane trust -- that peer is
+    /// still infrastructure, and the reachability connection is exactly
+    /// what should live on. But `ClassGated` decides a connection's
+    /// protocol set once, at establishment, from the class the peer held
+    /// THEN, and libp2p never rebuilds a handler. So a connection kept
+    /// by the origin check would be kept carrying every data-plane
+    /// protocol, which is the isolation invariant defeated by the
+    /// mechanism that was meant to preserve reachability.
+    ///
+    /// ADR-0036: close and re-establish "rather than allowing a
+    /// transient privilege mix". Decided HERE rather than inside the
+    /// wrapper so `set_trust`'s count includes it -- ADR-0012 makes that
+    /// count the observable, and a closure the wrapper performed on its
+    /// own would be invisible to it. Review finding on PR #77.
+    #[test]
+    fn a_downgraded_peer_is_closed_even_where_its_origin_still_permits() {
+        let mut m = manager(&[RELAY], &[RELAY]);
+        let peer = ident(RELAY);
+        // Data-plane trust withdrawn; infrastructure kept.
+        let revoked = m.set_trust(trust(&[], &[RELAY]), std::slice::from_ref(&peer));
+        assert_eq!(revoked.len(), 1, "the downgrade must be reported");
+
+        // THE CONTROL FIRST: the origin genuinely still permits this
+        // connection, so the authorization check alone would keep it.
+        assert!(
+            m.authorizes_for(
+                interweave_transport_runtime::ConnectionClass::ConnectivityInfrastructureOnly,
+                DialOrigin::RelayReservation
+            ),
+            "the premise: a reservation with an infrastructure peer stays authorized"
+        );
+
+        let id = ConnectionId::new_unchecked(7);
+        let closing = connections_to_close(
+            &m,
+            &revoked,
+            [(id, &peer, Some(DialOrigin::RelayReservation))].into_iter(),
+        );
+        assert!(
+            closing.contains(&id),
+            "a connection established while the peer was data-plane trusted carries \
+             every data-plane handler, and a handler cannot be rebuilt -- so losing \
+             that trust must close it even though its origin still permits it"
+        );
+    }
+
+    /// A peer that was ALREADY infrastructure-only keeps its
+    /// reachability connection.
+    ///
+    /// The control for the test above, and the case the origin check was
+    /// built for: no gating decision changed, so nothing is stale and
+    /// the reservation must survive.
+    #[test]
+    fn an_unchanged_infrastructure_peer_keeps_its_reachability_connection() {
+        let mut m = manager(&[], &[RELAY]);
+        let peer = ident(RELAY);
+        // Republish the same classes, with an unrelated peer added so
+        // the snapshot genuinely moves.
+        let revoked = m.set_trust(trust(&[], &[RELAY]), std::slice::from_ref(&peer));
+
+        let id = ConnectionId::new_unchecked(8);
+        let closing = connections_to_close(
+            &m,
+            &revoked,
+            [(id, &peer, Some(DialOrigin::RelayReservation))].into_iter(),
+        );
+        assert!(
+            closing.is_empty(),
+            "an infrastructure peer that stayed infrastructure has stale nothing -- \
+             closing here would churn every reservation on every republication"
+        );
     }
 
     /// A ticket libp2p cannot dial is not retried forever.

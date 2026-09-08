@@ -129,11 +129,10 @@ pub struct ClassGated<B> {
     /// policy moves. Only the LOSING direction: a peer promoted while
     /// connected stays gated until it reconnects, which is
     /// under-privileged rather than over.
-    allowed: HashMap<ConnectionId, PeerId>,
-    /// The revision of the snapshot the allowed set was last checked
-    /// against, so a re-check costs nothing while policy is unchanged.
+    /// The revision of the snapshot `gated` was last checked against, so
+    /// a re-check costs nothing while policy is unchanged.
     checked_revision: Option<u64>,
-    /// Connections to close because their peer is no longer trusted.
+    /// Connections to close because their peer's gating decision moved.
     ///
     /// Drained one per `poll`, which is how a `NetworkBehaviour`
     /// returns work.
@@ -147,7 +146,6 @@ impl<B> ClassGated<B> {
             inner,
             policy,
             gated: HashMap::new(),
-            allowed: HashMap::new(),
             checked_revision: None,
             closing: Vec::new(),
         }
@@ -202,7 +200,6 @@ impl<B: NetworkBehaviour> NetworkBehaviour for ClassGated<B> {
         let handler = self
             .inner
             .handle_established_inbound_connection(id, peer, local, remote)?;
-        self.allowed.insert(id, peer);
         Ok(ClassGatedHandler::Allowed(handler))
     }
 
@@ -221,7 +218,6 @@ impl<B: NetworkBehaviour> NetworkBehaviour for ClassGated<B> {
         let handler = self
             .inner
             .handle_established_outbound_connection(id, peer, addr, role, port)?;
-        self.allowed.insert(id, peer);
         Ok(ClassGatedHandler::Allowed(handler))
     }
 
@@ -287,7 +283,6 @@ impl<B: NetworkBehaviour> NetworkBehaviour for ClassGated<B> {
                     // REMOVED HERE, which is what keeps the map bounded.
                     return;
                 }
-                self.allowed.remove(&closed.connection_id);
                 // The same correction, and this is the arm where getting
                 // it wrong PANICS rather than misbehaves.
                 // `libp2p-request-response` asserts
@@ -320,12 +315,10 @@ impl<B: NetworkBehaviour> NetworkBehaviour for ClassGated<B> {
             // behaviours happen to refuse.
             FromSwarm::DialFailure(failure) => {
                 self.gated.remove(&failure.connection_id);
-                self.allowed.remove(&failure.connection_id);
                 self.inner.on_swarm_event(event);
             }
             FromSwarm::ListenFailure(failure) => {
                 self.gated.remove(&failure.connection_id);
-                self.allowed.remove(&failure.connection_id);
                 self.inner.on_swarm_event(event);
             }
             _ => self.inner.on_swarm_event(event),
@@ -341,32 +334,36 @@ impl<B: NetworkBehaviour> NetworkBehaviour for ClassGated<B> {
         self.inner.on_connection_handler_event(peer, id, event);
     }
 
-    /// Close any allowed connection whose peer has since lost data-plane
+    /// Close any GATED connection whose peer has since gained data-plane
     /// trust, then poll the inner behaviour.
     ///
-    /// A handler cannot be rebuilt, so this is the only way to withdraw
-    /// the protocols an allowed connection was given: end the
-    /// connection. A reachability connection that is still wanted is
-    /// re-established by whatever wanted it, correctly gated the second
-    /// time — a reconnect, not a loss of function.
+    /// The other direction is not here, and the split is deliberate. A
+    /// peer that LOSES data-plane trust is closed by
+    /// `dialing::connections_to_close`, in the command path, so that
+    /// `set_trust`'s count includes it — that count is ADR-0012's
+    /// observable, and a closure this wrapper performed on its own would
+    /// be invisible to it. A promotion is not a revocation and is not
+    /// part of that count, so it is handled here.
     ///
-    /// **THE ACCEPTED DOCUMENT SAYS SO**, and this should be argued from
-    /// there rather than from what `connections_to_close` happens to do.
-    /// ADR-0036's implementation implications: "If atomic in-place
-    /// reconciliation is not safe in the pinned library, close the
-    /// connection and re-establish it under the new class rather than
-    /// allowing a transient privilege mix." In-place reconciliation is
-    /// not safe here — libp2p never rebuilds a handler — so this is the
-    /// prescribed fallback, not a local invention.
+    /// **Why a promotion needs closing at all**, when the peer is only
+    /// under-privileged: a gated connection that survives a promotion
+    /// leaves the peer holding a `Denied` handler and, once it connects
+    /// again, an `Allowed` one. `kad` dispatches with
+    /// `NotifyHandler::Any`, which selects by PEER, so the Swarm may
+    /// route a query to the denied connection — where
+    /// `on_behaviour_event` drops it, safely and silently, and the query
+    /// times out with a usable connection sitting right there. Review
+    /// finding on PR #77.
+    ///
+    /// ADR-0036 names that state and forbids it: close and re-establish
+    /// "rather than allowing a transient privilege mix".
     ///
     /// CHECKED ONLY WHEN POLICY MOVES. `PolicySnapshot::revision`
-    /// changes on publication, so an unchanged policy skips the walk of
-    /// every allowed connection. It is not free — the load is an
-    /// `RwLock` read and an `Arc` clone, once per wrapper per poll — and
-    /// "unchanged" is less common than it sounds, since `publish` fires
-    /// on every dial outcome and every connection open and close.
-    /// Removing the guard would change no observable behaviour, only
-    /// cost, which is why nothing tests it.
+    /// changes on publication, so an unchanged policy skips the walk. It
+    /// is not free — the load is an `RwLock` read and an `Arc` clone,
+    /// once per wrapper per poll — and "unchanged" is less common than
+    /// it sounds, since `publish` fires on every dial outcome and every
+    /// connection open and close.
     fn poll(
         &mut self,
         cx: &mut Context<'_>,
@@ -374,36 +371,27 @@ impl<B: NetworkBehaviour> NetworkBehaviour for ClassGated<B> {
         let snapshot = self.policy.load();
         if self.checked_revision != Some(snapshot.revision()) {
             self.checked_revision = Some(snapshot.revision());
-            // COLLECTED FIRST, then moved out of `allowed` in one
-            // pass. Queueing without removing was the defect: `pop`
-            // removed only the entry it returned, so with M untrusted
-            // connections a poll queued M and dequeued 1, leaving M-1 in
-            // BOTH maps for the next revision to queue again. And a
-            // revision change on the very next poll is the normal case,
-            // not a contrived one -- `publish` fires on every connection
-            // open and close. `closing` grew O(M^2) and the inner
-            // behaviour went unpolled for the whole drain.
-            //
-            // Moving the entry at PUSH is what makes the queue bounded
-            // by `allowed` and makes the comment below true. Review
-            // finding on PR #77.
-            let untrusted: Vec<ConnectionId> = self
-                .allowed
+            // COLLECTED FIRST, then moved out of `gated` in one pass.
+            // Queueing without removing was a defect once already: `pop`
+            // removed only the entry it returned, so a poll queued M and
+            // dequeued 1 and the next revision queued the rest again.
+            let promoted: Vec<ConnectionId> = self
+                .gated
                 .iter()
                 .filter(|(_, peer)| {
-                    !TransportIdentity::parse(peer.to_base58())
+                    TransportIdentity::parse(peer.to_base58())
                         .is_ok_and(|i| snapshot.classify(&i) == ConnectionClass::DataPlaneTrusted)
                 })
                 .map(|(id, _)| *id)
                 .collect();
-            for id in untrusted {
-                if let Some(peer) = self.allowed.remove(&id) {
+            for id in promoted {
+                if let Some(peer) = self.gated.remove(&id) {
                     self.closing.push((peer, id));
                 }
             }
         }
         if let Some((peer_id, id)) = self.closing.pop() {
-            // The entry left `allowed` when it was queued, so a second
+            // The entry left `gated` when it was queued, so a second
             // publication before the close lands cannot queue it again.
             return Poll::Ready(ToSwarm::CloseConnection {
                 peer_id,
@@ -1313,23 +1301,6 @@ mod tests {
             .expect("still a connection");
         assert_eq!(g.gated.len(), 2, "both are being hidden");
 
-        // The mirror map needs draining too, and had no test at all:
-        // `allowed` is what `poll` walks to decide closures.
-        let allowed_id = ConnectionId::new_unchecked(3);
-        let _ = g
-            .handle_established_inbound_connection(allowed_id, peer(TRUSTED), &addr(), &addr())
-            .expect("admitted");
-        assert_eq!(g.allowed.len(), 1);
-        g.on_swarm_event(FromSwarm::ListenFailure(
-            libp2p::swarm::behaviour::ListenFailure {
-                local_addr: &addr(),
-                send_back_addr: &addr(),
-                error: &libp2p::swarm::ListenError::Aborted,
-                connection_id: allowed_id,
-                peer_id: Some(peer(TRUSTED)),
-            },
-        ));
-
         g.on_swarm_event(FromSwarm::ListenFailure(
             libp2p::swarm::behaviour::ListenFailure {
                 local_addr: &addr(),
@@ -1352,12 +1323,6 @@ mod tests {
             "an id whose connection never established must be released -- it will never \
              see the close that otherwise drains it, so the map would grow for the life \
              of the process"
-        );
-        assert!(
-            g.allowed.is_empty(),
-            "and so must an ALLOWED id: `allowed` decides which connections get closed \
-             on a downgrade, so a stale entry is both a leak and a close aimed at a \
-             connection that no longer exists"
         );
     }
 
@@ -1394,30 +1359,32 @@ mod tests {
     }
 
     #[test]
-    fn an_allowed_connection_is_closed_when_its_peer_loses_data_plane_trust() {
-        // THE P1 THIS FIXES, and it is worth stating why the obvious
-        // reasoning misses it.
+    fn a_gated_connection_is_closed_when_its_peer_gains_data_plane_trust() {
+        // THE MIXED-HANDLER STATE, and why a promotion is not merely
+        // "under-privileged until it reconnects".
         //
-        // A handler is chosen once and libp2p never rebuilds it, so a
-        // peer trusted at establishment keeps every data-plane protocol
-        // for the connection's life. The comforting answer is "a
-        // downgrade closes the connection" — and for a connection held
-        // under `Manual` or arriving inbound, it does. It does NOT for
-        // one held under a reachability origin: `connections_to_close`
-        // keeps a connection whose ORIGIN still permits, and
-        // `authorizes_for(ConnectivityInfrastructureOnly,
-        // RelayReservation)` is true on purpose, because a reservation
-        // with an infrastructure peer is exactly what should survive.
+        // A handler is chosen once and libp2p never rebuilds it. Leave a
+        // gated connection in place through a promotion and the peer
+        // ends up holding a `Denied` handler and, on its next
+        // connection, an `Allowed` one. `kad` dispatches with
+        // `NotifyHandler::Any`, which selects by PEER, so the Swarm may
+        // route a query to the denied side -- where `on_behaviour_event`
+        // drops it, safely and silently, and the query times out with a
+        // usable connection sitting right there.
         //
-        // So the connection lives on with handlers it should no longer
-        // have. Latent today — no call site passes those origins — and
-        // live the moment step 3 does, which is the same shape as
-        // SPIKE-004's D1/D2/D3.
+        // ADR-0036 names that state and forbids it: close and
+        // re-establish "rather than allowing a transient privilege mix".
+        // Review finding on PR #77.
+        //
+        // The LOSING direction is not here. It is decided by
+        // `dialing::connections_to_close`, so that `set_trust`'s count
+        // includes it -- see
+        // `a_downgraded_peer_is_closed_even_where_its_origin_still_permits`.
         let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
         let _ = m.set_trust(
             TrustSources::new(
-                PeerTrustPolicy::new([ident(TRUSTED)]).expect("small"),
-                InfrastructureSet::default(),
+                PeerTrustPolicy::new([]).expect("empty"),
+                InfrastructureSet::new([ident(INFRA)]).expect("small"),
             ),
             &[],
         );
@@ -1425,23 +1392,21 @@ mod tests {
 
         let id = ConnectionId::new_unchecked(1);
         let handler = g
-            .handle_established_inbound_connection(id, peer(TRUSTED), &addr(), &addr())
-            .expect("admitted while trusted");
-        assert!(matches!(handler, ClassGatedHandler::Allowed(_)));
+            .handle_established_inbound_connection(id, peer(INFRA), &addr(), &addr())
+            .expect("still a connection");
+        assert!(matches!(handler, ClassGatedHandler::Denied));
 
-        // Nothing to do while policy is unchanged.
         let mut cx = Context::from_waker(std::task::Waker::noop());
         assert!(
             matches!(g.poll(&mut cx), Poll::Pending),
             "an unchanged policy must not close anything"
         );
 
-        // DOWNGRADE, not revocation: still infrastructure, no longer
-        // data-plane. This is the case a reachability origin survives.
+        // PROMOTED to the data plane while its gated connection is open.
         let _ = m.set_trust(
             TrustSources::new(
-                PeerTrustPolicy::new([]).expect("empty"),
-                InfrastructureSet::new([ident(TRUSTED)]).expect("small"),
+                PeerTrustPolicy::new([ident(INFRA)]).expect("small"),
+                InfrastructureSet::default(),
             ),
             &[],
         );
@@ -1451,26 +1416,21 @@ mod tests {
                 peer_id,
                 connection: CloseConnection::One(closed),
             }) => {
-                assert_eq!(peer_id, peer(TRUSTED));
-                assert_eq!(
-                    closed, id,
-                    "the connection whose peer lost data-plane trust must be the one closed"
-                );
+                assert_eq!(peer_id, peer(INFRA));
+                assert_eq!(closed, id);
             }
             other => panic!(
-                "a downgraded peer's allowed connection must be closed, since its \
-                 handler cannot be rebuilt and still carries every data-plane \
-                 protocol; got {other:?} instead"
+                "a promoted peer's gated connection must be closed, or it and its next \
+                 connection form the mixed-handler pair `NotifyHandler::Any` can route \
+                 into; got {other:?}"
             ),
         }
 
-        // AND ONLY ONCE. A second publication must not re-queue a
-        // connection already closed, or a busy policy becomes a stream
-        // of duplicate close commands.
+        // AND ONLY ONCE.
         let _ = m.set_trust(
             TrustSources::new(
-                PeerTrustPolicy::new([]).expect("empty"),
-                InfrastructureSet::new([ident(TRUSTED)]).expect("small"),
+                PeerTrustPolicy::new([ident(INFRA)]).expect("small"),
+                InfrastructureSet::default(),
             ),
             &[],
         );
@@ -1483,7 +1443,7 @@ mod tests {
     #[test]
     fn a_still_trusted_peers_connection_survives_an_unrelated_policy_change() {
         // The control. A wrapper that closed on every republication
-        // would pass the test above and make the data plane unusable.
+        // would pass the test above and churn every connection it holds.
         let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
         let _ = m.set_trust(
             TrustSources::new(
