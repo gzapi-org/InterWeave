@@ -71,27 +71,57 @@ router_pub=$(addr_on "$ROUTER" "$NET_PUB")
 # talk itself into the class that says a hole punch would work.
 SRC_PORTS="${SRC_PORTS:-45000 45001}"
 
-# THE TRIAL LIST IS VALIDATED BEFORE ANYTHING RUNS, because `class`
+# THE TRIAL LIST IS VALIDATED BEFORE ANY TRIAL RUNS, because `class`
 # starts at `eim` and only a disagreeing trial moves it. Zero trials
 # therefore reported ENDPOINT-INDEPENDENT, matched `EXPECT=eim`, and
-# exited 0 having measured nothing -- and `SRC_PORTS=" "` reaches that,
-# since it is set and non-null so `:-` does not substitute. That is the
-# `MODES=" "` defect this harness already found one file over,
-# reproduced inside the fix for the classifier. `run.sh` happens to
-# catch it through the empty `PORTS=`; the standalone invocation this
-# README documents does not.
+# exited 0 having measured nothing -- and `SRC_PORTS=" "` reached that,
+# being set and non-null so `:-` did not substitute. That was the
+# `MODES=" "` defect this harness had already found one file over,
+# reproduced inside the fix for the classifier. `run.sh` happened to
+# catch it through the empty `PORTS=`; the standalone invocation the
+# README documents did not.
 #
 # TWO DISTINCT PORTS, not merely two tokens. One trial re-opens the
 # single-pair coincidence the trials exist to close, and a repeated port
 # is the same internal tuple twice -- conntrack hands the second trial
-# the first one's mapping, so it is literally the repeat the comment
-# below says it is not. Review finding on PR #78.
+# the first one's mapping, so it would be literally the repeat the
+# comment below says it is not.
+#
+# NUMERIC AND NORMALISED FIRST, because distinctness of the SPELLING is
+# not distinctness of the port: `45000` and `045000` are two tokens and
+# one tuple. `$((10#...))` collapses them, and a token that is not a number
+# at all would otherwise reach `socat`, fail, be swallowed by the
+# `|| true` on the send, and surface as NO DATA -- the wrong diagnosis
+# for a caller's typo, and the one this script calls its most alarming.
+#
+# GLOB DISABLED for the split. An unquoted expansion is pathname
+# expansion as well as word splitting, so a token containing `*` would
+# be replaced by matching filenames in the working directory.
+# Review findings on PR #78.
+[ "$#" -eq 0 ] \
+  || { echo "probe.sh takes no arguments; the trial list is the SRC_PORTS environment variable" >&2; exit 2; }
+set -f
 # shellcheck disable=SC2086
 set -- $SRC_PORTS
+set +f
 [ "$#" -ge 2 ] \
   || { echo "SRC_PORTS named $# trial(s); eim cannot be observed from fewer than two" >&2; exit 2; }
+normalised=""
+for src in "$@"; do
+  case "$src" in
+    ''|*[!0-9]*) echo "SRC_PORTS holds '$src', which is not a port number" >&2; exit 2 ;;
+  esac
+  # BASE TEN EXPLICITLY. `$((045000))` is OCTAL -- 18944 -- so the
+  # normalisation meant to collapse two spellings of one port silently
+  # produced a different port. Caught by the mutation check for the
+  # duplicate guard, which accepted `45000 045000` and printed
+  # `45000 18944`.
+  normalised="$normalised $((10#$src))"
+done
+# shellcheck disable=SC2086
+set -- $normalised
 [ "$#" -eq "$(printf '%s\n' "$@" | sort -u | wc -l)" ] \
-  || { echo "SRC_PORTS repeats a port, so a trial would re-measure one tuple: $*" >&2; exit 2; }
+  || { echo "SRC_PORTS names one port twice, so a trial would re-measure one tuple: $*" >&2; exit 2; }
 
 # Measure once from one bound source port, and print `p1 p2`.
 #

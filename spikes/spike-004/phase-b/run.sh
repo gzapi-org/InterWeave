@@ -36,8 +36,14 @@ MODES="${MODES:-eim eds}"
 # would be two independent word-splits of the same string -- the object
 # validated and the object iterated would not be the same object, which
 # is the shape half the findings in this directory have had.
+# GLOB DISABLED for the split, because an unquoted expansion is pathname
+# expansion as well as word splitting: a mode containing `*` would be
+# replaced by matching filenames in the working directory rather than
+# reaching `topology.sh`'s unknown-mode arm. Review finding on PR #78.
+set -f
 # shellcheck disable=SC2086
 set -- $MODES
+set +f
 [ "$#" -ge 1 ] || { echo "MODES named no rows, so nothing would be measured" >&2; exit 2; }
 
 # The two LANs the two NAT domains sit on, named the same way
