@@ -225,7 +225,8 @@ into the class that says a hole punch would work.
 
 Five checks stand between the observation and a passing row — four
 before the verdict is printed, one after — and any of them fails it.
-Every one of them runs on EVERY trial, not only the last.
+The four before the verdict run on EVERY trial, not only the last; the
+fifth is taken once, on the class every trial agreed on.
 (This said four, and before that two, both times because the sentence
 was counted against the bullet list below it rather than against
 `probe.sh`. It is the first bullet that kept going missing, and it is
