@@ -214,7 +214,18 @@ configure_nat() {
   # having installed nothing. The assertion below is what turned that
   # into a visible failure rather than a topology that quietly was not
   # one.
+  #
+  # DECLARED AND FLUSHED FIRST, so the ruleset holds exactly what this
+  # heredoc says. `nft -f -` ADDS: run twice on one container with
+  # different modes, the table would carry both rules, the whole-line
+  # assertion below would find the one it asked for, and the earlier
+  # rule would win at runtime. Not reachable while every row recreates
+  # the containers -- this is for whoever adds an in-place reconfigure.
+  # `table inet nat` on its own line creates it when absent, so the
+  # flush cannot fail on a fresh container.
   podman exec -i "$ctr" nft -f - <<NFT
+table inet nat
+flush table inet nat
 table inet nat {
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
