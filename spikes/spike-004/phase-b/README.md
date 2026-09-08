@@ -10,6 +10,11 @@ claims to be.
 
 ```
 ./run.sh          # every row, both domains: build, measure, assert, tear down
+
+# The manual path needs the image, which only run.sh builds -- without
+# this, `topology.sh up` tries to pull a tag that exists nowhere and
+# fails as a registry error rather than a setup one.
+podman build -t interweave-natmatrix:1 -f Containerfile .
 NAT_MODE=eds ./topology.sh up
 EXPECT=eds ./probe.sh                                    # domain A
 PEER=natm-peer-b ROUTER=natm-router-b LAN=natm-lan-b \
@@ -39,7 +44,10 @@ measured: with a `nat postrouting` chain and no DNAT, an inbound packet
 matching no conntrack entry is never reverse-translated, which makes
 `eim` a port-restricted cone rather than a full cone. That is the same
 reasoning-from-internals the `eds` paragraph below retracts, so it is
-marked as read — a probe sending from a third address would measure it. Whether a punch succeeds depends on filtering too, so
+marked as read. Measuring it needs an UNSOLICITED inbound from a third
+address to the mapped external port, which is a probe this harness does
+not have; a peer sending from a third address would measure nothing
+about filtering. Whether a punch succeeds depends on filtering too, so
 neither row licenses a claim about DCUtR succeeding; what they license
 is a claim about the mapping it would face.
 
@@ -63,14 +71,15 @@ machine, so expect different numbers and the same shape:
 
 == NAT_MODE=eim ==
   router-a lan=10.89.1.2 pub=10.89.0.4
-  natm-router: snat on eth1 using: masquerade
+  natm-router: snat on eth0 using: masquerade
   router-b lan=10.89.2.2 pub=10.89.0.5
-  natm-router-b: snat on eth0 using: masquerade
+  natm-router-b: snat on eth1 using: masquerade
   NAT mode: eim (both domains)
   kernel : 6.17.9-1.qubes.fc37.x86_64
   podman : podman version 5.8.4
   nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router)
   nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router-b)
+  socat  : socat version 1.8.1.3 on 26 Jun 2026 14:49:35 (natm-obs1)
 -- natm-peer behind natm-router --
 peer private   : 10.89.1.3 45000
 router public  : 10.89.0.4
@@ -86,7 +95,7 @@ VERDICT: ENDPOINT-INDEPENDENT MAPPING (one external port for both destinations)
 
 == NAT_MODE=eds ==
   router-a lan=10.89.1.2 pub=10.89.0.4
-  natm-router: snat on eth1 using: masquerade random
+  natm-router: snat on eth0 using: masquerade random
   router-b lan=10.89.2.2 pub=10.89.0.5
   natm-router-b: snat on eth0 using: masquerade random
   NAT mode: eds (both domains)
@@ -94,34 +103,41 @@ VERDICT: ENDPOINT-INDEPENDENT MAPPING (one external port for both destinations)
   podman : podman version 5.8.4
   nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router)
   nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router-b)
+  socat  : socat version 1.8.1.3 on 26 Jun 2026 14:49:35 (natm-obs1)
 -- natm-peer behind natm-router --
 peer private   : 10.89.1.3 45000
 router public  : 10.89.0.4
-observer 1 saw : 10.89.0.4 8518
-observer 2 saw : 10.89.0.4 22070
+observer 1 saw : 10.89.0.4 13356
+observer 2 saw : 10.89.0.4 60603
 VERDICT: ENDPOINT-DEPENDENT MAPPING (a port per destination)
 -- natm-peer-b behind natm-router-b --
 peer private   : 10.89.2.3 45000
 router public  : 10.89.0.5
-observer 1 saw : 10.89.0.5 42927
-observer 2 saw : 10.89.0.5 21049
+observer 1 saw : 10.89.0.5 42687
+observer 2 saw : 10.89.0.5 44027
 VERDICT: ENDPOINT-DEPENDENT MAPPING (a port per destination)
 
-measured and matched: natm-peer=eim(45000,45000) natm-peer-b=eim(45000,45000) natm-peer=eds(8518,22070) natm-peer-b=eds(42927,21049)
+measured and matched: natm-peer=eim(45000,45000) natm-peer-b=eim(45000,45000) natm-peer=eds(13356,60603) natm-peer-b=eds(42687,44027)
 ```
 
-Two things in it are worth reading twice.
+Two things in the transcript are worth reading twice.
 
 **The summary carries the two OBSERVED PORTS per domain**, and they are
 the only part of that line which is not a restatement of the input: the
 peer names are literals, and the class cannot differ from the mode
 because a mismatch exits the run before the summary is reached. `45000`
-twice is one mapping for both destinations; `8518` and `22070` are two.
+twice is one mapping for both destinations; `13356` and `60603` are two.
+Identical ports are not a degenerate reading — they are the observation
+that makes a row `eim`.
 
-**`natm-router` is on `eth1` and `natm-router-b` on `eth0`.** Podman
-numbers interfaces by walking each container's own network map, and the
-two routers are attached to different pairs of networks, so nothing
-makes the names agree — a later run had both on `eth0`. A shared
+**Read the four `snat on` lines.** In the `eim` row `natm-router` is on
+`eth0` and `natm-router-b` on `eth1`; in the `eds` row, twenty seconds
+later with the containers recreated, both are on `eth0`. So the
+numbering is not stable across container creations and the two routers
+do not reliably agree — which is observed here rather than argued from
+how podman walks a network map, and an explanation resting on the two
+routers' differing network pairs would predict a stable answer this run
+contradicts. A shared
 `configure_nat` deriving the interface from a hardcoded `natm-router`
 therefore gave router B a rule matching its LAN side, translating
 nothing, while the assertion beneath it passed: that assertion greps the
@@ -156,11 +172,14 @@ step 6 of Stage 11, its client reservations step 5, and DCUtR step 8.
 
 ## How the measurement works, and why it is a comparison
 
-One internal socket, bound to a fixed source port, sends to **two**
-observers. A single observer cannot tell an endpoint-independent mapping
-from a per-destination one, because there is nothing to compare against;
-and two different sockets would be allocated two external ports under
-any NAT, so the bound port is what makes the comparison mean anything.
+One internal address:port sends to **two** observers — two sequential
+sockets binding the same port, which is the same thing as far as a NAT
+is concerned, because RFC 4787 defines mapping behaviour over the
+internal tuple rather than over a socket handle. A single observer
+cannot tell an endpoint-independent mapping from a per-destination one,
+because there is nothing to compare against; and two sockets on
+DIFFERENT ports would be allocated two external ports under any NAT, so
+the bound port is what makes the comparison mean anything.
 
 `socat` reports the source it saw through `SOCAT_PEERADDR` /
 `SOCAT_PEERPORT`, which is the entire measurement.
@@ -198,8 +217,11 @@ exactly that reason, one of them a count of the loop it was written
 over. What `run.sh` does check is its INPUT: `MODES` is a caller-supplied
 row filter, and `MODES=" "` is set and non-null, so it used to run zero
 rows and still print a passing summary. That check runs before the build
-and is the only ASSERTION written in that file; everything else there —
-the build, `topology.sh up`, each probe — fails the run by failing.
+and is the only check on that script's INPUT; everything else there —
+the build, `topology.sh up`, each probe — fails the run by failing. (It
+is not the only assertion in the file: the summary's ports are guarded
+too. Saying it was, twice in different words, is a claim about how many
+things a file checks that neither round got right.)
 
 ## What it does NOT establish
 
@@ -216,9 +238,15 @@ harness answers one of them.
   is not a laptop leaving Wi-Fi.
 - **Anything about InterWeave itself.** No node runs here yet. The
   behaviours this matrix exists to test — AutoNAT, Relay, DCUtR — are
-  steps 3 through 8, and five of the six evidence items `SPIKES.md`
-  lists for phase B are blocked on components those steps have yet to
-  build — everything but the NAT classes this directory measures. This is the
+  steps 3 through 8. `SPIKES.md` lists six evidence items for phase B
+  and this directory answers part of one of them — the mapping classes,
+  not the public VM or the carrier NAT that item also names. Of the
+  rest, the relay and probe services and the relay loss/capacity and
+  resource-cost rows wait on those steps; hole-punch success rates wait
+  on the NAT population in the wild, and interface change on real
+  hardware, and neither of those becomes reachable when the steps land.
+  Counting them all as "blocked on unbuilt components" would say phase
+  B closes once steps 3 through 8 ship, and it does not. This is the
   environment, ready for them.
 
 **So this does not close phase B**, and whether a containerised matrix
