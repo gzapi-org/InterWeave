@@ -39,10 +39,16 @@ router_pub=$(addr_on "$ROUTER" "$NET_PUB")
 podman exec natm-obs1 sh -c ': > /seen.txt'
 podman exec natm-obs2 sh -c ': > /seen.txt'
 
-# ONE socket to both observers. Binding the source port is what makes
-# the comparison meaningful: two different sockets would be allocated
-# two external ports under ANY NAT, and the test would report symmetric
-# behaviour everywhere.
+# ONE INTERNAL ADDRESS:PORT to both observers, presented by two
+# sequential sockets -- the loop runs `podman exec` twice, and
+# `reuseaddr` is there because both bind the same port. That is what
+# makes the comparison meaningful, and the distinction is not pedantic:
+# RFC 4787 defines mapping behaviour over the internal tuple, not over a
+# socket handle, so two sockets sharing one tuple measure the mapping,
+# while two sockets on DIFFERENT ports would be allocated two external
+# ports under any NAT and report symmetric behaviour everywhere. This
+# said "ONE socket" directly above a loop that opens two. Review finding
+# on PR #78.
 for target in "$obs1" "$obs2"; do
   podman exec "$PEER" sh -c \
     "echo probe | socat -t1 - UDP-DATAGRAM:$target:9000,bind=:$SRC_PORT,reuseaddr" >/dev/null 2>&1 || true
@@ -76,10 +82,11 @@ seen2=$(podman exec natm-obs2 sh -c 'cat /seen.txt' | tail -1)
 ip1=${seen1% *}; port1=${seen1##* }
 ip2=${seen2% *}; port2=${seen2##* }
 
-# THE CONTROL, and it comes first. If the observers saw the peer's own
-# private address, no translation happened and every other conclusion is
-# void — this is the check that stops a misconfigured topology being
-# reported as a NAT matrix.
+# THE FIRST CONTROL ON THE OBSERVATION ITSELF — the no-data check above
+# comes before it and asks whether there IS one. If the observers saw
+# the peer's own private address, no translation happened and every
+# other conclusion is void, so this is the check that stops a
+# misconfigured topology being reported as a NAT matrix.
 if [ "$ip1" = "$peer_private" ] || [ "$ip2" = "$peer_private" ]; then
   echo "VERDICT: NOT NATTED — an observer saw the peer's private address" >&2
   exit 1
