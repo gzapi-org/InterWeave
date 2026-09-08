@@ -40,10 +40,14 @@ relationship is asymmetric in ONE topology: with BOTH peers behind
 both domains — failure follows from the mapping alone, and that is what
 the `eds` row exists to produce. **It is not a property of `eds` as
 such.** A punch succeeds if EITHER direction lands, so an `eds` peer
-paired with an endpoint-independent-FILTERING peer can still connect:
-the dial toward the `eds` peer dies, but the `eds` peer's own dial
-arrives at a port the other side does have a mapping for, and full-cone
-filtering forwards it whatever the source. Filtering rescues that punch.
+paired with a full-cone peer — endpoint-independent in BOTH its mapping
+and its filtering — can still connect: the dial toward the `eds` peer
+dies, but the `eds` peer's own dial arrives at the stable port the
+other side's mapping gives it, and endpoint-independent filtering
+forwards it whatever the source. Filtering rescues that punch, and it
+takes the mapping half to have a port worth aiming at. (A hypothetical:
+this harness's `eim` row is a port-restricted cone, not a full one, as
+the filtering note above says.)
 Which is why the rows are stated as a claim about mapping and the
 harness builds both domains alike. Neither row rules an
 ATTEMPT out: `DCUTR.md` §2 lists the eligibility conditions and NAT

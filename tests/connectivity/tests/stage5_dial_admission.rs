@@ -1091,7 +1091,7 @@ async fn revoking_trust_closes_the_connection_it_revoked() {
     // long as it kept talking -- which is exactly the session an
     // operator revokes trust to end.
     let (dialer_id, dialer_peer) = who();
-    let listener = SwarmRuntime::start(
+    let mut listener = SwarmRuntime::start(
         &identity(),
         SubstrateConfig::default(),
         trusting(&[&dialer_peer]),
@@ -1122,9 +1122,22 @@ async fn revoking_trust_closes_the_connection_it_revoked() {
         "connected first, so the eviction below has something to evict"
     );
 
-    // Give the listener a moment to record the inbound connection, so
-    // the revocation has something to find rather than racing it.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // WAITED FOR ON THE LISTENER, not slept through. `wait_connected`
+    // above is the DIALER's event; the revocation below asks the
+    // LISTENER which connections it holds, and a fixed sleep only made
+    // the gap unlikely rather than closed. `SwarmEvent::Connected` is
+    // emitted after `settle_outcome` has recorded the connection in
+    // `open`, which is the map `connections_to_close` walks -- so this
+    // is the listener's own statement that there is something to find.
+    //
+    // MEASURED, not assumed: with this wait deleted the test fails as
+    // `closed == 0`, which is the shape that reads as "the revocation
+    // does not close connections". Review finding on PR #79.
+    assert_eq!(
+        wait_connected(&mut listener).await,
+        dialer_peer,
+        "the listener records the inbound before the revocation looks for it"
+    );
 
     let closed = listener
         .set_trust(trusting_nobody())
@@ -1801,7 +1814,7 @@ async fn revoking_a_peer_with_several_connections_counts_each_once() {
     // admitted dial uses, so the second dial genuinely opens a second
     // connection rather than reusing the first.
     let (dialer_id, dialer_peer) = who();
-    let listener = SwarmRuntime::start(
+    let mut listener = SwarmRuntime::start(
         &identity(),
         SubstrateConfig::default(),
         trusting(&[&dialer_peer]),
@@ -1832,9 +1845,24 @@ async fn revoking_a_peer_with_several_connections_counts_each_once() {
         assert_eq!(wait_connected(&mut dialer).await, listener_peer);
     }
 
-    // Let the listener record both inbound connections before the
-    // revocation looks for them.
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // BOTH, on the listener, for the reason the sibling test gives: the
+    // loop above waited on the DIALER, and the revocation counts what
+    // the LISTENER holds. Two dials mean two `Connected` events.
+    //
+    // MEASURED: deleting these waits fails this test and its sibling.
+    // Waiting for only ONE of the two still passes here -- so the
+    // second event is for the correctness of the state the equality
+    // below reads, not something this machine exhibits. Recorded rather
+    // than claimed, because a race that does not fire on demand is
+    // exactly what the sleep this replaced was hiding.
+    // Review finding on PR #79.
+    for _ in 0..2 {
+        assert_eq!(
+            wait_connected(&mut listener).await,
+            dialer_peer,
+            "the listener records both inbounds before the revocation looks for them"
+        );
+    }
 
     let closed = listener
         .set_trust(trusting_nobody())
@@ -1844,9 +1872,17 @@ async fn revoking_a_peer_with_several_connections_counts_each_once() {
     // THE COUNT IS OF CONNECTIONS, and there were two. The bug reported
     // one closure per (revoked entry x matching connection) pair, so
     // two connections to one peer reported four.
-    assert!(
-        closed <= 2,
-        "a peer with two connections cannot have more than two closed, got {closed}"
+    //
+    // EXACTLY TWO, not "at most". `<= 2` passed while the listener had
+    // recorded only ONE of the inbounds, which is what the sleep this
+    // replaced could not rule out -- so the bound the test exists to
+    // check was being taken against a state it had not established.
+    // Waiting for both events is what makes the equality safe to
+    // assert, and the equality is what makes waiting for both
+    // load-bearing.
+    assert_eq!(
+        closed, 2,
+        "a peer with two connections has exactly two to close, got {closed}"
     );
 
     dialer.shutdown().await.expect("shuts down");
