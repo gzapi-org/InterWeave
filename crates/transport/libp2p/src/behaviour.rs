@@ -220,10 +220,18 @@ pub struct SubstrateBehaviour {
 // It is correct today because the only connections that exist are ones
 // the gated swarm admitted for the data plane. THE REASON FOR THAT
 // CHANGED WHEN STAGE 11 ENABLED THE THREE FEATURES, and is now much
-// weaker. It used to be the manifest: relay, AutoNAT and DCUtR were
-// absent from the libp2p feature list, so no
-// `ConnectivityInfrastructureOnly` connection could be DIALLED or
-// RETAINED. All three are compiled now.
+// weaker. It used to be PARTLY the manifest: relay, AutoNAT and DCUtR
+// were absent from the libp2p feature list, so the behaviours were
+// unconstructible and the relay transport stayed out of the builder.
+// All three are compiled now.
+//
+// THE MANIFEST NEVER GUARDED THE DIALLED-OR-RETAINED CASE, and an
+// earlier version of this comment said it did. `DialOrigin` lives in
+// `interweave-transport-runtime`, which has no libp2p dependency, and
+// `attempt_dial` has always taken an origin from its caller — so one
+// line passing `AutonatProbe` would have retained such a connection with
+// the features off. Do not read this commit as having removed a guard
+// that was never there.
 //
 // THAT WAS NEVER "ESTABLISHED", and the distinction is this comment's
 // whole subject. Neither gate denies at the established INBOUND hook —
@@ -243,12 +251,17 @@ pub struct SubstrateBehaviour {
 // loop iteration. Handlers installed is not protocols spoken.
 //
 // So the §14 exposure proper is about a connection that is KEPT, and
-// what stands in the way of a RETAINED one is that NOTHING CONSTRUCTS
-// THEM. There is no
+// what stands in the way of a RETAINED one is that NO CALL SITE PASSES
+// A REACHABILITY ORIGIN AND THE INBOUND ARM REFUSES THIS CLASS. Not
+// that nothing constructs the behaviours — that is true, and is the
+// weaker fact, spelled out below because it is the one a reader
+// reaches for first. There is no
 // field for any of the three in the struct above, no constructor, and no
 // configuration path — not a disabled behaviour but an absent one. Two
-// further facts keep such a connection from being RETAINED rather than
-// merely unused:
+// further facts are worth stating, though only the last bears on the
+// RETAINED case -- the first constrains `RelayCircuit`, which
+// `names_application_destination` already refuses for this class, and
+// the second is an enumeration rather than a guard:
 // the Swarm is built with `with_tcp` alone, so the relay TRANSPORT is
 // not installed and a `/p2p-circuit` address cannot be dialled at all;
 // and of the eight `DialOrigin` variants, only `RelayReservation` and

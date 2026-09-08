@@ -19,7 +19,7 @@ Authoritative objective, evidence requirements, and decision gate live in [`arch
 
 Do not treat the experiment in [`harness/`](./harness) as production implementation. It is deliberately outside the workspace — an empty `[workspace]` table in its manifest — so it cannot be built by `cargo xtask ci`, cannot enter the root `Cargo.lock`, and cannot become a production dependency by a stray `path =`.
 
-**That isolation is what KEPT `kad` off the production feature list.** Cargo unifies features across one build of one workspace, so as a member this harness would have switched Kademlia on inside `interweave-transport-libp2p` — undoing CLAUDE.md §3's "absent from the feature list rather than merely unused", and doing it with nothing in the production crate having changed. That rule is the whole reason this spike ran *before* Stage 10 rather than during it. Stage 10 has since put `kad` on that list and Stage 11 added `autonat`, `relay` and `dcutr`, so the isolation now protects nothing in that direction — and **feature unification runs the other way instead**: because this harness path-depends on the production crate, every feature the root manifest enables is compiled into this harness too, whether the spike measured it or not.
+**That isolation is what KEPT `kad` off the production feature list.** Cargo unifies features across one build of one workspace, so as a member this harness would have switched Kademlia on inside `interweave-transport-libp2p` — undoing CLAUDE.md §3's "absent from the feature list rather than merely unused", and doing it with nothing in the production crate having changed. That rule is the whole reason this spike ran *before* Stage 10 rather than during it. Stage 10 has since put `kad` on that list and Stage 11 added `autonat`, `relay` and `dcutr`, so the isolation now protects nothing in that direction — and **the dependency runs the other way instead**: this harness path-depends on the production crate, which declares `libp2p = { workspace = true }` — resolved against the ROOT manifest wherever that crate is built, including from inside this workspace. So every feature the root enables is compiled here too, whether the spike measured it or not. (Workspace-dependency inheritance, not feature unification, which does not cross a workspace boundary.)
 
 ## What was pinned
 
@@ -58,7 +58,7 @@ It also handles the ticket the way the runtime must, which is finding **F8**: a 
 
 ## What was observed
 
-202 assertions across 29 experiments, consecutive clean runs. The harness exits non-zero when any required observation is false, so `cargo run` cannot report success while its own output disproves the record.
+202 assertions across 29 experiments, consecutive clean runs. The harness exits non-zero when any required observation is false, so `cargo run --locked` cannot report success while its own output disproves the record.
 
 **Namespace (K1).** The published golden vector reproduces exactly: `network_id: example-private-network` → `ssbtblqj7mexczivog5qfbfjvi` → `/interweave/kad/1.0.0/ssbtblqj7mexczivog5qfbfjvi`. The derivation is implemented from the specification text rather than from a shared helper, so a derivation that merely agrees with itself could not pass. The 26-character unpadded base32 tag is a valid `libp2p::StreamProtocol`, and the `^[a-z0-9][a-z0-9._-]{0,63}$` grammar accepts and refuses what the spec says it should.
 

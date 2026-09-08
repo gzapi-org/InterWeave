@@ -302,10 +302,11 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
     // So what this pins is narrower and worth being exact about: an
     // infrastructure-only peer's connection **completes** rather than
     // being refused at or before the handshake. The §14 exposure proper
-    // is about a connection that is KEPT, which needs an origin outside
-    // `names_application_destination` -- and needs only a CALL SITE
-    // passing one, not a constructed behaviour, since `attempt_dial`
-    // takes the origin from its caller. This test is the control that
+    // is about a connection that is KEPT, which needs either a CALL SITE
+    // passing an origin outside `names_application_destination` -- not a
+    // constructed behaviour, since `attempt_dial` takes the origin from
+    // its caller -- or a relaxation of the inbound arm this test
+    // exercises. This test is the control that
     // will make that one meaningful, and the negative case
     // `ClassGated<B>` must flip.
     //
@@ -396,11 +397,6 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
     // transport completes the handshake before the runtime's event loop
     // ever sees `ConnectionEstablished` to classify.
     let mut established = false;
-    // ASSERTED, not merely observed once. `CLAUDE.md` and the plan both
-    // rest their `ClassGated<B>` argument on "nothing is advertised in
-    // this window", and a property stated in three documents and
-    // measured in none is what §4 exists to refuse.
-    let mut advertised_in_the_window: Option<Vec<String>> = None;
     let deadline = tokio::time::Instant::now() + PATIENCE;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -419,39 +415,60 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
                 // unreachable: a widened window also delays or removes
                 // the close, and the establish-then-close assertion
                 // below would panic first, reporting the wrong cause.
+                // ASSERTED, not merely observed once. `CLAUDE.md` and
+                // the plan both rest their `ClassGated<B>` argument on
+                // "nothing is advertised in this window", and a property
+                // stated in three documents and measured in none is what
+                // §4 exists to refuse.
                 let protocols: Vec<String> =
                     info.protocols.iter().map(ToString::to_string).collect();
-                advertised_in_the_window = Some(protocols.clone());
                 panic!(
                     "an infrastructure-only peer was told {protocols:?} before being \
                      refused. The window measured as empty is not empty any more, so \
                      the §14 exposure is live on this path -- which makes \
                      `ClassGated<B>` urgent rather than next, and changes what \
-                     CLAUDE.md and the canonical plan say about it."
+                     CLAUDE.md and the canonical plan say about it. Before \
+                     concluding that: the emptiness rests on `refuse.push` and \
+                     `close_connection` running with no await between them, so a \
+                     scheduling delay under load is the other explanation. Check \
+                     whether the close still happens in the same loop iteration \
+                     before rewriting any document."
                 );
             }
             Ok(libp2p::swarm::SwarmEvent::ConnectionClosed { .. }) => {
-                assert!(
-                    established,
-                    "a close without an establish would mean the peer was refused earlier \
-                     than this test claims -- which would make the old 'could not be \
-                     established by any means' wording right and this one wrong"
-                );
-                // The observer cannot have caused this: its own idle
-                // timeout is well beyond the whole test window.
+                // NOT an assertion that can fail. libp2p emits
+                // `ConnectionClosed` only for a connection it previously
+                // reported established, so this holds by construction --
+                // an earlier version asserted it as though it were the
+                // refusal-before-establish check, which it is not. That
+                // direction surfaces as `OutgoingConnectionError` and is
+                // caught by the arm below.
+                //
+                // The observer cannot have caused this close: its own
+                // idle timeout is well beyond the whole test window.
+                debug_assert!(established, "libp2p closed what it never established");
                 break;
             }
             Ok(libp2p::swarm::SwarmEvent::OutgoingConnectionError { error, .. }) => {
+                // THE REFUSAL-BEFORE-ESTABLISH DIRECTION. If this fires,
+                // the peer was refused at or before the handshake, which
+                // is what the wording this test replaced claimed already
+                // happened.
                 panic!("the dial failed before establishment: {error:?}");
             }
             Ok(_) => {}
-            Err(_) => panic!("neither establishment nor closure arrived"),
+            // THE RETENTION DIRECTION LANDS HERE, and the message has to
+            // say so: a peer that is KEPT produces an establish and then
+            // nothing further, so a timeout is the signal rather than an
+            // absence of events.
+            Err(_) => panic!(
+                "timed out with established={established}. If established, the peer was \
+                 RETAINED rather than refused -- an infrastructure-only connection was \
+                 kept open, which is the state `ClassGated<B>` exists to make safe. If \
+                 not established, neither establishment nor closure arrived at all."
+            ),
         }
     }
-
-    // Belt and braces: the panic above is the real assertion, and this
-    // catches an `Identify` that somehow arrived without matching it.
-    assert_eq!(advertised_in_the_window, None);
 
     subject.shutdown().await.expect("stops");
 }

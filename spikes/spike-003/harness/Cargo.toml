@@ -16,9 +16,12 @@
 #
 # 2026-09-08: `kad` has been production's since Stage 10 and Stage 11
 # added `autonat`, `relay` and `dcutr`, so nothing is being held back
-# here any more. Unification now runs the OTHER way — this harness
-# path-depends on the production crate, so it compiles whatever the root
-# manifest enables — which is why the committed lock had to be
+# here any more. The dependency now runs the OTHER way — this harness
+# path-depends on the production crate, which declares
+# `libp2p = { workspace = true }` and so resolves against the ROOT
+# manifest wherever it is built, including from inside this workspace.
+# (Inheritance, not feature unification, which does not cross a
+# workspace boundary.) That is why the committed lock had to be
 # regenerated when those three landed.
 #
 # An EMPTY workspace table is what keeps it out: the package is its own

@@ -120,7 +120,7 @@ subject**:
   two tests pinning it; the harness was wrong. Holding the manager is
   what let the control separate from the subject.
 
-`cargo run` exits non-zero if any required observation is false, so it
+`cargo run --locked` exits non-zero if any required observation is false, so it
 cannot report success while its own output disproves this file.
 
 ## Findings that constrain Stage 11
@@ -861,7 +861,7 @@ membership would have switched `autonat`, `relay` and `dcutr` on inside
 Stage 11 has since enabled all three there, so that particular risk is
 spent. The cost is that `cargo xtask ci`, the
 `rust` job and `cargo deny` never touch this directory: nothing re-runs
-`cargo run`, and nothing even proves these files still compile against
+`cargo run --locked`, and nothing even proves these files still compile against
 the production crates they path-depend on. A refactor of
 `OutboundAdmission::new` or `PreAuthLimitsBuilder` breaks the harness
 with no signal at all.
