@@ -47,8 +47,10 @@
 //! state this build can now reach rather than a latent one, and a new
 //! behaviour added here is one nothing outside this crate prevents from
 //! dialling. `mdns` remains genuinely absent, for the dependency-advisory
-//! reason the root manifest states, and so does `dns`, which leaves a
-//! `/dns4` address `profile-config` accepts undialable.
+//! reason the root manifest states — and it is a `NetworkBehaviour`
+//! Stage 11 was given a deadline for, now arrived unmet. So does `dns`,
+//! which leaves a `/dns4` address `profile-config` validates undialable
+//! and then forgotten. Both are detailed in the crate manifest.
 //!
 //! # Nothing above this crate sees a libp2p type
 //!

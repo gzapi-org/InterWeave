@@ -226,22 +226,29 @@ pub struct SubstrateBehaviour {
 // RETAINED. All three are compiled now.
 //
 // THAT WAS NEVER "ESTABLISHED", and the distinction is this comment's
-// whole subject. Neither gate denies at the established hook — both
-// return `Ok(dummy::ConnectionHandler)` unconditionally, and pre-Noise
-// admission cannot know a PeerId anyway — so an inbound connection from
-// an infrastructure-only peer COMPLETES, with every handler below
-// installed and every protocol advertised, and is closed afterwards by
-// the runtime's event loop. The window is real today, needs no relay
-// code, and is reachable through ordinary configuration, because an
-// `InfrastructureSet` comes from
-// `transport.connectivity.infrastructure.allowed_peers`.
+// whole subject. Neither gate denies at the established INBOUND hook —
+// both return `Ok(dummy::ConnectionHandler)` unconditionally, and
+// pre-Noise admission cannot know a PeerId anyway — so an inbound
+// connection from an infrastructure-only peer COMPLETES, with every
+// handler above installed, and is closed afterwards by the runtime's
+// event loop. That much needs no relay code and is reachable through
+// ordinary configuration, since an `InfrastructureSet` comes from
+// `transport.connectivity.infrastructure.allowed_peers`;
 // `tests/connectivity/tests/advertised_protocol_set.rs` pins it.
 //
-// What stands in the way of a RETAINED such connection is that NOTHING
-// CONSTRUCTS THEM. There is no
-// field for any of the three in the struct below, no constructor, and no
+// IT DOES NOT FOLLOW THAT ANYTHING IS ADVERTISED, and an earlier version
+// of this comment said it did. Measured: no `identify::Event::Received`
+// arrives before the close, five runs out of five, because the refusal
+// is pushed on the same `ConnectionEstablished` and closed in the same
+// loop iteration. Handlers installed is not protocols spoken.
+//
+// So the §14 exposure proper is about a connection that is KEPT, and
+// what stands in the way of a RETAINED one is that NOTHING CONSTRUCTS
+// THEM. There is no
+// field for any of the three in the struct above, no constructor, and no
 // configuration path — not a disabled behaviour but an absent one. Two
-// further facts make the class unreachable rather than merely unused:
+// further facts keep such a connection from being RETAINED rather than
+// merely unused:
 // the Swarm is built with `with_tcp` alone, so the relay TRANSPORT is
 // not installed and a `/p2p-circuit` address cannot be dialled at all;
 // and of the eight `DialOrigin` variants, only `RelayReservation` and
@@ -251,7 +258,15 @@ pub struct SubstrateBehaviour {
 // supply them: `attempt_dial` takes an origin from any in-crate caller,
 // which is exactly how `RelayCircuit` is meant to arrive. It is that no
 // call site passes either one — every production site passes `Manual`,
-// `ConnectionManager` or `KademliaQuery`. Inbound is answered
+// `ConnectionManager` or `KademliaQuery`.
+//
+// THAT LAST SENTENCE IS A GREP, NOT A GUARD. It is true today and
+// nothing fails when it stops being true, unlike the claim above it,
+// which `every_origin_is_classified_and_the_classification_is_pinned`
+// enforces. The first call site to pass `RelayReservation` or
+// `AutonatProbe` is step 3 or step 5, and it is supposed to — so a guard
+// here would have to assert something subtler than absence, and is
+// deliberately not written rather than forgotten. Inbound is answered
 // the same way: `dialing.rs` retains an inbound connection only if
 // `ConnectionManager::authorizes`, which asks under `DialOrigin::Manual`
 // and so refuses this class outright.

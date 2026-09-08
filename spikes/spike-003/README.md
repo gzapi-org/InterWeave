@@ -184,12 +184,12 @@ These are the things this spike did **not** establish, recorded so no future rea
 
 ```
 cd spikes/spike-003/harness
-cargo run
+cargo run --locked
 ```
 
 Around six minutes, mostly waiting on real socket timeouts and query settling. Exit code 0 means every required observation held; non-zero prints which did not.
 
-Passing a single experiment id — `cargo run -- K14` — runs only that one, for iterating on a failure without paying the whole set. An id that matches nothing **exits 2** and says so: selecting no experiment, running no check, and printing "all observations held" was a false green of exactly the kind this harness exists to refuse, in the harness itself. The success line now names how many experiments and checks actually ran.
+`--locked` is part of the command rather than a suggestion: this lock is committed BECAUSE the evidence is partly about the library's own behaviour, and a plain `cargo run` silently rewrites it when the root manifest changes — which is exactly what Stage 11's features-on change did, undetected until review. Passing a single experiment id — `cargo run --locked -- K14` — runs only that one, for iterating on a failure without paying the whole set. An id that matches nothing **exits 2** and says so: selecting no experiment, running no check, and printing "all observations held" was a false green of exactly the kind this harness exists to refuse, in the harness itself. The success line now names how many experiments and checks actually ran.
 
 Three mutations confirm the assertions are load-bearing rather than agreeing with the code for free:
 

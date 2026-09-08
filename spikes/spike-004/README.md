@@ -40,11 +40,13 @@ hole-punch matrix passes") cannot be met from loopback.
 
 `libp2p = "=0.56.0"` — exact, with `Cargo.lock` committed beside it.
 The manifest's own feature array is `tcp`, `noise`, `yamux`,
-`identify`, `tokio`, `macros`, `ed25519` plus the three spike-only
-`autonat`, `relay`, `dcutr`; the production crate's remaining features
-(`kad`, `request-response`, `gossipsub`) arrive through the path
-dependency on `interweave-transport-libp2p`, which Cargo unions in. So
-the RESOLVED graph is the production set plus three, and the array in
+`identify`, `tokio`, `macros`, `ed25519` plus `autonat`, `relay`,
+`dcutr` — spike-only WHEN THIS RAN, and production's since Stage 11's
+features-on change; the production crate's other features (`kad`,
+`request-response`, `gossipsub`) arrive through the path dependency on
+`interweave-transport-libp2p`, which Cargo unions in. So the RESOLVED
+graph was then the production set plus three, and is now the production
+set exactly — and the array in
 the file is not — a distinction worth stating here, directly above the
 paragraph about feature unification, because a reader takes the array
 at face value otherwise. Most of what is recorded below is the
@@ -844,8 +846,10 @@ same shape a Stage 11 test could take.
 **Nothing here runs in CI, and the phrase "pinned so a fix fails here"
 has to be read against that.** The harness is its own workspace root —
 deliberately, because Cargo unifies features across one workspace and
-membership would switch `autonat`, `relay` and `dcutr` on inside
-`interweave-transport-libp2p`. The cost is that `cargo xtask ci`, the
+membership would have switched `autonat`, `relay` and `dcutr` on inside
+`interweave-transport-libp2p` before the stage was ready for them.
+Stage 11 has since enabled all three there, so that particular risk is
+spent. The cost is that `cargo xtask ci`, the
 `rust` job and `cargo deny` never touch this directory: nothing re-runs
 `cargo run`, and nothing even proves these files still compile against
 the production crates they path-depend on. A refactor of
@@ -923,7 +927,7 @@ invisible.
 
 ```
 cd spikes/spike-004/harness
-cargo run
+cargo run --locked
 ```
 
 Exits 0 only when every required observation held — **86 of them**, and

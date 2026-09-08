@@ -51,6 +51,12 @@
 //! exact-set assertion catches it instead. Either way it is caught; the
 //! row records which mechanism does the catching.
 //!
+//! One caveat on how the panic PRESENTS. It fires inside the subject's
+//! spawned Swarm task, and a panic there does not propagate to the test
+//! thread — so what a reader actually sees is this file's `PATIENCE`
+//! timeout, with the panic in the captured output. Caught, but not
+//! self-explaining.
+//!
 //! Read from a third-party Identify observer over loopback rather than
 //! from this crate's own types, because what a peer is TOLD is the
 //! question. A test that asked `SubstrateBehaviour` what it contains
@@ -78,12 +84,24 @@ const PATIENCE: Duration = Duration::from_secs(20);
 /// libp2p's default is 10s, which is shorter than `PATIENCE` — and that
 /// gap made the refusal assertion below unfalsifiable until it was
 /// mutated.
+///
+/// **This covers only the OBSERVER's half of that confound.** The
+/// subject's own idle timeout is `SubstrateConfig::default().idle_timeout`,
+/// 60s against a 20s `PATIENCE`, so it cannot fire inside the window
+/// either — but that is a default this test does not set and does not
+/// assert. Lower it below `PATIENCE` and the refusal assertion goes
+/// unfalsifiable again, for exactly the reason the first draft did.
+///
+/// The test also does not check WHY the subject closed. A refusal on
+/// `max_connections` would satisfy it just as a trust refusal does; that
+/// ceiling is 256 by default, so it cannot be what fires here, but the
+/// assertion is about the closing rather than its reason.
 const IDLE_FAR_BEYOND_PATIENCE: Duration = Duration::from_secs(600);
 
 /// Everything a default profile advertises, and nothing else.
 ///
-/// **Every entry here is the BACKEND's, and that is the first thing this
-/// test taught.** It was written asserting `/interweave/id/1.0.0` among
+/// **Five of the seven entries are the BACKEND's, and which two are not
+/// is the first thing this test taught.** It was written asserting `/interweave/id/1.0.0` among
 /// them, on the strength of a constant then called `IDENTIFY_PROTOCOL`
 /// and documented as "the Identify protocol name this profile
 /// advertises". It is not — it is now `IDENTIFY_PROTOCOL_VERSION`,
@@ -250,10 +268,14 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
     // by any means". That is not what the code does, and the difference
     // is the whole of `BOTTOM-UP-IMPLEMENTATION-PLAN.md` §14.
     //
-    // Neither gate denies at the ESTABLISHED hook: `PreAuthAdmission`
-    // and `OutboundAdmission` both return `Ok(dummy::ConnectionHandler)`
-    // unconditionally (`preauth_gate.rs`, `outbound_gate.rs`), and
-    // pre-Noise admission cannot know a PeerId in any case. So the
+    // Neither gate denies at the established INBOUND hook:
+    // `PreAuthAdmission` and `OutboundAdmission` both return
+    // `Ok(dummy::ConnectionHandler)` unconditionally there
+    // (`preauth_gate.rs`, `outbound_gate.rs`), and pre-Noise admission
+    // cannot know a PeerId in any case. The OUTBOUND hook is not like
+    // this — `OutboundAdmission::handle_established_outbound_connection`
+    // rebinds the address and can refuse — which is why this test is
+    // written from the inbound side. So the
     // connection completes, every data-plane handler is installed, and
     // only afterwards does the runtime classify the peer and close it
     // (`runtime/dialing.rs`).
@@ -262,11 +284,45 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
     // makes that word load-bearing rather than a preference: it fails if
     // an infrastructure-only peer is ever refused before establishment,
     // which is what the old sentence claimed already happened, and it
-    // fails if such a peer is retained, which is the security rule.
+    // fails if such a peer is kept.
     //
-    // **This window is the exposure `ClassGated<B>` exists to close**,
-    // and it is reachable with no relay code anywhere — an
-    // `InfrastructureSet` is fed by ordinary configuration.
+    // # What this window is NOT
+    //
+    // It is tempting to call this "the exposure `ClassGated<B>` exists to
+    // close", and an earlier version of the surrounding prose did.
+    // MEASURED, IT IS NOT: instrumenting this test to record any
+    // `identify::Event::Received` before the close returned `None` on
+    // five runs out of five. The runtime pushes the refusal on the same
+    // `ConnectionEstablished` the Swarm emitted and closes in the same
+    // loop iteration, so no substream is negotiated and nothing is
+    // advertised in practice. The handlers are installed — that follows
+    // from the established hook returning `Ok` — but installed is not
+    // spoken.
+    //
+    // So what this pins is narrower and worth being exact about: an
+    // infrastructure-only peer's connection **completes** rather than
+    // being refused at or before the handshake. The §14 exposure proper
+    // is about a connection that is KEPT, which needs an origin outside
+    // `names_application_destination`, which needs a constructed relay
+    // or AutoNAT behaviour. This test is the control that will make that
+    // one meaningful, and the negative case `ClassGated<B>` must flip.
+    //
+    // # This asserts today's behaviour, not a rule from ADR-0036
+    //
+    // Closing an infrastructure-only inbound is not something any
+    // accepted document requires. ADR-0036 authorizes such a peer for
+    // reachability control, and §14 requires that its offered protocol
+    // set be RESTRICTED at the connection — which presupposes a
+    // connection that exists and is kept. It is closed today only
+    // because inbound asks the origin-less `ConnectionManager::authorizes`
+    // (`dialing.rs`), which asks under `DialOrigin::Manual`.
+    //
+    // **Step 4 will have to change this**, and this test with it: an
+    // AutoNAT v2 dial-back arrives as an inbound connection FROM the
+    // infrastructure-only server, and under today's rule the client
+    // closes it before it can serve `/libp2p/autonat/2/dial-back`. The
+    // same asymmetry `settle_established_outbound` already documents on
+    // the outbound side.
     use futures::StreamExt as _;
 
     let observer_keys = libp2p::identity::Keypair::generate_ed25519();
