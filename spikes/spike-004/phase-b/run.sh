@@ -14,6 +14,20 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGE="${IMAGE:-interweave-natmatrix:1}"
 
+MODES="${MODES:-eim eds}"
+
+# THE ROW SET IS VALIDATED BEFORE ANYTHING RUNS, and this is the only
+# check here that can fail. `MODES` is a caller-supplied filter, so
+# `MODES=" "` is set and non-null -- `:-` does not substitute, the loop
+# runs zero times, and every after-the-fact tally then agrees with
+# itself about nothing. The previous version printed `1 matrix rows,
+# each measured and matched, all distinct:` and exited 0 in exactly that
+# case, because `printf '%s\n'` with no arguments still prints the
+# format once. Review finding on PR #78.
+# shellcheck disable=SC2086
+set -- $MODES
+[ "$#" -ge 1 ] || { echo "MODES named no rows, so nothing would be measured" >&2; exit 2; }
+
 # BUILT EVERY RUN, not skipped when a tag exists. `interweave-natmatrix:1`
 # is exactly the moving tag the Containerfile argues against: once
 # anything with that name is present locally — an older build, another
@@ -27,30 +41,24 @@ podman build -q -t "$IMAGE" -f "$here/Containerfile" "$here" >/dev/null
 # later run self-heals -- but only a later run.
 trap '"$here/topology.sh" down >/dev/null 2>&1 || true' EXIT
 
-MODES="${MODES:-eim eds}"
+# AND NOTHING IS ASSERTED ACROSS ROWS, deliberately. Two attempts at a
+# cross-row claim have now been vacuous: a count of loop iterations
+# against the literal the loop was written over, and a distinctness
+# check that `probe.sh` had already made unfailable -- it asserts
+# `class == EXPECT` per row and exits non-zero on a mismatch, so by the
+# time control reaches here every class equals its own distinct mode by
+# construction. The per-row assertion is what carries the claim; saying
+# so is truer than a third tally.
 measured=""
 for mode in $MODES; do
   printf '\n== NAT_MODE=%s ==\n' "$mode"
   NAT_MODE="$mode" "$here/topology.sh" up
+  # A FAILING PROBE ALREADY STOPS THE RUN: `set -e` plus `pipefail` make
+  # this assignment inherit the pipeline's status, so a non-zero
+  # `probe.sh` never reaches the next line. The guard that used to sit
+  # here tested a variable that cannot be empty when it is read.
   class=$(EXPECT="$mode" "$here/probe.sh" | sed -n 's/^CLASS=//p')
-  [ -n "$class" ] || { echo "probe reported no class for $mode" >&2; exit 2; }
   measured="$measured $class"
 done
 
-# ASSERT THE ROWS WERE DISTINCT, which is the only claim worth making
-# here. An earlier version counted loop iterations against the literal
-# `2` it had just looped over -- an assertion that could not fail, sat
-# under a comment saying it was "NAMED, not counted from a variable",
-# above a counted variable. It also cited `spike-003`'s guard, which
-# protects against a USER-SUPPLIED filter selecting nothing; this script
-# takes no such input, so the guard was imported without the thing it
-# guards.
-#
-# Distinct classes is the real property: it fails if the topology built
-# the same NAT twice, or if the classifier answers the same whatever it
-# is shown.
-distinct=$(printf '%s\n' $measured | sort -u | wc -l)
-count=$(printf '%s\n' $measured | wc -l)
-[ "$distinct" -eq "$count" ] \
-  || { echo "rows were not distinct: measured$measured" >&2; exit 2; }
-printf '\n%s matrix rows, each measured and matched, all distinct:%s\n' "$count" "$measured"
+printf '\n%s matrix rows, each measured and matched:%s\n' "$#" "$measured"
