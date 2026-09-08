@@ -19,11 +19,17 @@ NET_LAN="${NET_LAN:-natm-lan}"
 # environment a punch needs, which was false. Review finding on PR #78.
 NET_LAN_B="${NET_LAN_B:-natm-lan-b}"
 
-# THE ROUTERS, NAMED ONCE. `record_environment` cannot know the topology
-# -- it only sees the arguments a caller passes -- so the protection
-# against recording half of it is that the list has a single site.
-# Adding a third NAT domain means adding it here, which reaches the
-# environment record and the teardown together.
+# THE ROUTER LIST, IN ONE PLACE. `record_environment` and `down` read it
+# from here instead of each carrying their own copy, so adding a third
+# NAT domain means remembering one site rather than two.
+#
+# THAT IS ALL IT IS. It is not a check and catches nothing: `up()` still
+# names each router at its `podman run`, and nothing verifies that those
+# and this list agree. A third router created in `up()` and forgotten
+# here goes unrecorded and unremoved, and the run still passes -- as it
+# also would for its peer and its LAN, which this does not reach at all.
+# The previous version of this comment said a single site was what
+# catches that. Review finding on PR #78.
 ROUTERS="natm-router natm-router-b"
 IMAGE="${IMAGE:-interweave-natmatrix:1}"
 
@@ -184,10 +190,10 @@ route_through() {
 # THE COUNT GUARD IS A FLOOR AND NOTHING MORE. It catches that
 # regression -- one router named, or none -- and it cannot catch a third
 # domain added without updating the caller, because two arguments still
-# satisfy it. Only `$ROUTERS` having one definition site does that, and
-# saying the guard did was this file claiming a check it does not
-# perform, one paragraph after deleting three guards for being unable to
-# fail. Review finding on PR #78.
+# satisfy it. Nothing here catches that; `$ROUTERS` only reduces the
+# number of places to remember. Saying the guard caught it was this file
+# claiming a check it does not perform, one paragraph after deleting
+# three guards for being unable to fail. Review finding on PR #78.
 #
 # WHAT MAKES THIS FAIL CLOSED IS THE ASSIGNMENT, not a non-empty check.
 # A command substitution inside a `printf` argument does not fire
@@ -238,10 +244,14 @@ configure_nat() {
   local ctr="$1" net="$2" rule
   case "$NAT_MODE" in
     eim)
-      # ENDPOINT-INDEPENDENT MAPPING. One external port per internal
-      # socket, reused for every destination — the case a hole punch is
-      # designed to work through, and the kernel's default behaviour for
-      # masquerade when it is not asked for anything else.
+      # ENDPOINT-INDEPENDENT MAPPING: one external port for every
+      # destination, which is the case a hole punch is designed to work
+      # through. Plain `masquerade` PRESERVES the source port when it is
+      # free rather than sharing one mapping by design, and those
+      # coincide under this harness's conditions -- one peer, one bound
+      # port at a time. `probe.sh` decides the class by observing it,
+      # which is why this comment does not have to be a claim about
+      # kernel behaviour.
       rule="masquerade"
       ;;
     eds)
@@ -263,10 +273,13 @@ configure_nat() {
   # `$ctr` AND `$net`, NOT THE NAMES THIS FUNCTION WAS WRITTEN FOR. When
   # the second NAT domain arrived, the function grew parameters and this
   # line kept reading `natm-router` and `$NET_PUB` -- so router B was
-  # given a rule naming router A's interface. Podman numbers `ethN` by
-  # walking each container's OWN network map, and the two routers are
-  # attached to different pairs of networks, so nothing made the names
-  # agree.
+  # given a rule naming router A's interface. The names are not reliably
+  # the same and are not stable across recreation -- a recorded run in
+  # the README has the two routers on different interfaces in one row
+  # and both on `eth0` in the next, twenty seconds later. That is the
+  # observation; an explanation resting on the routers being attached to
+  # different pairs of networks stood here for a round and would predict
+  # a stable answer that run contradicts.
   #
   # THE ASSERTION BELOW COULD NOT HAVE CAUGHT IT: it greps `$ctr` for the
   # string this function just wrote into `$ctr`, so it passes whether or
@@ -280,9 +293,12 @@ configure_nat() {
   # into a visible failure rather than a topology that quietly was not
   # one.
   #
-  # DECLARED AND FLUSHED FIRST, so the TABLE holds exactly what this
-  # heredoc says -- `flush table inet nat` is table-scoped, and calling
-  # that the ruleset was wrong by one level. `nft -f -` ADDS: run twice on one container with
+  # DECLARED AND FLUSHED FIRST, so the TABLE holds what this heredoc
+  # says -- `flush table inet nat` is table-scoped, and calling that the
+  # ruleset was wrong by one level. "Exactly" would be a claim the
+  # assertion below does not make: it reads one chain and only that
+  # chain's `oifname` rules, so a second chain added to this heredoc
+  # would go unchecked. `nft -f -` ADDS: run twice on one container with
   # different modes, the table would carry both rules, the whole-line
   # assertion below would find the one it asked for, and the earlier
   # rule would win at runtime. Not reachable while every row recreates
@@ -299,7 +315,7 @@ table inet nat {
   }
 }
 NFT
-  # ASSERT THE RULE LANDED, AND THAT IT IS THE ONLY ONE. A topology
+  # ASSERT THE RULE LANDED, AND THAT IT IS THE ONLY `oifname` RULE. A topology
   # harness that cannot tell whether it built the topology reports
   # loopback-quality evidence under a phase-B heading, which is the one
   # failure this spike exists to avoid -- and the first version of this
