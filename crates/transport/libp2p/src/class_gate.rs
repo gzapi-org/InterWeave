@@ -45,7 +45,7 @@
 //! ordinary event and drops it. There is no mismatched pairing to be
 //! unreachable about.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::task::{Context, Poll};
 
 use either::Either;
@@ -54,8 +54,8 @@ use libp2p::swarm::handler::{
     ConnectionEvent, ConnectionHandler, ConnectionHandlerEvent, SendWrapper,
 };
 use libp2p::swarm::{
-    ConnectionDenied, ConnectionId, FromSwarm, NetworkBehaviour, SubstreamProtocol, THandler,
-    THandlerInEvent, THandlerOutEvent, ToSwarm,
+    CloseConnection, ConnectionDenied, ConnectionId, FromSwarm, NetworkBehaviour,
+    SubstreamProtocol, THandler, THandlerInEvent, THandlerOutEvent, ToSwarm,
 };
 use libp2p::{
     Multiaddr, PeerId,
@@ -91,10 +91,53 @@ pub struct ClassGated<B> {
     /// whose two halves disagree is worse off than one told nothing.
     ///
     /// BOUNDED by the Swarm's own connection ceiling and drained on
-    /// close: an id enters on a gated establish and leaves on that
-    /// connection's close, which the Swarm reports for every connection
-    /// it reported established.
-    gated: HashSet<ConnectionId>,
+    /// close, on a listen failure and on a dial failure. The last two
+    /// matter structurally rather than in practice: the derive
+    /// `?`-propagates, so a field AFTER this one returning
+    /// `ConnectionDenied` means the Swarm reports `ListenFailure` or
+    /// `DialFailure` and never `ConnectionEstablished`, and the entry
+    /// would be permanent. No behaviour after these ones refuses today;
+    /// §6 asks that the bound not rest on that.
+    ///
+    /// A MAP RATHER THAN A SET, because the peer is needed to correct
+    /// the counters the Swarm computes — see [`Self::adjust`].
+    gated: HashMap<ConnectionId, PeerId>,
+    /// Connections this wrapper ALLOWED, and the peer each belongs to.
+    ///
+    /// The mirror of [`Self::gated`], and it exists for a defect the
+    /// gated set cannot cover. A handler is chosen once, at
+    /// establishment, and libp2p never rebuilds it — so a peer that was
+    /// `DataPlaneTrusted` when its connection opened keeps every
+    /// data-plane protocol for the connection's whole life, whatever
+    /// its class becomes.
+    ///
+    /// **A downgrade does not necessarily close such a connection.**
+    /// `connections_to_close` keeps one whose ORIGIN still permits, and
+    /// for a reachability origin — `RelayReservation`, `AutonatProbe` —
+    /// it does: `authorizes_for(ConnectivityInfrastructureOnly,
+    /// RelayReservation)` is true, deliberately, because a reservation
+    /// with an infrastructure peer is exactly what should survive. So
+    /// the connection lives on with handlers it should no longer have,
+    /// and the isolation invariant is defeated for as long as it does.
+    ///
+    /// Latent today, because no call site passes either origin, and live
+    /// the moment step 3 does — the same shape as SPIKE-004's D1/D2/D3,
+    /// which were fixed before the paths they governed were enabled.
+    /// Review finding on PR #77, by `@codex`.
+    ///
+    /// So [`ClassGated::poll`] closes such a connection itself when
+    /// policy moves. Only the LOSING direction: a peer promoted while
+    /// connected stays gated until it reconnects, which is
+    /// under-privileged rather than over.
+    allowed: HashMap<ConnectionId, PeerId>,
+    /// The revision of the snapshot the allowed set was last checked
+    /// against, so a re-check costs nothing while policy is unchanged.
+    checked_revision: Option<u64>,
+    /// Connections to close because their peer is no longer trusted.
+    ///
+    /// Drained one per `poll`, which is how a `NetworkBehaviour`
+    /// returns work.
+    closing: Vec<(PeerId, ConnectionId)>,
 }
 
 impl<B> ClassGated<B> {
@@ -103,7 +146,10 @@ impl<B> ClassGated<B> {
         Self {
             inner,
             policy,
-            gated: HashSet::new(),
+            gated: HashMap::new(),
+            allowed: HashMap::new(),
+            checked_revision: None,
+            closing: Vec::new(),
         }
     }
 
@@ -118,6 +164,18 @@ impl<B> ClassGated<B> {
     /// refuses cannot be classified, so it is gated rather than given
     /// the benefit of the doubt -- the same answer `dialing.rs` gives
     /// when it cannot build a `TransportIdentity`.
+    /// How many connections to `peer` this wrapper is currently hiding.
+    ///
+    /// The Swarm counts connections from its own pool, which knows
+    /// nothing about gating, so `other_established` and
+    /// `remaining_established` include the hidden ones. Forwarding those
+    /// numbers unaltered tells an inner behaviour it has connections it
+    /// was never given — the mirror of the crash that made hiding
+    /// necessary, and worse, because it does not announce itself.
+    fn hidden_for(&self, peer: &PeerId) -> usize {
+        self.gated.values().filter(|p| *p == peer).count()
+    }
+
     fn admits(&self, peer: &PeerId) -> bool {
         let Ok(identity) = TransportIdentity::parse(peer.to_base58()) else {
             return false;
@@ -138,13 +196,14 @@ impl<B: NetworkBehaviour> NetworkBehaviour for ClassGated<B> {
         remote: &Multiaddr,
     ) -> Result<THandler<Self>, ConnectionDenied> {
         if !self.admits(&peer) {
-            self.gated.insert(id);
+            self.gated.insert(id, peer);
             return Ok(ClassGatedHandler::Denied);
         }
-        Ok(ClassGatedHandler::Allowed(
-            self.inner
-                .handle_established_inbound_connection(id, peer, local, remote)?,
-        ))
+        let handler = self
+            .inner
+            .handle_established_inbound_connection(id, peer, local, remote)?;
+        self.allowed.insert(id, peer);
+        Ok(ClassGatedHandler::Allowed(handler))
     }
 
     fn handle_established_outbound_connection(
@@ -156,13 +215,14 @@ impl<B: NetworkBehaviour> NetworkBehaviour for ClassGated<B> {
         port: PortUse,
     ) -> Result<THandler<Self>, ConnectionDenied> {
         if !self.admits(&peer) {
-            self.gated.insert(id);
+            self.gated.insert(id, peer);
             return Ok(ClassGatedHandler::Denied);
         }
-        Ok(ClassGatedHandler::Allowed(
-            self.inner
-                .handle_established_outbound_connection(id, peer, addr, role, port)?,
-        ))
+        let handler = self
+            .inner
+            .handle_established_outbound_connection(id, peer, addr, role, port)?;
+        self.allowed.insert(id, peer);
+        Ok(ClassGatedHandler::Allowed(handler))
     }
 
     fn handle_pending_inbound_connection(
@@ -200,23 +260,76 @@ impl<B: NetworkBehaviour> NetworkBehaviour for ClassGated<B> {
     /// because some unrelated peer was gated would be broken in a way
     /// far harder to see.
     fn on_swarm_event(&mut self, event: FromSwarm<'_>) {
-        match &event {
-            FromSwarm::ConnectionEstablished(established)
-                if self.gated.contains(&established.connection_id) =>
-            {
-                return;
+        match event {
+            FromSwarm::ConnectionEstablished(established) => {
+                if self.gated.contains_key(&established.connection_id) {
+                    return;
+                }
+                // THE COUNT MUST BE CORRECTED, not just the event
+                // suppressed. `other_established` comes from the Swarm's
+                // connection pool, which does not know this wrapper
+                // exists, so it counts the hidden connections too.
+                // Forwarded unaltered it tells the inner behaviour it
+                // already has connections to this peer that it was never
+                // given -- and `libp2p-kad` then skips
+                // `connected_peers.insert` on the `== 0` branch and
+                // dials a peer it is already connected to.
+                let hidden = self.hidden_for(&established.peer_id);
+                self.inner.on_swarm_event(FromSwarm::ConnectionEstablished(
+                    libp2p::swarm::behaviour::ConnectionEstablished {
+                        other_established: established.other_established.saturating_sub(hidden),
+                        ..established
+                    },
+                ));
             }
-            FromSwarm::ConnectionClosed(closed) if self.gated.contains(&closed.connection_id) => {
-                // REMOVED HERE, which is what keeps the set bounded.
-                self.gated.remove(&closed.connection_id);
-                return;
+            FromSwarm::ConnectionClosed(closed) => {
+                if self.gated.remove(&closed.connection_id).is_some() {
+                    // REMOVED HERE, which is what keeps the map bounded.
+                    return;
+                }
+                self.allowed.remove(&closed.connection_id);
+                // The same correction, and this is the arm where getting
+                // it wrong PANICS rather than misbehaves.
+                // `libp2p-request-response` asserts
+                // `connections.is_empty() == (remaining_established == 0)`
+                // (`lib.rs:678`), and `libp2p-gossipsub` keeps its peer
+                // entry alive on the `!= 0` branch and later `.expect()`s
+                // a non-empty connection vec (`behaviour.rs:3457`) -- a
+                // release panic in the Swarm task, reached whenever a
+                // peer holds one allowed and one gated connection and
+                // the allowed one closes first.
+                let hidden = self.hidden_for(&closed.peer_id);
+                self.inner.on_swarm_event(FromSwarm::ConnectionClosed(
+                    libp2p::swarm::behaviour::ConnectionClosed {
+                        remaining_established: closed.remaining_established.saturating_sub(hidden),
+                        ..closed
+                    },
+                ));
             }
-            FromSwarm::AddressChange(change) if self.gated.contains(&change.connection_id) => {
-                return;
+            FromSwarm::AddressChange(change) => {
+                if self.gated.contains_key(&change.connection_id) {
+                    return;
+                }
+                self.inner.on_swarm_event(FromSwarm::AddressChange(change));
             }
-            _ => {}
+            // A DIAL OR LISTEN FAILURE MEANS NO CONNECTION, so the id can
+            // never reach the close that would otherwise drain it. Both
+            // are forwarded — `Attributing` needs `DialFailure` to drain
+            // its own note map — and the removal is what makes this
+            // wrapper's bound structural rather than a property of which
+            // behaviours happen to refuse.
+            FromSwarm::DialFailure(failure) => {
+                self.gated.remove(&failure.connection_id);
+                self.allowed.remove(&failure.connection_id);
+                self.inner.on_swarm_event(event);
+            }
+            FromSwarm::ListenFailure(failure) => {
+                self.gated.remove(&failure.connection_id);
+                self.allowed.remove(&failure.connection_id);
+                self.inner.on_swarm_event(event);
+            }
+            _ => self.inner.on_swarm_event(event),
         }
-        self.inner.on_swarm_event(event);
     }
 
     fn on_connection_handler_event(
@@ -228,10 +341,43 @@ impl<B: NetworkBehaviour> NetworkBehaviour for ClassGated<B> {
         self.inner.on_connection_handler_event(peer, id, event);
     }
 
+    /// Close any allowed connection whose peer has since lost data-plane
+    /// trust, then poll the inner behaviour.
+    ///
+    /// A handler cannot be rebuilt, so this is the only way to withdraw
+    /// the protocols an allowed connection was given: end the
+    /// connection. A reachability connection that is still wanted is
+    /// re-established by whatever wanted it, correctly gated the second
+    /// time — a reconnect, not a loss of function.
+    ///
+    /// CHECKED ONLY WHEN POLICY MOVES. `PolicySnapshot::revision`
+    /// changes on publication, so an unchanged policy costs one integer
+    /// comparison rather than a walk of every open connection.
     fn poll(
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
+        let snapshot = self.policy.load();
+        if self.checked_revision != Some(snapshot.revision()) {
+            self.checked_revision = Some(snapshot.revision());
+            for (id, peer) in &self.allowed {
+                let still_trusted = TransportIdentity::parse(peer.to_base58())
+                    .is_ok_and(|i| snapshot.classify(&i) == ConnectionClass::DataPlaneTrusted);
+                if !still_trusted {
+                    self.closing.push((*peer, *id));
+                }
+            }
+        }
+        if let Some((peer_id, id)) = self.closing.pop() {
+            // The entry goes now rather than on the close event, so a
+            // second publication before the close lands cannot queue the
+            // same connection twice.
+            self.allowed.remove(&id);
+            return Poll::Ready(ToSwarm::CloseConnection {
+                peer_id,
+                connection: CloseConnection::One(id),
+            });
+        }
         self.inner.poll(cx)
     }
 }
@@ -737,7 +883,7 @@ mod tests {
             .expect("still a connection");
         assert!(matches!(handler, ClassGatedHandler::Denied));
         assert!(
-            g.gated.contains(&id),
+            g.gated.contains_key(&id),
             "a gated connection must be remembered, or its lifecycle cannot be hidden"
         );
 
@@ -763,8 +909,224 @@ mod tests {
              never told it opened"
         );
         assert!(
-            !g.gated.contains(&id),
+            !g.gated.contains_key(&id),
             "and the id must be released on close, or the set grows without bound"
+        );
+    }
+
+    /// A `Recording` that keeps the counter it was told, not just a tally.
+    ///
+    /// The counts are the whole subject of the test below, so a double
+    /// that only counted calls could not see the defect.
+    #[derive(Default)]
+    struct Counts {
+        remaining: Arc<Mutex<Vec<usize>>>,
+        other: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl NetworkBehaviour for Counts {
+        type ConnectionHandler = dummy::ConnectionHandler;
+        type ToSwarm = std::convert::Infallible;
+
+        fn handle_established_inbound_connection(
+            &mut self,
+            _id: ConnectionId,
+            _peer: PeerId,
+            _local: &Multiaddr,
+            _remote: &Multiaddr,
+        ) -> Result<THandler<Self>, ConnectionDenied> {
+            Ok(dummy::ConnectionHandler)
+        }
+
+        fn handle_established_outbound_connection(
+            &mut self,
+            _id: ConnectionId,
+            _peer: PeerId,
+            _addr: &Multiaddr,
+            _role: Endpoint,
+            _port: PortUse,
+        ) -> Result<THandler<Self>, ConnectionDenied> {
+            Ok(dummy::ConnectionHandler)
+        }
+
+        fn on_swarm_event(&mut self, event: FromSwarm<'_>) {
+            match event {
+                FromSwarm::ConnectionEstablished(e) => {
+                    self.other
+                        .lock()
+                        .expect("not poisoned")
+                        .push(e.other_established);
+                }
+                FromSwarm::ConnectionClosed(c) => {
+                    self.remaining
+                        .lock()
+                        .expect("not poisoned")
+                        .push(c.remaining_established);
+                }
+                _ => {}
+            }
+        }
+
+        fn on_connection_handler_event(
+            &mut self,
+            _peer: PeerId,
+            _id: ConnectionId,
+            _event: THandlerOutEvent<Self>,
+        ) {
+        }
+
+        fn poll(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
+            Poll::Pending
+        }
+    }
+
+    fn connected_point() -> libp2p::core::ConnectedPoint {
+        libp2p::core::ConnectedPoint::Listener {
+            local_addr: addr(),
+            send_back_addr: addr(),
+        }
+    }
+
+    #[test]
+    fn a_hidden_connection_is_subtracted_from_the_counts_the_inner_behaviour_is_told() {
+        // THE SECOND HALF OF "NEVER CALL INTO B", and it is not the
+        // handler and not the events -- it is the NUMBERS the events
+        // carry. `other_established` and `remaining_established` come
+        // from the Swarm's connection pool, which does not know this
+        // wrapper exists, so they count the hidden connections too.
+        //
+        // Forwarded unaltered they are a lie in the dangerous
+        // direction. `libp2p-request-response` asserts
+        // `connections.is_empty() == (remaining_established == 0)`;
+        // `libp2p-gossipsub` keeps its peer entry alive on the `!= 0`
+        // branch and later `.expect()`s a non-empty connection vec --
+        // a RELEASE panic in the Swarm task; `libp2p-kad` skips
+        // `connected_peers.insert` on the `== 0` branch and dials a
+        // peer it is already connected to.
+        //
+        // Review finding on PR #77. The first version of this wrapper
+        // suppressed the events and left the counts alone, which is a
+        // subtler version of the crash that made suppression necessary.
+        let remaining = Arc::new(Mutex::new(Vec::new()));
+        let other = Arc::new(Mutex::new(Vec::new()));
+        let mut g = ClassGated::new(
+            Counts {
+                remaining: Arc::clone(&remaining),
+                other: Arc::clone(&other),
+            },
+            policy(),
+        );
+
+        // One peer, two identities: the gated connection belongs to
+        // INFRA and the allowed one to TRUSTED would not exercise this
+        // at all -- the correction is PER PEER, so both connections must
+        // be the same peer. `INFRA` is gated, so use a peer that is
+        // trusted for the allowed connection and separately gate a
+        // connection for that SAME peer by demoting nothing: instead,
+        // gate by id for a peer the policy refuses.
+        //
+        // Simplest faithful shape: TRUSTED holds one allowed
+        // connection; a second connection for TRUSTED is gated only if
+        // policy says so, which it does not. So the realistic pairing is
+        // an INFRA peer holding two gated connections plus a TRUSTED
+        // peer holding one allowed -- and the count that matters is that
+        // TRUSTED's close is NOT reduced by INFRA's hidden ones.
+        let allowed_id = ConnectionId::new_unchecked(1);
+        let gated_a = ConnectionId::new_unchecked(2);
+        let gated_b = ConnectionId::new_unchecked(3);
+
+        let _ = g
+            .handle_established_inbound_connection(allowed_id, peer(TRUSTED), &addr(), &addr())
+            .expect("trusted is admitted");
+        let _ = g
+            .handle_established_inbound_connection(gated_a, peer(INFRA), &addr(), &addr())
+            .expect("still a connection");
+        let _ = g
+            .handle_established_inbound_connection(gated_b, peer(INFRA), &addr(), &addr())
+            .expect("still a connection");
+
+        // TRUSTED's own close must not be reduced by INFRA's hidden
+        // connections: the correction is per peer, not global.
+        g.on_swarm_event(FromSwarm::ConnectionClosed(
+            libp2p::swarm::behaviour::ConnectionClosed {
+                peer_id: peer(TRUSTED),
+                connection_id: allowed_id,
+                endpoint: &connected_point(),
+                remaining_established: 0,
+                cause: None,
+            },
+        ));
+        assert_eq!(
+            *remaining.lock().expect("not poisoned"),
+            vec![0],
+            "a peer with no hidden connections must have its count passed through"
+        );
+
+        // Now the case that panics libp2p. Give INFRA an allowed
+        // connection as well, by promoting it, and close that one while
+        // its two gated connections are still open: the Swarm would say
+        // `remaining_established == 2`, and the inner behaviour holds
+        // none of them.
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        let _ = m.set_trust(
+            TrustSources::new(
+                PeerTrustPolicy::new([ident(INFRA)]).expect("small"),
+                InfrastructureSet::default(),
+            ),
+            &[],
+        );
+        let promoted_id = ConnectionId::new_unchecked(4);
+        // Swap the policy so INFRA is now trusted, then admit it.
+        g.policy = m.handle();
+        let _ = g
+            .handle_established_inbound_connection(promoted_id, peer(INFRA), &addr(), &addr())
+            .expect("now trusted");
+
+        remaining.lock().expect("not poisoned").clear();
+        g.on_swarm_event(FromSwarm::ConnectionClosed(
+            libp2p::swarm::behaviour::ConnectionClosed {
+                peer_id: peer(INFRA),
+                connection_id: promoted_id,
+                endpoint: &connected_point(),
+                // What the Swarm's pool would report: the two gated
+                // connections are still open.
+                remaining_established: 2,
+                cause: None,
+            },
+        ));
+        assert_eq!(
+            *remaining.lock().expect("not poisoned"),
+            vec![0],
+            "the inner behaviour holds no other connection to this peer, so it must be \
+             told zero -- told 2 it keeps a peer entry with an empty connection vec and \
+             `libp2p-gossipsub` later panics on `.expect()`"
+        );
+
+        // And the same correction on the establish side, which is where
+        // `libp2p-kad` silently misbehaves rather than panicking.
+        let second_allowed = ConnectionId::new_unchecked(5);
+        let _ = g
+            .handle_established_inbound_connection(second_allowed, peer(INFRA), &addr(), &addr())
+            .expect("trusted");
+        g.on_swarm_event(FromSwarm::ConnectionEstablished(
+            libp2p::swarm::behaviour::ConnectionEstablished {
+                peer_id: peer(INFRA),
+                connection_id: second_allowed,
+                endpoint: &connected_point(),
+                failed_addresses: &[],
+                // Pool count: two gated still open, and no allowed one.
+                other_established: 2,
+            },
+        ));
+        assert_eq!(
+            *other.lock().expect("not poisoned"),
+            vec![0],
+            "the inner behaviour has no other connection to this peer, so it must be \
+             told zero -- told 2, `libp2p-kad` skips `connected_peers.insert` and dials \
+             a peer it is already connected to"
         );
     }
 
@@ -804,6 +1166,65 @@ mod tests {
     }
 
     #[test]
+    fn a_gated_id_is_released_when_the_connection_never_establishes() {
+        // THE BOUND, made structural rather than assumed.
+        //
+        // An id enters `gated` at the established HOOK, which is not the
+        // same event as establishment. The derive `?`-propagates, so a
+        // behaviour field AFTER this one returning `ConnectionDenied`
+        // means the Swarm reports `ListenFailure` or `DialFailure` and
+        // never `ConnectionEstablished` or `ConnectionClosed` for that
+        // id -- and the entry would be permanent.
+        //
+        // No behaviour after these ones refuses today, which makes this
+        // unreachable by COMPOSITION rather than by construction: a
+        // property of three third-party crates and a field ordering.
+        // §6 asks that a bound not rest on that. Review finding on
+        // PR #77.
+        let mut g = gated(Recording::default());
+        let listen_id = ConnectionId::new_unchecked(1);
+        let dial_id = ConnectionId::new_unchecked(2);
+
+        let _ = g
+            .handle_established_inbound_connection(listen_id, peer(INFRA), &addr(), &addr())
+            .expect("still a connection");
+        let _ = g
+            .handle_established_outbound_connection(
+                dial_id,
+                peer(INFRA),
+                &addr(),
+                Endpoint::Dialer,
+                PortUse::Reuse,
+            )
+            .expect("still a connection");
+        assert_eq!(g.gated.len(), 2, "both are being hidden");
+
+        g.on_swarm_event(FromSwarm::ListenFailure(
+            libp2p::swarm::behaviour::ListenFailure {
+                local_addr: &addr(),
+                send_back_addr: &addr(),
+                error: &libp2p::swarm::ListenError::Aborted,
+                connection_id: listen_id,
+                peer_id: Some(peer(INFRA)),
+            },
+        ));
+        g.on_swarm_event(FromSwarm::DialFailure(
+            libp2p::swarm::behaviour::DialFailure {
+                peer_id: Some(peer(INFRA)),
+                error: &libp2p::swarm::DialError::Aborted,
+                connection_id: dial_id,
+            },
+        ));
+
+        assert!(
+            g.gated.is_empty(),
+            "an id whose connection never established must be released -- it will never \
+             see the close that otherwise drains it, so the map would grow for the life \
+             of the process"
+        );
+    }
+
+    #[test]
     fn a_node_level_swarm_event_reaches_the_inner_behaviour_even_while_a_peer_is_gated() {
         // Scoping again, from the other side. An event that is about
         // the NODE rather than about one connection must be forwarded
@@ -832,6 +1253,128 @@ mod tests {
             *events.lock().expect("not poisoned"),
             1,
             "a node-level event must reach the inner behaviour regardless of gating"
+        );
+    }
+
+    #[test]
+    fn an_allowed_connection_is_closed_when_its_peer_loses_data_plane_trust() {
+        // THE P1 THIS FIXES, and it is worth stating why the obvious
+        // reasoning misses it.
+        //
+        // A handler is chosen once and libp2p never rebuilds it, so a
+        // peer trusted at establishment keeps every data-plane protocol
+        // for the connection's life. The comforting answer is "a
+        // downgrade closes the connection" — and for a connection held
+        // under `Manual` or arriving inbound, it does. It does NOT for
+        // one held under a reachability origin: `connections_to_close`
+        // keeps a connection whose ORIGIN still permits, and
+        // `authorizes_for(ConnectivityInfrastructureOnly,
+        // RelayReservation)` is true on purpose, because a reservation
+        // with an infrastructure peer is exactly what should survive.
+        //
+        // So the connection lives on with handlers it should no longer
+        // have. Latent today — no call site passes those origins — and
+        // live the moment step 3 does, which is the same shape as
+        // SPIKE-004's D1/D2/D3.
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        let _ = m.set_trust(
+            TrustSources::new(
+                PeerTrustPolicy::new([ident(TRUSTED)]).expect("small"),
+                InfrastructureSet::default(),
+            ),
+            &[],
+        );
+        let mut g = ClassGated::new(Recording::default(), m.handle());
+
+        let id = ConnectionId::new_unchecked(1);
+        let handler = g
+            .handle_established_inbound_connection(id, peer(TRUSTED), &addr(), &addr())
+            .expect("admitted while trusted");
+        assert!(matches!(handler, ClassGatedHandler::Allowed(_)));
+
+        // Nothing to do while policy is unchanged.
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(
+            matches!(g.poll(&mut cx), Poll::Pending),
+            "an unchanged policy must not close anything"
+        );
+
+        // DOWNGRADE, not revocation: still infrastructure, no longer
+        // data-plane. This is the case a reachability origin survives.
+        let _ = m.set_trust(
+            TrustSources::new(
+                PeerTrustPolicy::new([]).expect("empty"),
+                InfrastructureSet::new([ident(TRUSTED)]).expect("small"),
+            ),
+            &[],
+        );
+
+        match g.poll(&mut cx) {
+            Poll::Ready(ToSwarm::CloseConnection {
+                peer_id,
+                connection: CloseConnection::One(closed),
+            }) => {
+                assert_eq!(peer_id, peer(TRUSTED));
+                assert_eq!(
+                    closed, id,
+                    "the connection whose peer lost data-plane trust must be the one closed"
+                );
+            }
+            other => panic!(
+                "a downgraded peer's allowed connection must be closed, since its \
+                 handler cannot be rebuilt and still carries every data-plane \
+                 protocol; got {other:?} instead"
+            ),
+        }
+
+        // AND ONLY ONCE. A second publication must not re-queue a
+        // connection already closed, or a busy policy becomes a stream
+        // of duplicate close commands.
+        let _ = m.set_trust(
+            TrustSources::new(
+                PeerTrustPolicy::new([]).expect("empty"),
+                InfrastructureSet::new([ident(TRUSTED)]).expect("small"),
+            ),
+            &[],
+        );
+        assert!(
+            matches!(g.poll(&mut cx), Poll::Pending),
+            "a connection already closed must not be queued again"
+        );
+    }
+
+    #[test]
+    fn a_still_trusted_peers_connection_survives_an_unrelated_policy_change() {
+        // The control. A wrapper that closed on every republication
+        // would pass the test above and make the data plane unusable.
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        let _ = m.set_trust(
+            TrustSources::new(
+                PeerTrustPolicy::new([ident(TRUSTED)]).expect("small"),
+                InfrastructureSet::default(),
+            ),
+            &[],
+        );
+        let mut g = ClassGated::new(Recording::default(), m.handle());
+        let id = ConnectionId::new_unchecked(1);
+        let _ = g
+            .handle_established_inbound_connection(id, peer(TRUSTED), &addr(), &addr())
+            .expect("admitted");
+
+        // Someone ELSE joins the allowlist. `TRUSTED` is untouched.
+        let _ = m.set_trust(
+            TrustSources::new(
+                PeerTrustPolicy::new([ident(TRUSTED), ident(STRANGER)]).expect("small"),
+                InfrastructureSet::default(),
+            ),
+            &[],
+        );
+
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(
+            matches!(g.poll(&mut cx), Poll::Pending),
+            "a still-trusted peer's connection must survive a policy change that did \
+             not concern it"
         );
     }
 
@@ -884,11 +1427,16 @@ mod tests {
              connection, without restarting anything"
         );
 
-        // NOT a claim that the EXISTING connection is re-gated. It is
-        // not: the handler was installed at establishment and is not
-        // rebuilt. What makes that acceptable is that revocation closes
-        // such connections, and THAT now has a test of its own rather
-        // than a citation:
+        // THE PROMOTION DIRECTION, which is the one left alone. The
+        // handler was installed at establishment and is not rebuilt, so
+        // this connection stays gated until it reconnects --
+        // under-privileged rather than over, so it is not paid for with
+        // a forced reconnect. The LOSING direction is closed by
+        // `poll`, pinned by
+        // `an_allowed_connection_is_closed_when_its_peer_loses_data_plane_trust`.
+        //
+        // Revocation also closes such connections where it can, and that
+        // now has a test of its own rather than a citation:
         // `advertised_protocol_set::a_peer_downgraded_to_infrastructure_only_loses_its_connection`
         // takes a trusted peer to infrastructure-only over real sockets
         // and requires the connection to go. It was written because the

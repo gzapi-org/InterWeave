@@ -108,11 +108,15 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   behaviours ship gated off and `ClassGated<B>` land first; the second
   half is done. The plan's Stage 11 section carries the ruling, because
   that is where the construction order lives.
-  **One thing `ClassGated<B>` does not do**, because a reader will
-  assume it: a handler is built once at establishment and never
-  rebuilt, so a peer PROMOTED while connected stays gated until it
-  reconnects. The dangerous direction is covered elsewhere — revocation
-  closes the connections it downgrades.
+  **The two directions are not symmetric**, because a handler is built
+  once at establishment and libp2p never rebuilds it. A peer DEMOTED
+  while connected would keep every data-plane handler for the
+  connection's life, so `ClassGated<B>` closes such connections itself
+  when policy moves — `connections_to_close` cannot, since it keeps a
+  connection whose ORIGIN still permits, which for `RelayReservation`
+  or `AutonatProbe` it deliberately does. A peer PROMOTED while
+  connected stays gated until it reconnects: the safe direction,
+  under-privileged rather than over.
   `DcutrHolePunch` (D1) and `RelayCircuit` (D2) were both admitted for
   an infrastructure-only peer; the admission predicate — renamed
   `names_application_destination` in the same commit, because the old

@@ -541,9 +541,9 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
                  behaviour, not a rule any accepted document states; see this \
                  file's header. If `established` and `advertised` are both set, \
                  the peer was RETAINED and told those protocols: the §14 exposure, \
-                 live. That is the state the planned `ClassGated<B>` restriction \
-                 is meant to make safe -- it is not built yet, so read the plan's \
-                 §14 rather than looking for the type. If established with nothing \
+                 live. `ClassGated<B>` is what makes that state safe, and it is \
+                 built -- so if this fires, the wrapper is not covering the behaviour \
+                 whose protocols are listed. If established with nothing \
                  advertised, it was held open in silence. If not established, no \
                  `ConnectionEstablished` arrived; other events are swallowed by \
                  the catch-all above."

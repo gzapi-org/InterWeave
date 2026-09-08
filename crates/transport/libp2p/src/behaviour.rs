@@ -244,13 +244,20 @@ pub struct SubstrateBehaviour {
 // protocol matrix grants that class.
 //
 // WHAT THIS DOES NOT DO, stated because a reader will otherwise assume
-// it. A connection's handler is built once, at establishment, and is
-// never rebuilt — so a peer PROMOTED to `DataPlaneTrusted` while
-// connected stays gated until it reconnects. That is acceptable only
-// because the opposite direction is handled elsewhere: revocation closes
-// the connections it downgrades (`runtime/mod.rs`), so a demoted peer
-// does not keep a handler it should no longer have. `class_gate.rs`
-// pins both halves.
+// it. A connection's handler is built once, at establishment, and libp2p
+// never rebuilds it. So the two directions are not symmetric:
+//
+// - a peer DEMOTED while connected would otherwise keep every
+//   data-plane handler for the connection's life, and closing the
+//   connection is the only way to withdraw them. `ClassGated` does that
+//   itself, on the policy change, because `connections_to_close` cannot:
+//   it keeps a connection whose ORIGIN still permits, which for a
+//   reachability origin it deliberately does;
+// - a peer PROMOTED while connected stays gated until it reconnects.
+//   That is the safe direction — under-privileged rather than over — and
+//   is left alone rather than paid for with a reconnect.
+//
+// `class_gate.rs` pins both.
 
 impl SubstrateBehaviour {
     /// Build the behaviour for `keypair`.
