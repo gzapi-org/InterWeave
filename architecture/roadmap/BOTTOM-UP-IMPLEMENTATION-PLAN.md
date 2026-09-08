@@ -1402,8 +1402,10 @@ authorized.
 **Half of it has since landed, and outside the spike.** Stage 11's
 `tests/connectivity/tests/advertised_protocol_set.rs` runs exactly such
 a node, over loopback and in CI, with no relay code — an
-`InfrastructureSet` is ordinary configuration — and asserts that nothing
-is advertised in the window before the refusal. What it does not supply
+`InfrastructureSet` is ordinary configuration — and RECORDS what is
+advertised in the window before the refusal. It does not assert it: that
+emptiness is scheduler-dependent and `CONNECTIVITY.md`'s matrix permits
+Identify for this class, so §14 treats it as an observation. What it does not supply
 is the RETAINED case, which is what the correction actually needs and
 what remains owed.
 
@@ -1489,8 +1491,11 @@ else names them.
   bounded ping a `yes` in the infrastructure-only column, and ADR-0036
   opens a clause "on an established infrastructure-only connection:".
   Today no such connection survives long enough for either: the inbound
-  arm closes it in the same loop iteration as `ConnectionEstablished`,
-  which `tests/connectivity/tests/advertised_protocol_set.rs` asserts.
+  arm closes it in the same loop iteration as `ConnectionEstablished`.
+  That is MEASURED, not asserted — deliberately, since asserting it would
+  resolve this very conflict in code, which is what this bullet exists to
+  avoid. What `tests/connectivity/tests/advertised_protocol_set.rs`
+  asserts is only that such a peer is established and then closed.
   Step 3 has to relax that arm anyway for the AutoNAT dial-back, so it is
   the step that must decide whether the documents or the code move
   (CLAUDE.md §2 — the conflict is named here rather than resolved in

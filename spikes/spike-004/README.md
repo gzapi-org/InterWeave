@@ -521,9 +521,12 @@ real infrastructure-only connection, which is work on
 **Half of that has since landed, and NOT in phase B** — an earlier
 version of this paragraph called it phase-B-shaped, which was wrong.
 Stage 11's `tests/connectivity/tests/advertised_protocol_set.rs` runs a
-node carrying all four data-plane behaviours beside a real
+node carrying THREE of the four data-plane behaviours beside a real
 infrastructure-only connection, over loopback, in CI, with no relay code
-at all: an `InfrastructureSet` is ordinary configuration. What that
+at all: an `InfrastructureSet` is ordinary configuration. Three, not
+four, because it uses `SubstrateConfig::default()`, which leaves
+`kademlia: None` — so the `Toggle` installs a dummy handler and
+advertises nothing, and a configured-kad variant is still owed. What that
 connection is not is RETAINED — it is closed in the same loop iteration
 as `ConnectionEstablished` — so the correction still owes the retained
 case, and that is what remains outstanding here. What phase A

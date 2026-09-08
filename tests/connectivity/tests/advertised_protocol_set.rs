@@ -323,8 +323,8 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
     // wrong paraphrases: it said a call site was needed and explicitly
     // denied the behaviour route, which is the intended route for both
     // reachability origins. This test is the control that
-    // will make that one meaningful, and the negative case
-    // `ClassGated<B>` must flip.
+    // will make the RETAINED case meaningful when it becomes
+    // reachable, and it is the negative case `ClassGated<B>` must flip.
     //
     // # This asserts today's behaviour, not a rule from ADR-0036
     //
@@ -413,6 +413,10 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
     // transport completes the handshake before the runtime's event loop
     // ever sees `ConnectionEstablished` to classify.
     let mut established = false;
+    // Kept for the TIMEOUT DIAGNOSTIC, not for an assertion. Retention
+    // is what lands in that arm, and what a retained peer was told is
+    // the single most useful thing to print there.
+    let mut advertised: Option<Vec<String>> = None;
     let deadline = tokio::time::Instant::now() + PATIENCE;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -448,14 +452,14 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
                 // asserts is the establish-then-close, which comes from
                 // one ordered event stream and does not depend on
                 // scheduling.
+                let protocols: Vec<String> =
+                    info.protocols.iter().map(ToString::to_string).collect();
                 eprintln!(
-                    "note: subject advertised {:?} before refusing an infrastructure-only \
-                     peer -- recorded, not a failure; see this arm's comment",
-                    info.protocols
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
+                    "note: subject advertised {protocols:?} before refusing an \
+                     infrastructure-only peer -- recorded, not a failure; see this \
+                     arm's comment"
                 );
+                advertised = Some(protocols);
             }
             Ok(libp2p::swarm::SwarmEvent::ConnectionClosed { .. }) => {
                 // NOT an assertion that can fail. libp2p emits
@@ -482,21 +486,24 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
                 panic!("the dial failed before establishment: {error:?}");
             }
             Ok(_) => {}
-            // NOT where retention lands, despite an earlier version of
-            // this comment saying so. Both swarms run Identify, so a
-            // RETAINED peer completes it in milliseconds and is caught
-            // by the `Received` arm above, naming the protocols -- which
-            // is what mutating `authorizes_for` produces. This arm
-            // covers established-and-then-SILENT: no Identify and no
-            // close, which is neither the measured behaviour nor
-            // retention, and which nothing today is known to produce.
+            // THIS IS WHERE RETENTION LANDS, and it moved here when the
+            // `Received` arm stopped panicking: that arm now records and
+            // continues, so a KEPT peer produces an establish, an
+            // Identify, no close, and finally this timeout. Two earlier
+            // versions of this comment named the wrong arm in each
+            // direction -- the failure this test most needs to report
+            // clearly is the one whose diagnostic kept being wrong.
+            //
+            // So the message reports what was actually seen rather than
+            // asserting which case it is.
             Err(_) => panic!(
-                "timed out with established={established}, having seen neither an \
-                 Identify nor a close. This is NOT the retention case -- a retained \
-                 peer completes Identify in milliseconds and panics in the arm above. \
-                 If established, the connection was held open in silence; if not, \
-                 nothing arrived at all. Either way the subject is behaving in a way \
-                 this test has never measured."
+                "timed out after {PATIENCE:?}: established={established}, \
+                 advertised={advertised:?}. An infrastructure-only peer must be \
+                 established and then CLOSED; no close arrived. If `established` and \
+                 `advertised` are both set, the peer was RETAINED and told those \
+                 protocols -- the §14 exposure, live, and the state `ClassGated<B>` \
+                 exists to make safe. If established with nothing advertised, it was \
+                 held open in silence. If not established, nothing arrived at all."
             ),
         }
     }
