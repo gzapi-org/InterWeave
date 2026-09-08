@@ -10,9 +10,11 @@ Evidence and the final decision are recorded against
 **This file is phase A.** The phase B ENVIRONMENT now exists at
 [`phase-b/`](./phase-b/README.md): a rootless-podman NAT matrix with two
 NAT domains, whose mapping behaviour is configured and then MEASURED
-rather than assumed. It answers the mechanism half only — no node runs
-in it, success rates and a specific carrier's CGNAT are population
-claims a container cannot make, and **it does not close phase B**.
+rather than assumed. It answers part of one of the six evidence
+items `SPIKES.md` lists for phase B — the NAT mapping classes, and only
+their mapping half, since filtering is neither configured nor measured
+there. No node runs in it; success rates and a specific carrier's CGNAT
+are claims a container cannot make; and **it does not close phase B**.
 
 **One name below no longer exists, and is left as written on purpose.**
 This record measures dated states of the production code, so it names

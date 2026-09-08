@@ -226,7 +226,9 @@ into the class that says a hole punch would work.
 Five checks stand between the observation and a passing row — four
 before the verdict is printed, one after — and any of them fails it.
 The four before the verdict run on EVERY trial, not only the last; the
-fifth is taken once, on the class every trial agreed on.
+fifth is taken once, on the class the trials produced. ("The class every
+trial agreed on" was true only for `eim` — when they disagree the class
+is `eds`, which no single trial produced on its own.)
 (This said four, and before that two, both times because the sentence
 was counted against the bullet list below it rather than against
 `probe.sh`. It is the first bullet that kept going missing, and it is
@@ -249,6 +251,14 @@ the one that fires when the topology is up and nothing traversed it.)
 - **a class that does not match `EXPECT`** — a NAT that silently behaves
   as the other class is a failure, not a footnote. With no `EXPECT` the
   probe prints `UNASSERTED` rather than passing quietly.
+
+`probe.sh` validates its own trial list the same way, and for the same
+reason: `class` starts at `eim` and only a disagreeing trial moves it,
+so a list naming nothing would report ENDPOINT-INDEPENDENT and exit 0
+having measured nothing. It requires at least two ports, numeric, and
+distinct once normalised — `45000` and `045000` are two spellings of one
+internal tuple, and one trial re-opens the coincidence the trials exist
+to close.
 
 `run.sh` asserts nothing across rows, and that is deliberate. The
 per-row `EXPECT` check already exits non-zero on a mismatch, so any
