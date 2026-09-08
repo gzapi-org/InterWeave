@@ -52,10 +52,13 @@ sleep 1
 seen1=$(podman exec natm-obs1 sh -c 'cat /seen.txt' | tail -1)
 seen2=$(podman exec natm-obs2 sh -c 'cat /seen.txt' | tail -1)
 
-# THE REPORT GOES TO STDERR and only the class to stdout, so a caller
-# can capture the verdict in a variable without swallowing the
-# measurement. An earlier `run.sh` read stdout and the transcript lost
-# every number the README cites.
+# THE REPORT GOES TO STDERR, and stdout carries the machine-readable
+# result: the class and the two ports it was derived from, one per line.
+# A caller can capture that in a variable without swallowing the
+# measurement -- an earlier `run.sh` read stdout and the transcript lost
+# every number the README cites. This comment said "only the class" for
+# one commit after `PORTS=` was added eighty lines below it, which is
+# the pair-in-one-file shape CLAUDE.md §7 names.
 {
   printf 'peer private   : %s %s\n' "$peer_private" "$SRC_PORT"
   printf 'router public  : %s\n' "$router_pub"
