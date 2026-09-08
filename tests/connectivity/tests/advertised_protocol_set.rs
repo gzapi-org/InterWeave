@@ -70,7 +70,8 @@
 //!
 //! Read from a third-party Identify observer over loopback rather than
 //! from this crate's own types, because what a peer is TOLD is the
-//! question.
+//! question — a test that asked `SubstrateBehaviour` what it contains
+//! would agree with any mistake made in constructing it.
 //!
 //! # One assay is owed and cannot be written yet
 //!
@@ -85,8 +86,7 @@
 //! produce one: the inbound arm refuses that class outright, and the two
 //! origins that would hold one open have no call site. Step 3 is the
 //! first commit that creates the state this assay requires, so the assay
-//! belongs with it. Recorded here rather than left undone silently. A test that asked `SubstrateBehaviour` what it contains
-//! would agree with any mistake made in constructing it.
+//! belongs with it. Recorded here rather than left undone silently.
 
 #![allow(clippy::expect_used, clippy::panic)]
 
@@ -462,11 +462,15 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
                 // RECORDS AND CONTINUES, so `advertised` ends up holding
                 // the LAST exchange rather than the first. That matters
                 // for reading the timeout diagnostic: instrumented under
-                // the retention mutation, the observer sees TWO Identify
-                // exchanges -- the first with all seven advertised
-                // names, the second with four, the three `/meshsub/`
-                // removed. So the diagnostic's list is the reduced one,
-                // and a retained peer was told more than it shows.
+                // the retention mutation BEFORE `ClassGated` existed, the
+                // observer saw TWO Identify exchanges -- the first with
+                // all seven advertised names, the second with four, the
+                // three `/meshsub/` removed. So the diagnostic's list
+                // was the reduced one, and a retained peer had been told
+                // more than it showed. **Past tense on purpose**: with
+                // the wrapper in place the same instrumentation reports
+                // the two Identify names and nothing else, so those
+                // figures describe the defect rather than the tree.
                 //
                 // OBSERVED, NOT ASSERTED, and the difference was a
                 // review finding on this very head. An earlier version

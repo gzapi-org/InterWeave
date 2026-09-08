@@ -536,6 +536,15 @@ impl<H: ConnectionHandler> ConnectionHandler for ClassGatedHandler<H> {
             ConnectionEvent::RemoteProtocolsChange(change) => {
                 handler.on_connection_event(ConnectionEvent::RemoteProtocolsChange(change));
             }
+            // THE ENUM IS `#[non_exhaustive]`, so this arm exists for
+            // variants that do not exist yet. All seven current ones are
+            // handled above. **A libp2p bump that adds one will silently
+            // stop forwarding it to ALLOWED connections** -- the ones
+            // that must behave exactly as an unwrapped behaviour --
+            // with no compile error. Check this arm on every libp2p
+            // upgrade. (Its mirror in `on_swarm_event` falls through to
+            // FORWARD, which is the safe default and needs no such
+            // note.)
             _ => {}
         }
     }
@@ -550,9 +559,7 @@ mod tests {
     use libp2p::swarm::dummy;
     use libp2p::swarm::handler::UpgradeInfoSend as _;
 
-    use interweave_transport_runtime::{
-        ConnectionManager, ConnectionPolicy, DialOrigin, TrustSources,
-    };
+    use interweave_transport_runtime::{ConnectionManager, ConnectionPolicy, TrustSources};
     use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 
     /// Trusted for the data plane.
@@ -758,6 +765,34 @@ mod tests {
     }
 
     #[test]
+    fn a_denied_handler_never_asks_to_open_an_outbound_substream() {
+        // THE PREMISE OF A TYPE CHOICE, and it had no test.
+        //
+        // `OutboundProtocol` and `OutboundOpenInfo` are the INNER
+        // handler's, uncovered by any `Either`, on the argument that a
+        // `Denied` handler never requests an outbound substream. That is
+        // load-bearing: if a future edit gives `Denied::poll` anything
+        // to emit -- a metric, a close signal -- the type system will
+        // happily let a gated connection open the inner behaviour's REAL
+        // outbound protocol, `/interweave/direct/2.0.0` or `/meshsub/`,
+        // on a connection this wrapper exists to keep bare. No compile
+        // error, no other test. Review finding on PR #77.
+        let mut denied: ClassGatedHandler<request_response_handler::Stub> =
+            ClassGatedHandler::Denied;
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(
+            matches!(denied.poll(&mut cx), Poll::Pending),
+            "a denied handler must emit nothing at all -- an \
+             `OutboundSubstreamRequest` here would carry the inner behaviour's own \
+             protocol onto a gated connection"
+        );
+        assert!(
+            !denied.connection_keep_alive(),
+            "and must never vote to hold the connection open"
+        );
+    }
+
+    #[test]
     fn a_gated_handler_drops_a_behaviour_event_rather_than_panicking() {
         // THE `unreachable!()` THIS WRAPPER EXISTS NOT TO INHERIT.
         // libp2p's `ConnectionHandler for Either<L, R>` panics on this
@@ -833,6 +868,19 @@ mod tests {
         }
     }
 
+    /// A `PeerId` the neutral grammar refuses.
+    ///
+    /// `TransportIdentity::parse` accepts only `12D3KooW`/`Qm` prefixes,
+    /// while `PeerId` accepts any identity or sha2-256 multihash — so an
+    /// identity multihash of an unusual length base58-encodes to neither
+    /// prefix and drives `admits`'s parse branch directly. Built rather
+    /// than hardcoded, so it cannot rot into a valid id.
+    fn unparseable_peer() -> PeerId {
+        let mut bytes = vec![0x00, 42];
+        bytes.extend(std::iter::repeat_n(0xAB, 42));
+        PeerId::from_bytes(&bytes).expect("an identity multihash is a valid PeerId")
+    }
+
     #[test]
     fn an_unparseable_peer_id_is_gated_rather_than_admitted() {
         // FAIL-CLOSED. `admits` cannot classify a PeerId the neutral
@@ -840,9 +888,27 @@ mod tests {
         // offer nothing. Constructed through libp2p rather than through
         // `TransportIdentity`, because the whole case is an id the
         // latter would reject.
-        let mut g = gated(Recording::default());
-        let unparseable = PeerId::random();
-        let classifiable = TransportIdentity::parse(unparseable.to_base58()).is_ok();
+        // TRUSTED FOR EVERYONE THE GRAMMAR ACCEPTS, so the only thing
+        // that can gate this peer is the parse failing. An earlier
+        // version used `PeerId::random()`, which IS parseable and is
+        // gated by being in neither trust set -- so it passed with the
+        // fail-closed arm mutated to `return true`, and documented the
+        // branch instead of exercising it. Review finding on PR #77.
+        let unparseable = unparseable_peer();
+        assert!(
+            TransportIdentity::parse(unparseable.to_base58()).is_err(),
+            "the fixture must actually be unparseable, or this test proves nothing"
+        );
+
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        let _ = m.set_trust(
+            TrustSources::new(
+                PeerTrustPolicy::new([ident(TRUSTED)]).expect("small"),
+                InfrastructureSet::default(),
+            ),
+            &[],
+        );
+        let mut g = ClassGated::new(Recording::default(), m.handle());
 
         let handler = g
             .handle_established_inbound_connection(
@@ -853,13 +919,10 @@ mod tests {
             )
             .expect("still a connection");
 
-        // A random PeerId IS parseable, so this documents the branch
-        // rather than exercising it -- and it is still gated, because a
-        // random peer is in neither trust set.
         assert!(
             matches!(handler, ClassGatedHandler::Denied),
-            "parseable={classifiable}: either way, an unclassifiable or untrusted \
-             peer must be gated"
+            "a PeerId that cannot be classified must be gated -- 'I cannot tell' is \
+             not a reason to offer the data plane"
         );
     }
 
@@ -1444,6 +1507,5 @@ mod tests {
         // NAMES a downgrade, and a named connection is CLOSED -- with
         // the closing half only ever exercised for a full revocation to
         // `Unauthorized`, which is the easier case.
-        let _ = DialOrigin::Manual;
     }
 }

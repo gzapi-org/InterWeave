@@ -509,7 +509,7 @@ impl GatedSwarm {
         // The decision itself is `mesh_admits`, kept separate and pure so
         // it can be enumerated over every class.
 
-        let broadcast = &mut self.inner.behaviour_mut().broadcast.inner_mut();
+        let broadcast = self.inner.behaviour_mut().broadcast.inner_mut();
         if data_plane_trusted {
             broadcast.remove_blacklisted_peer(peer);
         } else {

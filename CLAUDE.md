@@ -85,8 +85,9 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
      asks under `DialOrigin::Manual` and so refuses this class outright.
      The feature list never guarded this either.
 
-  **Step 3 reaches routes 1 and 3, and nothing may land before the
-  restriction below does.** It constructs an AutoNAT client and must
+  **Step 3 reaches routes 1 and 3**, which is why the restriction below
+  had to land first — it has, so what remains is that step 3 keep it
+  true rather than precede it. It constructs an AutoNAT client and must
   wrap it with a reachability classifier (route 1), and must relax the
   inbound arm (route 3) because an AutoNAT v2 dial-back arrives as an
   inbound connection from the infrastructure-only server and the CLIENT
