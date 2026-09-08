@@ -85,8 +85,9 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
      asks under `DialOrigin::Manual` and so refuses this class outright.
      The feature list never guarded this either.
 
-  **Step 3 reaches routes 1 and 3, and nothing may land before the
-  restriction below does.** It constructs an AutoNAT client and must
+  **Step 3 reaches routes 1 and 3**, which is why the restriction below
+  had to land first — it has, so what remains is that step 3 keep it
+  true rather than precede it. It constructs an AutoNAT client and must
   wrap it with a reachability classifier (route 1), and must relax the
   inbound arm (route 3) because an AutoNAT v2 dial-back arrives as an
   inbound connection from the infrastructure-only server and the CLIENT
@@ -94,13 +95,40 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   a grep over `attempt_dial` call sites would see none of that.** Do not
   read the feature change as evidence those paths are live. The exposure
   `BOTTOM-UP-IMPLEMENTATION-PLAN.md` §14 names — every data-plane
-  behaviour installed uniformly on every connection — is about the
-  RETAINED case, and it is now one commit away rather than one stage.
-  **No route above may be reached before `BOTTOM-UP-IMPLEMENTATION-PLAN.md`
-  §14's protocol-isolation restriction lands**; the owner ruled
-  on 2026-09-07 that the connectivity behaviours ship gated off and the
-  `ClassGated<B>` fix lands first. The plan's Stage 11 section carries
-  the same ruling, because that is where the construction order lives.
+  behaviour installed uniformly on every connection — was about the
+  RETAINED case, and **it is CLOSED**: `ClassGated<B>` wraps all four,
+  so a connection of any other class is offered no data-plane protocol
+  at all. Measured on a retained infrastructure-only inbound, its
+  Identify carries `/ipfs/id/1.0.0` and `/ipfs/id/push/1.0.0` and
+  nothing else.
+  **So the ordering constraint the routes above were written for is
+  DISCHARGED**, and what replaces it is weaker but not nothing: step 3
+  is the first commit that can produce a retained infrastructure-only
+  connection, so it must keep that restriction true rather than merely
+  not precede it. The owner ruled on 2026-09-07 that the connectivity
+  behaviours ship gated off and `ClassGated<B>` land first; the second
+  half is done. The plan's Stage 11 section carries the ruling, because
+  that is where the construction order lives.
+  **A gating change closes the connection, in whichever direction it
+  moves.** A handler is chosen once at establishment and libp2p never
+  rebuilds it, so a connection whose peer crosses the data-plane
+  boundary is carrying the wrong protocol set from that moment. Losing
+  the trust is decided by `connections_to_close`, so the closure lands
+  in `set_trust`'s ADR-0012 count; gaining it is decided by
+  `ClassGated::poll`, since a promotion is not a revocation and is not
+  part of that count. Both are ADR-0036's own instruction: close and
+  re-establish "rather than allowing a transient privilege mix" — and
+  the gaining direction is not merely under-privileged, because a peer
+  holding one `Denied` and one `Allowed` handler is a pair
+  `NotifyHandler::Any` can route a `kad` query into, where it is
+  silently dropped.
+
+  **The comparison is against the class the connection was ADMITTED
+  under, not the class the peer held before the change.** That is what
+  keeps ADR-0036's origin/class separation real: a connection admitted
+  while the peer was infrastructure-only has carried a denying handler
+  all along, so nothing is stale, and its origin still decides whether
+  it survives.
   `DcutrHolePunch` (D1) and `RelayCircuit` (D2) were both admitted for
   an infrastructure-only peer; the admission predicate — renamed
   `names_application_destination` in the same commit, because the old

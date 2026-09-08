@@ -78,6 +78,7 @@
 
 pub mod attribution;
 pub mod behaviour;
+mod class_gate;
 pub mod direct_codec;
 pub mod endpoints_codec;
 pub mod gated_swarm;

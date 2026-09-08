@@ -266,6 +266,14 @@ futures = "0.3"
 # already on the allow-list — so declaring it here adds no licence or
 # advisory surface, only a name.
 async-trait = "0.1.92"
+# Two-variant sum type, for `ClassGated`'s connection handler: a gated
+# connection installs a denying upgrade where the inner behaviour's would
+# go, and `ConnectionHandler` demands ONE protocol type for both. Already
+# in this graph as `libp2p-swarm`'s own dependency — its `Either`
+# handler impl is built on this exact version — so declaring it adds no
+# crate and no licence term, only a name. `libp2p` does not re-export it.
+either = "1.17.0"
+
 # The libp2p identity boundary. Pinned to 0.2 because that is what
 # `libp2p` 0.56 depends on, and two versions in one graph would mean two
 # incompatible `Keypair` types — the identity crate could not hand its key

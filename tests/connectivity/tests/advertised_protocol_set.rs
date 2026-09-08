@@ -70,8 +70,23 @@
 //!
 //! Read from a third-party Identify observer over loopback rather than
 //! from this crate's own types, because what a peer is TOLD is the
-//! question. A test that asked `SubstrateBehaviour` what it contains
+//! question — a test that asked `SubstrateBehaviour` what it contains
 //! would agree with any mistake made in constructing it.
+//!
+//! # One assay is owed and cannot be written yet
+//!
+//! The plan asks for a NEGOTIATION assay beside this one: a raw
+//! request-response observer attempting `send_request` on a gated
+//! connection and failing at negotiation rather than at the response —
+//! a stronger claim than reading Identify, since it would catch a
+//! wrapper that hid protocols from the advertisement while still
+//! accepting substreams.
+//!
+//! It needs a RETAINED infrastructure-only connection, and nothing can
+//! produce one: the inbound arm refuses that class outright, and the two
+//! origins that would hold one open have no call site. Step 3 is the
+//! first commit that creates the state this assay requires, so the assay
+//! belongs with it. Recorded here rather than left undone silently.
 
 #![allow(clippy::expect_used, clippy::panic)]
 
@@ -320,16 +335,18 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
     // So what this pins is narrower and worth being exact about: an
     // infrastructure-only peer's connection **completes** rather than
     // being refused at or before the handshake. The §14 exposure proper
-    // is about a connection that is KEPT, and there are THREE routes to
-    // one -- CLAUDE.md §1 enumerates them and is the place to read them,
-    // because paraphrasing that list is what went wrong
-    // repeatedly -- a count is not restated here, since the two places
-    // that carried one drifted apart. This paragraph carried one of those
-    // wrong paraphrases: it said a call site was needed and explicitly
-    // denied the behaviour route, which is the intended route for both
-    // reachability origins. This test is the control that
-    // will make the RETAINED case meaningful when it becomes
-    // reachable, and it is the negative case `ClassGated<B>` must flip.
+    // is about a connection that is KEPT, and is now CLOSED by
+    // `ClassGated<B>`: such a connection is offered no data-plane
+    // protocol at all, so there is nothing left to expose. CLAUDE.md §1
+    // carries the routes by which a retained infrastructure-only
+    // connection could come to exist, and is the place to read them --
+    // paraphrasing that list is what went wrong repeatedly here.
+    //
+    // What this test pins is the state BEFORE the wrapper's decision:
+    // that the connection COMPLETES rather than being refused at the
+    // handshake. That is what makes the decision observable at all, and
+    // it is why this test keeps its value now that the negative case has
+    // flipped.
     //
     // # This asserts today's behaviour, not a rule from ADR-0036
     //
@@ -445,11 +462,15 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
                 // RECORDS AND CONTINUES, so `advertised` ends up holding
                 // the LAST exchange rather than the first. That matters
                 // for reading the timeout diagnostic: instrumented under
-                // the retention mutation, the observer sees TWO Identify
-                // exchanges -- the first with all seven advertised
-                // names, the second with four, the three `/meshsub/`
-                // removed. So the diagnostic's list is the reduced one,
-                // and a retained peer was told more than it shows.
+                // the retention mutation BEFORE `ClassGated` existed, the
+                // observer saw TWO Identify exchanges -- the first with
+                // all seven advertised names, the second with four, the
+                // three `/meshsub/` removed. So the diagnostic's list
+                // was the reduced one, and a retained peer had been told
+                // more than it showed. **Past tense on purpose**: with
+                // the wrapper in place the same instrumentation reports
+                // the two Identify names and nothing else, so those
+                // figures describe the defect rather than the tree.
                 //
                 // OBSERVED, NOT ASSERTED, and the difference was a
                 // review finding on this very head. An earlier version
@@ -524,13 +545,146 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
                  behaviour, not a rule any accepted document states; see this \
                  file's header. If `established` and `advertised` are both set, \
                  the peer was RETAINED and told those protocols: the §14 exposure, \
-                 live. That is the state the planned `ClassGated<B>` restriction \
-                 is meant to make safe -- it is not built yet, so read the plan's \
-                 §14 rather than looking for the type. If established with nothing \
+                 live. `ClassGated<B>` is what makes that state safe, and it is \
+                 built -- so if this fires, the wrapper is not covering the behaviour \
+                 whose protocols are listed. If established with nothing \
                  advertised, it was held open in silence. If not established, no \
                  `ConnectionEstablished` arrived; other events are swallowed by \
                  the catch-all above."
             ),
+        }
+    }
+
+    subject.shutdown().await.expect("stops");
+}
+
+#[tokio::test]
+async fn a_peer_downgraded_to_infrastructure_only_loses_its_connection() {
+    // WHY THIS TEST EXISTS, and it is not coverage for its own sake.
+    //
+    // `ClassGated<B>` decides a connection's protocol set once, at
+    // establishment, and never rebuilds the handler. So a peer whose
+    // class crosses the data-plane boundary while connected is carrying
+    // the wrong protocol set from that moment — a peer DEMOTED would
+    // keep the
+    // data-plane handlers it was given. `connections_to_close` ends such
+    // a connection, which is ADR-0036's own instruction: close and
+    // re-establish under the new class rather than allow a transient
+    // privilege mix. This test covers that end to end.
+    //
+    // That claim was resting on two separately-tested halves.
+    // `connection_manager`'s `revoking_trust_names_the_connections_that_must_go`
+    // pins that the manager NAMES a `DataPlaneTrusted` ->
+    // `ConnectivityInfrastructureOnly` transition, and
+    // `stage5_dial_admission`'s `revoking_trust_closes_the_connection_it_revoked`
+    // pins that a named connection is CLOSED — but that one revokes to
+    // `trusting_nobody()`, which makes the peer `Unauthorized`. The
+    // DOWNGRADE composition, which is the one `ClassGated`'s limitation
+    // depends on, was tested at neither end to end.
+    use futures::StreamExt as _;
+
+    let observer_keys = libp2p::identity::Keypair::generate_ed25519();
+    let observer_peer = TransportIdentity::parse(observer_keys.public().to_peer_id().to_base58())
+        .expect("a canonical identity");
+
+    let subject_id = ProfileIdentity::generate();
+    let subject_peer = subject_id.transport_identity().expect("peer id");
+
+    // Trusted to begin with, so the connection is retained and the
+    // data-plane handlers are installed.
+    let mut subject = SwarmRuntime::start(
+        &subject_id,
+        SubstrateConfig::default(),
+        trusting(&[&observer_peer]),
+    )
+    .expect("the runtime starts");
+    let address = listening(&mut subject).await;
+
+    let mut observer = libp2p::SwarmBuilder::with_existing_identity(observer_keys)
+        .with_tokio()
+        .with_tcp(
+            libp2p::tcp::Config::default(),
+            libp2p::noise::Config::new,
+            libp2p::yamux::Config::default,
+        )
+        .expect("the same transport stack the subject uses")
+        .with_behaviour(|k| {
+            libp2p::identify::Behaviour::new(libp2p::identify::Config::new(
+                "/interweave-downgrade-observer/1".to_owned(),
+                k.public(),
+            ))
+        })
+        .expect("behaviour")
+        // As elsewhere in this file: the observer must not be the one
+        // that closes, or the assertion cannot tell a downgrade from a
+        // timeout.
+        .with_swarm_config(|c| c.with_idle_connection_timeout(IDLE_FAR_BEYOND_PATIENCE))
+        .build();
+
+    let peer: libp2p::PeerId = subject_peer.as_str().parse().expect("a libp2p identity");
+    observer
+        .dial(
+            libp2p::swarm::dial_opts::DialOpts::peer_id(peer)
+                .addresses(vec![address])
+                .build(),
+        )
+        .expect("dial accepted");
+
+    // Wait for the connection to be genuinely up before changing
+    // anything, or the test could pass by never having connected.
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "the trusted connection never established"
+        );
+        match tokio::time::timeout(remaining, observer.select_next_some()).await {
+            Ok(libp2p::swarm::SwarmEvent::ConnectionEstablished { .. }) => break,
+            Ok(libp2p::swarm::SwarmEvent::OutgoingConnectionError { error, .. }) => {
+                panic!("the control failed: a trusted peer could not connect: {error:?}");
+            }
+            Ok(_) => {}
+            Err(_) => panic!("the trusted connection never established"),
+        }
+    }
+
+    // THE OBSERVER'S ESTABLISH IS NOT THE SUBJECT'S. Both ends see
+    // their own event, and the downgrade below asks the SUBJECT which
+    // connections it holds -- so without this the trust change can
+    // arrive before the subject has recorded the connection, and find
+    // nothing to close. It fails as `closed == 0`, which reads exactly
+    // like "the downgrade does not close connections" and is the first
+    // way this test was wrong. `stage5_dial_admission` waits the same
+    // way, for the same reason, in its own comment.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // THE DOWNGRADE: still authorized for reachability control, no
+    // longer for the data plane. Not a full revocation -- that case is
+    // already covered, and it is the easier one.
+    let closed = subject
+        .set_trust(infrastructure_only(&observer_peer))
+        .await
+        .expect("the runtime accepts the new trust");
+    assert_eq!(
+        closed, 1,
+        "the downgraded peer's connection must be named for closure"
+    );
+
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "a peer downgraded to infrastructure-only kept its connection. It also kept \
+             the data-plane handlers `ClassGated` installed when it was trusted, since \
+             those are built once and never rebuilt -- so this is the assumption that \
+             makes that limitation acceptable, and it no longer holds."
+        );
+        match tokio::time::timeout(remaining, observer.select_next_some()).await {
+            Ok(libp2p::swarm::SwarmEvent::ConnectionClosed { .. }) => break,
+            Ok(_) => {}
+            Err(_) => panic!("no close arrived after the downgrade"),
         }
     }
 

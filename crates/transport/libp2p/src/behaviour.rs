@@ -31,10 +31,12 @@ use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::{identify, identity};
 
 use interweave_transport_api::{MAX_PAYLOAD_BYTES, broadcast_v1};
+use interweave_transport_runtime::SnapshotHandle;
 use interweave_transport_runtime::mesh_id::gossipsub_message_id_v1;
 use interweave_transport_runtime::preauth::PreAuthLimits;
 
 use crate::attribution::Attributing;
+use crate::class_gate::ClassGated;
 use crate::direct_codec::{DIRECT_PROTOCOL, DirectCodec};
 use crate::endpoints_codec::{ENDPOINTS_PROTOCOL, EndpointsCodec};
 use crate::outbound_gate::OutboundAdmission;
@@ -168,7 +170,7 @@ pub struct SubstrateBehaviour {
     /// dial and `preauth` already answers before Noise — the ordering
     /// CLAUDE.md §3 requires, and the reason Stage 5 had to be green
     /// before this field could exist at all.
-    pub direct: request_response::Behaviour<DirectCodec>,
+    pub direct: ClassGated<request_response::Behaviour<DirectCodec>>,
     /// Signed broadcast, GossipSub over hashed topics.
     ///
     /// LAST for the same reason `direct` is late, though for a weaker
@@ -183,7 +185,7 @@ pub struct SubstrateBehaviour {
     /// What it DOES need is the trust class kept in sync: it performs no
     /// connection admission at all, so an untrusted peer never reaches it
     /// only because the gated swarm refused the connection first.
-    pub broadcast: gossipsub::Behaviour,
+    pub broadcast: ClassGated<gossipsub::Behaviour>,
     /// The endpoint directory, `/interweave/endpoints/1.0.0` (ADR-0031).
     ///
     /// After both gates for the same reason `direct` is: `send_request`
@@ -191,7 +193,7 @@ pub struct SubstrateBehaviour {
     /// an unadmitted dial is already refused — and `GatedSwarm::
     /// query_endpoints` refuses to call it on an unconnected peer at all,
     /// so the gate is the second line and not the first.
-    pub endpoints: request_response::Behaviour<EndpointsCodec>,
+    pub endpoints: ClassGated<request_response::Behaviour<EndpointsCodec>>,
     /// Kademlia peer routing (ADR-0009), present only when configured.
     ///
     /// LAST, after both gates, and the strongest instance of the
@@ -210,115 +212,54 @@ pub struct SubstrateBehaviour {
     /// AutoNAT probe against the infrastructure the stack needs
     /// (SPIKE-004 F1, measured). The wrapper decides nothing; it writes
     /// `ConnectionId -> DialOrigin` before the Swarm acts on the dial.
-    pub kad: Toggle<Attributing<kad::Behaviour<MemoryStore>>>,
+    pub kad: ClassGated<Toggle<Attributing<kad::Behaviour<MemoryStore>>>>,
 }
 
-// EVERY DATA-PLANE BEHAVIOUR ABOVE IS INSTALLED UNIFORMLY, on every
-// connection this Swarm holds. That is correct today and must change at
-// Stage 11.
+// EVERY DATA-PLANE BEHAVIOUR ABOVE IS WRAPPED IN `ClassGated`, and that
+// is what makes §14's protocol-isolation invariant true rather than
+// merely intended.
 //
-// It is correct today because the only connections that exist are ones
-// the gated swarm admitted for the data plane. THE REASON FOR THAT
-// CHANGED WHEN STAGE 11 ENABLED THE THREE FEATURES, and is now much
-// weaker. It used to be PARTLY the manifest: relay, AutoNAT and DCUtR
-// were absent from the libp2p feature list, so the behaviours were
-// unconstructible and the relay transport stayed out of the builder.
-// All three are compiled now.
+// The invariant is about EXPOSURE, not authority. Authority was already
+// refused at four entry points — direct ingress, the GossipSub publisher
+// check, `endpoints::build_answer`, and the Kademlia driver's
+// `try_admit` — and an implementer who checked only those would find the
+// invariant apparently met. What was NOT met was the other half: these
+// behaviours used to be installed uniformly on every connection, so an
+// infrastructure-only peer was advertised their protocols and could open
+// their substreams, and a refusal cost a parse and an accounting charge
+// rather than a closed stream. `build_answer`'s pre-trust rate budget
+// exists because that is where the exposure used to land.
 //
-// THE MANIFEST GUARDED ONE OF THREE ROUTES to a retained such
-// connection, and this comment has said both more and less than that in
-// successive rounds. CLAUDE.md §1 enumerates them and is the place to
-// read them; the short form is that the feature list barred the wrapped-
-// behaviour route FOR THESE THREE ONLY — `Attributing<B>` is generic, so
-// another compiled dialling behaviour could always have been wrapped
-// with a reachability origin — while an `attempt_dial` call site passing
-// one, and a relaxation of the inbound arm, it never guarded at all.
+// FOUR, NOT THREE. `kad` is in the wrapped set with `direct`,
+// `broadcast` and `endpoints`. Its authority check is `try_admit`'s
+// data-plane trust requirement, so such a peer held no routing seat —
+// but it could still open the DHT substream and be answered, which is
+// the same exposure. An implementer working from a list of three would
+// have restricted three and left this one.
 //
-// THAT WAS NEVER "ESTABLISHED", and the distinction is this comment's
-// whole subject. Neither gate denies at the established INBOUND hook —
-// both return `Ok(dummy::ConnectionHandler)` unconditionally, and
-// pre-Noise admission cannot know a PeerId anyway — so an inbound
-// connection from an infrastructure-only peer COMPLETES, with every
-// handler above installed, and is closed afterwards by the runtime's
-// event loop. That much needs no relay code and is reachable through
-// ordinary configuration, since an `InfrastructureSet` comes from
-// `transport.connectivity.infrastructure.allowed_peers`;
-// `tests/connectivity/tests/advertised_protocol_set.rs` pins it.
+// Measured rather than argued: retaining an infrastructure-only inbound
+// and reading its Identify gave the seven advertised names before this
+// wrapper and gives `/ipfs/id/1.0.0` and `/ipfs/id/push/1.0.0` after —
+// Identify alone, which is what `transport/libp2p/CONNECTIVITY.md`'s
+// protocol matrix grants that class.
 //
-// IT DOES NOT FOLLOW THAT ANYTHING IS ADVERTISED, and an earlier version
-// of this comment said it did. Measured: no `identify::Event::Received`
-// arrives before the close, five runs out of five, because the refusal
-// is pushed on the same `ConnectionEstablished` and closed in the same
-// loop iteration. Handlers installed is not protocols spoken — but that
-// emptiness is an OBSERVATION, not an invariant, and the test does not
-// assert it: it depends on scheduling, and `CONNECTIVITY.md`'s matrix
-// permits Identify for this class in any case.
+// WHAT THIS DOES NOT DO, stated because a reader will otherwise assume
+// it. A connection's handler is built once, at establishment, and libp2p
+// never rebuilds it. So the two directions are not symmetric:
 //
-// So the §14 exposure proper is about a connection that is KEPT, and
-// three separate facts keep one from existing: nothing constructs a
-// behaviour that could be wrapped with a reachability classifier, no
-// `attempt_dial` call site passes such an origin, and the inbound arm
-// refuses this class. All three, not one — a guard written against any
-// single one of them misses step 3. There is no
-// field for any of the three in the struct above, no constructor, and no
-// configuration path — not a disabled behaviour but an absent one. Two
-// further facts are worth stating, though neither is one of the three
-// above -- the first constrains `RelayCircuit`, which
-// `names_application_destination` already refuses for this class, and
-// the second is an enumeration rather than a guard:
-// the Swarm is built with `with_tcp` alone, so the relay TRANSPORT is
-// not installed and a `/p2p-circuit` address cannot be dialled at all;
-// and of the eight `DialOrigin` variants, only `RelayReservation` and
-// `AutonatProbe` fall outside `names_application_destination`, so they
-// are the only two under which such a connection could be dialled or
-// held open. What keeps them unused is NOT that only a behaviour can
-// supply them: `attempt_dial` takes an origin from any in-crate caller,
-// which is exactly how `RelayCircuit` is meant to arrive. It is that no
-// call site passes either one — every production site passes `Manual`,
-// `ConnectionManager` or `KademliaQuery`.
+// - a peer DEMOTED while connected would otherwise keep every
+//   data-plane handler for the connection's life. `connections_to_close`
+//   ends it, so the closure lands in `set_trust`'s ADR-0012 count;
+// - a peer PROMOTED while connected would leave the peer holding a
+//   `Denied` handler beside a later `Allowed` one, which is a pair
+//   `NotifyHandler::Any` can route a `kad` query into and lose.
+//   `ClassGated::poll` ends that one, since a promotion is not a
+//   revocation and is not part of the count.
 //
-// THAT LAST SENTENCE IS A GREP, NOT A GUARD. It is true today and
-// nothing fails when it stops being true, unlike the claim above it,
-// which `every_origin_is_classified_and_the_classification_is_pinned`
-// enforces. The first call site to pass `RelayReservation` or
-// `AutonatProbe` is step 3 or step 5, and it is supposed to — so a guard
-// here would have to assert something subtler than absence, and is
-// deliberately not written rather than forgotten. Inbound is answered
-// the same way: `dialing.rs` retains an inbound connection only if
-// `ConnectionManager::authorizes`, which asks under `DialOrigin::Manual`
-// and so refuses this class outright.
-//
-// So the remaining distance to the gap is one commit, not one stage —
-// and it is step 3, which reaches two of the three routes at once: it
-// constructs an AutoNAT client and must wrap it with a reachability
-// classifier, and it must relax the inbound arm so the client can serve
-// a dial-back. That commit must not land before the restriction
-// described below.
-//
-// Stage 11 produces the first one, and then this shape is a gap. Each
-// entry point classifies its caller — direct ingress, the GossipSub
-// publisher check, `endpoints::build_answer`, and the Kademlia driver's
-// `try_admit` — so an infrastructure-only peer gains no AUTHORITY. What
-// it gains is EXPOSURE: the protocols are advertised to it and it can
-// open their substreams, so a refusal costs a parse and an accounting
-// charge rather than a closed stream. `build_answer`'s pre-trust rate
-// budget exists precisely because that is where the exposure lands
-// today.
-//
-// STAGE 10 ADDED A FOURTH, and it is named here rather than left to be
-// counted: `kad` joins `direct`, `broadcast` and `endpoints` in the set
-// installed uniformly. Its authority check is `try_admit`'s data-plane
-// trust requirement, so an infrastructure-only peer holds no routing
-// seat — but it can still open the DHT substream and be answered, which
-// is the same exposure the other three have. An implementer working the
-// Stage 11 correction from a list of three would restrict three and
-// leave this one.
-//
-// The Stage 11 correction is to restrict the protocol set offered on an
-// infrastructure-only connection, at the connection rather than at the
-// request. The plan's Stage 11 invariants carry it; this comment is here
-// so the next reader of THIS struct does not conclude from the
-// per-request checks that the work is done.
+// Both compare against the class the connection was ADMITTED under, so
+// a connection that has carried a denying handler all along is left
+// alone and its origin still decides. `class_gate.rs` and `dialing.rs`
+// pin all of it.
 
 impl SubstrateBehaviour {
     /// Build the behaviour for `keypair`.
@@ -341,6 +282,7 @@ impl SubstrateBehaviour {
         preauth: PreAuthLimits,
         outbound: OutboundAdmission,
         kad: Toggle<Attributing<kad::Behaviour<MemoryStore>>>,
+        policy: SnapshotHandle,
     ) -> Result<Self, &'static str> {
         let broadcast_config = gossipsub::ConfigBuilder::default()
             // STRICT, which is what makes the mesh id computable at all:
@@ -366,31 +308,40 @@ impl SubstrateBehaviour {
                 IDENTIFY_PROTOCOL_VERSION.to_owned(),
                 keypair.public(),
             )),
-            direct: request_response::Behaviour::with_codec(
-                DirectCodec,
-                // FULL, because a profile both sends and receives directed
-                // messages. Inbound-only would make this peer unable to
-                // initiate, which is not a security posture — an
-                // unauthorized peer is refused by trust, not by declining
-                // to speak.
-                [(DIRECT_PROTOCOL, ProtocolSupport::Full)],
-                request_response::Config::default().with_request_timeout(DIRECT_TIMEOUT),
+            direct: ClassGated::new(
+                request_response::Behaviour::with_codec(
+                    DirectCodec,
+                    // FULL, because a profile both sends and receives directed
+                    // messages. Inbound-only would make this peer unable to
+                    // initiate, which is not a security posture — an
+                    // unauthorized peer is refused by trust, not by declining
+                    // to speak.
+                    [(DIRECT_PROTOCOL, ProtocolSupport::Full)],
+                    request_response::Config::default().with_request_timeout(DIRECT_TIMEOUT),
+                ),
+                policy.clone(),
             ),
-            broadcast: gossipsub::Behaviour::new(
-                gossipsub::MessageAuthenticity::Signed(keypair.clone()),
-                broadcast_config,
-            )?,
-            endpoints: request_response::Behaviour::with_codec(
-                EndpointsCodec,
-                // FULL: a profile both asks and answers. Whether it
-                // ANSWERS is the runtime's decision per query, not a
-                // protocol it declines to speak — an unauthorized or
-                // disabled directory is a refusal frame, so the asker
-                // learns "no" rather than "no such protocol".
-                [(ENDPOINTS_PROTOCOL, ProtocolSupport::Full)],
-                request_response::Config::default().with_request_timeout(ENDPOINTS_TIMEOUT),
+            broadcast: ClassGated::new(
+                gossipsub::Behaviour::new(
+                    gossipsub::MessageAuthenticity::Signed(keypair.clone()),
+                    broadcast_config,
+                )?,
+                policy.clone(),
             ),
-            kad,
+            endpoints: ClassGated::new(
+                request_response::Behaviour::with_codec(
+                    EndpointsCodec,
+                    // FULL: a profile both asks and answers. Whether it
+                    // ANSWERS is the runtime's decision per query, not a
+                    // protocol it declines to speak — an unauthorized or
+                    // disabled directory is a refusal frame, so the asker
+                    // learns "no" rather than "no such protocol".
+                    [(ENDPOINTS_PROTOCOL, ProtocolSupport::Full)],
+                    request_response::Config::default().with_request_timeout(ENDPOINTS_TIMEOUT),
+                ),
+                policy.clone(),
+            ),
+            kad: ClassGated::new(kad, policy),
         })
     }
 }

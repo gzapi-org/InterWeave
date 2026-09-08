@@ -485,7 +485,8 @@ pub(super) fn handle_command(
             let closing = connections_to_close(
                 manager,
                 &revoked,
-                open.iter().map(|(id, c)| (*id, &c.peer, c.origin)),
+                open.iter()
+                    .map(|(id, c)| (*id, &c.peer, c.origin, c.admitted_class)),
             );
             let closed = closing.len();
             refuse.extend(closing);

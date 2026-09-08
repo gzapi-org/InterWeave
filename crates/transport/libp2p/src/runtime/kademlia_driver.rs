@@ -2403,6 +2403,7 @@ mod tests {
             attribution.clone(),
             tokio::time::Instant::now(),
         );
+        let class_policy = manager.handle();
         let kad = libp2p::swarm::behaviour::toggle::Toggle::from(Some(
             crate::attribution::Attributing::new(
                 build_behaviour(settings, local_pid).expect("buildable"),
@@ -2424,6 +2425,7 @@ mod tests {
                     interweave_transport_runtime::preauth::PreAuthLimits::default(),
                     outbound,
                     kad,
+                    class_policy,
                 )
                 .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
             })

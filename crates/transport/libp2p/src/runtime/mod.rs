@@ -497,6 +497,11 @@ impl SwarmRuntime {
             attribution.clone(),
             started,
         );
+        // CLONED BEFORE THE MOVE, for the same reason `refusals` is:
+        // the behaviour is about to take ownership of everything it
+        // needs, and `ClassGated` needs the policy handle at
+        // construction rather than later.
+        let class_policy = manager.handle();
         // CLONED BEFORE THE MOVE. `outbound` is about to disappear into
         // the behaviour, and the Swarm discards a denied behaviour
         // dial, so this handle is the only way anything outside the
@@ -536,7 +541,13 @@ impl SwarmRuntime {
             // should stop the runtime starting rather than panic inside
             // the task that would have driven it.
             .with_behaviour(|key| {
-                SubstrateBehaviour::new(key, config.preauth, outbound, kad_toggle)
+                // THE SAME HANDLE THE OUTBOUND GATE READS. One snapshot
+                // source for the whole behaviour: the gate decides
+                // whether a dial may be made, `ClassGated` decides which
+                // protocols a connection is offered, and both must agree
+                // about a peer's class or the second is a second opinion
+                // rather than an enforcement.
+                SubstrateBehaviour::new(key, config.preauth, outbound, kad_toggle, class_policy)
                     .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
             })
             .map_err(|e| SubstrateError::Transport(e.to_string()))?

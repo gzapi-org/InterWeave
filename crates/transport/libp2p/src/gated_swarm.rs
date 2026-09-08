@@ -327,7 +327,7 @@ impl GatedSwarm {
         if !self.inner.is_connected(peer) {
             return Err(NotConnected);
         }
-        Ok(self.inner.behaviour_mut().direct.send_request(
+        Ok(self.inner.behaviour_mut().direct.inner_mut().send_request(
             peer,
             crate::direct_codec::InboundRequest::Outbound(Box::new(frame)),
         ))
@@ -348,6 +348,7 @@ impl GatedSwarm {
         self.inner
             .behaviour_mut()
             .direct
+            .inner_mut()
             .send_response(channel, response)
             .map_err(|_| Unanswerable)
     }
@@ -372,6 +373,7 @@ impl GatedSwarm {
             .inner
             .behaviour_mut()
             .endpoints
+            .inner_mut()
             .send_request(peer, crate::endpoints_codec::ListEndpointsV1))
     }
 
@@ -389,6 +391,7 @@ impl GatedSwarm {
         self.inner
             .behaviour_mut()
             .endpoints
+            .inner_mut()
             .send_response(channel, response)
             .map_err(|_| Unanswerable)
     }
@@ -409,7 +412,11 @@ impl GatedSwarm {
         topic: gossipsub::TopicHash,
         bytes: Vec<u8>,
     ) -> Result<gossipsub::MessageId, gossipsub::PublishError> {
-        self.inner.behaviour_mut().broadcast.publish(topic, bytes)
+        self.inner
+            .behaviour_mut()
+            .broadcast
+            .inner_mut()
+            .publish(topic, bytes)
     }
 
     /// Subscribe the backend to a topic.
@@ -420,14 +427,22 @@ impl GatedSwarm {
         &mut self,
         topic: &gossipsub::IdentTopic,
     ) -> Result<bool, gossipsub::SubscriptionError> {
-        self.inner.behaviour_mut().broadcast.subscribe(topic)
+        self.inner
+            .behaviour_mut()
+            .broadcast
+            .inner_mut()
+            .subscribe(topic)
     }
 
     /// Unsubscribe the backend from a topic.
     ///
     /// Returns whether a subscription was held.
     pub fn unsubscribe_topic(&mut self, topic: &gossipsub::IdentTopic) -> bool {
-        self.inner.behaviour_mut().broadcast.unsubscribe(topic)
+        self.inner
+            .behaviour_mut()
+            .broadcast
+            .inner_mut()
+            .unsubscribe(topic)
     }
 
     /// Report one message's ADR-0029 validation result.
@@ -450,6 +465,7 @@ impl GatedSwarm {
         self.inner
             .behaviour_mut()
             .broadcast
+            .inner_mut()
             .report_message_validation_result(id, propagation_source, acceptance)
     }
 
@@ -467,11 +483,38 @@ impl GatedSwarm {
     /// Blacklisting is what expresses that to the backend. It is
     /// idempotent, so this may be called on every classification without
     /// tracking what was already applied.
+    ///
+    /// # This is not made redundant by `ClassGated`
+    ///
+    /// `ClassGated` decides at ESTABLISHMENT which protocols a
+    /// connection is offered, so an infrastructure-only peer is never
+    /// advertised `/meshsub/` at all. It would be easy to read that as
+    /// making this call defense-in-depth, and it does not, for two
+    /// measured reasons.
+    ///
+    /// First, a handler is built once and never rebuilt, so a peer whose
+    /// class changes WHILE CONNECTED keeps the handler it was given.
+    /// This is what covers the downgrade in the mesh until the
+    /// connection goes, which `connections_to_close` decides: a
+    /// connection admitted while the peer was data-plane trusted is
+    /// closed even where its origin would keep it, because its handler
+    /// cannot be rebuilt. One admitted while the peer was already
+    /// infrastructure-only is kept, and this blacklist is what covers
+    /// it.
+    ///
+    /// Second, the two act on different things. Blacklisting rejects
+    /// MESSAGES — `libp2p-gossipsub` checks it on receipt — and leaves
+    /// the `/meshsub/` protocols registered on the connection. That was
+    /// measured: before `ClassGated`, a retained infrastructure-only
+    /// peer was still advertised all three `/meshsub/` names despite
+    /// being blacklisted. So this call is AUTHORITY and `ClassGated` is
+    /// EXPOSURE, which is the same split §14 draws, and neither
+    /// substitutes for the other.
     pub fn sync_broadcast_admission(&mut self, peer: &libp2p::PeerId, data_plane_trusted: bool) {
         // The decision itself is `mesh_admits`, kept separate and pure so
         // it can be enumerated over every class.
 
-        let broadcast = &mut self.inner.behaviour_mut().broadcast;
+        let broadcast = self.inner.behaviour_mut().broadcast.inner_mut();
         if data_plane_trusted {
             broadcast.remove_blacklisted_peer(peer);
         } else {
@@ -493,6 +536,7 @@ impl GatedSwarm {
         self.inner
             .behaviour_mut()
             .kad
+            .inner_mut()
             .as_mut()
             .map(crate::attribution::Attributing::inner_mut)
     }
@@ -596,7 +640,7 @@ mod tests {
     /// to leave the peer policy empty.
     ///
     /// That precedence is pinned, but only sideways:
-    /// `partial_revocation_keeps_the_reachability_it_still_authorizes`
+    /// `partial_revocation_closes_the_connection_whose_protocols_went_stale`
     /// (`runtime/dialing.rs`) starts from a peer in both sets and
     /// requires one revocation, which an infrastructure-first
     /// `classify` would make zero. Worth naming here because a reader
