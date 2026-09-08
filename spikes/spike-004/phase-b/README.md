@@ -35,11 +35,17 @@ one of the two things that decide whether a hole punch SUCCEEDS;
 filtering is the other, and is neither configured nor measured here — so
 these rows license a claim about the mapping a punch would face and not
 about the punch SUCCEEDING. The missing word matters, because the
-relationship is asymmetric: `eim` mapping is necessary and not
-sufficient, while `eds` mapping is sufficient for FAILURE on its own —
-filtering cannot rescue a punch aimed at a port the peer will not be
-reached on. So the rows do license a claim about the punch, in one
-direction, and the `eds` row exists to use it. Neither row rules an
+relationship is asymmetric in ONE topology: with BOTH peers behind
+`eds` — which is what this harness builds, since one `NAT_MODE` sets
+both domains — failure follows from the mapping alone, and that is what
+the `eds` row exists to produce. **It is not a property of `eds` as
+such.** A punch succeeds if EITHER direction lands, so an `eds` peer
+paired with an endpoint-independent-FILTERING peer can still connect:
+the dial toward the `eds` peer dies, but the `eds` peer's own dial
+arrives at a port the other side does have a mapping for, and full-cone
+filtering forwards it whatever the source. Filtering rescues that punch.
+Which is why the rows are stated as a claim about mapping and the
+harness builds both domains alike. Neither row rules an
 ATTEMPT out: `DCUTR.md` §2 lists the eligibility conditions and NAT
 class is not among them, and §9
 requires a NAT-induced FAILURE test, which is a punch attempted and
@@ -200,11 +206,14 @@ Treat the row as the mapping property and nothing else.
 
 **The `eds` row is the one phase A could never reach.** On loopback every
 punch succeeds, so the failure cooldown (`DCUTR.md` §3 and
-`CONNECTIVITY.md` §13 both set it at 5 min) and fallback-on-failure have
+`transport/libp2p/CONNECTIVITY.md` §13 both set it at 5 min) and
+fallback-on-failure have
 never been exercised by anything. This is the mapping behaviour a
 failing punch depends on. **The retry ceiling is not a document's**:
 `DCUTR.md` has nine sections and no §13, which this cited for ten
-rounds, and neither §3 nor `CONNECTIVITY.md` §13 sets a retry count —
+rounds, and neither §3 nor that §13 sets a retry count — the PATH
+matters, because `contracts/CONNECTIVITY.md` is a different document
+with eleven sections and no §13, and it is the higher-authority one —
 `SPIKES.md` records that the crate's `MAX_NUMBER_OF_UPGRADE_ATTEMPTS`
 is `pub(crate)`, so DCUtR has no knob for it and the bound has to be
 built by an adapter.

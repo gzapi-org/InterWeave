@@ -8,8 +8,11 @@
 # version: it builds a real kernel NAT whose MAPPING BEHAVIOUR is chosen
 # rather than inherited, because that behaviour is one of the two things
 # deciding whether a hole punch SUCCEEDS — filtering is the other, and is
-# neither configured nor measured here. Neither gates the attempt: under
-# `eds` a punch is attempted and fails, which is what the row is for.
+# neither configured nor measured here. Neither gates the attempt: with
+# both peers behind `eds`, which is what this harness builds, a punch is
+# attempted and fails, and that is what the row is for. (Both, not one:
+# an `eds` peer facing a full-cone one can still connect on its own
+# dial, so failure is a property of the pairing rather than of `eds`.)
 # Phase A, on loopback, had no NAT at all.
 set -euo pipefail
 
@@ -44,8 +47,11 @@ IMAGE="${IMAGE:-interweave-natmatrix:1}"
 # Those are the two mapping classes, and mapping is one of the two
 # things deciding whether a punch succeeds -- filtering is the other and
 # is not measured here -- which is why these are the two rows this
-# harness builds. This said "the two rows that decide a hole punch" for
-# ten review rounds, thirty lines below the header that retracts it.
+# harness builds. This said "the two rows that decide a hole punch"
+# unchanged from the branch's first commit through ten review rounds --
+# though only for the last two of them was it CONTRADICTING the header
+# thirty lines above, which said the same thing until that was
+# corrected.
 NAT_MODE="${NAT_MODE:-eim}"
 
 log() { printf '  %s\n' "$*" >&2; }

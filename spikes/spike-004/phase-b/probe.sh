@@ -18,9 +18,14 @@
 #     two variables deciding whether a hole punch SUCCEEDS. Filtering is
 #     the other, and this harness neither configures nor measures it, so
 #     a row licenses a claim about the mapping a punch would face and
-#     not about the punch SUCCEEDING. `eds` mapping IS sufficient for
-#     failure on its own, which is the asymmetry the harness relies on. It does not gate the ATTEMPT either:
-#     `DCUTR.md` §2's eligibility list does not mention NAT class.
+#     not about the punch SUCCEEDING. With BOTH peers behind `eds` --
+#     what this harness builds, one `NAT_MODE` for both domains --
+#     failure does follow from the mapping, which is the asymmetry the
+#     `eds` row relies on. That is not a property of `eds` as such: a
+#     punch succeeds if EITHER direction lands, so an `eds` peer facing
+#     a full-cone one can still connect on its own dial. Mapping does
+#     not gate the ATTEMPT either: `DCUTR.md` §2's eligibility list
+#     does not mention NAT class.
 set -euo pipefail
 
 # NO ARGUMENTS, CHECKED FIRST. The trial list is an environment
