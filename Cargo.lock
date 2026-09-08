@@ -1837,6 +1837,7 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "bs58",
+ "either",
  "futures",
  "interweave-discovery-api",
  "interweave-kademlia-control-api",

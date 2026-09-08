@@ -327,7 +327,7 @@ impl GatedSwarm {
         if !self.inner.is_connected(peer) {
             return Err(NotConnected);
         }
-        Ok(self.inner.behaviour_mut().direct.send_request(
+        Ok(self.inner.behaviour_mut().direct.inner_mut().send_request(
             peer,
             crate::direct_codec::InboundRequest::Outbound(Box::new(frame)),
         ))
@@ -348,6 +348,7 @@ impl GatedSwarm {
         self.inner
             .behaviour_mut()
             .direct
+            .inner_mut()
             .send_response(channel, response)
             .map_err(|_| Unanswerable)
     }
@@ -372,6 +373,7 @@ impl GatedSwarm {
             .inner
             .behaviour_mut()
             .endpoints
+            .inner_mut()
             .send_request(peer, crate::endpoints_codec::ListEndpointsV1))
     }
 
@@ -389,6 +391,7 @@ impl GatedSwarm {
         self.inner
             .behaviour_mut()
             .endpoints
+            .inner_mut()
             .send_response(channel, response)
             .map_err(|_| Unanswerable)
     }
@@ -409,7 +412,11 @@ impl GatedSwarm {
         topic: gossipsub::TopicHash,
         bytes: Vec<u8>,
     ) -> Result<gossipsub::MessageId, gossipsub::PublishError> {
-        self.inner.behaviour_mut().broadcast.publish(topic, bytes)
+        self.inner
+            .behaviour_mut()
+            .broadcast
+            .inner_mut()
+            .publish(topic, bytes)
     }
 
     /// Subscribe the backend to a topic.
@@ -420,14 +427,22 @@ impl GatedSwarm {
         &mut self,
         topic: &gossipsub::IdentTopic,
     ) -> Result<bool, gossipsub::SubscriptionError> {
-        self.inner.behaviour_mut().broadcast.subscribe(topic)
+        self.inner
+            .behaviour_mut()
+            .broadcast
+            .inner_mut()
+            .subscribe(topic)
     }
 
     /// Unsubscribe the backend from a topic.
     ///
     /// Returns whether a subscription was held.
     pub fn unsubscribe_topic(&mut self, topic: &gossipsub::IdentTopic) -> bool {
-        self.inner.behaviour_mut().broadcast.unsubscribe(topic)
+        self.inner
+            .behaviour_mut()
+            .broadcast
+            .inner_mut()
+            .unsubscribe(topic)
     }
 
     /// Report one message's ADR-0029 validation result.
@@ -450,6 +465,7 @@ impl GatedSwarm {
         self.inner
             .behaviour_mut()
             .broadcast
+            .inner_mut()
             .report_message_validation_result(id, propagation_source, acceptance)
     }
 
@@ -471,7 +487,7 @@ impl GatedSwarm {
         // The decision itself is `mesh_admits`, kept separate and pure so
         // it can be enumerated over every class.
 
-        let broadcast = &mut self.inner.behaviour_mut().broadcast;
+        let broadcast = &mut self.inner.behaviour_mut().broadcast.inner_mut();
         if data_plane_trusted {
             broadcast.remove_blacklisted_peer(peer);
         } else {
@@ -493,6 +509,7 @@ impl GatedSwarm {
         self.inner
             .behaviour_mut()
             .kad
+            .inner_mut()
             .as_mut()
             .map(crate::attribution::Attributing::inner_mut)
     }

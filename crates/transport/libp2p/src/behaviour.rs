@@ -31,10 +31,12 @@ use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::{identify, identity};
 
 use interweave_transport_api::{MAX_PAYLOAD_BYTES, broadcast_v1};
+use interweave_transport_runtime::SnapshotHandle;
 use interweave_transport_runtime::mesh_id::gossipsub_message_id_v1;
 use interweave_transport_runtime::preauth::PreAuthLimits;
 
 use crate::attribution::Attributing;
+use crate::class_gate::ClassGated;
 use crate::direct_codec::{DIRECT_PROTOCOL, DirectCodec};
 use crate::endpoints_codec::{ENDPOINTS_PROTOCOL, EndpointsCodec};
 use crate::outbound_gate::OutboundAdmission;
@@ -168,7 +170,7 @@ pub struct SubstrateBehaviour {
     /// dial and `preauth` already answers before Noise — the ordering
     /// CLAUDE.md §3 requires, and the reason Stage 5 had to be green
     /// before this field could exist at all.
-    pub direct: request_response::Behaviour<DirectCodec>,
+    pub direct: ClassGated<request_response::Behaviour<DirectCodec>>,
     /// Signed broadcast, GossipSub over hashed topics.
     ///
     /// LAST for the same reason `direct` is late, though for a weaker
@@ -183,7 +185,7 @@ pub struct SubstrateBehaviour {
     /// What it DOES need is the trust class kept in sync: it performs no
     /// connection admission at all, so an untrusted peer never reaches it
     /// only because the gated swarm refused the connection first.
-    pub broadcast: gossipsub::Behaviour,
+    pub broadcast: ClassGated<gossipsub::Behaviour>,
     /// The endpoint directory, `/interweave/endpoints/1.0.0` (ADR-0031).
     ///
     /// After both gates for the same reason `direct` is: `send_request`
@@ -191,7 +193,7 @@ pub struct SubstrateBehaviour {
     /// an unadmitted dial is already refused — and `GatedSwarm::
     /// query_endpoints` refuses to call it on an unconnected peer at all,
     /// so the gate is the second line and not the first.
-    pub endpoints: request_response::Behaviour<EndpointsCodec>,
+    pub endpoints: ClassGated<request_response::Behaviour<EndpointsCodec>>,
     /// Kademlia peer routing (ADR-0009), present only when configured.
     ///
     /// LAST, after both gates, and the strongest instance of the
@@ -210,7 +212,7 @@ pub struct SubstrateBehaviour {
     /// AutoNAT probe against the infrastructure the stack needs
     /// (SPIKE-004 F1, measured). The wrapper decides nothing; it writes
     /// `ConnectionId -> DialOrigin` before the Swarm acts on the dial.
-    pub kad: Toggle<Attributing<kad::Behaviour<MemoryStore>>>,
+    pub kad: ClassGated<Toggle<Attributing<kad::Behaviour<MemoryStore>>>>,
 }
 
 // EVERY DATA-PLANE BEHAVIOUR ABOVE IS INSTALLED UNIFORMLY, on every
@@ -341,6 +343,7 @@ impl SubstrateBehaviour {
         preauth: PreAuthLimits,
         outbound: OutboundAdmission,
         kad: Toggle<Attributing<kad::Behaviour<MemoryStore>>>,
+        policy: SnapshotHandle,
     ) -> Result<Self, &'static str> {
         let broadcast_config = gossipsub::ConfigBuilder::default()
             // STRICT, which is what makes the mesh id computable at all:
@@ -366,31 +369,40 @@ impl SubstrateBehaviour {
                 IDENTIFY_PROTOCOL_VERSION.to_owned(),
                 keypair.public(),
             )),
-            direct: request_response::Behaviour::with_codec(
-                DirectCodec,
-                // FULL, because a profile both sends and receives directed
-                // messages. Inbound-only would make this peer unable to
-                // initiate, which is not a security posture — an
-                // unauthorized peer is refused by trust, not by declining
-                // to speak.
-                [(DIRECT_PROTOCOL, ProtocolSupport::Full)],
-                request_response::Config::default().with_request_timeout(DIRECT_TIMEOUT),
+            direct: ClassGated::new(
+                request_response::Behaviour::with_codec(
+                    DirectCodec,
+                    // FULL, because a profile both sends and receives directed
+                    // messages. Inbound-only would make this peer unable to
+                    // initiate, which is not a security posture — an
+                    // unauthorized peer is refused by trust, not by declining
+                    // to speak.
+                    [(DIRECT_PROTOCOL, ProtocolSupport::Full)],
+                    request_response::Config::default().with_request_timeout(DIRECT_TIMEOUT),
+                ),
+                policy.clone(),
             ),
-            broadcast: gossipsub::Behaviour::new(
-                gossipsub::MessageAuthenticity::Signed(keypair.clone()),
-                broadcast_config,
-            )?,
-            endpoints: request_response::Behaviour::with_codec(
-                EndpointsCodec,
-                // FULL: a profile both asks and answers. Whether it
-                // ANSWERS is the runtime's decision per query, not a
-                // protocol it declines to speak — an unauthorized or
-                // disabled directory is a refusal frame, so the asker
-                // learns "no" rather than "no such protocol".
-                [(ENDPOINTS_PROTOCOL, ProtocolSupport::Full)],
-                request_response::Config::default().with_request_timeout(ENDPOINTS_TIMEOUT),
+            broadcast: ClassGated::new(
+                gossipsub::Behaviour::new(
+                    gossipsub::MessageAuthenticity::Signed(keypair.clone()),
+                    broadcast_config,
+                )?,
+                policy.clone(),
             ),
-            kad,
+            endpoints: ClassGated::new(
+                request_response::Behaviour::with_codec(
+                    EndpointsCodec,
+                    // FULL: a profile both asks and answers. Whether it
+                    // ANSWERS is the runtime's decision per query, not a
+                    // protocol it declines to speak — an unauthorized or
+                    // disabled directory is a refusal frame, so the asker
+                    // learns "no" rather than "no such protocol".
+                    [(ENDPOINTS_PROTOCOL, ProtocolSupport::Full)],
+                    request_response::Config::default().with_request_timeout(ENDPOINTS_TIMEOUT),
+                ),
+                policy.clone(),
+            ),
+            kad: ClassGated::new(kad, policy),
         })
     }
 }
