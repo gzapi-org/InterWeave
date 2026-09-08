@@ -441,6 +441,15 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
                 info,
                 ..
             })) => {
+                // RECORDS AND CONTINUES, so `advertised` ends up holding
+                // the LAST exchange rather than the first. That matters
+                // for reading the timeout diagnostic: instrumented under
+                // the retention mutation, the observer sees TWO Identify
+                // exchanges -- the first with all seven advertised
+                // names, the second with four, the three `/meshsub/`
+                // removed. So the diagnostic's list is the reduced one,
+                // and a retained peer was told more than it shows.
+                //
                 // OBSERVED, NOT ASSERTED, and the difference was a
                 // review finding on this very head. An earlier version
                 // panicked here, on the strength of having measured
@@ -509,14 +518,17 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
             // asserting which case it is.
             Err(_) => panic!(
                 "timed out after {PATIENCE:?}: established={established}, \
-                 advertised={advertised:?}. This test requires such a peer to be \
-                 established and then CLOSED -- today's behaviour, not a rule any \
-                 accepted document states (see this file's header); no close arrived. If `established` and \
-                 `advertised` are both set, the peer was RETAINED and told those \
-                 protocols -- the §14 exposure, live. That is the state the planned \
-                 `ClassGated<B>` restriction is meant to make safe; it is not built \
-                 yet, so see the plan's §14 rather than looking for the type. If established with nothing advertised, it was \
-                 held open in silence. If not established, nothing arrived at all."
+                 advertised={advertised:?}. No close arrived. This test requires \
+                 such a peer to be established and then CLOSED -- today's \
+                 behaviour, not a rule any accepted document states; see this \
+                 file's header. If `established` and `advertised` are both set, \
+                 the peer was RETAINED and told those protocols: the §14 exposure, \
+                 live. That is the state the planned `ClassGated<B>` restriction \
+                 is meant to make safe -- it is not built yet, so read the plan's \
+                 §14 rather than looking for the type. If established with nothing \
+                 advertised, it was held open in silence. If not established, no \
+                 `ConnectionEstablished` arrived; other events are swallowed by \
+                 the catch-all above."
             ),
         }
     }

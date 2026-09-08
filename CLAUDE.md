@@ -51,12 +51,13 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   this class anyway. The test records what it sees there and asserts only
   the establish-then-close. A connection DIALLED or
   RETAINED as infrastructure-only still cannot exist. There are
-  **three** routes to one, none of them currently reached — and note that
-  is weaker than "blocked": route 2 is a grep and not a guard, as
-  `behaviour.rs` says in as many words — this has been written down wrong in both
-  directions, so read the list rather than a summary of it. Retention is
-  decided by `authorizes_for(class, origin)`, so any route that supplies
-  `RelayReservation` or `AutonatProbe` reaches it.
+  **three** routes to one, none of them currently reached. "Reached" is
+  deliberately weaker than "blocked": route 2 is a grep and not a guard,
+  as `behaviour.rs` says in as many words. **Read the list below rather
+  than any summary of it** — including this one: which route is which has
+  been written down wrong in both directions across five review rounds.
+  Retention is decided by `authorizes_for(class, origin)`, so any route
+  that supplies `RelayReservation` or `AutonatProbe` reaches it.
 
   1. **A WRAPPED BEHAVIOUR whose classifier announces one.** The
      intended route for both: `Attributing` announces the origin from
