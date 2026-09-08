@@ -5,9 +5,10 @@
 # Measure what the NAT actually did, and refuse to report a class it did
 # not observe.
 #
-# The measurement is a comparison, not a reading. One internal socket
-# sends to two observers on the public side; each reports the source it
-# SAW. Two things fall out:
+# The measurement is a comparison, not a reading. One internal
+# address:port sends to two observers on the public side -- two
+# sequential sockets binding the same port -- and each observer reports
+# the source it SAW. Two things fall out:
 #
 #   * whether translation happened at all — if an observer sees the
 #     peer's own private address, there is no NAT and every conclusion
@@ -32,6 +33,22 @@ obs1=$(addr_on natm-obs1 "$NET_PUB")
 obs2=$(addr_on natm-obs2 "$NET_PUB")
 peer_private=$(addr_on "$PEER" "$LAN")
 router_pub=$(addr_on "$ROUTER" "$NET_PUB")
+# ALL FOUR, not the two that happened to be guarded. An observer with no
+# usable address makes `socat UDP-DATAGRAM::9000` fail, `|| true`
+# swallows it, and the row reports NO DATA -- the verdict this script
+# calls its most alarming, arriving for a setup error rather than an
+# environment failure.
+#
+# WHAT ACTUALLY CATCHES THE COMMON CASE IS THE ASSIGNMENT. Measured on
+# podman 5.8: a container not attached to the named network makes
+# `podman inspect` exit non-zero (`nil pointer evaluating
+# *define.InspectAdditionalNetwork.IPAddress`), so `set -e` fires at
+# `addr_on` before any guard is read. These four cover the attached-but-
+# addressless case and, as much, keep the four reads consistent -- two
+# of them were guarded and two were not, on no principle. Review finding
+# on PR #78.
+[ -n "$obs1" ] || { echo "no public address for natm-obs1" >&2; exit 1; }
+[ -n "$obs2" ] || { echo "no public address for natm-obs2" >&2; exit 1; }
 [ -n "$peer_private" ] || { echo "no private address for $PEER" >&2; exit 1; }
 [ -n "$router_pub" ] || { echo "no public address for $ROUTER" >&2; exit 1; }
 
