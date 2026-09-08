@@ -43,10 +43,13 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   from such a peer has ALWAYS been ESTABLISHED and then closed — neither
   gate denies at the established inbound hook — so it needs no relay
   code and is reachable today through ordinary configuration;
-  `tests/connectivity/tests/advertised_protocol_set.rs` pins it, and
-  ASSERTS that nothing is advertised in that window — the refusal closes
-  in the same loop iteration, and the test fails naming the protocols if
-  that ever stops being true. A connection DIALLED or
+  `tests/connectivity/tests/advertised_protocol_set.rs` pins it. **What
+  is advertised in that window is NOT pinned and must not be relied on**:
+  it measured empty, five runs out of five, but that rests on the
+  subject's handler not getting CPU before the close takes effect, and
+  `transport/libp2p/CONNECTIVITY.md`'s matrix gives Identify a `yes` for
+  this class anyway. The test records what it sees there and asserts only
+  the establish-then-close. A connection DIALLED or
   RETAINED as infrastructure-only still cannot exist, and it takes
   **three** routes to say why — this has been written down wrong in both
   directions, so read the list rather than a summary of it. Retention is

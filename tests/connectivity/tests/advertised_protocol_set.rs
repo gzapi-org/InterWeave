@@ -426,29 +426,35 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
                 info,
                 ..
             })) => {
-                // ASSERTED HERE rather than after the loop, so it fires
-                // at the moment of violation. After the loop it would be
-                // unreachable: a widened window also delays or removes
-                // the close, and the establish-then-close assertion
-                // below would panic first, reporting the wrong cause.
-                // ASSERTED, not merely observed once. `CLAUDE.md` and
-                // the plan both rest their `ClassGated<B>` argument on
-                // "nothing is advertised in this window", and a property
-                // stated in three documents and measured in none is what
-                // §4 exists to refuse.
-                let protocols: Vec<String> =
-                    info.protocols.iter().map(ToString::to_string).collect();
-                panic!(
-                    "an infrastructure-only peer was told {protocols:?} before being \
-                     refused. The window measured as empty is not empty any more, so \
-                     the §14 exposure is live on this path -- which makes \
-                     `ClassGated<B>` urgent rather than next, and changes what \
-                     CLAUDE.md and the canonical plan say about it. Before \
-                     concluding that: the emptiness rests on `refuse.push` and \
-                     `close_connection` running with no await between them, so a \
-                     scheduling delay under load is the other explanation. Check \
-                     whether the close still happens in the same loop iteration \
-                     before rewriting any document."
+                // OBSERVED, NOT ASSERTED, and the difference was a
+                // review finding on this very head. An earlier version
+                // panicked here, on the strength of having measured
+                // `None` five runs out of five. That assertion was wrong
+                // twice over:
+                //
+                // - it is SCHEDULER-DEPENDENT. The emptiness rests on
+                //   the subject's handler not getting CPU between
+                //   `refuse.push` and `close_connection` taking effect.
+                //   Under load it can, and the test would then fail with
+                //   no behavioural regression at all.
+                // - it pinned the OPPOSITE of an accepted contract.
+                //   `transport/libp2p/CONNECTIVITY.md`'s protocol matrix
+                //   gives Identify a `yes` in the infrastructure-only
+                //   column, and nothing requires closing such a peer at
+                //   all — that is today's behaviour, not a rule, as this
+                //   test's own header says.
+                //
+                // So this records and does not judge. What the test
+                // asserts is the establish-then-close, which comes from
+                // one ordered event stream and does not depend on
+                // scheduling.
+                eprintln!(
+                    "note: subject advertised {:?} before refusing an infrastructure-only \
+                     peer -- recorded, not a failure; see this arm's comment",
+                    info.protocols
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
                 );
             }
             Ok(libp2p::swarm::SwarmEvent::ConnectionClosed { .. }) => {

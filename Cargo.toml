@@ -163,8 +163,9 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 #
 # Nor was "established" ever impossible: such a connection is established
 # and then closed. That is a different state, and NOT yet §14's exposure
-# — the test measures that nothing is advertised in it. §14 is about a
-# connection that is KEPT.
+# — nothing was advertised in it when measured, though that is an
+# observation rather than an invariant and the test does not assert it.
+# §14 is about a connection that is KEPT.
 # `an_infrastructure_only_peer_gets_a_connection_established_before_it_is_refused`
 # demonstrates it, and needs no relay code to do so. From here the guarantee is the gate and its tests, not the
 # feature list, and a rule about infrastructure-only peers that has no
@@ -175,7 +176,8 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 # protocol set a default profile advertises, from a third-party Identify
 # observer over loopback, and asserts it exactly — so a behaviour
 # constructed that nobody configured fails it, PROVIDED that behaviour
-# advertises on a direct inbound connection. Its own doc records what
+# advertises on a direct INBOUND connection — the observer dials, so an
+# outbound-only advertisement would be invisible too. Its own doc records what
 # that does and does not catch, measured by constructing each behaviour
 # in turn: relay server and autonat client are caught, a relay client is
 # caught either by panic or by the assertion depending on whether its

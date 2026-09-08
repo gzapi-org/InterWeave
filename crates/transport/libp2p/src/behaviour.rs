@@ -249,7 +249,10 @@ pub struct SubstrateBehaviour {
 // of this comment said it did. Measured: no `identify::Event::Received`
 // arrives before the close, five runs out of five, because the refusal
 // is pushed on the same `ConnectionEstablished` and closed in the same
-// loop iteration. Handlers installed is not protocols spoken.
+// loop iteration. Handlers installed is not protocols spoken — but that
+// emptiness is an OBSERVATION, not an invariant, and the test does not
+// assert it: it depends on scheduling, and `CONNECTIVITY.md`'s matrix
+// permits Identify for this class in any case.
 //
 // So the §14 exposure proper is about a connection that is KEPT, and
 // three separate facts keep one from existing: nothing constructs a
