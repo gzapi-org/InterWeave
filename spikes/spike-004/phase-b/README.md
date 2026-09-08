@@ -41,21 +41,22 @@ Measured, not asserted from the configuration, and **for both NAT
 domains**. The run below is complete rather than excerpted — an earlier
 version of this section showed six of its lines under the heading "the
 recorded run", and the lines it dropped were the two that name what each
-router installed, which is the only output that would reveal a router
-configured from the wrong container's interface. The addresses are
+router installed, which is the only output in which a router configured
+from the wrong container's interface would be visible. The addresses are
 podman's default pool on one machine, so expect different numbers and
 the same shape:
 
 ```
 == NAT_MODE=eim ==
   router-a lan=10.89.1.2 pub=10.89.0.4
-  natm-router: snat on eth1 using: masquerade
+  natm-router: snat on eth0 using: masquerade
   router-b lan=10.89.2.2 pub=10.89.0.5
   natm-router-b: snat on eth0 using: masquerade
   NAT mode: eim (both domains)
   kernel : 6.17.9-1.qubes.fc37.x86_64
   podman : podman version 5.8.4
-  nft    : nftables v1.1.3 (Commodore Bullmoose #4)
+  nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router)
+  nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router-b)
 -- natm-peer behind natm-router --
 peer private   : 10.89.1.3 45000
 router public  : 10.89.0.4
@@ -77,33 +78,47 @@ VERDICT: ENDPOINT-INDEPENDENT MAPPING (one external port for both destinations)
   NAT mode: eds (both domains)
   kernel : 6.17.9-1.qubes.fc37.x86_64
   podman : podman version 5.8.4
-  nft    : nftables v1.1.3 (Commodore Bullmoose #4)
+  nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router)
+  nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router-b)
 -- natm-peer behind natm-router --
 peer private   : 10.89.1.3 45000
 router public  : 10.89.0.4
-observer 1 saw : 10.89.0.4 63230
-observer 2 saw : 10.89.0.4 59359
+observer 1 saw : 10.89.0.4 3939
+observer 2 saw : 10.89.0.4 4286
 VERDICT: ENDPOINT-DEPENDENT MAPPING (a port per destination)
 -- natm-peer-b behind natm-router-b --
 peer private   : 10.89.2.3 45000
 router public  : 10.89.0.5
-observer 1 saw : 10.89.0.5 48980
-observer 2 saw : 10.89.0.5 25128
+observer 1 saw : 10.89.0.5 53454
+observer 2 saw : 10.89.0.5 16574
 VERDICT: ENDPOINT-DEPENDENT MAPPING (a port per destination)
 
-measured and matched: natm-peer=eim natm-peer-b=eim natm-peer=eds natm-peer-b=eds
+measured and matched: natm-peer=eim(45000,45000) natm-peer-b=eim(45000,45000) natm-peer=eds(3939,4286) natm-peer-b=eds(53454,16574)
 ```
 
-**Read the two `snat on` lines in the `eim` row.** Router A is on `eth1`
-and router B on `eth0` in the same run: podman numbers interfaces by
-walking each container's own network map, and the two routers are
-attached to different pairs of networks. A shared `configure_nat` that
-derived the interface from a hardcoded `natm-router` therefore gave
-router B a rule matching its LAN side, translating nothing — and the
-assertion beneath it could not see that, because it greps the container
-for the string it just wrote there. The interface is derived from the
-container being configured, which fails closed when no interface there
-carries that address.
+The summary line carries the two OBSERVED PORTS per domain, and they are
+the only part of it that is not a restatement of the input: the class
+cannot differ from the mode, because a mismatch exits the run before the
+summary is reached. `45000` twice is one mapping for both destinations;
+`3939` and `4286` are two.
+
+**The interface names are per container, and that is a correctness
+requirement rather than a detail.** In the run above both routers happen
+to be on `eth0`. A different run of the same script gave
+
+```
+  natm-router: snat on eth1 using: masquerade
+  natm-router-b: snat on eth0 using: masquerade
+```
+
+— podman numbers interfaces by walking each container's own network map,
+and the two routers are attached to different pairs of networks. A
+shared `configure_nat` deriving the interface from a hardcoded
+`natm-router` therefore gave router B a rule matching its LAN side,
+translating nothing, while the assertion beneath it passed: that
+assertion greps the container for the string it just wrote there. The
+interface is derived from the container being configured, which fails
+closed when no interface there carries that address.
 
 **`eds` is an approximation of a symmetric NAT, and how close is NOT
 measured here.** What the probe establishes is the property DCUtR cares
@@ -141,7 +156,8 @@ any NAT, so the bound port is what makes the comparison mean anything.
 `socat` reports the source it saw through `SOCAT_PEERADDR` /
 `SOCAT_PEERPORT`, which is the entire measurement.
 
-Two checks run before the verdict, and either fails the row:
+Four checks stand between the observation and a passing row — three
+before the verdict is printed, one after — and any of them fails it:
 
 - **an observer that saw the peer's private address** — no translation
   happened, and every conclusion would be a loopback result under a
@@ -166,7 +182,8 @@ exactly that reason, one of them a count of the loop it was written
 over. What `run.sh` does check is its INPUT: `MODES` is a caller-supplied
 row filter, and `MODES=" "` is set and non-null, so it used to run zero
 rows and still print a passing summary. That check runs before the build
-and is the only one in the file that can fail.
+and is the only ASSERTION written in that file; everything else there —
+the build, `topology.sh up`, each probe — fails the run by failing.
 
 ## What it does NOT establish
 
