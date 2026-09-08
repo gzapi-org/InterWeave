@@ -9,8 +9,11 @@ behaviour is chosen rather than inherited, and proves the NAT is what it
 claims to be.
 
 ```
-./run.sh          # every row: build, measure, assert, tear down
-NAT_MODE=eds ./topology.sh up && EXPECT=eds ./probe.sh
+./run.sh          # every row, both domains: build, measure, assert, tear down
+NAT_MODE=eds ./topology.sh up
+EXPECT=eds ./probe.sh                                    # domain A
+PEER=natm-peer-b ROUTER=natm-router-b LAN=natm-lan-b \
+  EXPECT=eds ./probe.sh                                  # domain B
 ./topology.sh down
 ```
 
@@ -31,9 +34,12 @@ rows are the two that decide whether a hole punch can work:
 | `eds` | `masquerade random` | a port per destination | endpoint-dependent MAPPING |
 
 **Mapping only — filtering is neither configured nor measured.** RFC 4787
-classifies a NAT by both, and conntrack gives endpoint-dependent
-filtering in both rows here, so `eim` is a port-restricted cone rather
-than a full cone. Whether a punch succeeds depends on filtering too, so
+classifies a NAT by both. The filtering here is READ rather than
+measured: with a `nat postrouting` chain and no DNAT, an inbound packet
+matching no conntrack entry is never reverse-translated, which makes
+`eim` a port-restricted cone rather than a full cone. That is the same
+reasoning-from-internals the `eds` paragraph below retracts, so it is
+marked as read — a probe sending from a third address would measure it. Whether a punch succeeds depends on filtering too, so
 neither row licenses a claim about DCUtR succeeding; what they license
 is a claim about the mapping it would face.
 
@@ -41,15 +47,23 @@ Measured, not asserted from the configuration, and **for both NAT
 domains**. The run below is complete rather than excerpted — an earlier
 version of this section showed six of its lines under the heading "the
 recorded run", and the lines it dropped were the two that name what each
-router installed, which is the only output in which a router configured
-from the wrong container's interface would be visible. The addresses are
-podman's default pool on one machine, so expect different numbers and
-the same shape:
+router installed, which is where a router configured from the wrong
+container's interface shows up first. (Not the only place: if the wrong
+name matches nothing or matches the LAN side, that domain's peer leaves
+untranslated and the probe fails the row with `NOT NATTED`. And when the
+two containers happen to number their interfaces alike, the mistake is
+neither visible nor harmful — which is why it survived a round.)
+
+Captured from a terminal. `./run.sh > log 2>&1` reorders it: `run.sh`'s
+own lines go to stdout, everything else to stderr, and bash block-buffers
+the redirected stdout. The addresses are podman's default pool on one
+machine, so expect different numbers and the same shape:
 
 ```
+
 == NAT_MODE=eim ==
   router-a lan=10.89.1.2 pub=10.89.0.4
-  natm-router: snat on eth0 using: masquerade
+  natm-router: snat on eth1 using: masquerade
   router-b lan=10.89.2.2 pub=10.89.0.5
   natm-router-b: snat on eth0 using: masquerade
   NAT mode: eim (both domains)
@@ -72,7 +86,7 @@ VERDICT: ENDPOINT-INDEPENDENT MAPPING (one external port for both destinations)
 
 == NAT_MODE=eds ==
   router-a lan=10.89.1.2 pub=10.89.0.4
-  natm-router: snat on eth0 using: masquerade random
+  natm-router: snat on eth1 using: masquerade random
   router-b lan=10.89.2.2 pub=10.89.0.5
   natm-router-b: snat on eth0 using: masquerade random
   NAT mode: eds (both domains)
@@ -83,42 +97,37 @@ VERDICT: ENDPOINT-INDEPENDENT MAPPING (one external port for both destinations)
 -- natm-peer behind natm-router --
 peer private   : 10.89.1.3 45000
 router public  : 10.89.0.4
-observer 1 saw : 10.89.0.4 3939
-observer 2 saw : 10.89.0.4 4286
+observer 1 saw : 10.89.0.4 8518
+observer 2 saw : 10.89.0.4 22070
 VERDICT: ENDPOINT-DEPENDENT MAPPING (a port per destination)
 -- natm-peer-b behind natm-router-b --
 peer private   : 10.89.2.3 45000
 router public  : 10.89.0.5
-observer 1 saw : 10.89.0.5 53454
-observer 2 saw : 10.89.0.5 16574
+observer 1 saw : 10.89.0.5 42927
+observer 2 saw : 10.89.0.5 21049
 VERDICT: ENDPOINT-DEPENDENT MAPPING (a port per destination)
 
-measured and matched: natm-peer=eim(45000,45000) natm-peer-b=eim(45000,45000) natm-peer=eds(3939,4286) natm-peer-b=eds(53454,16574)
+measured and matched: natm-peer=eim(45000,45000) natm-peer-b=eim(45000,45000) natm-peer=eds(8518,22070) natm-peer-b=eds(42927,21049)
 ```
 
-The summary line carries the two OBSERVED PORTS per domain, and they are
-the only part of it that is not a restatement of the input: the class
-cannot differ from the mode, because a mismatch exits the run before the
-summary is reached. `45000` twice is one mapping for both destinations;
-`3939` and `4286` are two.
+Two things in it are worth reading twice.
 
-**The interface names are per container, and that is a correctness
-requirement rather than a detail.** In the run above both routers happen
-to be on `eth0`. A different run of the same script gave
+**The summary carries the two OBSERVED PORTS per domain**, and they are
+the only part of that line which is not a restatement of the input: the
+peer names are literals, and the class cannot differ from the mode
+because a mismatch exits the run before the summary is reached. `45000`
+twice is one mapping for both destinations; `8518` and `22070` are two.
 
-```
-  natm-router: snat on eth1 using: masquerade
-  natm-router-b: snat on eth0 using: masquerade
-```
-
-— podman numbers interfaces by walking each container's own network map,
-and the two routers are attached to different pairs of networks. A
-shared `configure_nat` deriving the interface from a hardcoded
-`natm-router` therefore gave router B a rule matching its LAN side,
-translating nothing, while the assertion beneath it passed: that
-assertion greps the container for the string it just wrote there. The
-interface is derived from the container being configured, which fails
-closed when no interface there carries that address.
+**`natm-router` is on `eth1` and `natm-router-b` on `eth0`.** Podman
+numbers interfaces by walking each container's own network map, and the
+two routers are attached to different pairs of networks, so nothing
+makes the names agree — a later run had both on `eth0`. A shared
+`configure_nat` deriving the interface from a hardcoded `natm-router`
+therefore gave router B a rule matching its LAN side, translating
+nothing, while the assertion beneath it passed: that assertion greps the
+container for the string it just wrote there. The interface is derived
+from the container being configured, which fails closed when no
+interface there carries that address.
 
 **`eds` is an approximation of a symmetric NAT, and how close is NOT
 measured here.** What the probe establishes is the property DCUtR cares
@@ -156,9 +165,16 @@ any NAT, so the bound port is what makes the comparison mean anything.
 `socat` reports the source it saw through `SOCAT_PEERADDR` /
 `SOCAT_PEERPORT`, which is the entire measurement.
 
-Four checks stand between the observation and a passing row — three
-before the verdict is printed, one after — and any of them fails it:
+Five checks stand between the observation and a passing row — four
+before the verdict is printed, one after — and any of them fails it.
+(This said four, and before that two, both times because the sentence
+was counted against the bullet list below it rather than against
+`probe.sh`. It is the first bullet that kept going missing, and it is
+the one that fires when the topology is up and nothing traversed it.)
 
+- **an observer that saw nothing at all** — the topology is up, the
+  probe ran, and no datagram arrived. Nothing is measured, so no class
+  can be reported;
 - **an observer that saw the peer's private address** — no translation
   happened, and every conclusion would be a loopback result under a
   phase-B heading;
@@ -200,8 +216,9 @@ harness answers one of them.
   is not a laptop leaving Wi-Fi.
 - **Anything about InterWeave itself.** No node runs here yet. The
   behaviours this matrix exists to test — AutoNAT, Relay, DCUtR — are
-  steps 3 through 8, and three of phase B's own evidence items are
-  blocked on components those steps have yet to build. This is the
+  steps 3 through 8, and five of the six evidence items `SPIKES.md`
+  lists for phase B are blocked on components those steps have yet to
+  build — everything but the NAT classes this directory measures. This is the
   environment, ready for them.
 
 **So this does not close phase B**, and whether a containerised matrix
