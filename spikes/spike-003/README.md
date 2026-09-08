@@ -19,7 +19,7 @@ Authoritative objective, evidence requirements, and decision gate live in [`arch
 
 Do not treat the experiment in [`harness/`](./harness) as production implementation. It is deliberately outside the workspace — an empty `[workspace]` table in its manifest — so it cannot be built by `cargo xtask ci`, cannot enter the root `Cargo.lock`, and cannot become a production dependency by a stray `path =`.
 
-**That isolation is what keeps `kad` off the production feature list.** Cargo unifies features across one build of one workspace, so as a member this harness would switch Kademlia on inside `interweave-transport-libp2p` — undoing CLAUDE.md §3's "absent from the feature list rather than merely unused", and doing it with nothing in the production crate having changed. That rule is the whole reason this spike runs *before* Stage 10 rather than during it.
+**That isolation is what KEPT `kad` off the production feature list.** Cargo unifies features across one build of one workspace, so as a member this harness would have switched Kademlia on inside `interweave-transport-libp2p` — undoing CLAUDE.md §3's "absent from the feature list rather than merely unused", and doing it with nothing in the production crate having changed. That rule is the whole reason this spike ran *before* Stage 10 rather than during it. Stage 10 has since put `kad` on that list and Stage 11 added `autonat`, `relay` and `dcutr`, so the isolation now protects nothing in that direction — and **feature unification runs the other way instead**: because this harness path-depends on the production crate, every feature the root manifest enables is compiled into this harness too, whether the spike measured it or not.
 
 ## What was pinned
 
@@ -29,7 +29,7 @@ libp2p =0.56.0   features: tcp, noise, yamux, identify, tokio, macros,
 tokio  =1.53.1   futures =0.3.34   sha2 =0.10.9
 ```
 
-Every version is the one the root `Cargo.lock` resolves; `kad` is the only spike-only *feature*. The lock is committed, because half of what is recorded below is `libp2p-kad`'s own behaviour — an implicit bootstrap on routing insertion, protocol withdrawal on a mode change, what `BucketInserts::Manual` does and does not do — and every one of those is a patch-release-visible detail that Stage 10 is built on.
+Every version is the one the root `Cargo.lock` resolves. `kad` was the only spike-only *feature* when this ran; it is production's since Stage 10, and the harness now also compiles `autonat`, `relay` and `dcutr` because the root manifest enables them. **None of the three was measured here** — they entered the graph after the fact, and the committed lock was regenerated when they did so that `--locked` keeps working. That regeneration added them and `interweave-kademlia-control-api`, which had been missing since Stage 10, and changed no existing version, so the graph this evidence describes is unchanged where it matters. The lock is committed, because half of what is recorded below is `libp2p-kad`'s own behaviour — an implicit bootstrap on routing insertion, protocol withdrawal on a mode change, what `BucketInserts::Manual` does and does not do — and every one of those is a patch-release-visible detail that Stage 10 is built on.
 
 The harness uses the **production dial gate and the production connection policy by path**: `interweave-transport-libp2p`, `interweave-transport-runtime`, `interweave-transport-api`, `interweave-trust-api`. The dependency runs spike → product, which is the direction CLAUDE.md §4 permits. Measuring a copy of the gate would have measured a copy.
 
