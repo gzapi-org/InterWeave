@@ -63,11 +63,13 @@ measured=""
 # `probe.sh` never reaches the line after it. The guard that used to sit
 # here tested a variable that cannot be empty when it is read.
 probe_domain() {
-  local peer="$1" router="$2" lan="$3" expect="$4" class
+  local peer="$1" router="$2" lan="$3" expect="$4" reported class ports
   printf -- '-- %s behind %s --\n' "$peer" "$router"
-  class=$(PEER="$peer" ROUTER="$router" LAN="$lan" EXPECT="$expect" \
-    "$here/probe.sh" | sed -n 's/^CLASS=//p')
-  measured="$measured $peer=$class"
+  reported=$(PEER="$peer" ROUTER="$router" LAN="$lan" EXPECT="$expect" \
+    "$here/probe.sh")
+  class=$(printf '%s\n' "$reported" | sed -n 's/^CLASS=//p')
+  ports=$(printf '%s\n' "$reported" | sed -n 's/^PORTS=//p')
+  measured="$measured $peer=$class($ports)"
 }
 
 for mode in $MODES; do
@@ -84,7 +86,12 @@ for mode in $MODES; do
   probe_domain natm-peer-b natm-router-b "$NET_LAN_B" "$mode"
 done
 
-# THE MEASUREMENTS THEMSELVES, not a count of them. Every tally written
-# here so far has counted the loop it was written over; the list is the
-# evidence and cannot agree with itself about nothing.
+# THE OBSERVED PORTS, which is the only part of this line that is not a
+# restatement of `MODES`. The class cannot differ from the mode -- the
+# per-row assertion exits non-zero on any other value -- so a summary
+# carrying classes alone prints back its own input, which is what the
+# two tallies before it did in different words. The ports are
+# unconstrained by any assertion here: they differ between runs and
+# between the two domains, and they are what makes the line worth
+# reading. The full measurement is `probe.sh`'s block on stderr.
 printf '\nmeasured and matched:%s\n' "$measured"

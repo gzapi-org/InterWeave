@@ -128,5 +128,12 @@ elif [ "$EXPECT" != "$class" ]; then
   exit 1
 fi
 
-# The measured class, for a caller that wants to assert across rows.
+# THE CLASS AND THE PORTS IT WAS DERIVED FROM. The class alone is a
+# restatement of `EXPECT`: this script exits non-zero on any other
+# value, so a caller that prints only the class prints back what it
+# asked for. The two observed ports are the part no assertion here
+# constrains -- they differ between runs and between domains, and they
+# are what a reader can check the verdict against. Review finding on
+# PR #78.
 printf 'CLASS=%s\n' "$class"
+printf 'PORTS=%s,%s\n' "$port1" "$port2"
