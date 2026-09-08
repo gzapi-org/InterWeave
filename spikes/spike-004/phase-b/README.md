@@ -44,10 +44,11 @@ measured: with a `nat postrouting` chain and no DNAT, an inbound packet
 matching no conntrack entry is never reverse-translated, which makes
 `eim` a port-restricted cone rather than a full cone. That is the same
 reasoning-from-internals the `eds` paragraph below retracts, so it is
-marked as read. Measuring it needs an UNSOLICITED inbound from a third
-address to the mapped external port, which is a probe this harness does
-not have; a peer sending from a third address would measure nothing
-about filtering. Whether a punch succeeds depends on filtering too, so
+marked as read. Measuring it needs a third host to send INTO the mapped
+external port unsolicited — an inbound the peer never asked for — and
+this harness has no such probe: everything it sends originates behind
+the NAT, and an outbound from anywhere measures the mapping rather than
+the filtering. Whether a punch succeeds depends on filtering too, so
 neither row licenses a claim about DCUtR succeeding; what they license
 is a claim about the mapping it would face.
 
@@ -73,7 +74,7 @@ machine, so expect different numbers and the same shape:
   router-a lan=10.89.1.2 pub=10.89.0.4
   natm-router: snat on eth0 using: masquerade
   router-b lan=10.89.2.2 pub=10.89.0.5
-  natm-router-b: snat on eth1 using: masquerade
+  natm-router-b: snat on eth0 using: masquerade
   NAT mode: eim (both domains)
   kernel : 6.17.9-1.qubes.fc37.x86_64
   podman : podman version 5.8.4
@@ -81,17 +82,29 @@ machine, so expect different numbers and the same shape:
   nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router-b)
   socat  : socat version 1.8.1.3 on 26 Jun 2026 14:49:35 (natm-obs1)
 -- natm-peer behind natm-router --
-peer private   : 10.89.1.3 45000
-router public  : 10.89.0.4
-observer 1 saw : 10.89.0.4 45000
-observer 2 saw : 10.89.0.4 45000
-VERDICT: ENDPOINT-INDEPENDENT MAPPING (one external port for both destinations)
+from port 45000
+  peer private   : 10.89.1.3 45000
+  router public  : 10.89.0.4
+  observer 1 saw : 10.89.0.4 45000
+  observer 2 saw : 10.89.0.4 45000
+from port 45001
+  peer private   : 10.89.1.3 45001
+  router public  : 10.89.0.4
+  observer 1 saw : 10.89.0.4 45001
+  observer 2 saw : 10.89.0.4 45001
+VERDICT: ENDPOINT-INDEPENDENT MAPPING (one external port for both destinations, in every trial)
 -- natm-peer-b behind natm-router-b --
-peer private   : 10.89.2.3 45000
-router public  : 10.89.0.5
-observer 1 saw : 10.89.0.5 45000
-observer 2 saw : 10.89.0.5 45000
-VERDICT: ENDPOINT-INDEPENDENT MAPPING (one external port for both destinations)
+from port 45000
+  peer private   : 10.89.2.3 45000
+  router public  : 10.89.0.5
+  observer 1 saw : 10.89.0.5 45000
+  observer 2 saw : 10.89.0.5 45000
+from port 45001
+  peer private   : 10.89.2.3 45001
+  router public  : 10.89.0.5
+  observer 1 saw : 10.89.0.5 45001
+  observer 2 saw : 10.89.0.5 45001
+VERDICT: ENDPOINT-INDEPENDENT MAPPING (one external port for both destinations, in every trial)
 
 == NAT_MODE=eds ==
   router-a lan=10.89.1.2 pub=10.89.0.4
@@ -105,45 +118,59 @@ VERDICT: ENDPOINT-INDEPENDENT MAPPING (one external port for both destinations)
   nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router-b)
   socat  : socat version 1.8.1.3 on 26 Jun 2026 14:49:35 (natm-obs1)
 -- natm-peer behind natm-router --
-peer private   : 10.89.1.3 45000
-router public  : 10.89.0.4
-observer 1 saw : 10.89.0.4 13356
-observer 2 saw : 10.89.0.4 60603
+from port 45000
+  peer private   : 10.89.1.3 45000
+  router public  : 10.89.0.4
+  observer 1 saw : 10.89.0.4 14321
+  observer 2 saw : 10.89.0.4 50980
+from port 45001
+  peer private   : 10.89.1.3 45001
+  router public  : 10.89.0.4
+  observer 1 saw : 10.89.0.4 25387
+  observer 2 saw : 10.89.0.4 21432
 VERDICT: ENDPOINT-DEPENDENT MAPPING (a port per destination)
 -- natm-peer-b behind natm-router-b --
-peer private   : 10.89.2.3 45000
-router public  : 10.89.0.5
-observer 1 saw : 10.89.0.5 42687
-observer 2 saw : 10.89.0.5 44027
+from port 45000
+  peer private   : 10.89.2.3 45000
+  router public  : 10.89.0.5
+  observer 1 saw : 10.89.0.5 22307
+  observer 2 saw : 10.89.0.5 56711
+from port 45001
+  peer private   : 10.89.2.3 45001
+  router public  : 10.89.0.5
+  observer 1 saw : 10.89.0.5 20700
+  observer 2 saw : 10.89.0.5 25536
 VERDICT: ENDPOINT-DEPENDENT MAPPING (a port per destination)
 
-measured and matched: natm-peer=eim(45000,45000) natm-peer-b=eim(45000,45000) natm-peer=eds(13356,60603) natm-peer-b=eds(42687,44027)
+measured and matched: natm-peer=eim(45000,45000;45001,45001) natm-peer-b=eim(45000,45000;45001,45001) natm-peer=eds(14321,50980;25387,21432) natm-peer-b=eds(22307,56711;20700,25536)
 ```
 
-Two things in the transcript are worth reading twice.
+Two things in it are worth reading twice, and one thing about it is
+worth saying separately.
 
-**The summary carries the two OBSERVED PORTS per domain**, and they are
-the only part of that line which is not a restatement of the input: the
-peer names are literals, and the class cannot differ from the mode
-because a mismatch exits the run before the summary is reached. `45000`
-twice is one mapping for both destinations; `13356` and `60603` are two.
-Identical ports are not a degenerate reading — they are the observation
-that makes a row `eim`.
+**The summary carries the OBSERVED PORTS per domain**, one group per
+trial. They are the only part of that line which is not a restatement of
+the input: the peer names are literals, and the class cannot differ from
+the mode because a mismatch exits the run before the summary is reached.
+`45000,45000;45001,45001` is one external port per internal socket
+whatever the destination, twice over; `14321,50980;25387,21432` is a
+port per destination. Identical ports within a group are not a
+degenerate reading — they are the observation that makes a row `eim`.
 
-**Read the four `snat on` lines.** In the `eim` row `natm-router` is on
-`eth0` and `natm-router-b` on `eth1`; in the `eds` row, twenty seconds
-later with the containers recreated, both are on `eth0`. So the
-numbering is not stable across container creations and the two routers
-do not reliably agree — which is observed here rather than argued from
-how podman walks a network map, and an explanation resting on the two
-routers' differing network pairs would predict a stable answer this run
-contradicts. A shared
+**The interface names are not a detail.** In the run above all four
+`snat on` lines say `eth0`, and that is a coincidence of this run rather
+than a guarantee: across runs the two routers land on different
+interfaces, and the same router lands on different ones in the two rows
+of a single run. Podman assigns them per container and per creation, and
+the topology recreates every container for every row. So a shared
 `configure_nat` deriving the interface from a hardcoded `natm-router`
-therefore gave router B a rule matching its LAN side, translating
-nothing, while the assertion beneath it passed: that assertion greps the
-container for the string it just wrote there. The interface is derived
-from the container being configured, which fails closed when no
-interface there carries that address.
+gave router B a rule matching its LAN side, translating nothing, while
+the assertion beneath it passed — that assertion compares against the
+name the function itself wrote. The interface is derived from the
+container being configured, which fails closed when no interface there
+carries that address. (This paragraph pointed at the transcript for its
+evidence while the transcript was re-recorded each round, which made the
+claim true only on the runs that happened to show it.)
 
 **`eds` is an approximation of a symmetric NAT, and how close is NOT
 measured here.** What the probe establishes is the property DCUtR cares
@@ -184,8 +211,21 @@ the bound port is what makes the comparison mean anything.
 `socat` reports the source it saw through `SOCAT_PEERADDR` /
 `SOCAT_PEERPORT`, which is the entire measurement.
 
+**And it is taken from more than one source port, which is what makes
+`eim` an observation rather than a guess.** `masquerade random`
+allocates per flow at random, so the two destinations can be handed the
+same port by coincidence — roughly one row in 64512. A single pair would
+then classify a correctly-built endpoint-dependent NAT as `eim`, failing
+a good row under `EXPECT` and reporting the wrong class without it. Two
+bound source ports are not a repeat of one look: endpoint-independence
+must hold for every internal socket, so the second is a second instance
+of the property. `eim` requires every trial to agree; one disagreement
+is `eds`, which is the safe asymmetry — the harness cannot talk itself
+into the class that says a hole punch would work.
+
 Five checks stand between the observation and a passing row — four
 before the verdict is printed, one after — and any of them fails it.
+Every one of them runs on EVERY trial, not only the last.
 (This said four, and before that two, both times because the sentence
 was counted against the bullet list below it rather than against
 `probe.sh`. It is the first bullet that kept going missing, and it is
@@ -225,8 +265,10 @@ things a file checks that neither round got right.)
 
 ## What it does NOT establish
 
-Phase B as the plan states it bundles two different claims, and this
-harness answers one of them.
+Phase B as the plan states it bundles several claims, and this harness
+answers part of one — the mapping classes. Everything below is outside
+what it can say, and the last bullet is the one that matters most: no
+InterWeave node runs here.
 
 - **Hole-punch success RATES.** A property of the NAT population in the
   wild. This shows the mechanism works against a class; it cannot say
@@ -271,7 +313,7 @@ Three things cost time to find, all of which fail silently:
   — visible only in the container's logs. The observers report space
   separated.
 
-The image is pinned by digest, not by tag. But **the image is not what
+The image is pinned by digest, and its three packages by version. But **the image is not what
 translates** — the NAT is the host kernel's netfilter, and the
 `eim`/`eds` distinction is a `get_unique_tuple` port-selection behaviour
 that has changed across kernel releases. Pinning the image and recording

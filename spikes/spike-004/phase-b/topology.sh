@@ -273,13 +273,13 @@ configure_nat() {
   # `$ctr` AND `$net`, NOT THE NAMES THIS FUNCTION WAS WRITTEN FOR. When
   # the second NAT domain arrived, the function grew parameters and this
   # line kept reading `natm-router` and `$NET_PUB` -- so router B was
-  # given a rule naming router A's interface. The names are not reliably
-  # the same and are not stable across recreation -- a recorded run in
-  # the README has the two routers on different interfaces in one row
-  # and both on `eth0` in the next, twenty seconds later. That is the
+  # given a rule naming router A's interface. The names are neither
+  # reliably the same across the two routers nor stable across
+  # recreation -- observed across runs, and within one run between its
+  # two rows, since every row recreates every container. That is the
   # observation; an explanation resting on the routers being attached to
   # different pairs of networks stood here for a round and would predict
-  # a stable answer that run contradicts.
+  # a stable answer the runs contradict.
   #
   # THE ASSERTION BELOW COULD NOT HAVE CAUGHT IT: it greps `$ctr` for the
   # string this function just wrote into `$ctr`, so it passes whether or
