@@ -158,12 +158,6 @@ impl<B> ClassGated<B> {
         &mut self.inner
     }
 
-    /// Whether this peer may be offered the data plane.
-    ///
-    /// FAILS CLOSED on every uncertainty. A `PeerId` the neutral grammar
-    /// refuses cannot be classified, so it is gated rather than given
-    /// the benefit of the doubt -- the same answer `dialing.rs` gives
-    /// when it cannot build a `TransportIdentity`.
     /// How many connections to `peer` this wrapper is currently hiding.
     ///
     /// The Swarm counts connections from its own pool, which knows
@@ -176,6 +170,12 @@ impl<B> ClassGated<B> {
         self.gated.values().filter(|p| *p == peer).count()
     }
 
+    /// Whether this peer may be offered the data plane.
+    ///
+    /// FAILS CLOSED on every uncertainty. A `PeerId` the neutral grammar
+    /// refuses cannot be classified, so it is gated rather than given
+    /// the benefit of the doubt -- the same answer `dialing.rs` gives
+    /// when it cannot build a `TransportIdentity`.
     fn admits(&self, peer: &PeerId) -> bool {
         let Ok(identity) = TransportIdentity::parse(peer.to_base58()) else {
             return false;
@@ -350,9 +350,23 @@ impl<B: NetworkBehaviour> NetworkBehaviour for ClassGated<B> {
     /// re-established by whatever wanted it, correctly gated the second
     /// time — a reconnect, not a loss of function.
     ///
+    /// **THE ACCEPTED DOCUMENT SAYS SO**, and this should be argued from
+    /// there rather than from what `connections_to_close` happens to do.
+    /// ADR-0036's implementation implications: "If atomic in-place
+    /// reconciliation is not safe in the pinned library, close the
+    /// connection and re-establish it under the new class rather than
+    /// allowing a transient privilege mix." In-place reconciliation is
+    /// not safe here — libp2p never rebuilds a handler — so this is the
+    /// prescribed fallback, not a local invention.
+    ///
     /// CHECKED ONLY WHEN POLICY MOVES. `PolicySnapshot::revision`
-    /// changes on publication, so an unchanged policy costs one integer
-    /// comparison rather than a walk of every open connection.
+    /// changes on publication, so an unchanged policy skips the walk of
+    /// every allowed connection. It is not free — the load is an
+    /// `RwLock` read and an `Arc` clone, once per wrapper per poll — and
+    /// "unchanged" is less common than it sounds, since `publish` fires
+    /// on every dial outcome and every connection open and close.
+    /// Removing the guard would change no observable behaviour, only
+    /// cost, which is why nothing tests it.
     fn poll(
         &mut self,
         cx: &mut Context<'_>,
@@ -360,19 +374,37 @@ impl<B: NetworkBehaviour> NetworkBehaviour for ClassGated<B> {
         let snapshot = self.policy.load();
         if self.checked_revision != Some(snapshot.revision()) {
             self.checked_revision = Some(snapshot.revision());
-            for (id, peer) in &self.allowed {
-                let still_trusted = TransportIdentity::parse(peer.to_base58())
-                    .is_ok_and(|i| snapshot.classify(&i) == ConnectionClass::DataPlaneTrusted);
-                if !still_trusted {
-                    self.closing.push((*peer, *id));
+            // COLLECTED FIRST, then moved out of `allowed` in one
+            // pass. Queueing without removing was the defect: `pop`
+            // removed only the entry it returned, so with M untrusted
+            // connections a poll queued M and dequeued 1, leaving M-1 in
+            // BOTH maps for the next revision to queue again. And a
+            // revision change on the very next poll is the normal case,
+            // not a contrived one -- `publish` fires on every connection
+            // open and close. `closing` grew O(M^2) and the inner
+            // behaviour went unpolled for the whole drain.
+            //
+            // Moving the entry at PUSH is what makes the queue bounded
+            // by `allowed` and makes the comment below true. Review
+            // finding on PR #77.
+            let untrusted: Vec<ConnectionId> = self
+                .allowed
+                .iter()
+                .filter(|(_, peer)| {
+                    !TransportIdentity::parse(peer.to_base58())
+                        .is_ok_and(|i| snapshot.classify(&i) == ConnectionClass::DataPlaneTrusted)
+                })
+                .map(|(id, _)| *id)
+                .collect();
+            for id in untrusted {
+                if let Some(peer) = self.allowed.remove(&id) {
+                    self.closing.push((peer, id));
                 }
             }
         }
         if let Some((peer_id, id)) = self.closing.pop() {
-            // The entry goes now rather than on the close event, so a
-            // second publication before the close lands cannot queue the
-            // same connection twice.
-            self.allowed.remove(&id);
+            // The entry left `allowed` when it was queued, so a second
+            // publication before the close lands cannot queue it again.
             return Poll::Ready(ToSwarm::CloseConnection {
                 peer_id,
                 connection: CloseConnection::One(id),
@@ -888,8 +920,15 @@ mod tests {
         // offer nothing. Constructed through libp2p rather than through
         // `TransportIdentity`, because the whole case is an id the
         // latter would reject.
-        // TRUSTED FOR EVERYONE THE GRAMMAR ACCEPTS, so the only thing
-        // that can gate this peer is the parse failing. An earlier
+        // The allowlist holds one peer, so an unparseable id is gated
+        // by BOTH arms -- the parse and the classification. What makes
+        // this test discriminating is not the allowlist but the
+        // mutation: with the fail-closed arm returning `true` the parse
+        // branch returns before classification ever runs, so the test
+        // fails. (`PeerTrustPolicy` has no allow-all constructor, by
+        // design, so "trusted for everyone the grammar accepts" is not
+        // available and an earlier version of this comment claimed it
+        // anyway.) An earlier
         // version used `PeerId::random()`, which IS parseable and is
         // gated by being in neither trust set -- so it passed with the
         // fail-closed arm mutated to `return true`, and documented the
@@ -973,7 +1012,7 @@ mod tests {
         );
         assert!(
             !g.gated.contains_key(&id),
-            "and the id must be released on close, or the set grows without bound"
+            "and the id must be released on close, or the map grows without bound"
         );
     }
 
@@ -1083,20 +1122,14 @@ mod tests {
             policy(),
         );
 
-        // One peer, two identities: the gated connection belongs to
-        // INFRA and the allowed one to TRUSTED would not exercise this
-        // at all -- the correction is PER PEER, so both connections must
-        // be the same peer. `INFRA` is gated, so use a peer that is
-        // trusted for the allowed connection and separately gate a
-        // connection for that SAME peer by demoting nothing: instead,
-        // gate by id for a peer the policy refuses.
-        //
-        // Simplest faithful shape: TRUSTED holds one allowed
-        // connection; a second connection for TRUSTED is gated only if
-        // policy says so, which it does not. So the realistic pairing is
-        // an INFRA peer holding two gated connections plus a TRUSTED
-        // peer holding one allowed -- and the count that matters is that
-        // TRUSTED's close is NOT reduced by INFRA's hidden ones.
+        // THE SHAPE, and why it takes three phases. The correction is
+        // per peer, so the interesting case needs ONE peer holding both
+        // hidden and visible connections -- and a peer's class decides
+        // every connection alike, so that state is only reachable by
+        // changing the class between them. INFRA therefore takes two
+        // gated connections first, is promoted, and then takes an
+        // allowed one; TRUSTED is the control that must pass through
+        // untouched throughout.
         let allowed_id = ConnectionId::new_unchecked(1);
         let gated_a = ConnectionId::new_unchecked(2);
         let gated_b = ConnectionId::new_unchecked(3);
@@ -1112,20 +1145,38 @@ mod tests {
             .expect("still a connection");
 
         // TRUSTED's own close must not be reduced by INFRA's hidden
-        // connections: the correction is per peer, not global.
+        // connections: the correction is PER PEER, not global.
+        //
+        // The count here has to be NON-ZERO for that to be checkable.
+        // An earlier version closed TRUSTED's only connection with
+        // `remaining_established: 0` and asserted `0` -- which
+        // `saturating_sub` clamps to `0` under a global `hidden_for`
+        // too, so the assertion whose message claimed to prove
+        // pass-through could not distinguish pass-through from any
+        // subtraction at all. Review finding on PR #77; the
+        // assertion-that-cannot-fail class, in the test written to pin
+        // this exact property.
+        let trusted_second = ConnectionId::new_unchecked(6);
+        let _ = g
+            .handle_established_inbound_connection(trusted_second, peer(TRUSTED), &addr(), &addr())
+            .expect("trusted is admitted");
         g.on_swarm_event(FromSwarm::ConnectionClosed(
             libp2p::swarm::behaviour::ConnectionClosed {
                 peer_id: peer(TRUSTED),
                 connection_id: allowed_id,
                 endpoint: &connected_point(),
-                remaining_established: 0,
+                // TRUSTED's other connection is still open, and it is
+                // not hidden -- so this must pass through untouched.
+                remaining_established: 1,
                 cause: None,
             },
         ));
         assert_eq!(
             *remaining.lock().expect("not poisoned"),
-            vec![0],
-            "a peer with no hidden connections must have its count passed through"
+            vec![1],
+            "a peer with no hidden connections must have its count passed through. A \
+             global rather than per-peer `hidden_for` would subtract INFRA's two here \
+             and report 0."
         );
 
         // Now the case that panics libp2p. Give INFRA an allowed
@@ -1262,6 +1313,23 @@ mod tests {
             .expect("still a connection");
         assert_eq!(g.gated.len(), 2, "both are being hidden");
 
+        // The mirror map needs draining too, and had no test at all:
+        // `allowed` is what `poll` walks to decide closures.
+        let allowed_id = ConnectionId::new_unchecked(3);
+        let _ = g
+            .handle_established_inbound_connection(allowed_id, peer(TRUSTED), &addr(), &addr())
+            .expect("admitted");
+        assert_eq!(g.allowed.len(), 1);
+        g.on_swarm_event(FromSwarm::ListenFailure(
+            libp2p::swarm::behaviour::ListenFailure {
+                local_addr: &addr(),
+                send_back_addr: &addr(),
+                error: &libp2p::swarm::ListenError::Aborted,
+                connection_id: allowed_id,
+                peer_id: Some(peer(TRUSTED)),
+            },
+        ));
+
         g.on_swarm_event(FromSwarm::ListenFailure(
             libp2p::swarm::behaviour::ListenFailure {
                 local_addr: &addr(),
@@ -1284,6 +1352,12 @@ mod tests {
             "an id whose connection never established must be released -- it will never \
              see the close that otherwise drains it, so the map would grow for the life \
              of the process"
+        );
+        assert!(
+            g.allowed.is_empty(),
+            "and so must an ALLOWED id: `allowed` decides which connections get closed \
+             on a downgrade, so a stale entry is both a leak and a close aimed at a \
+             connection that no longer exists"
         );
     }
 

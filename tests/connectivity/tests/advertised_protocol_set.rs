@@ -567,8 +567,11 @@ async fn a_peer_downgraded_to_infrastructure_only_loses_its_connection() {
     // while connected stays gated until it reconnects, and — the half
     // that matters — a peer DEMOTED while connected keeps the data-plane
     // handlers it was given. That is only acceptable because something
-    // else ends the connection, and `class_gate.rs` says so in as many
-    // words: "revocation closes the connections it downgrades".
+    // else ends the connection, which ADR-0036 requires in as many
+    // words: close and re-establish under the new class rather than
+    // allow a transient privilege mix. For a reachability-origin
+    // connection `ClassGated` does that itself; for the rest, revocation
+    // does, which is what this test covers.
     //
     // That claim was resting on two separately-tested halves.
     // `connection_manager`'s `revoking_trust_names_the_connections_that_must_go`

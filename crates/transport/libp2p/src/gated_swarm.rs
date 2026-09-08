@@ -494,8 +494,10 @@ impl GatedSwarm {
     ///
     /// First, a handler is built once and never rebuilt, so a peer whose
     /// class changes WHILE CONNECTED keeps the handler it was given.
-    /// This is what covers the downgrade in the mesh until revocation
-    /// closes the connection.
+    /// This is what covers the downgrade in the mesh until the
+    /// connection goes -- which since `ClassGated` is that wrapper's own
+    /// doing for a reachability-origin connection, and revocation's for
+    /// the rest.
     ///
     /// Second, the two act on different things. Blacklisting rejects
     /// MESSAGES — `libp2p-gossipsub` checks it on receipt — and leaves
