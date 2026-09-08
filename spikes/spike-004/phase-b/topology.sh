@@ -50,6 +50,8 @@ up() {
       --entrypoint /bin/sh "$IMAGE" -c \
       "socat -u UDP-RECVFROM:9000,fork SYSTEM:'echo \$SOCAT_PEERADDR \$SOCAT_PEERPORT >> /seen.txt'" >/dev/null
   done
+  await_listener natm-obs1
+  await_listener natm-obs2
 
   podman run -d --name natm-router --network "$NET_PUB" --network "$NET_LAN" \
     --cap-add=NET_ADMIN --sysctl net.ipv4.ip_forward=1 \
@@ -94,6 +96,32 @@ up() {
   log "NAT mode: $NAT_MODE (both domains)"
   # shellcheck disable=SC2086
   record_environment $ROUTERS
+}
+
+# Wait until an observer is actually listening on UDP 9000.
+#
+# `podman run -d` reports the CONTAINER started, not the application
+# ready: the shell may not have execed socat yet, and the port is not
+# bound until it has. `probe.sh` sends each datagram exactly once, and
+# UDP drops what arrives at a closed port silently -- so a slow start
+# produced a row that failed `NO DATA` with the topology perfectly
+# correct. Codex review on PR #78.
+#
+# ASSERTED, NOT SLEPT. A fixed wait long enough to be safe on a loaded
+# host is dead time on every run, and one short enough to be tolerable
+# is the same race with a smaller window. This polls the listener the
+# container actually holds and fails closed when it never appears.
+await_listener() {
+  local ctr="$1" waited=0
+  while ! podman exec "$ctr" ss -uln 2>/dev/null | grep -q ':9000 '; do
+    waited=$((waited + 1))
+    # BOUNDED IN ATTEMPTS, not seconds: each one is a `podman exec`,
+    # which costs far more than the sleep beside it, so a deadline in
+    # wall-clock would be a deadline on podman rather than on socat.
+    [ "$waited" -le 100 ] \
+      || { echo "$ctr: socat never bound UDP 9000 (100 attempts)" >&2; return 1; }
+    sleep 0.1
+  done
 }
 
 # The interface podman gave this container on that network.
