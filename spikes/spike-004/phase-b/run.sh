@@ -66,10 +66,20 @@ measured=""
 
 # Measure one NAT domain and record what it answered.
 #
-# A FAILING PROBE ALREADY STOPS THE RUN: `set -e` plus `pipefail` make
-# the assignment inherit the pipeline's status, so a non-zero
-# `probe.sh` never reaches the line after it. The guard that used to sit
-# here tested a variable that cannot be empty when it is read.
+# A FAILING PROBE ALREADY STOPS THE RUN: `class=$(probe.sh)` is a simple
+# command whose status is the substitution's, so `set -e` fires and a
+# non-zero `probe.sh` never reaches the line after it. (This said
+# "`pipefail` makes the assignment inherit the PIPELINE's status" for one
+# commit after the pipe through `sed` was removed -- true when written,
+# and naming machinery that is no longer there.)
+#
+# THE PORTS ARE GUARDED, and the class deliberately is not. `probe.sh`
+# cannot print `CLASS=` without `PORTS=` today -- both are unconditional
+# on its only exit-0 path -- but that is a contract across two files,
+# and the summary below is worth reading only because of the ports. An
+# empty one would print `natm-peer=eim()`, exit 0, and look like a pass:
+# the same shape as the row set that measured nothing. Review finding on
+# PR #78.
 probe_domain() {
   local peer="$1" router="$2" lan="$3" expect="$4" reported class ports
   printf -- '-- %s behind %s --\n' "$peer" "$router"
@@ -77,6 +87,8 @@ probe_domain() {
     "$here/probe.sh")
   class=$(printf '%s\n' "$reported" | sed -n 's/^CLASS=//p')
   ports=$(printf '%s\n' "$reported" | sed -n 's/^PORTS=//p')
+  [ -n "$ports" ] \
+    || { echo "$peer: probe.sh reported no ports beside its class" >&2; return 1; }
   measured="$measured $peer=$class($ports)"
 }
 
@@ -95,7 +107,8 @@ for mode in "$@"; do
 done
 
 # THE OBSERVED PORTS, which is the only part of this line that is not a
-# restatement of `MODES`. The class cannot differ from the mode -- the
+# restatement of the INPUT: the peer names are two literals written
+# here, and the class cannot differ from the mode -- the
 # per-row assertion exits non-zero on any other value -- so a summary
 # carrying classes alone prints back its own input, which is what the
 # two tallies before it did in different words. The ports are
