@@ -31,7 +31,9 @@ router's own address. Phase A had no NAT at all, and the first thing
 this harness owes is evidence that these ones do.
 
 **That the mapping behaviour is the one that was asked for.** The two
-rows are the two that decide whether a hole punch can work:
+rows are the two that decide whether a hole punch can be ATTEMPTED at
+all — `eds` rules one out, `eim` permits one if filtering allows, and
+filtering is not measured here:
 
 | `NAT_MODE` | nft rule | observers see | meaning |
 | --- | --- | --- | --- |
@@ -226,9 +228,12 @@ into the class that says a hole punch would work.
 Five checks stand between the observation and a passing row — four
 before the verdict is printed, one after — and any of them fails it.
 The four before the verdict run on EVERY trial, not only the last; the
-fifth is taken once, on the class the trials produced. ("The class every
-trial agreed on" was true only for `eim` — when they disagree the class
-is `eds`, which no single trial produced on its own.)
+fifth is taken once, on the class the trials produced. ("The class
+every trial agreed on" was true only for `eim`: `eds` needs no
+agreement, because one disagreeing trial imposes it on its own. The
+correction that first replaced that phrase said the opposite — that
+`eds` was the class no single trial produced — which denies the safe
+asymmetry stated two paragraphs above it.)
 (This said four, and before that two, both times because the sentence
 was counted against the bullet list below it rather than against
 `probe.sh`. It is the first bullet that kept going missing, and it is

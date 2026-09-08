@@ -7,7 +7,9 @@
 # See README.md for what this does and does not establish. The short
 # version: it builds a real kernel NAT whose MAPPING BEHAVIOUR is chosen
 # rather than inherited, because that behaviour is what decides whether
-# a hole punch can succeed — and phase A, on loopback, had no NAT at all.
+# a hole punch can be ATTEMPTED at all — filtering decides whether one
+# succeeds, and is neither configured nor measured here. Phase A, on
+# loopback, had no NAT at all.
 set -euo pipefail
 
 NET_PUB="${NET_PUB:-natm-pub}"

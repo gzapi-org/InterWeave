@@ -15,7 +15,9 @@
 #     below would be a loopback result wearing a phase-B label;
 #   * whether the mapping is endpoint-independent — the same external
 #     port to both observers — or per-destination, which is the variable
-#     that decides whether a hole punch can work.
+#     that decides whether a hole punch can be ATTEMPTED at all. It does
+#     not decide whether one SUCCEEDS: filtering decides the rest, and
+#     this harness neither configures nor measures it.
 set -euo pipefail
 
 # NO ARGUMENTS, CHECKED FIRST. The trial list is an environment

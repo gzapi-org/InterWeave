@@ -1331,7 +1331,8 @@ Run and close **SPIKE-004**. **Phase A closed 2026-09-01: PASS FOR
 IMPLEMENTATION.** The work below is authorized. What is NOT authorized
 is calling the stage complete — phase A ran on one machine over
 loopback, so the exit gate's NAT/relay/hole-punch matrix is unmet and
-**phase B is required before stage closure**: real and carrier NAT, two
+**phase B is required before stage closure**: a public VM and
+home/symmetric/carrier NAT, two
 independently operated relay/probe services, **relay loss and capacity
 denial**, interface change, hole-punch success rates, measured resource
 cost. That is six items, matching `SPIKES.md`; this list omitted the

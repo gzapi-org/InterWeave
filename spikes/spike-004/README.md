@@ -11,8 +11,8 @@ Evidence and the final decision are recorded against
 [`phase-b/`](./phase-b/README.md): a rootless-podman NAT matrix with two
 NAT domains, whose mapping behaviour is configured and then MEASURED
 rather than assumed. It answers part of one of the six evidence
-items `SPIKES.md` lists for phase B — the NAT mapping classes, and only
-their mapping half, since filtering is neither configured nor measured
+items `SPIKES.md` lists for phase B — the NAT classes, and only their
+mapping half, since filtering is neither configured nor measured
 there. No node runs in it; success rates and a specific carrier's CGNAT
 are claims a container cannot make; and **it does not close phase B**.
 
