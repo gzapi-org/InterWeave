@@ -16,11 +16,15 @@ IMAGE="${IMAGE:-interweave-natmatrix:1}"
 
 MODES="${MODES:-eim eds}"
 
-# THE ROW SET IS VALIDATED BEFORE ANYTHING RUNS, and this is the only
-# ASSERTION written in this file -- everything else here fails the run
-# by failing: the build, `topology.sh up`, and each probe. Saying it was
-# "the only check that can fail" was false in the direction that
-# matters, since it reads as though a failing probe would be tolerated.
+# THE ROW SET IS VALIDATED BEFORE ANYTHING RUNS, and it is the only
+# check on this script's INPUT -- everything else here fails the run by
+# failing: the build, `topology.sh up`, and each probe. There is one
+# other assertion written in this file, on `$ports` in `probe_domain`,
+# and the sentence that used to say this was the only one was made false
+# by the commit that added it. Before that it said "the only check that
+# can fail", which read as though a failing probe would be tolerated.
+# Two rounds of review, two corrections, both to a claim about how many
+# things this file checks.
 # `MODES` is a caller-supplied filter, so
 # `MODES=" "` is set and non-null -- `:-` does not substitute, the loop
 # runs zero times, and every after-the-fact tally then agrees with
@@ -66,14 +70,18 @@ measured=""
 
 # Measure one NAT domain and record what it answered.
 #
-# A FAILING PROBE ALREADY STOPS THE RUN: `class=$(probe.sh)` is a simple
-# command whose status is the substitution's, so `set -e` fires and a
-# non-zero `probe.sh` never reaches the line after it. (This said
-# "`pipefail` makes the assignment inherit the PIPELINE's status" for one
-# commit after the pipe through `sed` was removed -- true when written,
-# and naming machinery that is no longer there.)
+# A FAILING PROBE ALREADY STOPS THE RUN: `reported=$(... probe.sh)`
+# below is a simple command whose status is the substitution's, so
+# `set -e` fires and a non-zero `probe.sh` never reaches the lines that
+# parse it. (The `class=` and `ports=` assignments under it ARE
+# pipelines; they run only after the probe has succeeded. An earlier
+# version of this comment credited `pipefail` with stopping the run,
+# which was true when the probe itself was piped through `sed`, and a
+# later one illustrated the point with a `class=$(probe.sh)` that does
+# not exist in this file.)
 #
-# THE PORTS ARE GUARDED, and the class deliberately is not. `probe.sh`
+# THE PORTS ARE GUARDED -- the second and last assertion in this file --
+# and the class deliberately is not. `probe.sh`
 # cannot print `CLASS=` without `PORTS=` today -- both are unconditional
 # on its only exit-0 path -- but that is a contract across two files,
 # and the summary below is worth reading only because of the ports. An
@@ -112,7 +120,10 @@ done
 # per-row assertion exits non-zero on any other value -- so a summary
 # carrying classes alone prints back its own input, which is what the
 # two tallies before it did in different words. The ports are
-# unconstrained by any assertion here: they differ between runs and
-# between the two domains, and they are what makes the line worth
-# reading. The full measurement is `probe.sh`'s block on stderr.
+# unconstrained by any assertion here: nothing in this harness decides
+# what they are, so they are what makes the line worth reading. They do
+# NOT always differ -- an `eim` row reports `45000` for both domains on
+# every run, because the source port is fixed and `masquerade` preserves
+# it, and saying they differ was a claim the transcript in the README
+# contradicts. The full measurement is `probe.sh`'s block on stderr.
 printf '\nmeasured and matched:%s\n' "$measured"

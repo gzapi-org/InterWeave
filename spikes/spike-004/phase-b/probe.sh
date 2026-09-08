@@ -142,8 +142,9 @@ fi
 # restatement of `EXPECT`: this script exits non-zero on any other
 # value, so a caller that prints only the class prints back what it
 # asked for. The two observed ports are the part no assertion here
-# constrains -- they differ between runs and between domains, and they
-# are what a reader can check the verdict against. Review finding on
-# PR #78.
+# constrains -- nothing here decides what they are -- and they are what
+# a reader can check the verdict against. They are not always
+# DIFFERENT: an `eim` row reports the bound port twice, which is the
+# observation that makes it `eim`. Review findings on PR #78.
 printf 'CLASS=%s\n' "$class"
 printf 'PORTS=%s,%s\n' "$port1" "$port2"
