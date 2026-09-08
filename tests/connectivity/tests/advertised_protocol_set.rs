@@ -286,7 +286,11 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
     // `PreAuthAdmission` and `OutboundAdmission` both return
     // `Ok(dummy::ConnectionHandler)` unconditionally there
     // (`preauth_gate.rs`, `outbound_gate.rs`), and pre-Noise admission
-    // cannot know a PeerId in any case. The OUTBOUND hook is not like
+    // cannot know a PeerId in any case. **That is background, and this
+    // test does not enforce it**: if a gate began denying there, the
+    // observer would still see an establish followed by a close and this
+    // test would pass unchanged. What it does catch is refusal BEFORE
+    // establishment, and retention. The OUTBOUND hook is not like
     // this — `OutboundAdmission::handle_established_outbound_connection`
     // rebinds the address and can refuse — which is why this test is
     // written from the inbound side. So the
@@ -420,9 +424,16 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
     let deadline = tokio::time::Instant::now() + PATIENCE;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        // The same diagnostic as the timeout arm below, because this
+        // fires on the knife-edge path where an event is delivered in
+        // the instant the deadline expires: `Ok(_)` repeats the loop and
+        // `saturating_duration_since` is then zero. An earlier version
+        // printed only `established` here, which is the unimproved form
+        // of the message the arm below was fixed to give.
         assert!(
             !remaining.is_zero(),
-            "expected the connection to be established and then closed; established={established}"
+            "deadline reached: established={established}, advertised={advertised:?}. \
+             Same reading as the timeout below -- both set means RETAINED."
         );
         match tokio::time::timeout(remaining, observer.select_next_some()).await {
             Ok(libp2p::swarm::SwarmEvent::ConnectionEstablished { .. }) => established = true,
@@ -498,11 +509,13 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
             // asserting which case it is.
             Err(_) => panic!(
                 "timed out after {PATIENCE:?}: established={established}, \
-                 advertised={advertised:?}. An infrastructure-only peer must be \
-                 established and then CLOSED; no close arrived. If `established` and \
+                 advertised={advertised:?}. This test requires such a peer to be \
+                 established and then CLOSED -- today's behaviour, not a rule any \
+                 accepted document states (see this file's header); no close arrived. If `established` and \
                  `advertised` are both set, the peer was RETAINED and told those \
-                 protocols -- the §14 exposure, live, and the state `ClassGated<B>` \
-                 exists to make safe. If established with nothing advertised, it was \
+                 protocols -- the §14 exposure, live. That is the state the planned \
+                 `ClassGated<B>` restriction is meant to make safe; it is not built \
+                 yet, so see the plan's §14 rather than looking for the type. If established with nothing advertised, it was \
                  held open in silence. If not established, nothing arrived at all."
             ),
         }

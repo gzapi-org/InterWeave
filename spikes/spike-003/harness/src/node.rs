@@ -23,7 +23,7 @@ use interweave_transport_runtime::{
 };
 use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 
-/// The identify protocol this spike advertises, so a node's Kademlia
+/// The identify `protocol_version` this spike advertises, so a node's Kademlia
 /// mode is observable the way the design says it must be: through an
 /// authenticated Identify exchange, not by assumption.
 // NOT a protocol name: `identify::Config::new` takes a
