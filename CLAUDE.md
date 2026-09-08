@@ -94,13 +94,25 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   a grep over `attempt_dial` call sites would see none of that.** Do not
   read the feature change as evidence those paths are live. The exposure
   `BOTTOM-UP-IMPLEMENTATION-PLAN.md` §14 names — every data-plane
-  behaviour installed uniformly on every connection — is about the
-  RETAINED case, and it is now one commit away rather than one stage.
-  **No route above may be reached before `BOTTOM-UP-IMPLEMENTATION-PLAN.md`
-  §14's protocol-isolation restriction lands**; the owner ruled
-  on 2026-09-07 that the connectivity behaviours ship gated off and the
-  `ClassGated<B>` fix lands first. The plan's Stage 11 section carries
-  the same ruling, because that is where the construction order lives.
+  behaviour installed uniformly on every connection — was about the
+  RETAINED case, and **it is CLOSED**: `ClassGated<B>` wraps all four,
+  so a connection of any other class is offered no data-plane protocol
+  at all. Measured on a retained infrastructure-only inbound, its
+  Identify carries `/ipfs/id/1.0.0` and `/ipfs/id/push/1.0.0` and
+  nothing else.
+  **So the ordering constraint the routes above were written for is
+  DISCHARGED**, and what replaces it is weaker but not nothing: step 3
+  is the first commit that can produce a retained infrastructure-only
+  connection, so it must keep that restriction true rather than merely
+  not precede it. The owner ruled on 2026-09-07 that the connectivity
+  behaviours ship gated off and `ClassGated<B>` land first; the second
+  half is done. The plan's Stage 11 section carries the ruling, because
+  that is where the construction order lives.
+  **One thing `ClassGated<B>` does not do**, because a reader will
+  assume it: a handler is built once at establishment and never
+  rebuilt, so a peer PROMOTED while connected stays gated until it
+  reconnects. The dangerous direction is covered elsewhere — revocation
+  closes the connections it downgrades.
   `DcutrHolePunch` (D1) and `RelayCircuit` (D2) were both admitted for
   an infrastructure-only peer; the admission predicate — renamed
   `names_application_destination` in the same commit, because the old

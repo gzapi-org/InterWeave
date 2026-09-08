@@ -483,6 +483,28 @@ impl GatedSwarm {
     /// Blacklisting is what expresses that to the backend. It is
     /// idempotent, so this may be called on every classification without
     /// tracking what was already applied.
+    ///
+    /// # This is not made redundant by `ClassGated`
+    ///
+    /// `ClassGated` decides at ESTABLISHMENT which protocols a
+    /// connection is offered, so an infrastructure-only peer is never
+    /// advertised `/meshsub/` at all. It would be easy to read that as
+    /// making this call defense-in-depth, and it does not, for two
+    /// measured reasons.
+    ///
+    /// First, a handler is built once and never rebuilt, so a peer whose
+    /// class changes WHILE CONNECTED keeps the handler it was given.
+    /// This is what covers the downgrade in the mesh until revocation
+    /// closes the connection.
+    ///
+    /// Second, the two act on different things. Blacklisting rejects
+    /// MESSAGES — `libp2p-gossipsub` checks it on receipt — and leaves
+    /// the `/meshsub/` protocols registered on the connection. That was
+    /// measured: before `ClassGated`, a retained infrastructure-only
+    /// peer was still advertised all three `/meshsub/` names despite
+    /// being blacklisted. So this call is AUTHORITY and `ClassGated` is
+    /// EXPOSURE, which is the same split §14 draws, and neither
+    /// substitutes for the other.
     pub fn sync_broadcast_admission(&mut self, peer: &libp2p::PeerId, data_plane_trusted: bool) {
         // The decision itself is `mesh_admits`, kept separate and pure so
         // it can be enumerated over every class.
