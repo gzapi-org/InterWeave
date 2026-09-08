@@ -233,24 +233,37 @@ table inet nat {
   }
 }
 NFT
-  # ASSERT THE RULE LANDED. A topology harness that cannot tell whether
-  # it built the topology reports loopback-quality evidence under a
-  # phase-B heading, which is the one failure this spike exists to
-  # avoid -- and the first version of this script did exactly that.
-  # The MODE as well as the interface: a bare `oifname "eth0"` with no
-  # statement would satisfy a check on the interface alone, and the
-  # comment above says the rule landed rather than half of it.
+  # ASSERT THE RULE LANDED, AND THAT IT IS THE ONLY ONE. A topology
+  # harness that cannot tell whether it built the topology reports
+  # loopback-quality evidence under a phase-B heading, which is the one
+  # failure this spike exists to avoid -- and the first version of this
+  # script did exactly that.
   #
-  # WHOLE LINE, not substring. `grep -q "oifname \"eth0\" masquerade"`
-  # matches the line `oifname "eth0" masquerade random`, so an `eim`
-  # assertion was satisfied by an `eds` ruleset -- the comment claimed
-  # the mode and checked a prefix of it. `-x` against the trimmed line
-  # is what makes the two modes distinguishable here. Review finding on
-  # PR #78.
-  podman exec "$ctr" nft list ruleset 2>/dev/null \
-    | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
-    | grep -qx "oifname \"$oif\" $rule" \
-    || { echo "$ctr: NAT rule absent or not exactly '$rule' after configuring it" >&2; return 1; }
+  # THE WHOLE CHAIN, COMPARED TO ONE LINE, rather than a `grep` over the
+  # ruleset. Three things follow from that and none of them held before:
+  #
+  #   * the MODE is checked, not a prefix of it. `grep -q 'oifname
+  #     "eth0" masquerade'` matches the line `oifname "eth0" masquerade
+  #     random`, so an `eim` assertion was satisfied by an `eds`
+  #     ruleset.
+  #   * the FLUSH above is checked. `nft -f -` adds; without the flush a
+  #     second run with a different mode leaves both rules and a `grep`
+  #     still finds the one it asked for, while the earlier rule wins at
+  #     runtime. Comparing the whole chain to one line is what makes
+  #     deleting the flush fail this assertion instead of passing it.
+  #   * the SCOPE matches the claim. `flush table inet nat` is
+  #     table-scoped while `nft list ruleset` is not, so a matching line
+  #     in any other table used to satisfy the check.
+  #
+  # `nft`'s own failure is also distinguished from an absent rule: the
+  # old form discarded stderr and reported "rule absent" for a chain it
+  # could not read. Review findings on PR #78.
+  local installed
+  installed=$(podman exec "$ctr" nft list chain inet nat postrouting) \
+    || { echo "$ctr: could not read back the nat chain" >&2; return 1; }
+  installed=$(printf '%s\n' "$installed" | sed -n 's/^[[:space:]]*\(oifname .*\)$/\1/p')
+  [ "$installed" = "oifname \"$oif\" $rule" ] \
+    || { echo "$ctr: nat chain holds [$installed], expected [oifname \"$oif\" $rule]" >&2; return 1; }
   log "$ctr: snat on $oif using: $rule"
 }
 
