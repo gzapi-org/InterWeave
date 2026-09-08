@@ -85,7 +85,7 @@ up() {
   configure_nat natm-router-b "$NET_PUB"
 
   log "NAT mode: $NAT_MODE (both domains)"
-  record_environment natm-router
+  record_environment natm-router natm-router-b
 }
 
 # The interface podman gave this container on that network.
@@ -136,16 +136,37 @@ route_through() {
 # the reproducibility argument at the wrong component. Review finding on
 # PR #78.
 #
-# THE CONTAINER IS AN ARGUMENT. It reads `nft --version` from whichever
-# router it is given rather than from a name written here -- the same
-# hardcoding that made `configure_nat` build router B's rule from router
-# A's interface, sitting inside the function whose whole job is
-# attribution. Review finding on PR #78.
+# THE CONTAINER IS AN ARGUMENT, and it is called for BOTH routers. It
+# reads `nft --version` from whichever router it is given rather than
+# from a name written here -- the same hardcoding that made
+# `configure_nat` build router B's rule from router A's interface,
+# sitting inside the function whose whole job is attribution. The two
+# routers run the one digest-pinned image, so the versions agree by
+# construction; reading both is what makes that a measurement rather
+# than an assumption. Review finding on PR #78.
+#
+# AND IT FAILS CLOSED. A command substitution inside an argument does
+# not fire `set -e`: the status that counts is `printf`'s, so a failing
+# `podman exec` used to log `nft    : ` and return 0 from the last
+# statement of `up()`. An empty value here is exactly the unattributable
+# run this function exists to prevent, and it was silent. Same hazard
+# `configure_nat` hoists `oif` out of a heredoc to avoid.
 record_environment() {
-  local ctr="$1"
-  log "kernel : $(uname -r)"
-  log "podman : $(podman --version)"
-  log "nft    : $(podman exec "$ctr" nft --version)"
+  local kernel podman_version
+  kernel=$(uname -r)
+  podman_version=$(podman --version)
+  [ -n "$kernel" ] && [ -n "$podman_version" ] \
+    || { echo "could not record the host that performed the NAT" >&2; return 1; }
+  log "kernel : $kernel"
+  log "podman : $podman_version"
+  local ctr
+  for ctr in "$@"; do
+    local nft_version
+    nft_version=$(podman exec "$ctr" nft --version)
+    [ -n "$nft_version" ] \
+      || { echo "$ctr: could not record its nft version" >&2; return 1; }
+    log "nft    : $nft_version ($ctr)"
+  done
 }
 
 configure_nat() {
