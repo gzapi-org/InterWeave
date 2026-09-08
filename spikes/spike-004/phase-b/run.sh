@@ -17,13 +17,21 @@ IMAGE="${IMAGE:-interweave-natmatrix:1}"
 MODES="${MODES:-eim eds}"
 
 # THE ROW SET IS VALIDATED BEFORE ANYTHING RUNS, and this is the only
-# check here that can fail. `MODES` is a caller-supplied filter, so
+# ASSERTION written in this file -- everything else here fails the run
+# by failing: the build, `topology.sh up`, and each probe. Saying it was
+# "the only check that can fail" was false in the direction that
+# matters, since it reads as though a failing probe would be tolerated.
+# `MODES` is a caller-supplied filter, so
 # `MODES=" "` is set and non-null -- `:-` does not substitute, the loop
 # runs zero times, and every after-the-fact tally then agrees with
 # itself about nothing. The previous version printed `1 matrix rows,
 # each measured and matched, all distinct:` and exited 0 in exactly that
 # case, because `printf '%s\n'` with no arguments still prints the
 # format once. Review finding on PR #78.
+# THE SPLIT HAPPENS ONCE. `set --` and a later `for mode in $MODES`
+# would be two independent word-splits of the same string -- the object
+# validated and the object iterated would not be the same object, which
+# is the shape half the findings in this directory have had.
 # shellcheck disable=SC2086
 set -- $MODES
 [ "$#" -ge 1 ] || { echo "MODES named no rows, so nothing would be measured" >&2; exit 2; }
@@ -72,7 +80,7 @@ probe_domain() {
   measured="$measured $peer=$class($ports)"
 }
 
-for mode in $MODES; do
+for mode in "$@"; do
   printf '\n== NAT_MODE=%s ==\n' "$mode"
   NAT_MODE="$mode" "$here/topology.sh" up
   # BOTH DOMAINS ARE MEASURED, and the second one is why. A hole punch
