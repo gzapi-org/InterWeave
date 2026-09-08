@@ -54,6 +54,28 @@ router_pub=$(addr_on "$ROUTER" "$NET_PUB")
 # talk itself into the class that says a hole punch would work.
 SRC_PORTS="${SRC_PORTS:-45000 45001}"
 
+# THE TRIAL LIST IS VALIDATED BEFORE ANYTHING RUNS, because `class`
+# starts at `eim` and only a disagreeing trial moves it. Zero trials
+# therefore reported ENDPOINT-INDEPENDENT, matched `EXPECT=eim`, and
+# exited 0 having measured nothing -- and `SRC_PORTS=" "` reaches that,
+# since it is set and non-null so `:-` does not substitute. That is the
+# `MODES=" "` defect this harness already found one file over,
+# reproduced inside the fix for the classifier. `run.sh` happens to
+# catch it through the empty `PORTS=`; the standalone invocation this
+# README documents does not.
+#
+# TWO DISTINCT PORTS, not merely two tokens. One trial re-opens the
+# single-pair coincidence the trials exist to close, and a repeated port
+# is the same internal tuple twice -- conntrack hands the second trial
+# the first one's mapping, so it is literally the repeat the comment
+# below says it is not. Review finding on PR #78.
+# shellcheck disable=SC2086
+set -- $SRC_PORTS
+[ "$#" -ge 2 ] \
+  || { echo "SRC_PORTS named $# trial(s); eim cannot be observed from fewer than two" >&2; exit 2; }
+[ "$#" -eq "$(printf '%s\n' "$@" | sort -u | wc -l)" ] \
+  || { echo "SRC_PORTS repeats a port, so a trial would re-measure one tuple: $*" >&2; exit 2; }
+
 # Measure once from one bound source port, and print `p1 p2`.
 #
 # Every control lives here, so each trial is checked rather than only
@@ -158,7 +180,7 @@ measure_from() {
 # `eim` REQUIRES EVERY TRIAL TO AGREE; one disagreement is `eds`.
 class=eim
 observed=""
-for src in $SRC_PORTS; do
+for src in "$@"; do
   pair=$(measure_from "$src")
   p1=${pair% *}; p2=${pair#* }
   [ "$p1" = "$p2" ] || class=eds
