@@ -19,7 +19,6 @@ set -euo pipefail
 
 NET_PUB="${NET_PUB:-natm-pub}"
 NET_LAN="${NET_LAN:-natm-lan}"
-SRC_PORT="${SRC_PORT:-45000}"
 
 addr_on() {
   podman inspect "$1" --format "{{ (index .NetworkSettings.Networks \"$2\").IPAddress }}"
@@ -36,108 +35,140 @@ router_pub=$(addr_on "$ROUTER" "$NET_PUB")
 [ -n "$peer_private" ] || { echo "no private address for $PEER" >&2; exit 1; }
 [ -n "$router_pub" ] || { echo "no public address for $ROUTER" >&2; exit 1; }
 
-podman exec natm-obs1 sh -c ': > /seen.txt'
-podman exec natm-obs2 sh -c ': > /seen.txt'
-
-# ONE INTERNAL ADDRESS:PORT to both observers, presented by two
-# sequential sockets -- the loop runs `podman exec` twice, and
-# `reuseaddr` is there because both bind the same port. That is what
-# makes the comparison meaningful, and the distinction is not pedantic:
-# RFC 4787 defines mapping behaviour over the internal tuple, not over a
-# socket handle, so two sockets sharing one tuple measure the mapping,
-# while two sockets on DIFFERENT ports would be allocated two external
-# ports under any NAT and report symmetric behaviour everywhere. This
-# said "ONE socket" directly above a loop that opens two. Review finding
-# on PR #78.
-for target in "$obs1" "$obs2"; do
-  podman exec "$PEER" sh -c \
-    "echo probe | socat -t1 - UDP-DATAGRAM:$target:9000,bind=:$SRC_PORT,reuseaddr" >/dev/null 2>&1 || true
-done
-
-# POLLED, NOT SLEPT ONCE. socat's `fork` hands each datagram to a
-# SYSTEM: handler that appends asynchronously, so on a loaded host the
-# write can land after any fixed wait -- and the read that followed then
-# reported NO DATA with both datagrams delivered. A false negative here
-# reads as "the topology is not a NAT", which is the most alarming
-# verdict this script has. Codex review on PR #78.
+# TRIED FROM MORE THAN ONE SOURCE PORT, and that is not thoroughness --
+# it is the difference between a class this script observed and one it
+# guessed.
 #
-# Bounded in ATTEMPTS rather than seconds, because each one is a
-# `podman exec` and costs far more than the sleep beside it.
-seen1=""; seen2=""
-attempt=0
-while [ -z "$seen1" ] || [ -z "$seen2" ]; do
-  seen1=$(podman exec natm-obs1 sh -c 'cat /seen.txt' | tail -1)
-  seen2=$(podman exec natm-obs2 sh -c 'cat /seen.txt' | tail -1)
-  [ -n "$seen1" ] && [ -n "$seen2" ] && break
-  attempt=$((attempt + 1))
-  [ "$attempt" -le 50 ] || break
-  sleep 0.1
-done
+# `masquerade random` allocates a port per flow at random, so the two
+# destinations CAN be handed the same port by coincidence: roughly one
+# row in 64512. Classifying from a single pair then reports `eim` for a
+# correctly-built endpoint-dependent NAT, which fails a good row under
+# `EXPECT` and reports the wrong class outright without it. Codex review
+# on PR #78.
+#
+# Two trials make a false `eim` need the coincidence twice, and they are
+# legitimate rather than a repeat: endpoint-independence must hold for
+# EVERY internal socket, so a second bound port is a second instance of
+# the property, not a second look at the first. `eds` needs only one
+# trial to disagree, which is the safe asymmetry -- the harness cannot
+# talk itself into the class that says a hole punch would work.
+SRC_PORTS="${SRC_PORTS:-45000 45001}"
 
-# THE REPORT GOES TO STDERR, and stdout carries the machine-readable
-# result: the class and the two ports it was derived from, one per line.
-# A caller can capture that in a variable without swallowing the
-# measurement -- an earlier `run.sh` read stdout and the transcript lost
-# every number the README cites. This comment said "only the class" for
-# one commit after `PORTS=` was added eighty lines below it, which is
-# the pair-in-one-file shape CLAUDE.md §7 names.
-{
-  printf 'peer private   : %s %s\n' "$peer_private" "$SRC_PORT"
-  printf 'router public  : %s\n' "$router_pub"
-  printf 'observer 1 saw : %s\n' "${seen1:-<nothing>}"
-  printf 'observer 2 saw : %s\n' "${seen2:-<nothing>}"
-} >&2
+# Measure once from one bound source port, and print `p1 p2`.
+#
+# Every control lives here, so each trial is checked rather than only
+# the last: a trial that saw the private address, an address that is not
+# the router's, or a malformed port fails the whole probe.
+measure_from() {
+  local src="$1" seen1 seen2 attempt ip1 ip2 port1 port2 port
 
-[ -n "$seen1" ] && [ -n "$seen2" ] || {
-  echo "VERDICT: NO DATA — an observer saw nothing, so nothing is measured" >&2
-  exit 1
+  podman exec natm-obs1 sh -c ': > /seen.txt'
+  podman exec natm-obs2 sh -c ': > /seen.txt'
+
+  # ONE INTERNAL ADDRESS:PORT to both observers, presented by two
+  # sequential sockets -- the loop runs `podman exec` twice, and both
+  # bind the same port. That is what makes the comparison meaningful,
+  # and the distinction is not pedantic: RFC 4787 defines mapping
+  # behaviour over the internal tuple, not over a socket handle, so two
+  # sockets sharing one tuple measure the mapping, while two sockets on
+  # DIFFERENT ports would be allocated two external ports under any NAT
+  # and report symmetric behaviour everywhere. This said "ONE socket"
+  # directly above a loop that opens two. Review finding on PR #78.
+  local target
+  for target in "$obs1" "$obs2"; do
+    podman exec "$PEER" sh -c \
+      "echo probe | socat -t1 - UDP-DATAGRAM:$target:9000,bind=:$src" >/dev/null 2>&1 || true
+  done
+
+  # POLLED, NOT SLEPT ONCE. socat's `fork` hands each datagram to a
+  # SYSTEM: handler that appends asynchronously, so on a loaded host the
+  # write can land after any fixed wait -- and the read that followed
+  # then reported NO DATA with both datagrams delivered. A false
+  # negative here reads as "the topology is not a NAT", which is the
+  # most alarming verdict this script has. Codex review on PR #78.
+  #
+  # Bounded in ATTEMPTS rather than seconds, because each one is a
+  # `podman exec` and costs far more than the sleep beside it.
+  seen1=""; seen2=""; attempt=0
+  while [ -z "$seen1" ] || [ -z "$seen2" ]; do
+    seen1=$(podman exec natm-obs1 sh -c 'cat /seen.txt' | tail -1)
+    seen2=$(podman exec natm-obs2 sh -c 'cat /seen.txt' | tail -1)
+    [ -n "$seen1" ] && [ -n "$seen2" ] && break
+    attempt=$((attempt + 1))
+    [ "$attempt" -le 50 ] || break
+    sleep 0.1
+  done
+
+  {
+    printf 'from port %s\n' "$src"
+    printf '  peer private   : %s %s\n' "$peer_private" "$src"
+    printf '  router public  : %s\n' "$router_pub"
+    printf '  observer 1 saw : %s\n' "${seen1:-<nothing>}"
+    printf '  observer 2 saw : %s\n' "${seen2:-<nothing>}"
+  } >&2
+
+  [ -n "$seen1" ] && [ -n "$seen2" ] || {
+    echo "VERDICT: NO DATA — an observer saw nothing, so nothing is measured" >&2
+    return 1
+  }
+
+  # Space-separated, because socat's `SYSTEM:` reads a colon as its own
+  # parameter separator and silently refused the address:port form.
+  ip1=${seen1% *}; port1=${seen1##* }
+  ip2=${seen2% *}; port2=${seen2##* }
+
+  # THE FIRST CONTROL ON THE OBSERVATION ITSELF — the no-data check
+  # above comes before it and asks whether there IS one. If the
+  # observers saw the peer's own private address, no translation
+  # happened and every other conclusion is void, so this is the check
+  # that stops a misconfigured topology being reported as a NAT matrix.
+  if [ "$ip1" = "$peer_private" ] || [ "$ip2" = "$peer_private" ]; then
+    echo "VERDICT: NOT NATTED — an observer saw the peer's private address" >&2
+    return 1
+  fi
+
+  # THE ADDRESS IS PART OF THE MAPPING, and an earlier version checked
+  # only the ports: two different external ADDRESSES with the same port
+  # would have been reported as endpoint-independent. This also closes
+  # the gap the private-address control cannot see — translated, but by
+  # something other than the rule this harness installed.
+  if [ "$ip1" != "$router_pub" ] || [ "$ip2" != "$router_pub" ]; then
+    echo "VERDICT: TRANSLATED BY SOMETHING ELSE — expected $router_pub, saw $ip1 and $ip2" >&2
+    return 1
+  fi
+
+  # A line with no space would make `port` the address, both would be
+  # the router's, and the classifier would say `eim` for any NAT at all.
+  #
+  # EACH PORT, NOT THE TWO CONCATENATED. `case "$port1$port2"` tested
+  # the JOINED string, so an empty `port1` with `port2=45000` gave the
+  # subject `45000` -- numeric and non-empty, so it passed -- and the
+  # comparison then read the two as different and reported an
+  # endpoint-dependent mapping from one observation. Review finding on
+  # PR #78.
+  for port in "$port1" "$port2"; do
+    case "$port" in
+      *[!0-9]*|"") echo "VERDICT: MALFORMED — ports were '$port1' and '$port2'" >&2; return 1 ;;
+    esac
+  done
+
+  printf '%s %s' "$port1" "$port2"
 }
 
-# Space-separated, because socat's `SYSTEM:` reads a colon as its own
-# parameter separator and silently refused the address:port form.
-ip1=${seen1% *}; port1=${seen1##* }
-ip2=${seen2% *}; port2=${seen2##* }
-
-# THE FIRST CONTROL ON THE OBSERVATION ITSELF — the no-data check above
-# comes before it and asks whether there IS one. If the observers saw
-# the peer's own private address, no translation happened and every
-# other conclusion is void, so this is the check that stops a
-# misconfigured topology being reported as a NAT matrix.
-if [ "$ip1" = "$peer_private" ] || [ "$ip2" = "$peer_private" ]; then
-  echo "VERDICT: NOT NATTED — an observer saw the peer's private address" >&2
-  exit 1
-fi
-
-# THE ADDRESS IS PART OF THE MAPPING, and an earlier version checked
-# only the ports: two different external ADDRESSES with the same port
-# would have been reported as endpoint-independent. This also closes the
-# gap the private-address control cannot see — translated, but by
-# something other than the rule this harness installed.
-if [ "$ip1" != "$router_pub" ] || [ "$ip2" != "$router_pub" ]; then
-  echo "VERDICT: TRANSLATED BY SOMETHING ELSE — expected $router_pub, saw $ip1 and $ip2" >&2
-  exit 1
-fi
-
-# A line with no space would make `port` the address, both would be the
-# router's, and the classifier would say `eim` for any NAT at all.
-#
-# EACH PORT, NOT THE TWO CONCATENATED. `case "$port1$port2"` tested the
-# JOINED string, so an empty `port1` with `port2=45000` gave the subject
-# `45000` -- numeric and non-empty, so it passed -- and the comparison
-# below then read the two as different and reported an endpoint-dependent
-# mapping from one observation. Review finding on PR #78.
-for port in "$port1" "$port2"; do
-  case "$port" in
-    *[!0-9]*|"") echo "VERDICT: MALFORMED — ports were '$port1' and '$port2'" >&2; exit 1 ;;
-  esac
+# `eim` REQUIRES EVERY TRIAL TO AGREE; one disagreement is `eds`.
+class=eim
+observed=""
+for src in $SRC_PORTS; do
+  pair=$(measure_from "$src")
+  p1=${pair% *}; p2=${pair#* }
+  [ "$p1" = "$p2" ] || class=eds
+  observed="${observed:+$observed;}$p1,$p2"
 done
 
-if [ "$port1" = "$port2" ]; then
-  verdict="ENDPOINT-INDEPENDENT MAPPING (one external port for both destinations)"
-  class=eim
+if [ "$class" = eim ]; then
+  verdict="ENDPOINT-INDEPENDENT MAPPING (one external port for both destinations, in every trial)"
 else
   verdict="ENDPOINT-DEPENDENT MAPPING (a port per destination)"
-  class=eds
 fi
 printf 'VERDICT: %s\n' "$verdict" >&2
 
@@ -163,4 +194,4 @@ fi
 # DIFFERENT: an `eim` row reports the bound port twice, which is the
 # observation that makes it `eim`. Review findings on PR #78.
 printf 'CLASS=%s\n' "$class"
-printf 'PORTS=%s,%s\n' "$port1" "$port2"
+printf 'PORTS=%s\n' "$observed"
