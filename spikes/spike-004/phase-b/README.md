@@ -239,7 +239,7 @@ every trial agreed on" was true only for `eim`: `eds` needs no
 agreement, because one disagreeing trial imposes it on its own. The
 correction that first replaced that phrase said the opposite — that
 `eds` was the class no single trial produced — which denies the safe
-asymmetry stated two paragraphs above it.)
+asymmetry stated in the paragraph immediately above it.)
 (This said four, and before that two, both times because the sentence
 was counted against the bullet list below it rather than against
 `probe.sh`. It is the first bullet that kept going missing, and it is
@@ -266,10 +266,13 @@ the one that fires when the topology is up and nothing traversed it.)
 `probe.sh` validates its own trial list the same way, and for the same
 reason: `class` starts at `eim` and only a disagreeing trial moves it,
 so a list naming nothing would report ENDPOINT-INDEPENDENT and exit 0
-having measured nothing. It requires at least two ports, numeric, and
-distinct once normalised — `45000` and `045000` are two spellings of one
-internal tuple, and one trial re-opens the coincidence the trials exist
-to close.
+having measured nothing. It requires at least two tokens; each numeric and in
+1–65535, because `*[!0-9]*` admits `0`, `70000` and a token that wraps
+negative, and `bind=:0` binds ANY port — which breaks the one-internal-
+tuple premise and measures a correct `eim` topology as `eds`; and
+distinct once normalised, since `45000` and `045000` are two spellings
+of one tuple and one trial re-opens the coincidence the trials exist to
+close.
 
 `run.sh` asserts nothing across rows, and that is deliberate. The
 per-row `EXPECT` check already exits non-zero on a mismatch, so any

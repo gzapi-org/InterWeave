@@ -231,8 +231,10 @@ record_environment() {
   #
   # GUARDED, UNLIKE THE THREE ABOVE, and the difference is the `sed`.
   # `podman exec` failing is caught by the assignment, as it is for the
-  # others -- but `sed -n '2p'` exits 0 printing NOTHING whenever socat's
-  # banner has fewer than two lines or changes shape, which would log
+  # others -- but `sed -n '2p'` exited 0 printing NOTHING whenever
+  # socat's banner had fewer than two lines or changed shape, and the
+  # current `s///p` has the same property, since a substitution that
+  # matches nothing succeeds. Either would log
   # `socat  : ` and return 0 from `up()`. That is the record-half-a-
   # topology failure this function was rewritten to close, in a narrower
   # form. Review finding on PR #78.

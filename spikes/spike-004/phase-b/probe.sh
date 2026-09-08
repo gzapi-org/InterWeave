@@ -26,8 +26,10 @@ set -euo pipefail
 # variable, and `set --` below would silently discard anything passed
 # positionally. Checked before the four `podman inspect` reads, because
 # `./probe.sh --help` with the topology down otherwise dies inside
-# `addr_on` with podman's nil-pointer error and never reaches this.
-# Review finding on PR #78.
+# `addr_on` when `podman inspect` fails on a container that does not
+# exist, and never reaches this. (That is a different failure from the
+# nil-pointer one described further down, which is the
+# attached-but-not-on-that-network case.) Review finding on PR #78.
 [ "$#" -eq 0 ] \
   || { echo "probe.sh takes no arguments; the trial list is the SRC_PORTS environment variable" >&2; exit 2; }
 
@@ -129,11 +131,11 @@ for src in "$@"; do
   port=$((10#$src))
   # A PORT, NOT MERELY DIGITS. `*[!0-9]*` admits `0`, `70000` and a
   # twenty-digit token that wraps to something negative in 64-bit
-  # arithmetic -- and every one of them reaches `socat`, fails to bind,
-  # is swallowed by the `|| true` on the send, and surfaces as NO DATA.
-  # That is the misdiagnosis this guard's own comment says it exists to
-  # prevent, so the guard has to check what its error message claims.
-  # `bind=:0` is worse than a failure: it binds ANY port, so the two
+  # arithmetic. `70000` and the wrapped one reach `socat`, fail to bind,
+  # are swallowed by the `|| true` on the send, and surface as NO DATA --
+  # the misdiagnosis this guard's own comment says it exists to prevent,
+  # with an error message already claiming "not a port number".
+  # `0` is worse than a failure: `bind=:0` binds ANY port, so the two
   # sequential sockets get two different ones, the "one internal tuple"
   # premise the comparison rests on is gone, and a correct `eim`
   # topology measures as `eds`. Review finding on PR #78.
