@@ -398,9 +398,11 @@ bounded internal command/event channels
 deterministic shutdown
 ```
 
-Do not enable GossipSub, direct v2, Kademlia, AutoNAT, Relay or DCUtR yet.
+Stage 4 does not enable GossipSub, direct v2, Kademlia, AutoNAT, Relay or DCUtR.
 
-They are **absent from the `libp2p` feature list** rather than merely unused, so none can be switched on by a `use` statement or a stray builder call. A behaviour that is not compiled cannot be enabled by accident, which is the cheapest way to keep §3's promise that admission policy is never retrofitted.
+At Stage 4 they were **absent from the `libp2p` feature list** rather than merely unused, so none could be switched on by a `use` statement or a stray builder call. A behaviour that is not compiled cannot be enabled by accident, which is the cheapest way to keep §3's promise that admission policy is never retrofitted.
+
+Each later stage added its own and only its own: `request-response` at Stage 6, `gossipsub` at Stage 7, `kad` at Stage 10, and `autonat`/`relay`/`dcutr` at Stage 11. **That list is now empty of behaviours this stage builds, so from Stage 11 on the promise is kept by the gate and its tests rather than by the compiler** (`mdns` and `dns` remain absent — see this stage's own section, which owns both) — which is the reason Stage 11 spends two whole steps on attribution and on SPIKE-004's D1/D2/D3 before it touches the manifest.
 
 The dial path runs through the Stage 2 `ConnectionPolicy` from the first line of substrate code. Stage 5 owns making that gate **root** — behaviour-originated dials, the ConnectionManager, the retry scheduler, and feeding connection outcomes back into the policy so backoff has something to act on. What Stage 4 declines to do is ship a dial path with no gate and add one later.
 
@@ -1077,8 +1079,9 @@ Three limits, stated because the tests cannot reach past them.
 **SPIKE-003 ran and closed on 2026-08-30: PASS FOR THIS STAGE.** It does
 **not** close ADR-0034's v1 release gate — two required evidence items
 are unmet, and both need infrastructure the spike does not have:
-server-mode reachability evidence is not consumed (AutoNAT and Relay are
-absent from the libp2p feature list — SPIKE-004), and single-path capture
+server-mode reachability evidence is not consumed (AutoNAT and Relay were
+absent from the libp2p feature list when the spike ran — SPIKE-004), and
+single-path capture
 is not shown to be reduced (measured against controls; no capture was
 observed at all, so the comparison cannot speak for the option).
 Implementing this stage is unlocked; shipping configured entries
@@ -1117,8 +1120,10 @@ an empty list until the provider admits the peers that dialled *it*.
 story; the inbound direction is what a bootstrap node lives on.
 
 **Server-mode reachability evidence is NOT validated.** AutoNAT and Relay
-are absent from the libp2p feature list, so the spike could not consume
-the AutoNAT-verified-or-relay-reservation rule this stage's §14 requires.
+were absent from the libp2p feature list when the spike ran, so it could
+not consume the AutoNAT-verified-or-relay-reservation rule this stage's
+§14 requires. Stage 11 has since compiled both, which changes nothing
+about what this spike established.
 SPIKE-004 is where that arrives. Do not treat it as proved.
 
 **The capability-observation mapping is DECIDED (2026-08-30). This
@@ -1291,10 +1296,11 @@ A later stage AND a later spike. Stage 10 closing is not evidence for
 either, and no build may ship the default on until both land.
 
 What the stage did NOT establish, beyond that clause: **server-mode
-reachability evidence is not validated at all.** AutoNAT and Relay are
-absent from the libp2p feature list, so §14's
-AutoNAT-verified-or-relay-reservation rule has never been exercised.
-Nothing here should be read as evidence for it.
+reachability evidence is not validated at all.** AutoNAT and Relay were
+absent from the libp2p feature list for the whole of Stage 10, so §14's
+AutoNAT-verified-or-relay-reservation rule was never exercised here.
+Nothing in this block should be read as evidence for it. Stage 11 has
+since compiled both, which changes nothing about what Stage 10 proved.
 
 ### Why the shipping default was never reachable here
 
@@ -1355,9 +1361,10 @@ below and are repeated where they bite:
   socket is open, which is after the target has been contacted.
 - **D1, D2 and D3 sit in already-shipped code**, not in this stage's
   work, and none is reachable in a shipped build today — nothing
-  constructs `DcutrHolePunch` or `RelayCircuit`, and no relay feature
-  is compiled — so all three were latent until this stage enables the
-  paths they govern. `DcutrHolePunch` and `RelayCircuit` were both
+  constructs `DcutrHolePunch` or `RelayCircuit`. The features-on change
+  removed the second half of that reason: `relay` and `dcutr` are
+  compiled now, so absence of code is all that keeps them latent, and
+  it lasts only until this stage builds the paths they govern. `DcutrHolePunch` and `RelayCircuit` were both
   admitted for a `ConnectivityInfrastructureOnly` peer; the fix was not
   "add both to the data-plane predicate", because `RelayReservation`
   must stay outside it and D2 differs from it precisely in naming the
@@ -1381,7 +1388,8 @@ below and are repeated where they bite:
   itself.
 
 **And one thing phase A does NOT unlock: the protocol-isolation
-correction.** The exposure invariant below is about what an
+correction** — though see the note at the end of this paragraph, because
+half of the evidence it says is owed has since landed outside the spike. The exposure invariant below is about what an
 infrastructure-only connection is OFFERED — four data-plane protocols
 installed uniformly — and the phase-A harness carries none of them. Its
 `SpikeBehaviour` is Identify plus the three connectivity behaviours, so
@@ -1390,6 +1398,16 @@ about whether ours are withheld from it. That correction needs a node
 carrying the data-plane behaviours beside a real infrastructure-only
 connection; treat it as evidence still owed, not as a step the verdict
 authorized.
+
+**Half of it has since landed, and outside the spike.** Stage 11's
+`tests/connectivity/tests/advertised_protocol_set.rs` runs exactly such
+a node, over loopback and in CI, with no relay code — an
+`InfrastructureSet` is ordinary configuration — and RECORDS what is
+advertised in the window before the refusal. It does not assert it: that
+emptiness is scheduler-dependent and `CONNECTIVITY.md`'s matrix permits
+Identify for this class, so §14 treats it as an observation. What it does not supply
+is the RETAINED case, which is what the correction actually needs and
+what remains owed.
 
 Server-mode reachability evidence for ADR-0034's v1 release gate — the
 item SPIKE-003 could not supply — is still outstanding and belongs to
@@ -1405,6 +1423,123 @@ following it would have enabled a dialling behaviour while every
 unticketed dial was still classified `KademliaQuery` — refused, as a
 data-plane origin, against the infrastructure the stage exists to use.
 
+**Five obligations sit on this stage without being numbered steps
+below.** They are recorded here because the features-on change is the
+moment each became visible, and a manifest comment — or a test comment —
+is not where a stage's obligations belong. Two of them (`dns`, and the
+spike-lock drift) predate Stage 11; they are named here because nothing
+else names them.
+
+- **`mdns` — a deadline this stage was given, and has not met.**
+  `contracts/DISCOVERY-CONFORMANCE.md`'s 2026-08-30 amendment defers the
+  mDNS multicast tests to Stage 11 by name, "because that is where the
+  libp2p feature set is next revisited under SPIKE-004, and where the
+  dependency graph is re-resolved anyway", and states that this is a
+  deadline rather than a preference. The revisit has now happened. The
+  feature still cannot be enabled: RUSTSEC-2026-0118 and -0119 are
+  unresolved inside the `libp2p-mdns 0.48` line, so §8's dependency gate
+  refuses it. **So the deadline has arrived unmet**, and the stage
+  cannot quietly inherit Stage 9's deferral a second time — either the
+  advisories clear before this stage closes, or closing it requires
+  re-deferring the tests explicitly, with an amendment, the way Stage 9
+  did.
+- **`dns` — an accepted contract with no implementation and no owner.**
+  `discovery/providers/static-bootstrap.md` says DNS resolution happens
+  when the dial path consumes the multiaddress, and `profile-config`
+  validates `/dns4` and `/dns6` accordingly. The `dns` feature is not
+  enabled and the Swarm is built `with_tcp` alone, so such a dial fails
+  `MultiaddrNotSupported` — which `attempt_is_structural` classifies as
+  structural, so `record_permanent_failure` runs and
+  `known.remove(ticket.address())` drops the address from the book.
+  **Say what that does and does not mean today.** `known` is the address
+  BOOK, written only by `learn_address` — from a successful establish,
+  from Identify, or from the `LearnAddress` command — so what is
+  forgotten now is an Identify-learned or explicitly-learned `/dns4`
+  address, dialled once and removed. No configured bootstrap address
+  reaches it at all: nothing composes a static-bootstrap provider,
+  `DiscoveryManager` never dials, and provider composition is Stage 12.
+  So the live defect is the book eviction; the sharper consequence —
+  a configured DNS bootstrap peer discarded on first use — arrives with
+  Stage 12 unless this is fixed first. Either way it contradicts
+  `static-bootstrap.md`, which says the ConnectionManager applies its
+  normal bounded retry and backoff. This predates Stage 11 and is named
+  here because nothing else names it.
+
+- **The connectivity behaviours ship GATED OFF, and `ClassGated<B>`
+  lands before the first commit that reaches ANY of the three routes to
+  a retained infrastructure-only connection** — a wrapped behaviour
+  announcing a reachability origin, an `attempt_dial` call site passing
+  one, or a relaxation of the inbound arm (§14 enumerates them).
+  Owner's ruling, 2026-09-07, taken
+  when phase 1b's config half was about to model
+  `transport.connectivity` — whose schema makes `relay.client.enabled` a
+  `literal[true]`, so modelling it is what would otherwise construct a
+  relay client by default. Recorded here rather than only in `CLAUDE.md`
+  because this is where the construction order lives: a decision about
+  ordering stated only in the operating contract is the shape Stage 10's
+  exit gate had, where a shipping decision sat somewhere that could not
+  enforce it. The restriction itself is §14's protocol-isolation
+  invariant below; the commit it must precede is **step 3's**, not step
+  5's, because step 3 reaches routes 1 and 3 at once — it wraps a
+  constructed AutoNAT client with a reachability classifier and must
+  relax the inbound arm to serve a dial-back. A guard written as a grep
+  over `attempt_dial` call sites would see neither.
+
+- **An accepted document describes an infrastructure-only state this
+  build cannot hold, and step 3 owes the decision.**
+  `transport/libp2p/CONNECTIVITY.md`'s protocol matrix gives Identify and
+  bounded ping a `yes` in the infrastructure-only column, and ADR-0036
+  opens a clause "on an established infrastructure-only connection:".
+  Today no such connection survives long enough for either: the inbound
+  arm closes it in the same loop iteration as `ConnectionEstablished`.
+  That is MEASURED, not asserted — deliberately, since asserting it would
+  resolve this very conflict in code, which is what this bullet exists to
+  avoid. What `tests/connectivity/tests/advertised_protocol_set.rs`
+  asserts is only that such a peer is established and then closed.
+  Step 3 has to relax that arm anyway for the AutoNAT dial-back, so it is
+  the step that must decide whether the documents or the code move
+  (CLAUDE.md §2 — the conflict is named here rather than resolved in
+  prose).
+
+- **Committed spike locks drift silently when the root manifest
+  changes, and nothing checks them.** A spike harness is its own
+  workspace but path-depends on production crates — and
+  `crates/transport/libp2p` declares `libp2p = { workspace = true }`,
+  which resolves against the ROOT manifest wherever that crate is built,
+  including from inside another workspace. (Not feature unification,
+  which does not cross a workspace boundary; getting the mechanism right
+  matters for the check below, which must re-resolve each spike rather
+  than inspect a unified feature set.) Its committed `Cargo.lock` then
+  names fewer packages than the build needs. `cargo metadata --locked` fails;
+  a plain `cargo run` rewrites the lock instead, silently, destroying the
+  pinning the README claims. SPIKE-003's and SPIKE-004's READMEs now
+  document `cargo run --locked`; SPIKE-002's and SPIKE-006's still name
+  the plain form. Stage 11's
+  features-on change did exactly this to SPIKE-003 — though **that lock
+  was already broken before it**, missing the
+  `interweave-kademlia-control-api` package since Stage 10 plus three
+  dependency edges on `interweave-transport-libp2p`
+  (`interweave-discovery-api`, `interweave-kademlia-control-api`,
+  `sha2`), so the features-on change
+  added a third reason rather than the first. It was found in review
+  rather than by any check. **SPIKE-002's harness is in that state too**,
+  needing `interweave-discovery-api`, for a reason unrelated to Stage 11
+  — it path-depends on no crate that reaches libp2p. Both were stale for
+  pre-Stage-11 reasons; only one is also stale for a Stage 11 reason. The durable fix is a tree
+  check asserting `--locked` resolves for every committed spike lock,
+  wired into CI like any other guard; it is not written yet, and writing
+  it means fixing SPIKE-002's lock in the same change so the guard can
+  be green when it lands.
+
+**Between step 2 and step 3 sits a change with no number: `autonat`,
+`relay` and `dcutr` entered the libp2p feature list.** It is unnumbered
+because it constructs nothing and therefore proves nothing — no field, no
+constructor, no configuration — so it is not a step anyone can be at. It
+is recorded here because the steps below were written when those features
+were absent, and several of them cited that absence as the reason a rule
+could not be violated. Those reasons are spent: from here the guarantee
+is the outbound gate, the trust classification and their tests.
+
 1. **dial attribution**: every behaviour-originated dial reaches the
    root gate under its own `DialOrigin`, and the map that carries it
    drops a note for a dial the Swarm refuses before the pending hook;
@@ -1415,10 +1550,16 @@ data-plane origin, against the infrastructure the stage exists to use.
    after admission, before the Swarm is touched — enforces the
    address/origin PAIRING both ways. **The attribution and the pairing
    enforcement landed in PR #71**; no caller supplies `RelayCircuit`
-   yet, because no relay feature is compiled — every `attempt_dial` call
-   site today passes `Manual` (`runtime/commands.rs`) or comes from the
-   retry tick. The mechanism is there and its first user is step 5, where the relay
-   feature is compiled.
+   yet, and the reason is the command path rather than any behaviour —
+   a circuit is dialled by the transport, so no behaviour supplies this
+   origin by design; what is absent is a call site, and the relay
+   transport the builder never installs — every
+   `attempt_dial` call site today passes `Manual` (`runtime/commands.rs`)
+   or comes from the retry tick. The mechanism is there and its first
+   user is step 5. **The `relay` FEATURE no longer arrives with step 5**:
+   it was compiled ahead of the ordered list below, together with
+   `autonat` and `dcutr`, in a features-on change that constructs
+   nothing. What step 5 brings is the constructor.
    **One label decides whether relaying works at all**, and step 2's
    move of `RelayCircuit` into `names_application_destination` is what
    armed it: `relay::client::Behaviour` emits two dials of its own
@@ -1542,7 +1683,7 @@ data-plane origin, against the infrastructure the stage exists to use.
 ### Mandatory invariants
 
 - all behavior-originated dials pass DialAdmissionGate;
-- connectivity-infrastructure peers never gain GossipSub/direct/endpoint/Kademlia authority merely by being connected. **Read this as EXPOSURE, not only authority.** Stages 6-9 built each data-plane entry point to classify its caller — direct ingress, the GossipSub publisher check, `build_answer`'s trust check — so authority is already refused, and an implementer who checks only that will find the invariant apparently met. What is NOT met is the other half: `SubstrateBehaviour` installs `direct`, `broadcast`, `endpoints` and — since Stage 10 — `kad` on every connection uniformly, so once an infrastructure-only connection exists, that peer can advertise and open those substreams and be refused only after the request has been parsed and accounted. **Four protocols, not three**: Kademlia's authority check is the driver's `try_admit` data-plane trust requirement, so such a peer holds no routing seat, but it can still open the DHT substream and be answered — the same exposure, and an implementer working from a list of three would leave it in place. Nothing exercises this today because relay, AutoNAT and DCUtR are absent from the libp2p feature list, so no infrastructure-only connection can be established at all — Stage 11 is the change that creates the first one, which is why the correction belongs here. The protocol set an infrastructure-only connection offers must be restricted at the connection, not merely answered at the request;
+- connectivity-infrastructure peers never gain GossipSub/direct/endpoint/Kademlia authority merely by being connected. **Read this as EXPOSURE, not only authority.** Stages 6-9 built each data-plane entry point to classify its caller — direct ingress, the GossipSub publisher check, `build_answer`'s trust check — so authority is already refused, and an implementer who checks only that will find the invariant apparently met. What is NOT met is the other half: `SubstrateBehaviour` installs `direct`, `broadcast`, `endpoints` and — since Stage 10 — `kad` on every connection uniformly, so once an infrastructure-only connection exists, that peer can advertise and open those substreams and be refused only after the request has been parsed and accounted. **Four protocols, not three**: Kademlia's authority check is the driver's `try_admit` data-plane trust requirement, so such a peer holds no routing seat, but it can still open the DHT substream and be answered — the same exposure, and an implementer working from a list of three would leave it in place. For as long as relay, AutoNAT and DCUtR were absent from the libp2p feature list, no infrastructure-only connection could be dialled *by one of those behaviours*, and no `/p2p-circuit` address could be dialled at all. **The feature list never guarded the DIALLED-or-RETAINED case in general**: `DialOrigin` lives in `interweave-transport-runtime`, which has no libp2p dependency, so a call site passing `AutonatProbe` would have retained an infrastructure-only connection with the features off. **It could always be ESTABLISHED**: neither gate denies at the established inbound hook, so such a peer's connection completes with the data-plane handlers installed and is closed only afterwards by the runtime's event loop — **three of the four**, since the test runs `SubstrateConfig::default()`, which leaves `kademlia: None`, so the `Toggle` installs a dummy handler and advertises nothing; a configured-kad variant would be needed to pin the fourth — `tests/connectivity/tests/advertised_protocol_set.rs` pins that, with no relay code involved, since an `InfrastructureSet` is ordinary configuration. **That is not yet this exposure.** Nothing was advertised in the window when the same test measured it — no Identify exchange completed before the close, because the refusal is pushed on the same `ConnectionEstablished` and closed in the same loop iteration — so handlers installed is not protocols spoken. **That emptiness is an observation, not an invariant**, and the test deliberately does not assert it: it is scheduler-dependent, and `transport/libp2p/CONNECTIVITY.md`'s matrix gives Identify a `yes` for this class, so asserting silence would pin the opposite of an accepted contract. (Mutating `authorizes_for` to retain the class does make the connection stay and the data-plane protocols this profile CONSTRUCTS appear — `direct` and `endpoints` in the steady state, `broadcast` in the first exchange only, and `kad` not at all, being unconfigured here — which is what the §14 exposure looks like when it is live. **The observer sees TWO Identify exchanges, and they differ** — instrumented and printed in order: the first carries all seven advertised names, the second carries four, the three `/meshsub/` having been REMOVED. So a retained infrastructure-only peer is told **every data-plane protocol this profile constructs** at least once — three of the four; a configured-kad profile would add the fourth, and nothing here measures that. The test's TIMEOUT MESSAGE prints the LAST exchange, because its `Received` arm records and continues, which is why that message reports four while the per-exchange notes above it show both. What triggers GossipSub's removal is not established and is not load-bearing here. **This sentence has now been wrong twice**: first "all seven" from reasoning about the advertised set, then "four, because registrations propagate late" from reasoning about a cause — refuted by the sibling test, which reads the FIRST exchange and does see all three `/meshsub/`. The figures above are read off an instrumented run.) THIS exposure is about a connection that is KEPT, which needs an origin outside `names_application_destination` — `RelayReservation` or `AutonatProbe`. **There are THREE routes to such an origin, and naming any one of them as *the* subject has now aimed this guard wrongly twice.** Retention is decided by `authorizes_for(class, origin)`, so any route supplying one reaches it: (1) a WRAPPED BEHAVIOUR whose classifier announces it — the intended route, where `OutboundAdmission`'s pending hook resolves the announcement and mints the ticket with no `attempt_dial` at all, and the route the feature list barred **for these three behaviours only** — not in general, since `Attributing<B>` is generic and other dialling behaviours were already compiled; (2) an `attempt_dial` CALL SITE passing it, which needs no behaviour anywhere and is how `RelayCircuit` is designed to arrive; (3) a relaxation of the INBOUND arm. CLAUDE.md §1 carries the same list. **Stage 11's features-on step compiled all three, so the argument from the feature list is spent** — what keeps a retained infrastructure-only connection impossible now is all three of the facts above holding at once: nothing constructs a behaviour that could be wrapped with a reachability classifier, no `attempt_dial` call site passes such an origin, and the inbound arm refuses this class. **Step 3 reaches routes 1 and 3 in one commit** — it constructs an AutoNAT client and must wrap it with a reachability classifier, and it must relax the inbound arm, because an AutoNAT v2 dial-back arrives as an inbound connection from the infrastructure-only server and the client has to serve `/libp2p/autonat/2/dial-back` on it. **No route may be reached before the restriction below lands.** The protocol set an infrastructure-only connection offers must be restricted at the connection, not merely answered at the request;
 - AutoNAT server dial-back candidate is literal IP, matches requester observed source IP, and rejects prohibited address classes;
 - statically configured infrastructure is preferred; Identify-learned relay/probe promotion remains explicit opt-in;
 - relayed pre-Noise accounting is charged to authenticated relay connection/PeerId plus global limits when original IP is unavailable;

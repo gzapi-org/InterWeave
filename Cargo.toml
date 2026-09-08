@@ -128,13 +128,65 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 # Stage 7 added GossipSub; Stage 10 added Kademlia — the first autonomous
 # behaviour, and it landed only AFTER the root gate learned to admit
 # behaviour-originated dials by policy, the order CLAUDE.md §3 requires.
-# AutoNAT, Relay and DCUtR remain absent
-# from the feature list rather than merely unused, so a stray `use` cannot
-# switch one on: CLAUDE.md §3 forbids turning on autonomous libp2p
-# behaviour and retrofitting admission policy later, and a feature that is
-# not compiled cannot be turned on by accident.
+# Stage 11 adds `autonat`, `relay` and `dcutr`, and it is the same order
+# again rather than an exception to it: dial attribution landed first
+# (step 1), then SPIKE-004's D1, D2 and D3 were fixed (step 2), and only
+# now is the code that can produce those dials compiled at all.
 #
-# `mdns` IS ALSO ABSENT, and for a different reason worth stating so the
+# THE ABSENCE OF THESE THREE WAS LOAD-BEARING UNTIL THIS COMMIT, and be
+# exact about WHAT it bore. It made these three behaviours
+# unconstructible, so none of THEM could originate a dial under a
+# reachability origin — which is narrower than "no behaviour-originated
+# dial under a reachability origin could exist", because nothing stopped
+# another compiled behaviour being wrapped with one.
+#
+# IT GUARDED ONE OF THE THREE ROUTES TO A RETAINED SUCH CONNECTION, and
+# this comment has now said both more and less than that. The routes are
+# enumerated in CLAUDE.md §1, and read them there rather than from a
+# paraphrase — paraphrasing that list is what went wrong in four
+# successive review rounds. In short: a wrapped behaviour whose
+# classifier announces a reachability origin, which the feature list
+# barred FOR THESE THREE BEHAVIOURS ONLY and not in general, since
+# `Attributing<B>` is generic and other dialling behaviours were already
+# compiled; an `attempt_dial` call site passing one, never guarded by it
+# — `DialOrigin` lives in `interweave-transport-runtime`, which has no
+# libp2p dependency; and a relaxation of the inbound arm, never guarded
+# by it either.
+#
+# And it did NOT make a `/p2p-circuit` address dialable. Compiling
+# `libp2p-relay` is not installing a relay transport: that needs
+# `.with_relay_client(...)` on the builder, which appears nowhere, so
+# `runtime/mod.rs` is still `with_tcp` alone and a circuit address is
+# exactly as undialable as before. What the absence removed was the
+# OPTION of installing one — a property of the builder, which must go on
+# being preserved.
+#
+# Nor was "established" ever impossible: such a connection is established
+# and then closed. That is a different state, and NOT yet §14's exposure
+# — nothing was advertised in it when measured, though that is an
+# observation rather than an invariant and the test does not assert it.
+# §14 is about a connection that is KEPT.
+# `an_infrastructure_only_peer_gets_a_connection_established_before_it_is_refused`
+# demonstrates it, and needs no relay code to do so. From here the guarantee is the gate and its tests, not the
+# feature list, and a rule about infrastructure-only peers that has no
+# test is now a rule about a reachable state.
+#
+# The test that replaces THIS clause is
+# `tests/connectivity/tests/advertised_protocol_set.rs`: it reads the
+# protocol set a default profile advertises, from a third-party Identify
+# observer over loopback, and asserts it exactly — so a behaviour
+# constructed that nobody configured fails it, PROVIDED that behaviour
+# advertises on a direct INBOUND connection — the observer dials, so an
+# outbound-only advertisement would be invisible too. Its own doc records what
+# that does and does not catch, measured by constructing each behaviour
+# in turn: relay server and autonat client are caught, a relay client is
+# caught either by panic or by the assertion depending on whether its
+# Transport was dropped, and DCUtR is invisible to any observer
+# on a direct connection because `libp2p-dcutr` registers its handler
+# only on a `/p2p-circuit` one.
+#
+# `mdns` IS ABSENT, and for a reason unlike any above — not stage order
+# but a dependency advisory — worth stating so the
 # next reader does not simply switch it on. Stage 9 tried: enabling it
 # pulls `libp2p-mdns 0.48`, which pins `hickory-proto 0.25.x`, which
 # carries RUSTSEC-2026-0118 (a DNSSEC validation loop that never
@@ -179,6 +231,26 @@ libp2p = { version = "0.56", default-features = false, features = [
     # does need is the trust class kept in sync, which is why an
     # infrastructure-only peer is blacklisted from the mesh.
     "gossipsub",
+    # Stage 11 (ADR-0035). The CLIENT roles are what this stage builds
+    # first, but the features are not role-split — `autonat` and `relay`
+    # compile their server halves too, which steps 4 and 6 own. Each
+    # originates
+    # autonomous dials — an AutoNAT probe, a reservation renewal, a hole
+    # punch — so all three arrive only now that the outbound gate
+    # attributes a dial to the behaviour that started it rather than
+    # assuming Kademlia, and now that the three ADR-0036 violations
+    # SPIKE-004 found in the admission path are fixed.
+    #
+    # COMPILED IS NOT CONSTRUCTED. None of the three has a field in
+    # `SubstrateBehaviour`, a constructor, or a configuration path — the
+    # code to build them is not written, so no profile advertises their
+    # protocols and none of their dials can exist. That is what lets the
+    # features land before the configuration that will drive them, and it
+    # is a stronger position than the `Toggle`-and-`None` shape `kad`
+    # has: a disabled behaviour is still a behaviour.
+    "autonat",
+    "relay",
+    "dcutr",
 ] }
 # The async runtime the Swarm is driven on. Bounded channels only (§6).
 tokio = { version = "1", default-features = false, features = [
@@ -245,9 +317,10 @@ overflow-checks = true
 # AutoNAT/Relay/DCUtR work this value authorizes may proceed. Its phase
 # B — the real-NAT matrix — has not run, so the stage cannot CLOSE, and
 # no production code may assume server-mode reachability evidence
-# exists. The verdict's findings bind rather than inform, and three of
-# them are live violations in already-shipped code that must be fixed
-# before the paths they govern are enabled: read
+# exists. The verdict's findings bind rather than inform. Three of them
+# were live violations in already-shipped code — D1, D2 and D3 — and all
+# three were fixed in step 2 (2026-09-04 and -09-05), before the paths
+# they govern were built rather than after: read
 # architecture/roadmap/SPIKES.md before extending the stage.
 status = "stage-11-connectivity"
 architecture_root = "architecture"

@@ -140,8 +140,10 @@ pub(super) fn attempt_dial(
 /// the correct class, since the pairing is a property of the ticket
 /// and would fail identically on every retry; the note is that the
 /// blast radius of a caller-side bug is a forgotten route, not a
-/// refused dial. Neither direction is reachable today -- no relay
-/// feature is compiled. Review finding on PR #74.
+/// refused dial. Neither direction is reachable today -- Stage 11
+/// compiled `relay`, but no relay transport is installed on the Swarm
+/// and nothing constructs a behaviour that supplies a circuit origin.
+/// Review finding on PR #74.
 pub(super) fn settle_undialable(
     manager: &mut ConnectionManager,
     undialable: UndialableAdmission,

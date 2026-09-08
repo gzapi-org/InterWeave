@@ -30,15 +30,27 @@
 //! order CLAUDE.md §3 requires; Stage 10 taught it to answer with
 //! policy rather than with a flat no.
 //!
-//! # What is absent, and why it is absent rather than merely unused
+//! # The feature list withholds no behaviour any more
 //!
-//! GossipSub, direct v2, Kademlia, AutoNAT, Circuit Relay and DCUtR are
-//! not in the `libp2p` feature list this crate compiles against. They
-//! cannot be switched on by a `use` statement or a stray builder call,
-//! because the code is not there. CLAUDE.md §3 forbids enabling
-//! autonomous libp2p behaviour and retrofitting admission policy
-//! afterwards, and the cheapest way to keep that promise is to not
-//! compile the behaviour.
+//! This section used to name GossipSub, direct v2, Kademlia, AutoNAT,
+//! Circuit Relay and DCUtR as absent from the `libp2p` feature list this
+//! crate compiles against — not merely unused, so none could be switched
+//! on by a `use` statement or a stray builder call, because the code was
+//! not there. That was the cheapest way to keep CLAUDE.md §3's promise
+//! that admission policy is never retrofitted, and each stage spent its
+//! entry from that list exactly once.
+//!
+//! **Stage 11 spent the last three.** All six are compiled now, so the
+//! promise is kept by the outbound gate, by the trust classification and
+//! by their tests, and by nothing else. Two consequences a reader should
+//! carry: a rule about an infrastructure-only peer is a rule about a
+//! state this build can now reach rather than a latent one, and a new
+//! behaviour added here is one nothing outside this crate prevents from
+//! dialling. `mdns` remains genuinely absent, for the dependency-advisory
+//! reason the root manifest states — and it is a `NetworkBehaviour`
+//! Stage 11 was given a deadline for, now arrived unmet. So does `dns`,
+//! which leaves a `/dns4` address `profile-config` validates undialable
+//! and then forgotten. Both are detailed in the crate manifest.
 //!
 //! # Nothing above this crate sees a libp2p type
 //!
@@ -75,7 +87,7 @@ pub mod refusals;
 pub mod runtime;
 
 pub use attribution::{Attributing, Classifier, DialAttribution, always};
-pub use behaviour::{IDENTIFY_PROTOCOL, SubstrateBehaviour};
+pub use behaviour::{IDENTIFY_PROTOCOL_VERSION, SubstrateBehaviour};
 pub use gated_swarm::{AdmittedDial, GatedSwarm};
 pub use outbound_gate::{AdmittedDials, OutboundAdmission};
 pub use preauth_gate::PreAuthAdmission;

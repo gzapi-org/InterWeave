@@ -40,11 +40,13 @@ hole-punch matrix passes") cannot be met from loopback.
 
 `libp2p = "=0.56.0"` — exact, with `Cargo.lock` committed beside it.
 The manifest's own feature array is `tcp`, `noise`, `yamux`,
-`identify`, `tokio`, `macros`, `ed25519` plus the three spike-only
-`autonat`, `relay`, `dcutr`; the production crate's remaining features
-(`kad`, `request-response`, `gossipsub`) arrive through the path
-dependency on `interweave-transport-libp2p`, which Cargo unions in. So
-the RESOLVED graph is the production set plus three, and the array in
+`identify`, `tokio`, `macros`, `ed25519` plus `autonat`, `relay`,
+`dcutr` — spike-only WHEN THIS RAN, and production's since Stage 11's
+features-on change; the production crate's other features (`kad`,
+`request-response`, `gossipsub`) arrive through the path dependency on
+`interweave-transport-libp2p`, which Cargo unions in. So the RESOLVED
+graph was then the production set plus three, and is now the production
+set exactly — and the array in
 the file is not — a distinction worth stating here, directly above the
 paragraph about feature unification, because a reader takes the array
 at face value otherwise. Most of what is recorded below is the
@@ -53,9 +55,11 @@ validates, whether a dial carries an address at the pending hook. A
 floating `0.56` resolves a later patch, and a result that cannot be
 rebuilt is not evidence.
 
-The harness is its own workspace (an empty `[workspace]` table). That is
-what keeps `autonat`, `relay` and `dcutr` off the production feature
-list: Cargo unifies features across one build of one workspace, so as a
+The harness is its own workspace (an empty `[workspace]` table). When
+this spike ran, that is what kept `autonat`, `relay` and `dcutr` off the
+production feature list — Stage 11 has since put all three on it, so
+this paragraph is the record of why the spike ran first, not a live
+constraint. The mechanism it describes is unchanged: Cargo unifies features across one build of one workspace, so as a
 member this harness would switch all three on inside
 `interweave-transport-libp2p` invisibly — nothing in the production
 crate would have changed.
@@ -116,7 +120,7 @@ subject**:
   two tests pinning it; the harness was wrong. Holding the manager is
   what let the control separate from the subject.
 
-`cargo run` exits non-zero if any required observation is false, so it
+`cargo run --locked` exits non-zero if any required observation is false, so it
 cannot report success while its own output disproves this file.
 
 ## Findings that constrain Stage 11
@@ -424,9 +428,10 @@ The relayed pair escapes it. R9.4 measures what is left: the global
 `max_pending_total` still holds at 8 of 32, so this is the bucket's
 granularity failing, not the absence of any bound.
 
-**Not reachable in a shipped build today** — no relay feature is
-compiled, so no relayed inbound can arrive — and live the moment Phase 4
-lands. **The same is true of D1 and D2**, and an earlier version of this
+**Not reachable in a shipped build** — when this spike ran no relay
+feature was compiled, and since Stage 11 compiled one, nothing constructs
+the relay client — so no relayed inbound can arrive, and this goes live
+the moment that constructor lands. **The same is true of D1 and D2**, and an earlier version of this
 paragraph implied otherwise: `grep` over `crates/` shows
 `DialOrigin::DcutrHolePunch` and `DialOrigin::RelayCircuit` appear only
 in the enum definition and in `#[cfg(test)]` blocks, so nothing in
@@ -510,8 +515,21 @@ states.
 
 **So the protocol-isolation correction is NOT unlocked by this
 verdict.** It needs a node carrying both the data-plane behaviours and a
-real infrastructure-only connection, which is phase-B-shaped work on
-`SubstrateBehaviour` rather than on this harness. What phase A
+real infrastructure-only connection, which is work on
+`SubstrateBehaviour` rather than on this harness.
+
+**Half of that has since landed, and NOT in phase B** — an earlier
+version of this paragraph called it phase-B-shaped, which was wrong.
+Stage 11's `tests/connectivity/tests/advertised_protocol_set.rs` runs a
+node carrying THREE of the four data-plane behaviours beside a real
+infrastructure-only connection, over loopback, in CI, with no relay code
+at all: an `InfrastructureSet` is ordinary configuration. Three, not
+four, because it uses `SubstrateConfig::default()`, which leaves
+`kademlia: None` — so the `Toggle` installs a dummy handler and
+advertises nothing, and a configured-kad variant is still owed. What that
+connection is not is RETAINED — it is closed in the same loop iteration
+as `ConnectionEstablished` — so the correction still owes the retained
+case, and that is what remains outstanding here. What phase A
 establishes is narrower and still useful: the control protocols an
 infrastructure peer advertises to US, which is the list a restriction
 must leave intact.
@@ -841,10 +859,12 @@ same shape a Stage 11 test could take.
 **Nothing here runs in CI, and the phrase "pinned so a fix fails here"
 has to be read against that.** The harness is its own workspace root —
 deliberately, because Cargo unifies features across one workspace and
-membership would switch `autonat`, `relay` and `dcutr` on inside
-`interweave-transport-libp2p`. The cost is that `cargo xtask ci`, the
+membership would have switched `autonat`, `relay` and `dcutr` on inside
+`interweave-transport-libp2p` before the stage was ready for them.
+Stage 11 has since enabled all three there, so that particular risk is
+spent. The cost is that `cargo xtask ci`, the
 `rust` job and `cargo deny` never touch this directory: nothing re-runs
-`cargo run`, and nothing even proves these files still compile against
+`cargo run --locked`, and nothing even proves these files still compile against
 the production crates they path-depend on. A refactor of
 `OutboundAdmission::new` or `PreAuthLimitsBuilder` breaks the harness
 with no signal at all.
@@ -920,7 +940,7 @@ invisible.
 
 ```
 cd spikes/spike-004/harness
-cargo run
+cargo run --locked
 ```
 
 Exits 0 only when every required observation held — **86 of them**, and

@@ -5,14 +5,24 @@
 # member. Nothing depends on it, and its results reach production as
 # permanent tests rather than as code (CLAUDE.md §4, spikes/README.md).
 #
-# Staying outside the workspace is what keeps `kad` off the production
+# Staying outside the workspace is what KEPT `kad` off the production
 # feature list. Cargo unifies features across one build of one
-# workspace, so as a member this harness would switch Kademlia on inside
-# `interweave-transport-libp2p` — undoing CLAUDE.md §3's "absent from
-# the feature list rather than merely unused", and doing it invisibly,
-# because nothing in the production crate would have changed. That rule
-# is the whole reason this spike runs BEFORE Stage 10 rather than during
-# it.
+# workspace, so as a member this harness would have switched Kademlia on
+# inside `interweave-transport-libp2p` — undoing CLAUDE.md §3's "absent
+# from the feature list rather than merely unused", and doing it
+# invisibly, because nothing in the production crate would have changed.
+# That rule is the whole reason this spike ran BEFORE Stage 10 rather
+# than during it.
+#
+# 2026-09-08: `kad` has been production's since Stage 10 and Stage 11
+# added `autonat`, `relay` and `dcutr`, so nothing is being held back
+# here any more. The dependency now runs the OTHER way — this harness
+# path-depends on the production crate, which declares
+# `libp2p = { workspace = true }` and so resolves against the ROOT
+# manifest wherever it is built, including from inside this workspace.
+# (Inheritance, not feature unification, which does not cross a
+# workspace boundary.) That is why the committed lock had to be
+# regenerated when those three landed.
 #
 # An EMPTY workspace table is what keeps it out: the package is its own
 # workspace root, so it is never built by `cargo xtask ci`, never enters

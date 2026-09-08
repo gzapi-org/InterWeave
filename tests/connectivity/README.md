@@ -1,10 +1,15 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # `tests/connectivity`
 
-**Current status:** Stage 5, active workspace member.
+**Current status:** Stage 11, active workspace member.
 
-The Stage 5 exit gate: root connection and dial admission. Test-only —
+Root connection and dial admission, over real sockets. Test-only —
 nothing depends on this package.
+
+Opened for the Stage 5 exit gate and no longer only that: Stage 11 added
+`advertised_protocol_set.rs`, which pins what a default profile offers on
+the wire now that the libp2p feature list no longer withholds the
+connectivity behaviours.
 
 ## Why these run against a real Swarm
 
@@ -36,9 +41,19 @@ property. `GatedSwarm` owns the `Swarm` privately and `dial` takes an
 which only `PolicySnapshot::admit` issues. A call site that skips
 admission does not fail a test — it fails to compile.
 
-**The behaviour-originated dial path is not yet closed**, and no test
-here should be read as claiming it is. Stage 4's behaviour set is TCP,
-Noise, Yamux and Identify, none of which dials, so there is nothing to
-gate; the hook is `NetworkBehaviour::handle_pending_outbound_connection`
-and it must require the same ticket before Kademlia, AutoNAT, Relay or
-DCUtR is enabled (CLAUDE.md §3).
+**The behaviour-originated dial path was not yet closed when this
+package opened**, and no Stage 5 test here should be read as claiming it
+was. Stage 4's behaviour set was TCP, Noise, Yamux and Identify, none of
+which dials, so there was nothing to gate; the hook is
+`NetworkBehaviour::handle_pending_outbound_connection` and it had to
+require the same ticket before Kademlia, AutoNAT, Relay or DCUtR was
+enabled (CLAUDE.md §3).
+
+**That precondition has since been met, which is why those features are
+now enabled.** Stage 10 taught the hook to admit a behaviour-originated
+dial by root policy; Stage 11 step 1 replaced the "every unticketed dial
+is Kademlia's" assumption with real per-dial attribution, so an
+unattributed dial is refused rather than misclassified
+(`outbound_gate.rs::a_dial_no_behaviour_claimed_is_refused`). Only then
+did `autonat`, `relay` and `dcutr` enter the feature list — and they
+construct nothing yet.

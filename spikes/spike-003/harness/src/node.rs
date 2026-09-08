@@ -23,9 +23,16 @@ use interweave_transport_runtime::{
 };
 use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 
-/// The identify protocol this spike advertises, so a node's Kademlia
+/// The identify `protocol_version` this spike advertises, so a node's Kademlia
 /// mode is observable the way the design says it must be: through an
 /// authenticated Identify exchange, not by assumption.
+// NOT a protocol name: `identify::Config::new` takes a
+// `protocol_version`, metadata inside the payload, while the negotiated
+// names are libp2p's own `/ipfs/id/1.0.0` and `/ipfs/id/push/1.0.0`.
+// Production carried the same misnaming until Stage 11 renamed it
+// `IDENTIFY_PROTOCOL_VERSION`; this is the last copy, kept spelled the
+// same as when the spike ran and annotated rather than renamed, because
+// a spike's source is a record.
 const IDENTIFY_PROTOCOL: &str = "/interweave-spike/id/1.0.0";
 
 #[derive(NetworkBehaviour)]

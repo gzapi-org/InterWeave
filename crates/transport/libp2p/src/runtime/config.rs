@@ -295,12 +295,6 @@ pub enum SubstrateError {
     Identity(String),
     /// A Kademlia setting the driver cannot honour.
     Kademlia(&'static str),
-    /// A [`SubstrateConfig`] value outside its permitted range.
-    ///
-    /// Returned rather than panicked. `mpsc::channel(0)` aborts the
-    /// process, and this is a transport daemon whose lint policy treats a
-    /// reachable panic as a defect — a configuration mistake must not be
-    /// the thing that takes it down.
     /// A profile configuration the canonical validator refused.
     ///
     /// Carries every broken rule rather than the first: an operator
@@ -308,6 +302,11 @@ pub enum SubstrateError {
     /// apart.
     InvalidProfile(Vec<String>),
     /// A [`SubstrateConfig`] value outside its permitted range.
+    ///
+    /// Returned rather than panicked. `mpsc::channel(0)` aborts the
+    /// process, and this is a transport daemon whose lint policy treats a
+    /// reachable panic as a defect — a configuration mistake must not be
+    /// the thing that takes it down.
     InvalidConfig {
         /// Which field.
         field: &'static str,

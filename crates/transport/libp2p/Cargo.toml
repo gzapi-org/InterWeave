@@ -6,19 +6,45 @@
 #
 # TCP, Noise, Yamux and Identify from Stage 4; direct v2 over
 # request-response from Stage 6; signed GossipSub from Stage 7; Kademlia
-# from Stage 10, peer routing only. No AutoNAT, no Relay, no DCUtR — and
-# those three are absent from the workspace feature list rather than
-# merely unused, so a stray `use` cannot switch one on. CLAUDE.md §3
-# forbids enabling autonomous libp2p behaviour and retrofitting admission
-# policy afterwards; a behaviour that is not compiled cannot be enabled by
-# accident.
+# from Stage 10, peer routing only; AutoNAT v2, Circuit Relay v2 and
+# DCUtR from Stage 11. Client roles are what this stage builds first;
+# the features are not role-split, so the AutoNAT and Relay server
+# halves are compiled too and later steps own them.
+#
+# THE FEATURE LIST WITHHOLDS NO BEHAVIOUR THIS STAGE BUILDS. Two entries
+# are still absent, and neither is merely forgotten.
+#
+# `mdns` is STAGE 11'S OWN OBLIGATION, not an unowned gap.
+# `contracts/DISCOVERY-CONFORMANCE.md`'s 2026-08-30 amendment defers the
+# mDNS multicast tests to this stage by name — "Stage 11 owns it because
+# that is where the libp2p feature set is next revisited under SPIKE-004,
+# and where the dependency graph is re-resolved anyway" — and calls that
+# a deadline rather than a preference. This change IS that revisit, and
+# `mdns` still cannot be enabled: RUSTSEC-2026-0118 and -0119 are
+# unresolved inside the `libp2p-mdns 0.48` line, so §8's dependency gate
+# refuses it. It is a `NetworkBehaviour` like any other here; what blocks
+# it is an advisory, and the deadline it was given has arrived unmet.
+#
+# `dns` is absent with no stage owning it at all, and that leaves an
+# accepted contract unimplemented: `profile-config` validates `/dns4` and
+# `/dns6`, and `discovery/providers/static-bootstrap.md` says resolution
+# happens on the dial path — but with no `dns` transport the dial fails
+# `MultiaddrNotSupported`, which is classified structural, so the
+# configured address is FORGOTTEN rather than retried. Recorded in the
+# plan's Stage 11 section; it predates this change.
+#
+# Every stage before this
+# one could say a behaviour was absent from the workspace features rather
+# than merely unused, so a stray `use` could not switch it on and
+# CLAUDE.md §3's promise was kept by the compiler. From Stage 11 it is
+# kept by the outbound gate, the trust classification and their tests —
+# which is why attribution (step 1) and SPIKE-004's D1/D2/D3 (step 2) both
+# landed before the manifest changed.
 #
 # This paragraph said "No Kademlia" for a stage and a half after Stage 10
 # added `kad` to the workspace features and built a driver on it. It is
 # the file a reader consults to check exactly the claim it was getting
-# wrong, which is why the correction is worth a commit of its own:
-# SPIKE-004's D1, D2 and D3 are all latent BECAUSE relay and dcutr are
-# uncompiled, and this is the evidence for that.
+# wrong.
 #
 # This header claimed "no direct v2" for a full stage after direct v2
 # shipped, which is why the rule about prose describing changed behaviour

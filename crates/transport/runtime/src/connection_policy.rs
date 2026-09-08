@@ -140,7 +140,8 @@ impl DialOrigin {
     /// names the far end of the path it is opening. **Both were
     /// admitted for an infrastructure-only peer until Stage 11 step 2**
     /// — SPIKE-004's D1 and D2, latent because nothing constructed
-    /// either origin and no relay or DCUtR feature was compiled.
+    /// either origin and, until Stage 11, no relay or DCUtR feature was
+    /// compiled.
     /// Neither was ever reachable in a shipped build, and both are
     /// refused now, before the paths they govern are built.
     ///

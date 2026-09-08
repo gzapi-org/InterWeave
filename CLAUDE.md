@@ -32,6 +32,75 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   violations sitting in already-shipped code, none ever reachable in a
   shipped build**, and **step 2 fixed all three (D1 and D2 on
   2026-09-04, D3 on 2026-09-05); the harness reports zero divergences.**
+  **`autonat`, `relay` and `dcutr` are now IN the workspace libp2p
+  features**, added after step 2 in a change that constructs nothing —
+  no field in `SubstrateBehaviour`, no constructor, no configuration
+  path. That ends the era in which §3's promise was kept by the
+  compiler: a behaviour can now be switched on by writing code rather
+  than by editing a manifest, so from here the guarantee is the outbound
+  gate, the trust classification and their tests. **Two
+  infrastructure-only states must not be confused.** An inbound connection
+  from such a peer has ALWAYS been ESTABLISHED and then closed — neither
+  gate denies at the established inbound hook — so it needs no relay
+  code and is reachable today through ordinary configuration;
+  `tests/connectivity/tests/advertised_protocol_set.rs` pins it. **What
+  is advertised in that window is NOT pinned and must not be relied on**:
+  it measured empty, five runs out of five, but that rests on the
+  subject's handler not getting CPU before the close takes effect, and
+  `transport/libp2p/CONNECTIVITY.md`'s matrix gives Identify a `yes` for
+  this class anyway. The test records what it sees there and asserts only
+  the establish-then-close. A connection DIALLED or
+  RETAINED as infrastructure-only still cannot exist. There are
+  **three** routes to one, none of them currently reached. "Reached" is
+  deliberately weaker than "blocked": route 2 is a grep and not a guard,
+  as `behaviour.rs` says in as many words. **Read the list below rather
+  than any summary of it** — including this one: which route is which has
+  been written down wrong in both directions, more than once.
+  Retention is decided by `authorizes_for(class, origin)`, so any route
+  that supplies `RelayReservation` or `AutonatProbe` reaches it.
+
+  1. **A WRAPPED BEHAVIOUR whose classifier announces one.** The
+     intended route for both: `Attributing` announces the origin from
+     the behaviour's own `poll`, and `OutboundAdmission`'s pending hook
+     resolves it, mints the ticket and deposits it — no `attempt_dial`
+     anywhere. **The feature list barred this route FOR THESE THREE
+     BEHAVIOURS ONLY** — you cannot wrap what you cannot construct — and
+     not in general: `Attributing<B>` is generic over every
+     `NetworkBehaviour` and `always` is exported from the crate root, so
+     wrapping an already-compiled dialling behaviour (`request-response`
+     since Stage 6, `kad` since Stage 10) with `always(AutonatProbe)`
+     would have reached retention with the connectivity features off.
+     Enabling them removed the narrow barrier; nothing constructs the
+     three, and that is now all that stands here.
+  2. **AN `attempt_dial` CALL SITE passing one.** `attempt_dial` takes
+     an origin from any in-crate caller, so one line suffices with no
+     behaviour anywhere. The feature list never guarded this, and nothing
+     passes either reachability origin today. (The command path is how
+     `RelayCircuit` is designed to arrive, since the transport rather
+     than a behaviour dials a circuit — that is the same MECHANISM, but
+     `RelayCircuit` names an application destination and so cannot
+     produce a retained infrastructure-only connection at all.)
+  3. **A RELAXATION OF THE INBOUND ARM.** `dialing.rs` retains an
+     inbound connection only if `ConnectionManager::authorizes`, which
+     asks under `DialOrigin::Manual` and so refuses this class outright.
+     The feature list never guarded this either.
+
+  **Step 3 reaches routes 1 and 3, and nothing may land before the
+  restriction below does.** It constructs an AutoNAT client and must
+  wrap it with a reachability classifier (route 1), and must relax the
+  inbound arm (route 3) because an AutoNAT v2 dial-back arrives as an
+  inbound connection from the infrastructure-only server and the CLIENT
+  has to serve `/libp2p/autonat/2/dial-back` on it. **A guard written as
+  a grep over `attempt_dial` call sites would see none of that.** Do not
+  read the feature change as evidence those paths are live. The exposure
+  `BOTTOM-UP-IMPLEMENTATION-PLAN.md` §14 names — every data-plane
+  behaviour installed uniformly on every connection — is about the
+  RETAINED case, and it is now one commit away rather than one stage.
+  **No route above may be reached before `BOTTOM-UP-IMPLEMENTATION-PLAN.md`
+  §14's protocol-isolation restriction lands**; the owner ruled
+  on 2026-09-07 that the connectivity behaviours ship gated off and the
+  `ClassGated<B>` fix lands first. The plan's Stage 11 section carries
+  the same ruling, because that is where the construction order lives.
   `DcutrHolePunch` (D1) and `RelayCircuit` (D2) were both admitted for
   an infrastructure-only peer; the admission predicate — renamed
   `names_application_destination` in the same commit, because the old
@@ -64,7 +133,7 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
 - Stage 10 closed Kademlia, activating `crates/api/kademlia-control-api` and `crates/discovery/kademlia` with the Swarm-owned driver in `crates/transport/libp2p`; Stage 9 activated `crates/discovery/{static,cache,mdns}`. The Stage-1 contract crates under `crates/api/` remain types and validation only — no I/O, no runtime, no backend — and the Stage-2 crates remain pure state machines.
 - **Stage 10's exit gate was AMENDED as part of closing it, and the amendment is the part to read.** The first clause bundled a build capability with a shipping decision — "standard build supports Kademlia and configured entries default on" — and no test in the stage could reach the second half, so the gate was one the stage could never pass. Shipping configured entries default-enabled is now stated where the decision lives: ADR-0034 §7's v1 release gate, blocked on **Stage 12** composition (nothing constructs a provider, so a default has no site to be expressed at) and on **SPIKE-004**. **Closing Stage 10 cleared neither, and no build may ship the default on until both land.** The `Met.` block also records that the only place the control port's two halves have ever run against each other is `tests/kademlia/tests/overlay_health.rs`, and what that test does not prove.
 - **Stage 10 had a second prerequisite beside SPIKE-003 — the capability-observation mapping — and it is CLOSED (2026-08-30).** Both are closed; neither blocks the stage. The mapping is `kademlia-integration.md` §7: a stored observation is `(protocol_family, wire_major, network_hash, role)` while a `ProtocolObservation` carries one `protocol_id`, and the four are encoded AS the derived server protocol string `/interweave/kad/<wire_major>.0.0/<network_hash>` — `role = server` implied by presence, minor and patch always zero. `PeerCache::candidates` fills the field and `add_hint` parses the exact grammar back, both round-tripped against the frozen namespace fixture. What is worth carrying forward is the reason the deferral was taken seriously: a targeted lookup built on an empty observation set does not fail loudly, it reads as "no peer supports this" and silently degrades to no targeting.
-- **SPIKE-003 is closed (2026-08-30): PASS FOR THE STAGE, and it does NOT close ADR-0034's v1 release gate** — server-mode reachability evidence is not consumed (AutoNAT and Relay are absent from the feature list) and single-path capture is not shown to be reduced (measured against controls; no capture occurred, so the comparison cannot speak for the option). Implementing Stage 10 is unlocked; shipping configured entries default-enabled is not. Its findings bind the stage rather than merely informing it; the record is `spikes/spike-003/README.md` and the verdict is in `architecture/roadmap/SPIKES.md`. The one that changes the ORDER of the work: **Stage 10 cannot begin by enabling the feature.** The production `OutboundAdmission` refuses every dial carrying no root admission ticket, and every Kademlia query dial carries none — so turning `kad` on without first extending the gate to admit a behaviour-originated dial *through* `PolicySnapshot::admit` under `DialOrigin::KademliaQuery` yields a subsystem whose every query dies at the first hop it lacks a connection for, silently. SPIKE-003 said that refusal "surfaces as an ordinary dial failure"; **SPIKE-004 measured that it surfaces as nothing at all** — the Swarm discards the denial of a behaviour-originated dial, so there is no `Dialing` and no `OutgoingConnectionError`, and only the originating behaviour is told. Do not build on downstream telemetry that does not exist: the gate must record its own refusals. Seventeen findings in total, five saying the gate cannot be written the obvious way and three naming API changes the production crates need. Two that a reader of the design would not predict: a routing insertion starts one query nobody asked for and it dials, so policy installed after seeding is installed after the dial it meant to govern; and under `BucketInserts::Manual` a seed node routes NOBODY, because inbound connections insert nothing — the admission pipeline in `kademlia-integration.md` §7 reads as an outbound story and a bootstrap node lives on the other direction. What the spike did NOT establish is stated in its record and must not be read out of its silence, above all that **server-mode reachability evidence is not validated**: AutoNAT and Relay are absent from the feature list, so SPIKE-004 is where that arrives.
+- **SPIKE-003 is closed (2026-08-30): PASS FOR THE STAGE, and it does NOT close ADR-0034's v1 release gate** — server-mode reachability evidence is not consumed (AutoNAT and Relay were absent from the feature list when it ran; Stage 11 has since compiled both, which changes nothing about what SPIKE-003 established) and single-path capture is not shown to be reduced (measured against controls; no capture occurred, so the comparison cannot speak for the option). Implementing Stage 10 is unlocked; shipping configured entries default-enabled is not. Its findings bind the stage rather than merely informing it; the record is `spikes/spike-003/README.md` and the verdict is in `architecture/roadmap/SPIKES.md`. The one that changes the ORDER of the work: **Stage 10 cannot begin by enabling the feature.** The production `OutboundAdmission` refuses every dial carrying no root admission ticket, and every Kademlia query dial carries none — so turning `kad` on without first extending the gate to admit a behaviour-originated dial *through* `PolicySnapshot::admit` under `DialOrigin::KademliaQuery` yields a subsystem whose every query dies at the first hop it lacks a connection for, silently. SPIKE-003 said that refusal "surfaces as an ordinary dial failure"; **SPIKE-004 measured that it surfaces as nothing at all** — the Swarm discards the denial of a behaviour-originated dial, so there is no `Dialing` and no `OutgoingConnectionError`, and only the originating behaviour is told. Do not build on downstream telemetry that does not exist: the gate must record its own refusals. Seventeen findings in total, five saying the gate cannot be written the obvious way and three naming API changes the production crates need. Two that a reader of the design would not predict: a routing insertion starts one query nobody asked for and it dials, so policy installed after seeding is installed after the dial it meant to govern; and under `BucketInserts::Manual` a seed node routes NOBODY, because inbound connections insert nothing — the admission pipeline in `kademlia-integration.md` §7 reads as an outbound story and a bootstrap node lives on the other direction. What the spike did NOT establish is stated in its record and must not be read out of its silence, above all that **server-mode reachability evidence is not validated**: AutoNAT and Relay were absent from the feature list, so SPIKE-004 is where that arrives.
 - The toolchain is pinned in `rust-toolchain.toml`; edition, MSRV, lints, shared dependency versions, and the release profile are declared once in the root `Cargo.toml` and inherited.
 - Production Rust exists and grows one stage at a time; `apps/` and `packaging/` are still empty, so there is no binary, installer, or service unit yet.
 - Display name is **InterWeave**. Machine/wire namespace is lowercase `interweave` per ADR-0047.

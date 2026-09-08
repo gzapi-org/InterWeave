@@ -10,7 +10,7 @@ Thirteen findings change how Stage 10 must be written, one of which says Stage 1
 
 **NOT unlocked:** ADR-0034 makes SPIKE-003 a *v1 release gate* for shipping configured Kademlia entries default-enabled. Two required items are unmet, so that gate stays open:
 
-- **Server-mode reachability evidence is not consumed.** The design requires AutoNAT-verified direct reachability or an active relay reservation before a node advertises server mode. AutoNAT and Relay are absent from the libp2p feature list; SPIKE-004 is where they arrive. A node here advertises server mode because it was configured to.
+- **Server-mode reachability evidence is not consumed.** The design requires AutoNAT-verified direct reachability or an active relay reservation before a node advertises server mode. AutoNAT and Relay were absent from the libp2p feature list when this ran; SPIKE-004 is where they arrive. A node here advertises server mode because it was configured to.
 - **Single-path capture is not shown to be reduced.** K24 measures it against controls — one seed versus three, `disjoint_paths` off versus on, nine routers of which two know the target, `parallelism` 3 so a walk cannot contact them all at once. **No capture was observed at all**: the single-seed asker reached the target too, so the topology cannot distinguish the configurations, and an absence of difference is not evidence for the option. K16 says the same about path width — five requests against five.
 
 Neither is a failure of the design; both are questions this harness cannot pose. Recording PASS without naming them would have closed a release gate on evidence that does not exist.
@@ -19,7 +19,7 @@ Authoritative objective, evidence requirements, and decision gate live in [`arch
 
 Do not treat the experiment in [`harness/`](./harness) as production implementation. It is deliberately outside the workspace — an empty `[workspace]` table in its manifest — so it cannot be built by `cargo xtask ci`, cannot enter the root `Cargo.lock`, and cannot become a production dependency by a stray `path =`.
 
-**That isolation is what keeps `kad` off the production feature list.** Cargo unifies features across one build of one workspace, so as a member this harness would switch Kademlia on inside `interweave-transport-libp2p` — undoing CLAUDE.md §3's "absent from the feature list rather than merely unused", and doing it with nothing in the production crate having changed. That rule is the whole reason this spike runs *before* Stage 10 rather than during it.
+**That isolation is what KEPT `kad` off the production feature list.** Cargo unifies features across one build of one workspace, so as a member this harness would have switched Kademlia on inside `interweave-transport-libp2p` — undoing CLAUDE.md §3's "absent from the feature list rather than merely unused", and doing it with nothing in the production crate having changed. That rule is the whole reason this spike ran *before* Stage 10 rather than during it. Stage 10 has since put `kad` on that list and Stage 11 added `autonat`, `relay` and `dcutr`, so the isolation now protects nothing in that direction — and **the dependency runs the other way instead**: this harness path-depends on the production crate, which declares `libp2p = { workspace = true }` — resolved against the ROOT manifest wherever that crate is built, including from inside this workspace. So every feature the root enables is compiled here too, whether the spike measured it or not. (Workspace-dependency inheritance, not feature unification, which does not cross a workspace boundary.)
 
 ## What was pinned
 
@@ -29,7 +29,7 @@ libp2p =0.56.0   features: tcp, noise, yamux, identify, tokio, macros,
 tokio  =1.53.1   futures =0.3.34   sha2 =0.10.9
 ```
 
-Every version is the one the root `Cargo.lock` resolves; `kad` is the only spike-only *feature*. The lock is committed, because half of what is recorded below is `libp2p-kad`'s own behaviour — an implicit bootstrap on routing insertion, protocol withdrawal on a mode change, what `BucketInserts::Manual` does and does not do — and every one of those is a patch-release-visible detail that Stage 10 is built on.
+Every version is the one the root `Cargo.lock` resolves. `kad` was the only spike-only *feature* when this ran; it is production's since Stage 10, and the harness now also compiles `autonat`, `relay` and `dcutr` because the root manifest enables them. **None of the three was measured here** — they entered the graph after the fact, and the committed lock was regenerated when they did so that `--locked` keeps working. That regeneration added them and `interweave-kademlia-control-api`, missing since Stage 10, plus three dependency edges on `interweave-transport-libp2p` (`interweave-discovery-api`, `interweave-kademlia-control-api`, `sha2`) — so **this lock did not resolve under `--locked` before Stage 11 either**, and the features-on change added a third reason rather than the first. It changed no existing version, so the graph this evidence describes is unchanged where it matters. The lock is committed, because half of what is recorded below is `libp2p-kad`'s own behaviour — an implicit bootstrap on routing insertion, protocol withdrawal on a mode change, what `BucketInserts::Manual` does and does not do — and every one of those is a patch-release-visible detail that Stage 10 is built on.
 
 The harness uses the **production dial gate and the production connection policy by path**: `interweave-transport-libp2p`, `interweave-transport-runtime`, `interweave-transport-api`, `interweave-trust-api`. The dependency runs spike → product, which is the direction CLAUDE.md §4 permits. Measuring a copy of the gate would have measured a copy.
 
@@ -58,7 +58,7 @@ It also handles the ticket the way the runtime must, which is finding **F8**: a 
 
 ## What was observed
 
-202 assertions across 29 experiments, consecutive clean runs. The harness exits non-zero when any required observation is false, so `cargo run` cannot report success while its own output disproves the record.
+202 assertions across 29 experiments, consecutive clean runs. The harness exits non-zero when any required observation is false, so `cargo run --locked` cannot report success while its own output disproves the record.
 
 **Namespace (K1).** The published golden vector reproduces exactly: `network_id: example-private-network` → `ssbtblqj7mexczivog5qfbfjvi` → `/interweave/kad/1.0.0/ssbtblqj7mexczivog5qfbfjvi`. The derivation is implemented from the specification text rather than from a shared helper, so a derivation that merely agrees with itself could not pass. The 26-character unpadded base32 tag is a valid `libp2p::StreamProtocol`, and the `^[a-z0-9][a-z0-9._-]{0,63}$` grammar accepts and refuses what the spec says it should.
 
@@ -172,7 +172,7 @@ These are the things this spike did **not** establish, recorded so no future rea
 - **No adversary, and disjoint paths is not shown to do anything.** K16 measures query path **width** against a disabled control and finds no difference at six nodes; K24 measures single-path **capture** against controls at nine routers with `parallelism` 3, and finds no capture to reduce — a single-seed asker reached the target as reliably as a three-seed one. So the option is shown to be configurable and harmless, and nothing more. The weakest adversary K24 models is a router that truthfully does not know the target; nothing here models one that lies, and no claim about Byzantine resistance is made or implied.
 - **No hostile *protocol* peer.** K8, K10 and K18 model a peer that returns unauthorized peers, writes records, and hands over dead addresses. None models a peer that violates the Kademlia wire format itself.
 - **One machine, loopback only.** No NAT, no latency, no loss, no interface change. The twenty-node convergence figure is a convergence *shape*, not a deployment number.
-- **Server-mode reachability evidence is not consumed.** The design requires AutoNAT-verified direct reachability or an active relay reservation as strong evidence before a node advertises server mode. AutoNAT and Relay are absent from the feature list — SPIKE-004 is where they arrive — so this spike **cannot** validate that rule, and Stage 10 must not treat it as validated. A node here advertises server mode because it was configured to.
+- **Server-mode reachability evidence is not consumed.** The design requires AutoNAT-verified direct reachability or an active relay reservation as strong evidence before a node advertises server mode. AutoNAT and Relay were absent from the feature list when this ran — SPIKE-004 is where they arrive — so this spike **cannot** validate that rule, and Stage 10 must not treat it as validated. A node here advertises server mode because it was configured to.
 - **The exploration rules are validated as logic, not as deployment behaviour.** K12 exercises the state machine over synthetic rounds. Whether three no-progress rounds is the right threshold on a real network is not a question a five-node loopback topology can answer.
 - **`PolicyAdmit` is a prototype.** It demonstrates that the production admission *can* decide a behaviour dial, that its answers reach the library correctly, and that both ceilings bind when the ticket is settled properly. It is not the production gate, has not been reviewed as one, and Stage 10 owns writing it.
 - **Per-class dial attribution is exact only for one class at a time.** F13 is a limit on any implementation, not on this harness: with two classes in flight the honest answer is the set, and K23 asserts the set rather than picking one.
@@ -184,12 +184,12 @@ These are the things this spike did **not** establish, recorded so no future rea
 
 ```
 cd spikes/spike-003/harness
-cargo run
+cargo run --locked
 ```
 
 Around six minutes, mostly waiting on real socket timeouts and query settling. Exit code 0 means every required observation held; non-zero prints which did not.
 
-Passing a single experiment id — `cargo run -- K14` — runs only that one, for iterating on a failure without paying the whole set. An id that matches nothing **exits 2** and says so: selecting no experiment, running no check, and printing "all observations held" was a false green of exactly the kind this harness exists to refuse, in the harness itself. The success line now names how many experiments and checks actually ran.
+`--locked` is part of the command rather than a suggestion: this lock is committed BECAUSE the evidence is partly about the library's own behaviour, and a plain `cargo run` silently rewrites it when the root manifest changes — which is exactly what Stage 11's features-on change did, undetected until review. Passing a single experiment id — `cargo run --locked -- K14` — runs only that one, for iterating on a failure without paying the whole set. An id that matches nothing **exits 2** and says so: selecting no experiment, running no check, and printing "all observations held" was a false green of exactly the kind this harness exists to refuse, in the harness itself. The success line now names how many experiments and checks actually ran.
 
 Three mutations confirm the assertions are load-bearing rather than agreeing with the code for free:
 

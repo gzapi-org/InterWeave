@@ -54,11 +54,31 @@ pub const DIRECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// holds, and a slow one is a slow peer rather than a slow decision.
 const ENDPOINTS_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The Identify protocol name this profile advertises.
+/// The `protocol_version` string this profile puts in its Identify
+/// payload.
+///
+/// **Not a protocol name, despite looking exactly like one.**
+/// `identify::Config::new` takes a `protocol_version`, which travels
+/// inside the Identify payload as metadata a peer may read; the
+/// protocols actually negotiated are libp2p's own hardcoded
+/// `/ipfs/id/1.0.0` and `/ipfs/id/push/1.0.0`
+/// (`libp2p-identify-0.47.0` `protocol.rs:35,37`). Setting this changes
+/// what a peer is TOLD, never what is spoken, and this node advertises
+/// no protocol under the `interweave` namespace for Identify.
+///
+/// This constant was called `IDENTIFY_PROTOCOL` and documented as "the
+/// Identify protocol name this profile advertises" from Stage 4 until
+/// Stage 11. Nothing was ever wrong with the CODE — every use passes it
+/// where a `protocol_version` belongs, and `two_peers.rs` reads it back
+/// off the `Identified` event's `protocol_version` field. Only the name
+/// and the sentence were wrong, and they were wrong in the direction
+/// that costs something: a test written from them asserted
+/// `/interweave/id/1.0.0` in the advertised protocol set, where it has
+/// never appeared.
 ///
 /// Namespaced under `interweave` per ADR-0047, and versioned so a future
 /// change is a new string rather than a silent reinterpretation.
-pub const IDENTIFY_PROTOCOL: &str = "/interweave/id/1.0.0";
+pub const IDENTIFY_PROTOCOL_VERSION: &str = "/interweave/id/1.0.0";
 
 /// What the signed GossipSub RPC adds around one application envelope.
 ///
@@ -198,11 +218,82 @@ pub struct SubstrateBehaviour {
 // Stage 11.
 //
 // It is correct today because the only connections that exist are ones
-// the gated swarm admitted for the data plane: relay, AutoNAT and DCUtR
-// are absent from the libp2p feature list, so no
-// `ConnectivityInfrastructureOnly` connection can be established at all.
-// The class is modelled and gate-tested; nothing can currently produce
-// one.
+// the gated swarm admitted for the data plane. THE REASON FOR THAT
+// CHANGED WHEN STAGE 11 ENABLED THE THREE FEATURES, and is now much
+// weaker. It used to be PARTLY the manifest: relay, AutoNAT and DCUtR
+// were absent from the libp2p feature list, so the behaviours were
+// unconstructible and the relay transport stayed out of the builder.
+// All three are compiled now.
+//
+// THE MANIFEST GUARDED ONE OF THREE ROUTES to a retained such
+// connection, and this comment has said both more and less than that in
+// successive rounds. CLAUDE.md §1 enumerates them and is the place to
+// read them; the short form is that the feature list barred the wrapped-
+// behaviour route FOR THESE THREE ONLY — `Attributing<B>` is generic, so
+// another compiled dialling behaviour could always have been wrapped
+// with a reachability origin — while an `attempt_dial` call site passing
+// one, and a relaxation of the inbound arm, it never guarded at all.
+//
+// THAT WAS NEVER "ESTABLISHED", and the distinction is this comment's
+// whole subject. Neither gate denies at the established INBOUND hook —
+// both return `Ok(dummy::ConnectionHandler)` unconditionally, and
+// pre-Noise admission cannot know a PeerId anyway — so an inbound
+// connection from an infrastructure-only peer COMPLETES, with every
+// handler above installed, and is closed afterwards by the runtime's
+// event loop. That much needs no relay code and is reachable through
+// ordinary configuration, since an `InfrastructureSet` comes from
+// `transport.connectivity.infrastructure.allowed_peers`;
+// `tests/connectivity/tests/advertised_protocol_set.rs` pins it.
+//
+// IT DOES NOT FOLLOW THAT ANYTHING IS ADVERTISED, and an earlier version
+// of this comment said it did. Measured: no `identify::Event::Received`
+// arrives before the close, five runs out of five, because the refusal
+// is pushed on the same `ConnectionEstablished` and closed in the same
+// loop iteration. Handlers installed is not protocols spoken — but that
+// emptiness is an OBSERVATION, not an invariant, and the test does not
+// assert it: it depends on scheduling, and `CONNECTIVITY.md`'s matrix
+// permits Identify for this class in any case.
+//
+// So the §14 exposure proper is about a connection that is KEPT, and
+// three separate facts keep one from existing: nothing constructs a
+// behaviour that could be wrapped with a reachability classifier, no
+// `attempt_dial` call site passes such an origin, and the inbound arm
+// refuses this class. All three, not one — a guard written against any
+// single one of them misses step 3. There is no
+// field for any of the three in the struct above, no constructor, and no
+// configuration path — not a disabled behaviour but an absent one. Two
+// further facts are worth stating, though neither is one of the three
+// above -- the first constrains `RelayCircuit`, which
+// `names_application_destination` already refuses for this class, and
+// the second is an enumeration rather than a guard:
+// the Swarm is built with `with_tcp` alone, so the relay TRANSPORT is
+// not installed and a `/p2p-circuit` address cannot be dialled at all;
+// and of the eight `DialOrigin` variants, only `RelayReservation` and
+// `AutonatProbe` fall outside `names_application_destination`, so they
+// are the only two under which such a connection could be dialled or
+// held open. What keeps them unused is NOT that only a behaviour can
+// supply them: `attempt_dial` takes an origin from any in-crate caller,
+// which is exactly how `RelayCircuit` is meant to arrive. It is that no
+// call site passes either one — every production site passes `Manual`,
+// `ConnectionManager` or `KademliaQuery`.
+//
+// THAT LAST SENTENCE IS A GREP, NOT A GUARD. It is true today and
+// nothing fails when it stops being true, unlike the claim above it,
+// which `every_origin_is_classified_and_the_classification_is_pinned`
+// enforces. The first call site to pass `RelayReservation` or
+// `AutonatProbe` is step 3 or step 5, and it is supposed to — so a guard
+// here would have to assert something subtler than absence, and is
+// deliberately not written rather than forgotten. Inbound is answered
+// the same way: `dialing.rs` retains an inbound connection only if
+// `ConnectionManager::authorizes`, which asks under `DialOrigin::Manual`
+// and so refuses this class outright.
+//
+// So the remaining distance to the gap is one commit, not one stage —
+// and it is step 3, which reaches two of the three routes at once: it
+// constructs an AutoNAT client and must wrap it with a reachability
+// classifier, and it must relax the inbound arm so the client can serve
+// a dial-back. That commit must not land before the restriction
+// described below.
 //
 // Stage 11 produces the first one, and then this shape is a gap. Each
 // entry point classifies its caller — direct ingress, the GossipSub
@@ -272,7 +363,7 @@ impl SubstrateBehaviour {
             preauth: PreAuthAdmission::new(preauth),
             outbound,
             identify: identify::Behaviour::new(identify::Config::new(
-                IDENTIFY_PROTOCOL.to_owned(),
+                IDENTIFY_PROTOCOL_VERSION.to_owned(),
                 keypair.public(),
             )),
             direct: request_response::Behaviour::with_codec(
