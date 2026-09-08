@@ -14,10 +14,12 @@
 #     peer's own private address, there is no NAT and every conclusion
 #     below would be a loopback result wearing a phase-B label;
 #   * whether the mapping is endpoint-independent — the same external
-#     port to both observers — or per-destination, which is the variable
-#     that decides whether a hole punch can be ATTEMPTED at all. It does
-#     not decide whether one SUCCEEDS: filtering decides the rest, and
-#     this harness neither configures nor measures it.
+#     port to both observers — or per-destination, which is ONE of the
+#     two variables deciding whether a hole punch SUCCEEDS. Filtering is
+#     the other, and this harness neither configures nor measures it, so
+#     a row licenses a claim about the mapping a punch would face and
+#     not about the punch. It does not gate the ATTEMPT either:
+#     `DCUTR.md` §2's eligibility list does not mention NAT class.
 set -euo pipefail
 
 # NO ARGUMENTS, CHECKED FIRST. The trial list is an environment
@@ -79,7 +81,7 @@ router_pub=$(addr_on "$ROUTER" "$NET_PUB")
 # EVERY internal socket, so a second bound port is a second instance of
 # the property, not a second look at the first. `eds` needs only one
 # trial to disagree, which is the safe asymmetry -- the harness cannot
-# talk itself into the class that says a hole punch would work.
+# talk itself into the class that does not rule a punch out.
 SRC_PORTS="${SRC_PORTS:-45000 45001}"
 
 # THE TRIAL LIST IS VALIDATED BEFORE ANY TRIAL RUNS, because `class`

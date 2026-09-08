@@ -6,10 +6,11 @@
 #
 # See README.md for what this does and does not establish. The short
 # version: it builds a real kernel NAT whose MAPPING BEHAVIOUR is chosen
-# rather than inherited, because that behaviour is what decides whether
-# a hole punch can be ATTEMPTED at all — filtering decides whether one
-# succeeds, and is neither configured nor measured here. Phase A, on
-# loopback, had no NAT at all.
+# rather than inherited, because that behaviour is one of the two things
+# deciding whether a hole punch SUCCEEDS — filtering is the other, and is
+# neither configured nor measured here. Neither gates the attempt: under
+# `eds` a punch is attempted and fails, which is what the row is for.
+# Phase A, on loopback, had no NAT at all.
 set -euo pipefail
 
 NET_PUB="${NET_PUB:-natm-pub}"

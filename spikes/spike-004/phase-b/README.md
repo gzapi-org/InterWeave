@@ -30,10 +30,16 @@ peer B sends from `10.89.2.3:45000` and they see `10.89.0.5` — each
 router's own address. Phase A had no NAT at all, and the first thing
 this harness owes is evidence that these ones do.
 
-**That the mapping behaviour is the one that was asked for.** The two
-rows are the two that decide whether a hole punch can be ATTEMPTED at
-all — `eds` rules one out, `eim` permits one if filtering allows, and
-filtering is not measured here:
+**That the mapping behaviour is the one that was asked for.** Mapping is
+one of the two things that decide whether a hole punch SUCCEEDS;
+filtering is the other, and is neither configured nor measured here — so
+these rows license a claim about the mapping a punch would face and not
+about the punch. Neither row rules an ATTEMPT out: `DCUTR.md` §2 lists
+the eligibility conditions and NAT class is not among them, and §9
+requires a NAT-induced FAILURE test, which is a punch attempted and
+failed. An earlier version of this sentence said mapping decides whether
+a punch can be attempted at all, which would leave the `eds` row with no
+failing punch to produce — the thing it exists for:
 
 | `NAT_MODE` | nft rule | observers see | meaning |
 | --- | --- | --- | --- |
@@ -223,7 +229,7 @@ bound source ports are not a repeat of one look: endpoint-independence
 must hold for every internal socket, so the second is a second instance
 of the property. `eim` requires every trial to agree; one disagreement
 is `eds`, which is the safe asymmetry — the harness cannot talk itself
-into the class that says a hole punch would work.
+into the class that does not rule a punch out.
 
 Five checks stand between the observation and a passing row — four
 before the verdict is printed, one after — and any of them fails it.
