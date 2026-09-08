@@ -18,6 +18,15 @@
 #     that decides whether a hole punch can work.
 set -euo pipefail
 
+# NO ARGUMENTS, CHECKED FIRST. The trial list is an environment
+# variable, and `set --` below would silently discard anything passed
+# positionally. Checked before the four `podman inspect` reads, because
+# `./probe.sh --help` with the topology down otherwise dies inside
+# `addr_on` with podman's nil-pointer error and never reaches this.
+# Review finding on PR #78.
+[ "$#" -eq 0 ] \
+  || { echo "probe.sh takes no arguments; the trial list is the SRC_PORTS environment variable" >&2; exit 2; }
+
 NET_PUB="${NET_PUB:-natm-pub}"
 NET_LAN="${NET_LAN:-natm-lan}"
 
@@ -98,12 +107,9 @@ SRC_PORTS="${SRC_PORTS:-45000 45001}"
 # expansion as well as word splitting, so a token containing `*` would
 # be replaced by matching filenames in the working directory.
 # Review findings on PR #78.
-[ "$#" -eq 0 ] \
-  || { echo "probe.sh takes no arguments; the trial list is the SRC_PORTS environment variable" >&2; exit 2; }
 set -f
 # shellcheck disable=SC2086
 set -- $SRC_PORTS
-set +f
 [ "$#" -ge 2 ] \
   || { echo "SRC_PORTS named $# trial(s); eim cannot be observed from fewer than two" >&2; exit 2; }
 normalised=""
@@ -116,10 +122,27 @@ for src in "$@"; do
   # produced a different port. Caught by the mutation check for the
   # duplicate guard, which accepted `45000 045000` and printed
   # `45000 18944`.
-  normalised="$normalised $((10#$src))"
+  port=$((10#$src))
+  # A PORT, NOT MERELY DIGITS. `*[!0-9]*` admits `0`, `70000` and a
+  # twenty-digit token that wraps to something negative in 64-bit
+  # arithmetic -- and every one of them reaches `socat`, fails to bind,
+  # is swallowed by the `|| true` on the send, and surfaces as NO DATA.
+  # That is the misdiagnosis this guard's own comment says it exists to
+  # prevent, so the guard has to check what its error message claims.
+  # `bind=:0` is worse than a failure: it binds ANY port, so the two
+  # sequential sockets get two different ones, the "one internal tuple"
+  # premise the comparison rests on is gone, and a correct `eim`
+  # topology measures as `eds`. Review finding on PR #78.
+  [ "$port" -ge 1 ] && [ "$port" -le 65535 ] \
+    || { echo "SRC_PORTS holds '$src', which is not a port in 1-65535" >&2; exit 2; }
+  normalised="$normalised $port"
 done
 # shellcheck disable=SC2086
 set -- $normalised
+# `set -f` COVERS BOTH SPLITS. The second one expands only arithmetic
+# results today, so leaving it unprotected made its safety depend on the
+# numeric guard above rather than on the split itself.
+set +f
 [ "$#" -eq "$(printf '%s\n' "$@" | sort -u | wc -l)" ] \
   || { echo "SRC_PORTS names one port twice, so a trial would re-measure one tuple: $*" >&2; exit 2; }
 
