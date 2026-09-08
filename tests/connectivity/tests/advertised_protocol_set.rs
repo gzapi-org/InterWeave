@@ -95,7 +95,7 @@ use std::time::Duration;
 
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::TransportIdentity;
-use interweave_transport_libp2p::{SubstrateConfig, SwarmRuntime};
+use interweave_transport_libp2p::{SubstrateConfig, SwarmEvent, SwarmRuntime};
 use interweave_transport_runtime::TrustSources;
 use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 use libp2p::Multiaddr;
@@ -655,9 +655,30 @@ async fn a_peer_downgraded_to_infrastructure_only_loses_its_connection() {
     // arrive before the subject has recorded the connection, and find
     // nothing to close. It fails as `closed == 0`, which reads exactly
     // like "the downgrade does not close connections" and is the first
-    // way this test was wrong. `stage5_dial_admission` waits the same
-    // way, for the same reason, in its own comment.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // way this test was wrong.
+    //
+    // WAITED FOR, NOT SLEPT THROUGH. A fixed 200ms only made the race
+    // less likely, and under a loaded suite it fails in the direction
+    // that reads as a security regression. `SwarmEvent::Connected` is
+    // the subject's own statement that the state the downgrade reads
+    // exists: `runtime/mod.rs` calls `settle_outcome` -- which records
+    // the connection in `open` -- BEFORE `translate` turns the event
+    // into this one, and `open` is exactly what `connections_to_close`
+    // walks. Review finding on PR #77.
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "the subject never recorded the connection the downgrade must close"
+        );
+        match tokio::time::timeout(remaining, subject.next_event()).await {
+            Ok(Some(SwarmEvent::Connected { peer })) if peer == observer_peer => break,
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("the subject's event stream ended before it reported a connection"),
+            Err(_) => panic!("the subject never recorded the connection the downgrade must close"),
+        }
+    }
 
     // THE DOWNGRADE: still authorized for reachability control, no
     // longer for the data plane. Not a full revocation -- that case is
