@@ -12,6 +12,12 @@ set -euo pipefail
 
 NET_PUB="${NET_PUB:-natm-pub}"
 NET_LAN="${NET_LAN:-natm-lan}"
+# THE SECOND NAT DOMAIN. A hole punch needs two peers each behind their
+# OWN translation: one domain measures a mapping, two are required
+# before a punch is a thing that can be attempted at all. The first
+# version of this harness built one and described itself as the
+# environment a punch needs, which was false. Review finding on PR #78.
+NET_LAN_B="${NET_LAN_B:-natm-lan-b}"
 IMAGE="${IMAGE:-interweave-natmatrix:1}"
 
 # The NAT class to build. `eim` gives one external port per internal
@@ -26,6 +32,7 @@ up() {
   down >/dev/null 2>&1 || true
   podman network create "$NET_PUB" >/dev/null
   podman network create "$NET_LAN" >/dev/null
+  podman network create "$NET_LAN_B" >/dev/null
 
   # THE OBSERVERS ARE TWO, and that is the measurement rather than
   # redundancy: one observer cannot tell an endpoint-independent mapping
@@ -44,6 +51,13 @@ up() {
   podman run -d --name natm-peer --network "$NET_LAN" --cap-add=NET_ADMIN \
     --entrypoint /bin/sh "$IMAGE" -c 'sleep infinity' >/dev/null
 
+  podman run -d --name natm-router-b --network "$NET_PUB" --network "$NET_LAN_B" \
+    --cap-add=NET_ADMIN --sysctl net.ipv4.ip_forward=1 \
+    --entrypoint /bin/sh "$IMAGE" -c 'sleep infinity' >/dev/null
+
+  podman run -d --name natm-peer-b --network "$NET_LAN_B" --cap-add=NET_ADMIN \
+    --entrypoint /bin/sh "$IMAGE" -c 'sleep infinity' >/dev/null
+
   # Addresses are read back rather than assumed: podman picks the
   # subnets, and a hardcoded guess here would fail as a NAT behaviour
   # instead of as a setup error.
@@ -59,14 +73,17 @@ up() {
   # left both in place -- they differ by metric, so the kernel treats
   # them as distinct routes -- and which one wins then depends on a
   # metric this script never set.
-  podman exec natm-peer sh -c \
-    'ip route del default 2>/dev/null; while ip route del default 2>/dev/null; do :; done; true'
-  podman exec natm-peer ip route add default via "$router_lan"
-  podman exec natm-peer sh -c \
-    '[ "$(ip route show default | wc -l)" -eq 1 ] || { echo "peer has more than one default route" >&2; exit 1; }'
+  route_through natm-peer "$router_lan"
 
-  configure_nat "$router_pub"
-  log "NAT mode: $NAT_MODE"
+  configure_nat natm-router "$NET_PUB"
+
+  local router_b_lan
+  router_b_lan=$(addr_on natm-router-b "$NET_LAN_B")
+  route_through natm-peer-b "$router_b_lan"
+  configure_nat natm-router-b "$NET_PUB"
+
+  log "NAT mode: $NAT_MODE (both domains)"
+  record_environment
 }
 
 # The interface podman gave this container on that network.
@@ -92,8 +109,38 @@ addr_on() {
   podman inspect "$ctr" --format "{{ (index .NetworkSettings.Networks \"$net\").IPAddress }}"
 }
 
+# Point a peer's only default route at its router.
+#
+# Asserted by GATEWAY, not by count: one default route pointing at
+# podman's own gateway would satisfy a count check and translate
+# nothing.
+route_through() {
+  local ctr="$1" gw="$2"
+  podman exec "$ctr" sh -c \
+    'while ip route del default 2>/dev/null; do :; done; true'
+  podman exec "$ctr" ip route add default via "$gw"
+  local got
+  got=$(podman exec "$ctr" sh -c "ip route show default | awk '{print \$3}'" | tr -d '\r')
+  [ "$got" = "$gw" ] || { echo "$ctr default route is via $got, expected $gw" >&2; return 1; }
+}
+
+# What performed the NAT, recorded because the harness cannot attribute
+# a measurement without it.
+#
+# The IMAGE is digest-pinned, and the image is not what translates: the
+# NAT is the host kernel's netfilter, and the eim/eds distinction is a
+# `get_unique_tuple` port-selection behaviour that has changed across
+# kernel releases. Pinning the image and not recording the kernel aimed
+# the reproducibility argument at the wrong component. Review finding on
+# PR #78.
+record_environment() {
+  log "kernel : $(uname -r)"
+  log "podman : $(podman --version)"
+  log "nft    : $(podman exec natm-router nft --version)"
+}
+
 configure_nat() {
-  local snat_to="$1" rule
+  local ctr="$1" net="$2" rule
   case "$NAT_MODE" in
     eim)
       # ENDPOINT-INDEPENDENT MAPPING. One external port per internal
@@ -123,7 +170,7 @@ configure_nat() {
   # having installed nothing. The assertion below is what turned that
   # into a visible failure rather than a topology that quietly was not
   # one.
-  podman exec -i natm-router nft -f - <<NFT
+  podman exec -i "$ctr" nft -f - <<NFT
 table inet nat {
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
@@ -135,14 +182,18 @@ NFT
   # it built the topology reports loopback-quality evidence under a
   # phase-B heading, which is the one failure this spike exists to
   # avoid -- and the first version of this script did exactly that.
-  podman exec natm-router nft list ruleset 2>/dev/null | grep -q "oifname \"$oif\"" \
-    || { echo "NAT rule absent after configuring it" >&2; return 1; }
-  log "snat via $snat_to using: $rule"
+  # The MODE as well as the interface: a bare `oifname "eth0"` with no
+  # statement would satisfy a check on the interface alone, and the
+  # comment above says the rule landed rather than half of it.
+  podman exec "$ctr" nft list ruleset 2>/dev/null | grep -q "oifname \"$oif\" $rule" \
+    || { echo "$ctr: NAT rule absent or not '$rule' after configuring it" >&2; return 1; }
+  log "$ctr: snat on $oif using: $rule"
 }
 
 down() {
-  podman rm -f natm-obs1 natm-obs2 natm-router natm-peer >/dev/null 2>&1 || true
-  podman network rm -f "$NET_PUB" "$NET_LAN" >/dev/null 2>&1 || true
+  podman rm -f natm-obs1 natm-obs2 natm-router natm-peer \
+    natm-router-b natm-peer-b >/dev/null 2>&1 || true
+  podman network rm -f "$NET_PUB" "$NET_LAN" "$NET_LAN_B" >/dev/null 2>&1 || true
 }
 
 case "${1:-up}" in

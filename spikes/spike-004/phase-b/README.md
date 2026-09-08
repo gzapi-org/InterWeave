@@ -26,16 +26,52 @@ rows are the two that decide whether a hole punch can work:
 
 | `NAT_MODE` | nft rule | observers see | meaning |
 | --- | --- | --- | --- |
-| `eim` | `masquerade` | one port for both destinations | endpoint-independent; DCUtR should succeed |
-| `eds` | `masquerade random` | a port per destination | endpoint-dependent; DCUtR must fail and fall back to the relay |
+| `eim` | `masquerade` | one port for both destinations | endpoint-independent MAPPING |
+| `eds` | `masquerade random` | a port per destination | endpoint-dependent MAPPING |
 
-Measured, not asserted from the configuration: `eim` gave `45000` to both
-observers and `eds` gave two different ports in the same run.
+**Mapping only — filtering is neither configured nor measured.** RFC 4787
+classifies a NAT by both, and conntrack gives endpoint-dependent
+filtering in both rows here, so `eim` is a port-restricted cone rather
+than a full cone. Whether a punch succeeds depends on filtering too, so
+neither row licenses a claim about DCUtR succeeding; what they license
+is a claim about the mapping it would face.
+
+Measured, not asserted from the configuration. From the recorded run
+below — the addresses are podman's default pool on one machine, so
+expect different numbers and the same shape:
+
+```
+== NAT_MODE=eim ==
+  kernel : 6.17.9-1.qubes.fc37.x86_64
+peer private   : 10.89.1.3 45000
+router public  : 10.89.0.4
+observer 1 saw : 10.89.0.4 45000
+observer 2 saw : 10.89.0.4 45000
+VERDICT: ENDPOINT-INDEPENDENT MAPPING (one external port for both destinations)
+== NAT_MODE=eds ==
+observer 1 saw : 10.89.0.4 58519
+observer 2 saw : 10.89.0.4 22699
+VERDICT: ENDPOINT-DEPENDENT MAPPING (a port per destination)
+2 matrix rows, each measured and matched, all distinct: eim eds
+```
+
+**`masquerade random` is per-flow randomisation, not per-destination
+mapping by construction.** The two are observationally identical for
+this probe and adequate for what DCUtR faces, but a real symmetric NAT
+would still preserve a mapping consistently within its lifetime toward
+one destination, and `random` does not. The row approximates the
+property that matters and nothing more.
 
 **The `eds` row is the one phase A could never reach.** On loopback every
 punch succeeds, so `DCUTR.md` §13's cooldown, retry ceiling and
-fallback-on-failure have never been exercised. This is the topology that
-exercises them.
+fallback-on-failure have never been exercised by anything. This is the
+mapping behaviour a failing punch depends on.
+
+**It is not yet a punch.** The topology has two NAT domains — two peers,
+each behind its own router — which is the minimum a hole punch needs,
+and an earlier version had one while claiming to be the environment a
+punch requires. What is still missing is the relay both peers reach and
+the nodes themselves; those arrive with steps 5 and 8.
 
 ## How the measurement works, and why it is a comparison
 
@@ -53,8 +89,21 @@ Two checks run before the verdict, and either fails the row:
 - **an observer that saw the peer's private address** — no translation
   happened, and every conclusion would be a loopback result under a
   phase-B heading;
+- **an observed address that is not the router's** — translated, but by
+  something other than the rule this harness installed, which the
+  private-address control alone cannot see. The address is part of the
+  mapping: two different external addresses sharing a port would
+  otherwise have been reported as endpoint-independent;
+- **a port that is not numeric** — a malformed observer line would make
+  the address the "port", both would match, and any NAT would classify
+  as `eim`;
 - **a class that does not match `EXPECT`** — a NAT that silently behaves
-  as the other class is a failure, not a footnote.
+  as the other class is a failure, not a footnote. With no `EXPECT` the
+  probe prints `UNASSERTED` rather than passing quietly.
+
+`run.sh` adds one more across rows: the measured classes must be
+**distinct**, which fails if the topology built the same NAT twice or if
+the classifier answers the same whatever it is shown.
 
 ## What it does NOT establish
 
@@ -97,6 +146,15 @@ Three things cost time to find, all of which fail silently:
   — visible only in the container's logs. The observers report space
   separated.
 
-The image is pinned by digest, not by tag: this harness's whole output
-is a claim about what a NAT did, and a tag that moves under it
-invalidates the record without changing a line here.
+The image is pinned by digest, not by tag. But **the image is not what
+translates** — the NAT is the host kernel's netfilter, and the
+`eim`/`eds` distinction is a `get_unique_tuple` port-selection behaviour
+that has changed across kernel releases. Pinning the image and recording
+nothing else aimed the reproducibility argument at the wrong component,
+so `topology.sh` now prints the kernel, podman and nft versions into
+every transcript. That is what makes a run attributable later.
+
+`run.sh` also rebuilds the image every run rather than skipping when the
+tag exists: `interweave-natmatrix:1` is exactly the moving tag the
+Containerfile argues against, and a stale local copy would silently be
+measured instead.
