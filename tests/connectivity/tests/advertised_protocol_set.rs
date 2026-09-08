@@ -31,6 +31,14 @@
 //! | `dcutr::Behaviour` | **NO — survives silently** |
 //! | `relay::client::Behaviour` | yes, but by PANIC rather than by this assertion |
 //!
+//! **A second blind spot, and it is about DIRECTION rather than about
+//! any one behaviour.** The observer dials the subject, so what is read
+//! is the subject's INBOUND handler set. A behaviour that installs a
+//! real handler only in `handle_established_outbound_connection` would
+//! be invisible here too. All five candidates checked for the table
+//! register their protocol-bearing handlers on the inbound side, so no
+//! row changes — but a future one need not.
+//!
 //! **DCUtR is invisible here and that is structural, not a gap to
 //! tighten.** `libp2p-dcutr 0.14.1` registers its relayed handler only
 //! when `is_relayed(local_addr)` (`behaviour.rs:179`); on a direct
@@ -442,11 +450,14 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
                 // an earlier version asserted it as though it were the
                 // refusal-before-establish check, which it is not. That
                 // direction surfaces as `OutgoingConnectionError` and is
-                // caught by the arm below.
+                // caught by the arm below. So there is no statement here
+                // at all: a `debug_assert!` would vanish under
+                // `--release`, leaving a check whose presence depends on
+                // the profile for a condition that holds by
+                // construction.
                 //
                 // The observer cannot have caused this close: its own
                 // idle timeout is well beyond the whole test window.
-                debug_assert!(established, "libp2p closed what it never established");
                 break;
             }
             Ok(libp2p::swarm::SwarmEvent::OutgoingConnectionError { error, .. }) => {
@@ -457,10 +468,15 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
                 panic!("the dial failed before establishment: {error:?}");
             }
             Ok(_) => {}
-            // THE RETENTION DIRECTION LANDS HERE, and the message has to
-            // say so: a peer that is KEPT produces an establish and then
-            // nothing further, so a timeout is the signal rather than an
-            // absence of events.
+            // NOT where retention lands, despite an earlier version of
+            // this comment saying so. Both swarms run Identify, so a
+            // RETAINED peer completes it in milliseconds and is caught
+            // by the `Received` arm above, naming the protocols -- which
+            // is what mutating `authorizes_for` produces. This arm
+            // covers established-and-then-silent: no Identify and no
+            // close, which is neither the measured behaviour nor
+            // retention. The message still reports `established` because
+            // that is the one fact worth having if it ever fires.
             Err(_) => panic!(
                 "timed out with established={established}. If established, the peer was \
                  RETAINED rather than refused -- an infrastructure-only connection was \

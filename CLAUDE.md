@@ -39,10 +39,7 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   compiler: a behaviour can now be switched on by writing code rather
   than by editing a manifest, so from here the guarantee is the outbound
   gate, the trust classification and their tests. **Two
-  infrastructure-only states must not be confused, and enabling the
-  features changed the guard on NEITHER — it removed only the
-  impossibility of CONSTRUCTING the behaviours, and of dialling a
-  `/p2p-circuit` address at all.** An inbound connection
+  infrastructure-only states must not be confused.** An inbound connection
   from such a peer has ALWAYS been ESTABLISHED and then closed — neither
   gate denies at the established inbound hook — so it needs no relay
   code and is reachable today through ordinary configuration;
@@ -50,28 +47,43 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   ASSERTS that nothing is advertised in that window — the refusal closes
   in the same loop iteration, and the test fails naming the protocols if
   that ever stops being true. A connection DIALLED or
-  RETAINED as infrastructure-only still cannot exist: it needs an origin
-  outside `names_application_destination` — `RelayReservation` or
-  `AutonatProbe` — and **no call site passes either**. Note the subject:
-  a CALL SITE, not a behaviour. `attempt_dial` takes an origin from any
-  in-crate caller and `settle_established_outbound` retains on
-  `authorizes_for(class, ticket.origin())`, so one line passing
-  `AutonatProbe` produces a retained infrastructure-only connection with
-  no behaviour constructed anywhere. **THE ORDERING CONSTRAINT THEREFORE
-  HAS TWO ARMS, and step 3 is the first commit to reach either.** One: a
-  call site passing a reachability origin. Two: any relaxation of the
-  INBOUND arm — `dialing.rs` retains an inbound connection only if
-  `ConnectionManager::authorizes`, which asks under `DialOrigin::Manual`
-  and so refuses this class outright. **Step 3 must relax exactly that**,
-  because an AutoNAT v2 dial-back arrives as an inbound connection from
-  the infrastructure-only server and the CLIENT has to serve
-  `/libp2p/autonat/2/dial-back` on it; a guard written only against new
-  call sites would not see that commit at all. Do not read the feature
-  change as evidence those paths are live. The exposure
+  RETAINED as infrastructure-only still cannot exist, and it takes
+  **three** routes to say why — this has been written down wrong in both
+  directions, so read the list rather than a summary of it. Retention is
+  decided by `authorizes_for(class, origin)`, so any route that supplies
+  `RelayReservation` or `AutonatProbe` reaches it.
+
+  1. **A WRAPPED BEHAVIOUR whose classifier announces one.** The
+     intended route for both: `Attributing` announces the origin from
+     the behaviour's own `poll`, and `OutboundAdmission`'s pending hook
+     resolves it, mints the ticket and deposits it — no `attempt_dial`
+     anywhere. **This is the route the feature list DID guard**, because
+     a behaviour that cannot be constructed cannot be wrapped. Enabling
+     the features removed that barrier; nothing constructs the three, and
+     that is now all that stands here.
+  2. **AN `attempt_dial` CALL SITE passing one.** `attempt_dial` takes
+     an origin from any in-crate caller, so one line suffices with no
+     behaviour anywhere. This is how `RelayCircuit` is designed to
+     arrive, since the transport rather than a behaviour dials a circuit.
+     The feature list never guarded this. Nothing passes either
+     reachability origin today.
+  3. **A RELAXATION OF THE INBOUND ARM.** `dialing.rs` retains an
+     inbound connection only if `ConnectionManager::authorizes`, which
+     asks under `DialOrigin::Manual` and so refuses this class outright.
+     The feature list never guarded this either.
+
+  **Step 3 reaches routes 1 and 3, and nothing may land before the
+  restriction below does.** It constructs an AutoNAT client and must
+  wrap it with a reachability classifier (route 1), and must relax the
+  inbound arm (route 3) because an AutoNAT v2 dial-back arrives as an
+  inbound connection from the infrastructure-only server and the CLIENT
+  has to serve `/libp2p/autonat/2/dial-back` on it. **A guard written as
+  a grep over `attempt_dial` call sites would see none of that.** Do not
+  read the feature change as evidence those paths are live. The exposure
   `BOTTOM-UP-IMPLEMENTATION-PLAN.md` §14 names — every data-plane
   behaviour installed uniformly on every connection — is about the
   RETAINED case, and it is now one commit away rather than one stage.
-  **Neither arm may land before that restriction does**; the owner ruled
+  **No route above may be reached before that restriction lands**; the owner ruled
   on 2026-09-07 that the connectivity behaviours ship gated off and the
   `ClassGated<B>` fix lands first. The plan's Stage 11 section carries
   the same ruling, because that is where the construction order lives.

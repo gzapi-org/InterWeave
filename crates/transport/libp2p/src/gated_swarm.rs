@@ -147,9 +147,14 @@ impl AdmittedDial {
         // it claims a purpose the dial does not have. Neither is
         // reachable today, though the reason has narrowed since Stage
         // 11 compiled `relay`: the Swarm is built with `with_tcp`
-        // alone, so no relay transport is installed and a
-        // `/p2p-circuit` address cannot be dialled, and nothing
-        // constructs a behaviour that would supply either origin. Both
+        // alone -- compiling `libp2p-relay` is not installing a relay
+        // transport, which needs `.with_relay_client(...)` and appears
+        // nowhere -- so a `/p2p-circuit` address cannot be dialled. And
+        // no `attempt_dial` call site passes `RelayCircuit`, which is
+        // the right reason for THIS origin: as the block above says, a
+        // circuit is dialled by the command path, so no behaviour
+        // supplies it by design and "nothing constructs a behaviour"
+        // would be the wrong guard to cite here. Both
         // become reachable when that changes, and refusing here costs
         // a string comparison.
         let circuit_address = address

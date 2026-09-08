@@ -225,13 +225,13 @@ pub struct SubstrateBehaviour {
 // unconstructible and the relay transport stayed out of the builder.
 // All three are compiled now.
 //
-// THE MANIFEST NEVER GUARDED THE DIALLED-OR-RETAINED CASE, and an
-// earlier version of this comment said it did. `DialOrigin` lives in
-// `interweave-transport-runtime`, which has no libp2p dependency, and
-// `attempt_dial` has always taken an origin from its caller — so one
-// line passing `AutonatProbe` would have retained such a connection with
-// the features off. Do not read this commit as having removed a guard
-// that was never there.
+// THE MANIFEST GUARDED ONE OF THREE ROUTES to a retained such
+// connection, and this comment has said both more and less than that in
+// successive rounds. CLAUDE.md §1 enumerates them; the short form is
+// that a wrapped behaviour announcing a reachability origin was guarded
+// by the feature list — a behaviour that cannot be constructed cannot be
+// wrapped — while an `attempt_dial` call site passing one, and a
+// relaxation of the inbound arm, never were.
 //
 // THAT WAS NEVER "ESTABLISHED", and the distinction is this comment's
 // whole subject. Neither gate denies at the established INBOUND hook —
@@ -251,15 +251,15 @@ pub struct SubstrateBehaviour {
 // loop iteration. Handlers installed is not protocols spoken.
 //
 // So the §14 exposure proper is about a connection that is KEPT, and
-// what stands in the way of a RETAINED one is that NO CALL SITE PASSES
-// A REACHABILITY ORIGIN AND THE INBOUND ARM REFUSES THIS CLASS. Not
-// that nothing constructs the behaviours — that is true, and is the
-// weaker fact, spelled out below because it is the one a reader
-// reaches for first. There is no
+// three separate facts keep one from existing: nothing constructs a
+// behaviour that could be wrapped with a reachability classifier, no
+// `attempt_dial` call site passes such an origin, and the inbound arm
+// refuses this class. All three, not one — a guard written against any
+// single one of them misses step 3. There is no
 // field for any of the three in the struct above, no constructor, and no
 // configuration path — not a disabled behaviour but an absent one. Two
-// further facts are worth stating, though only the last bears on the
-// RETAINED case -- the first constrains `RelayCircuit`, which
+// further facts are worth stating, though neither is one of the three
+// above -- the first constrains `RelayCircuit`, which
 // `names_application_destination` already refuses for this class, and
 // the second is an enumeration rather than a guard:
 // the Swarm is built with `with_tcp` alone, so the relay TRANSPORT is
@@ -285,10 +285,11 @@ pub struct SubstrateBehaviour {
 // and so refuses this class outright.
 //
 // So the remaining distance to the gap is one commit, not one stage —
-// and it is the commit that adds the first CALL SITE passing
-// `RelayReservation` or `AutonatProbe`, which is step 3, NOT the later
-// one that constructs a relay. That commit must not land before the
-// restriction described below.
+// and it is step 3, which reaches two of the three routes at once: it
+// constructs an AutoNAT client and must wrap it with a reachability
+// classifier, and it must relax the inbound arm so the client can serve
+// a dial-back. That commit must not land before the restriction
+// described below.
 //
 // Stage 11 produces the first one, and then this shape is a gap. Each
 // entry point classifies its caller — direct ingress, the GossipSub
