@@ -83,7 +83,7 @@ up() {
   configure_nat natm-router-b "$NET_PUB"
 
   log "NAT mode: $NAT_MODE (both domains)"
-  record_environment
+  record_environment natm-router
 }
 
 # The interface podman gave this container on that network.
@@ -133,10 +133,17 @@ route_through() {
 # kernel releases. Pinning the image and not recording the kernel aimed
 # the reproducibility argument at the wrong component. Review finding on
 # PR #78.
+#
+# THE CONTAINER IS AN ARGUMENT. It reads `nft --version` from whichever
+# router it is given rather than from a name written here -- the same
+# hardcoding that made `configure_nat` build router B's rule from router
+# A's interface, sitting inside the function whose whole job is
+# attribution. Review finding on PR #78.
 record_environment() {
+  local ctr="$1"
   log "kernel : $(uname -r)"
   log "podman : $(podman --version)"
-  log "nft    : $(podman exec natm-router nft --version)"
+  log "nft    : $(podman exec "$ctr" nft --version)"
 }
 
 configure_nat() {
@@ -164,7 +171,21 @@ configure_nat() {
   # OUTSIDE the heredoc, so a failure fails the script. Inside a command
   # substitution in a heredoc, `set -e` does not fire and the empty
   # result becomes a rule that matches nothing.
-  oif=$(iface_on natm-router "$NET_PUB")
+  #
+  # `$ctr` AND `$net`, NOT THE NAMES THIS FUNCTION WAS WRITTEN FOR. When
+  # the second NAT domain arrived, the function grew parameters and this
+  # line kept reading `natm-router` and `$NET_PUB` -- so router B was
+  # given a rule naming router A's interface. Podman numbers `ethN` by
+  # walking each container's OWN network map, and the two routers are
+  # attached to different pairs of networks, so nothing made the names
+  # agree.
+  #
+  # THE ASSERTION BELOW COULD NOT HAVE CAUGHT IT: it greps `$ctr` for the
+  # string this function just wrote into `$ctr`, so it passes whether or
+  # not that interface exists there. `iface_on` is what actually checks,
+  # because it fails closed when no interface in that container carries
+  # that address. Review finding on PR #78.
+  oif=$(iface_on "$ctr" "$net")
   # `-i`, or the heredoc goes nowhere: `podman exec` does not attach
   # stdin by default, so `nft -f -` reads EOF immediately and exits 0
   # having installed nothing. The assertion below is what turned that
