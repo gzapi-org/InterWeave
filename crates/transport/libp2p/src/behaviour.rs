@@ -227,11 +227,12 @@ pub struct SubstrateBehaviour {
 //
 // THE MANIFEST GUARDED ONE OF THREE ROUTES to a retained such
 // connection, and this comment has said both more and less than that in
-// successive rounds. CLAUDE.md §1 enumerates them; the short form is
-// that a wrapped behaviour announcing a reachability origin was guarded
-// by the feature list — a behaviour that cannot be constructed cannot be
-// wrapped — while an `attempt_dial` call site passing one, and a
-// relaxation of the inbound arm, never were.
+// successive rounds. CLAUDE.md §1 enumerates them and is the place to
+// read them; the short form is that the feature list barred the wrapped-
+// behaviour route FOR THESE THREE ONLY — `Attributing<B>` is generic, so
+// another compiled dialling behaviour could always have been wrapped
+// with a reachability origin — while an `attempt_dial` call site passing
+// one, and a relaxation of the inbound arm, it never guarded at all.
 //
 // THAT WAS NEVER "ESTABLISHED", and the distinction is this comment's
 // whole subject. Neither gate denies at the established INBOUND hook —

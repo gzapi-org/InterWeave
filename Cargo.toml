@@ -134,20 +134,24 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 # now is the code that can produce those dials compiled at all.
 #
 # THE ABSENCE OF THESE THREE WAS LOAD-BEARING UNTIL THIS COMMIT, and be
-# exact about WHAT it bore. It made the three behaviours unconstructible,
-# so no behaviour-originated dial under a reachability origin could
-# exist, and it kept the relay TRANSPORT out of the builder, so a
-# `/p2p-circuit` address could not be dialled at all.
+# exact about WHAT it bore. It made these three behaviours
+# unconstructible, so none of THEM could originate a dial under a
+# reachability origin — which is narrower than "no behaviour-originated
+# dial under a reachability origin could exist", because nothing stopped
+# another compiled behaviour being wrapped with one.
 #
 # IT GUARDED ONE OF THE THREE ROUTES TO A RETAINED SUCH CONNECTION, and
 # this comment has now said both more and less than that. The routes are
-# enumerated in CLAUDE.md §1; in short, a wrapped behaviour whose
-# classifier announces a reachability origin (guarded by the feature
-# list, since a behaviour that cannot be constructed cannot be wrapped),
-# an `attempt_dial` call site passing one (never guarded by it —
-# `DialOrigin` lives in `interweave-transport-runtime`, which has no
-# libp2p dependency), and a relaxation of the inbound arm (never guarded
-# by it either).
+# enumerated in CLAUDE.md §1, and read them there rather than from a
+# paraphrase — paraphrasing that list is what went wrong in four
+# successive review rounds. In short: a wrapped behaviour whose
+# classifier announces a reachability origin, which the feature list
+# barred FOR THESE THREE BEHAVIOURS ONLY and not in general, since
+# `Attributing<B>` is generic and other dialling behaviours were already
+# compiled; an `attempt_dial` call site passing one, never guarded by it
+# — `DialOrigin` lives in `interweave-transport-runtime`, which has no
+# libp2p dependency; and a relaxation of the inbound arm, never guarded
+# by it either.
 #
 # And it did NOT make a `/p2p-circuit` address dialable. Compiling
 # `libp2p-relay` is not installing a relay transport: that needs

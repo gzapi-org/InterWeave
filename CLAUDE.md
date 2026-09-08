@@ -57,16 +57,23 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
      intended route for both: `Attributing` announces the origin from
      the behaviour's own `poll`, and `OutboundAdmission`'s pending hook
      resolves it, mints the ticket and deposits it — no `attempt_dial`
-     anywhere. **This is the route the feature list DID guard**, because
-     a behaviour that cannot be constructed cannot be wrapped. Enabling
-     the features removed that barrier; nothing constructs the three, and
-     that is now all that stands here.
+     anywhere. **The feature list barred this route FOR THESE THREE
+     BEHAVIOURS ONLY** — you cannot wrap what you cannot construct — and
+     not in general: `Attributing<B>` is generic over every
+     `NetworkBehaviour` and `always` is exported from the crate root, so
+     wrapping an already-compiled dialling behaviour (`request-response`
+     since Stage 6, `kad` since Stage 10) with `always(AutonatProbe)`
+     would have reached retention with the connectivity features off.
+     Enabling them removed the narrow barrier; nothing constructs the
+     three, and that is now all that stands here.
   2. **AN `attempt_dial` CALL SITE passing one.** `attempt_dial` takes
      an origin from any in-crate caller, so one line suffices with no
-     behaviour anywhere. This is how `RelayCircuit` is designed to
-     arrive, since the transport rather than a behaviour dials a circuit.
-     The feature list never guarded this. Nothing passes either
-     reachability origin today.
+     behaviour anywhere. The feature list never guarded this, and nothing
+     passes either reachability origin today. (The command path is how
+     `RelayCircuit` is designed to arrive, since the transport rather
+     than a behaviour dials a circuit — that is the same MECHANISM, but
+     `RelayCircuit` names an application destination and so cannot
+     produce a retained infrastructure-only connection at all.)
   3. **A RELAXATION OF THE INBOUND ARM.** `dialing.rs` retains an
      inbound connection only if `ConnectionManager::authorizes`, which
      asks under `DialOrigin::Manual` and so refuses this class outright.
@@ -83,7 +90,8 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   `BOTTOM-UP-IMPLEMENTATION-PLAN.md` §14 names — every data-plane
   behaviour installed uniformly on every connection — is about the
   RETAINED case, and it is now one commit away rather than one stage.
-  **No route above may be reached before that restriction lands**; the owner ruled
+  **No route above may be reached before `BOTTOM-UP-IMPLEMENTATION-PLAN.md`
+  §14's protocol-isolation restriction lands**; the owner ruled
   on 2026-09-07 that the connectivity behaviours ship gated off and the
   `ClassGated<B>` fix lands first. The plan's Stage 11 section carries
   the same ruling, because that is where the construction order lives.

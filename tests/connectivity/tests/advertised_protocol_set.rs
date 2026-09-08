@@ -37,7 +37,10 @@
 //! real handler only in `handle_established_outbound_connection` would
 //! be invisible here too. All five candidates checked for the table
 //! register their protocol-bearing handlers on the inbound side, so no
-//! row changes — but a future one need not.
+//! row changes — but a future one need not. (Five, not four: the table
+//! has a row per outcome, and `relay::Behaviour` and
+//! `relay::client::Behaviour` were checked separately from the two
+//! autonat halves.)
 //!
 //! **DCUtR is invisible here and that is structural, not a gap to
 //! tighten.** `libp2p-dcutr 0.14.1` registers its relayed handler only
@@ -270,10 +273,13 @@ fn infrastructure_only(infra: &TransportIdentity) -> TrustSources {
 
 #[tokio::test]
 async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_refused() {
-    // WHAT THIS CORRECTS. Three places in this repository have said that
-    // while relay, AutoNAT and DCUtR were uncompiled "no
+    // WHAT THIS CORRECTS. Several places in this repository said, in
+    // effect, that while relay, AutoNAT and DCUtR were uncompiled no
     // `ConnectivityInfrastructureOnly` connection could be established
-    // by any means". That is not what the code does, and the difference
+    // at all. (Not a count and not a quotation: an earlier version gave
+    // "three places" and a verbatim phrase, and both were wrong --
+    // `gated_swarm.rs` warns against restating a hit count for exactly
+    // this reason, in this same crate.) That is not what the code does, and the difference
     // is the whole of `BOTTOM-UP-IMPLEMENTATION-PLAN.md` §14.
     //
     // Neither gate denies at the established INBOUND hook:
@@ -310,11 +316,13 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
     // So what this pins is narrower and worth being exact about: an
     // infrastructure-only peer's connection **completes** rather than
     // being refused at or before the handshake. The §14 exposure proper
-    // is about a connection that is KEPT, which needs either a CALL SITE
-    // passing an origin outside `names_application_destination` -- not a
-    // constructed behaviour, since `attempt_dial` takes the origin from
-    // its caller -- or a relaxation of the inbound arm this test
-    // exercises. This test is the control that
+    // is about a connection that is KEPT, and there are THREE routes to
+    // one -- CLAUDE.md §1 enumerates them and is the place to read them,
+    // because paraphrasing that list is what went wrong in four
+    // successive review rounds. This paragraph carried one of those
+    // wrong paraphrases: it said a call site was needed and explicitly
+    // denied the behaviour route, which is the intended route for both
+    // reachability origins. This test is the control that
     // will make that one meaningful, and the negative case
     // `ClassGated<B>` must flip.
     //
@@ -473,15 +481,16 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
             // RETAINED peer completes it in milliseconds and is caught
             // by the `Received` arm above, naming the protocols -- which
             // is what mutating `authorizes_for` produces. This arm
-            // covers established-and-then-silent: no Identify and no
+            // covers established-and-then-SILENT: no Identify and no
             // close, which is neither the measured behaviour nor
-            // retention. The message still reports `established` because
-            // that is the one fact worth having if it ever fires.
+            // retention, and which nothing today is known to produce.
             Err(_) => panic!(
-                "timed out with established={established}. If established, the peer was \
-                 RETAINED rather than refused -- an infrastructure-only connection was \
-                 kept open, which is the state `ClassGated<B>` exists to make safe. If \
-                 not established, neither establishment nor closure arrived at all."
+                "timed out with established={established}, having seen neither an \
+                 Identify nor a close. This is NOT the retention case -- a retained \
+                 peer completes Identify in milliseconds and panics in the arm above. \
+                 If established, the connection was held open in silence; if not, \
+                 nothing arrived at all. Either way the subject is behaving in a way \
+                 this test has never measured."
             ),
         }
     }
