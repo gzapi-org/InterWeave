@@ -322,8 +322,9 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
     // being refused at or before the handshake. The §14 exposure proper
     // is about a connection that is KEPT, and there are THREE routes to
     // one -- CLAUDE.md §1 enumerates them and is the place to read them,
-    // because paraphrasing that list is what went wrong in four
-    // successive review rounds. This paragraph carried one of those
+    // because paraphrasing that list is what went wrong
+    // repeatedly -- a count is not restated here, since the two places
+    // that carried one drifted apart. This paragraph carried one of those
     // wrong paraphrases: it said a call site was needed and explicitly
     // denied the behaviour route, which is the intended route for both
     // reachability origins. This test is the control that

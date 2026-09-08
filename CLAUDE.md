@@ -55,7 +55,7 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   deliberately weaker than "blocked": route 2 is a grep and not a guard,
   as `behaviour.rs` says in as many words. **Read the list below rather
   than any summary of it** — including this one: which route is which has
-  been written down wrong in both directions across five review rounds.
+  been written down wrong in both directions, more than once.
   Retention is decided by `authorizes_for(class, origin)`, so any route
   that supplies `RelayReservation` or `AutonatProbe` reaches it.
 
