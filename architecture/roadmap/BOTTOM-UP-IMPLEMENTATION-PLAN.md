@@ -1388,7 +1388,8 @@ below and are repeated where they bite:
   itself.
 
 **And one thing phase A does NOT unlock: the protocol-isolation
-correction.** The exposure invariant below is about what an
+correction** — though see the note at the end of this paragraph, because
+half of the evidence it says is owed has since landed outside the spike. The exposure invariant below is about what an
 infrastructure-only connection is OFFERED — four data-plane protocols
 installed uniformly — and the phase-A harness carries none of them. Its
 `SpikeBehaviour` is Identify plus the three connectivity behaviours, so
@@ -1397,6 +1398,14 @@ about whether ours are withheld from it. That correction needs a node
 carrying the data-plane behaviours beside a real infrastructure-only
 connection; treat it as evidence still owed, not as a step the verdict
 authorized.
+
+**Half of it has since landed, and outside the spike.** Stage 11's
+`tests/connectivity/tests/advertised_protocol_set.rs` runs exactly such
+a node, over loopback and in CI, with no relay code — an
+`InfrastructureSet` is ordinary configuration — and asserts that nothing
+is advertised in the window before the refusal. What it does not supply
+is the RETAINED case, which is what the correction actually needs and
+what remains owed.
 
 Server-mode reachability evidence for ADR-0034's v1 release gate — the
 item SPIKE-003 could not supply — is still outstanding and belongs to
@@ -1436,25 +1445,56 @@ where a stage's obligations belong.
   validates `/dns4` and `/dns6` accordingly. The `dns` feature is not
   enabled and the Swarm is built `with_tcp` alone, so such a dial fails
   `MultiaddrNotSupported` — which `attempt_is_structural` classifies as
-  structural, so `record_permanent_failure` runs and the configured
-  bootstrap address is **forgotten**, not retried. A configured DNS
-  bootstrap peer is therefore silently discarded on first use. This
-  predates Stage 11 and is named here because nothing else names it;
-  whether it is fixed in this stage or given its own is a decision, not
-  an oversight.
+  structural, so `record_permanent_failure` runs and
+  `known.remove(ticket.address())` drops the address from the book.
+  **Say what that does and does not mean today.** `known` is the address
+  BOOK, written only by `learn_address` — from a successful establish,
+  from Identify, or from the `LearnAddress` command — so what is
+  forgotten now is an Identify-learned or explicitly-learned `/dns4`
+  address, dialled once and removed. No configured bootstrap address
+  reaches it at all: nothing composes a static-bootstrap provider,
+  `DiscoveryManager` never dials, and provider composition is Stage 12.
+  So the live defect is the book eviction; the sharper consequence —
+  a configured DNS bootstrap peer discarded on first use — arrives with
+  Stage 12 unless this is fixed first. Either way it contradicts
+  `static-bootstrap.md`, which says the ConnectionManager applies its
+  normal bounded retry and backoff. This predates Stage 11 and is named
+  here because nothing else names it.
+
+- **The connectivity behaviours ship GATED OFF, and `ClassGated<B>`
+  lands before the first call site that could retain an
+  infrastructure-only connection.** Owner's ruling, 2026-09-07, taken
+  when phase 1b's config half was about to model
+  `transport.connectivity` — whose schema makes `relay.client.enabled` a
+  `literal[true]`, so modelling it is what would otherwise construct a
+  relay client by default. Recorded here rather than only in `CLAUDE.md`
+  because this is where the construction order lives: a decision about
+  ordering stated only in the operating contract is the shape Stage 10's
+  exit gate had, where a shipping decision sat somewhere that could not
+  enforce it. The restriction itself is §14's protocol-isolation
+  invariant below; the commit it must precede is **step 3's**, not step
+  5's, for the call-site reason §14 now states.
 
 - **Committed spike locks drift silently when the root manifest
   changes, and nothing checks them.** A spike harness is its own
-  workspace but path-depends on production crates, so Cargo unifies the
-  root's features into it — and its committed `Cargo.lock` then names
-  fewer packages than the build needs. `cargo metadata --locked` fails;
+  workspace but path-depends on production crates — and
+  `crates/transport/libp2p` declares `libp2p = { workspace = true }`,
+  which resolves against the ROOT manifest wherever that crate is built,
+  including from inside another workspace. (Not feature unification,
+  which does not cross a workspace boundary; getting the mechanism right
+  matters for the check below, which must re-resolve each spike rather
+  than inspect a unified feature set.) Its committed `Cargo.lock` then
+  names fewer packages than the build needs. `cargo metadata --locked` fails;
   the plain `cargo run` each README documents rewrites the lock instead,
   silently, destroying the pinning the README claims. Stage 11's
-  features-on change did exactly this to SPIKE-003, and it was found in
-  review rather than by any check. **SPIKE-002's harness is in that
-  state now**, needing `interweave-discovery-api`, for a reason unrelated
-  to Stage 11 — it path-depends on no crate that reaches libp2p, so it
-  has been stale since some earlier stage. The durable fix is a tree
+  features-on change did exactly this to SPIKE-003 — though **that lock
+  was already broken before it**, missing `interweave-kademlia-control-api`
+  since Stage 10 plus two dependency edges, so the features-on change
+  added a third reason rather than the first. It was found in review
+  rather than by any check. **SPIKE-002's harness is in that state too**,
+  needing `interweave-discovery-api`, for a reason unrelated to Stage 11
+  — it path-depends on no crate that reaches libp2p. Both were stale for
+  pre-Stage-11 reasons; only one is also stale for a Stage 11 reason. The durable fix is a tree
   check asserting `--locked` resolves for every committed spike lock,
   wired into CI like any other guard; it is not written yet, and writing
   it means fixing SPIKE-002's lock in the same change so the guard can
@@ -1609,7 +1649,7 @@ is the outbound gate, the trust classification and their tests.
 ### Mandatory invariants
 
 - all behavior-originated dials pass DialAdmissionGate;
-- connectivity-infrastructure peers never gain GossipSub/direct/endpoint/Kademlia authority merely by being connected. **Read this as EXPOSURE, not only authority.** Stages 6-9 built each data-plane entry point to classify its caller — direct ingress, the GossipSub publisher check, `build_answer`'s trust check — so authority is already refused, and an implementer who checks only that will find the invariant apparently met. What is NOT met is the other half: `SubstrateBehaviour` installs `direct`, `broadcast`, `endpoints` and — since Stage 10 — `kad` on every connection uniformly, so once an infrastructure-only connection exists, that peer can advertise and open those substreams and be refused only after the request has been parsed and accounted. **Four protocols, not three**: Kademlia's authority check is the driver's `try_admit` data-plane trust requirement, so such a peer holds no routing seat, but it can still open the DHT substream and be answered — the same exposure, and an implementer working from a list of three would leave it in place. For as long as relay, AutoNAT and DCUtR were absent from the libp2p feature list, no infrastructure-only connection could be DIALLED or RETAINED. **It could always be ESTABLISHED**: neither gate denies at the established inbound hook, so such a peer's connection completes with all four data-plane handlers installed and is closed only afterwards by the runtime's event loop — `tests/connectivity/tests/advertised_protocol_set.rs` pins that, with no relay code involved, since an `InfrastructureSet` is ordinary configuration. **That is not yet this exposure.** Measured on the same test, nothing is advertised in the window: no Identify exchange completes before the close, because the refusal is pushed on the same `ConnectionEstablished` and closed in the same loop iteration. Handlers installed is not protocols spoken. THIS exposure is about a connection that is KEPT, which needs an origin outside `names_application_destination`, which needs a constructed relay or AutoNAT behaviour. **Stage 11's features-on step compiled all three, so the argument from the feature list is spent** — what keeps a retained infrastructure-only connection impossible now is only that nothing constructs those behaviours, and the step that gives them a constructor must not land before the restriction below does. The protocol set an infrastructure-only connection offers must be restricted at the connection, not merely answered at the request;
+- connectivity-infrastructure peers never gain GossipSub/direct/endpoint/Kademlia authority merely by being connected. **Read this as EXPOSURE, not only authority.** Stages 6-9 built each data-plane entry point to classify its caller — direct ingress, the GossipSub publisher check, `build_answer`'s trust check — so authority is already refused, and an implementer who checks only that will find the invariant apparently met. What is NOT met is the other half: `SubstrateBehaviour` installs `direct`, `broadcast`, `endpoints` and — since Stage 10 — `kad` on every connection uniformly, so once an infrastructure-only connection exists, that peer can advertise and open those substreams and be refused only after the request has been parsed and accounted. **Four protocols, not three**: Kademlia's authority check is the driver's `try_admit` data-plane trust requirement, so such a peer holds no routing seat, but it can still open the DHT substream and be answered — the same exposure, and an implementer working from a list of three would leave it in place. For as long as relay, AutoNAT and DCUtR were absent from the libp2p feature list, no infrastructure-only connection could be DIALLED or RETAINED. **It could always be ESTABLISHED**: neither gate denies at the established inbound hook, so such a peer's connection completes with all four data-plane handlers installed and is closed only afterwards by the runtime's event loop — `tests/connectivity/tests/advertised_protocol_set.rs` pins that, with no relay code involved, since an `InfrastructureSet` is ordinary configuration. **That is not yet this exposure.** The same test ASSERTS that nothing is advertised in the window — no Identify exchange completes before the close, because the refusal is pushed on the same `ConnectionEstablished` and closed in the same loop iteration — and fails naming the protocols if that changes. Handlers installed is not protocols spoken. (Mutating `authorizes_for` to retain the class makes it fail with all seven, which is what the §14 exposure looks like when it is live.) THIS exposure is about a connection that is KEPT, which needs an origin outside `names_application_destination` — `RelayReservation` or `AutonatProbe`. **The subject is a CALL SITE, not a behaviour**, and getting that wrong points the ordering guard at the wrong commit: `attempt_dial` takes an origin from any in-crate caller and `settle_established_outbound` retains on `authorizes_for(class, ticket.origin())`, so a single line passing `AutonatProbe` yields a retained infrastructure-only connection with nothing constructed anywhere. **Stage 11's features-on step compiled all three, so the argument from the feature list is spent** — what keeps a retained infrastructure-only connection impossible now is only that no call site passes either origin, and **the first commit that adds one must not land before the restriction below does. That is step 3**, which builds the AutoNAT client, not the later commit that constructs a relay. The protocol set an infrastructure-only connection offers must be restricted at the connection, not merely answered at the request;
 - AutoNAT server dial-back candidate is literal IP, matches requester observed source IP, and rejects prohibited address classes;
 - statically configured infrastructure is preferred; Identify-learned relay/probe promotion remains explicit opt-in;
 - relayed pre-Noise accounting is charged to authenticated relay connection/PeerId plus global limits when original IP is unavailable;

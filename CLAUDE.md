@@ -45,12 +45,20 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   gate denies at the established inbound hook — so it needs no relay
   code and is reachable today through ordinary configuration;
   `tests/connectivity/tests/advertised_protocol_set.rs` pins it, and
-  measures that nothing is advertised in that window, because the
-  refusal closes in the same loop iteration. A connection DIALLED or
+  ASSERTS that nothing is advertised in that window — the refusal closes
+  in the same loop iteration, and the test fails naming the protocols if
+  that ever stops being true. A connection DIALLED or
   RETAINED as infrastructure-only still cannot exist: it needs an origin
-  outside `names_application_destination`, so it needs a constructed
-  relay or AutoNAT behaviour, and nothing constructs one. Do not read
-  the feature change as evidence those paths are live. The exposure
+  outside `names_application_destination` — `RelayReservation` or
+  `AutonatProbe` — and **no call site passes either**. Note the subject:
+  a CALL SITE, not a behaviour. `attempt_dial` takes an origin from any
+  in-crate caller and `settle_established_outbound` retains on
+  `authorizes_for(class, ticket.origin())`, so one line passing
+  `AutonatProbe` produces a retained infrastructure-only connection with
+  no behaviour constructed anywhere. **The ordering constraint below
+  therefore binds the first commit that adds such a CALL SITE, which is
+  step 3 — not the later commit that constructs a behaviour.** Do not
+  read the feature change as evidence those paths are live. The exposure
   `BOTTOM-UP-IMPLEMENTATION-PLAN.md` §14 names — every data-plane
   behaviour installed uniformly on every connection — is about the
   RETAINED case, and it is now one commit away rather than one stage,

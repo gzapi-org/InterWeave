@@ -271,9 +271,11 @@ pub struct SubstrateBehaviour {
 // `ConnectionManager::authorizes`, which asks under `DialOrigin::Manual`
 // and so refuses this class outright.
 //
-// So the remaining distance to the gap is one commit, not one stage, and
-// it is the commit that gives those behaviours a constructor. That
-// commit must not land before the restriction described below.
+// So the remaining distance to the gap is one commit, not one stage —
+// and it is the commit that adds the first CALL SITE passing
+// `RelayReservation` or `AutonatProbe`, which is step 3, NOT the later
+// one that constructs a relay. That commit must not land before the
+// restriction described below.
 //
 // Stage 11 produces the first one, and then this shape is a gap. Each
 // entry point classifies its caller — direct ingress, the GossipSub

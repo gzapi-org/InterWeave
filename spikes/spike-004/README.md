@@ -515,8 +515,18 @@ states.
 
 **So the protocol-isolation correction is NOT unlocked by this
 verdict.** It needs a node carrying both the data-plane behaviours and a
-real infrastructure-only connection, which is phase-B-shaped work on
-`SubstrateBehaviour` rather than on this harness. What phase A
+real infrastructure-only connection, which is work on
+`SubstrateBehaviour` rather than on this harness.
+
+**Half of that has since landed, and NOT in phase B** — an earlier
+version of this paragraph called it phase-B-shaped, which was wrong.
+Stage 11's `tests/connectivity/tests/advertised_protocol_set.rs` runs a
+node carrying all four data-plane behaviours beside a real
+infrastructure-only connection, over loopback, in CI, with no relay code
+at all: an `InfrastructureSet` is ordinary configuration. What that
+connection is not is RETAINED — it is closed in the same loop iteration
+as `ConnectionEstablished` — so the correction still owes the retained
+case, and that is what remains outstanding here. What phase A
 establishes is narrower and still useful: the control protocols an
 infrastructure peer advertises to US, which is the list a restriction
 must leave intact.

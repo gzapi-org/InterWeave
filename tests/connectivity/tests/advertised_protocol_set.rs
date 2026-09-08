@@ -303,9 +303,11 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
     // infrastructure-only peer's connection **completes** rather than
     // being refused at or before the handshake. The §14 exposure proper
     // is about a connection that is KEPT, which needs an origin outside
-    // `names_application_destination`, which needs a constructed relay
-    // or AutoNAT behaviour. This test is the control that will make that
-    // one meaningful, and the negative case `ClassGated<B>` must flip.
+    // `names_application_destination` -- and needs only a CALL SITE
+    // passing one, not a constructed behaviour, since `attempt_dial`
+    // takes the origin from its caller. This test is the control that
+    // will make that one meaningful, and the negative case
+    // `ClassGated<B>` must flip.
     //
     // # This asserts today's behaviour, not a rule from ADR-0036
     //
@@ -317,12 +319,25 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
     // because inbound asks the origin-less `ConnectionManager::authorizes`
     // (`dialing.rs`), which asks under `DialOrigin::Manual`.
     //
-    // **Step 4 will have to change this**, and this test with it: an
+    // **There is an unresolved tension here and it is named rather than
+    // decided** (CLAUDE.md §2). `transport/libp2p/CONNECTIVITY.md`'s
+    // protocol matrix gives Identify and bounded ping a `yes` in the
+    // infrastructure-only column, and ADR-0036 opens a clause with "on
+    // an established infrastructure-only connection:". Both describe a
+    // state this build cannot hold, since the connection is closed in
+    // the same loop iteration as `ConnectionEstablished`. Whether the
+    // documents or the code move is step 3's decision, not this test's.
+    //
+    // **Step 3 will have to change this**, and this test with it: an
     // AutoNAT v2 dial-back arrives as an inbound connection FROM the
-    // infrastructure-only server, and under today's rule the client
-    // closes it before it can serve `/libp2p/autonat/2/dial-back`. The
-    // same asymmetry `settle_established_outbound` already documents on
-    // the outbound side.
+    // infrastructure-only server, and the node that must serve
+    // `/libp2p/autonat/2/dial-back` on it is the CLIENT --
+    // `libp2p-autonat 0.15.0` installs `dial_back::Handler` on every
+    // established inbound. Step 3 is the AutoNAT client; step 4 is the
+    // server role. Under today's rule the client closes the dial-back
+    // before it can answer. The same asymmetry
+    // `settle_established_outbound` already documents on the outbound
+    // side.
     use futures::StreamExt as _;
 
     let observer_keys = libp2p::identity::Keypair::generate_ed25519();
@@ -381,6 +396,11 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
     // transport completes the handshake before the runtime's event loop
     // ever sees `ConnectionEstablished` to classify.
     let mut established = false;
+    // ASSERTED, not merely observed once. `CLAUDE.md` and the plan both
+    // rest their `ClassGated<B>` argument on "nothing is advertised in
+    // this window", and a property stated in three documents and
+    // measured in none is what §4 exists to refuse.
+    let mut advertised_in_the_window: Option<Vec<String>> = None;
     let deadline = tokio::time::Instant::now() + PATIENCE;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -390,6 +410,26 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
         );
         match tokio::time::timeout(remaining, observer.select_next_some()).await {
             Ok(libp2p::swarm::SwarmEvent::ConnectionEstablished { .. }) => established = true,
+            Ok(libp2p::swarm::SwarmEvent::Behaviour(libp2p::identify::Event::Received {
+                info,
+                ..
+            })) => {
+                // ASSERTED HERE rather than after the loop, so it fires
+                // at the moment of violation. After the loop it would be
+                // unreachable: a widened window also delays or removes
+                // the close, and the establish-then-close assertion
+                // below would panic first, reporting the wrong cause.
+                let protocols: Vec<String> =
+                    info.protocols.iter().map(ToString::to_string).collect();
+                advertised_in_the_window = Some(protocols.clone());
+                panic!(
+                    "an infrastructure-only peer was told {protocols:?} before being \
+                     refused. The window measured as empty is not empty any more, so \
+                     the §14 exposure is live on this path -- which makes \
+                     `ClassGated<B>` urgent rather than next, and changes what \
+                     CLAUDE.md and the canonical plan say about it."
+                );
+            }
             Ok(libp2p::swarm::SwarmEvent::ConnectionClosed { .. }) => {
                 assert!(
                     established,
@@ -408,6 +448,10 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
             Err(_) => panic!("neither establishment nor closure arrived"),
         }
     }
+
+    // Belt and braces: the panic above is the real assertion, and this
+    // catches an `Identify` that somehow arrived without matching it.
+    assert_eq!(advertised_in_the_window, None);
 
     subject.shutdown().await.expect("stops");
 }
