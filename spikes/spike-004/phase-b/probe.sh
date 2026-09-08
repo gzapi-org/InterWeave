@@ -15,17 +15,15 @@
 #     below would be a loopback result wearing a phase-B label;
 #   * whether the mapping is endpoint-independent — the same external
 #     port to both observers — or per-destination, which is ONE of the
-#     two variables deciding whether a hole punch SUCCEEDS. Filtering is
+#     two variables deciding whether a hole punch succeeds. Filtering is
 #     the other, and this harness neither configures nor measures it, so
-#     a row licenses a claim about the mapping a punch would face and
-#     not about the punch SUCCEEDING. With BOTH peers behind `eds` --
-#     what this harness builds, one `NAT_MODE` for both domains --
-#     failure does follow from the mapping, which is the asymmetry the
-#     `eds` row relies on. That is not a property of `eds` as such: a
-#     punch succeeds if EITHER direction lands, so an `eds` peer facing
-#     a full-cone one can still connect on its own dial. Mapping does
-#     not gate the ATTEMPT either: `DCUTR.md` §2's eligibility list
-#     does not mention NAT class.
+#     a row licenses a claim about the mapping a punch would face and NO
+#     claim about a punch: not that one would succeed, and not that one
+#     would fail. Even `eds` on both sides does not entail failure -- if
+#     either side's filtering is endpoint-independent the packet is
+#     forwarded through the relay-created mapping whatever its source.
+#     Mapping does not gate the ATTEMPT either: `DCUTR.md` §2's
+#     eligibility list does not mention NAT class. Codex review, PR #79.
 set -euo pipefail
 
 # NO ARGUMENTS, CHECKED FIRST. The trial list is an environment
@@ -89,7 +87,7 @@ router_pub=$(addr_on "$ROUTER" "$NET_PUB")
 # EVERY internal socket, so a second bound port is a second instance of
 # the property, not a second look at the first. `eds` needs only one
 # trial to disagree, which is the safe asymmetry -- the harness cannot
-# talk itself into the class that does not rule a punch out.
+# talk itself into the more permissive mapping class.
 SRC_PORTS="${SRC_PORTS:-45000 45001}"
 
 # THE TRIAL LIST IS VALIDATED BEFORE ANY TRIAL RUNS, because `class`

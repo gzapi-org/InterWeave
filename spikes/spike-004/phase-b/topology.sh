@@ -7,13 +7,17 @@
 # See README.md for what this does and does not establish. The short
 # version: it builds a real kernel NAT whose MAPPING BEHAVIOUR is chosen
 # rather than inherited, because that behaviour is one of the two things
-# deciding whether a hole punch SUCCEEDS — filtering is the other, and is
-# neither configured nor measured here. Neither gates the attempt: with
-# both peers behind `eds`, which is what this harness builds, a punch is
-# attempted and fails, and that is what the row is for. (Both, not one:
-# an `eds` peer facing a full-cone one can still connect on its own
-# dial, so failure is a property of the pairing rather than of `eds`.)
-# Phase A, on loopback, had no NAT at all.
+# deciding whether a hole punch succeeds — filtering is the other, and is
+# neither configured nor measured here.
+#
+# NO PUNCH IS ATTEMPTED HERE. `run.sh` builds the topology and runs UDP
+# mapping probes; the relay, the nodes and DCUtR arrive with steps 5, 6
+# and 8. A comment saying the `eds` row attempts a punch and fails made
+# this look like NAT-induced-failure evidence when it is mapping
+# evidence. Nor would `eds` on both sides entail failure if it did: an
+# endpoint-independent FILTER on either side forwards the other peer's
+# packet through the relay-created mapping whatever its source.
+# Codex review on PR #79. Phase A, on loopback, had no NAT at all.
 set -euo pipefail
 
 NET_PUB="${NET_PUB:-natm-pub}"

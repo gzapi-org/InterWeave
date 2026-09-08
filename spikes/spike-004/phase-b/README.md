@@ -31,32 +31,28 @@ router's own address. Phase A had no NAT at all, and the first thing
 this harness owes is evidence that these ones do.
 
 **That the mapping behaviour is the one that was asked for.** Mapping is
-one of the two things that decide whether a hole punch SUCCEEDS;
+one of the two things that decide whether a hole punch succeeds;
 filtering is the other, and is neither configured nor measured here — so
-these rows license a claim about the mapping a punch would face and not
-about the punch SUCCEEDING. The missing word matters, because the
-relationship is asymmetric in ONE topology: with BOTH peers behind
-`eds` — which is what this harness builds, since one `NAT_MODE` sets
-both domains — failure follows from the mapping alone, and that is what
-the `eds` row exists to produce. **It is not a property of `eds` as
-such.** A punch succeeds if EITHER direction lands, so an `eds` peer
-paired with a full-cone peer — endpoint-independent in BOTH its mapping
-and its filtering — can still connect: the dial toward the `eds` peer
-dies, but the `eds` peer's own dial arrives at the stable port the
-other side's mapping gives it, and endpoint-independent filtering
-forwards it whatever the source. Filtering rescues that punch, and it
-takes the mapping half to have a port worth aiming at. (A hypothetical
-here: this harness's `eim` row is a port-restricted cone, not a full
-one, as the filtering note BELOW says — so the rescuing pairing is not
-one these two rows can build.)
-Which is why the rows are stated as a claim about mapping and the
-harness builds both domains alike. Neither row rules an
-ATTEMPT out: `DCUTR.md` §2 lists the eligibility conditions and NAT
-class is not among them, and §9
-requires a NAT-induced FAILURE test, which is a punch attempted and
-failed. An earlier version of this sentence said mapping decides whether
-a punch can be attempted at all, which would leave the `eds` row with no
-failing punch to produce — the thing it exists for:
+**these rows license a claim about the mapping a punch would face, and
+no claim about a punch at all.** Not that one would succeed, and not
+that one would fail.
+
+That last half took four attempts to state without overreaching, so the
+counterexample is worth keeping: even with BOTH peers behind `eds`,
+failure does not follow from the mapping. If either side's filtering is
+endpoint-independent, the other peer's packet is forwarded through the
+relay-created mapping whatever its source, and the punch can still land.
+`eds` on both sides is the mapping a failing punch would face; whether
+it fails is decided by filtering this harness does not set. No punch is
+attempted here in any case — the relay, the nodes and DCUtR arrive with
+steps 5, 6 and 8.
+
+Neither row rules an ATTEMPT out either: `DCUTR.md` §2 lists the
+eligibility conditions and NAT class is not among them, and §9 requires
+a NAT-induced FAILURE test — which is a punch attempted and failed, so
+an `eds` mapping has to be reachable by an attempt for that test to
+exist at all. An earlier version of this sentence said mapping decides
+whether a punch can be attempted; it does not:
 
 | `NAT_MODE` | nft rule | observers see | meaning |
 | --- | --- | --- | --- |
@@ -213,8 +209,10 @@ Treat the row as the mapping property and nothing else.
 punch succeeds, so the failure cooldown (`DCUTR.md` §3 and
 `transport/libp2p/CONNECTIVITY.md` §13 both set it at 5 min) and
 fallback-on-failure have
-never been exercised by anything. This is the mapping behaviour a
-failing punch depends on. **The retry ceiling is not a document's**:
+never been exercised by anything. This row supplies the mapping such a
+test would have to run against; it does not run one.
+
+**The retry ceiling is not a document's**:
 `DCUTR.md` has nine sections and no §13, which this cited for ten
 rounds, and neither §3 nor that §13 sets a retry count — the PATH
 matters, because `contracts/CONNECTIVITY.md` is a different document
@@ -255,7 +253,7 @@ bound source ports are not a repeat of one look: endpoint-independence
 must hold for every internal socket, so the second is a second instance
 of the property. `eim` requires every trial to agree; one disagreement
 is `eds`, which is the safe asymmetry — the harness cannot talk itself
-into the class that does not rule a punch out.
+into the more permissive mapping class.
 
 Five checks stand between the observation and a passing row — four
 before the verdict is printed, one after — and any of them fails it.
