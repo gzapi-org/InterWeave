@@ -62,6 +62,20 @@ ROUTERS="natm-router natm-router-b"
 # names for the ports, in the other direction: an override that looks
 # live and is ignored. Review finding on PR #81.
 PROBER="${PROBER:-natm-filt}"
+# AND GUARDED HERE, because this is the file that runs `podman rm -f` on
+# the name -- `up` calls `down` first -- so a `PROBER` naming a container
+# standing from other work would be removed silently before the image
+# build finished. `filter.sh`'s guard covers the observers, two minutes
+# later; every other destructive use in that file sits behind address
+# resolution and fails first. This one does not. The refused set is
+# everything this file creates, plus the prefix rule that keeps it off
+# anything it does not. Review finding on PR #81.
+case "$PROBER" in
+  natm-obs1|natm-obs2|natm-peer|natm-peer-b|natm-router|natm-router-b)
+    echo "PROBER must not be a container this topology creates ($PROBER): down would remove it as the prober" >&2; exit 2 ;;
+  natm-*) ;;
+  *) echo "PROBER must be named natm-* ($PROBER): this file force-removes it on down, and the prefix keeps that off anything it did not create" >&2; exit 2 ;;
+esac
 
 # The ports `filter.sh` uses are declared THERE, not here: this file
 # never reads them, and declaring them in both places made
