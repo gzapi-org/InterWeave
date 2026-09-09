@@ -753,7 +753,7 @@ impl ConnectivityConfig {
 
     /// Every `integer[a..b]`, `duration[a..b]` and `bytes[a..b]` range.
     ///
-    /// Table-driven rather than thirty near-identical blocks, so a row
+    /// Table-driven rather than twenty-eight near-identical blocks, so a row
     /// added to the schema is a row added here and the shape of the
     /// check cannot drift between fields.
     fn check_ranges(&self, errors: &mut Vec<ConfigError>) {
@@ -762,7 +762,7 @@ impl ConnectivityConfig {
         let relay_client = &self.relay.client;
         let relay_server = &self.relay.server;
         let dcutr = &self.dcutr;
-        let rows: [(&'static str, u64, u64, u64); 26] = [
+        let rows: [(&'static str, u64, u64, u64); 28] = [
             (
                 "connectivity.autonat.client.required_distinct_successes",
                 u64::from(autonat_client.required_distinct_successes),
@@ -919,25 +919,13 @@ impl ConnectivityConfig {
                 1,
                 32,
             ),
-        ];
-        for (field, got, min, max) in rows {
-            if got < min || got > max {
-                errors.push(ConfigError::ConnectivityOutOfRange {
-                    field,
-                    got,
-                    allowed: (min, max),
-                });
-            }
-        }
-        // A SECOND TABLE ONLY BECAUSE THE FIRST ONE'S LENGTH IS FIXED.
-        // These two rows are no different in kind -- the first table
-        // already holds seven durations -- and the loop below is
-        // identical to the one above. Said rather than implied, because
-        // the earlier version of this comment offered a distinction that
-        // is not one: `retry_cooldown` and `direct_stability_period` are
-        // the two bounds SPIKE-004 measured the crate exposes no knob
-        // for, which is a fact about enforcement, not about this check.
-        let durations: [(&'static str, u64, u64, u64); 2] = [
+            // THE LAST TWO ROWS ARE THE TWO BOUNDS SPIKE-004 MEASURED
+            // THE CRATE EXPOSES NO KNOB FOR. That is a fact about
+            // enforcement, not about this check, so they are rows like
+            // any other -- they sat in a second table of their own only
+            // because an array's length is part of its type, and a
+            // reader took the split for a distinction. Review finding on
+            // PR #80.
             (
                 "connectivity.dcutr.retry_cooldown",
                 u64::from(dcutr.retry_cooldown_ms),
@@ -951,7 +939,7 @@ impl ConnectivityConfig {
                 120_000,
             ),
         ];
-        for (field, got, min, max) in durations {
+        for (field, got, min, max) in rows {
             if got < min || got > max {
                 errors.push(ConfigError::ConnectivityOutOfRange {
                     field,
