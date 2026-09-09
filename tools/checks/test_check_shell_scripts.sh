@@ -168,24 +168,43 @@ echo done'
 expect_status 1 "an unused assignment (SC2034) is refused as a FINDING"
 cleanup; SANDBOX=""
 
-# 3. THE NEGATIVE CONTROL, and the reason the threshold is `warning`:
-#    the `A && B || { fail; }` idiom is SC2015 at INFO and is used
-#    deliberately throughout this repository. It must pass.
+# 3. THE NEGATIVE CONTROL: the `A && B || { ...; exit N; }` idiom this
+#    repository uses deliberately must pass -- and on 0.11.0 it passes at
+#    EVERY severity, because SC2015 exempts a fail arm that exits. Two
+#    earlier versions of this case asserted it was refused at `info`; the
+#    first passed only because an unrelated directive-parse error fired
+#    at every severity, and the second failed in CI the moment that
+#    error was fixed. The idiom is not what `info` reports, and this case
+#    now says so at both ends. Review findings on PR #82.
 sandbox_with '#!/usr/bin/env bash
 value=5
 [ "$value" -ge 1 ] && [ "$value" -le 10 ] \
   || { echo "out of range" >&2; exit 2; }
 echo "$value"'
-expect_status 0 "the deliberate A && B || { fail; } idiom passes at warning severity"
-#    AND THE SAME FIXTURE IS REFUSED AT `info` -- the half that makes
-#    this a test of the threshold rather than of an empty finding set.
-#    Exit 0 above is equally true if SC2015 never fires at all: a
-#    linter release that stops flagging this shape, or a "simplified"
-#    fixture, would leave the case passing forever while asserting
-#    nothing. Exit 1 here proves the finding exists and that `warning`
-#    is what admits it. Review finding on PR #82.
-expect_status 1 "and is refused at severity=info, so SC2015 fires and warning is the threshold that admits it" \
+expect_status 0 "the deliberate A && B || { ...; exit N; } idiom passes at warning severity"
+expect_status 0 "and at info too: a fail arm that exits is exempt from SC2015" \
     INTERWEAVE_SHELLCHECK_SEVERITY=info
+cleanup; SANDBOX=""
+
+# 3b. THE THRESHOLD, pinned at both ends BY CONTENT. A fixture whose
+#    fail arm does NOT exit -- so C runs when A is true, which is what
+#    SC2015 warns about -- is refused at `info` with SC2015 named in the
+#    output against the fixture's path, and admitted at `warning`. The
+#    content assertion is what makes this a test of that finding rather
+#    than of any finding anywhere in the sandbox, the guard's own tracked
+#    copy included. Review finding on PR #82.
+sandbox_with '#!/usr/bin/env bash
+value=5
+[ "$value" -ge 1 ] && [ "$value" -le 10 ] || touch /tmp/out-of-range
+echo "$value"'
+expect_status 1 "a fail arm that continues is refused at severity=info" \
+    INTERWEAVE_SHELLCHECK_SEVERITY=info
+if [[ "$GUARD_OUTPUT" == *"SC2015"* && "$GUARD_OUTPUT" == *"scripts/case.sh"* ]]; then
+    pass "and the finding named is SC2015, on the fixture"
+else
+    fail "the info-level refusal must be SC2015 on scripts/case.sh, got: $GUARD_OUTPUT"
+fi
+expect_status 0 "and the same fixture is admitted at warning, so warning is the threshold that admits SC2015"
 cleanup; SANDBOX=""
 
 # 4. A TARGETED DISABLE IS HONOURED, because the guard's own message

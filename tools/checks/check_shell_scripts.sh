@@ -27,16 +27,17 @@
 # a variable holds. That one needed the review.
 #
 # SEVERITY IS `warning`, NOT `style` OR `info`, and the threshold is a
-# judgement rather than a default. At `info` the bulk of what the tree
-# reports is SC2015 on the `A && B || { fail; }` idiom this repository
-# uses deliberately and correctly — C runs when B is false, which is the
-# intent every time — so gating there would mean rewriting most of the
-# tree to satisfy a note about a construct it uses on purpose. (The
-# counts that used to sit here were one shellcheck release's answer
-# about one day's tree, so they are not restated; the self-test pins the
-# judgement instead, at both ends.) At `warning` the tree is clean, and
-# every finding the threshold admits is one shellcheck thinks is
-# probably a bug.
+# judgement rather than a default: `info` and `style` are advisory
+# notes, and `warning` is where shellcheck starts saying "probably a
+# bug". At `warning` the tree is clean. An earlier version of this
+# paragraph justified the choice by SC2015 on the `A && B || { ...;
+# exit N; }` idiom this repository uses on purpose, with counts -- and
+# the self-test then showed that on the pinned 0.11.0 that idiom is
+# EXEMPT from SC2015 at every severity, because the fail arm exits. So
+# what the tree reports at `info` was not the reason, and it has not
+# been measured on the pinned release; the self-test pins the threshold
+# at both ends with a fixture that does fire SC2015 (a fail arm that
+# continues), and the judgement stands on its own.
 #
 # WHAT SHELLCHECK READS BESIDES THE FILES, and why it is switched off:
 # `SHELLCHECK_OPTS` in the environment and `.shellcheckrc` files (from
