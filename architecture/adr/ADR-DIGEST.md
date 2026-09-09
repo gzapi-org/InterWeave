@@ -50,6 +50,7 @@ Authority order is unchanged (`CLAUDE.md` §2): accepted ADRs → normative cont
 | AutoNAT v2, Circuit Relay v2, DCUtR, NAT traversal, reachability state | **0035** (mandatory in standard v1; supersedes **0024**) |
 | relay reservation targets, path selection, address advertisement | **0035** §Relay reservation policy / §Path selection |
 | infrastructure peers, relay/probe authorization that is not data-plane trust | **0036** (+ 0012, 0011) |
+| vendored dependency, third_party, patch.crates-io, libp2p-autonat, retest, second observer, refresh | **0051** (+ 0035 the requirement it serves) |
 | dialling a circuit *to* a relay, circuit destination vs relay control | **0036** (Amendment 2026-09-03) |
 | human client boundary, what the UI may own, contacts, display names | **0032** (+ 0039 stack, 0040 desktop, 0041 Android) |
 | Slint, human client UI stack, Rust core, JNI shim scope | **0039** |
@@ -248,6 +249,11 @@ The standard v1 build and release include the complete reachability stack.
 A second authorization set that buys reachability without buying data-plane membership.
 - Rules: `transport.connectivity.infrastructure.allowed_peers` is separate from `trust.allowed_peers`; class is `DataPlaneTrusted` (in trust set — wins if in both), `ConnectivityInfrastructureOnly`, or `Unauthorized`. Infrastructure-only peers may carry Noise/Yamux, Identify/bounded ping, AutoNAT v2 probe control, and relay reservation and circuit *control with that peer* — and **nothing else**: no relay circuit and no DCUtR *with that peer as application destination*, no GossipSub, no direct v2, no endpoint directory, no Kademlia routing, no Channel/application trust. **Who an exchange is WITH is a different question from who it is FOR** (Amendment 2026-09-03): reserving on a relay is eligible, terminating a circuit at it is not. The root gate evaluates dial *purpose* as well as class. On an established infrastructure connection GossipSub excludes the peer from mesh exchange, direct and directory managers reject before payload admission, and Kademlia never inserts it. **Inbound relayed connections are evaluated against the authenticated remote application PeerId, not the relay's** — a trusted relay cannot smuggle an unauthorized source into the data plane. Every configured static AutoNAT/relay PeerId must appear in one of the two sets or configuration fails closed; discovery and Identify never modify either set.
 - Keywords: infrastructure peer, control plane, protocol admission matrix, relay cannot smuggle, fail closed, circuit destination vs relay control
+
+### 0051 — Vendor libp2p-autonat and give its v2 client a re-test entry point (Accepted)
+The released client tests an address once; ADR-0035 needs two observers and §5 needs refresh, so the workspace builds a vendored copy with one recorded method.
+- Rules: `libp2p-autonat` 0.15.0 is built from `third_party/libp2p-autonat/` via `[patch.crates-io]`, the crates.io tarball plus `LICENSE` and `INTERWEAVE.patch` and **nothing else**. The patch is one method, `Behaviour::retest(&Multiaddr) -> bool`, returning a tested candidate to the sweep; WHEN to call it — refresh, a further observer, retry under the dial gate's constants — is the `ReachabilityManager`'s decision. Every vendored file is in `license_exempt.txt` with provenance and checksum. Dropped when a release carries an equivalent; every libp2p bump re-vendors and re-applies. Server choice stays the crate's random pick, so the second observer converges probabilistically and the manager counts distinct servers.
+- Keywords: vendored dependency, third_party, patch.crates-io, retest, candidate lifecycle, second observer, refresh, dependabot blind spot
 
 ### 0024 — Conservative v1 reachability (Historical; superseded by 0035)
 - Rules: historical only — directly reachable TCP/LAN/static operation was once considered sufficient, with relay/AutoNAT/DCUtR deferred. **Read 0035 instead.**
