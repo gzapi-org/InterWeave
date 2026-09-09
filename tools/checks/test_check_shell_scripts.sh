@@ -25,6 +25,11 @@
 #   0  all assertions passed
 #   1  one or more failed
 #   2  shellcheck is not installed, so none of this can be exercised
+#
+# NOT RUN LOCALLY WHEN WRITTEN: the machine these cases were authored on
+# had shellcheck installed but not yet on PATH, so the first execution of
+# this file was CI's, against the pinned 0.11.0. Said here because a
+# self-test that was never watched failing is one more claim.
 
 set -uo pipefail
 
@@ -76,18 +81,24 @@ sandbox_with() {
 # add` silently produced nothing and shellcheck was never invoked at all.
 # That is the shape this file's header says it exists to prevent.
 # Review finding on PR #82.
-guard_status() {
-    ( cd "$SANDBOX" && bash tools/checks/check_shell_scripts.sh >/dev/null 2>&1 )
-    echo $?
+#
+# THE OUTPUT IS KEPT, and shown on failure. `>/dev/null 2>&1` left a
+# failing case reporting `(expected exit 1, got 2)` and nothing about
+# why, which from a CI log is a number with no cause. Review finding on
+# PR #82.
+guard_run() {
+    GUARD_OUTPUT=$( cd "$SANDBOX" && bash tools/checks/check_shell_scripts.sh 2>&1 )
+    GUARD_STATUS=$?
 }
 
 expect_status() {
-    local want="$1" label="$2" got
-    got=$(guard_status)
-    if [[ "$got" == "$want" ]]; then
+    local want="$1" label="$2"
+    guard_run
+    if [[ "$GUARD_STATUS" == "$want" ]]; then
         pass "$label"
     else
-        fail "$label (expected exit $want, got $got)"
+        fail "$label (expected exit $want, got $GUARD_STATUS)"
+        printf '%s\n' "$GUARD_OUTPUT" | sed 's/^/      | /' >&2
     fi
 }
 
