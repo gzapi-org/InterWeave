@@ -1852,9 +1852,11 @@ pub enum ConfigError {
     /// carries an address longer than a candidate address may be, and an
     /// entry longer than a candidate entry may be — both of which ARE
     /// peer-qualified, so the message says "not a usable static
-    /// candidate" rather than naming the grammar. Review finding on
-    /// PR #80.
-    StaticCandidateNotPeerQualified {
+    /// candidate" rather than naming the grammar. The variant was called
+    /// `StaticCandidateNotPeerQualified` and named only the first of the
+    /// three; the name now says what the `Display` always said. Review
+    /// findings on PR #80.
+    StaticCandidateUnusable {
         /// Which list.
         role: &'static str,
         /// The entry as configured.
@@ -2079,7 +2081,7 @@ impl core::fmt::Display for ConfigError {
                  connectivity.infrastructure.allowed_peers",
                 peer.as_str()
             ),
-            Self::StaticCandidateNotPeerQualified {
+            Self::StaticCandidateUnusable {
                 role,
                 entry,
                 reason,

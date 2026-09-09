@@ -1071,7 +1071,7 @@ impl ConnectivityConfig {
             }
             for candidate in candidates {
                 if candidate.len() > MAX_STATIC_PEER_BYTES {
-                    errors.push(ConfigError::StaticCandidateNotPeerQualified {
+                    errors.push(ConfigError::StaticCandidateUnusable {
                         role,
                         entry: candidate.clone(),
                         reason: "the entry is longer than a candidate entry may be",
@@ -1124,7 +1124,7 @@ impl ConnectivityConfig {
         ] {
             for candidate in candidates {
                 match split_peer_multiaddr(candidate) {
-                    Err(reason) => errors.push(ConfigError::StaticCandidateNotPeerQualified {
+                    Err(reason) => errors.push(ConfigError::StaticCandidateUnusable {
                         role,
                         entry: candidate.clone(),
                         reason,
@@ -1148,7 +1148,7 @@ impl ConnectivityConfig {
                         // shape `validate_into`'s own doc refuses.
                         // Review finding on PR #80.
                         if address.len() > MAX_ADDRESS_BYTES {
-                            errors.push(ConfigError::StaticCandidateNotPeerQualified {
+                            errors.push(ConfigError::StaticCandidateUnusable {
                                 role,
                                 entry: candidate.clone(),
                                 reason: "the address is longer than a candidate address may be",
@@ -1767,7 +1767,7 @@ mod tests {
         assert!(
             errors.iter().any(|e| matches!(
                 e,
-                ConfigError::StaticCandidateNotPeerQualified { role, .. }
+                ConfigError::StaticCandidateUnusable { role, .. }
                     if *role == "relay.client.static_relays"
             )),
             "a bare multiaddr must be refused, got {errors:?}"
@@ -1894,7 +1894,7 @@ mod tests {
             !errors.iter().any(|e| matches!(
                 e,
                 ConfigError::StaticCandidateUnauthorized { .. }
-                    | ConfigError::StaticCandidateNotPeerQualified { .. }
+                    | ConfigError::StaticCandidateUnusable { .. }
             )),
             "a legal entry under the entry ceiling must draw no candidate complaint: {errors:?}"
         );
@@ -1932,7 +1932,7 @@ mod tests {
         assert!(
             errors.iter().any(|e| matches!(
                 e,
-                ConfigError::StaticCandidateNotPeerQualified { reason, .. }
+                ConfigError::StaticCandidateUnusable { reason, .. }
                     if reason.contains("longer than a candidate address")
             )),
             "an over-long address half must be refused: {errors:?}"
@@ -1993,7 +1993,7 @@ mod tests {
         assert!(
             errors.iter().any(|e| matches!(
                 e,
-                ConfigError::StaticCandidateNotPeerQualified { reason, .. }
+                ConfigError::StaticCandidateUnusable { reason, .. }
                     if reason.contains("longer than a candidate entry")
             )),
             "an over-long entry built in Rust must still be refused: {errors:?}"
