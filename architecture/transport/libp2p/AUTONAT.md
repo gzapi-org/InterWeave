@@ -31,12 +31,69 @@ AutoNAT must not modify trust, discovery membership, EndpointId state, or applic
 A server is eligible only when all are true:
 
 - its PeerId is `DataPlaneTrusted` or `ConnectivityInfrastructureOnly`;
-- it is configured statically, or (only when `use_authorized_identify_servers=true`) learned through an already-authorized Identify/control connection; this flag defaults false and static servers have selection precedence until they cannot meet the observer target;
 - it advertises/negotiates the required AutoNAT-v2 server protocol on fresh evidence;
-- it is not in per-server cooldown/backoff;
+- **this profile holds a connection to it**;
 - global probe/resource budgets permit work.
 
 Discovery of a peer or protocol support never authorizes it.
+
+### Amendment 2026-09-09 — eligibility is a property of the CONNECTION, not of a selection order
+
+**What changed.** Two clauses were removed from the list above: that a
+server must be "configured statically, or (only when
+`use_authorized_identify_servers=true`) learned through an
+already-authorized Identify/control connection", and that "static
+servers have selection precedence until they cannot meet the observer
+target". Per-server cooldown/backoff was removed as an eligibility
+clause for the same reason and survives as client-side policy (§4).
+
+**Why.** `libp2p-autonat` 0.15.0's v2 client chooses its probe server by
+`random_autonat_server()` — a uniformly random pick among CONNECTED
+peers whose Identify reported the dial-request protocol
+(`v2/client/behaviour.rs:340`). Its whole public surface is
+`Config::with_max_candidates`, `Config::with_probe_interval`,
+`Behaviour::new` and `validate_addr`: there is no hook to rank servers,
+to prefer one source over another, or to veto a pick. Nor can the
+outbound gate do it, because a probe is a request over an ALREADY-OPEN
+connection and the client emits no dial at all (see CLAUDE.md §1 on
+step 3 reaching routes 2 and 3). A rule the crate cannot express and the
+gate never sees is a rule nothing enforces, and this repository has
+shipped that shape before — a comment that reads as settled while
+nothing fails when it stops being true.
+
+**What replaces it.** The eligible set is exactly the set of connected
+peers advertising the protocol, and every one of those is already
+`DataPlaneTrusted` or `ConnectivityInfrastructureOnly` because no other
+class is retained. Static configuration keeps a weaker and enforceable
+meaning: a statically configured server is one this profile
+**guarantees to be CONNECTED to**, by dialling it under
+`DialOrigin::AutonatProbe`. `use_authorized_identify_servers` likewise
+governs CONNECTION rather than selection — with it false, this profile
+opens no AutoNAT connection it was not configured for, so an
+Identify-learned server can only ever be a peer already connected for
+another reason.
+
+**What this gives up, stated rather than implied.** A
+`DataPlaneTrusted` peer connected for data-plane reasons that happens to
+advertise the AutoNAT server protocol IS an eligible probe server under
+the amended rule, and was not under the old one. It learns which of our
+addresses we are testing. It cannot forge a verdict — `verified_public`
+needs the configured number of DISTINCT servers, and the evidence key is
+`(address, server)` — but it is one of them. An operator who needs the
+narrower set gets it by not connecting to such peers, which is a trust
+decision rather than an AutoNAT one.
+
+**Still open, and not settled by this amendment**: §6's candidate scope
+has the same shape and a sharper edge. `libp2p-identify` pushes
+`ToSwarm::NewExternalAddrCandidate` for every address a peer claims to
+have observed (`libp2p-identify-0.47.0/src/behaviour.rs:370`), and the
+AutoNAT client probes from exactly that set. So a connected peer can put
+an address of its choosing into the set this profile asks a server to
+dial — bounded by `max_candidates` and by the servers being authorized,
+but it is the "arbitrary remote-supplied addresses" §6 forbids by name.
+Whatever closes it sits where candidates are reported, not in the
+behaviour. Recorded here so the next reader finds it before writing a
+comment that says §6 holds.
 
 ## 4. Evidence model
 

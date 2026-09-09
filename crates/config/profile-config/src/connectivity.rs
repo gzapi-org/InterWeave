@@ -962,9 +962,13 @@ impl ConnectivityConfig {
     /// an android profile enabling a relay server is refused by nothing
     /// today; and "static configured candidates have selection precedence
     /// until their target cannot be met", a runtime selection rule with
-    /// no configuration-time shape (its first half, Identify-learned
-    /// candidates off by default, IS here as the two `use_authorized_*`
-    /// defaults, pinned by the no-transport-block test). The third is
+    /// no configuration-time shape for RELAY (its first half,
+    /// Identify-learned candidates off by default, IS here as the two
+    /// `use_authorized_*` defaults, pinned by the no-transport-block
+    /// test). For AUTONAT it has no runtime shape either: `AUTONAT.md`'s
+    /// Amendment 2026-09-09 records that the pinned client cannot
+    /// express a selection order at all, so the flag governs which
+    /// servers the profile CONNECTS to. The third is
     /// enforced ELSEWHERE: "a PeerId in both sets is treated as
     /// DataPlaneTrusted for protocol admission" is
     /// `TrustSources::classify`'s order (reached through

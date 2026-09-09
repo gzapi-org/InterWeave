@@ -140,6 +140,10 @@ transport:
     #   dcutr.max_inflight_per_peer <= dcutr.max_inflight
     #   Identify-learned relay/AutoNAT candidates are disabled by default; when explicitly enabled,
     #   static configured candidates have selection precedence until their target cannot be met.
+    #   FOR RELAY ONLY since AUTONAT.md's Amendment 2026-09-09: the AutoNAT v2 client cannot
+    #   express a selection order, so for AutoNAT `use_authorized_identify_servers` governs which
+    #   servers this profile CONNECTS to, and static servers are the ones it guarantees to connect
+    #   to, rather than ones it prefers among peers already connected.
     #   every static relay/AutoNAT server PeerId is in either trust.allowed_peers
     #   or transport.connectivity.infrastructure.allowed_peers
     #   a PeerId in both sets is treated as DataPlaneTrusted for protocol admission
