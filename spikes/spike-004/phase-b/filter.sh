@@ -59,8 +59,28 @@ HOLD_SECONDS="${HOLD_SECONDS:-6}"
 # `ALT_SOURCE=$PROBER` makes OTHER_ADDRESS the same address. Either
 # misclassifies UPWARD, toward the permissive end.
 # Review finding on PR #81.
-[ "$PROBE_PORT" != "$PROBE_PORT_ALT" ] \
-  || { echo "PROBE_PORT and PROBE_PORT_ALT must differ, or SAME_ADDRESS is the control" >&2; exit 2; }
+# COMPARED AS NUMBERS, NOT AS SPELLINGS. `PROBE_PORT_ALT=09001` against
+# `PROBE_PORT=9001` is two strings and one UDP port, so a string
+# comparison admits it and SAME_ADDRESS becomes the control wearing
+# another name -- an `address-restricted` row would then match `adf` on
+# two packets from the same endpoint. The identical class bit
+# `profile-config`'s candidate list in the same week (`045000` against
+# `45000`), where `$((10#...))` is likewise the fix: base ten
+# EXPLICITLY, since `$((09001))` is an invalid octal literal and
+# `$((045000))` is a different number.
+# Codex review on PR #81.
+for port_name in PROBE_PORT PROBE_PORT_ALT ALT_SOURCE_PORT SRC_PORT; do
+  eval "port_value=\$$port_name"
+  case "$port_value" in
+    ''|*[!0-9]*) echo "$port_name holds '$port_value', which is not a port number" >&2; exit 2 ;;
+  esac
+  port_value=$((10#$port_value))
+  [ "$port_value" -ge 1 ] && [ "$port_value" -le 65535 ] \
+    || { echo "$port_name holds '$port_value', which is not a port in 1-65535" >&2; exit 2; }
+  eval "$port_name=$port_value"
+done
+[ "$PROBE_PORT" -ne "$PROBE_PORT_ALT" ] \
+  || { echo "PROBE_PORT and PROBE_PORT_ALT must be different ports, or SAME_ADDRESS is the control" >&2; exit 2; }
 [ "$ALT_SOURCE" != "$PROBER" ] \
   || { echo "ALT_SOURCE and PROBER must differ, or OTHER_ADDRESS is the same address" >&2; exit 2; }
 
