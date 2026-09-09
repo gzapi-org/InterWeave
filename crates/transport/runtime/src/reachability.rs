@@ -639,6 +639,23 @@ pub fn is_probeable_address(address: &str) -> bool {
     if parts.next() != Some("") {
         return false;
     }
+    // NOT A RELAYED ADDRESS, and this is checked over the WHOLE string
+    // rather than the first component. `/ip4/<relay>/tcp/4001/p2p/<relay
+    // id>/p2p-circuit/p2p/<us>` begins `/ip4/` with a public literal, so
+    // reading only the first component accepted it -- and asking a probe
+    // server to dial it tests the RELAY's reachability, putting a
+    // relay-derived address into `verified_addresses`. `AUTONAT.md` §6
+    // keeps "AutoNAT-verified direct addresses" and "active
+    // relay-derived addresses" as separate registry classes precisely so
+    // that cannot happen, and Identify reports exactly this shape as the
+    // observed address on a relayed connection. Review finding on
+    // PR #84.
+    if address
+        .split('/')
+        .any(|component| component == "p2p-circuit")
+    {
+        return false;
+    }
     match (parts.next(), parts.next()) {
         (Some("ip4"), Some(literal)) => literal.parse::<Ipv4Addr>().is_ok_and(is_public_v4),
         (Some("ip6"), Some(literal)) => literal.parse::<Ipv6Addr>().is_ok_and(is_public_v6),
@@ -647,12 +664,20 @@ pub fn is_probeable_address(address: &str) -> bool {
 }
 
 fn is_public_v4(ip: Ipv4Addr) -> bool {
-    let [a, b, _, _] = ip.octets();
+    let [a, b, c, _] = ip.octets();
     let shared = a == 100 && (64..=127).contains(&b);
     let benchmarking = a == 198 && (b == 18 || b == 19);
     let reserved = a >= 240;
+    // `is_unspecified` is the single address 0.0.0.0; the whole 0.0.0.0/8
+    // is "this network" and none of it is a destination.
+    let this_network = a == 0;
+    // RFC 6890's IETF protocol assignments, and RFC 7526's deprecated
+    // 6to4 relay anycast -- both routable-looking and neither ours.
+    let protocol_assignments = a == 192 && b == 0 && c == 0;
+    let six_to_four_relay = a == 192 && b == 88 && c == 99;
     !(ip.is_loopback()
         || ip.is_unspecified()
+        || this_network
         || ip.is_private()
         || ip.is_link_local()
         || ip.is_multicast()
@@ -660,6 +685,8 @@ fn is_public_v4(ip: Ipv4Addr) -> bool {
         || ip.is_documentation()
         || shared
         || benchmarking
+        || protocol_assignments
+        || six_to_four_relay
         || reserved)
 }
 
@@ -667,8 +694,19 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
     let segments = ip.segments();
     let unique_local = (segments[0] & 0xfe00) == 0xfc00;
     let link_local = (segments[0] & 0xffc0) == 0xfe80;
+    // Deprecated by RFC 3879 and still routed by some stacks; neither
+    // `unique_local`'s nor `link_local`'s mask covers `fec0::/10`.
+    let site_local = (segments[0] & 0xffc0) == 0xfec0;
     let documentation = segments[0] == 0x2001 && segments[1] == 0x0db8;
     let benchmarking = segments[0] == 0x2001 && segments[1] == 0x0002 && segments[2] == 0;
+    // 6to4 and Teredo carry an embedded IPv4 address whose reachability
+    // is the tunnel's, not ours.
+    let six_to_four = segments[0] == 0x2002;
+    let teredo = segments[0] == 0x2001 && segments[1] == 0;
+    // `to_ipv4_mapped` covers `::ffff:a.b.c.d` only, so the deprecated
+    // IPv4-COMPATIBLE form `::a.b.c.d` needs its own arm -- it is
+    // otherwise a public-looking address with a private v4 inside.
+    let ipv4_compatible = segments[..6].iter().all(|s| *s == 0) && !ip.is_unspecified();
     if let Some(v4) = ip.to_ipv4_mapped() {
         return is_public_v4(v4);
     }
@@ -677,8 +715,12 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
         || ip.is_multicast()
         || unique_local
         || link_local
+        || site_local
         || documentation
-        || benchmarking)
+        || benchmarking
+        || six_to_four
+        || teredo
+        || ipv4_compatible)
 }
 
 #[cfg(test)]
@@ -780,7 +822,20 @@ mod tests {
             "/ip6/2001:db8::1/tcp/4001",
             "/ip6/::ffff:10.0.0.1/tcp/4001",
             "/dns4/relay.example.net/tcp/4001",
+            // THE SHAPE A LISTENER ACTUALLY HANDS OVER, not the bare
+            // marker: a relayed observed address begins `/ip4/` with a
+            // public literal and was accepted while only the first
+            // component was read.
+            "/ip4/198.41.0.4/tcp/4001/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN/p2p-circuit/p2p/12D3KooWHyNGMf9HTd3Zj6dStdkcc5ycsubW1rEgQSp6k6yfZBoy",
+            "/ip6/2606:4700:4700::1111/tcp/4001/p2p-circuit",
             "/p2p-circuit",
+            "/ip4/0.1.2.3/tcp/4001",
+            "/ip4/192.0.0.8/tcp/4001",
+            "/ip4/192.88.99.1/tcp/4001",
+            "/ip6/fec0::1/tcp/4001",
+            "/ip6/2002:c058:6301::1/tcp/4001",
+            "/ip6/2001:0:1234::1/tcp/4001",
+            "/ip6/::10.0.0.1/tcp/4001",
             "garbage",
             "/ip4/not-an-ip/tcp/4001",
             "",
