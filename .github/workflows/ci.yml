@@ -50,6 +50,17 @@ concurrency:
 # different binary from the checks — green for a reason nobody could see.
 env:
   CARGO_DENY_VERSION: "0.20.2"
+  # Pinned for the same reason, and with a sharper one: shellcheck's
+  # SEVERITY CLASSIFICATION is a property of the release. A runner-image
+  # bump that promoted any currently-`info` code to `warning` would turn a
+  # required context red on a PR whose diff explains nothing — SC2015 is
+  # the obvious candidate, and 159 sites use that idiom on purpose. It
+  # would fail the guard's own self-test in the same run. Taking it from
+  # whatever the image ships also made the numbers in the guard's help
+  # unreproducible. 0.11.0 is what Fedora 43 packages, so a developer's
+  # `dnf install ShellCheck` and CI agree.
+  SHELLCHECK_VERSION: "v0.11.0"
+  SHELLCHECK_SHA256: "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
   CARGO_DENY_SHA256: "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
 
 jobs:
@@ -156,10 +167,29 @@ jobs:
         run: bash tools/checks/check_yamux_muxer.sh
 
       # Shell got the reviewer's eye and no check at all until this, while
-      # Rust gets `clippy -D warnings`. `ubuntu-latest` ships shellcheck,
-      # so there is nothing to install; the guard exits 2 rather than 0
-      # when it is absent, which is a developer-machine state and never a
-      # silent skip here.
+      # Rust gets `clippy -D warnings`.
+      #
+      # INSTALLED FROM A PINNED TARBALL rather than taken from the runner
+      # image, the same discipline as cargo-deny above and for a reason
+      # specific to this tool: severity classification belongs to the
+      # release, so an image bump could turn this required context red
+      # with nothing in the diff to explain it.
+      - name: Install shellcheck
+        run: |
+          set -euo pipefail
+          asset="shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          url="https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/${asset}"
+          curl -fsSL -o "$asset" "$url"
+          echo "${SHELLCHECK_SHA256}  ${asset}" | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/bin"
+          tar -xJf "$asset" --strip-components=1 -C "${RUNNER_TEMP}/bin" \
+            "shellcheck-${SHELLCHECK_VERSION}/shellcheck"
+          echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
+          "${RUNNER_TEMP}/bin/shellcheck" --version
+
+      # The guard exits 2 rather than 0 when shellcheck is absent, so a
+      # failed install above surfaces here as a refusal and never as a
+      # silent skip.
       - name: Every tracked shell script passes shellcheck
         run: bash tools/checks/check_shell_scripts.sh
 

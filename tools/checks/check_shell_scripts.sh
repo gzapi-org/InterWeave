@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Andrea Benetton
+# tools/checks/check_shell_scripts.sh
 #
+# >>> help
 # Every tracked shell script passes shellcheck at warning severity.
 #
-# WHY THIS EXISTS. The repository owns 44 shell scripts — the tree checks
-# and their self-tests under `tools/`, and the spike harnesses under
-# `spikes/` — and until this guard, no check read any of them. Rust gets
+# WHY THIS EXISTS. Every shell script the repository owns — the tree
+# checks and their self-tests under `tools/`, and the spike harnesses
+# under `spikes/` — went unread by any check until this guard. The count
+# is deliberately not written here: the success line below prints what
+# was actually judged, and a number in prose is one more thing to
+# falsify. Rust gets
 # `clippy -D warnings`, Python gets its own checks, and shell got the
 # reviewer's eye and nothing else. Three of the four review rounds on
 # SPIKE-004 phase B found defects in shell that no automated check
@@ -36,10 +41,11 @@
 #   0  every tracked shell script is clean at warning severity
 #   1  shellcheck reported at least one finding — read its output above
 #   2  shellcheck is not installed, or the tracked file list is empty
+# <<< help
 set -uo pipefail
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '4,38p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '/^# >>> help$/,/^# <<< help$/p' "$0" | sed '1d;$d;s/^# \{0,1\}//'
     exit 0
 fi
 
@@ -81,9 +87,19 @@ if [[ ${#scripts[@]} -eq 0 ]]; then
     exit 2
 fi
 
-# `-x` so a script that sources another is checked against what it
-# actually sources rather than against an unknown function.
-if ! shellcheck --severity="$SEVERITY" -x "${scripts[@]}"; then
+# NO `-x`, DELIBERATELY. Following `source` targets would make the guard
+# read files outside the tracked set -- including untracked or generated
+# ones -- which is the machine-dependence the file list above is built to
+# avoid. Nothing tracked sources anything today
+# (`git grep -nE '^\s*(source|\.)\s+' -- '*.sh'` is empty), so the flag
+# bought nothing and promised less than the comment beside it claimed.
+# Add it back together with a rule about what may be sourced.
+#
+# The glob is extension-based, so a shell script named without `.sh`
+# is invisible here. There are none today -- no tracked file outside
+# `*.sh` carries a shell shebang -- and nothing would report it if one
+# arrived. Review findings on PR #82.
+if ! shellcheck --severity="$SEVERITY" "${scripts[@]}"; then
     cat >&2 <<MISSING
 check_shell_scripts: shellcheck reported findings at severity '$SEVERITY' (above).
 
@@ -98,4 +114,8 @@ MISSING
     exit 1
 fi
 
-echo "check_shell_scripts: OK — ${#scripts[@]} tracked shell scripts clean at severity '$SEVERITY'."
+# THE VERSION IS PART OF THE RESULT. Severity classification belongs to
+# the release, so "clean at warning" is a statement about one shellcheck;
+# CI pins it, and printing it here is what makes a local run comparable
+# to a CI one rather than merely similar.
+echo "check_shell_scripts: OK — ${#scripts[@]} tracked shell scripts clean at severity '$SEVERITY' ($(shellcheck --version | sed -n 's/^version: /shellcheck /p'))."

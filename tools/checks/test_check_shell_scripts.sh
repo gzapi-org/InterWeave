@@ -38,6 +38,13 @@ if ! command -v shellcheck >/dev/null 2>&1; then
     exit 2
 fi
 
+# PINNED, NOT INHERITED. The guard reads
+# `INTERWEAVE_SHELLCHECK_SEVERITY` from the environment, so a suite that
+# let it through would pass or fail on ambient state -- an exported
+# `error` makes the two finding cases report clean. The hatch gets its
+# own case below instead. Review finding on PR #82.
+unset INTERWEAVE_SHELLCHECK_SEVERITY
+
 failures=0
 SANDBOX=""
 cleanup() { [[ -n "$SANDBOX" && -d "$SANDBOX" ]] && rm -rf "$SANDBOX"; }
@@ -58,8 +65,27 @@ sandbox_with() {
     git -C "$SANDBOX" add -A
 }
 
-run_guard() {
+# THE EXIT CODE, not merely non-zero.
+#
+# Exit 2 means "looked at nothing" and exit 1 means "found something", and
+# an assertion that only reads non-zero treats them as the same answer --
+# so the two positive cases below would pass whenever the sandbox's `git
+# add` silently produced nothing and shellcheck was never invoked at all.
+# That is the shape this file's header says it exists to prevent.
+# Review finding on PR #82.
+guard_status() {
     ( cd "$SANDBOX" && bash tools/checks/check_shell_scripts.sh >/dev/null 2>&1 )
+    echo $?
+}
+
+expect_status() {
+    local want="$1" label="$2" got
+    got=$(guard_status)
+    if [[ "$got" == "$want" ]]; then
+        pass "$label"
+    else
+        fail "$label (expected exit $want, got $got)"
+    fi
 }
 
 echo "test_check_shell_scripts: exercising the guard"
@@ -70,11 +96,7 @@ echo "test_check_shell_scripts: exercising the guard"
 sandbox_with '#!/usr/bin/env bash
 export THING="$(echo value)"
 echo "$THING"'
-if run_guard; then
-    fail "a masked exit status (SC2155) must be refused"
-else
-    pass "a masked exit status (SC2155) is refused"
-fi
+expect_status 1 "a masked exit status (SC2155) is refused as a FINDING"
 cleanup; SANDBOX=""
 
 # 2. SC2034: an assignment nothing reads. The second warning class the
@@ -82,11 +104,7 @@ cleanup; SANDBOX=""
 sandbox_with '#!/usr/bin/env bash
 unused_value=1
 echo done'
-if run_guard; then
-    fail "an unused assignment (SC2034) must be refused"
-else
-    pass "an unused assignment (SC2034) is refused"
-fi
+expect_status 1 "an unused assignment (SC2034) is refused as a FINDING"
 cleanup; SANDBOX=""
 
 # 3. THE NEGATIVE CONTROL, and the reason the threshold is `warning`:
@@ -97,11 +115,7 @@ value=5
 [ "$value" -ge 1 ] && [ "$value" -le 10 ] \
   || { echo "out of range" >&2; exit 2; }
 echo "$value"'
-if run_guard; then
-    pass "the deliberate A && B || { fail; } idiom passes at warning severity"
-else
-    fail "SC2015 is info-level and must not fail the guard"
-fi
+expect_status 0 "the deliberate A && B || { fail; } idiom passes at warning severity"
 cleanup; SANDBOX=""
 
 # 4. A TARGETED DISABLE IS HONOURED, because the guard's own message
@@ -111,11 +125,7 @@ sandbox_with '#!/usr/bin/env bash
 # shellcheck disable=SC2155 # deliberate, for this test
 export THING="$(echo value)"
 echo "$THING"'
-if run_guard; then
-    pass "a targeted disable with a reason is honoured"
-else
-    fail "a targeted disable must suppress its own finding"
-fi
+expect_status 0 "a targeted disable with a reason is honoured"
 cleanup; SANDBOX=""
 
 # 5. AN EMPTY FILE SET IS NOT A PASS. Without this the guard would report
@@ -126,10 +136,21 @@ mkdir -p "$SANDBOX/tools/checks"
 cp "$UNDER_TEST" "$SANDBOX/tools/checks/"
 git -C "$SANDBOX" init --quiet
 # The guard itself is untracked here, so `git ls-files '*.sh'` is empty.
-if run_guard; then
-    fail "an empty file set must not pass"
+expect_status 2 "an empty file set is refused as LOOKED AT NOTHING, not as a finding"
+cleanup; SANDBOX=""
+
+# 6. THE SEVERITY HATCH RELAXES THE GUARD, and that is worth a case
+#    rather than a sentence: `--severity` is a MINIMUM, so `error` reports
+#    LESS than `warning`. A reader who thought raising it tightened the
+#    gate would have it backwards, and the guard's failure message says so
+#    in words that nothing checked. Review finding on PR #82.
+sandbox_with '#!/usr/bin/env bash
+export THING="$(echo value)"
+echo "$THING"'
+if ( cd "$SANDBOX" && INTERWEAVE_SHELLCHECK_SEVERITY=error bash tools/checks/check_shell_scripts.sh >/dev/null 2>&1 ); then
+    pass "severity=error hides a warning-level finding, so the hatch relaxes rather than tightens"
 else
-    pass "an empty file set is refused rather than passing"
+    fail "severity=error should report less, not more"
 fi
 cleanup; SANDBOX=""
 
