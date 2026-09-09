@@ -67,6 +67,14 @@ esac
 # was armed, so a typo in `FILTER_MODE` paid for a build and then tore
 # down a topology the caller had standing from `topology.sh up`. Nothing
 # in it depends on the build. Review finding on PR #81.
+# WHAT THIS DOES AND DOES NOT MOVE: only `run.sh`'s OWN input is checked
+# here. The ports and `HOLD_SECONDS` are validated by `filter.sh` and
+# `SRC_PORTS` by `probe.sh`, each when it runs -- so `ALT_SOURCE_PORT=9000
+# ./run.sh` still pays for the build, a topology and domain A's mapping
+# before it exits 2. Late, but no longer destructive: by then the standing
+# topology is this run's own, so the trap tears down nothing the caller
+# built. Hoisting those checks would mean duplicating them; they stay
+# where the value is used. Review finding on PR #81.
 if [ "$FILTER_MODE" != conntrack ]; then
   for mode in "$@"; do
     [ "$mode" = eim ] \
