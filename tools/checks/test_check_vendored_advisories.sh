@@ -153,6 +153,22 @@ else
     ok "  and no lockfile is written behind it"
 fi
 
+# CARGO-DENY THAT NEVER RAN must be exit 2, not a pass. An earlier
+# version classified FAILURES by matching network wording, so any other
+# failure -- here a `deny.toml` cargo-deny cannot deserialize -- fell
+# through to a filter that found no advisory and called the crate clean.
+# The crate in this fixture genuinely carries two advisories, so a pass
+# here is a false pass and not merely a missed error.
+build_vendored unrunnable atty 0.2.14 inline
+printf '[advisories]\nthis-key-does-not-exist = "boom"\nversion = 2\n' \
+    > "$SANDBOX/unrunnable/deny.toml"
+bash "$GUARD" --root "$SANDBOX/unrunnable" >/dev/null 2>&1
+case $? in
+    2) ok "cargo-deny that could not run is exit 2, not a pass" ;;
+    1) bad "exit 1 — it reported a finding it cannot have obtained" ;;
+    *) bad "a cargo-deny that never ran must exit 2, got $?" ;;
+esac
+
 # THE POSITIVE CASE.
 build_vendored vulnerable atty 0.2.14 inline
 expect_finding vulnerable "a vendored crate carrying an advisory fails" RUSTSEC-2021-0145

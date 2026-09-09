@@ -52,9 +52,13 @@
 # Exit codes:
 #   0  every vendored crate is free of RustSec advisories at its version
 #   1  an advisory applies to a vendored crate
-#   2  cargo-deny is not installed, or the advisory database is
-#      unreachable — a guard that passes because it could not run is the
-#      shape this repository refuses
+#   2  the check could not be RUN: cargo-deny absent, the lockfile
+#      unusable, or cargo-deny stopping before it produced a summary — an
+#      unreachable database, a config it cannot read, a crash. Success is
+#      proved by that summary and never inferred from an absence of
+#      findings, because a guard that passes because it could not run is
+#      the shape this repository refuses — and this script has done it
+#      three times.
 # <<< help
 
 set -uo pipefail
@@ -146,40 +150,63 @@ for entry in "${patched[@]}"; do
     fi
 
     out="$(cd "$probe" && cargo deny --format json check advisories 2>&1)"
-    status=$?
-    # cargo-deny exits non-zero both for a real finding and for a
-    # database it could not fetch. Only the first is this guard's answer.
-    if [ "$status" -ne 0 ] \
-        && printf '%s' "$out" | grep -qiE 'unable to |failed to fetch|could not (fetch|update)|no such host'; then
-        printf '%s\n' "$out" >&2
-        die "$name $version: the advisory database is unreachable" 2
-    fi
 
-    # ONLY ADVISORIES NAMING THE VENDORED CRATE. The probe pins that crate
-    # and lets cargo resolve its dependencies fresh, so the graph it
-    # judges is not one any commit here contains -- a future advisory on
-    # a transitive dependency at latest would turn a required check red
-    # and name the wrong crate. Those belong to `check_dependencies.sh`,
-    # which reads the committed lockfile. Review finding on PR #85.
+    # SUCCESS IS PROVED, NEVER INFERRED FROM ABSENCE. cargo-deny ends a
+    # completed run with a `{"type":"summary"}` line carrying its
+    # advisory counts; anything that stops it earlier -- a config it
+    # cannot deserialize, a corrupt database, a crash, an output-schema
+    # change -- produces no such line. An earlier version classified
+    # FAILURES instead, by matching network wording, and so let every
+    # unclassified failure fall through to a filter that found no
+    # advisory and called the crate clean. That is the third time this
+    # script has reported success without having checked, so it now
+    # requires the positive signal rather than trying to enumerate the
+    # ways of not getting one. Confirmed by construction with an
+    # undeserializable `deny.toml`. Review findings on PR #85.
+    #
+    # The filter reports ONLY advisories naming the vendored crate. The
+    # probe pins that crate and lets cargo resolve its dependencies
+    # fresh, so the graph it judges is not one any commit here contains;
+    # a future advisory on a transitive dependency at latest would turn a
+    # required check red and name the wrong crate. Those belong to
+    # `check_dependencies.sh`, which reads the committed lockfile.
     findings="$(printf '%s' "$out" | python3 -c '
 import json, sys
+
 name = sys.argv[1]
+completed = False
+found = []
 for line in sys.stdin:
     line = line.strip()
     if not line.startswith("{"):
         continue
     try:
-        field = json.loads(line).get("fields", {})
+        record = json.loads(line)
     except ValueError:
+        continue
+    field = record.get("fields", {})
+    if record.get("type") == "summary" and "advisories" in field:
+        completed = True
         continue
     if field.get("severity") != "error":
         continue
     if not any(g.get("Krate", {}).get("name") == name for g in field.get("graphs", [])):
         continue
     advisory = field.get("advisory", {})
-    print("    {}: {}".format(advisory.get("id", field.get("code", "?")),
-                              advisory.get("title", field.get("message", ""))))
-' "$name")" || die "$name $version: cannot read the advisory report" 2
+    found.append("    {}: {}".format(advisory.get("id", field.get("code", "?")),
+                                     advisory.get("title", field.get("message", ""))))
+if not completed:
+    sys.exit(3)
+sys.stdout.write("".join(f + "\n" for f in found))
+' "$name")"
+    case $? in
+        0) ;;
+        3)
+            printf '%s\n' "$out" >&2
+            die "$name $version: cargo-deny did not complete a run — its output carries no summary, so nothing was checked" 2
+            ;;
+        *) die "$name $version: cannot read the advisory report" 2 ;;
+    esac
 
     if [ -z "$findings" ]; then
         checked=$((checked + 1))
