@@ -41,47 +41,47 @@
 # about their callers changed: the call sites moved into files that reach
 # them through a field and never name the owning type, so the guard's
 # co-occurrence rule stopped seeing calls that were there all along.
-EndpointRegistry::authorize_outbound             call  registry.authorize_outbound(
-TrustSources::classify                           call  self.trust.classify(
-PreAuthLimits::handshake_timeout_ms              call  preauth.handshake_timeout_ms(
-SubscriptionRegistry::subscribers                call  subs.subscribers(
-SubscriptionRegistry::set_desired                call  broadcast_state.subs.set_desired(
-PolicySnapshot::address_dialable                 call  .address_dialable(&peer, &used, self.now_ms())
-SubscriptionRegistry::holds_any                  call  broadcast_state.subs.holds_any(
-SessionQueues::set_bound                         call  broadcast_state.queues.set_bound(
+EndpointRegistry::authorize_outbound  call  registry.authorize_outbound(
+TrustSources::classify                call  self.trust.classify(
+PreAuthLimits::handshake_timeout_ms   call  preauth.handshake_timeout_ms(
+SubscriptionRegistry::subscribers     call  subs.subscribers(
+SubscriptionRegistry::set_desired     call  broadcast_state.subs.set_desired(
+PolicySnapshot::address_dialable      call  .address_dialable(&peer, &used, self.now_ms())
+SubscriptionRegistry::holds_any       call  broadcast_state.subs.holds_any(
+SessionQueues::set_bound              call  broadcast_state.queues.set_bound(
 
 # --- stage 7 wired these; the ledger cannot attribute a call through a
 # --- field, so each names the expression that reaches it.
-SubscriptionRegistry::join                       call  broadcast_state.subs.join(
-SubscriptionRegistry::leave                      call  broadcast_state.subs.leave(
-SubscriptionRegistry::may_publish                call  broadcast_state.subs.may_publish(
-SubscriptionRegistry::backend_should_subscribe   call  broadcast_state.subs.backend_should_subscribe(
-SessionQueues::open                              call  .open(session, broadcast_state.queue_bound
-SessionQueues::close                             call  broadcast_state.queues.close(
-SessionQueues::is_open                           call  broadcast_state.queues.is_open(
-SessionQueues::drain                             call  broadcast_state.queues.drain(
-TopicKey::wire_string                            call  topic_key_v1(channel).wire_string(
+SubscriptionRegistry::join            call  broadcast_state.subs.join(
+SubscriptionRegistry::leave           call  broadcast_state.subs.leave(
+SubscriptionRegistry::may_publish     call  broadcast_state.subs.may_publish(
+SubscriptionRegistry::backend_should_subscribe  call  broadcast_state.subs.backend_should_subscribe(
+SessionQueues::open                   call  .open(session, broadcast_state.queue_bound
+SessionQueues::close                  call  broadcast_state.queues.close(
+SessionQueues::is_open                call  broadcast_state.queues.is_open(
+SessionQueues::drain                  call  broadcast_state.queues.drain(
+TopicKey::wire_string                 call  topic_key_v1(channel).wire_string(
 
 # --- stage 8 wired these; a directory budget/cache reached through a
 # --- field, and MessageId hex reached through Display/Serialize.
-DirectoryBudget::charge_rate                     call  .budget.charge_rate(
-DirectoryBudget::reserve                         call  .budget.reserve(
-DirectoryBudget::end_exchange                    call  .budget.end_exchange(
-DirectoryBudget::with_defaults                   call  DirectoryBudget::with_defaults(
-DirectoryCache::get                              call  .cache.get(
-DirectoryCache::insert                           call  .cache.insert(
-DirectoryCache::new                              call  DirectoryCache::new(
-MessageId::parse_hex                             call  Self::parse_hex(
-MessageId::to_hex                                call  self.to_hex(
-MeshMessageId::as_bytes                          call  MessageId::new(id.as_bytes(
+DirectoryBudget::charge_rate          call  .budget.charge_rate(
+DirectoryBudget::reserve              call  .budget.reserve(
+DirectoryBudget::end_exchange         call  .budget.end_exchange(
+DirectoryBudget::with_defaults        call  DirectoryBudget::with_defaults(
+DirectoryCache::get                   call  .cache.get(
+DirectoryCache::insert                call  .cache.insert(
+DirectoryCache::new                   call  DirectoryCache::new(
+MessageId::parse_hex                  call  Self::parse_hex(
+MessageId::to_hex                     call  self.to_hex(
+MeshMessageId::as_bytes               call  MessageId::new(id.as_bytes(
 
 # --- stage 13 — the daemon and desktop IPC v2, which is where a client
 # --- session first exists to disconnect and an admin surface first
 # --- exists to read a counter. Stage 8 is the endpoint-directory
 # --- protocol and has neither, so dating these to it would have expired
 # --- them five stages before anything could call them.
-SubscriptionRegistry::release_session            stage-13  a client disconnect releases its joins, once IPC reports one
-IngressLimiter::tracked_peers                    stage-13  the admin surface reads it
+SubscriptionRegistry::release_session  stage-13  a client disconnect releases its joins, once IPC reports one
+IngressLimiter::tracked_peers          stage-13  the admin surface reads it
 
 # --- These two are NOT waiting for anything: each is called from its own
 # --- file, which the heuristic does not count as a reference. Dating them
@@ -89,25 +89,77 @@ IngressLimiter::tracked_peers                    stage-13  the admin surface rea
 # --- pass unnoticed until stage 13 -- `subscriptions()` is what applies
 # --- the MAX_SUBSCRIPTIONS ceiling inside `join`, and `prune_idle` is
 # --- what bounds the limiter's peer map inside `admit`.
-SubscriptionRegistry::subscriptions              call  self.subscriptions()
-IngressLimiter::prune_idle                       call  self.prune_idle(now_ms)
+SubscriptionRegistry::subscriptions    call  self.subscriptions()
+IngressLimiter::prune_idle             call  self.prune_idle(now_ms)
 
 # --- stage 16 — the Claude bridge, where a reply route first has a
 # --- channel to resolve against (plan section 19).
-ReplyResolution::as_error                        stage-16  reply routes arrive with the bridge
-ReplyTokenTable::new                             stage-16  reply routes arrive with the bridge
-ReplyTokenTable::mint                            stage-16  reply routes arrive with the bridge
-ReplyTokenTable::resolve                         stage-16  reply routes arrive with the bridge
+ReplyResolution::as_error              stage-16  reply routes arrive with the bridge
+ReplyTokenTable::new                   stage-16  reply routes arrive with the bridge
+ReplyTokenTable::mint                  stage-16  reply routes arrive with the bridge
+ReplyTokenTable::resolve               stage-16  reply routes arrive with the bridge
+ReplyTokenTable::expire                stage-16  reply routes arrive with the bridge
+ReplyTokenTable::clear                 stage-16  reply routes arrive with the bridge
+ReplyTokenTable::len                   stage-16  reply routes arrive with the bridge
+ReplyTokenTable::is_empty              stage-16  reply routes arrive with the bridge
+FrameError::to_wire                              call  error.to_wire(
+Refusal::to_wire                                 call  refusal.to_wire(
+
+
+# --- stage-9 -----------------------------------------------------
+AggregatedCandidate::address_list                 stage-12  a consumer reads the ordered addresses at runtime composition
+# RE-DATED AT THE STAGE 9 CLOSURE, and the old reason was wrong rather
+# than merely expired: every one of these said "the conformance suite
+# composes the manager", and a test is not a caller here — this check
+# strips `#[cfg(test)]` and excludes `tests/` wholesale, precisely
+# because `authorize_outbound` had unit tests and no production caller.
+# Stage 9 built the manager and proved it through the conformance suite,
+# which is what its exit gate asked for; it did not give it a production
+# holder, and the plan never said it would. §15 does: TransportRuntime
+# composition is where a DiscoveryManager is constructed and driven.
+DiscoveryManager::new                            stage-12  TransportRuntime composition constructs it (plan §15); nothing in production holds one before
+DiscoveryManager::register                       stage-12  composition registers the configured providers at startup
+DiscoveryManager::on_event                       stage-12  composition pumps provider events into it
+DiscoveryManager::sweep                          stage-12  composition drives expiry on the runtime clock
+DiscoveryManager::candidates                     stage-12  composition reads candidates to feed ConnectionManager::learn_address
+DiscoveryManager::candidate_count                stage-12  composition exposes it as runtime diagnostics
+DiscoveryManager::provider_count                 stage-12  composition exposes it as runtime diagnostics
+DiscoveryManager::provider_health                stage-12  composition answers per-provider health from it
+DiscoveryManager::provider_priority              stage-12  composition orders candidate application by it
+DiscoveryManager::aggregate_health               stage-12  composition answers discovery health from it
+DiscoveryManager::descriptor                     stage-12  composition names the source of each event it forwards
+# The Stage 10 capability mapping gave this its production caller: the
+# cache renders a stored server capability as the derived protocol
+# string and parses it into a ProtocolId on export
+# (crates/discovery/cache/src/cache.rs), exactly as SPIKE-003 F5
+# anticipated. Method position, so recorded as a call entry.
+ProtocolId::parse                                call  ProtocolId::parse(id)
+CandidateSet::new                                stage-12  the manager owns one; TransportRuntime composition is the first outside holder
+CandidateSet::candidates                         stage-12  reached through DiscoveryManager::candidates until composition
+CandidateSet::overflow_stats                     stage-12  reached through DiscoveryManager::overflow_stats until composition
+DiscoveryManager::overflow_stats                 stage-12  the diagnostic DESIGN.md requires; its first reader is runtime composition
+CandidateSet::sweep                              stage-12  reached through DiscoveryManager::sweep until composition
+CandidateSet::len                                stage-12  reached through DiscoveryManager::candidate_count until composition
+CandidateSet::is_empty                           stage-12  candidate-set introspection, first read at runtime composition
+
+# Method position, so recorded as a call entry: the driver's targeted
+# arm asks the key whether it IS a public key before rebuilding a
+# PeerId from it, which is the check that makes an exploration point
+# unable to name a peer that does not exist.
+LookupKey::as_public_key                         call  key.as_public_key(
+
+# --- stage-10 ----------------------------------------------------
+# BOTH Stage 10 halves are in: the provider consumes
+# OfferedAddress/OfferedAddresses/RoutingView, and the driver mints
+# ObservedCandidates. What is left is the slice only the config layer,
+# or a stage after this one, can reach.
+validate_limits                                  stage-12  profile-config holds all six fields and defers the cross-field rules while it refuses enabled=true; that gate is Stage 12 composition, not Stage 10
+RoutingView::effective_target                    stage-12  consumed inside the port's own health today; the composed daemon's §16 diagnostics surface the trust-capped target directly
+
+# --- stage-11 ----------------------------------------------------
 AddressState::is_dialable_at                     stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
 AddressState::is_known_good                      stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
 AddressState::is_punitive_at                     stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
-AggregatedCandidate::address_list                stage-12  a consumer reads the ordered addresses at runtime composition
-CandidateSet::candidates                         stage-12  reached through DiscoveryManager::candidates until composition
-CandidateSet::is_empty                           stage-12  candidate-set introspection, first read at runtime composition
-CandidateSet::len                                stage-12  reached through DiscoveryManager::candidate_count until composition
-CandidateSet::new                                stage-12  the manager owns one; TransportRuntime composition is the first outside holder
-CandidateSet::overflow_stats                     stage-12  reached through DiscoveryManager::overflow_stats until composition
-CandidateSet::sweep                              stage-12  reached through DiscoveryManager::sweep until composition
 ConnectionManager::connections                   stage-11  dial-management introspection, first read by the reachability stack
 ConnectionManager::is_retry_due                  stage-11  dial-management introspection, first read by the reachability stack
 ConnectionManager::revision                      stage-11  dial-management introspection, first read by the reachability stack
@@ -115,65 +167,44 @@ ConnectionManager::scheduled_retries             stage-11  dial-management intro
 ConnectionPolicy::address_entries                stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
 ConnectionPolicy::peer_entries                   stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
 ConnectionPolicy::prune                          stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
-ContentFingerprint::as_bytes                     stage-13  fingerprint rendering, surfaced by diagnostics
-ContentFingerprint::to_hex                       stage-13  fingerprint rendering, surfaced by diagnostics
-DedupCache::expire                               stage-12  expiry and introspection driven at runtime composition
-DirectDestination::to_default                    stage-13  a local client addresses a direct send at the IPC boundary
-DirectDestination::to_endpoint                   stage-13  a local client addresses a direct send at the IPC boundary
 DirectInboundState::summary_word                 stage-11  the connectivity-summary word, emitted by step 3's libp2p adapter
-DirectoryBudget::charge_rate                     call  .budget.charge_rate(
-DirectoryBudget::end_exchange                    call  .budget.end_exchange(
-DirectoryBudget::inflight                        stage-13  in-flight count surfaced by admin.* directory diagnostics
-DirectoryBudget::reserve                         call  .budget.reserve(
-DirectoryBudget::with_defaults                   call  DirectoryBudget::with_defaults(
-DirectoryCache::expire                           stage-13  cache sweep driven by the daemon's idle maintenance
-DirectoryCache::forget                           stage-13  an admin command drops one peer's cached directory
-DirectoryCache::get                              call  .cache.get(
-DirectoryCache::insert                           call  .cache.insert(
-DirectoryCache::is_empty                         stage-13  cache introspection surfaced by admin.* diagnostics
-DirectoryCache::new                              call  DirectoryCache::new(
-DiscoveryManager::aggregate_health               stage-12  composition answers discovery health from it
-DiscoveryManager::candidate_count                stage-12  composition exposes it as runtime diagnostics
-DiscoveryManager::candidates                     stage-12  composition reads candidates to feed ConnectionManager::learn_address
-DiscoveryManager::descriptor                     stage-12  composition names the source of each event it forwards
-DiscoveryManager::new                            stage-12  TransportRuntime composition constructs it (plan §15); nothing in production holds one before
-DiscoveryManager::on_event                       stage-12  composition pumps provider events into it
-DiscoveryManager::overflow_stats                 stage-12  the diagnostic DESIGN.md requires; its first reader is runtime composition
-DiscoveryManager::provider_count                 stage-12  composition exposes it as runtime diagnostics
-DiscoveryManager::provider_health                stage-12  composition answers per-provider health from it
-DiscoveryManager::provider_priority              stage-12  composition orders candidate application by it
-DiscoveryManager::register                       stage-12  composition registers the configured providers at startup
-DiscoveryManager::sweep                          stage-12  composition drives expiry on the runtime clock
-EndpointQueues::is_open                          stage-13  a session on the other side of the lease boundary reads it
-EndpointRegistry::authorize_outbound             call  registry.authorize_outbound(
-EndpointRegistry::default_endpoint               stage-13  admin.endpoints reads the configured default
-EndpointRegistry::set_default                    stage-13  admin.endpoints sets the default endpoint
-EndpointRegistry::set_enabled                    stage-13  admin.endpoints enables or disables an endpoint
-FrameError::to_wire                              call  error.to_wire(
-HandshakeSlot::source                            stage-13  pre-auth admission counters, surfaced by `admin.*` status
-Hello::evaluate                                  stage-13  handshake authority domain, needs two real sockets
-IngressLimiter::prune_idle                       call  self.prune_idle(now_ms)
-IngressLimiter::tracked_peers                    stage-13  the admin surface reads it
-is_probeable_address                             stage-11  AUTONAT.md 6 candidate scope; the adapter filters the swarm's candidates with it
-LocalAdminPort                                   stage-13  the admin IPC session is the local-client boundary wired at desktop IPC v2
-LocalDataSession                                 stage-13  the data IPC session is the local-client boundary wired at desktop IPC v2 (Stage 8 wired the lease via EndpointLease, not this)
-LookupKey::as_public_key                         call  key.as_public_key(
-MeshMessageId::as_bytes                          call  MessageId::new(id.as_bytes(
-MessageId::parse_hex                             call  Self::parse_hex(
-MessageId::to_hex                                call  self.to_hex(
-Payload::at_ceiling                              stage-13  payload decomposition at the IPC frame boundary
-Payload::into_parts                              stage-13  payload decomposition at the IPC frame boundary
+is_probeable_address                             stage-11  AUTONAT.md §6 candidate scope; the adapter filters the swarm's candidates with it
 PeerBackoff::is_clear_at                         stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
 PeerBackoff::is_punitive_at                      stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
-PeerTrustPolicy::with_local_peer                 stage-12  bound at runtime composition
-PolicySnapshot::address_dialable                 call  .address_dialable(&peer, &used, self.now_ms())
 PolicySnapshot::admit                            stage-11  dial-management introspection, first read by the reachability stack
 PolicySnapshot::classify                         stage-11  dial-management introspection, first read by the reachability stack
 PolicySnapshot::connections                      stage-11  dial-management introspection, first read by the reachability stack
 PolicySnapshot::pending_dials                    stage-11  dial-management introspection, first read by the reachability stack
 PolicySnapshot::revision                         stage-11  dial-management introspection, first read by the reachability stack
+ReachabilityManager                              stage-11  AutoNAT client policy; step 3's libp2p adapter constructs and drives it
+
+# --- stage-12 ----------------------------------------------------
+DedupCache::expire                               stage-12  expiry and introspection driven at runtime composition
+PeerTrustPolicy::with_local_peer                 stage-12  bound at runtime composition
+ReservationMap::outstanding                      stage-12  expiry and introspection driven at runtime composition
+TransportCapabilities::clamped                   stage-12  capability clamping happens at runtime composition
+
+
+# --- stage-13 ----------------------------------------------------
+DirectoryBudget::inflight                        stage-13  in-flight count surfaced by admin.* directory diagnostics
+DirectoryCache::expire                           stage-13  cache sweep driven by the daemon's idle maintenance
+DirectoryCache::forget                           stage-13  an admin command drops one peer's cached directory
+DirectoryCache::is_empty                         stage-13  cache introspection surfaced by admin.* diagnostics
+DirectDestination::to_default                    stage-13  a local client addresses a direct send at the IPC boundary
+DirectDestination::to_endpoint                   stage-13  a local client addresses a direct send at the IPC boundary
+EndpointQueues::is_open                          stage-13  a session on the other side of the lease boundary reads it
+EndpointRegistry::default_endpoint               stage-13  admin.endpoints reads the configured default
+EndpointRegistry::set_default                    stage-13  admin.endpoints sets the default endpoint
+EndpointRegistry::set_enabled                    stage-13  admin.endpoints enables or disables an endpoint
+LocalAdminPort                                   stage-13  the admin IPC session is the local-client boundary wired at desktop IPC v2
+LocalDataSession                                 stage-13  the data IPC session is the local-client boundary wired at desktop IPC v2 (Stage 8 wired the lease via EndpointLease, not this)
+ContentFingerprint::as_bytes                     stage-13  fingerprint rendering, surfaced by diagnostics
+ContentFingerprint::to_hex                       stage-13  fingerprint rendering, surfaced by diagnostics
+HandshakeSlot::source                            stage-13  pre-auth admission counters, surfaced by `admin.*` status
+Hello::evaluate                                  stage-13  handshake authority domain, needs two real sockets
+Payload::at_ceiling                              stage-13  payload decomposition at the IPC frame boundary
+Payload::into_parts                              stage-13  payload decomposition at the IPC frame boundary
 PreAuthGate::tracked_sources                     stage-13  pre-auth admission counters, surfaced by `admin.*` status
-PreAuthLimits::handshake_timeout_ms              call  preauth.handshake_timeout_ms(
 PreAuthLimits::max_attempts_per_window           stage-13  pre-auth admission counters, surfaced by `admin.*` status
 PreAuthLimits::max_global_attempts_per_window    stage-13  pre-auth admission counters, surfaced by `admin.*` status
 PreAuthLimits::max_pending_per_source            stage-13  pre-auth admission counters, surfaced by `admin.*` status
@@ -181,36 +212,5 @@ PreAuthLimits::max_pending_total                 stage-13  pre-auth admission co
 PreAuthLimits::max_sources                       stage-13  pre-auth admission counters, surfaced by `admin.*` status
 PreAuthLimits::rate_window_ms                    stage-13  pre-auth admission counters, surfaced by `admin.*` status
 PreAuthLimitsBuilder                             stage-13  pre-auth admission counters, surfaced by `admin.*` status
-ProtocolId::parse                                call  ProtocolId::parse(id)
-ReachabilityManager                              stage-11  AutoNAT client policy; step 3's libp2p adapter constructs and drives it
-Refusal::to_wire                                 call  refusal.to_wire(
-ReplyResolution::as_error                        stage-16  reply routes arrive with the bridge
-ReplyTokenTable::clear                           stage-16  reply routes arrive with the bridge
-ReplyTokenTable::expire                          stage-16  reply routes arrive with the bridge
-ReplyTokenTable::is_empty                        stage-16  reply routes arrive with the bridge
-ReplyTokenTable::len                             stage-16  reply routes arrive with the bridge
-ReplyTokenTable::mint                            stage-16  reply routes arrive with the bridge
-ReplyTokenTable::new                             stage-16  reply routes arrive with the bridge
-ReplyTokenTable::resolve                         stage-16  reply routes arrive with the bridge
 RequestedCapability::as_admin                    stage-13  handshake authority domain, needs two real sockets
 RequestedCapability::as_data                     stage-13  handshake authority domain, needs two real sockets
-ReservationMap::outstanding                      stage-12  expiry and introspection driven at runtime composition
-RoutingView::effective_target                    stage-12  consumed inside the port's own health today; the composed daemon's §16 diagnostics surface the trust-capped target directly
-SessionQueues::close                             call  broadcast_state.queues.close(
-SessionQueues::drain                             call  broadcast_state.queues.drain(
-SessionQueues::is_open                           call  broadcast_state.queues.is_open(
-SessionQueues::open                              call  .open(session, broadcast_state.queue_bound
-SessionQueues::set_bound                         call  broadcast_state.queues.set_bound(
-SubscriptionRegistry::backend_should_subscribe   call  broadcast_state.subs.backend_should_subscribe(
-SubscriptionRegistry::holds_any                  call  broadcast_state.subs.holds_any(
-SubscriptionRegistry::join                       call  broadcast_state.subs.join(
-SubscriptionRegistry::leave                      call  broadcast_state.subs.leave(
-SubscriptionRegistry::may_publish                call  broadcast_state.subs.may_publish(
-SubscriptionRegistry::release_session            stage-13  a client disconnect releases its joins, once IPC reports one
-SubscriptionRegistry::set_desired                call  broadcast_state.subs.set_desired(
-SubscriptionRegistry::subscribers                call  subs.subscribers(
-SubscriptionRegistry::subscriptions              call  self.subscriptions()
-TopicKey::wire_string                            call  topic_key_v1(channel).wire_string(
-TransportCapabilities::clamped                   stage-12  capability clamping happens at runtime composition
-TrustSources::classify                           call  self.trust.classify(
-validate_limits                                  stage-12  profile-config holds all six fields and defers the cross-field rules while it refuses enabled=true; that gate is Stage 12 composition, not Stage 10
