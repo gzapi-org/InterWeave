@@ -29,13 +29,15 @@ PEER=natm-peer-b ROUTER=natm-router-b LAN=natm-lan-b \
 
 ## What it establishes
 
-**That the translation is real, in both NAT domains.** Peer A sends from
-`10.89.1.3:45000` and the observers on the public side see its router's
-address; peer B sends from `10.89.2.3:45000` and they see a different
-one — each router's own. The transcript below has the numbers, and they
-are deliberately not repeated here: adding the filtering prober shifted
-podman's pool by one and left this paragraph naming the wrong addresses. Phase A had no NAT at all, and the first thing
-this harness owes is evidence that these ones do.
+**That the translation is real, in both NAT domains.** Each peer sends
+from its own LAN address and the observers on the public side see its
+router's address instead; the two peers are seen as two different ones —
+each router's own. The transcript below has the addresses, and they are
+deliberately not repeated here: adding the filtering prober shifted
+podman's pool by one and left this paragraph naming the wrong ones, and
+the version after that stated the rule while still quoting two of them.
+Phase A had no NAT at all, and the first thing this harness owes is
+evidence that these ones do.
 
 **That the mapping behaviour is the one that was asked for, and the
 FILTERING behaviour too.** RFC 4787 classifies a NAT by both, and until
@@ -437,9 +439,13 @@ InterWeave node runs here.
   environment, ready for them.
 
 **So this does not close phase B**, and whether a containerised matrix
-can satisfy the exit gate's NAT row — with the population claim
-explicitly deferred, as Stage 9 deferred mDNS and Stage 10 the release
-gate — is the owner's decision and belongs in the plan, not here.
+can satisfy the exit gate's NAT row — with the population claim, the
+public VM and a carrier's CGNAT explicitly deferred, as Stage 9 deferred
+mDNS and Stage 10 the release gate — is the owner's decision and belongs
+in the plan, not here. (This is the third copy of that deferral list;
+`SPIKES.md` and the plan carry the other two, and this one was short by
+two items until the same round that removed "the filtering half" from
+the others.)
 
 ## Notes for whoever extends it
 
