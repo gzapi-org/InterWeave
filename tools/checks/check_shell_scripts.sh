@@ -99,7 +99,16 @@ fi
 # outputs, vendored copies and anything untracked a developer happens to
 # have in the tree, so the set a guard judges would depend on whose
 # machine it ran on.
-mapfile -t scripts < <(git ls-files '*.sh')
+# `-z` because `core.quotePath` (on by default) would otherwise emit a
+# path with a special character double-quoted and C-escaped, and
+# shellcheck would be handed the quoted spelling. None exists today.
+# And the listing's own status is read: `git ls-files` failing — not a
+# repository, git absent — also yields an empty array, and "no tracked
+# files" would name the wrong cause. Review findings on PR #82.
+if ! listing=$(git ls-files -z '*.sh'); then
+    die "check_shell_scripts: git ls-files failed, so the tracked set could not be read (exit 2, not a pass)."
+fi
+mapfile -d '' -t scripts < <(printf '%s' "$listing")
 
 if [[ ${#scripts[@]} -eq 0 ]]; then
     echo "check_shell_scripts: no tracked *.sh files found — the guard would pass by looking at nothing." >&2
