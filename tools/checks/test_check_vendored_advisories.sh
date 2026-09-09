@@ -14,9 +14,10 @@
 # guard reads only a name and a version from it and then asks the
 # registry about that version, so no source is needed to exercise it.
 #
-# Like test_check_dependencies.sh, the advisory cases need `cargo-deny`
-# and a reachable database. Without them this degrades to the paths that
-# do not: no-patch-block, and an unreadable vendored manifest.
+# The guard checks for `cargo-deny` before it does anything else and
+# exits 2 without it, so EVERY case here needs it -- this self-test
+# skips whole rather than degrading to a subset, which an earlier
+# revision of this comment got wrong.
 
 set -uo pipefail
 
@@ -30,6 +31,39 @@ bad()  { printf '  \xe2\x9c\x97 %s\n' "$1"; failures=$((failures + 1)); }
 SANDBOX="$(mktemp -d)" || { echo "cannot create a sandbox" >&2; exit 1; }
 trap 'rm -rf "$SANDBOX"' EXIT
 
+if ! cargo deny --version >/dev/null 2>&1; then
+    printf 'test_check_vendored_advisories: cargo-deny absent — skipped whole.\n'
+    printf 'The guard exits 2 in that state, which is what CI relies on.\n'
+    exit 0
+fi
+
+# Is the advisory database reachable at all? Everything below distinguishes
+# a finding from an environment failure, and without this baseline it
+# could not: a guard mutation that misclassifies findings as unreachable
+# would otherwise look like a skip and report success.
+mkdir -p "$SANDBOX/baseline/src"
+cat > "$SANDBOX/baseline/Cargo.toml" <<'EOF'
+[package]
+name = "baseline"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+atty = "=0.2.14"
+EOF
+echo 'fn main() {}' > "$SANDBOX/baseline/src/main.rs"
+cp "$ROOT/deny.toml" "$SANDBOX/baseline/deny.toml"
+if (cd "$SANDBOX/baseline" && cargo generate-lockfile >/dev/null 2>&1); then
+    if (cd "$SANDBOX/baseline" && cargo deny check advisories >/dev/null 2>&1); then
+        printf 'test_check_vendored_advisories: the fixture crate reports no advisory —\n'
+        printf 'either the database is stale or atty 0.2.14 was cleared. Skipped.\n'
+        exit 0
+    fi
+else
+    printf 'test_check_vendored_advisories: the registry is unreachable — skipped.\n'
+    exit 0
+fi
+
 # A workspace with no [patch.crates-io] block at all.
 mkdir -p "$SANDBOX/none/src"
 cat > "$SANDBOX/none/Cargo.toml" <<'EOF'
@@ -38,103 +72,83 @@ name = "nothing-vendored"
 version = "0.0.0"
 edition = "2021"
 EOF
+echo 'fn main() {}' > "$SANDBOX/none/src/main.rs"
 cp "$ROOT/deny.toml" "$SANDBOX/none/deny.toml"
 
-bash "$GUARD" --root "$SANDBOX/none" >/dev/null 2>&1
-if [ $? -eq 0 ]; then
+if bash "$GUARD" --root "$SANDBOX/none" >/dev/null 2>&1; then
     ok "a workspace vendoring nothing passes"
 else
     bad "a workspace vendoring nothing must pass"
 fi
 
-# A patch entry whose vendored manifest is missing.
-mkdir -p "$SANDBOX/broken/src"
-cat > "$SANDBOX/broken/Cargo.toml" <<'EOF'
-[package]
-name = "broken"
-version = "0.0.0"
-edition = "2021"
+# Build a workspace that vendors one crate. $1 sandbox name, $2 crate,
+# $3 version, $4 the [patch.crates-io] spelling (inline or subtable).
+build_vendored() {
+    local dir="$SANDBOX/$1" crate="$2" ver="$3" form="$4"
+    mkdir -p "$dir/src" "$dir/third_party/$crate/src"
+    {
+        printf '[package]\nname = "%s-probe"\nversion = "0.0.0"\nedition = "2021"\n\n' "$1"
+        printf '[dependencies]\n%s = "=%s"\n\n' "$crate" "$ver"
+        if [ "$form" = subtable ]; then
+            printf '[patch.crates-io.%s]\npath = "third_party/%s"\n' "$crate" "$crate"
+        else
+            printf '[patch.crates-io]\n%s = { path = "third_party/%s" }\n' "$crate" "$crate"
+        fi
+    } > "$dir/Cargo.toml"
+    echo 'fn main() {}' > "$dir/src/main.rs"
+    printf '[package]\nname = "%s"\nversion = "%s"\nedition = "2018"\n' "$crate" "$ver" \
+        > "$dir/third_party/$crate/Cargo.toml"
+    echo '' > "$dir/third_party/$crate/src/lib.rs"
+    cp "$ROOT/deny.toml" "$dir/deny.toml"
+}
 
-[patch.crates-io]
-atty = { path = "third_party/atty" }
-EOF
-cp "$ROOT/deny.toml" "$SANDBOX/broken/deny.toml"
-
-bash "$GUARD" --root "$SANDBOX/broken" >/dev/null 2>&1
-if [ $? -eq 1 ]; then
-    ok "a patch entry with no vendored manifest is an error"
-else
-    bad "a patch entry with no vendored manifest must exit 1"
-fi
-
-if ! cargo deny --version >/dev/null 2>&1; then
-    printf '\ntest_check_vendored_advisories: cargo-deny absent — the advisory\n'
-    printf 'cases did not run. The guard itself exits 2 in that state, which is\n'
-    printf 'what CI relies on; only this self-test degrades.\n'
-    [ "$failures" -eq 0 ] || exit 1
-    echo "test_check_vendored_advisories: OK — absence paths only."
-    exit 0
-fi
-
-# THE POSITIVE CASE: a vendored crate that carries advisories.
-mkdir -p "$SANDBOX/vulnerable/third_party/atty"
-cat > "$SANDBOX/vulnerable/Cargo.toml" <<'EOF'
-[package]
-name = "vulnerable"
-version = "0.0.0"
-edition = "2021"
-
-[patch.crates-io]
-atty = { path = "third_party/atty" }
-EOF
-cat > "$SANDBOX/vulnerable/third_party/atty/Cargo.toml" <<'EOF'
-[package]
-name = "atty"
-version = "0.2.14"
-edition = "2018"
-EOF
-cp "$ROOT/deny.toml" "$SANDBOX/vulnerable/deny.toml"
-
-out="$(bash "$GUARD" --root "$SANDBOX/vulnerable" 2>&1)"
-status=$?
-if [ "$status" -eq 2 ]; then
-    printf '\ntest_check_vendored_advisories: the advisory database is unreachable —\n'
-    printf 'the positive case did not run.\n'
-    [ "$failures" -eq 0 ] || exit 1
-    echo "test_check_vendored_advisories: OK — absence paths only."
-    exit 0
-fi
-if [ "$status" -eq 1 ]; then
-    ok "a vendored crate carrying an advisory fails"
-else
-    bad "a vendored atty 0.2.14 must exit 1, got $status"
-fi
-if printf '%s' "$out" | grep -q 'RUSTSEC-2021-0145'; then
-    ok "and the advisory id is reported"
-else
-    bad "the advisory id must appear in the output"
-fi
-
-# The mutation this guard exists to survive: the whole point is that
-# cargo-deny alone does NOT see it. Assert that directly, so the day the
-# tool starts covering path patches, this fixture says so.
-probe="$SANDBOX/deny-alone"
-mkdir -p "$probe/third_party/atty/src" "$probe/src"
-cp "$SANDBOX/vulnerable/Cargo.toml" "$probe/Cargo.toml"
-cp "$ROOT/deny.toml" "$probe/deny.toml"
-echo 'fn main() {}' > "$probe/src/main.rs"
-printf '[package]\nname = "atty"\nversion = "0.2.14"\nedition = "2018"\n' \
-    > "$probe/third_party/atty/Cargo.toml"
-echo '' > "$probe/third_party/atty/src/lib.rs"
-printf '\n[dependencies]\natty = "=0.2.14"\n' >> "$probe/Cargo.toml"
-if (cd "$probe" && cargo generate-lockfile >/dev/null 2>&1); then
-    if (cd "$probe" && cargo deny check advisories >/dev/null 2>&1); then
-        ok "cargo-deny alone still misses a path-patched crate (the reason this guard exists)"
+# Run the guard and classify. Exit 2 is only ever an environment problem,
+# and the baseline above proved the environment works -- so here it is a
+# FAILURE, not a skip. Without that, a mutation misclassifying findings as
+# unreachable would report success.
+expect_finding() {
+    local dir="$1" label="$2" id="$3"
+    local out status
+    out="$(bash "$GUARD" --root "$SANDBOX/$dir" 2>&1)"; status=$?
+    case "$status" in
+        1) ok "$label" ;;
+        2) bad "$label — exit 2, but the baseline proved the database reachable" ;;
+        *) bad "$label — expected exit 1, got $status" ;;
+    esac
+    if printf '%s' "$out" | grep -q "$id"; then
+        ok "  and $id is reported"
     else
-        bad "cargo-deny now reports path-patched crates — this guard may be redundant, check before deleting it"
+        bad "  $id must appear in the output"
+    fi
+}
+
+# THE POSITIVE CASE.
+build_vendored vulnerable atty 0.2.14 inline
+expect_finding vulnerable "a vendored crate carrying an advisory fails" RUSTSEC-2021-0145
+
+# THE SUB-TABLE FORM, which cargo accepts identically. An awk-based
+# parser saw nothing here and printed "no crate is vendored", exit 0 --
+# a false pass in the guard that is the only warning there is.
+build_vendored subtable atty 0.2.14 subtable
+expect_finding subtable "the [patch.crates-io.<crate>] form is not missed" RUSTSEC-2021-0145
+
+# THE VERSION PIN. `time 0.1.45` carries RUSTSEC-2020-0071; 0.3.x does
+# not. A guard that asked the registry for the crate without pinning the
+# VENDORED version would resolve the clean release and pass.
+build_vendored pinned time 0.1.45 inline
+expect_finding pinned "the vendored VERSION is what gets asked about" RUSTSEC-2020-0071
+
+# THE REASON THIS GUARD EXISTS: cargo-deny alone must still miss it. If
+# that ever stops being true this guard may be redundant, and the fixture
+# is what will say so rather than it quietly becoming dead weight.
+if (cd "$SANDBOX/vulnerable" && cargo generate-lockfile >/dev/null 2>&1); then
+    if (cd "$SANDBOX/vulnerable" && cargo deny check advisories >/dev/null 2>&1); then
+        ok "cargo-deny alone still misses a path-patched crate"
+    else
+        bad "cargo-deny now reports path-patched crates — check before deleting this guard"
     fi
 else
-    printf '  - could not resolve the deny-alone probe; skipped\n'
+    bad "the vulnerable fixture must resolve; it is the basis of every case above"
 fi
 
 if [ "$failures" -gt 0 ]; then

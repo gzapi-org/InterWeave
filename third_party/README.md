@@ -4,9 +4,9 @@
 
 Vendored dependency sources, each under its own licence and each the
 subject of an ADR that says why a registry release would not do. Every
-file here is listed with its provenance in
-`tools/checks/license_exempt.txt`; a subdirectory without an entry is an
-unreviewed import and fails `check_license_headers.sh`.
+vendored file is listed with its provenance in
+`tools/checks/license_exempt.txt` — this README is first-party and is
+not among them. A subdirectory without entries is an unreviewed import.
 
 | Directory | Upstream | Licence | Why vendored | Patch |
 |---|---|---|---|---|

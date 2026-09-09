@@ -27,18 +27,28 @@
 # for the question it asks, the question just stops covering us, so the
 # gap gets its own guard rather than a sentence in a document.
 #
-# HOW. For each patched crate, a throwaway workspace is generated in a
-# temporary directory depending on that crate at that exact version FROM
-# THE REGISTRY, and `cargo deny check advisories` runs there under this
-# repository's own `deny.toml`, so any documented ignore still applies.
-# Nothing in the working tree is touched.
+# HOW. The vendored set comes from `cargo metadata`, not from reading
+# Cargo.toml: a patched crate is exactly a package cargo resolved with no
+# `source` that is not a workspace member. An earlier version parsed the
+# `[patch.crates-io]` table with awk and was blind to the equally valid
+# `[patch.crates-io.<crate>]` sub-table form -- it found nothing, said so,
+# and exited 0, which is a false pass in a guard whose whole job is to be
+# the only warning there is. Asking cargo removes that family of bug
+# whole: sub-tables, comments, `package = ` renames, quoted keys and CRLF
+# are all cargo's problem and it has already solved them.
+#
+# For each such crate a throwaway workspace is generated in a temporary
+# directory depending on it at that exact version FROM THE REGISTRY, and
+# `cargo deny check advisories` runs there under this repository's own
+# `deny.toml`, so any documented ignore still applies. Nothing in the
+# working tree is touched.
 #
 # Dependabot cannot see a path-patched crate either, so this guard is
 # also the only thing that will ever say a vendored tree needs a bump.
 #
 # Exit codes:
 #   0  every vendored crate is free of RustSec advisories at its version
-#   1  an advisory applies to a vendored crate, or a manifest is unreadable
+#   1  an advisory applies to a vendored crate
 #   2  cargo-deny is not installed, or the advisory database is
 #      unreachable — a guard that passes because it could not run is the
 #      shape this repository refuses
@@ -66,24 +76,29 @@ cargo deny --version >/dev/null 2>&1 \
 
 [ -f Cargo.toml ] || die "no Cargo.toml at $ROOT"
 [ -f deny.toml ] || die "no deny.toml at $ROOT"
+command -v python3 >/dev/null 2>&1 || die "python3 is not installed" 2
 
-# The `[patch.crates-io]` block, one `name = { path = "..." }` per line.
-# Anything without a `path` key is not a vendored tree and is not ours to
-# check here.
-mapfile -t patched < <(
-    awk '
-        /^\[patch\.crates-io\]/ { inblock = 1; next }
-        /^\[/                   { inblock = 0 }
-        inblock && /path[[:space:]]*=/ {
-            name = $1
-            match($0, /path[[:space:]]*=[[:space:]]*"[^"]+"/)
-            p = substr($0, RSTART, RLENGTH)
-            sub(/^path[[:space:]]*=[[:space:]]*"/, "", p)
-            sub(/"$/, "", p)
-            print name "\t" p
-        }
-    ' Cargo.toml
-)
+metadata="$(cargo metadata --format-version 1 --locked 2>/dev/null)" \
+    || metadata="$(cargo metadata --format-version 1 2>/dev/null)" \
+    || die "cargo metadata failed at $ROOT" 2
+
+# A package cargo resolved with no `source` and which is not a workspace
+# member is a vendored crate: `[patch.crates-io]` with a path, or a plain
+# path dependency outside the workspace. Both are trees this repository
+# ships and neither is covered by the advisory check.
+mapfile -t patched < <(printf '%s' "$metadata" | python3 -c '
+import json, os, sys
+meta = json.load(sys.stdin)
+members = set(meta.get("workspace_members", []))
+root = os.path.realpath(meta.get("workspace_root", "."))
+for pkg in meta.get("packages", []):
+    if pkg.get("source") is not None or pkg["id"] in members:
+        continue
+    manifest = os.path.realpath(pkg["manifest_path"])
+    if not manifest.startswith(root + os.sep):
+        continue
+    print("\t".join((pkg["name"], pkg["version"], os.path.dirname(manifest))))
+') || die "cannot read the package graph" 2
 
 if [ "${#patched[@]}" -eq 0 ]; then
     echo "check_vendored_advisories: OK — no crate is vendored through [patch.crates-io]."
@@ -97,18 +112,7 @@ violations=0
 checked=0
 
 for entry in "${patched[@]}"; do
-    name="${entry%%$'\t'*}"
-    path="${entry#*$'\t'}"
-
-    [ -f "$path/Cargo.toml" ] || die "$name: no manifest at $path/Cargo.toml"
-    version="$(awk '
-        /^\[package\]/ { inpkg = 1; next }
-        /^\[/          { inpkg = 0 }
-        inpkg && /^version[[:space:]]*=/ {
-            match($0, /"[^"]+"/); print substr($0, RSTART + 1, RLENGTH - 2); exit
-        }
-    ' "$path/Cargo.toml")"
-    [ -n "$version" ] || die "$name: no version in $path/Cargo.toml"
+    IFS=$'\t' read -r name version path <<< "$entry"
 
     probe="$WORK/$name"
     mkdir -p "$probe/src"

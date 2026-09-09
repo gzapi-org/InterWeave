@@ -54,8 +54,12 @@ fn retest_leaves_no_candidate_holding_the_old_nonce() {
     ));
     client.validate_addr(&addr);
 
-    // A second `retest` answers `false` precisely because the first one
-    // left nothing holding a nonce -- the same lookup the guard makes.
+    // `retest` reports `true` once and then `false`, because it tests
+    // `status != Untested` -- which is NOT the lookup `reset_status_to`
+    // makes (`is_pending_with_nonce || is_received_with_nonce`). The two
+    // coincide on this input and diverge on a `Failed` candidate, which
+    // holds no nonce yet still answers `true` here. Stated because an
+    // earlier comment called them the same lookup.
     assert!(client.retest(&addr));
     assert!(!client.retest(&addr));
 }

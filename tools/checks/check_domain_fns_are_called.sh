@@ -217,14 +217,19 @@ fi
 #
 # `third_party/` is excluded on the same reasoning, one step further out: a
 # vendored dependency did not choose this repository's names and cannot be
-# evidence that anything here has a consumer. This is NOT hypothetical --
-# two owner types collide with the vendored tree today, `DialRequest`
-# (connection_policy.rs, and `libp2p-autonat`'s own v1 type) and `Outcome`
-# (direct_inbound.rs, and a local in the v2 client) -- so without the
-# exclusion a vendored file could satisfy `owner_is_wired` for a domain
-# type nothing here calls. An earlier revision of this comment claimed
-# the measurement showed no collisions at all; it showed these two.
-# Review finding on PR #85 (ADR-0051).
+# evidence that anything here has a consumer.
+#
+# The exclusion is DEFENSIVE rather than load-bearing today, and saying so
+# took three attempts. Measured the way this script measures -- owner types
+# come from top-level `impl` lines, not from `struct`/`enum` declarations --
+# no owner type in `crates/api/` or `crates/transport/runtime/` appears in
+# the vendored tree, so nothing there can satisfy `owner_is_wired` now.
+# Nineteen METHOD names collide (`sweep`, `candidates`, `drain`, `parse`,
+# `insert`, ...), but a method also needs its owner named in the same
+# file, and no free domain function collides at all. Two earlier revisions
+# of this comment claimed first no collisions and then two owner-type
+# collisions; the second was grepped for `struct X`/`enum X`, which is not
+# what this script reads. Review findings on PR #85 (ADR-0051).
 
 mapfile -t all_rs < <(git ls-files '*.rs' 2>/dev/null | grep -vE '(^|/)tests/|^spikes/|^third_party/')
 
