@@ -968,7 +968,7 @@ impl ConnectivityConfig {
     /// test). For AUTONAT it has no runtime shape either: `AUTONAT.md`'s
     /// Amendment 2026-09-09 records that the pinned client cannot
     /// express a selection order at all, so the flag governs which
-    /// servers the profile CONNECTS to. The third is
+    /// servers the profile DIALS. The third is
     /// enforced ELSEWHERE: "a PeerId in both sets is treated as
     /// DataPlaneTrusted for protocol admission" is
     /// `TrustSources::classify`'s order (reached through

@@ -311,7 +311,12 @@ impl ReachabilityManager {
     /// The accepted list is ALSO bounded to `max_candidates_per_cycle`,
     /// so an address registry handing over fifty listeners produces
     /// four candidates and not fifty.
-    pub fn set_candidates<I, S>(&mut self, addresses: I) -> usize
+    /// RE-DERIVES, because dropping a candidate can end a verdict.
+    /// Without it `state()` would keep naming a withdrawn address in
+    /// `verified_addresses` until the next expiry pass, and ADR-0035's
+    /// advertisement rule reads exactly that list. Review finding on
+    /// PR #84.
+    pub fn set_candidates<I, S>(&mut self, addresses: I, now_ms: u64) -> usize
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
@@ -335,6 +340,7 @@ impl ReachabilityManager {
         self.candidates = accepted;
         self.inflight
             .retain(|(address, _), _| self.candidates.contains(address));
+        let _ = self.rederive(now_ms);
         rejected
     }
 
@@ -794,7 +800,7 @@ mod tests {
         // through `public_manager` below. These two exist for the
         // refusal test.
         let _ = (PUBLIC_A, PUBLIC_B);
-        m.set_candidates(["/ip4/8.8.8.8/tcp/4001", "/ip4/1.1.1.1/tcp/4001"]);
+        m.set_candidates(["/ip4/8.8.8.8/tcp/4001", "/ip4/1.1.1.1/tcp/4001"], 0);
         m
     }
 
@@ -899,11 +905,14 @@ mod tests {
             assert!(is_probeable_address(address), "must accept {address:?}");
         }
         let mut m = ReachabilityManager::new(ReachabilityConfig::default()).expect("valid");
-        let rejected = m.set_candidates([
-            "/ip4/127.0.0.1/tcp/4001",
-            "/ip4/8.8.8.8/tcp/4001",
-            "/dns4/x/tcp/1",
-        ]);
+        let rejected = m.set_candidates(
+            [
+                "/ip4/127.0.0.1/tcp/4001",
+                "/ip4/8.8.8.8/tcp/4001",
+                "/dns4/x/tcp/1",
+            ],
+            0,
+        );
         assert_eq!(rejected, 2);
         assert_eq!(m.rejected_candidates(), 2);
         assert_eq!(m.candidates(), ["/ip4/8.8.8.8/tcp/4001"]);
@@ -915,7 +924,7 @@ mod tests {
         let many: Vec<String> = (1..=50)
             .map(|i| format!("/ip4/8.8.{i}.{i}/tcp/4001"))
             .collect();
-        let rejected = m.set_candidates(many.iter().chain(many.iter()));
+        let rejected = m.set_candidates(many.iter().chain(many.iter()), 0);
         assert_eq!(rejected, 0, "all fifty are public");
         assert_eq!(m.candidates().len(), DEFAULT_MAX_CANDIDATES_PER_CYCLE);
         assert_eq!(m.candidates(), &many[..DEFAULT_MAX_CANDIDATES_PER_CYCLE]);
@@ -1189,6 +1198,28 @@ mod tests {
     }
 
     #[test]
+    fn withdrawing_a_verified_candidate_ends_the_verdict_at_once() {
+        // `state()` is a cached value, so without a re-derive here it
+        // would go on naming an address the profile no longer listens
+        // on -- and ADR-0035's advertisement rule reads exactly that
+        // list. Review finding on PR #84.
+        let mut m = manager();
+        m.set_candidates(["/ip4/8.8.8.8/tcp/4001"], 0);
+        m.add_server(peer(S1), ServerSource::Static);
+        m.add_server(peer(S2), ServerSource::Static);
+        let a = "/ip4/8.8.8.8/tcp/4001";
+        let _ = m.record_outcome(a, &peer(S1), ProbeOutcome::Reachable, 0);
+        let _ = m.record_outcome(a, &peer(S2), ProbeOutcome::Reachable, 0);
+        assert!(verified(&m));
+        m.set_candidates(["/ip4/1.1.1.1/tcp/4001"], 1);
+        assert_eq!(
+            *m.state(),
+            ReachabilityVerdict::Unknown,
+            "the verified address is gone, so the verdict is too"
+        );
+    }
+
+    #[test]
     fn a_success_clears_the_servers_incomplete_probe_timestamp() {
         // Otherwise the value `NotVerified` reports ages without bound:
         // the evidence half it is merged with expires after
@@ -1228,7 +1259,7 @@ mod tests {
         // refresh path, which is what makes it worth a test rather than
         // a comment. Review finding on PR #84.
         let mut m = manager();
-        m.set_candidates(["/ip4/8.8.8.8/tcp/4001"]);
+        m.set_candidates(["/ip4/8.8.8.8/tcp/4001"], 0);
         m.add_server(peer(S1), ServerSource::Static);
         m.add_server(peer(S2), ServerSource::Static);
         let a = "/ip4/8.8.8.8/tcp/4001";
@@ -1261,7 +1292,7 @@ mod tests {
     fn a_verified_address_is_refreshed_after_the_refresh_interval_and_not_before() {
         let mut m = manager();
         m.add_server(peer(S1), ServerSource::Static);
-        m.set_candidates(["/ip4/8.8.8.8/tcp/4001"]);
+        m.set_candidates(["/ip4/8.8.8.8/tcp/4001"], 0);
         let a = "/ip4/8.8.8.8/tcp/4001";
         let _ = m.record_outcome(a, &peer(S1), ProbeOutcome::Reachable, 0);
         assert!(
@@ -1305,7 +1336,7 @@ mod tests {
         // than then" until this test was written for it.
         // Review finding on PR #84.
         let mut m = manager();
-        m.set_candidates(["/ip4/8.8.8.8/tcp/4001"]);
+        m.set_candidates(["/ip4/8.8.8.8/tcp/4001"], 0);
         for server in [S1, S2, S3] {
             m.add_server(peer(server), ServerSource::Static);
         }
@@ -1386,7 +1417,7 @@ mod tests {
         m.add_server(peer(S1), ServerSource::Static);
         let first = m.due_probes(0);
         assert_eq!(first.len(), DEFAULT_MAX_INFLIGHT_PROBES);
-        m.set_candidates(["/ip4/9.9.9.9/tcp/4001"]);
+        m.set_candidates(["/ip4/9.9.9.9/tcp/4001"], 0);
         assert!(
             !m.has_outstanding_probe_to(&peer(S1)),
             "the in-flight pairs named addresses that are gone"

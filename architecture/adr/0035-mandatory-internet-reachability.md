@@ -51,7 +51,7 @@ Default reservation targets are:
 
 Relays are selected from static configured relay addresses by default. Identify-learned relay/probe candidates require explicit opt-in (`use_authorized_identify_* = true`), and static candidates have selection precedence until they cannot meet the configured target. Relay service discovery never uses Kademlia provider/value records.
 
-**Selection precedence binds RELAY only.** For AutoNAT it is unimplementable and is therefore not required: the standard-v1 client cannot express a server order, so what `use_authorized_identify_servers` and static configuration govern there is which servers the profile CONNECTS to, not which it prefers among peers already connected. See `transport/libp2p/AUTONAT.md` §3 and its Amendment 2026-09-09, and the amendment below.
+**Selection precedence binds RELAY only.** For AutoNAT it is unimplementable and is therefore not required: the standard-v1 client cannot express a server order, so what `use_authorized_identify_servers` and static configuration govern there is which servers the profile DIALS, not which it prefers among peers already connected. Dials, not merely connects to: the standard-v1 client offers its dial-request protocol only on connections this profile opened, so a server that dialled us is never eligible and accepting its inbound connection buys nothing. See `transport/libp2p/AUTONAT.md` §3 and its Amendment 2026-09-09, and the amendment below.
 
 ### Path selection
 
@@ -128,4 +128,4 @@ Full notes: [`history/0035-amendments.md`](./history/0035-amendments.md).
 
 | Date | Amendment | Effect |
 |---|---|---|
-| 2026-09-09 | Selection precedence binds relay only | An implementer no longer owes an AutoNAT probe-server ordering. Static configuration and `use_authorized_identify_servers` decide which AutoNAT servers the profile connects to; among connected servers there is no required preference, because the standard-v1 client exposes no way to express one. The relay clause is unchanged. |
+| 2026-09-09 | Selection precedence binds relay only | An implementer no longer owes an AutoNAT probe-server ordering. Static configuration and `use_authorized_identify_servers` decide which AutoNAT servers the profile DIALS — a server that dialled us is not eligible — and among those there is no required preference, because the standard-v1 client exposes no way to express one. The relay clause is unchanged. |

@@ -142,8 +142,9 @@ transport:
     #   static configured candidates have selection precedence until their target cannot be met.
     #   FOR RELAY ONLY since AUTONAT.md's Amendment 2026-09-09: the AutoNAT v2 client cannot
     #   express a selection order, so for AutoNAT `use_authorized_identify_servers` governs which
-    #   servers this profile CONNECTS to, and static servers are the ones it guarantees to connect
-    #   to, rather than ones it prefers among peers already connected.
+    #   servers this profile DIALS, and static servers are the ones it guarantees to dial, rather
+    #   than ones it prefers among peers already connected (a server that dialled us is not
+    #   eligible: the client offers dial-request only on connections it opened).
     #   every static relay/AutoNAT server PeerId is in either trust.allowed_peers
     #   or transport.connectivity.infrastructure.allowed_peers
     #   a PeerId in both sets is treated as DataPlaneTrusted for protocol admission

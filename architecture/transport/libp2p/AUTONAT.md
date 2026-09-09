@@ -73,8 +73,9 @@ is already
 `DataPlaneTrusted` or `ConnectivityInfrastructureOnly` because no other
 class is retained. Static configuration keeps a weaker and enforceable
 meaning: a statically configured server is one this profile
-**guarantees to be CONNECTED to**, by dialling it under
-`DialOrigin::AutonatProbe`. `use_authorized_identify_servers` likewise
+**guarantees to DIAL**, under `DialOrigin::AutonatProbe` -- dial and not
+merely connect to, since the client offers its dial-request protocol
+only on connections this profile opened. `use_authorized_identify_servers` likewise
 governs CONNECTION rather than selection — with it false, this profile
 opens no AutoNAT connection it was not configured for, so an
 Identify-learned server can only ever be a peer already connected for
