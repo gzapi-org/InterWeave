@@ -92,9 +92,10 @@ On Qubes, install it in the TEMPLATE rather than an AppVM: an AppVM's
 the next run and this guard would start reporting "not installed" again.
 
 Exit 2 rather than 0: a guard that passes because it could not run is
-the shape this repository refuses. CI has shellcheck preinstalled on its
-ubuntu runners, so this path is a developer-machine state and never a
-silent skip in CI.
+the shape this repository refuses. CI installs a pinned shellcheck
+before this step in both jobs that run it, so there a failed install
+surfaces here as exit 2 and never as a silent skip; on a developer
+machine this path means exactly what it says.
 MISSING
     exit 2
 fi
@@ -163,13 +164,15 @@ case $rc in
         cat >&2 <<MISSING
 check_shell_scripts: shellcheck reported findings at severity '$SEVERITY' (above).
 
-A finding that is deliberate takes a targeted disable WITH a reason on
-the line above it:
+A finding that is deliberate takes a targeted disable, and the
+repository's convention is a reason on the same line:
 
   # shellcheck disable=SC2086 # word splitting is the point here: \$MODES is a list
 
-A blanket disable at the top of a file is not that, and neither is
-raising INTERWEAVE_SHELLCHECK_SEVERITY to get past a warning.
+Nothing here checks for the reason -- shellcheck honours the bare form
+too -- so the reason is for the reader. A blanket disable at the top of
+a file is not that, and neither is raising
+INTERWEAVE_SHELLCHECK_SEVERITY to get past a warning.
 MISSING
         exit 1
         ;;
