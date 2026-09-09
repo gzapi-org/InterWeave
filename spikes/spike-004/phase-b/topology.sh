@@ -64,15 +64,21 @@ ROUTERS="natm-router natm-router-b"
 PROBER="${PROBER:-natm-filt}"
 # AND GUARDED HERE, because this is the file that runs `podman rm -f` on
 # the name -- `up` calls `down` first -- so a `PROBER` naming a container
-# standing from other work would be removed silently before the image
-# build finished. `filter.sh`'s guard covers the observers, two minutes
-# later; every other destructive use in that file sits behind address
-# resolution and fails first. This one does not. The refused set is
-# everything this file creates, plus the prefix rule that keeps it off
-# anything it does not. Review finding on PR #81.
+# standing from other work would be removed silently, before the topology
+# is up and before any output the caller would read. (An earlier version
+# of this sentence said "before the image build finished"; the build
+# always precedes `up`, so that ordering never happens.) `filter.sh`'s
+# guard covers the observers, two minutes later; every other destructive
+# use in that file sits behind address resolution and fails first. This
+# one does not. The refused set is every CONTAINER this file creates --
+# the routers read from `$ROUTERS` so a third domain cannot slip past
+# here -- plus the prefix rule that keeps `down` off anything it did
+# not create. Review findings on PR #81.
+for created in natm-obs1 natm-obs2 natm-peer natm-peer-b $ROUTERS; do
+  [ "$PROBER" != "$created" ] \
+    || { echo "PROBER must not be a container this topology creates ($PROBER): up would create it twice under one name" >&2; exit 2; }
+done
 case "$PROBER" in
-  natm-obs1|natm-obs2|natm-peer|natm-peer-b|natm-router|natm-router-b)
-    echo "PROBER must not be a container this topology creates ($PROBER): down would remove it as the prober" >&2; exit 2 ;;
   natm-*) ;;
   *) echo "PROBER must be named natm-* ($PROBER): this file force-removes it on down, and the prefix keeps that off anything it did not create" >&2; exit 2 ;;
 esac

@@ -27,8 +27,8 @@
 #     from RFC 4787, not measured: the control filtering modes install a
 #     static forward and so need `NAT_MODE=eim`, which `topology.sh`
 #     refuses to combine with `eds`. `filter.sh` measures the filtering
-#     half of each row it CAN build; this sentence is why the mapping
-#     rows cannot decide a punch, not a row of its own.
+#     half of each row `topology.sh` CAN build; this sentence is why the
+#     mapping rows cannot decide a punch, not a row of its own.
 #     Mapping does not gate the ATTEMPT either: `DCUTR.md` §2's
 #     eligibility list does not mention NAT class. Codex review, PR #79.
 set -euo pipefail
