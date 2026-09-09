@@ -17,7 +17,8 @@
 //!
 //! Two things it deliberately does NOT do. It does not judge the
 //! node-level sections (`runtime`, `identity`, `ipc`, `profile`) that no
-//! Rust type models yet — a profile document is wider than this crate,
+//! Rust type models yet — nor the sub-blocks of `transport` other than
+//! `connectivity`, for the same reason one level down — a profile document is wider than this crate,
 //! and asserting on shapes nothing parses would be inventing a contract.
 //! And it does not resolve DNS or reach a network: placeholders become
 //! syntactically valid identities, because the question is whether the
@@ -30,12 +31,20 @@ use interweave_profile_config::ProfileConfig;
 
 /// The sections `ProfileConfig` models. A key outside this set belongs
 /// to the wider profile document and is not this crate's to judge.
-const MODELLED: [&str; 5] = [
+const MODELLED: [&str; 6] = [
     "schema_version",
     "trust",
     "endpoints",
     "discovery",
     "channels",
+    // `transport` joined the list when `transport.connectivity` landed,
+    // and the list is why that block had no coverage against the
+    // documents operators are handed until it did: the projection drops
+    // every unlisted key, so all ten examples' connectivity blocks were
+    // stripped before parsing. A hand-maintained set goes stale the
+    // first time `ProfileConfig` grows a section. Review finding on
+    // PR #80.
+    "transport",
 ];
 
 /// Stand-ins for the `<PLACEHOLDER>` peer ids the examples carry.
@@ -90,6 +99,43 @@ fn examples() -> Result<Vec<PathBuf>, String> {
     Ok(found)
 }
 
+/// `MODELLED` must name every section `ProfileConfig` actually models.
+///
+/// WITHOUT THIS THE LIST GOES STALE IN SILENCE, which is how the
+/// `transport` block went uncovered: the projection drops any key the
+/// list omits, so a missing section does not fail anything — it removes
+/// coverage, and removing coverage is invisible by construction. That is
+/// the one mutation of this file that passed, so this is the test for the
+/// test. Review finding on PR #80.
+///
+/// Serialization is the oracle: every field of `ProfileConfig` is
+/// serialized, so the keys of a round-tripped value ARE the sections this
+/// crate models. A new section therefore fails here until it is listed.
+#[test]
+fn the_modelled_list_names_every_section_the_type_models() {
+    let minimal: ProfileConfig = serde_norway::from_str(
+        "schema_version: 2\ntrust:\n  policy: static-allowlist\n  allowed_peers: []\nendpoints:\n  entries: []\n",
+    )
+    .expect("a minimal profile parses");
+    let value = serde_norway::to_value(&minimal).expect("a profile serializes");
+    let mapping = value.as_mapping().expect("a profile is a mapping");
+
+    let mut modelled: Vec<&str> = MODELLED.to_vec();
+    modelled.sort_unstable();
+    let mut serialized: Vec<String> = mapping
+        .keys()
+        .map(|k| k.as_str().expect("a section key is a string").to_owned())
+        .collect();
+    serialized.sort();
+
+    assert_eq!(
+        serialized,
+        modelled.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
+        "MODELLED and the sections ProfileConfig serializes must agree; \
+         a section missing from MODELLED is projected away and silently untested"
+    );
+}
+
 #[test]
 fn every_shipped_example_satisfies_the_validator() {
     let mut checked = 0;
@@ -108,6 +154,31 @@ fn every_shipped_example_satisfies_the_validator() {
             if let Some(value) = mapping.get(serde_norway::Value::from(key)) {
                 projected.insert(serde_norway::Value::from(key), value.clone());
             }
+        }
+        // `transport` IS PROJECTED ONE LEVEL DEEPER, because this crate
+        // models one of its sub-blocks. `connectivity` is typed and
+        // `backend`, `listen`, `limits`, `pre_auth`, `connection_policy`,
+        // `direct` and `pubsub` are not — so keeping the whole block
+        // would refuse every example on `unknown field 'backend'`, which
+        // says nothing about the block under test. Same reasoning as
+        // dropping `runtime`/`identity`/`ipc` at the top level, applied
+        // one level down. Review finding on PR #80.
+        if let Some(transport) = projected
+            .get(serde_norway::Value::from("transport"))
+            .and_then(serde_norway::Value::as_mapping)
+            .cloned()
+        {
+            let mut kept = serde_norway::Mapping::new();
+            if let Some(connectivity) = transport.get(serde_norway::Value::from("connectivity")) {
+                kept.insert(
+                    serde_norway::Value::from("connectivity"),
+                    connectivity.clone(),
+                );
+            }
+            projected.insert(
+                serde_norway::Value::from("transport"),
+                serde_norway::Value::Mapping(kept),
+            );
         }
         if !projected.contains_key(serde_norway::Value::from("endpoints")) {
             continue; // not a node profile this crate models

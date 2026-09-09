@@ -30,12 +30,14 @@
 
 use std::collections::BTreeSet;
 
-use interweave_discovery_api::MAX_ADDRESS_BYTES;
 use interweave_transport_api::TransportIdentity;
 use interweave_trust_api::InfrastructureSet;
 use serde::{Deserialize, Serialize};
 
-use crate::{ConfigError, de_duration_ms, default_true, ser_duration_ms, split_peer_multiaddr};
+use crate::{
+    ConfigError, MAX_STATIC_PEER_BYTES, de_bytes, de_duration_ms, default_true, ser_bytes,
+    ser_duration_ms, split_peer_multiaddr,
+};
 
 /// Static candidate addresses a profile may list per role.
 ///
@@ -43,7 +45,15 @@ use crate::{ConfigError, de_duration_ms, default_true, ser_duration_ms, split_pe
 /// `autonat.client.static_servers` and `relay.client.static_relays`.
 pub const MAX_STATIC_CANDIDATES: usize = 16;
 
-/// The `transport` block.
+/// The `connectivity` sub-block of `transport`.
+///
+/// NOT THE WHOLE `transport` SECTION. The schema also defines `backend`,
+/// `listen`, `limits`, `pre_auth`, `connection_policy`, `direct` and
+/// `pubsub` there, and no Rust type models any of them — so a profile
+/// stating one is refused by `deny_unknown_fields` here, as it was
+/// refused by `ProfileConfig` before this type existed.
+/// `tests/shipped_examples.rs` projects those keys away for the same
+/// reason it drops `runtime`, `identity` and `ipc` at the top level.
 ///
 /// Defaulted as a whole, like `channels` and unlike `trust`: a profile
 /// written before this section existed states no opinion about
@@ -457,7 +467,16 @@ pub struct RelayServerConfig {
     )]
     pub max_circuit_duration_ms: u32,
     /// Bytes one circuit may carry.
-    #[serde(default = "default_circuit_bytes")]
+    ///
+    /// READ IN BINARY UNITS as well as bare, because the schema writes
+    /// `64MiB` and so does the shipped `connectivity-infrastructure.yaml`
+    /// — a `u64` alone refused the only spelling an operator has an
+    /// example of. Review finding on PR #80.
+    #[serde(
+        default = "default_circuit_bytes",
+        deserialize_with = "de_bytes",
+        serialize_with = "ser_bytes"
+    )]
     pub max_circuit_bytes: u64,
     /// Control-protocol operations queued at once.
     ///
@@ -569,31 +588,92 @@ const fn default_stability_ms() -> u32 {
     10_000
 }
 
-/// One static candidate, refused before this crate owns it.
+/// Read the static candidate list, judging it as it arrives.
 ///
-/// Bounded like `CandidatePeer::addresses`, for the same reason and with
-/// the same constant: the address grammar is libp2p's and a neutral
-/// configuration crate does not parse it, but an unbounded string is a
-/// resource question rather than a grammar one.
+/// TWO CEILINGS, AND THE ENTRY'S IS NOT THE ADDRESS'S. An entry is
+/// `<multiaddr>/p2p/<PeerId>`, so [`MAX_STATIC_PEER_BYTES`] bounds the
+/// whole of it and [`MAX_ADDRESS_BYTES`] bounds the address half after
+/// the split. Applying the address limit to the entry made a legal
+/// 220-byte address illegal the moment its required peer suffix was
+/// appended — a limit contradicting the API it feeds — which is a
+/// mistake this crate already fixed once for
+/// `discovery.providers.*.peers` and documented above
+/// `MAX_STATIC_PEER_BYTES`. It was reintroduced here and caught in
+/// review on PR #80. The address half is checked by
+/// `check_static_candidate_trust`, which has already split the entry.
+///
+/// JUDGED AS IT ARRIVES, not after collecting. `Vec::<String>::deserialize`
+/// parses and allocates the entire input first, so the count check
+/// afterwards bounds what is KEPT and not what is READ — and this crate
+/// has no file-size ceiling anywhere, which makes this guard the only
+/// bound there is. The same analysis `trust-api` wrote down for
+/// `bounded_peer_seq`, and the same fix: stop at `max + 1`.
 fn de_static_candidates<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = Vec::<String>::deserialize(deserializer)?;
-    if raw.len() > MAX_STATIC_CANDIDATES {
-        return Err(serde::de::Error::custom(format!(
-            "at most {MAX_STATIC_CANDIDATES} static candidates, got {}",
-            raw.len()
-        )));
-    }
-    for address in &raw {
-        if address.len() > MAX_ADDRESS_BYTES {
-            return Err(serde::de::Error::custom(format!(
-                "a static candidate address may be at most {MAX_ADDRESS_BYTES} bytes"
-            )));
+    struct Bounded;
+
+    impl<'de> serde::de::Visitor<'de> for Bounded {
+        type Value = Vec<String>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "at most {MAX_STATIC_CANDIDATES} static candidates")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut out = Vec::new();
+            // EACH ELEMENT LENGTH-CHECKED BEFORE IT IS KEPT, through a
+            // newtype whose own `visit_str` refuses — so the bound holds
+            // per string rather than after the whole sequence is in
+            // memory.
+            while let Some(BoundedEntry(entry)) = seq.next_element::<BoundedEntry>()? {
+                if out.len() == MAX_STATIC_CANDIDATES {
+                    return Err(serde::de::Error::custom(format!(
+                        "at most {MAX_STATIC_CANDIDATES} static candidates, got more"
+                    )));
+                }
+                out.push(entry);
+            }
+            Ok(out)
         }
     }
-    Ok(raw)
+
+    deserializer.deserialize_seq(Bounded)
+}
+
+/// One entry, refused before this crate owns the string.
+struct BoundedEntry(String);
+
+impl<'de> Deserialize<'de> for BoundedEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Visit;
+
+        impl serde::de::Visitor<'_> for Visit {
+            type Value = BoundedEntry;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(
+                    f,
+                    "a <multiaddr>/p2p/<PeerId> entry of at most {MAX_STATIC_PEER_BYTES} bytes"
+                )
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<BoundedEntry, E> {
+                if value.len() > MAX_STATIC_PEER_BYTES {
+                    return Err(E::custom(format!(
+                        "a static candidate entry may be at most {MAX_STATIC_PEER_BYTES} bytes"
+                    )));
+                }
+                Ok(BoundedEntry(value.to_owned()))
+            }
+        }
+
+        d.deserialize_str(Visit)
+    }
 }
 
 impl ConnectivityConfig {
@@ -619,7 +699,7 @@ impl ConnectivityConfig {
 
     /// The values the schema pins to one possibility.
     fn check_literals(&self, errors: &mut Vec<ConfigError>) {
-        let pinned: [(&'static str, bool); 5] = [
+        let pinned: [(&'static str, bool); 6] = [
             ("connectivity.required", self.required),
             (
                 "connectivity.address_advertisement.advertise_unverified_public_direct",
@@ -639,16 +719,12 @@ impl ConnectivityConfig {
                 "connectivity.relay.client.enabled",
                 self.relay.client.enabled,
             ),
+            ("connectivity.dcutr.enabled", self.dcutr.enabled),
         ];
         for (field, holds) in pinned {
             if !holds {
                 errors.push(ConfigError::ConnectivityLiteralViolated { field });
             }
-        }
-        if !self.dcutr.enabled {
-            errors.push(ConfigError::ConnectivityLiteralViolated {
-                field: "connectivity.dcutr.enabled",
-            });
         }
         if self.autonat.version != AUTONAT_VERSION {
             errors.push(ConfigError::ConnectivityOutOfRange {
@@ -847,9 +923,14 @@ impl ConnectivityConfig {
                 });
             }
         }
-        // DURATIONS TOO, and separately, because `retry_cooldown` and
-        // `direct_stability_period` are the two the DCUtR bounds rest on
-        // and the spike measured that the crate exposes neither.
+        // A SECOND TABLE ONLY BECAUSE THE FIRST ONE'S LENGTH IS FIXED.
+        // These two rows are no different in kind -- the first table
+        // already holds seven durations -- and the loop below is
+        // identical to the one above. Said rather than implied, because
+        // the earlier version of this comment offered a distinction that
+        // is not one: `retry_cooldown` and `direct_stability_period` are
+        // the two bounds SPIKE-004 measured the crate exposes no knob
+        // for, which is a fact about enforcement, not about this check.
         let durations: [(&'static str, u64, u64, u64); 2] = [
             (
                 "connectivity.dcutr.retry_cooldown",
@@ -1005,6 +1086,8 @@ impl ConnectivityConfig {
 
 #[cfg(test)]
 mod tests {
+    use interweave_discovery_api::MAX_ADDRESS_BYTES;
+
     use super::*;
     use crate::ProfileConfig;
 
@@ -1106,7 +1189,7 @@ mod tests {
 
     #[test]
     fn every_pinned_value_is_refused_when_a_profile_changes_it() {
-        // The five booleans and the two numbers the schema pins. Each is
+        // The SIX booleans and the two numbers the schema pins. Each is
         // asserted SEPARATELY rather than in one document, because a
         // single document would pass with only one check working.
         for (body, field) in [
@@ -1165,21 +1248,56 @@ mod tests {
         }
     }
 
+    /// A minimum of zero on an unsigned field has no representable
+    /// value below it, so the range table says so instead of pretending.
+    const NO_LOWER_EDGE: i64 = i64::MIN;
+
     #[test]
     fn every_range_is_refused_at_both_edges_and_accepted_inside() {
         // TABLE-DRIVEN LIKE THE CHECK, and deliberately so: a row the
         // check gained without a row here would be untested, and the
         // pairing is visible when both are lists.
         //
+        // 22 ROWS AGAINST THE CHECK'S 28, and the six absences are
+        // deliberate rather than the coverage gap this comment used to
+        // paper over. `target_reservations_*` and the two
+        // `*_per_peer` ceilings are exercised by the cross-field test,
+        // which drives them past their partners; `autonat.version` and
+        // `dcutr.max_inflight_per_peer` are exercised by the literal
+        // test, which is where a pinned number's refusal belongs. An
+        // earlier version had eight rows and claimed the pairing anyway.
+        // Review finding on PR #80.
+        //
         // Each row is (json body template, field, below, inside, above).
         // `{}` is where the value goes, so one row exercises all three.
-        let rows: [(&str, &str, i64, i64, i64); 8] = [
+        let rows: [(&str, &str, i64, i64, i64); 22] = [
             (
                 r#"{"autonat":{"client":{"required_distinct_successes":{}}}}"#,
                 "connectivity.autonat.client.required_distinct_successes",
                 0,
-                1,
+                4,
                 5,
+            ),
+            (
+                r#"{"autonat":{"client":{"success_evidence_ttl":{}}}}"#,
+                "connectivity.autonat.client.success_evidence_ttl",
+                59999,
+                3600000,
+                3600001,
+            ),
+            (
+                r#"{"autonat":{"client":{"retry_interval":{}}}}"#,
+                "connectivity.autonat.client.retry_interval",
+                9999,
+                300000,
+                300001,
+            ),
+            (
+                r#"{"autonat":{"client":{"refresh_interval":{}}}}"#,
+                "connectivity.autonat.client.refresh_interval",
+                59999,
+                1800000,
+                1800001,
             ),
             (
                 r#"{"autonat":{"client":{"max_inflight_probes":{}}}}"#,
@@ -1189,11 +1307,46 @@ mod tests {
                 9,
             ),
             (
+                r#"{"autonat":{"client":{"max_candidate_addresses_per_cycle":{}}}}"#,
+                "connectivity.autonat.client.max_candidate_addresses_per_cycle",
+                0,
+                16,
+                17,
+            ),
+            (
+                r#"{"autonat":{"client":{"timeout":{}}}}"#,
+                "connectivity.autonat.client.timeout",
+                4999,
+                60000,
+                60001,
+            ),
+            (
+                r#"{"autonat":{"server":{"max_concurrent_probes":{}}}}"#,
+                "connectivity.autonat.server.max_concurrent_probes",
+                0,
+                64,
+                65,
+            ),
+            (
                 r#"{"autonat":{"server":{"max_probes_per_peer_per_minute":{}}}}"#,
                 "connectivity.autonat.server.max_probes_per_peer_per_minute",
                 0,
                 30,
                 31,
+            ),
+            (
+                r#"{"autonat":{"server":{"max_probes_global_per_minute":{}}}}"#,
+                "connectivity.autonat.server.max_probes_global_per_minute",
+                0,
+                600,
+                601,
+            ),
+            (
+                r#"{"autonat":{"server":{"timeout":{}}}}"#,
+                "connectivity.autonat.server.timeout",
+                4999,
+                60000,
+                60001,
             ),
             (
                 r#"{"relay":{"client":{"max_reservations":{}}}}"#,
@@ -1203,18 +1356,58 @@ mod tests {
                 9,
             ),
             (
+                r#"{"relay":{"client":{"direct_head_start":{}}}}"#,
+                "connectivity.relay.client.direct_head_start",
+                // NO VALUE BELOW THIS MINIMUM IS REPRESENTABLE: the
+                // schema's floor is zero and the field is unsigned, so
+                // the TYPE refuses `-1` while parsing and `validate`
+                // never sees it. `NO_LOWER_EDGE` says that rather than
+                // inventing a case the deserializer would reject.
+                NO_LOWER_EDGE,
+                5000,
+                5001,
+            ),
+            (
+                r#"{"relay":{"server":{"max_reservations":{}}}}"#,
+                "connectivity.relay.server.max_reservations",
+                0,
+                512,
+                513,
+            ),
+            (
+                r#"{"relay":{"server":{"reservation_duration":{}}}}"#,
+                "connectivity.relay.server.reservation_duration",
+                299999,
+                86400000,
+                86400001,
+            ),
+            (
                 r#"{"relay":{"server":{"max_circuits":{}}}}"#,
                 "connectivity.relay.server.max_circuits",
                 0,
-                1_024,
-                1_025,
+                1024,
+                1025,
+            ),
+            (
+                r#"{"relay":{"server":{"max_circuit_duration":{}}}}"#,
+                "connectivity.relay.server.max_circuit_duration",
+                59999,
+                86400000,
+                86400001,
             ),
             (
                 r#"{"relay":{"server":{"max_circuit_bytes":{}}}}"#,
                 "connectivity.relay.server.max_circuit_bytes",
-                1_048_575,
-                1_073_741_824,
-                1_073_741_825,
+                1048575,
+                1073741824,
+                1073741825,
+            ),
+            (
+                r#"{"relay":{"server":{"max_pending_control":{}}}}"#,
+                "connectivity.relay.server.max_pending_control",
+                0,
+                512,
+                513,
             ),
             (
                 r#"{"dcutr":{"max_inflight":{}}}"#,
@@ -1224,15 +1417,27 @@ mod tests {
                 33,
             ),
             (
-                r#"{"autonat":{"client":{"timeout":{}}}}"#,
-                "connectivity.autonat.client.timeout",
-                4_999,
-                60_000,
-                60_001,
+                r#"{"dcutr":{"retry_cooldown":{}}}"#,
+                "connectivity.dcutr.retry_cooldown",
+                29999,
+                3600000,
+                3600001,
+            ),
+            (
+                r#"{"dcutr":{"direct_stability_period":{}}}"#,
+                "connectivity.dcutr.direct_stability_period",
+                999,
+                120000,
+                120001,
             ),
         ];
         for (template, field, below, inside, above) in rows {
-            for bad in [below, above] {
+            let edges: Vec<i64> = if below == NO_LOWER_EDGE {
+                vec![above]
+            } else {
+                vec![below, above]
+            };
+            for bad in edges {
                 let body = template.replace("{}", &bad.to_string());
                 let errors = errors_for(&body);
                 assert!(
@@ -1282,8 +1487,10 @@ mod tests {
     #[test]
     fn each_of_the_schemas_seven_cross_field_rules_is_enforced() {
         // Every rule from the schema's own "Cross-field validation"
-        // list, each with the ORDER REVERSED so the rule is the only
-        // thing that can fail the document.
+        // list, each with the ORDER REVERSED. NOT IN ISOLATION, despite
+        // what this said: case 2 also violates rule 1 and case 7 is also
+        // out of range, so each assertion looks for its own ordering
+        // error rather than for a document with exactly one complaint.
         let cases: [(&str, &str, &str); 7] = [
             (
                 r#"{"relay":{"client":{"target_reservations_private_or_unknown":4,"max_reservations":2,"target_reservations_public":1}}}"#,
@@ -1433,6 +1640,103 @@ mod tests {
                     if *role == "relay.client.static_relays"
             )),
             "a bare multiaddr must be refused, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_byte_size_is_read_in_the_units_the_schema_writes() {
+        // THE SCHEMA WRITES `64MiB` AND SO DOES THE SHIPPED EXAMPLE, so a
+        // `u64` field alone refused the only spelling an operator has an
+        // example of — `connectivity-infrastructure.yaml` sets exactly
+        // this. Review finding on PR #80.
+        for (written, bytes) in [
+            ("64MiB", 67_108_864_u64),
+            ("1MiB", 1_048_576),
+            ("1GiB", 1_073_741_824),
+            ("512KiB", 524_288),
+        ] {
+            let config = profile_with(&format!(
+                r#"{{"relay":{{"server":{{"max_circuit_bytes":"{written}"}}}}}}"#
+            ))
+            .unwrap_or_else(|e| panic!("{written} must parse: {e}"));
+            assert_eq!(
+                config.transport.connectivity.relay.server.max_circuit_bytes, bytes,
+                "{written}"
+            );
+        }
+
+        // A bare count still works, and reaches the same value.
+        let bare = profile_with(r#"{"relay":{"server":{"max_circuit_bytes":67108864}}}"#)
+            .expect("a bare byte count parses");
+        assert_eq!(
+            bare.transport.connectivity.relay.server.max_circuit_bytes,
+            67_108_864
+        );
+
+        // AND THE RANGE IS STILL CHECKED in written units, which is the
+        // case the bare-integer range rows cannot reach.
+        let too_small = errors_for(r#"{"relay":{"server":{"max_circuit_bytes":"512KiB"}}}"#);
+        assert!(
+            too_small.iter().any(|e| matches!(
+                e,
+                ConfigError::ConnectivityOutOfRange { field, .. }
+                    if *field == "connectivity.relay.server.max_circuit_bytes"
+            )),
+            "512KiB is below the 1MiB floor, got {too_small:?}"
+        );
+
+        // DECIMAL UNITS ARE NOT ACCEPTED. The schema uses one vocabulary;
+        // taking `MB` as well would make it mean whatever this crate
+        // chose.
+        assert!(
+            profile_with(r#"{"relay":{"server":{"max_circuit_bytes":"64MB"}}}"#).is_err(),
+            "a decimal unit must be refused rather than guessed at"
+        );
+    }
+
+    #[test]
+    fn a_static_candidate_entry_is_bounded_by_the_entry_ceiling_not_the_address_one() {
+        // THE ENTRY IS LONGER THAN THE ADDRESS IT CONTAINS. A 220-byte
+        // address plus `/p2p/` plus a 52-byte PeerId is a legal entry and
+        // was refused while the address limit was applied to the whole
+        // thing -- a limit contradicting the API it feeds, which this
+        // crate had already fixed once for the static provider's peers.
+        // Review finding on PR #80.
+        let long_address = format!("/dns4/{}/tcp/4001", "a".repeat(200));
+        assert!(
+            long_address.len() > 200 && long_address.len() <= MAX_ADDRESS_BYTES,
+            "the fixture must be a legal address: {}",
+            long_address.len()
+        );
+        let entry = format!("{long_address}/p2p/{P1}");
+        assert!(
+            entry.len() > MAX_ADDRESS_BYTES,
+            "and the entry must exceed the ADDRESS limit, or the test proves nothing: {}",
+            entry.len()
+        );
+        let body = format!(
+            r#"{{"infrastructure":{{"allowed_peers":["{P1}"]}},
+                 "relay":{{"client":{{"static_relays":["{entry}"]}}}}}}"#
+        );
+        let config = profile_with(&body).expect("a legal address with its peer suffix parses");
+        assert!(
+            !config
+                .validate()
+                .iter()
+                .any(|e| matches!(e, ConfigError::StaticCandidateUnauthorized { .. })),
+            "and it is authorized, so nothing else refuses it"
+        );
+
+        // The entry ceiling still bites above its own bound.
+        let over = format!(
+            "/dns4/{}/tcp/4001/p2p/{P1}",
+            "a".repeat(MAX_STATIC_PEER_BYTES)
+        );
+        let body = format!(r#"{{"relay":{{"client":{{"static_relays":["{over}"]}}}}}}"#);
+        let err = profile_with(&body).expect_err("an over-ceiling entry is refused");
+        assert!(
+            err.to_string().contains("at most"),
+            "the refusal must name the ceiling: {err}"
         );
     }
 

@@ -1474,6 +1474,67 @@ pub(crate) fn ser_duration_ms<S: serde::Serializer>(ms: &u32, s: S) -> Result<S:
     }
 }
 
+/// Read a `bytes[a..b]` field: `64MiB`, `1GiB`, or a bare byte count.
+///
+/// The schema writes these in binary units and so does the shipped
+/// `connectivity-infrastructure.yaml`, so a `u64` field alone refused
+/// the only spelling an operator is given an example of. Durations got
+/// this treatment when they were added and the one `bytes[...]` field in
+/// the schema did not. Review finding on PR #80.
+///
+/// Binary multiples only — `MiB`, not `MB`. The schema uses one
+/// vocabulary and accepting a second would make `1MB` mean something
+/// this crate chose rather than something the schema said.
+pub(crate) fn de_bytes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Wire {
+        Text(String),
+        Bytes(u64),
+    }
+    match Wire::deserialize(d)? {
+        Wire::Text(t) => parse_bytes(&t).map_err(serde::de::Error::custom),
+        Wire::Bytes(b) => Ok(b),
+    }
+}
+
+/// Write a byte count back as the largest exact binary unit.
+pub(crate) fn ser_bytes<S: serde::Serializer>(bytes: &u64, s: S) -> Result<S::Ok, S::Error> {
+    let bytes = *bytes;
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+    const GIB: u64 = 1024 * MIB;
+    if bytes != 0 && bytes.is_multiple_of(GIB) {
+        s.serialize_str(&format!("{}GiB", bytes / GIB))
+    } else if bytes != 0 && bytes.is_multiple_of(MIB) {
+        s.serialize_str(&format!("{}MiB", bytes / MIB))
+    } else if bytes != 0 && bytes.is_multiple_of(KIB) {
+        s.serialize_str(&format!("{}KiB", bytes / KIB))
+    } else {
+        s.serialize_str(&bytes.to_string())
+    }
+}
+
+fn parse_bytes(text: &str) -> Result<u64, String> {
+    let text = text.trim();
+    let (digits, unit): (&str, u64) = if let Some(n) = text.strip_suffix("KiB") {
+        (n, 1024)
+    } else if let Some(n) = text.strip_suffix("MiB") {
+        (n, 1024 * 1024)
+    } else if let Some(n) = text.strip_suffix("GiB") {
+        (n, 1024 * 1024 * 1024)
+    } else {
+        (text, 1)
+    };
+    let value: u64 = digits
+        .trim()
+        .parse()
+        .map_err(|_| format!("'{text}' is not a byte size like 64MiB, 1GiB, or 1048576"))?;
+    value
+        .checked_mul(unit)
+        .ok_or_else(|| format!("byte size '{text}' overflows"))
+}
+
 fn ser_cache_ttl<S: serde::Serializer>(ms: &u32, s: S) -> Result<S::Ok, S::Error> {
     if ms.is_multiple_of(1_000) {
         s.serialize_str(&format!("{}s", ms / 1_000))
