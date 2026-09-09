@@ -35,9 +35,10 @@ NET_LAN="${NET_LAN:-natm-lan}"
 # environment a punch needs, which was false. Review finding on PR #78.
 NET_LAN_B="${NET_LAN_B:-natm-lan-b}"
 
-# THE ROUTER LIST, IN ONE PLACE. `record_environment` and `down` read it
-# from here instead of each carrying their own copy, so adding a third
-# NAT domain means remembering one site rather than two.
+# THE ROUTER LIST, IN ONE PLACE. `record_environment`, `down` and the
+# `PROBER` guard below read it from here instead of each carrying their
+# own copy, so adding a third NAT domain means remembering one site
+# rather than three.
 #
 # THAT IS ALL IT IS. It is not a check and catches nothing: `up()` still
 # names each router at its `podman run`, and nothing verifies that those
@@ -71,16 +72,20 @@ PROBER="${PROBER:-natm-filt}"
 # guard covers the observers, two minutes later; every other destructive
 # use in that file sits behind address resolution and fails first. This
 # one does not. The refused set is every CONTAINER this file creates --
-# the routers read from `$ROUTERS` so a third domain cannot slip past
-# here -- plus the prefix rule that keeps `down` off anything it did
-# not create. Review findings on PR #81.
+# the routers read from `$ROUTERS`, so a third domain added THERE cannot
+# slip past here (one forgotten there slips past everything, as the
+# `ROUTERS` comment above says) -- plus a prefix rule that keeps `down`
+# off anything outside this harness's `natm-` namespace. A container
+# named `natm-something` from other work is NOT protected by it; the
+# prefix is a namespace, not an inventory. Review findings on PR #81.
+# shellcheck disable=SC2086 # word splitting is the point: ROUTERS is a list
 for created in natm-obs1 natm-obs2 natm-peer natm-peer-b $ROUTERS; do
   [ "$PROBER" != "$created" ] \
-    || { echo "PROBER must not be a container this topology creates ($PROBER): up would create it twice under one name" >&2; exit 2; }
+    || { echo "PROBER must not be a container this topology creates ($PROBER): up would create that name twice, and down would remove it whatever it holds" >&2; exit 2; }
 done
 case "$PROBER" in
   natm-*) ;;
-  *) echo "PROBER must be named natm-* ($PROBER): this file force-removes it on down, and the prefix keeps that off anything it did not create" >&2; exit 2 ;;
+  *) echo "PROBER must be named natm-* ($PROBER): this file force-removes it on down, and the prefix keeps that inside this harness's namespace" >&2; exit 2 ;;
 esac
 
 # The ports `filter.sh` uses are declared THERE, not here: this file

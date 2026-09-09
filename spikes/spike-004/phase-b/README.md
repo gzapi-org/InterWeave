@@ -71,8 +71,8 @@ landed correctly: two lines both reading `eth0`, as in the
 `address-restricted` excerpt, cannot show the interface was derived per
 container — the transcript's introduction below says so: when the two
 containers number their interfaces alike the mistake is neither visible
-nor harmful —
-the `full-cone` run recorded here happened to land router B on `eth1`,
+nor harmful — the `full-cone` run recorded here happened to land router
+B on `eth1`,
 so that one does show it, by luck of podman's numbering rather than by
 design. What fails closed either way is the pair of per-domain
 verdicts beneath them — a forward on the wrong interface leaves domain B
@@ -454,9 +454,10 @@ public VM and a carrier's CGNAT explicitly deferred, as Stage 9 deferred
 mDNS and Stage 10 the release gate — is the owner's decision and belongs
 in the plan, not here. (This is the third copy of that deferral list;
 `SPIKES.md` and the plan carry the other two. Those lost "the filtering
-half" when `filter.sh` landed and one commit later; this one stayed
-short by two items through two further fix batches, including one that
-edited this file twice.)
+half" when `filter.sh` landed (`0c5f7e1`) and one commit later
+(`32a7f8f`); this one was extended in `8bbaa75`, after three attempts at
+counting the rounds between had each been wrong — so the commits are
+named and the rounds are not.)
 
 ## Notes for whoever extends it
 
