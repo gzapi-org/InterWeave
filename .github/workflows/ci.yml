@@ -56,9 +56,9 @@ env:
   # SEVERITY CLASSIFICATION is a property of the release. A runner-image
   # bump that promoted any currently-`info` code to `warning` would turn a
   # required context red on a PR whose diff explains nothing — SC2015 is
-  # the obvious candidate, 158 sites on 0.11.0, the assertion idiom every
-  # self-test is built from — and would fail the guard's own self-test in
-  # the same run. Taking it from
+  # the obvious candidate, 158 sites on 0.11.0, the assertion idiom most
+  # self-tests are built from — and would fail the guard's own self-test
+  # in the same run. Taking it from
   # whatever the image ships would also let the severity classification
   # the self-test pins vary by runner image. 0.11.0 is what Fedora 43
   # packages, so a developer's
