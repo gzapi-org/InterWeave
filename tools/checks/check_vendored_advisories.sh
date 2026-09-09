@@ -49,6 +49,16 @@
 # Dependabot cannot see a path-patched crate either, so this guard is
 # also the only thing that will ever say a vendored tree needs a bump.
 #
+# TWO THINGS IT STILL CANNOT SEE, both recorded rather than papered over.
+# An `ignore` entry in `deny.toml` silences an advisory here as well, and
+# one added because a REGISTRY dependency carries it also removes the
+# vendored crate's only coverage -- so an ignore touching a crate that is
+# also vendored wants a note saying so. And this asks about the version
+# the vendored manifest DECLARES, not about the bytes: a tree whose
+# version string does not match the release it was taken from redirects
+# the question to a different release. Tying the bytes to the tarball is
+# ADR-0051's named follow-up.
+#
 # Exit codes:
 #   0  every vendored crate is free of RustSec advisories at its version
 #   1  an advisory applies to a vendored crate
@@ -71,6 +81,9 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 fi
 if [[ "${1:-}" == "--root" ]]; then
     ROOT="${2:?--root needs a directory}"
+elif [ -n "${1:-}" ]; then
+    printf 'check_vendored_advisories: unknown argument %s\n' "$1" >&2
+    exit 1
 fi
 cd "$ROOT" || exit 1
 
@@ -89,7 +102,14 @@ command -v python3 >/dev/null 2>&1 || die "python3 is not installed" 2
 # repository's `Cargo.lock`, which this guard promises not to do -- and a
 # lockfile that does not satisfy the manifest is a real problem, not
 # something to route around. Review finding on PR #85.
-metadata="$(cargo metadata --format-version 1 --locked 2>/dev/null)" \
+# `--all-features`, for the reason `deny.toml` gives for its own
+# `all-features = true`: a dependency that appears only under a
+# non-default feature is still governed. Without it, vendoring a crate
+# behind an optional or gated feature left it out of the graph entirely
+# and this guard announced that nothing was vendored -- and CLAUDE.md §1
+# records that the connectivity behaviours ship GATED OFF, so that is one
+# manifest edit away. Review finding on PR #85.
+metadata="$(cargo metadata --format-version 1 --locked --all-features 2>/dev/null)" \
     || die "cargo metadata --locked failed at $ROOT; is Cargo.lock current?" 2
 
 # A package cargo resolved with no `source` and which is not a workspace
@@ -120,9 +140,30 @@ while IFS= read -r line; do
     [ -n "$line" ] && patched+=("$line")
 done <<< "$selected"
 
+# THE FLOOR. "The graph named nothing" and "nothing is vendored" are
+# different claims, and conflating them is how this guard reported
+# success twice before. A directory under a vendored root with its own
+# manifest is a tree this repository ships, so if one exists and the
+# graph did not account for it, something is wrong with the question --
+# the crate is behind a disabled feature, or listed as a workspace
+# member, or reached through a symlink, or patched but unused. Every one
+# of those produced a confident "nothing is vendored" and exit 0.
+# Review findings on PR #85.
+shipped=0
+for manifest in third_party/*/Cargo.toml; do
+    [ -f "$manifest" ] && shipped=$((shipped + 1))
+done
+
 if [ "${#patched[@]}" -eq 0 ]; then
-    echo "check_vendored_advisories: OK — no crate is vendored through [patch.crates-io]."
+    if [ "$shipped" -gt 0 ]; then
+        die "third_party/ holds $shipped vendored crate(s) but the package graph names none -- a disabled feature, a workspace member, a symlink, or an unused patch would each do this, and none of them is a reason to report success" 2
+    fi
+    echo "check_vendored_advisories: OK — nothing is vendored."
     exit 0
+fi
+
+if [ "${#patched[@]}" -lt "$shipped" ]; then
+    die "third_party/ holds $shipped vendored crate(s) and the package graph names only ${#patched[@]}" 2
 fi
 
 WORK="$(mktemp -d)" || die "cannot create a temporary directory"
@@ -133,6 +174,12 @@ checked=0
 
 for entry in "${patched[@]}"; do
     IFS=$'\t' read -r name version path <<< "$entry"
+    # The row protocol is tab-separated lines, so a path carrying either
+    # would be split wrong and checked as a different crate.
+    case "$path" in
+        *"$(printf '\t')"*) die "$name: vendored path contains a tab" 2 ;;
+    esac
+    [ -d "$path" ] || die "$name $version: vendored path $path is not a directory" 2
 
     probe="$WORK/$name"
     mkdir -p "$probe/src"
@@ -151,7 +198,16 @@ for entry in "${patched[@]}"; do
 
     out="$(cd "$probe" && cargo deny --format json check advisories 2>&1)"
 
-    # SUCCESS IS PROVED, NEVER INFERRED FROM ABSENCE. cargo-deny ends a
+    # SUCCESS IS PROVED, NEVER INFERRED FROM ABSENCE.
+    #
+    # And the unreachable-database message is reached only when the run
+    # did NOT complete. An earlier version grepped network wording over
+    # the whole merged output, which includes every advisory's own
+    # description -- so a real finding whose text happens to contain
+    # "unable to" was reported as an unreachable database, exit 2, which
+    # tells an operator to re-run rather than to act. `rand 0.9.0`
+    # (RUSTSEC-2026-0097) is one such advisory and `rand` is in this
+    # workspace. Review finding on PR #85. cargo-deny ends a
     # completed run with a `{"type":"summary"}` line carrying its
     # advisory counts; anything that stops it earlier -- a config it
     # cannot deserialize, a corrupt database, a crash, an output-schema
@@ -188,13 +244,20 @@ for line in sys.stdin:
     if record.get("type") == "summary" and "advisories" in field:
         completed = True
         continue
-    if field.get("severity") != "error":
+    # ERROR **OR** WARNING. For a registry crate a warning still reaches
+    # a human through `check_dependencies.sh` output; for a vendored one
+    # this guard is the only report there is, so a policy that downgrades
+    # advisories must not silence it here.
+    if field.get("severity") not in ("error", "warning"):
         continue
     if not any(g.get("Krate", {}).get("name") == name for g in field.get("graphs", [])):
         continue
     advisory = field.get("advisory", {})
-    found.append("    {}: {}".format(advisory.get("id", field.get("code", "?")),
-                                     advisory.get("title", field.get("message", ""))))
+    if not advisory:
+        continue
+    found.append("    {} [{}]: {}".format(advisory.get("id", field.get("code", "?")),
+                                          field.get("severity", "?"),
+                                          advisory.get("title", field.get("message", ""))))
 if not completed:
     sys.exit(3)
 sys.stdout.write("".join(f + "\n" for f in found))
@@ -202,6 +265,13 @@ sys.stdout.write("".join(f + "\n" for f in found))
     case $? in
         0) ;;
         3)
+            # No summary: the run did not complete. Say which kind, from
+            # cargo-deny's own log records rather than from advisory text.
+            if printf '%s' "$out" \
+                | grep -E '"(type|level)":"(log|ERROR)"' \
+                | grep -qiE 'unable to |failed to fetch|could not (fetch|update)|no such host'; then
+                die "$name $version: the advisory database is unreachable" 2
+            fi
             printf '%s\n' "$out" >&2
             die "$name $version: cargo-deny did not complete a run — its output carries no summary, so nothing was checked" 2
             ;;

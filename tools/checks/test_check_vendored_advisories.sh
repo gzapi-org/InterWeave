@@ -96,17 +96,24 @@ fi
 
 # Build a workspace that vendors one crate. $1 sandbox name, $2 crate,
 # $3 version, $4 the [patch.crates-io] spelling (inline or subtable).
+# $5 replaces the [dependencies] block when given; $6 is appended after
+# the patch table. Both default to the ordinary shape.
 build_vendored() {
     local dir="$SANDBOX/$1" crate="$2" ver="$3" form="$4"
     mkdir -p "$dir/src" "$dir/third_party/$crate/src"
     {
         printf '[package]\nname = "%s-probe"\nversion = "0.0.0"\nedition = "2021"\n\n' "$1"
-        printf '[dependencies]\n%s = "=%s"\n\n' "$crate" "$ver"
+        if [ -n "${5:-}" ]; then
+            printf '%s\n\n' "$5"
+        else
+            printf '[dependencies]\n%s = "=%s"\n\n' "$crate" "$ver"
+        fi
         if [ "$form" = subtable ]; then
             printf '[patch.crates-io.%s]\npath = "third_party/%s"\n' "$crate" "$crate"
         else
             printf '[patch.crates-io]\n%s = { path = "third_party/%s" }\n' "$crate" "$crate"
         fi
+        [ -n "${6:-}" ] && printf '\n%s\n' "$6"
     } > "$dir/Cargo.toml"
     echo 'fn main() {}' > "$dir/src/main.rs"
     printf '[package]\nname = "%s"\nversion = "%s"\nedition = "2018"\n' "$crate" "$ver" \
@@ -172,6 +179,49 @@ esac
 # THE POSITIVE CASE.
 build_vendored vulnerable atty 0.2.14 inline
 expect_finding vulnerable "a vendored crate carrying an advisory fails" RUSTSEC-2021-0145
+
+# AN ADVISORY WHOSE OWN TEXT MATCHES THE NETWORK WORDING must be reported
+# as the finding it is. `rand 0.9.0` carries RUSTSEC-2026-0097, whose
+# description contains "unable to" -- an earlier discriminator grepped
+# the whole output, advisory bodies included, and called it an
+# unreachable database, which tells an operator to re-run rather than to
+# act. Review finding on PR #85.
+build_vendored textmatch rand 0.9.0 inline
+expect_finding textmatch "an advisory reading like a network error is still a finding" RUSTSEC-2026-0097
+
+# A VENDORED TREE THE GRAPH DOES NOT EXPLAIN is exit 2, never "nothing is
+# vendored". Each of these ships a real vulnerable tree and produced a
+# confident OK with exit 0 before the floor existed.
+expect_unexplained() {
+    bash "$GUARD" --root "$SANDBOX/$1" >/dev/null 2>&1
+    case $? in
+        2) ok "$2" ;;
+        0) bad "$2 -- reported success for a tree it did not check" ;;
+        *) bad "$2 -- expected exit 2, got a different code" ;;
+    esac
+}
+
+build_vendored unused atty 0.2.14 inline '# nothing depends on it'
+expect_unexplained unused "a patch nothing uses is not 'nothing is vendored'"
+
+build_vendored amember atty 0.2.14 inline '' '[workspace]
+members = ["third_party/atty"]'
+expect_unexplained amember "a vendored crate listed as a workspace member is not skipped"
+
+# A CRATE BEHIND AN OPTIONAL FEATURE is resolved, because `--all-features`
+# is what `deny.toml` itself uses, and CLAUDE.md §1 records that the
+# connectivity behaviours ship gated off -- one manifest edit from this.
+build_vendored optional atty 0.2.14 inline '[dependencies]
+atty = { version = "=0.2.14", optional = true }'
+expect_finding optional "a crate behind an optional feature is still checked" RUSTSEC-2021-0145
+
+# AN UNKNOWN ARGUMENT must not silently check this repository instead of
+# the tree the caller named.
+bash "$GUARD" -root /nonexistent >/dev/null 2>&1
+case $? in
+    1) ok "an unrecognised argument is refused" ;;
+    *) bad "an unrecognised argument must exit 1" ;;
+esac
 
 # THE SUB-TABLE FORM, which cargo accepts identically. An awk-based
 # parser saw nothing here and printed "no crate is vendored", exit 0 --
