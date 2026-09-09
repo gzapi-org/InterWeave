@@ -1296,21 +1296,26 @@ mod tests {
         // the other seven fields out. The impls now delegate to the same
         // functions, so there is one copy; this test is what fails if a
         // later edit re-splits them. Review finding on PR #80.
-        let every_block_named = profile_with(
-            r#"{"address_advertisement":{},
-                 "autonat":{"client":{},"server":{}},
-                 "relay":{"client":{},"server":{}},
-                 "dcutr":{}}"#,
-        )
-        .expect("naming a block without its fields is legal")
-        .transport
-        .connectivity;
-        assert_eq!(
-            every_block_named,
-            ConnectivityConfig::default(),
-            "the per-field defaults must agree with the whole-struct ones"
-        );
-    }
+        //
+        // THE DOCUMENT IS DERIVED FROM THE TYPE, not written out. A
+        // literal naming six blocks is a hand-maintained list, and a
+        // seventh block added later is absent from it -- so serde fills
+        // it from `impl Default` on both sides, the two agree for free,
+        // and the per-field path goes untested in silence. That is the
+        // shape `shipped_examples.rs` closed twice. Serializing the
+        // default and hollowing every object to `{}` names exactly the
+        // blocks the type has, whatever they are. Review finding on
+        // PR #80.
+        fn hollow(value: serde_json::Value) -> serde_json::Value {
+            match value {
+                serde_json::Value::Object(map) => serde_json::Value::Object(
+                    map.into_iter()
+                        .filter(|(_, v)| v.is_object())
+                        .map(|(k, v)| (k, hollow(v)))
+                        .collect(),
+                ),
+                _ => unreachable!("only objects are kept by the filter above"),
+            }
     #[test]
     fn every_pinned_value_is_refused_when_a_profile_changes_it() {
         // The SIX booleans and the two numbers the schema pins. Each is
