@@ -62,12 +62,18 @@ run for every row in it and only the `conntrack` one had one. **These two
 are EXCERPTS — the filtering lines only**, and are labelled as such
 because the complete run below is the standard this directory holds
 itself to; the rest of each is the same shape as that one. The two
-`forward on` lines are the only evidence in a transcript that the static
-forward landed on BOTH routers with the interface derived per container
-— the failure the `eth0`/`eth1` paragraph below is about, reachable
-through a second function since `configure_filtering` — and an earlier
-version of these excerpts left them out. Re-recorded 2026-09-09 from the
-scripts as committed; review finding on PR #81.
+`forward on` lines say which mode `configure_filtering` installed on
+which router, and that it ran for both — an earlier version of these
+excerpts left them out. They are NOT the evidence that the forward
+landed correctly: two lines both reading `eth0` cannot show the
+interface was derived per container, as the `eth0`/`eth1` paragraph
+below says in as many words. What fails closed is the pair of per-domain
+verdicts beneath them — a forward on the wrong interface leaves domain B
+measuring `apdf` against an `adf` expectation, and the row exits
+non-zero. (A first version of this sentence called the two lines "the
+only evidence", in the commit that removed three other claims the
+transcript does not carry.) Re-recorded 2026-09-09 from the scripts as
+committed; review findings on PR #81.
 
 ```
   natm-router: address-restricted forward on eth0 for udp/45000
