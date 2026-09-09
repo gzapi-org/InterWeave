@@ -55,10 +55,18 @@
 # <<< help
 set -uo pipefail
 
+die() { printf '%s\n' "$*" >&2; exit 2; }
+
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     sed -n '/^# >>> help$/,/^# <<< help$/p' "$0" | sed '1d;$d;s/^# \{0,1\}//'
     exit 0
 fi
+# NO OTHER ARGUMENT, and an unknown one is refused rather than ignored:
+# this guard's subject IS a file list, so `check_shell_scripts.sh
+# some/script.sh` silently judging all of them while the caller believes
+# one was singled out is the worst reading available. Review finding on
+# PR #82.
+[[ $# -eq 0 ]] || die "check_shell_scripts: unexpected argument: $1 (the guard takes none; it judges every tracked *.sh)"
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 2
 

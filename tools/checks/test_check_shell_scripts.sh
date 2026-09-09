@@ -196,6 +196,19 @@ else
 fi
 cleanup; SANDBOX=""
 
+# 9. AN UNKNOWN ARGUMENT IS REFUSED, exit 2, rather than ignored. The
+#    guard's subject is a file list, so a path argument silently judging
+#    every file while the caller believes one was singled out is the
+#    worst reading available. Review finding on PR #82.
+sandbox_with '#!/usr/bin/env bash
+echo fine'
+if ( cd "$SANDBOX" && bash tools/checks/check_shell_scripts.sh scripts/case.sh >/dev/null 2>&1 ); then
+    fail "a path argument must be refused, not silently ignored"
+else
+    pass "an unexpected argument is refused rather than ignored"
+fi
+cleanup; SANDBOX=""
+
 if [[ $failures -gt 0 ]]; then
     echo "test_check_shell_scripts: FAILED — $failures assertion(s)" >&2
     exit 1
