@@ -57,12 +57,10 @@ ROUTERS="natm-router natm-router-b"
 # filtering.
 PROBER="natm-filt"
 
-# The port the prober is addressed on, and the one beside it. Filtering
-# is classified by which of three sources reaches the peer: this port on
-# the prober (the control), the port beside it (same address, different
-# port), and an observer (a different address entirely).
-PROBE_PORT="${PROBE_PORT:-9001}"
-PROBE_PORT_ALT="${PROBE_PORT_ALT:-9002}"
+# The ports `filter.sh` uses are declared THERE, not here: this file
+# never reads them, and declaring them in both places made
+# `PROBE_PORT=9005 ./topology.sh up` look like it configured something
+# while changing nothing. Review finding on PR #81.
 
 # The FILTERING behaviour to build, which is independent of the mapping
 # one and is the other half of RFC 4787's classification.
@@ -90,9 +88,9 @@ IMAGE="${IMAGE:-interweave-natmatrix:1}"
 # The NAT class to build. `eim` gives one external port per internal
 # socket whatever the destination; `eds` allocates per destination.
 # Those are the two mapping classes, and mapping is one of the two
-# things deciding whether a punch succeeds -- filtering is the other and
-# is not measured here -- which is why these are the two rows this
-# harness builds. This said "the two rows that decide a hole punch"
+# things deciding whether a punch succeeds -- `FILTER_MODE` builds the
+# other and `filter.sh` measures it -- which is why these are the two
+# MAPPING rows this harness builds. This said "the two rows that decide a hole punch"
 # unchanged from the branch's first commit through ten review rounds --
 # though only for the last two of them was it CONTRADICTING the header
 # thirty lines above, which said the same thing until that was
@@ -120,7 +118,7 @@ up() {
   await_listener natm-obs2
 
   # NO LISTENER OF ITS OWN while the topology is up: `filter.sh` starts
-  # one on `$PROBE_PORT` to learn the mapping, then stops it so the same
+  # one on its probe port to learn the mapping, then stops it so the same
   # port is free to send the control from.
   podman run -d --name "$PROBER" --network "$NET_PUB" \
     --entrypoint /bin/sh "$IMAGE" -c 'sleep infinity' >/dev/null

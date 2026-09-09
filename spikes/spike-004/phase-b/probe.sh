@@ -16,12 +16,15 @@
 #   * whether the mapping is endpoint-independent — the same external
 #     port to both observers — or per-destination, which is ONE of the
 #     two variables deciding whether a hole punch succeeds. Filtering is
-#     the other, and this harness neither configures nor measures it, so
-#     a row licenses a claim about the mapping a punch would face and NO
-#     claim about a punch: not that one would succeed, and not that one
-#     would fail. Even `eds` on both sides does not entail failure -- if
-#     either side's filtering is endpoint-independent the packet is
-#     forwarded through the relay-created mapping whatever its source.
+#     the other, and `FILTER_MODE` configures it while `filter.sh`
+#     measures it -- so both NAT inputs are observed here now. A row
+#     still licenses NO claim about a punch, and the reason is no longer
+#     filtering: the third input is the implementation, DCUtR's address
+#     exchange and its timing, and no node runs here. Even `eds` on both
+#     sides does not entail failure -- if either side's filtering is
+#     endpoint-independent the packet is forwarded through the
+#     relay-created mapping whatever its source, which is a pairing
+#     `filter.sh` can now build and measure.
 #     Mapping does not gate the ATTEMPT either: `DCUTR.md` §2's
 #     eligibility list does not mention NAT class. Codex review, PR #79.
 set -euo pipefail

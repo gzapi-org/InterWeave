@@ -17,18 +17,23 @@ FILTER_MODE=full-cone MODES=eim ./run.sh   # a control for the classifier
 # fails as a registry error rather than a setup one.
 podman build -t interweave-natmatrix:1 -f Containerfile .
 NAT_MODE=eds ./topology.sh up
-EXPECT=eds ./probe.sh                                    # domain A
+EXPECT=eds ./probe.sh                                    # domain A, mapping
+EXPECT_FILTER=apdf ./filter.sh                           # domain A, filtering
 PEER=natm-peer-b ROUTER=natm-router-b LAN=natm-lan-b \
-  EXPECT=eds ./probe.sh                                  # domain B
+  EXPECT=eds ./probe.sh                                  # domain B, mapping
+PEER=natm-peer-b ROUTER=natm-router-b LAN=natm-lan-b \
+  EXPECT_FILTER=apdf ./filter.sh                         # domain B, filtering
 ./topology.sh down
 ```
 
 ## What it establishes
 
 **That the translation is real, in both NAT domains.** Peer A sends from
-`10.89.1.3:45000` and the observers on the public side see `10.89.0.4`;
-peer B sends from `10.89.2.3:45000` and they see `10.89.0.5` — each
-router's own address. Phase A had no NAT at all, and the first thing
+`10.89.1.3:45000` and the observers on the public side see its router's
+address; peer B sends from `10.89.2.3:45000` and they see a different
+one — each router's own. The transcript below has the numbers, and they
+are deliberately not repeated here: adding the filtering prober shifted
+podman's pool by one and left this paragraph naming the wrong addresses. Phase A had no NAT at all, and the first thing
 this harness owes is evidence that these ones do.
 
 **That the mapping behaviour is the one that was asked for, and the
@@ -50,6 +55,30 @@ conntrack alone it can only ever answer one way, and a classifier with
 two unreachable branches is indistinguishable from a constant. They
 install an nftables forward and need `NAT_MODE=eim`, since a static
 forward cannot name a per-flow mapped port.
+
+Both control rows are recorded, because a column headed "measured" owes a
+run for every row in it and only the `conntrack` one had one. **These two
+are EXCERPTS — the filtering lines only**, and are labelled as such
+because the complete run below is the standard this directory holds
+itself to; the rest of each is the same shape as that one:
+
+```
+  filter  : address-restricted (both domains)
+peer received  : CONTROL SAME_ADDRESS
+VERDICT: ADDRESS-DEPENDENT FILTERING (an address-restricted cone: the address must match, the port need not)
+peer received  : CONTROL SAME_ADDRESS
+VERDICT: ADDRESS-DEPENDENT FILTERING (an address-restricted cone: the address must match, the port need not)
+measured and matched: natm-peer=eim(45000,45000;45001,45001)/adf natm-peer-b=eim(45000,45000;45001,45001)/adf
+```
+
+```
+  filter  : full-cone (both domains)
+peer received  : CONTROL SAME_ADDRESS OTHER_ADDRESS
+VERDICT: ENDPOINT-INDEPENDENT FILTERING (a full cone: any source reaches the mapping)
+peer received  : CONTROL SAME_ADDRESS OTHER_ADDRESS
+VERDICT: ENDPOINT-INDEPENDENT FILTERING (a full cone: any source reaches the mapping)
+measured and matched: natm-peer=eim(45000,45000;45001,45001)/eif natm-peer-b=eim(45000,45000;45001,45001)/eif
+```
 
 **What the two together still do not license is a claim about a punch.**
 They are the two NAT inputs; the third is the implementation — DCUtR's
@@ -80,9 +109,10 @@ port-restricted cone rather than a full one. True, and the same
 reasoning-from-internals the `eds` paragraph below retracts — so
 `filter.sh` now sends the inbound instead. A third host aims a datagram
 the peer never asked for at the mapped external port, and the class is
-which sources arrive. Whether a punch succeeds depends on filtering too, so
-neither row licenses a claim about DCUtR succeeding; what they license
-is a claim about the mapping it would face.
+which sources arrive. Whether a punch succeeds depends on filtering too, and both are measured
+here now — so what a row still does not license is a claim about the
+punch, because the third input is the implementation and no node runs
+here.
 
 Measured, not asserted from the configuration, and **for both NAT
 domains**. The run below is complete rather than excerpted — an earlier
@@ -149,7 +179,7 @@ VERDICT: ADDRESS-AND-PORT-DEPENDENT FILTERING (a port-restricted cone: only the 
 
 == NAT_MODE=eds FILTER_MODE=conntrack ==
   router-a lan=10.89.1.2 pub=10.89.0.5
-  natm-router: snat on eth0 using: masquerade random
+  natm-router: snat on eth1 using: masquerade random
   router-b lan=10.89.2.2 pub=10.89.0.6
   natm-router-b: snat on eth0 using: masquerade random
   NAT mode: eds (both domains)
@@ -163,36 +193,36 @@ VERDICT: ADDRESS-AND-PORT-DEPENDENT FILTERING (a port-restricted cone: only the 
 from port 45000
   peer private   : 10.89.1.3 45000
   router public  : 10.89.0.5
-  observer 1 saw : 10.89.0.5 2853
-  observer 2 saw : 10.89.0.5 40401
+  observer 1 saw : 10.89.0.5 33565
+  observer 2 saw : 10.89.0.5 10750
 from port 45001
   peer private   : 10.89.1.3 45001
   router public  : 10.89.0.5
-  observer 1 saw : 10.89.0.5 18734
-  observer 2 saw : 10.89.0.5 37132
+  observer 1 saw : 10.89.0.5 19983
+  observer 2 saw : 10.89.0.5 50695
 VERDICT: ENDPOINT-DEPENDENT MAPPING (a port per destination)
 peer private   : 10.89.1.3 45000
-prober saw     : 10.89.0.5 37124
+prober saw     : 10.89.0.5 26915
 peer received  : CONTROL
 VERDICT: ADDRESS-AND-PORT-DEPENDENT FILTERING (a port-restricted cone: only the addressed endpoint reaches the mapping)
 -- natm-peer-b behind natm-router-b --
 from port 45000
   peer private   : 10.89.2.3 45000
   router public  : 10.89.0.6
-  observer 1 saw : 10.89.0.6 26111
-  observer 2 saw : 10.89.0.6 7184
+  observer 1 saw : 10.89.0.6 48810
+  observer 2 saw : 10.89.0.6 22254
 from port 45001
   peer private   : 10.89.2.3 45001
   router public  : 10.89.0.6
-  observer 1 saw : 10.89.0.6 31205
-  observer 2 saw : 10.89.0.6 8632
+  observer 1 saw : 10.89.0.6 33304
+  observer 2 saw : 10.89.0.6 7970
 VERDICT: ENDPOINT-DEPENDENT MAPPING (a port per destination)
 peer private   : 10.89.2.3 45000
-prober saw     : 10.89.0.6 9717
+prober saw     : 10.89.0.6 45641
 peer received  : CONTROL
 VERDICT: ADDRESS-AND-PORT-DEPENDENT FILTERING (a port-restricted cone: only the addressed endpoint reaches the mapping)
 
-measured and matched: natm-peer=eim(45000,45000;45001,45001)/apdf natm-peer-b=eim(45000,45000;45001,45001)/apdf natm-peer=eds(2853,40401;18734,37132)/apdf natm-peer-b=eds(26111,7184;31205,8632)/apdf
+measured and matched: natm-peer=eim(45000,45000;45001,45001)/apdf natm-peer-b=eim(45000,45000;45001,45001)/apdf natm-peer=eds(33565,10750;19983,50695)/apdf natm-peer-b=eds(48810,22254;33304,7970)/apdf
 ```
 
 Two things in it are worth reading twice, and one thing about it is
@@ -335,17 +365,17 @@ construction — two attempts at a cross-row claim have been vacuous for
 exactly that reason, one of them a count of the loop it was written
 over. What `run.sh` does check is its INPUT: `MODES` is a caller-supplied
 row filter, and `MODES=" "` is set and non-null, so it used to run zero
-rows and still print a passing summary. That check runs before the build
-and is the only check on that script's INPUT; everything else there —
-the build, `topology.sh up`, each probe — fails the run by failing. (It
-is not the only assertion in the file: the summary's ports are guarded
-too. Saying it was, twice in different words, is a claim about how many
-things a file checks that neither round got right.)
+rows and still print a passing summary. That check runs before the build.
+It is not the only one — `FILTER_MODE` is validated beside it, and the
+summary's ports and filtering class are asserted per domain — and the
+comment in `run.sh` stops counting, because three successive versions of
+that sentence were each falsified by the next commit to add a check.
 
 ## What it does NOT establish
 
 Phase B as the plan states it bundles several claims, and this harness
-answers part of one — the mapping classes. Everything below is outside
+answers part of one — the NAT classes, in both the mapping and the
+filtering half. Everything below is outside
 what it can say, and the last bullet is the one that matters most: no
 InterWeave node runs here.
 
@@ -360,8 +390,8 @@ InterWeave node runs here.
 - **Anything about InterWeave itself.** No node runs here yet. The
   behaviours this matrix exists to test — AutoNAT, Relay, DCUtR — are
   steps 3 through 8. `SPIKES.md` lists six evidence items for phase B
-  and this directory answers part of one of them — the mapping classes,
-  not the public VM or the carrier NAT that item also names. Of the
+  and this directory answers part of one of them — the NAT classes in both
+  halves, not the public VM or the carrier NAT that item also names. Of the
   rest, the relay and probe services and the relay loss/capacity and
   resource-cost rows wait on those steps; hole-punch success rates wait
   on the NAT population in the wild, and interface change on real

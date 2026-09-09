@@ -1346,11 +1346,13 @@ stage's own deferral discussion turns on.
 `SPIKES.md` points at this section for it.** The ENVIRONMENT for the NAT
 rows now exists at
 [`spikes/spike-004/phase-b/`](../../spikes/spike-004/phase-b/README.md) —
-containerised, two NAT domains, mapping class configured and then
-measured. It closes none of the six. The question is whether the exit
-gate's NAT row can be satisfied by a containerised matrix with the
-population claim, the filtering half, the public VM and a carrier's
-CGNAT all explicitly deferred — the shape Stage 9 used for mDNS and
+containerised, two NAT domains, with BOTH halves of RFC 4787's
+classification configured and then measured — the mapping class, and the
+filtering class since `filter.sh`. It closes none of the six. The
+question is whether the exit gate's NAT row can be satisfied by a
+containerised matrix with the population claim, the public VM and a
+carrier's CGNAT explicitly deferred — the filtering half was on that list
+and is not any more — the shape Stage 9 used for mDNS and
 Stage 10 for the release gate. **Nothing here answers it, and no row is
 marked met on the strength of that environment.**
 

@@ -27,9 +27,13 @@
 #     entirely. Admitted only by an endpoint-independent filter.
 #
 # All three inside one socket lifetime, so one mapping is classified
-# rather than three. Order does not matter: the control arriving creates
-# no state that would admit the others, because the conntrack entry it
-# matches is the one the peer's own packet made.
+# rather than three. The control is sent FIRST and is believed not to
+# widen what the others meet -- the entry it matches is the one the
+# peer's own packet made -- but that is read from netfilter rather than
+# measured, which is the move this directory retracts elsewhere. What
+# supports it is weaker and real: the `conntrack` row measures `apdf`,
+# and a control that widened the mapping would have shown as `eif` and
+# failed that row. Review finding on PR #81.
 set -euo pipefail
 
 NET_PUB="${NET_PUB:-natm-pub}"
@@ -49,6 +53,16 @@ HOLD_SECONDS="${HOLD_SECONDS:-6}"
 
 [ "$#" -eq 0 ] \
   || { echo "filter.sh takes no arguments; it is configured by environment" >&2; exit 2; }
+
+# THREE DISTINCT ENDPOINTS, or two probes are the control wearing another
+# name: `PROBE_PORT_ALT=$PROBE_PORT` makes SAME_ADDRESS the control, and
+# `ALT_SOURCE=$PROBER` makes OTHER_ADDRESS the same address. Either
+# misclassifies UPWARD, toward the permissive end.
+# Review finding on PR #81.
+[ "$PROBE_PORT" != "$PROBE_PORT_ALT" ] \
+  || { echo "PROBE_PORT and PROBE_PORT_ALT must differ, or SAME_ADDRESS is the control" >&2; exit 2; }
+[ "$ALT_SOURCE" != "$PROBER" ] \
+  || { echo "ALT_SOURCE and PROBER must differ, or OTHER_ADDRESS is the same address" >&2; exit 2; }
 
 addr_on() {
   podman inspect "$1" --format "{{ (index .NetworkSettings.Networks \"$2\").IPAddress }}"
@@ -124,17 +138,57 @@ podman exec "$PEER" sh -c ': > /filtered.txt'
 podman exec -d "$PEER" sh -c \
   "echo hold | socat -t$HOLD_SECONDS - UDP-DATAGRAM:$prober:$PROBE_PORT,bind=:$SRC_PORT,reuseaddr > /filtered.txt 2>&1" \
   >/dev/null
-sleep 1
+# ASSERTED, NOT SLEPT, which is this directory's rule and was a `sleep 1`
+# standing in for it: the socket has to be bound before a probe is aimed
+# at the mapping, or the probe races the bind.
+waited=0
+while ! podman exec "$PEER" ss -uln 2>/dev/null | grep -q ":$SRC_PORT "; do
+  waited=$((waited + 1))
+  [ "$waited" -le 100 ] \
+    || { echo "$PEER: the holding socket never bound UDP $SRC_PORT" >&2; exit 1; }
+  sleep 0.1
+done
 
+# EVERY SEND'S STATUS IS KEPT, not discarded.
+#
+# `|| true` on all three was the first version, and it reproduced the
+# exact defect the CONTROL exists to prevent -- for the two probes that
+# actually discriminate. A `socat` that cannot bind, or an `ALT_SOURCE`
+# container that has exited, produces the same observable as a NAT that
+# refused the packet: nothing arrives, the classifier falls through to
+# `apdf`, and `apdf` is what the default row EXPECTS. A probe that never
+# left would have reported a clean pass. The control closes this for its
+# own socket only, and says nothing about the other containers at all.
+# Review finding on PR #81.
+sent=""
+failed=""
 send_from() {
   local container="$1" port="$2" tag="$3"
-  podman exec "$container" sh -c \
+  if podman exec "$container" sh -c \
     "echo $tag | socat -t1 - UDP-DATAGRAM:$router_pub:$mapped,bind=:$port,reuseaddr" \
-    >/dev/null 2>&1 || true
+    >/dev/null 2>&1; then
+    sent="${sent:+$sent,}$tag"
+  else
+    failed="${failed:+$failed,}$tag(from $container:$port)"
+  fi
 }
 send_from "$PROBER" "$PROBE_PORT" CONTROL
 send_from "$PROBER" "$PROBE_PORT_ALT" SAME_ADDRESS
 send_from "$ALT_SOURCE" "$ALT_SOURCE_PORT" OTHER_ADDRESS
+[ -z "$failed" ] || {
+  echo "VERDICT: NOT SENT — $failed could not be sent, so an absence below would not be a refusal" >&2
+  exit 1
+}
+
+# STILL OPEN AFTER THE SENDS, or the window closed under them. Three
+# `podman exec` round trips plus socat's own half-close wait fit inside
+# `HOLD_SECONDS` comfortably on an idle host and not necessarily on a
+# loaded one -- and a probe arriving after the socket closed is absent
+# for a reason that is not filtering. Checked rather than budgeted for,
+# since this directory's own rule is asserted-not-slept.
+# Review finding on PR #81.
+podman exec "$PEER" sh -c 'pgrep socat >/dev/null' \
+  || { echo "VERDICT: WINDOW CLOSED — the holding socket exited before the probes landed; raise HOLD_SECONDS" >&2; exit 1; }
 
 # Wait for the socket to close rather than sleeping past it.
 waited=0
@@ -182,3 +236,4 @@ fi
 
 printf 'FILTER=%s\n' "$class"
 printf 'ADMITTED=%s\n' "$(echo "$arrived" | tr '\n' ',' | sed 's/,*$//')"
+printf 'SENT=%s\n' "$sent"

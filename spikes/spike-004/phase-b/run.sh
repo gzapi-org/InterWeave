@@ -16,15 +16,13 @@ IMAGE="${IMAGE:-interweave-natmatrix:1}"
 
 MODES="${MODES:-eim eds}"
 
-# THE ROW SET IS VALIDATED BEFORE ANYTHING RUNS, and it is the only
-# check on this script's INPUT -- everything else here fails the run by
-# failing: the build, `topology.sh up`, and each probe. There is one
-# other assertion written in this file, on `$ports` in `probe_domain`,
-# and the sentence that used to say this was the only one was made false
-# by the commit that added it. Before that it said "the only check that
-# can fail", which read as though a failing probe would be tolerated.
-# Two rounds of review, two corrections, both to a claim about how many
-# things this file checks.
+# THE ROW SET IS VALIDATED BEFORE ANYTHING RUNS. It is not the only such
+# check and this comment has now been wrong about that THREE times --
+# "the only check that can fail", then "the only check on this script's
+# INPUT", each falsified by the next commit to add one. So it stops
+# counting: `FILTER_MODE` is validated below, `$ports` and `$filtering`
+# are asserted in `probe_domain`, and everything else here fails the run
+# by failing -- the build, `topology.sh up`, each probe.
 # `MODES` is a caller-supplied filter, so
 # `MODES=" "` is set and non-null -- `:-` does not substitute, the loop
 # runs zero times, and every after-the-fact tally then agrees with
@@ -131,6 +129,16 @@ case "$FILTER_MODE" in
   full-cone) EXPECT_FILTER=eif ;;
   *) echo "unknown FILTER_MODE: $FILTER_MODE" >&2; exit 2 ;;
 esac
+# AND AGAINST THE ROW SET, here rather than inside `topology.sh`: the
+# control modes install a static forward and so need `eim`, and checking
+# that only when the row is built meant `FILTER_MODE=full-cone ./run.sh`
+# measured the whole `eim` row before aborting on `eds`. Loud, but late.
+if [ "$FILTER_MODE" != conntrack ]; then
+  for mode in "$@"; do
+    [ "$mode" = eim ] \
+      || { echo "FILTER_MODE=$FILTER_MODE needs MODES=eim; a static forward cannot name a per-flow mapped port (got '$mode')" >&2; exit 2; }
+  done
+fi
 export FILTER_MODE
 
 for mode in "$@"; do
