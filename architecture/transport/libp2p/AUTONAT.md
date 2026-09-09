@@ -109,8 +109,8 @@ comment that says §6 holds.
 ## 4. Evidence model
 
 Evidence is keyed at least by `(tested_address, server_peer)` and holds
-that server's LATEST SUCCESS AND LATEST FAILURE SIDE BY SIDE, each with
-its own observation time:
+that server's latest success and latest failure with their observation
+times:
 
 ```text
 success_observed_at   (absent until one succeeds)
@@ -119,20 +119,28 @@ probe_id/correlation
 bytes_sent class (diagnostic)
 ```
 
-One outcome per key is NOT sufficient, and that is what §5's two-failure
-rule requires: with a single slot, one `Unreachable` from a server whose
-success is being counted overwrites that success and drops the address
-below the threshold on its own — an invalidation §5 gives only to two
-fresh independent failures. A later success is the newer word on the same
-question and clears that server's failure; a failure never erases a
-success.
+**Each server speaks once, with its latest word**: a fresh failure makes
+it an observer saying unreachable, otherwise a fresh success makes it one
+saying reachable, never both. The success is kept under a later failure
+so the state table in §5 can tell a *contradicted* observer from a
+*silent* one — which is the whole of the hysteresis: an address verified
+by the threshold stays verified while those observers are still fresh and
+speaking, at least one still says reachable, and fewer than two say
+unreachable. One slot per key could not express this (one `Unreachable`
+from a counting observer dropped the address below the threshold on its
+own), and counting a server in both sets could not either (at a threshold
+of one, the address stayed verified for a full TTL while its only
+observer said unreachable). A success that merely ages out is silence,
+not contradiction, and a verdict short of its threshold lapses with it.
 
 Defaults:
 
 - required distinct successful servers: 2;
 - evidence TTL: 15 minutes — for a success and for a failure alike, since
   the two are weighed against each other;
-- refresh: 5 minutes;
+- refresh: 5 minutes — the interval at which an address with fresh
+  success evidence is re-tested; the client's own tick is not this, see
+  the amendment below;
 - max candidate addresses per cycle: 4.
 
 ### Amendment 2026-09-09 (ii) — three client knobs named a policy nothing here could apply
@@ -146,11 +154,19 @@ cycle` stay, and are now stated as what the client actually sets.
 **Why.** After the §3 amendment above, this profile does not issue
 probes: `libp2p-autonat` 0.15.0 picks the address, picks the server and
 picks the moment. Its whole client surface is `Config::
-with_probe_interval` and `Config::with_max_candidates`, which are exactly
-`refresh` and `max candidate addresses per cycle` — and its DEFAULT
-interval is five seconds, so an adapter that does not set it probes sixty
-times more often than this section says. The other three had no
-mechanism:
+with_probe_interval` and `Config::with_max_candidates`. The second is
+`max candidate addresses per cycle`. The first is NOT `refresh`, though
+the adapter sets it from that value: the crate's tick sweeps only
+candidates it has never tested (`v2/client/behaviour.rs:319-321`), and a
+tested candidate — `Received` or `Failed` — is never swept again by any
+public path (`:166`, `:232`; re-reporting an address only raises its
+score, `:108-112`). So the crate offers no refresh and no second observer
+for an address at all, which is the finding ADR-0051 answers: the client
+is vendored with a `retest` entry point, and WHICH address is re-tested
+and WHEN becomes the reachability manager's decision, keyed on this
+section's evidence. The interval's default of five seconds matters only
+in that light — the tick is cheap while nothing is untested, and it is
+`retest` that puts something there. The other three had no mechanism:
 
 - **in-flight probes** — the client caps its own outbound dial-requests
   in a `FuturesMap` built at `v2/client/handler/dial_request.rs:94`, with
@@ -160,20 +176,31 @@ mechanism:
   is unaffected: that one is ours to enforce;
 - **retry backoff** — a probe is a request on a connection already open,
   so what a failure should slow down is the DIAL of a server that will
-  not answer. That is the root dial gate's, where
+  not connect. That is the root dial gate's, where
   `ConnectionManager::retry_delay_ms` is already 30 s doubling to a
   5-minute ceiling — this section's own numbers — and
   `ConnectionPolicy` scopes it to the address before the peer, so one bad
   address does not suppress a server's working route. A second copy in
   the client had no way to act: it could not tell the crate which server
-  to skip.
+  to skip. **One case the gate cannot see**: a server that connects and
+  then never answers the dial-request. The crate maps that stream timeout
+  to `Io`, resets the candidate to untested and re-issues on its next
+  tick (`behaviour.rs:212-223`), so nothing bounds it. ADR-0051's vendored
+  client stops the reset, and the manager's retry policy — the one this
+  clause deletes from configuration — is applied by it through `retest`
+  under the same 30 s / 5 min numbers, now read from the dial gate's
+  constants rather than from a second knob.
 
 **What an implementer now does differently.** Set the crate's two knobs
-from configuration. Do not build a probe scheduler, a per-probe timeout,
-or a per-server backoff table in the AutoNAT client; a server that will
-not connect is slowed by the dial gate. The three removed keys are gone
-from `config.schema.yaml` too, since a key nothing can honour is a
-promise the file should not make.
+from configuration. Do not build a per-probe timeout or a per-server
+backoff table in the AutoNAT client; a server that will not connect is
+slowed by the dial gate, and one that will not answer by the manager's
+`retest` cadence. What the manager DOES schedule is which address is
+re-tested and when — refresh, the second observer, and retry after a
+failure — because `retest` is a lever that exists, which a per-pair
+in-flight table was not. The three removed keys are gone from
+`config.schema.yaml` too, since a key nothing can honour is a promise the
+file should not make.
 
 `verified_public` requires fresh successful evidence from the configured number of **distinct authorized servers** for at least one advertised direct address.
 
@@ -248,7 +275,7 @@ Required diagnostics:
 
 ```text
 autonat_probes_total{outcome}
-autonat_probes_inflight
+autonat_retests_total{reason}   (refresh | second_observer | retry)
 autonat_distinct_success_observers
 autonat_verified_address_count
 direct_inbound_state

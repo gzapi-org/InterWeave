@@ -24,17 +24,24 @@
 //! never issued and back a server off for it. Review finding on PR #84.
 //! That half is gone, and its concerns are held where the lever is:
 //!
-//! - **Probe pacing and the per-cycle candidate ceiling** are the crate's
-//!   own two knobs, `with_probe_interval` and `with_max_candidates`; the
+//! - **The tick and the per-sweep candidate ceiling** are the crate's own
+//!   two knobs, `with_probe_interval` and `with_max_candidates`; the
 //!   adapter sets them from `refresh_interval` and
-//!   `max_candidate_addresses_per_cycle`. The crate's DEFAULT interval is
-//!   five seconds, so an adapter that forgets floods every server it has
-//!   dialled.
-//! - **Retry backoff for a server that will not connect** is the dial
-//!   gate's: `ConnectionManager::retry_delay_ms` is already `AUTONAT.md`
-//!   §4's "30 s, bounded exponential, 5 min", and `ConnectionPolicy`
-//!   scopes it to the address before the peer. A static server is
-//!   reached through `attempt_dial`, so it inherits that for free.
+//!   `max_candidate_addresses_per_cycle`. The interval is NOT a refresh:
+//!   the tick sweeps only candidates the crate has never tested
+//!   (`v2/client/behaviour.rs:319-321`), and a tested candidate is never
+//!   swept again. Until ADR-0051's `retest` lands, which address is
+//!   re-probed and when is a decision nothing can yet act on; once it
+//!   lands, that decision is this manager's, keyed on the evidence below.
+//! - **Backoff for a server that will not CONNECT** is the dial gate's:
+//!   `ConnectionManager::retry_delay_ms` is already `AUTONAT.md` §4's
+//!   "30 s, bounded exponential, 5 min", and `ConnectionPolicy` scopes it
+//!   to the address before the peer. A static server is reached through
+//!   `attempt_dial`, so it inherits that for free. A server that connects
+//!   and then never ANSWERS is a different case: the crate maps a stream
+//!   timeout to `Io`, resets the candidate and re-issues on the next tick
+//!   (`behaviour.rs:223`), and no gate sees it. ADR-0051 closes that by
+//!   handing the retry decision here. Review finding on PR #84.
 //! - **The inbound dial-back** is retained by the adapter on the basis
 //!   of which servers IT dialled, not of anything recorded here.
 //!
@@ -46,16 +53,24 @@
 //! address with fresh evidence. The key makes that structural rather than
 //! a check: a second success from the same server overwrites the first.
 //!
-//! # One contradiction is not an invalidation
+//! # A server speaks once, and one contradiction is not an invalidation
 //!
-//! `AUTONAT.md` §5: "Two fresh independent failures may invalidate a
-//! previously verified address before TTL." So an entry holds a server's
-//! latest success AND its latest failure side by side. A failure does not
-//! erase the success it contradicts -- an earlier version let it, and one
-//! `Unreachable` from a counting observer then dropped the address below
-//! the threshold on its own. Review finding on PR #84. A later SUCCESS
-//! does clear that server's failure, because it is the newer word on the
-//! same question.
+//! Each server counts with its LATEST word on an address: a fresh failure
+//! makes it an observer saying unreachable, otherwise a fresh success
+//! makes it one saying reachable, never both. `AUTONAT.md` §5 then gives
+//! the hysteresis: "Two fresh independent failures may invalidate a
+//! previously verified address before TTL." So an address that WAS
+//! verified stays verified while the observers that verified it are still
+//! fresh and speaking, at least one still says reachable, and fewer than
+//! two say unreachable. Two earlier versions each got half of this: one
+//! let a single failure overwrite the success it contradicted, so one
+//! report from a counting observer unverified the address; the next kept
+//! both and counted the server twice, so at a threshold of one the
+//! address stayed verified for a full TTL while its only observer said
+//! unreachable. Review findings on PR #84. Expiry is not a contradiction:
+//! a success that ages out leaves the observer silent, and a verdict
+//! short of its threshold lapses with it -- §5's "must not survive beyond
+//! its evidence TTL".
 //!
 //! # A private address is never a candidate
 //!
@@ -78,13 +93,16 @@ pub const DEFAULT_REQUIRED_DISTINCT_SUCCESSES: u32 = 2;
 pub const DEFAULT_SUCCESS_EVIDENCE_TTL_MS: u64 = 15 * 60 * 1000;
 /// How many probeable addresses the manager will TRACK.
 ///
-/// Bounds memory: the evidence map is keyed by address, and the address
-/// registry is not this module's to trust. It equals the runtime's
-/// default listener ceiling (`max_active_listeners`, 64), which lives in
-/// the libp2p crate and so cannot be named from here; a smaller value
-/// silently dropped listeners a profile was allowed to bind. Review
-/// finding on PR #84. Overflow is reported by
-/// [`ReachabilityManager::truncated_candidates`].
+/// Bounds the address dimension of the evidence map, which the address
+/// registry is not this module's to fill unchecked. It equals the libp2p
+/// crate's DEFAULT `max_active_listeners`, 64 -- a smaller value silently
+/// dropped listeners a profile was allowed to bind. That crate depends on
+/// this one and not the reverse, so the two numbers are pinned together
+/// THERE, by `SubstrateConfig`'s test against this constant; the test in
+/// this file pins only this side. An operator who raises the listener
+/// ceiling above the default still overflows, and
+/// [`ReachabilityManager::truncated_candidates`] is what says so. Review
+/// findings on PR #84.
 pub const MAX_TRACKED_CANDIDATES: usize = 64;
 
 /// The policy knobs this manager owns.
@@ -201,16 +219,19 @@ impl ReachabilityVerdict {
 
 /// What one probe told us.
 ///
-/// The pinned client emits `Event` for exactly TWO results (measured in
-/// `libp2p-autonat-0.15.0` `v2/client/behaviour.rs:200-243`): `Ok(())`,
-/// and `Err(AddressNotReachable { .. })` after the server tried and
-/// failed to dial back. For `UnsupportedProtocol` and `Io` it emits **no
-/// event at all** -- it resets the candidate to `Untested` and returns.
-/// So the adapter's mapping is total: `Ok(())` is
-/// [`Reachable`](Self::Reachable), `Err(AddressNotReachable)` is
-/// [`Unreachable`](Self::Unreachable), and there is no third case for
-/// it to invent. An earlier version carried a `Failed` for a probe that
-/// never came back; no such probe can be observed, so it is gone.
+/// As of `libp2p-autonat-0.15.0` the client emits `Event` for two results
+/// (`v2/client/behaviour.rs:200-243`): `Ok(())`, and
+/// `Err(AddressNotReachable { .. })` after the server tried and failed to
+/// dial back. `Ok(())` is [`Reachable`](Self::Reachable) and
+/// `Err(AddressNotReachable)` is [`Unreachable`](Self::Unreachable). Three
+/// paths produce NO event: `UnsupportedProtocol` and `Io` reset the
+/// candidate and return, and a server reporting success when no dial-back
+/// was received (`behaviour.rs:186-198`) warns and returns leaving the
+/// candidate `Pending` -- so an adapter must not wait on an outcome for
+/// every probe. This crate does not depend on the AutoNAT crate, so the
+/// adapter's `match` on `Event.result` is where a third result would
+/// surface, not here. An earlier version carried a `Failed` for a probe
+/// that never came back; no such probe can be observed, so it is gone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeOutcome {
     /// The server dialled the address back and reached us.
@@ -253,7 +274,10 @@ pub struct ConnectivityChanged {
     pub to: ReachabilityVerdict,
 }
 
-/// One server's latest word on one address, both halves kept.
+/// One server's word on one address. A success clears the failure it
+/// supersedes, so a present `failure_at_ms` is always the LATEST word;
+/// `success_at_ms` survives a later failure only so `derive` can tell a
+/// contradicted observer from a silent one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Evidence {
     success_at_ms: Option<u64>,
@@ -471,7 +495,9 @@ impl ReachabilityManager {
             .or_default();
         match outcome {
             // THE NEWER WORD ON THE SAME QUESTION: a success clears the
-            // failure it supersedes. The reverse is not true, by §5.
+            // failure it supersedes. A failure leaves the success in
+            // place, and `derive` reads the pair as one contradicting
+            // observer, not as one of each -- see the module note.
             ProbeOutcome::Reachable => {
                 entry.success_at_ms = Some(now_ms);
                 entry.failure_at_ms = None;
@@ -523,43 +549,57 @@ impl ReachabilityManager {
         }
     }
 
-    /// `AUTONAT.md` §5, computed from the fresh evidence alone.
+    /// `AUTONAT.md` §5, computed from the fresh evidence and the verdict
+    /// it is replacing.
     ///
-    /// For each candidate: the distinct servers holding a fresh success
-    /// and the distinct servers holding a fresh failure. An address is
-    /// verified when the first count meets the threshold AND fewer than
-    /// two servers currently contradict it -- "two fresh independent
-    /// failures may invalidate a previously verified address before
-    /// TTL". If any address is verified, `VerifiedPublic`; else if any
-    /// fresh evidence exists, `NotVerified`; else `Unknown`.
+    /// For each candidate, each server with fresh evidence speaks once: a
+    /// fresh failure makes it an observer saying unreachable, else a fresh
+    /// success makes it one saying reachable. An address is verified when
+    /// the reachable count meets the threshold, OR it was verified before
+    /// and the observers that verified it are still fresh and speaking
+    /// with at least one still saying reachable -- and in either case
+    /// fewer than two say unreachable ("two fresh independent failures
+    /// may invalidate a previously verified address before TTL"). If any
+    /// address is verified, `VerifiedPublic`; else if any fresh failure
+    /// exists, `NotVerified`; else `Unknown` -- successes short of the
+    /// threshold are "insufficient evidence", which §4 and
+    /// `CONNECTIVITY.md` §5 both give to `unknown`. An earlier version
+    /// returned `NotVerified` for one success, contradicting both. Review
+    /// finding on PR #84.
     fn derive(&self, now_ms: u64) -> ReachabilityVerdict {
         let ttl = self.config.success_evidence_ttl_ms;
         let threshold =
             usize::try_from(self.config.required_distinct_successes).unwrap_or(usize::MAX);
+        let previously_verified = self.state.verified_addresses();
         let mut verified = Vec::new();
         let mut evidence_until = u64::MAX;
-        let mut any_evidence = false;
+        let mut any_failure = false;
         let mut last_failure: Option<u64> = None;
         for address in &self.candidates {
-            let mut reachable: BTreeSet<&TransportIdentity> = BTreeSet::new();
-            let mut unreachable: BTreeSet<&TransportIdentity> = BTreeSet::new();
+            let mut saying_reachable: BTreeSet<&TransportIdentity> = BTreeSet::new();
+            let mut saying_unreachable: BTreeSet<&TransportIdentity> = BTreeSet::new();
             let mut earliest_success_expiry = u64::MAX;
             for ((a, server), e) in &self.evidence {
                 if a != address {
                     continue;
                 }
-                if let Some(at) = e.fresh_success(ttl, now_ms) {
-                    any_evidence = true;
-                    reachable.insert(server);
+                if let Some(at) = e.fresh_failure(ttl, now_ms) {
+                    any_failure = true;
+                    saying_unreachable.insert(server);
+                    last_failure = Some(last_failure.map_or(at, |f| f.max(at)));
+                } else if let Some(at) = e.fresh_success(ttl, now_ms) {
+                    saying_reachable.insert(server);
                     earliest_success_expiry = earliest_success_expiry.min(at.saturating_add(ttl));
                 }
-                if let Some(at) = e.fresh_failure(ttl, now_ms) {
-                    any_evidence = true;
-                    unreachable.insert(server);
-                    last_failure = Some(last_failure.map_or(at, |f| f.max(at)));
-                }
             }
-            if reachable.len() >= threshold && unreachable.len() < 2 {
+            let meets_threshold = saying_reachable.len() >= threshold;
+            // THE HOLD: the same observers, one of them now disagreeing.
+            // Counted over fresh words only, so an observer whose success
+            // merely aged out is silent and does not sustain the verdict.
+            let holds = previously_verified.iter().any(|v| v == address)
+                && !saying_reachable.is_empty()
+                && saying_reachable.len() + saying_unreachable.len() >= threshold;
+            if (meets_threshold || holds) && saying_unreachable.len() < 2 {
                 verified.push(address.clone());
                 evidence_until = evidence_until.min(earliest_success_expiry);
             }
@@ -569,7 +609,7 @@ impl ReachabilityManager {
                 verified_addresses: verified,
                 evidence_until_ms: evidence_until,
             }
-        } else if any_evidence {
+        } else if any_failure {
             ReachabilityVerdict::NotVerified {
                 last_failure_at_ms: last_failure,
             }
@@ -652,9 +692,12 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
     // Deprecated by RFC 3879 and still routed by some stacks; neither
     // `unique_local`'s nor `link_local`'s mask covers `fec0::/10`.
     let site_local = (segments[0] & 0xffc0) == 0xfec0;
-    // RFC 3849's `2001:db8::/32` and RFC 9637's `3fff::/20`.
-    let documentation =
-        (segments[0] == 0x2001 && segments[1] == 0x0db8) || (segments[0] & 0xfff0) == 0x3ff0;
+    // RFC 3849's `2001:db8::/32` and RFC 9637's `3fff::/20`. An earlier
+    // mask, `segments[0] & 0xfff0 == 0x3ff0`, was `3ff0::/12` -- 256 times
+    // the prefix the comment named, refusing `3ff0::`-`3ffe::` with no
+    // test on that axis. Review finding on PR #84.
+    let documentation = (segments[0] == 0x2001 && segments[1] == 0x0db8)
+        || (segments[0] == 0x3fff && (segments[1] & 0xf000) == 0);
     let benchmarking = segments[0] == 0x2001 && segments[1] == 0x0002 && segments[2] == 0;
     // 6to4 and Teredo carry an embedded IPv4 address whose reachability
     // is the tunnel's, not ours.
@@ -734,7 +777,14 @@ mod tests {
     #[test]
     fn every_zero_bound_is_refused_for_a_caller_that_never_deserialized() {
         // EVERY field, not some: the previous version checked four of
-        // seven and documented all seven as checked.
+        // seven and documented all seven as checked. The destructuring
+        // below is exhaustive, so a field added to the config without a
+        // row here fails to COMPILE rather than leaving a hand-kept list
+        // silently short. Review finding on PR #84.
+        let ReachabilityConfig {
+            required_distinct_successes: _,
+            success_evidence_ttl_ms: _,
+        } = ReachabilityConfig::default();
         for (field, config) in [
             (
                 "required_distinct_successes",
@@ -797,6 +847,7 @@ mod tests {
             "/ip6/fec0::1/tcp/4001",
             "/ip6/2001:db8::1/tcp/4001",
             "/ip6/3fff::1/tcp/4001",
+            "/ip6/3fff:fff::1/tcp/4001",
             "/ip6/2001:2::1/tcp/4001",
             "/ip6/2002:c000:0204::1/tcp/4001",
             "/ip6/2001::1/tcp/4001",
@@ -815,6 +866,9 @@ mod tests {
             A,
             B,
             "/ip6/2606:4700:4700::1111/tcp/4001",
+            // Outside `3fff::/20` on both sides of the old `/12` mask.
+            "/ip6/3ffe::1/tcp/4001",
+            "/ip6/3fff:1000::1/tcp/4001",
             "/ip6/2001:30::1/tcp/4001",
             "/ip6/101::1/tcp/4001",
             "/ip6/64:ff9b:2::1/tcp/4001",
@@ -860,10 +914,12 @@ mod tests {
 
     #[test]
     fn the_tracking_bound_is_the_runtime_listener_ceiling() {
-        // The libp2p crate's `max_active_listeners` default is 64 and
-        // cannot be named from here; this pins the number so a change to
-        // either side shows up as a failing test rather than a profile
-        // whose last listener is never verified.
+        // THIS SIDE ONLY. The libp2p crate's `max_active_listeners`
+        // default cannot be named from here, so a change to IT is caught
+        // by `SubstrateConfig`'s test in that crate, which asserts its
+        // default against this constant. An earlier comment claimed this
+        // test pinned both numbers; it never could. Review finding on
+        // PR #84.
         assert_eq!(MAX_TRACKED_CANDIDATES, 64);
     }
 
@@ -892,16 +948,15 @@ mod tests {
     #[test]
     fn verified_needs_distinct_servers_and_one_server_twice_is_one_observer() {
         let mut m = manager_with(&[S1, S2]);
+        // ONE SUCCESS IS `Unknown`: insufficient evidence, which §4 and
+        // `CONNECTIVITY.md` §5 both give to that word and not to
+        // `not_verified`. An earlier version said `NotVerified` here and
+        // a test froze it. Review finding on PR #84.
         assert!(
             m.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0)
-                .is_some()
+                .is_none()
         );
-        assert_eq!(
-            *m.state(),
-            ReachabilityVerdict::NotVerified {
-                last_failure_at_ms: None
-            }
-        );
+        assert_eq!(*m.state(), ReachabilityVerdict::Unknown);
         // The same server again is still one observer.
         assert!(
             m.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 1)
@@ -918,7 +973,7 @@ mod tests {
                 evidence_until_ms: 1 + TTL,
             }
         );
-        assert_eq!(change.from.state(), DirectInboundState::NotVerified);
+        assert_eq!(change.from, ReachabilityVerdict::Unknown);
     }
 
     #[test]
@@ -968,19 +1023,15 @@ mod tests {
         assert!(verified(&m));
         assert!(m.expire_evidence(TTL - 1).is_none(), "still fresh");
         assert!(verified(&m));
+        // EXPIRY IS NOT A CONTRADICTION, so the hold does not apply: S1
+        // is silent, the threshold is no longer met, and with no failure
+        // on record the verdict is `Unknown` at once -- §5's "must not
+        // survive beyond its evidence TTL".
         let change = m.expire_evidence(TTL).expect("S1's success has lapsed");
-        assert_eq!(
-            change.to,
-            ReachabilityVerdict::NotVerified {
-                last_failure_at_ms: None
-            },
-            "one fresh success is below the threshold"
-        );
-        let change = m.expire_evidence(10 + TTL).expect("S2's has too");
-        assert_eq!(
-            change.to,
-            ReachabilityVerdict::Unknown,
-            "no evidence at all"
+        assert_eq!(change.to, ReachabilityVerdict::Unknown);
+        assert!(
+            m.expire_evidence(10 + TTL).is_none(),
+            "S2 lapsing changes nothing further"
         );
     }
 
@@ -1040,16 +1091,85 @@ mod tests {
                 last_failure_at_ms: Some(6)
             }
         );
-        // A LATER SUCCESS CLEARS THAT SERVER'S CONTRADICTION: S2 says
-        // reachable again, so only S1 contradicts and the address is
-        // verified once more -- without S1 having to be heard from.
+        // ONCE INVALIDATED, THE HOLD IS GONE: S2 saying reachable again
+        // clears S2's contradiction but is one observer, and §5's
+        // `not_verified + threshold fresh successes` means the threshold.
+        assert!(
+            m.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 7)
+                .is_none()
+        );
+        assert_eq!(
+            *m.state(),
+            ReachabilityVerdict::NotVerified {
+                last_failure_at_ms: Some(5)
+            },
+            "S1's contradiction still stands alone"
+        );
         let change = m
-            .record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 7)
-            .expect("back to verified");
+            .record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 8)
+            .expect("the threshold is met again");
         assert!(matches!(
             change.to,
             ReachabilityVerdict::VerifiedPublic { .. }
         ));
+    }
+
+    #[test]
+    fn at_a_threshold_of_one_the_sole_observers_reversal_unverifies_at_once() {
+        // The regression the two-sided entry introduced: with the server
+        // counted in BOTH sets, one success and one later failure from
+        // the same server kept the address verified for a full TTL while
+        // its only observer said unreachable. Each server now speaks
+        // once, with its latest word. Review finding on PR #84.
+        let mut m = ReachabilityManager::new(ReachabilityConfig {
+            required_distinct_successes: 1,
+            ..ReachabilityConfig::default()
+        })
+        .expect("valid");
+        let _ = m.set_candidates([A], 0);
+        m.add_server(peer(S1), ServerSource::Static);
+        assert!(
+            m.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0)
+                .is_some()
+        );
+        assert!(verified(&m));
+        let change = m
+            .record_outcome(A, &peer(S1), ProbeOutcome::Unreachable, 1_000)
+            .expect("the only observer reversed");
+        assert_eq!(
+            change.to,
+            ReachabilityVerdict::NotVerified {
+                last_failure_at_ms: Some(1_000)
+            }
+        );
+    }
+
+    #[test]
+    fn the_hold_needs_the_verifying_observers_still_fresh() {
+        // Threshold two, S1 and S2 verify at t=0. S2 lapses at TTL; S1
+        // then contradicts. One fresh word from one observer is not the
+        // verified set minus a dissenter -- it is a verdict that already
+        // lapsed -- so there is nothing to hold.
+        let mut m = manager_with(&[S1, S2]);
+        let _ = m.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 10);
+        let _ = m.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 0);
+        assert!(verified(&m));
+        assert_eq!(
+            m.expire_evidence(TTL).map(|c| c.to),
+            Some(ReachabilityVerdict::Unknown),
+            "S2 lapsed, threshold unmet, no failure"
+        );
+        // And a later contradiction from S1 while S1's own success is
+        // still fresh does not resurrect anything.
+        let change = m
+            .record_outcome(A, &peer(S1), ProbeOutcome::Unreachable, TTL + 1)
+            .expect("unknown to not_verified");
+        assert_eq!(
+            change.to,
+            ReachabilityVerdict::NotVerified {
+                last_failure_at_ms: Some(TTL + 1)
+            }
+        );
     }
 
     #[test]
@@ -1119,10 +1239,8 @@ mod tests {
         let change = m.set_candidates([B], 1).expect("A is withdrawn");
         assert_eq!(
             change.to,
-            ReachabilityVerdict::NotVerified {
-                last_failure_at_ms: None
-            },
-            "B alone has one success"
+            ReachabilityVerdict::Unknown,
+            "B alone has one success, which is insufficient evidence"
         );
         // And A's evidence is GONE: re-adding it inside the TTL does not
         // re-verify it from before.
@@ -1180,7 +1298,7 @@ mod tests {
         let _ = m.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 0);
         assert!(verified(&m));
         let change = m.remove_server(&peer(S2), 1).expect("below threshold");
-        assert_eq!(change.to.state(), DirectInboundState::NotVerified);
+        assert_eq!(change.to, ReachabilityVerdict::Unknown);
         assert!(!m.is_server(&peer(S2)));
         // And it is a stranger now: its later word is dropped.
         assert!(

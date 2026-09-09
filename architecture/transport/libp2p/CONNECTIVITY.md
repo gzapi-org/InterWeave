@@ -182,16 +182,17 @@ Per-address observations are keyed by:
 (tested_address, probe_server_peer_id)
 ```
 
-Each observation contains success/failure, time, and expiry.
+Each observation is keyed by `(tested_address, server)` and carries that server's latest success and latest failure with their times; each server counts once, with its latest word (`AUTONAT.md` §4).
 
 Default architecture targets:
 
 - minimum distinct successful authorized servers for `VerifiedPublic`: **2**;
-- success evidence TTL: **15 min**;
-- retry cadence while unknown/not verified: **30 s**, exponentially/backoff bounded by **5 min**;
+- evidence TTL: **15 min**, for a success and for a failure alike;
+- retry after a failure: **30 s**, exponentially/backoff bounded by **5 min** — the dial gate's constants, applied to a re-test rather than read from a configuration key (`AUTONAT.md` §4, Amendment 2026-09-09 (ii));
 - refresh cadence while verified: **5 min**;
-- max concurrent client probes: **2**;
-- max candidate addresses tested per evaluation cycle: **4**.
+- max candidate addresses tested per sweep: **4**.
+
+The client's in-flight bound and per-probe timeout are the pinned crate's own (10 and 10 s) and are not configurable; the 2 and 15 s an earlier revision of this list named were keys nothing could honour.
 
 `VerifiedPublic` for an address is entered only when at least two distinct currently authorized AutoNAT servers have recent success for that exact normalized address. One success remains useful diagnostics but keeps aggregate state `Unknown`/not fully verified.
 
@@ -595,7 +596,7 @@ Reachability-specific defaults are summarized in `docs/architecture/resource-lim
 
 Client defaults:
 
-- AutoNAT probes inflight: 2;
+- AutoNAT probes inflight: the crate's 10 per connection, not configurable;
 - AutoNAT distinct confirmations: 2;
 - relay reservations private/unknown: 2;
 - relay reservations public: 1;
@@ -640,7 +641,7 @@ Required bounded diagnostics:
 
 - `direct_inbound_state` and state transitions;
 - tested-address counts without raw public labels in metrics;
-- AutoNAT probes started/succeeded/failed/timeouts by bounded reason;
+- AutoNAT probes succeeded/failed and re-tests by bounded reason (a client-side timeout is not observable: the crate reports it as no event);
 - distinct evidence-server count;
 - relay candidates/active reservations/target;
 - reservation accepted/renewed/denied/closed/backoff;
