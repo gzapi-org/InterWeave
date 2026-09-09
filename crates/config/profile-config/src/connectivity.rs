@@ -1910,7 +1910,13 @@ mod tests {
             "the fixture must exceed the address limit: {}",
             over_address.len()
         );
-        let entry = format!("{over_address}/p2p/{P1}");
+        // THE PEER IS `P2` AND ONLY `P1` IS AUTHORIZED, so this entry is
+        // over-long AND unauthorized -- which is what makes the
+        // accumulation testable. While it carried `P1` the peer was
+        // authorized, so only the length error could arise, and
+        // restoring the early `return` the accumulation replaced broke
+        // nothing. Review finding on PR #80.
+        let entry = format!("{over_address}/p2p/{P2}");
         assert!(
             entry.len() < MAX_STATIC_PEER_BYTES,
             "and stay under the ENTRY limit, or the entry ceiling would catch it: {}",
@@ -1930,6 +1936,13 @@ mod tests {
                     if reason.contains("longer than a candidate address")
             )),
             "an over-long address half must be refused: {errors:?}"
+        );
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ConfigError::StaticCandidateUnauthorized { peer, .. } if peer.as_str() == P2
+            )),
+            "and the length complaint must not hide the authorization verdict: {errors:?}"
         );
 
         // And the entry ceiling still bites above its own bound, while
