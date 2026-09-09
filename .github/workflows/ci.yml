@@ -45,12 +45,26 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# The cargo-deny pin lives HERE, once, because two jobs install it and a
-# version bumped in one place only would leave the self-tests exercising a
-# different binary from the checks — green for a reason nobody could see.
+# Each tool's pin lives HERE, once — cargo-deny's and shellcheck's — because
+# two jobs install each of them and a version bumped in one place only would
+# leave the self-tests exercising a different binary from the checks — green
+# for a reason nobody could see.
 env:
   CARGO_DENY_VERSION: "0.20.2"
   CARGO_DENY_SHA256: "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
+  # Pinned for the same reason, and with a sharper one: shellcheck's
+  # SEVERITY CLASSIFICATION is a property of the release. A runner-image
+  # bump that promoted any currently-`info` code to `warning` would turn a
+  # required context red on a PR whose diff explains nothing — SC2015 is
+  # the obvious candidate, 158 sites on 0.11.0, the assertion idiom most
+  # self-tests under tools/checks/ are built from — and would fail the guard's own self-test
+  # in the same run. Taking it from
+  # whatever the image ships would also let the severity classification
+  # the self-test pins vary by runner image. 0.11.0 is what Fedora 43
+  # packages, so a developer's
+  # `dnf install ShellCheck` and CI agree.
+  SHELLCHECK_VERSION: "v0.11.0"
+  SHELLCHECK_SHA256: "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
 
 jobs:
   rust:
@@ -155,6 +169,33 @@ jobs:
       - name: No first-party source selects the vulnerable yamux muxer
         run: bash tools/checks/check_yamux_muxer.sh
 
+      # Shell got the reviewer's eye and no check at all until this, while
+      # Rust gets `clippy -D warnings`.
+      #
+      # INSTALLED FROM A PINNED TARBALL rather than taken from the runner
+      # image, the same discipline as cargo-deny above and for a reason
+      # specific to this tool: severity classification belongs to the
+      # release, so an image bump could turn this required context red
+      # with nothing in the diff to explain it.
+      - name: Install shellcheck
+        run: |
+          set -euo pipefail
+          asset="shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          url="https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/${asset}"
+          curl -fsSL -o "$asset" "$url"
+          echo "${SHELLCHECK_SHA256}  ${asset}" | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/bin"
+          tar -xJf "$asset" --strip-components=1 -C "${RUNNER_TEMP}/bin" \
+            "shellcheck-${SHELLCHECK_VERSION}/shellcheck"
+          echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
+          "${RUNNER_TEMP}/bin/shellcheck" --version
+
+      # The guard exits 2 rather than 0 when shellcheck is absent, so a
+      # failed install above surfaces here as a refusal and never as a
+      # silent skip.
+      - name: Every tracked shell script passes shellcheck
+        run: bash tools/checks/check_shell_scripts.sh
+
       # Also outside cargo-deny's reach: this is a property of a
       # dependency's internals, which no version pin describes.
       - name: GossipSub still refuses invalid signatures during decode
@@ -250,6 +291,28 @@ jobs:
             "cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl/cargo-deny"
           echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
           "${RUNNER_TEMP}/bin/cargo-deny" --version
+
+      # THE SAME PIN HERE, because this job is where
+      # `test_check_shell_scripts.sh` runs, and jobs share no installed
+      # tools. Installed only in tree-checks, the self-test judged the
+      # guard against whatever shellcheck the runner image bundles -- a
+      # different release from the one the guard runs under, which is the
+      # split the cargo-deny comment above exists to prevent -- and an
+      # image that stopped bundling it would have turned `tool self-tests`
+      # red with nothing in the diff to explain it. Both reviewers on
+      # PR #82 found this independently.
+      - name: Install shellcheck
+        run: |
+          set -euo pipefail
+          asset="shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          url="https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/${asset}"
+          curl -fsSL -o "$asset" "$url"
+          echo "${SHELLCHECK_SHA256}  ${asset}" | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/bin"
+          tar -xJf "$asset" --strip-components=1 -C "${RUNNER_TEMP}/bin" \
+            "shellcheck-${SHELLCHECK_VERSION}/shellcheck"
+          echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
+          "${RUNNER_TEMP}/bin/shellcheck" --version
 
       # The suites mock `gh` and `curl` on PATH, so no token and no
       # network are used. They do need jq and coreutils `timeout`, both

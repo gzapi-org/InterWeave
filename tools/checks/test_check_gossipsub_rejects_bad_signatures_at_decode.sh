@@ -76,14 +76,25 @@ RS
 RS
   # Pin the guard's expectation to THIS fixture, so every case below
   # exercises the real comparison rather than a copy of it.
-  export INTERWEAVE_REVIEWED_PROTOCOL_SHA256="$(
+  # ASSIGNED THEN EXPORTED, separately. `export X="$(...)"` returns
+  # `export`'s status, not the substitution's -- SC2155, a warning-level
+  # finding the shell guard admits. The split does not by itself make a
+  # failed pipeline fatal: this file runs without `set -e` and reads no
+  # status here, so a digest of NOTHING -- sha256 of empty input --
+  # would still be exported. What catches that is the accepted-fixture
+  # case below, which fails loudly against that expectation rather than
+  # passing vacuously.
+  local protocol_sha behaviour_sha
+  protocol_sha=$(
     sed 's;//.*$;;' "$work/src/protocol.rs" \
       | sed 's/[[:space:]]\+/ /g;s/^ //;s/ $//' | grep -v '^$' | sha256sum | cut -d' ' -f1
-  )"
-  export INTERWEAVE_REVIEWED_BEHAVIOUR_SHA256="$(
+  )
+  behaviour_sha=$(
     sed 's;//.*$;;' "$work/src/behaviour.rs" \
       | sed 's/[[:space:]]\+/ /g;s/^ //;s/ $//' | grep -v '^$' | sha256sum | cut -d' ' -f1
-  )"
+  )
+  export INTERWEAVE_REVIEWED_PROTOCOL_SHA256="$protocol_sha"
+  export INTERWEAVE_REVIEWED_BEHAVIOUR_SHA256="$behaviour_sha"
 }
 
 run_guard() { INTERWEAVE_GOSSIPSUB_SRC="$work/src" bash "$GUARD" >/dev/null 2>&1; }

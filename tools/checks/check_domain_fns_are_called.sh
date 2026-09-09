@@ -159,6 +159,13 @@ if ! [[ "$open_stage" =~ ^[0-9]+$ ]]; then
 fi
 
 # name -> "stage reason", parsed once.
+# `exempt_reason` is READ, in both deadline-passed diagnostics. It was
+# populated and read nowhere until the shellcheck guard's first run found
+# it -- an exemption's reason parsed and thrown away, which is the one
+# thing a reader of an expired deadline wants. The `:-` default at those
+# two sites is unreachable by construction, since the parser below exits
+# when a deadline carries no reason; it is there because `set -u` makes a
+# missing key fatal and a diagnostic is the worst place to abort.
 declare -A exempt_stage exempt_reason exempt_call
 exempt_count=0
 if [[ -f "$EXEMPT_FILE" ]]; then
@@ -316,7 +323,7 @@ for file in "${domain[@]}"; do
                 if [[ -n "${exempt_stage[$owner]:-}" ]]; then
                     seen_exempt["$owner"]=1
                     if (( exempt_stage[$owner] < open_stage )); then
-                        echo "check_domain_fns_are_called: $file: type \`$owner\` is exempt until stage ${exempt_stage[$owner]}, but stage $open_stage is open — the deadline passed." >&2
+                        echo "check_domain_fns_are_called: $file: type \`$owner\` is exempt until stage ${exempt_stage[$owner]} (${exempt_reason[$owner]:-no reason recorded}), but stage $open_stage is open — the deadline passed." >&2
                         problems=$((problems + 1))
                     fi
                 else
@@ -364,7 +371,7 @@ for file in "${domain[@]}"; do
                 echo "check_domain_fns_are_called: $EXEMPT_FILE: \`$qualified\` is exempt but IS referred to elsewhere — drop the entry." >&2
                 problems=$((problems + 1))
             elif (( exempt_stage[$qualified] < open_stage )); then
-                echo "check_domain_fns_are_called: $file: \`$qualified\` is exempt until stage ${exempt_stage[$qualified]}, but stage $open_stage is open — the deadline passed." >&2
+                echo "check_domain_fns_are_called: $file: \`$qualified\` is exempt until stage ${exempt_stage[$qualified]} (${exempt_reason[$qualified]:-no reason recorded}), but stage $open_stage is open — the deadline passed." >&2
                 problems=$((problems + 1))
             fi
             continue

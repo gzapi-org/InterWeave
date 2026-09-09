@@ -112,6 +112,11 @@ fn tree_checks() -> Vec<Task> {
             &["tools/checks/check_yamux_muxer.sh"],
         ),
         Task::new(
+            "every tracked shell script passes shellcheck",
+            "bash",
+            &["tools/checks/check_shell_scripts.sh"],
+        ),
+        Task::new(
             "gossipsub still refuses invalid signatures during decode",
             "bash",
             &["tools/checks/check_gossipsub_rejects_bad_signatures_at_decode.sh"],
