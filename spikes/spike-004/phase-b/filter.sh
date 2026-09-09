@@ -96,9 +96,12 @@ digits_of() {
 }
 [ "$(digits_of "$HOLD_SECONDS")" -le 3 ] \
   || { echo "HOLD_SECONDS holds '$HOLD_SECONDS', which has too many digits to be a number of seconds in 1-120" >&2; exit 2; }
+# THE SPELLING THE CALLER TYPED in the message, as the port loop below
+# does: `0200` reported as "holds '200'" names a number nobody wrote.
+hold_spelling="$HOLD_SECONDS"
 HOLD_SECONDS=$((10#$HOLD_SECONDS))
 [ "$HOLD_SECONDS" -ge 1 ] && [ "$HOLD_SECONDS" -le 120 ] \
-  || { echo "HOLD_SECONDS holds '$HOLD_SECONDS'; the window must be 1-120 seconds" >&2; exit 2; }
+  || { echo "HOLD_SECONDS holds '$hold_spelling'; the window must be 1-120 seconds" >&2; exit 2; }
 
 for port_name in PROBE_PORT PROBE_PORT_ALT ALT_SOURCE_PORT SRC_PORT; do
   eval "port_value=\$$port_name"
