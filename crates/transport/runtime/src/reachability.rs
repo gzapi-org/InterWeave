@@ -6,7 +6,7 @@
 //! behaviour, and a `ReachabilityManager` owns POLICY and EVIDENCE. This
 //! is that manager. It decides which `(address, server)` pairs are due a
 //! probe, folds probe outcomes into evidence, and derives the
-//! `DirectInboundState` that `contracts/CONNECTIVITY.md` §5 and the
+//! `ReachabilityVerdict` that `contracts/CONNECTIVITY.md` §5 and the
 //! `connectivity-summary` schema describe. It opens no socket and reads no
 //! clock: every method that can expire or schedule anything takes
 //! `now_ms`, so the transitions are testable by enumeration.
@@ -59,7 +59,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use interweave_transport_api::TransportIdentity;
+use interweave_transport_api::{DirectInboundState, TransportIdentity};
 
 /// `AUTONAT.md` §4 defaults, the ones the schema pins as defaults too.
 pub const DEFAULT_REQUIRED_DISTINCT_SUCCESSES: u32 = 2;
@@ -131,12 +131,23 @@ impl std::fmt::Display for ReachabilityError {
 
 impl std::error::Error for ReachabilityError {}
 
-/// `contracts/CONNECTIVITY.md` §5's state.
+/// `contracts/CONNECTIVITY.md` §5's state, with the evidence behind it.
+///
+/// NOT the wire type. `interweave_transport_api::DirectInboundState` is
+/// the neutral three-word enum the `connectivity-summary` schema pins
+/// (`transport-api/tests/schema_agreement.rs`); this carries the same
+/// three answers plus what they rest on, and [`ReachabilityVerdict::
+/// state`] is the one place the two are mapped. An earlier version of
+/// this module declared its own `DirectInboundState` with a hand-written
+/// `summary_word` returning string literals, which is a second copy of a
+/// normative vocabulary with nothing comparing them -- CLAUDE.md §7's
+/// "avoid duplicating normative constants … unless there is a drift
+/// check". Review finding on PR #84.
 ///
 /// `NotVerified` deliberately claims no NAT type: it means the current
 /// evidence does not verify direct inbound reachability.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DirectInboundState {
+pub enum ReachabilityVerdict {
     /// Startup, or insufficient or indeterminate evidence.
     Unknown,
     /// At least one address has fresh successes from enough distinct
@@ -160,14 +171,19 @@ pub enum DirectInboundState {
     },
 }
 
-impl DirectInboundState {
-    /// The `connectivity-summary` schema's `direct_inbound` word.
+impl ReachabilityVerdict {
+    /// The neutral state this verdict reports, for
+    /// `connectivity-summary`.
+    ///
+    /// The schema words come from `DirectInboundState`'s own serde,
+    /// which `transport-api`'s schema-agreement test pins against the
+    /// contract -- so this crate carries no copy of them.
     #[must_use]
-    pub const fn summary_word(&self) -> &'static str {
+    pub const fn state(&self) -> DirectInboundState {
         match self {
-            Self::Unknown => "unknown",
-            Self::VerifiedPublic { .. } => "verified_public",
-            Self::NotVerified { .. } => "not_verified",
+            Self::Unknown => DirectInboundState::Unknown,
+            Self::VerifiedPublic { .. } => DirectInboundState::VerifiedPublic,
+            Self::NotVerified { .. } => DirectInboundState::NotVerified,
         }
     }
 }
@@ -209,9 +225,9 @@ pub struct ProbePlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectivityChanged {
     /// The state before.
-    pub from: DirectInboundState,
+    pub from: ReachabilityVerdict,
     /// The state now.
-    pub to: DirectInboundState,
+    pub to: ReachabilityVerdict,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,7 +257,7 @@ pub struct ReachabilityManager {
     servers: BTreeMap<TransportIdentity, ServerRecord>,
     evidence: BTreeMap<(String, TransportIdentity), Evidence>,
     inflight: BTreeMap<(String, TransportIdentity), u64>,
-    state: DirectInboundState,
+    state: ReachabilityVerdict,
 }
 
 impl ReachabilityManager {
@@ -272,13 +288,13 @@ impl ReachabilityManager {
             servers: BTreeMap::new(),
             evidence: BTreeMap::new(),
             inflight: BTreeMap::new(),
-            state: DirectInboundState::Unknown,
+            state: ReachabilityVerdict::Unknown,
         })
     }
 
     /// The current state.
     #[must_use]
-    pub const fn state(&self) -> &DirectInboundState {
+    pub const fn state(&self) -> &ReachabilityVerdict {
         &self.state
     }
 
@@ -544,7 +560,7 @@ impl ReachabilityManager {
             record.backoff_until_ms = 0;
             record.last_failure_at_ms = None;
         }
-        self.state = DirectInboundState::Unknown;
+        self.state = ReachabilityVerdict::Unknown;
         Self::change(before, &self.state)
     }
 
@@ -556,8 +572,8 @@ impl ReachabilityManager {
     }
 
     fn change(
-        before: DirectInboundState,
-        after: &DirectInboundState,
+        before: ReachabilityVerdict,
+        after: &ReachabilityVerdict,
     ) -> Option<ConnectivityChanged> {
         if before == *after {
             None
@@ -578,7 +594,7 @@ impl ReachabilityManager {
     /// independent failures may invalidate a previously verified address
     /// before TTL". If any address is verified, `VerifiedPublic`; else if
     /// any evidence at all exists, `NotVerified`; else `Unknown`.
-    fn derive(&self, now_ms: u64) -> DirectInboundState {
+    fn derive(&self, now_ms: u64) -> ReachabilityVerdict {
         let mut verified = Vec::new();
         let mut evidence_until = u64::MAX;
         let mut any_evidence = false;
@@ -623,12 +639,12 @@ impl ReachabilityManager {
             .filter_map(|record| record.last_failure_at_ms)
             .max();
         if !verified.is_empty() {
-            DirectInboundState::VerifiedPublic {
+            ReachabilityVerdict::VerifiedPublic {
                 verified_addresses: verified,
                 evidence_until_ms: evidence_until,
             }
         } else if any_evidence {
-            DirectInboundState::NotVerified {
+            ReachabilityVerdict::NotVerified {
                 last_failure_at_ms: match (last_failure, last_incomplete) {
                     (Some(a), Some(b)) => Some(a.max(b)),
                     (a, b) => a.or(b),
@@ -639,7 +655,7 @@ impl ReachabilityManager {
             // `not_verified` to evidence "sufficient to say the proof
             // threshold is not currently satisfied", and a probe that
             // never completed is not that.
-            DirectInboundState::Unknown
+            ReachabilityVerdict::Unknown
         }
     }
 }
@@ -771,7 +787,7 @@ mod tests {
     }
 
     fn verified(m: &ReachabilityManager) -> bool {
-        matches!(m.state(), DirectInboundState::VerifiedPublic { .. })
+        matches!(m.state(), ReachabilityVerdict::VerifiedPublic { .. })
     }
 
     #[test]
@@ -949,7 +965,7 @@ mod tests {
         assert_eq!(
             m.record_outcome(a, &peer(S1), ProbeOutcome::Reachable, 10)
                 .map(|c| c.to),
-            Some(DirectInboundState::NotVerified {
+            Some(ReachabilityVerdict::NotVerified {
                 last_failure_at_ms: None
             })
         );
@@ -964,13 +980,13 @@ mod tests {
             .expect("second distinct server verifies");
         assert_eq!(
             change.to,
-            DirectInboundState::VerifiedPublic {
+            ReachabilityVerdict::VerifiedPublic {
                 verified_addresses: vec![a.to_owned()],
                 evidence_until_ms: 20 + DEFAULT_SUCCESS_EVIDENCE_TTL_MS,
             },
             "evidence_until is the EARLIEST counting success's expiry"
         );
-        assert_eq!(m.state().summary_word(), "verified_public");
+        assert_eq!(m.state().state(), DirectInboundState::VerifiedPublic);
     }
 
     #[test]
@@ -991,7 +1007,7 @@ mod tests {
         );
         assert_eq!(
             *m.state(),
-            DirectInboundState::Unknown,
+            ReachabilityVerdict::Unknown,
             "two strangers verify nothing"
         );
     }
@@ -1015,7 +1031,7 @@ mod tests {
             .expect("lapses at the TTL");
         assert_eq!(
             change.to,
-            DirectInboundState::Unknown,
+            ReachabilityVerdict::Unknown,
             "no evidence left, so unknown rather than not_verified"
         );
     }
@@ -1050,7 +1066,7 @@ mod tests {
         let _ = m.record_outcome(a, &peer(S4), ProbeOutcome::Unreachable, 6);
         assert_eq!(
             *m.state(),
-            DirectInboundState::NotVerified {
+            ReachabilityVerdict::NotVerified {
                 last_failure_at_ms: Some(6)
             },
             "two fresh independent failures invalidate before TTL"
@@ -1120,7 +1136,7 @@ mod tests {
             m.expire_inflight(DEFAULT_PROBE_TIMEOUT_MS).is_none(),
             "indeterminate: unknown to unknown is no change"
         );
-        assert_eq!(*m.state(), DirectInboundState::Unknown);
+        assert_eq!(*m.state(), ReachabilityVerdict::Unknown);
         assert!(
             !m.has_outstanding_probe_to(&peer(S1)),
             "and is no longer outstanding"
@@ -1131,7 +1147,7 @@ mod tests {
         let _ = m.record_outcome(a, &peer(S1), ProbeOutcome::Unreachable, 20_000);
         assert_eq!(
             *m.state(),
-            DirectInboundState::NotVerified {
+            ReachabilityVerdict::NotVerified {
                 last_failure_at_ms: Some(20_000)
             }
         );
@@ -1233,7 +1249,7 @@ mod tests {
         let _ = m.record_outcome(a, &peer(S1), ProbeOutcome::Reachable, 0);
         let _ = m.record_outcome(a, &peer(S2), ProbeOutcome::Reachable, 10);
         let _ = m.record_outcome(a, &peer(S3), ProbeOutcome::Reachable, 20);
-        let DirectInboundState::VerifiedPublic {
+        let ReachabilityVerdict::VerifiedPublic {
             evidence_until_ms, ..
         } = m.state().clone()
         else {
@@ -1249,12 +1265,12 @@ mod tests {
             .expire_evidence(evidence_until_ms)
             .expect("the earliest counting expiry rolls forward");
         assert_eq!(
-            change.from.summary_word(),
-            change.to.summary_word(),
+            change.from.state(),
+            change.to.state(),
             "the word does not change: {change:?}"
         );
         assert!(verified(&m), "so the claim OUTLIVES evidence_until_ms");
-        let DirectInboundState::VerifiedPublic {
+        let ReachabilityVerdict::VerifiedPublic {
             evidence_until_ms: now_until,
             ..
         } = m.state().clone()
@@ -1270,7 +1286,7 @@ mod tests {
             .expect("now the threshold is not met");
         assert_eq!(
             change.to,
-            DirectInboundState::NotVerified {
+            ReachabilityVerdict::NotVerified {
                 last_failure_at_ms: None
             },
             "one fresh success left, and no failure to report"
@@ -1329,7 +1345,7 @@ mod tests {
         let _ = m.due_probes(1);
         assert!(verified(&m));
         let change = m.network_changed().expect("a change");
-        assert_eq!(change.to, DirectInboundState::Unknown);
+        assert_eq!(change.to, ReachabilityVerdict::Unknown);
         assert!(!m.has_outstanding_probe_to(&peer(S1)) && !m.has_outstanding_probe_to(&peer(S2)));
         assert!(
             m.network_changed().is_none(),
@@ -1349,26 +1365,36 @@ mod tests {
         let change = m
             .remove_server(&peer(S2), 1)
             .expect("losing an observer changes the state");
-        assert!(matches!(change.to, DirectInboundState::NotVerified { .. }));
+        assert!(matches!(change.to, ReachabilityVerdict::NotVerified { .. }));
     }
 
     #[test]
-    fn the_summary_words_are_the_schemas() {
-        assert_eq!(DirectInboundState::Unknown.summary_word(), "unknown");
+    fn every_verdict_maps_to_the_neutral_state_of_the_same_name() {
+        // THE WORDS ARE NOT HERE. They are `DirectInboundState`'s serde,
+        // pinned against `connectivity-summary.schema.json` by
+        // `transport-api/tests/schema_agreement.rs`, so this asserts the
+        // mapping and lets that test own the vocabulary. The version
+        // this replaced compared string literals to string literals in
+        // a crate that reads no schema -- it could not fail if the two
+        // diverged, which is the case it was named for.
         assert_eq!(
-            DirectInboundState::VerifiedPublic {
+            ReachabilityVerdict::Unknown.state(),
+            DirectInboundState::Unknown
+        );
+        assert_eq!(
+            ReachabilityVerdict::VerifiedPublic {
                 verified_addresses: vec![],
                 evidence_until_ms: 0
             }
-            .summary_word(),
-            "verified_public"
+            .state(),
+            DirectInboundState::VerifiedPublic
         );
         assert_eq!(
-            DirectInboundState::NotVerified {
+            ReachabilityVerdict::NotVerified {
                 last_failure_at_ms: None
             }
-            .summary_word(),
-            "not_verified"
+            .state(),
+            DirectInboundState::NotVerified
         );
     }
 }

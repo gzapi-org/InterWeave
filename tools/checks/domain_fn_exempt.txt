@@ -167,7 +167,6 @@ ConnectionManager::scheduled_retries             stage-11  dial-management intro
 ConnectionPolicy::address_entries                stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
 ConnectionPolicy::peer_entries                   stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
 ConnectionPolicy::prune                          stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
-DirectInboundState::summary_word                 stage-11  the connectivity-summary word, emitted by step 3's libp2p adapter
 is_probeable_address                             stage-11  AUTONAT.md §6 candidate scope; the adapter filters the swarm's candidates with it
 PeerBackoff::is_clear_at                         stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
 PeerBackoff::is_punitive_at                      stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
@@ -177,6 +176,7 @@ PolicySnapshot::connections                      stage-11  dial-management intro
 PolicySnapshot::pending_dials                    stage-11  dial-management introspection, first read by the reachability stack
 PolicySnapshot::revision                         stage-11  dial-management introspection, first read by the reachability stack
 ReachabilityManager                              stage-11  AutoNAT client policy; step 3's libp2p adapter constructs and drives it
+ReachabilityVerdict                              stage-11  the verdict and its evidence; the adapter maps it to DirectInboundState
 
 # --- stage-12 ----------------------------------------------------
 DedupCache::expire                               stage-12  expiry and introspection driven at runtime composition
