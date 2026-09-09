@@ -95,7 +95,7 @@ measured=""
 # the same shape as the row set that measured nothing. Review finding on
 # PR #78.
 probe_domain() {
-  local peer="$1" router="$2" lan="$3" expect="$4" reported class ports
+  local peer="$1" router="$2" lan="$3" expect="$4" reported class ports filtering
   printf -- '-- %s behind %s --\n' "$peer" "$router"
   reported=$(PEER="$peer" ROUTER="$router" LAN="$lan" EXPECT="$expect" \
     "$here/probe.sh")
@@ -103,11 +103,38 @@ probe_domain() {
   ports=$(printf '%s\n' "$reported" | sed -n 's/^PORTS=//p')
   [ -n "$ports" ] \
     || { echo "$peer: probe.sh reported no ports beside its class" >&2; return 1; }
-  measured="$measured $peer=$class($ports)"
+
+  # BOTH HALVES OF RFC 4787, measured on the same domain. Mapping alone
+  # says nothing about whether a punch succeeds -- filtering is the other
+  # input -- and the harness reported one and called the other a
+  # non-goal until `filter.sh` existed.
+  reported=$(PEER="$peer" ROUTER="$router" LAN="$lan" \
+    EXPECT_FILTER="$EXPECT_FILTER" "$here/filter.sh")
+  filtering=$(printf '%s\n' "$reported" | sed -n 's/^FILTER=//p')
+  [ -n "$filtering" ] \
+    || { echo "$peer: filter.sh reported no class" >&2; return 1; }
+
+  measured="$measured $peer=$class($ports)/$filtering"
 }
 
+# THE FILTERING CLASS EACH ROW IS BUILT FOR, and `conntrack` is the
+# honest default: it is what masquerade alone gives, and it is the row a
+# deployment actually meets. `address-restricted` and `full-cone` exist
+# so the classifier has a positive control for every branch -- with
+# conntrack alone it can only answer one way, which is indistinguishable
+# from a constant. They need `NAT_MODE=eim`, since a static forward
+# cannot name a per-flow mapped port.
+FILTER_MODE="${FILTER_MODE:-conntrack}"
+case "$FILTER_MODE" in
+  conntrack) EXPECT_FILTER=apdf ;;
+  address-restricted) EXPECT_FILTER=adf ;;
+  full-cone) EXPECT_FILTER=eif ;;
+  *) echo "unknown FILTER_MODE: $FILTER_MODE" >&2; exit 2 ;;
+esac
+export FILTER_MODE
+
 for mode in "$@"; do
-  printf '\n== NAT_MODE=%s ==\n' "$mode"
+  printf '\n== NAT_MODE=%s FILTER_MODE=%s ==\n' "$mode" "$FILTER_MODE"
   NAT_MODE="$mode" "$here/topology.sh" up
   # BOTH DOMAINS ARE MEASURED, and the second one is why. A hole punch
   # needs two peers each behind their OWN translation, so the topology

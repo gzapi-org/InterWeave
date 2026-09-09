@@ -9,7 +9,8 @@ behaviour is chosen rather than inherited, and proves the NAT is what it
 claims to be.
 
 ```
-./run.sh          # every row, both domains: build, measure, assert, tear down
+./run.sh          # every row, both domains, mapping and filtering
+FILTER_MODE=full-cone MODES=eim ./run.sh   # a control for the classifier
 
 # The manual path needs the image, which only run.sh builds -- without
 # this, `topology.sh up` tries to pull a tag that exists nowhere and
@@ -30,22 +31,35 @@ peer B sends from `10.89.2.3:45000` and they see `10.89.0.5` — each
 router's own address. Phase A had no NAT at all, and the first thing
 this harness owes is evidence that these ones do.
 
-**That the mapping behaviour is the one that was asked for.** Mapping is
-one of the two things that decide whether a hole punch succeeds;
-filtering is the other, and is neither configured nor measured here — so
-**these rows license a claim about the mapping a punch would face, and
-no claim about a punch at all.** Not that one would succeed, and not
-that one would fail.
+**That the mapping behaviour is the one that was asked for, and the
+FILTERING behaviour too.** RFC 4787 classifies a NAT by both, and until
+`filter.sh` existed this harness measured one and called the other a
+non-goal — which is why no row licensed a claim about a punch at all.
+Both are measured per domain now:
 
-That last half took four attempts to state without overreaching, so the
-counterexample is worth keeping: even with BOTH peers behind `eds`,
-failure does not follow from the mapping. If either side's filtering is
-endpoint-independent, the other peer's packet is forwarded through the
-relay-created mapping whatever its source, and the punch can still land.
-`eds` on both sides is the mapping a failing punch would face; whether
-it fails is decided by filtering this harness does not set. No punch is
-attempted here in any case — the relay, the nodes and DCUtR arrive with
-steps 5, 6 and 8.
+| `FILTER_MODE` | measured | which sources reached the peer |
+| --- | --- | --- |
+| `conntrack` | `apdf` — address-and-port-dependent, a port-restricted cone | the addressed endpoint only |
+| `address-restricted` | `adf` — address-dependent | that address, any port |
+| `full-cone` | `eif` — endpoint-independent | any source |
+
+`conntrack` is the default and the honest row: it is what masquerade
+alone gives and what a deployment actually meets. **The other two exist
+so the classifier has a positive control for every branch** — with
+conntrack alone it can only ever answer one way, and a classifier with
+two unreachable branches is indistinguishable from a constant. They
+install an nftables forward and need `NAT_MODE=eim`, since a static
+forward cannot name a per-flow mapped port.
+
+**What the two together still do not license is a claim about a punch.**
+They are the two NAT inputs; the third is the implementation — DCUtR's
+address exchange and its timing — and no node runs here. So a row says
+what a punch would face, not what it would do. That sentence took four
+attempts to state without overreaching in one direction or the other,
+so the counterexample stays: even `eds` on both sides does not entail
+failure, because an endpoint-independent filter on either side forwards
+the other peer's packet through the relay-created mapping whatever its
+source. The relay, the nodes and DCUtR arrive with steps 5, 6 and 8.
 
 Neither row rules an ATTEMPT out either: `DCUTR.md` §2 lists the
 eligibility conditions and NAT class is not among them, and §9 requires
@@ -59,17 +73,14 @@ whether a punch can be attempted; it does not:
 | `eim` | `masquerade` | one port for both destinations | endpoint-independent MAPPING |
 | `eds` | `masquerade random` | a port per destination | endpoint-dependent MAPPING |
 
-**Mapping only — filtering is neither configured nor measured.** RFC 4787
-classifies a NAT by both. The filtering here is READ rather than
-measured: with a `nat postrouting` chain and no DNAT, an inbound packet
-matching no conntrack entry is never reverse-translated, which makes
-`eim` a port-restricted cone rather than a full cone. That is the same
-reasoning-from-internals the `eds` paragraph below retracts, so it is
-marked as read. Measuring it needs a third host to send INTO the mapped
-external port unsolicited — an inbound the peer never asked for — and
-this harness has no such probe: everything it sends originates behind
-the NAT, and an outbound from anywhere measures the mapping rather than
-the filtering. Whether a punch succeeds depends on filtering too, so
+**Filtering is measured, not read.** It used to be reasoned about here:
+with a `nat postrouting` chain and no DNAT, an inbound packet matching no
+conntrack entry is never reverse-translated, so `eim` is a
+port-restricted cone rather than a full one. True, and the same
+reasoning-from-internals the `eds` paragraph below retracts — so
+`filter.sh` now sends the inbound instead. A third host aims a datagram
+the peer never asked for at the mapped external port, and the class is
+which sources arrive. Whether a punch succeeds depends on filtering too, so
 neither row licenses a claim about DCUtR succeeding; what they license
 is a claim about the mapping it would face.
 
@@ -91,12 +102,13 @@ machine, so expect different numbers and the same shape:
 
 ```
 
-== NAT_MODE=eim ==
-  router-a lan=10.89.1.2 pub=10.89.0.4
+== NAT_MODE=eim FILTER_MODE=conntrack ==
+  router-a lan=10.89.1.2 pub=10.89.0.5
   natm-router: snat on eth0 using: masquerade
-  router-b lan=10.89.2.2 pub=10.89.0.5
+  router-b lan=10.89.2.2 pub=10.89.0.6
   natm-router-b: snat on eth0 using: masquerade
   NAT mode: eim (both domains)
+  filter  : conntrack (both domains)
   kernel : 6.17.9-1.qubes.fc37.x86_64
   podman : podman version 5.8.4
   nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router)
@@ -105,34 +117,43 @@ machine, so expect different numbers and the same shape:
 -- natm-peer behind natm-router --
 from port 45000
   peer private   : 10.89.1.3 45000
-  router public  : 10.89.0.4
-  observer 1 saw : 10.89.0.4 45000
-  observer 2 saw : 10.89.0.4 45000
-from port 45001
-  peer private   : 10.89.1.3 45001
-  router public  : 10.89.0.4
-  observer 1 saw : 10.89.0.4 45001
-  observer 2 saw : 10.89.0.4 45001
-VERDICT: ENDPOINT-INDEPENDENT MAPPING (one external port for both destinations, in every trial)
--- natm-peer-b behind natm-router-b --
-from port 45000
-  peer private   : 10.89.2.3 45000
   router public  : 10.89.0.5
   observer 1 saw : 10.89.0.5 45000
   observer 2 saw : 10.89.0.5 45000
 from port 45001
-  peer private   : 10.89.2.3 45001
+  peer private   : 10.89.1.3 45001
   router public  : 10.89.0.5
   observer 1 saw : 10.89.0.5 45001
   observer 2 saw : 10.89.0.5 45001
 VERDICT: ENDPOINT-INDEPENDENT MAPPING (one external port for both destinations, in every trial)
+peer private   : 10.89.1.3 45000
+prober saw     : 10.89.0.5 45000
+peer received  : CONTROL
+VERDICT: ADDRESS-AND-PORT-DEPENDENT FILTERING (a port-restricted cone: only the addressed endpoint reaches the mapping)
+-- natm-peer-b behind natm-router-b --
+from port 45000
+  peer private   : 10.89.2.3 45000
+  router public  : 10.89.0.6
+  observer 1 saw : 10.89.0.6 45000
+  observer 2 saw : 10.89.0.6 45000
+from port 45001
+  peer private   : 10.89.2.3 45001
+  router public  : 10.89.0.6
+  observer 1 saw : 10.89.0.6 45001
+  observer 2 saw : 10.89.0.6 45001
+VERDICT: ENDPOINT-INDEPENDENT MAPPING (one external port for both destinations, in every trial)
+peer private   : 10.89.2.3 45000
+prober saw     : 10.89.0.6 45000
+peer received  : CONTROL
+VERDICT: ADDRESS-AND-PORT-DEPENDENT FILTERING (a port-restricted cone: only the addressed endpoint reaches the mapping)
 
-== NAT_MODE=eds ==
-  router-a lan=10.89.1.2 pub=10.89.0.4
+== NAT_MODE=eds FILTER_MODE=conntrack ==
+  router-a lan=10.89.1.2 pub=10.89.0.5
   natm-router: snat on eth0 using: masquerade random
-  router-b lan=10.89.2.2 pub=10.89.0.5
+  router-b lan=10.89.2.2 pub=10.89.0.6
   natm-router-b: snat on eth0 using: masquerade random
   NAT mode: eds (both domains)
+  filter  : conntrack (both domains)
   kernel : 6.17.9-1.qubes.fc37.x86_64
   podman : podman version 5.8.4
   nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router)
@@ -141,29 +162,37 @@ VERDICT: ENDPOINT-INDEPENDENT MAPPING (one external port for both destinations, 
 -- natm-peer behind natm-router --
 from port 45000
   peer private   : 10.89.1.3 45000
-  router public  : 10.89.0.4
-  observer 1 saw : 10.89.0.4 14321
-  observer 2 saw : 10.89.0.4 50980
+  router public  : 10.89.0.5
+  observer 1 saw : 10.89.0.5 2853
+  observer 2 saw : 10.89.0.5 40401
 from port 45001
   peer private   : 10.89.1.3 45001
-  router public  : 10.89.0.4
-  observer 1 saw : 10.89.0.4 25387
-  observer 2 saw : 10.89.0.4 21432
+  router public  : 10.89.0.5
+  observer 1 saw : 10.89.0.5 18734
+  observer 2 saw : 10.89.0.5 37132
 VERDICT: ENDPOINT-DEPENDENT MAPPING (a port per destination)
+peer private   : 10.89.1.3 45000
+prober saw     : 10.89.0.5 37124
+peer received  : CONTROL
+VERDICT: ADDRESS-AND-PORT-DEPENDENT FILTERING (a port-restricted cone: only the addressed endpoint reaches the mapping)
 -- natm-peer-b behind natm-router-b --
 from port 45000
   peer private   : 10.89.2.3 45000
-  router public  : 10.89.0.5
-  observer 1 saw : 10.89.0.5 22307
-  observer 2 saw : 10.89.0.5 56711
+  router public  : 10.89.0.6
+  observer 1 saw : 10.89.0.6 26111
+  observer 2 saw : 10.89.0.6 7184
 from port 45001
   peer private   : 10.89.2.3 45001
-  router public  : 10.89.0.5
-  observer 1 saw : 10.89.0.5 20700
-  observer 2 saw : 10.89.0.5 25536
+  router public  : 10.89.0.6
+  observer 1 saw : 10.89.0.6 31205
+  observer 2 saw : 10.89.0.6 8632
 VERDICT: ENDPOINT-DEPENDENT MAPPING (a port per destination)
+peer private   : 10.89.2.3 45000
+prober saw     : 10.89.0.6 9717
+peer received  : CONTROL
+VERDICT: ADDRESS-AND-PORT-DEPENDENT FILTERING (a port-restricted cone: only the addressed endpoint reaches the mapping)
 
-measured and matched: natm-peer=eim(45000,45000;45001,45001) natm-peer-b=eim(45000,45000;45001,45001) natm-peer=eds(14321,50980;25387,21432) natm-peer-b=eds(22307,56711;20700,25536)
+measured and matched: natm-peer=eim(45000,45000;45001,45001)/apdf natm-peer-b=eim(45000,45000;45001,45001)/apdf natm-peer=eds(2853,40401;18734,37132)/apdf natm-peer-b=eds(26111,7184;31205,8632)/apdf
 ```
 
 Two things in it are worth reading twice, and one thing about it is

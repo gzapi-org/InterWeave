@@ -7,8 +7,11 @@
 # See README.md for what this does and does not establish. The short
 # version: it builds a real kernel NAT whose MAPPING BEHAVIOUR is chosen
 # rather than inherited, because that behaviour is one of the two things
-# deciding whether a hole punch succeeds — filtering is the other, and is
-# neither configured nor measured here.
+# deciding whether a hole punch succeeds — and `FILTER_MODE` chooses the
+# other, which `filter.sh` then measures. Both halves of RFC 4787's
+# classification are built and observed here; what is still missing is
+# the implementation, which is why a row says what a punch would face
+# rather than what it would do.
 #
 # NO PUNCH IS ATTEMPTED HERE. `run.sh` builds the topology and runs UDP
 # mapping probes; the relay, the nodes and DCUtR arrive with steps 5, 6
@@ -44,6 +47,44 @@ NET_LAN_B="${NET_LAN_B:-natm-lan-b}"
 # The previous version of this comment said a single site was what
 # catches that. Review finding on PR #78.
 ROUTERS="natm-router natm-router-b"
+
+# THE FILTERING PROBER, and it is a separate container for one reason:
+# every port on it must be free to bind. An observer runs
+# `socat UDP-RECVFROM:9000` and therefore cannot send FROM 9000, which is
+# exactly the packet the filtering control has to send -- the reply from
+# the endpoint the peer addressed. Discovered as `bind(5, 0.0.0.0:9000):
+# Address in use` while the control failed and looked like strict
+# filtering.
+PROBER="natm-filt"
+
+# The port the prober is addressed on, and the one beside it. Filtering
+# is classified by which of three sources reaches the peer: this port on
+# the prober (the control), the port beside it (same address, different
+# port), and an observer (a different address entirely).
+PROBE_PORT="${PROBE_PORT:-9001}"
+PROBE_PORT_ALT="${PROBE_PORT_ALT:-9002}"
+
+# The FILTERING behaviour to build, which is independent of the mapping
+# one and is the other half of RFC 4787's classification.
+#
+#   conntrack          -- what masquerade alone gives: only the endpoint
+#                         the peer addressed reaches the mapping. A
+#                         port-restricted cone.
+#   address-restricted -- a forward admitting any port at the prober's
+#                         ADDRESS.
+#   full-cone          -- a forward admitting any source at all.
+#
+# THE TWO FORWARDS EXIST TO MAKE THE CLASSIFIER DISCRIMINATING. With
+# conntrack alone `filter.sh` can only ever answer one way, and a
+# classifier with two unreachable branches is indistinguishable from a
+# constant. These are the positive controls for the other two.
+FILTER_MODE="${FILTER_MODE:-conntrack}"
+
+# The peer port the filtering forwards name. Under `eim` this is also the
+# mapped external port, which is what makes a static forward possible;
+# `filter.sh` binds the same port and learns the mapping rather than
+# assuming it.
+SRC_PORT="${SRC_PORT:-45000}"
 IMAGE="${IMAGE:-interweave-natmatrix:1}"
 
 # The NAT class to build. `eim` gives one external port per internal
@@ -77,6 +118,12 @@ up() {
   done
   await_listener natm-obs1
   await_listener natm-obs2
+
+  # NO LISTENER OF ITS OWN while the topology is up: `filter.sh` starts
+  # one on `$PROBE_PORT` to learn the mapping, then stops it so the same
+  # port is free to send the control from.
+  podman run -d --name "$PROBER" --network "$NET_PUB" \
+    --entrypoint /bin/sh "$IMAGE" -c 'sleep infinity' >/dev/null
 
   podman run -d --name natm-router --network "$NET_PUB" --network "$NET_LAN" \
     --cap-add=NET_ADMIN --sysctl net.ipv4.ip_forward=1 \
@@ -118,7 +165,11 @@ up() {
   route_through natm-peer-b "$router_b_lan"
   configure_nat natm-router-b "$NET_PUB"
 
+  configure_filtering natm-router "$NET_PUB" natm-peer "$NET_LAN"
+  configure_filtering natm-router-b "$NET_PUB" natm-peer-b "$NET_LAN_B"
+
   log "NAT mode: $NAT_MODE (both domains)"
+  log "filter  : $FILTER_MODE (both domains)"
   # shellcheck disable=SC2086
   record_environment $ROUTERS
 }
@@ -377,9 +428,60 @@ NFT
   log "$ctr: snat on $oif using: $rule"
 }
 
+# Build the FILTERING behaviour on one router.
+#
+# `conntrack` installs nothing: masquerade's own reverse path is already
+# address-and-port-dependent, so the absence of a rule IS the row. The
+# other two add a forward for the peer's bound port, which is the mapped
+# port under `eim` -- stated as a restriction rather than papered over,
+# since under `eds` the mapped port is chosen per flow and a static
+# forward cannot name it.
+configure_filtering() {
+  local router="$1" pub="$2" peer="$3" lan="$4"
+  case "$FILTER_MODE" in
+    conntrack) return 0 ;;
+    full-cone | address-restricted) ;;
+    *) echo "unknown FILTER_MODE: $FILTER_MODE" >&2; exit 2 ;;
+  esac
+  if [ "$NAT_MODE" != eim ]; then
+    echo "FILTER_MODE=$FILTER_MODE needs NAT_MODE=eim: a static forward cannot name a per-flow mapped port" >&2
+    exit 2
+  fi
+  local peer_addr oif saddr=""
+  peer_addr=$(addr_on "$peer" "$lan")
+  [ -n "$peer_addr" ] || { echo "no address for $peer on $lan" >&2; return 1; }
+  oif=$(iface_on "$router" "$pub")
+  if [ "$FILTER_MODE" = address-restricted ]; then
+    local prober_addr
+    prober_addr=$(addr_on "$PROBER" "$pub")
+    [ -n "$prober_addr" ] || { echo "no address for $PROBER on $pub" >&2; return 1; }
+    saddr="ip saddr $prober_addr "
+  fi
+  # `dnat ip`, not `dnat`: an `inet` table serves both families, so nft
+  # refuses the ambiguous form with "specify `dnat ip' or `dnat ip6'".
+  local rule="iifname \"$oif\" ${saddr}udp dport $SRC_PORT dnat ip to $peer_addr:$SRC_PORT"
+  podman exec -i "$router" nft -f - <<NFT
+table inet filtering
+flush table inet filtering
+table inet filtering {
+  chain prerouting {
+    type nat hook prerouting priority dstnat; policy accept;
+    $rule
+  }
+}
+NFT
+  local installed
+  installed=$(podman exec "$router" nft list chain inet filtering prerouting) \
+    || { echo "$router: could not read back the filtering chain" >&2; return 1; }
+  installed=$(printf '%s\n' "$installed" | sed -n 's/^[[:space:]]*\(iifname .*\)$/\1/p')
+  [ "$installed" = "$rule" ] \
+    || { echo "$router: filtering chain holds [$installed], expected [$rule]" >&2; return 1; }
+  log "$router: $FILTER_MODE forward on $oif for udp/$SRC_PORT"
+}
+
 down() {
   # shellcheck disable=SC2086
-  podman rm -f natm-obs1 natm-obs2 natm-peer natm-peer-b $ROUTERS \
+  podman rm -f natm-obs1 natm-obs2 natm-peer natm-peer-b "$PROBER" $ROUTERS \
     >/dev/null 2>&1 || true
   podman network rm -f "$NET_PUB" "$NET_LAN" "$NET_LAN_B" >/dev/null 2>&1 || true
 }
