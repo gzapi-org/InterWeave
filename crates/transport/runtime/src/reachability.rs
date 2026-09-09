@@ -36,12 +36,14 @@
 //! this profile DIALLED whose remote advertises the protocol -- and
 //! exposes no hook to rank or veto one.
 //! So [`ReachabilityManager::due_probes`] is NOT what starts a probe. It
-//! is the schedule an adapter uses to decide **which servers to hold a
-//! connection to** and when a pair's evidence has gone stale enough to
-//! be worth another round: the amendment gives static configuration
-//! exactly that weaker meaning, a server this profile guarantees to be
-//! CONNECTED to. [`ServerSource`] orders that connection preference, not
-//! a selection among peers already connected.
+//! is the schedule an adapter uses to decide **which servers to DIAL**
+//! and when a pair's evidence has gone stale enough to be worth another
+//! round: the amendment gives static configuration exactly that weaker
+//! meaning, a server this profile guarantees to dial. Dial, not hold a
+//! connection to -- an inbound connection from a server is never
+//! eligible, because the client offers dial-request only on connections
+//! it opened. [`ServerSource`] orders that dialling preference, not a
+//! selection among peers already connected.
 //!
 //! The crate also reports no event when a probe STARTS -- only
 //! `Event { tested_addr, server, result }` on completion -- so
@@ -205,7 +207,7 @@ pub enum ProbeOutcome {
 ///
 /// The ORDER is the connection preference `AUTONAT.md`'s Amendment
 /// 2026-09-09 leaves static configuration -- which servers this profile
-/// guarantees to connect to -- and not the §3 selection precedence that
+/// guarantees to dial -- and not the §3 selection precedence that
 /// amendment removed, which the pinned client cannot express.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ServerSource {
@@ -306,17 +308,29 @@ impl ReachabilityManager {
     /// Replace the candidate addresses, keeping only those a probe server
     /// may legitimately be asked to dial.
     ///
-    /// Returns how many were refused, so the caller can say so rather
-    /// than wonder why a LAN-only node never reaches `verified_public`.
+    /// Returns the state change, like every other mutator here, so a
+    /// caller can honour `lifecycle.md`'s "emit `ConnectivityChanged`
+    /// whenever the normalized state changes" without snapshotting
+    /// around the call: withdrawing a verified listener ends the
+    /// verdict, and that edge is one an advertisement must be withdrawn
+    /// on. How many addresses were refused is
+    /// [`rejected_candidates`](Self::rejected_candidates), so a caller
+    /// can still say why a LAN-only node never reaches
+    /// `verified_public`. Review finding on PR #84.
+    ///
     /// The accepted list is ALSO bounded to `max_candidates_per_cycle`,
     /// so an address registry handing over fifty listeners produces
-    /// four candidates and not fifty.
+    /// four candidates and not fifty. EVIDENCE FOR A WITHDRAWN ADDRESS
+    /// IS DROPPED: keeping it left the map unbounded in the address
+    /// dimension while `candidates` is bounded, and re-adding an address
+    /// inside the TTL would have re-verified it from evidence gathered
+    /// before it was withdrawn -- silently, and without a probe.
     /// RE-DERIVES, because dropping a candidate can end a verdict.
     /// Without it `state()` would keep naming a withdrawn address in
     /// `verified_addresses` until the next expiry pass, and ADR-0035's
     /// advertisement rule reads exactly that list. Review finding on
     /// PR #84.
-    pub fn set_candidates<I, S>(&mut self, addresses: I, now_ms: u64) -> usize
+    pub fn set_candidates<I, S>(&mut self, addresses: I, now_ms: u64) -> Option<ConnectivityChanged>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
@@ -340,8 +354,9 @@ impl ReachabilityManager {
         self.candidates = accepted;
         self.inflight
             .retain(|(address, _), _| self.candidates.contains(address));
-        let _ = self.rederive(now_ms);
-        rejected
+        self.evidence
+            .retain(|(address, _), _| self.candidates.contains(address));
+        self.rederive(now_ms)
     }
 
     /// Candidates refused by the last [`set_candidates`](Self::set_candidates).
@@ -905,7 +920,7 @@ mod tests {
             assert!(is_probeable_address(address), "must accept {address:?}");
         }
         let mut m = ReachabilityManager::new(ReachabilityConfig::default()).expect("valid");
-        let rejected = m.set_candidates(
+        m.set_candidates(
             [
                 "/ip4/127.0.0.1/tcp/4001",
                 "/ip4/8.8.8.8/tcp/4001",
@@ -913,7 +928,6 @@ mod tests {
             ],
             0,
         );
-        assert_eq!(rejected, 2);
         assert_eq!(m.rejected_candidates(), 2);
         assert_eq!(m.candidates(), ["/ip4/8.8.8.8/tcp/4001"]);
     }
@@ -924,8 +938,8 @@ mod tests {
         let many: Vec<String> = (1..=50)
             .map(|i| format!("/ip4/8.8.{i}.{i}/tcp/4001"))
             .collect();
-        let rejected = m.set_candidates(many.iter().chain(many.iter()), 0);
-        assert_eq!(rejected, 0, "all fifty are public");
+        m.set_candidates(many.iter().chain(many.iter()), 0);
+        assert_eq!(m.rejected_candidates(), 0, "all fifty are public");
         assert_eq!(m.candidates().len(), DEFAULT_MAX_CANDIDATES_PER_CYCLE);
         assert_eq!(m.candidates(), &many[..DEFAULT_MAX_CANDIDATES_PER_CYCLE]);
     }
@@ -964,11 +978,11 @@ mod tests {
 
     #[test]
     fn static_servers_are_preferred_for_connection_before_identify_learned_ones() {
-        // CONNECTION PREFERENCE, not selection among connected peers:
+        // DIALLING PREFERENCE, not selection among connected peers:
         // `AUTONAT.md`'s Amendment 2026-09-09 removed the selection-order
         // rule because the pinned client cannot express one. What
         // survives is that a static server is one this profile
-        // guarantees to be connected to, and this ordering is what an
+        // guarantees to dial, and this ordering is what an
         // adapter reads to honour that.
         let mut m = manager();
         m.add_server(peer(S2), ServerSource::Identify);
@@ -1211,12 +1225,23 @@ mod tests {
         let _ = m.record_outcome(a, &peer(S1), ProbeOutcome::Reachable, 0);
         let _ = m.record_outcome(a, &peer(S2), ProbeOutcome::Reachable, 0);
         assert!(verified(&m));
-        m.set_candidates(["/ip4/1.1.1.1/tcp/4001"], 1);
+        let change = m
+            .set_candidates(["/ip4/1.1.1.1/tcp/4001"], 1)
+            .expect("withdrawing the verified address is a state change");
         assert_eq!(
-            *m.state(),
+            change.to,
             ReachabilityVerdict::Unknown,
             "the verified address is gone, so the verdict is too"
         );
+        assert_eq!(*m.state(), ReachabilityVerdict::Unknown);
+        // AND ITS EVIDENCE IS GONE WITH IT: re-adding the address inside
+        // the TTL must re-probe, not silently re-verify from
+        // observations gathered before it was withdrawn.
+        assert!(
+            m.set_candidates([a], 2).is_none(),
+            "re-adding must not resurrect the verdict"
+        );
+        assert_eq!(*m.state(), ReachabilityVerdict::Unknown);
     }
 
     #[test]
