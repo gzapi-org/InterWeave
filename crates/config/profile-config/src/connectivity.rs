@@ -1044,24 +1044,27 @@ impl ConnectivityConfig {
     /// question: that one bounds what is READ, before the input is
     /// allocated, and this one bounds what is HELD, whatever built it.
     fn check_candidate_bounds(&self, errors: &mut Vec<ConfigError>) {
-        for (role, candidates) in [
+        // THE FIELD NAME TRAVELS WITH THE ROLE rather than being mapped
+        // back from it. A `match role { ... _ => }` was a second list
+        // that had to agree with the first, and its `_` arm would have
+        // labelled a third candidate list with the second one's name --
+        // silently, since nothing would fail to compile.
+        // Review finding on PR #80.
+        for (role, field, candidates) in [
             (
                 "autonat.client.static_servers",
+                "connectivity.autonat.client.static_servers",
                 &self.autonat.client.static_servers,
             ),
             (
                 "relay.client.static_relays",
+                "connectivity.relay.client.static_relays",
                 &self.relay.client.static_relays,
             ),
         ] {
             if candidates.len() > MAX_STATIC_CANDIDATES {
                 errors.push(ConfigError::ConnectivityOutOfRange {
-                    field: match role {
-                        "autonat.client.static_servers" => {
-                            "connectivity.autonat.client.static_servers"
-                        }
-                        _ => "connectivity.relay.client.static_relays",
-                    },
+                    field,
                     got: candidates.len() as u64,
                     allowed: (0, MAX_STATIC_CANDIDATES as u64),
                 });
@@ -1135,14 +1138,22 @@ impl ConnectivityConfig {
                     // reserves for it -- and `split_peer_multiaddr`
                     // checks the address's GRAMMAR, never its length.
                     // Review finding on PR #80.
-                    Ok((address, _)) if address.len() > MAX_ADDRESS_BYTES => {
-                        errors.push(ConfigError::StaticCandidateNotPeerQualified {
-                            role,
-                            entry: candidate.clone(),
-                            reason: "the address is longer than a candidate address may be",
-                        });
-                    }
-                    Ok((_, peer)) => {
+                    Ok((address, peer)) => {
+                        // BOTH COMPLAINTS, not the first one. The peer is
+                        // in hand here -- the split produced it -- so
+                        // returning after the length check made an
+                        // operator shorten the address before learning
+                        // the candidate was also unauthorized, which is
+                        // the discover-the-second-after-fixing-the-first
+                        // shape `validate_into`'s own doc refuses.
+                        // Review finding on PR #80.
+                        if address.len() > MAX_ADDRESS_BYTES {
+                            errors.push(ConfigError::StaticCandidateNotPeerQualified {
+                                role,
+                                entry: candidate.clone(),
+                                reason: "the address is longer than a candidate address may be",
+                            });
+                        }
                         if !trusted.contains(&peer)
                             && !self.infrastructure.permits_control_connection(&peer)
                         {
@@ -1335,7 +1346,15 @@ mod tests {
         // `dcutr.max_inflight_per_peer` come from `check_literals`) and
         // quietly left `retry_min`/`retry_max` with no range coverage at
         // all -- the cross-field case that reverses them uses two
-        // IN-RANGE values. Review findings on PR #80.
+        // IN-RANGE values.
+        //
+        // AND THE VARIANT HAS TWO MORE EMITTERS THAN THIS TABLE, which
+        // an accounting that claims to be exhaustive owes: the candidate
+        // COUNTS in `check_candidate_bounds` also report
+        // `ConnectivityOutOfRange`, and are tested by the Rust-caller
+        // test rather than here, since a document cannot reach them --
+        // the deserializer refuses the seventeenth element first.
+        // Review findings on PR #80.
         //
         // Each row is (json body template, field, below, inside, above).
         // `{}` is where the value goes, so one row exercises all three.
@@ -1824,27 +1843,41 @@ mod tests {
             let room = host_bytes - host.len();
             host.push_str(&"a".repeat(room.min(50)));
         }
-        assert_eq!(host.len(), host_bytes, "the fixture must be exact");
+        // THE LEGALITY, not the length. `push_str` adds at most `room`
+        // and the loop exits at `>=`, so exactness is structural and an
+        // `assert_eq!(host.len(), host_bytes)` could not fail for any
+        // input -- while the property the doc claims can: a `host_bytes`
+        // of 51, 102, 153 and so on ends the host on the separator, and
+        // `validate_address_grammar` refuses the empty label that makes.
+        // Review finding on PR #80.
+        assert!(
+            host.split('.')
+                .all(|label| !label.is_empty() && label.len() <= 63),
+            "the fixture must be a grammatically legal host: {host}"
+        );
         format!("/dns4/{host}/tcp/4001")
     }
 
     #[test]
     fn a_static_candidate_entry_is_bounded_by_the_entry_ceiling_not_the_address_one() {
-        // THE ENTRY IS LONGER THAN THE ADDRESS IT CONTAINS. A 218-byte
-        // address plus `/p2p/` plus a 52-byte PeerId is a legal entry and
+        // THE ENTRY IS LONGER THAN THE ADDRESS IT CONTAINS. A 215-byte
+        // address plus `/p2p/` plus a 52-byte PeerId is a 272-byte entry,
+        // legal, and
         // was refused while the address limit was applied to the whole
         // thing -- a limit contradicting the API it feeds, which this
         // crate had already fixed once for the static provider's peers.
         let long_address = dns_address(200);
-        assert!(
-            long_address.len() > MAX_ADDRESS_BYTES / 2 && long_address.len() <= MAX_ADDRESS_BYTES,
-            "the fixture must be a legal address within the address limit: {}",
-            long_address.len()
-        );
         let entry = format!("{long_address}/p2p/{P1}");
+        // THE PROPERTY THE TEST NEEDS, asserted directly: the ADDRESS is
+        // within its limit while the ENTRY is not, which is the only
+        // thing distinguishing the two ceilings. A guard reading
+        // `len() > MAX_ADDRESS_BYTES / 2` did not imply that, and would
+        // have gone vacuous in silence if the constant ever moved.
+        // Review finding on PR #80.
         assert!(
-            entry.len() > MAX_ADDRESS_BYTES,
-            "and the entry must exceed the ADDRESS limit, or the test proves nothing: {}",
+            long_address.len() <= MAX_ADDRESS_BYTES && entry.len() > MAX_ADDRESS_BYTES,
+            "address {} must be within the address limit and entry {} beyond it",
+            long_address.len(),
             entry.len()
         );
         let body = format!(

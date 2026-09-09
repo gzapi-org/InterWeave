@@ -1844,10 +1844,16 @@ pub enum ConfigError {
         /// The peer no set authorizes.
         peer: TransportIdentity,
     },
-    /// A static reachability candidate is not `<multiaddr>/p2p/<PeerId>`.
+    /// A static reachability candidate cannot be used as one.
     ///
-    /// The schema's type for these lists is `multiaddr-with-peer-id`, and
-    /// without the peer half there is no identity to authorize.
+    /// THREE REASONS, not one. The schema's type for these lists is
+    /// `multiaddr-with-peer-id`: without the peer half there is no
+    /// identity to authorize, which is where this started. It also
+    /// carries an address longer than a candidate address may be, and an
+    /// entry longer than a candidate entry may be — both of which ARE
+    /// peer-qualified, so the message says "not a usable static
+    /// candidate" rather than naming the grammar. Review finding on
+    /// PR #80.
     StaticCandidateNotPeerQualified {
         /// Which list.
         role: &'static str,
@@ -2079,7 +2085,7 @@ impl core::fmt::Display for ConfigError {
                 reason,
             } => write!(
                 f,
-                "connectivity.{role} entry '{entry}' is not <multiaddr>/p2p/<PeerId>: {reason}"
+                "connectivity.{role} entry '{entry}' is not a usable static candidate: {reason}"
             ),
             Self::DirectoryCacheTtlOutOfRange { got_ms } => write!(
                 f,

@@ -173,6 +173,7 @@ fn the_deeper_projection_keeps_every_transport_sub_block_the_type_models() {
 #[test]
 fn every_shipped_example_satisfies_the_validator() {
     let mut checked = 0;
+    let mut saw_connectivity = false;
     for path in examples().expect("the shipped examples are readable") {
         let raw = substitute(&std::fs::read_to_string(&path).expect("readable"));
         let whole: serde_norway::Value =
@@ -221,6 +222,41 @@ fn every_shipped_example_satisfies_the_validator() {
         let profile: ProfileConfig =
             serde_norway::from_value(serde_norway::Value::Mapping(projected))
                 .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
+
+        // THE BLOCK ACTUALLY SURVIVED THE PROJECTION, checked against a
+        // value no default supplies.
+        //
+        // The sibling type-level guard cannot see this. `MODELLED` is the
+        // level-one projection's INPUT, so asserting on it constrains the
+        // projection itself; the level-two projection hardcodes
+        // `"connectivity"` twice and reads no list, so a test that
+        // serializes a `TransportConfig` never touches those literals.
+        // Delete the `kept.insert` above and every example's block is
+        // stripped again -- silently, because a stripped block
+        // deserializes to `ConnectivityConfig::default()`, which is valid
+        // by construction and which no example contradicts.
+        //
+        // The invisible-loss shape twice over: closed at level one by the
+        // commit that opened it at level two.
+        // Review finding on PR #80.
+        if path
+            .file_name()
+            .is_some_and(|n| n == "internet-reachability.yaml")
+        {
+            assert!(
+                !profile
+                    .transport
+                    .connectivity
+                    .relay
+                    .client
+                    .static_relays
+                    .is_empty(),
+                "{} carries static relays; an empty list here means the projection dropped \
+                 transport.connectivity rather than that the document changed",
+                path.display()
+            );
+            saw_connectivity = true;
+        }
         // A NOT-YET-BUILT PROVIDER IS A STAGE FACT, NOT A BAD PROFILE.
         // The examples describe the target architecture, and this build
         // refuses an enabled `mdns` (multicast backend deferred over the
@@ -249,5 +285,10 @@ fn every_shipped_example_satisfies_the_validator() {
     assert!(
         checked >= 8,
         "expected most examples to be node profiles, checked {checked}"
+    );
+    assert!(
+        saw_connectivity,
+        "internet-reachability.yaml is the document the connectivity assertion reads; \
+         if it is gone or renamed, that assertion silently stops running"
     );
 }
