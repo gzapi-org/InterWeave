@@ -524,10 +524,16 @@ impl ReachabilityManager {
     /// Fold a probe's outcome in. Returns the state change, if any.
     ///
     /// An outcome for a pair that is not in flight is still recorded --
-    /// the behaviour may report one we did not plan, and evidence is
-    /// evidence -- but only if the server is one we know, so a stranger's
-    /// report cannot count toward `verified_public`. FAILS CLOSED on an
-    /// unknown server: the report is dropped and `None` is returned.
+    /// the behaviour may report one we did not plan. TWO conditions drop
+    /// it, and both return `None`: an address this manager does not
+    /// track, because `derive` reads only candidates so such evidence
+    /// could never count and would only grow the map; and a server we
+    /// do not know, so a stranger's report cannot reach
+    /// `verified_public`. FAILS CLOSED on both.
+    ///
+    /// The untracked-address case is the COMMON one, not an edge:
+    /// `AUTONAT.md` §3's open note records that the pinned client probes
+    /// from libp2p's own candidate set, which is not this list.
     pub fn record_outcome(
         &mut self,
         address: &str,
@@ -535,19 +541,20 @@ impl ReachabilityManager {
         outcome: ProbeOutcome,
         now_ms: u64,
     ) -> Option<ConnectivityChanged> {
-        // AND FOR AN ADDRESS WE TRACK. The behaviour reports whatever
-        // the swarm handed it, which is not this manager's candidate
-        // list; `derive` iterates candidates, so evidence for anything
-        // else could never be counted and would only grow the map
-        // between `set_candidates` calls -- unbounded in the address
-        // dimension, which is the thing that prune was added to stop.
-        // Review finding on PR #84.
-        if !self.candidates.iter().any(|candidate| candidate == address) {
-            return None;
-        }
         let record = self.servers.get_mut(server)?;
         let key = (address.to_owned(), server.clone());
         self.inflight.remove(&key);
+        // THE SERVER ACCOUNTING BELOW IS NOT ADDRESS-SCOPED, so it runs
+        // for every outcome from a known server -- including the many
+        // whose address this manager does not track, since `AUTONAT.md`
+        // §3's open note records that the pinned client probes from
+        // libp2p's own candidate set rather than this one. Gating it on
+        // the address would have meant a server that times out on those
+        // probes never accumulates backoff and one that succeeds never
+        // clears it, which is health information about the SERVER thrown
+        // away for an address reason. Only the evidence insert is gated.
+        // Review findings on PR #84.
+        let tracked = self.candidates.iter().any(|candidate| candidate == address);
         match outcome {
             ProbeOutcome::Reachable => {
                 record.consecutive_failures = 0;
@@ -586,6 +593,9 @@ impl ReachabilityManager {
                     .last_failure_at_ms
                     .map_or(now_ms, |previous| previous.max(now_ms)),
             );
+            return self.rederive(now_ms);
+        }
+        if !tracked {
             return self.rederive(now_ms);
         }
         let expires_at_ms = match outcome {
@@ -1152,7 +1162,27 @@ mod tests {
             ReachabilityVerdict::Unknown,
             "two successes for an address we do not track verify nothing"
         );
+        // THE LOAD-BEARING LINE. The three assertions above pass with the
+        // guard deleted too, because `derive` reads only candidates -- so
+        // this is the one that fails, and it is not to be simplified away.
         assert!(m.evidence.is_empty(), "and are not retained");
+        // BUT THE SERVER'S HEALTH IS STILL RECORDED, because a probe that
+        // failed says something about the server whatever address it
+        // named. The pinned client probes mostly untracked addresses, so
+        // gating this on the address would have left backoff never
+        // accumulating and never clearing. Review finding on PR #84.
+        let untracked = "/ip4/9.9.9.9/tcp/4001";
+        let _ = m.record_outcome(untracked, &peer(S1), ProbeOutcome::Unreachable, 3);
+        let record = m.servers.get(&peer(S1)).expect("known");
+        assert_eq!(record.consecutive_failures, 1, "the server backs off");
+        assert!(record.backoff_until_ms > 3);
+        let _ = m.record_outcome(untracked, &peer(S1), ProbeOutcome::Reachable, 4);
+        let record = m.servers.get(&peer(S1)).expect("known");
+        assert_eq!(record.backoff_until_ms, 0, "and a success clears it");
+        assert!(
+            m.evidence.is_empty(),
+            "still no evidence for an untracked address"
+        );
     }
 
     #[test]
@@ -1587,6 +1617,23 @@ mod tests {
             1,
             "and the slots are free for the new candidate"
         );
+        // AND A LATE OUTCOME FOR THE DROPPED ADDRESS CHANGES NOTHING.
+        // The two `retain`s above are what make this safe -- the
+        // in-flight entry went with the address, so `record_outcome`'s
+        // untracked-address guard has no slot left to leak. True today
+        // by the pairing of those two lines, which is why it is pinned.
+        let stale = &first[0];
+        assert!(
+            m.record_outcome(&stale.address, &stale.server, ProbeOutcome::Reachable, 2)
+                .is_none(),
+            "the address is gone, so its outcome is not evidence"
+        );
+        assert!(
+            m.due_probes(3).is_empty(),
+            "and it neither freed nor occupied a slot: the one live candidate is still in flight"
+        );
+        assert!(m.has_outstanding_probe_to(&peer(S1)));
+        assert_eq!(*m.state(), ReachabilityVerdict::Unknown);
     }
 
     #[test]
