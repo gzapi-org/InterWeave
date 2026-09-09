@@ -40,7 +40,10 @@
 # Exit codes:
 #   0  every tracked shell script is clean at warning severity
 #   1  shellcheck reported at least one finding — read its output above
-#   2  shellcheck is not installed, or the tracked file list is empty
+#   2  the guard could not judge the tree: shellcheck is not installed,
+#      the tracked file list is empty or could not be read, shellcheck
+#      could not open a tracked file, or the severity was not one it
+#      accepts. Never a finding, and never a pass.
 # <<< help
 set -uo pipefail
 
@@ -99,8 +102,22 @@ fi
 # is invisible here. There are none today -- no tracked file outside
 # `*.sh` carries a shell shebang -- and nothing would report it if one
 # arrived. Review findings on PR #82.
-if ! shellcheck --severity="$SEVERITY" "${scripts[@]}"; then
-    cat >&2 <<MISSING
+#
+# AND SHELLCHECK'S OWN EXIT CODE IS READ, not collapsed: 1 is findings,
+# 2 is "some files could not be processed", 3 is a syntax error in a
+# checked file, 4 is a bad option. The first version turned all of them
+# into this guard's exit 1 with the findings message, so a tracked file
+# missing from the worktree — mid-rebase, `git rm --cached` — or a typo
+# in the severity read as "add a targeted disable". That is "looked at
+# less than everything" wearing the "found something" code, the exact
+# distinction the self-test's header argues is load-bearing.
+# Review finding on PR #82.
+shellcheck --severity="$SEVERITY" "${scripts[@]}"
+rc=$?
+case $rc in
+    0) ;;
+    1)
+        cat >&2 <<MISSING
 check_shell_scripts: shellcheck reported findings at severity '$SEVERITY' (above).
 
 A finding that is deliberate takes a targeted disable WITH a reason on
@@ -111,8 +128,19 @@ the line above it:
 A blanket disable at the top of a file is not that, and neither is
 raising INTERWEAVE_SHELLCHECK_SEVERITY to get past a warning.
 MISSING
-    exit 1
-fi
+        exit 1
+        ;;
+    *)
+        cat >&2 <<COULDNOT
+check_shell_scripts: shellcheck could not judge the tracked set (its exit $rc; above).
+
+That is not a finding and not a pass: a tracked *.sh it could not open,
+a syntax error it could not parse past, or a severity it does not
+accept ('$SEVERITY' — it takes error, warning, info, style).
+COULDNOT
+        exit 2
+        ;;
+esac
 
 # THE VERSION IS PART OF THE RESULT. Severity classification belongs to
 # the release, so "clean at warning" is a statement about one shellcheck;

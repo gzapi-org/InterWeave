@@ -154,6 +154,18 @@ else
 fi
 cleanup; SANDBOX=""
 
+# 7. A TRACKED FILE THE WORKTREE DOES NOT HAVE IS "LOOKED AT LESS THAN
+#    EVERYTHING", exit 2 -- not a finding. shellcheck exits 2 when it
+#    cannot open a file, and the first guard collapsed that into its own
+#    exit 1 with advice to add a targeted disable for a file that does
+#    not exist. Mid-rebase and `git rm --cached` both produce this state.
+#    Review finding on PR #82.
+sandbox_with '#!/usr/bin/env bash
+echo fine'
+rm "$SANDBOX/scripts/case.sh"
+expect_status 2 "a tracked file missing from the worktree is refused as COULD NOT JUDGE, not as a finding"
+cleanup; SANDBOX=""
+
 if [[ $failures -gt 0 ]]; then
     echo "test_check_shell_scripts: FAILED — $failures assertion(s)" >&2
     exit 1
