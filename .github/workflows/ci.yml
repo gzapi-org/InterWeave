@@ -45,9 +45,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# The cargo-deny pin lives HERE, once, because two jobs install it and a
-# version bumped in one place only would leave the self-tests exercising a
-# different binary from the checks — green for a reason nobody could see.
+# Each tool's pin lives HERE, once — cargo-deny's and shellcheck's — because
+# two jobs install each of them and a version bumped in one place only would
+# leave the self-tests exercising a different binary from the checks — green
+# for a reason nobody could see.
 env:
   CARGO_DENY_VERSION: "0.20.2"
   CARGO_DENY_SHA256: "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
@@ -55,10 +56,12 @@ env:
   # SEVERITY CLASSIFICATION is a property of the release. A runner-image
   # bump that promoted any currently-`info` code to `warning` would turn a
   # required context red on a PR whose diff explains nothing — SC2015 is
-  # the obvious candidate, and most of the tree uses that idiom on purpose. It
+  # the obvious candidate, and most of the tree uses that idiom on
+  # purpose. It
   # would fail the guard's own self-test in the same run. Taking it from
-  # whatever the image ships also made the numbers in the guard's help
-  # unreproducible. 0.11.0 is what Fedora 43 packages, so a developer's
+  # whatever the image ships would also let the severity classification
+  # the self-test pins vary by runner image. 0.11.0 is what Fedora 43
+  # packages, so a developer's
   # `dnf install ShellCheck` and CI agree.
   SHELLCHECK_VERSION: "v0.11.0"
   SHELLCHECK_SHA256: "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"

@@ -77,9 +77,12 @@ RS
   # Pin the guard's expectation to THIS fixture, so every case below
   # exercises the real comparison rather than a copy of it.
   # ASSIGNED THEN EXPORTED, separately. `export X="$(...)"` returns
-  # `export`'s status, not the substitution's, so a pipeline that failed
-  # here would have exported an empty digest and every case below would
-  # then compare against nothing.
+  # `export`'s status, not the substitution's -- SC2155, a warning-level
+  # finding the shell guard admits. The split does not by itself make a
+  # failed pipeline fatal: this file runs without `set -e` and reads no
+  # status here, so an empty digest would still be exported. What
+  # catches that is the accepted-fixture case below, which fails loudly
+  # against an empty expectation rather than passing vacuously.
   local protocol_sha behaviour_sha
   protocol_sha=$(
     sed 's;//.*$;;' "$work/src/protocol.rs" \
