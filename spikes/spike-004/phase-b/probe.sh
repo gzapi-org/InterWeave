@@ -23,8 +23,12 @@
 #     exchange and its timing, and no node runs here. Even `eds` on both
 #     sides does not entail failure -- if either side's filtering is
 #     endpoint-independent the packet is forwarded through the
-#     relay-created mapping whatever its source, which is a pairing
-#     `filter.sh` can now build and measure.
+#     relay-created mapping whatever its source. That pairing is stated
+#     from RFC 4787, not measured: the control filtering modes install a
+#     static forward and so need `NAT_MODE=eim`, which `topology.sh`
+#     refuses to combine with `eds`. `filter.sh` measures the filtering
+#     half of each row it CAN build; this sentence is why the mapping
+#     rows cannot decide a punch, not a row of its own.
 #     Mapping does not gate the ATTEMPT either: `DCUTR.md` §2's
 #     eligibility list does not mention NAT class. Codex review, PR #79.
 set -euo pipefail
