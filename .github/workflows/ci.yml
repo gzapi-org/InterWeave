@@ -289,6 +289,28 @@ jobs:
           echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
           "${RUNNER_TEMP}/bin/cargo-deny" --version
 
+      # THE SAME PIN HERE, because this job is where
+      # `test_check_shell_scripts.sh` runs, and jobs share no installed
+      # tools. Installed only in tree-checks, the self-test judged the
+      # guard against whatever shellcheck the runner image bundles -- a
+      # different release from the one the guard runs under, which is the
+      # split the cargo-deny comment above exists to prevent -- and an
+      # image that stopped bundling it would have turned `tool self-tests`
+      # red with nothing in the diff to explain it. Both reviewers on
+      # PR #82 found this independently.
+      - name: Install shellcheck
+        run: |
+          set -euo pipefail
+          asset="shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          url="https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/${asset}"
+          curl -fsSL -o "$asset" "$url"
+          echo "${SHELLCHECK_SHA256}  ${asset}" | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/bin"
+          tar -xJf "$asset" --strip-components=1 -C "${RUNNER_TEMP}/bin" \
+            "shellcheck-${SHELLCHECK_VERSION}/shellcheck"
+          echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
+          "${RUNNER_TEMP}/bin/shellcheck" --version
+
       # The suites mock `gh` and `curl` on PATH, so no token and no
       # network are used. They do need jq and coreutils `timeout`, both
       # present on ubuntu-latest.
