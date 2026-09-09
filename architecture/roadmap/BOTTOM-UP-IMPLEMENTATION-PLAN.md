@@ -144,7 +144,7 @@ Spikes are **just-in-time implementation gates**, not a large front-loaded phase
 |---|---|---|
 | SPIKE-002 | Stage 6 direct v2 | **CLOSED 2026-08-24, PASS** — rust-libp2p request/response scheduling, concurrent same-key retries, negotiation/failure behavior |
 | SPIKE-003 | Stage 10 Kademlia | **CLOSED 2026-08-30, PASS for the stage; v1 release gate still open** — driver behavior, autonomous dials, client/server mode, private namespace, routing/query behavior |
-| SPIKE-004 | Stage 11 mandatory connectivity | **PHASE A CLOSED 2026-09-01, PASS for implementation; the NAT matrix is NOT run and phase B is required before stage closure** — AutoNAT v2, Relay v2, DCUtR, infrastructure class, dial admission, deployment/NAT matrix |
+| SPIKE-004 | Stage 11 mandatory connectivity | **PHASE A CLOSED 2026-09-01, PASS for implementation; the exit gate's NAT row was ruled satisfied by the containerised matrix on 2026-09-09 with three deferrals, and phase B's other five items are required before stage closure** — AutoNAT v2, Relay v2, DCUtR, infrastructure class, dial admission, deployment/NAT matrix |
 | SPIKE-006 | identity recovery implementation in Stage 3 | **CLOSED 2026-08-19, PASS** — exact 32-byte Ed25519 secret import/export and same-PeerId restore |
 | SPIKE-001 | Stage 16 Claude bridge | current Claude Code Channel/MCP packaging and runtime contract |
 | SPIKE-005 | admin hardening when enabled | stronger same-user local admin boundary |
@@ -1330,9 +1330,13 @@ the clauses this stage met and the one that moved.
 Run and close **SPIKE-004**. **Phase A closed 2026-09-01: PASS FOR
 IMPLEMENTATION.** The work below is authorized. What is NOT authorized
 is calling the stage complete — phase A ran on one machine over
-loopback, so the exit gate's NAT/relay/hole-punch matrix is unmet and
+loopback, so the exit gate's NAT/relay/hole-punch matrix was unmet (the
+NAT row has since been ruled satisfied; see the 2026-09-09 ruling below,
+and the relay and hole-punch rows remain unmet) and
 **phase B is required before stage closure**: a public VM and
-home/symmetric/carrier NAT, two independently operated relay/probe
+home/symmetric/carrier NAT (the NAT row of this item is the one ruled
+satisfied below; the public VM and the carrier's CGNAT are its
+deferrals), two independently operated relay/probe
 services, **relay loss and capacity denial**, interface change,
 hole-punch success rates, measured resource cost against the default
 budgets. That is six items,
@@ -1342,9 +1346,9 @@ who counted here got five, and the first item read "real and carrier
 NAT" — dropping the public VM, which is the half of that item this
 stage's own deferral discussion turns on.
 
-**AN OWNER DECISION IS OPEN, and it is recorded here because
-`SPIKES.md` points at this section for it.** The ENVIRONMENT for the NAT
-rows now exists at
+**AN OWNER DECISION WAS TAKEN ON 2026-09-09, and it is recorded here
+because `SPIKES.md` points at this section for it.** The ENVIRONMENT for
+the NAT rows now exists at
 [`spikes/spike-004/phase-b/`](../../spikes/spike-004/phase-b/README.md) —
 containerised, two NAT domains, with BOTH halves of RFC 4787's
 classification MEASURED — the mapping class, chosen with nftables, and
@@ -1352,13 +1356,30 @@ the filtering class since `filter.sh`. Measured rather than configured
 for the filtering half's default row, where the absence of a rule IS the
 row: masquerade's own reverse path is already address-and-port-dependent,
 and the harness's two other filtering modes exist so the classifier has a
-positive control for each branch rather than one reachable answer. It closes none of the six. The
-question is whether the exit gate's NAT row can be satisfied by a
-containerised matrix with the population claim, the public VM and a
-carrier's CGNAT explicitly deferred — the filtering half was on that list
-and is not any more — the shape Stage 9 used for mDNS and
-Stage 10 for the release gate. **Nothing here answers it, and no row is
-marked met on the strength of that environment.**
+positive control for each branch rather than one reachable answer. It
+closes none of the six by itself. The question put to the owner was
+whether the exit gate's NAT row can be satisfied by a containerised matrix
+with the population claim, the public VM and a carrier's CGNAT explicitly
+deferred — the filtering half was on that list and is not any more — the
+shape Stage 9 used for mDNS and Stage 10 for the release gate.
+**The ruling: yes, with those three deferrals recorded.** The NAT row of
+the exit gate is satisfied by that matrix, measured in both halves RFC
+4787 defines. The three deferrals are what was carved OUT of that row and
+carried forward as named limits rather than discharged: the public VM
+and a carrier's CGNAT are the parts of item 1 above that the same item
+also names and a container is not, and hole-punch success rates against
+NAT as deployed are item 5, which the row never claimed. **So the ruling
+satisfies the NAT row of item 1 and touches no other item**: two
+independently operated relay and probe services,
+relay loss and capacity denial, network-interface change, success rates
+and resource cost against the default budgets are all still phase B —
+success rates appearing both as a deferral out of the NAT row and as an
+open item, because it is both — so the stage still cannot close on this
+evidence alone. It can
+close on it once steps 3 through 10 land and the remaining five are met
+or deferred with the owner's explicit go-ahead, which is a separate
+decision and is NOT taken here. No row other than the NAT one is marked
+met.
 
 The verdict and its binding findings are in
 [`SPIKES.md`](./SPIKES.md); the record is
