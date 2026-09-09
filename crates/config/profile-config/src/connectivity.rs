@@ -89,8 +89,9 @@ pub struct ConnectivityConfig {
     /// a second guard to keep in step with the first.
     ///
     /// So this field is also the answer to "nothing constructs an
-    /// `InfrastructureSet`": ADR-0036's second class has been
-    /// expressible in code since Stage 5 and in a profile document never.
+    /// `InfrastructureSet`": ADR-0036's second class had been
+    /// expressible in code since Stage 5 and in a profile document never,
+    /// until this field.
     #[serde(default)]
     pub infrastructure: InfrastructureSet,
     /// What this profile is willing to advertise.
@@ -952,16 +953,20 @@ impl ConnectivityConfig {
 
     /// The schema's own "Cross-field validation" list for this block.
     ///
-    /// ONE SCHEMA RULE OVER `connectivity` IS NOT HERE AND CANNOT BE.
+    /// TWO SCHEMA RULES OVER `connectivity` ARE NOT HERE AND CANNOT BE.
     /// `# Runtime cross-field validation` says
     /// `runtime.deployment=embedded-android => connectivity AutoNAT/relay
     /// server roles are false and Kademlia mode is client`. Its
     /// antecedent lives in `runtime`, which no Rust type models, so this
     /// block cannot see it — an android profile enabling a relay server
-    /// is refused by nothing today. Stated rather than left to a reader
-    /// who takes the doc line above for a claim of completeness; the
-    /// check belongs wherever `runtime` first gets a type, not here.
-    /// Review finding on PR #80.
+    /// is refused by nothing today; the check belongs wherever `runtime`
+    /// first gets a type. And the block's own list ends with "static
+    /// configured candidates have selection precedence until their
+    /// target cannot be met", which is a runtime selection rule with no
+    /// configuration-time shape — its first half, Identify-learned
+    /// candidates off by default, IS here as the two `use_authorized_*`
+    /// defaults. Stated rather than left to a reader who takes the doc
+    /// line above for a claim of completeness. Review findings on PR #80.
     fn check_cross_fields(&self, errors: &mut Vec<ConfigError>) {
         let relay_client = &self.relay.client;
         let relay_server = &self.relay.server;
@@ -1316,6 +1321,34 @@ mod tests {
                 ),
                 _ => unreachable!("only objects are kept by the filter above"),
             }
+        }
+        let document = hollow(
+            serde_json::to_value(ConnectivityConfig::default()).expect("the default serializes"),
+        );
+        let blocks: Vec<&String> = document
+            .as_object()
+            .expect("the block is an object")
+            .keys()
+            .collect();
+        assert!(
+            blocks.len() >= 5,
+            "the derived document must name the nested blocks, or it tests nothing: {blocks:?}"
+        );
+        assert!(
+            blocks.iter().any(|k| k.as_str() == "infrastructure"),
+            "and `infrastructure` is one of them -- a hand-written list left it out: {blocks:?}"
+        );
+        let every_block_named = profile_with(&document.to_string())
+            .expect("naming a block without its fields is legal")
+            .transport
+            .connectivity;
+        assert_eq!(
+            every_block_named,
+            ConnectivityConfig::default(),
+            "the per-field defaults must agree with the whole-struct ones"
+        );
+    }
+
     #[test]
     fn every_pinned_value_is_refused_when_a_profile_changes_it() {
         // The SIX booleans and the two numbers the schema pins. Each is
