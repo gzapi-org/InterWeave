@@ -17,8 +17,10 @@
 //!
 //! Two things it deliberately does NOT do. It does not judge the
 //! node-level sections (`runtime`, `identity`, `ipc`, `profile`) that no
-//! Rust type models yet — a profile document is wider than this crate,
-//! and asserting on shapes nothing parses would be inventing a contract.
+//! Rust type models yet — nor the sub-blocks of `transport` other than
+//! `connectivity`, for the same reason one level down — a profile
+//! document is wider than this crate, and asserting on shapes nothing
+//! parses would be inventing a contract.
 //! And it does not resolve DNS or reach a network: placeholders become
 //! syntactically valid identities, because the question is whether the
 //! FORM an operator is shown is one the code accepts.
@@ -30,12 +32,20 @@ use interweave_profile_config::ProfileConfig;
 
 /// The sections `ProfileConfig` models. A key outside this set belongs
 /// to the wider profile document and is not this crate's to judge.
-const MODELLED: [&str; 5] = [
+const MODELLED: [&str; 6] = [
     "schema_version",
     "trust",
     "endpoints",
     "discovery",
     "channels",
+    // `transport` joined the list when `transport.connectivity` landed,
+    // and the list is why that block had no coverage against the
+    // documents operators are handed until it did: the projection drops
+    // every unlisted key, so all ten examples' connectivity blocks were
+    // stripped before parsing. A hand-maintained set goes stale the
+    // first time `ProfileConfig` grows a section. Review finding on
+    // PR #80.
+    "transport",
 ];
 
 /// Stand-ins for the `<PLACEHOLDER>` peer ids the examples carry.
@@ -90,9 +100,81 @@ fn examples() -> Result<Vec<PathBuf>, String> {
     Ok(found)
 }
 
+/// `MODELLED` must name every section `ProfileConfig` actually models.
+///
+/// WITHOUT THIS THE LIST GOES STALE IN SILENCE, which is how the
+/// `transport` block went uncovered: the projection drops any key the
+/// list omits, so a missing section does not fail anything — it removes
+/// coverage, and removing coverage is invisible by construction. That is
+/// the one mutation of this file that passed, so this is the test for the
+/// test. Review finding on PR #80.
+///
+/// Serialization is the oracle: every field of `ProfileConfig` is
+/// serialized, so the keys of a round-tripped value ARE the sections this
+/// crate models. A new section therefore fails here until it is listed.
+///
+/// TRUE OF THIS TYPE, NOT BY CONSTRUCTION. A future field carrying
+/// `skip_serializing_if` would be modelled, absent from a minimal
+/// profile's serialization, and projected away with this test still
+/// green. No field carries one today and the assertion is
+/// two-directional, which is as far as serialization can take it.
+#[test]
+fn the_modelled_list_names_every_section_the_type_models() {
+    let minimal: ProfileConfig = serde_norway::from_str(
+        "schema_version: 2\ntrust:\n  policy: static-allowlist\n  allowed_peers: []\nendpoints:\n  entries: []\n",
+    )
+    .expect("a minimal profile parses");
+    let value = serde_norway::to_value(&minimal).expect("a profile serializes");
+    let mapping = value.as_mapping().expect("a profile is a mapping");
+
+    let mut modelled: Vec<&str> = MODELLED.to_vec();
+    modelled.sort_unstable();
+    let mut serialized: Vec<String> = mapping
+        .keys()
+        .map(|k| k.as_str().expect("a section key is a string").to_owned())
+        .collect();
+    serialized.sort();
+
+    assert_eq!(
+        serialized,
+        modelled.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
+        "MODELLED and the sections ProfileConfig serializes must agree; \
+         a section missing from MODELLED is projected away and silently untested"
+    );
+}
+
+/// The deeper projection must keep every sub-block `TransportConfig`
+/// models, for the same reason `MODELLED` must name every section.
+///
+/// THE COMMIT THAT CLOSED THE STALENESS AT LEVEL ONE OPENED IT AT LEVEL
+/// TWO. `transport` is projected down to `connectivity` alone, so a
+/// second sub-block — `limits`, `pre_auth` — would be stripped from all
+/// ten examples and nothing would fail: invisible by construction, which
+/// is the phrase the sibling test's own doc uses. Review finding on
+/// PR #80.
+#[test]
+fn the_deeper_projection_keeps_every_transport_sub_block_the_type_models() {
+    let value =
+        serde_norway::to_value(interweave_profile_config::connectivity::TransportConfig::default())
+            .expect("the transport block serializes");
+    let keys: Vec<String> = value
+        .as_mapping()
+        .expect("the transport block is a mapping")
+        .keys()
+        .map(|k| k.as_str().expect("a sub-block key is a string").to_owned())
+        .collect();
+    assert_eq!(
+        keys,
+        vec!["connectivity".to_owned()],
+        "the projection below keeps only `connectivity`; a sub-block this type gained \
+         would be stripped from every example and silently untested"
+    );
+}
+
 #[test]
 fn every_shipped_example_satisfies_the_validator() {
     let mut checked = 0;
+    let mut saw_connectivity = false;
     for path in examples().expect("the shipped examples are readable") {
         let raw = substitute(&std::fs::read_to_string(&path).expect("readable"));
         let whole: serde_norway::Value =
@@ -109,6 +191,31 @@ fn every_shipped_example_satisfies_the_validator() {
                 projected.insert(serde_norway::Value::from(key), value.clone());
             }
         }
+        // `transport` IS PROJECTED ONE LEVEL DEEPER, because this crate
+        // models one of its sub-blocks. `connectivity` is typed and
+        // `backend`, `listen`, `limits`, `pre_auth`, `connection_policy`,
+        // `direct` and `pubsub` are not — so keeping the whole block
+        // would refuse every example on `unknown field 'backend'`, which
+        // says nothing about the block under test. Same reasoning as
+        // dropping `runtime`/`identity`/`ipc` at the top level, applied
+        // one level down. Review finding on PR #80.
+        if let Some(transport) = projected
+            .get(serde_norway::Value::from("transport"))
+            .and_then(serde_norway::Value::as_mapping)
+            .cloned()
+        {
+            let mut kept = serde_norway::Mapping::new();
+            if let Some(connectivity) = transport.get(serde_norway::Value::from("connectivity")) {
+                kept.insert(
+                    serde_norway::Value::from("connectivity"),
+                    connectivity.clone(),
+                );
+            }
+            projected.insert(
+                serde_norway::Value::from("transport"),
+                serde_norway::Value::Mapping(kept),
+            );
+        }
         if !projected.contains_key(serde_norway::Value::from("endpoints")) {
             continue; // not a node profile this crate models
         }
@@ -116,6 +223,41 @@ fn every_shipped_example_satisfies_the_validator() {
         let profile: ProfileConfig =
             serde_norway::from_value(serde_norway::Value::Mapping(projected))
                 .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
+
+        // THE BLOCK ACTUALLY SURVIVED THE PROJECTION, checked against a
+        // value no default supplies.
+        //
+        // The sibling type-level guard cannot see this. `MODELLED` is the
+        // level-one projection's INPUT, so asserting on it constrains the
+        // projection itself; the level-two projection hardcodes
+        // `"connectivity"` twice and reads no list, so a test that
+        // serializes a `TransportConfig` never touches those literals.
+        // Delete the `kept.insert` above and every example's block is
+        // stripped again -- silently, because a stripped block
+        // deserializes to `ConnectivityConfig::default()`, which is valid
+        // by construction and which no example contradicts.
+        //
+        // The invisible-loss shape twice over: closed at level one by the
+        // commit that opened it at level two.
+        // Review finding on PR #80.
+        if path
+            .file_name()
+            .is_some_and(|n| n == "internet-reachability.yaml")
+        {
+            assert!(
+                !profile
+                    .transport
+                    .connectivity
+                    .relay
+                    .client
+                    .static_relays
+                    .is_empty(),
+                "{} carries static relays; an empty list here means the projection dropped \
+                 transport.connectivity rather than that the document changed",
+                path.display()
+            );
+            saw_connectivity = true;
+        }
         // A NOT-YET-BUILT PROVIDER IS A STAGE FACT, NOT A BAD PROFILE.
         // The examples describe the target architecture, and this build
         // refuses an enabled `mdns` (multicast backend deferred over the
@@ -144,5 +286,10 @@ fn every_shipped_example_satisfies_the_validator() {
     assert!(
         checked >= 8,
         "expected most examples to be node profiles, checked {checked}"
+    );
+    assert!(
+        saw_connectivity,
+        "internet-reachability.yaml is the document the connectivity assertion reads; \
+         if it is gone or renamed, that assertion silently stops running"
     );
 }

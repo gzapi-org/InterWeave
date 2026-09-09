@@ -31,6 +31,7 @@ use interweave_transport_api::{ChannelId, EndpointId, TransportIdentity};
 use interweave_trust_api::{EndpointTrustPolicy, PeerTrustPolicy};
 use serde::{Deserialize, Serialize};
 
+pub mod connectivity;
 pub mod paths;
 pub mod persist;
 
@@ -802,7 +803,11 @@ pub fn split_peer_multiaddr(entry: &str) -> Result<(&str, TransportIdentity), &'
 ///
 /// Each half is also checked against its own limit after the split, so
 /// this bound stops an oversized entry from being read and the halves
-/// decide what is actually well-formed.
+/// decide what is actually well-formed. BOTH consumers do that: the
+/// static provider's `peers` and, since PR #80,
+/// `connectivity`'s static candidates — which for one commit had the
+/// entry ceiling and no address check, leaving 460 bytes of address
+/// legal under a 517-byte entry.
 pub const MAX_STATIC_PEER_BYTES: usize =
     MAX_ADDRESS_BYTES + "/p2p/".len() + TransportIdentity::MAX_BYTES;
 /// Maximum advertised endpoints the directory may hold.
@@ -1438,6 +1443,102 @@ fn de_cache_ttl<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, D::Error>
     }
 }
 
+/// Read a `duration[a..b]` field: a string like `5m`, or bare millis.
+///
+/// The generic form of `de_cache_ttl`, which predates it and keeps its
+/// own name because its error message names its own field. The RANGE is
+/// not checked here — a deserializer that refused would report a type
+/// error where `validate` reports a policy one, and `validate`
+/// accumulates while serde stops at the first fault.
+pub(crate) fn de_duration_ms<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Wire {
+        Text(String),
+        Ms(u64),
+    }
+    match Wire::deserialize(d)? {
+        Wire::Text(t) => parse_duration_ms(&t).map_err(serde::de::Error::custom),
+        Wire::Ms(ms) => u32::try_from(ms)
+            .map_err(|_| serde::de::Error::custom("duration overflows the millisecond range")),
+    }
+}
+
+/// Write a duration back as the largest exact unit.
+pub(crate) fn ser_duration_ms<S: serde::Serializer>(ms: &u32, s: S) -> Result<S::Ok, S::Error> {
+    let ms = *ms;
+    if ms != 0 && ms.is_multiple_of(3_600_000) {
+        s.serialize_str(&format!("{}h", ms / 3_600_000))
+    } else if ms != 0 && ms.is_multiple_of(60_000) {
+        s.serialize_str(&format!("{}m", ms / 60_000))
+    } else if ms != 0 && ms.is_multiple_of(1_000) {
+        s.serialize_str(&format!("{}s", ms / 1_000))
+    } else {
+        s.serialize_str(&format!("{ms}ms"))
+    }
+}
+
+/// Read a `bytes[a..b]` field: `64MiB`, `1GiB`, or a bare byte count.
+///
+/// The schema writes these in binary units and so does the shipped
+/// `connectivity-infrastructure.yaml`, so a `u64` field alone refused
+/// the only spelling an operator is given an example of. Durations got
+/// this treatment when they were added and the one `bytes[...]` field in
+/// the schema did not. Review finding on PR #80.
+///
+/// Binary multiples only — `MiB`, not `MB`. The schema uses one
+/// vocabulary and accepting a second would make `1MB` mean something
+/// this crate chose rather than something the schema said.
+pub(crate) fn de_bytes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Wire {
+        Text(String),
+        Bytes(u64),
+    }
+    match Wire::deserialize(d)? {
+        Wire::Text(t) => parse_bytes(&t).map_err(serde::de::Error::custom),
+        Wire::Bytes(b) => Ok(b),
+    }
+}
+
+/// Write a byte count back as the largest exact binary unit.
+pub(crate) fn ser_bytes<S: serde::Serializer>(bytes: &u64, s: S) -> Result<S::Ok, S::Error> {
+    let bytes = *bytes;
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+    const GIB: u64 = 1024 * MIB;
+    if bytes != 0 && bytes.is_multiple_of(GIB) {
+        s.serialize_str(&format!("{}GiB", bytes / GIB))
+    } else if bytes != 0 && bytes.is_multiple_of(MIB) {
+        s.serialize_str(&format!("{}MiB", bytes / MIB))
+    } else if bytes != 0 && bytes.is_multiple_of(KIB) {
+        s.serialize_str(&format!("{}KiB", bytes / KIB))
+    } else {
+        s.serialize_str(&bytes.to_string())
+    }
+}
+
+fn parse_bytes(text: &str) -> Result<u64, String> {
+    let text = text.trim();
+    let (digits, unit): (&str, u64) = if let Some(n) = text.strip_suffix("KiB") {
+        (n, 1024)
+    } else if let Some(n) = text.strip_suffix("MiB") {
+        (n, 1024 * 1024)
+    } else if let Some(n) = text.strip_suffix("GiB") {
+        (n, 1024 * 1024 * 1024)
+    } else {
+        (text, 1)
+    };
+    let value: u64 = digits
+        .trim()
+        .parse()
+        .map_err(|_| format!("'{text}' is not a byte size like 64MiB, 1GiB, or 1048576"))?;
+    value
+        .checked_mul(unit)
+        .ok_or_else(|| format!("byte size '{text}' overflows"))
+}
+
 fn ser_cache_ttl<S: serde::Serializer>(ms: &u32, s: S) -> Result<S::Ok, S::Error> {
     if ms.is_multiple_of(1_000) {
         s.serialize_str(&format!("{}s", ms / 1_000))
@@ -1476,7 +1577,7 @@ pub struct DirectoryConfig {
     pub max_inflight_queries: u32,
 }
 
-const fn default_true() -> bool {
+pub(crate) const fn default_true() -> bool {
     true
 }
 const fn default_max_advertised() -> u32 {
@@ -1586,6 +1687,20 @@ pub struct ProfileConfig {
     /// opinion should have.
     #[serde(default)]
     pub discovery: DiscoveryConfig,
+    /// Transport, and within it the mandatory reachability stack.
+    ///
+    /// Defaulted like `channels`, and for the same reason: every profile
+    /// written before this section existed states no opinion about
+    /// reachability, and the schema gives every value below a default.
+    /// A profile that says nothing therefore gets standard v1's client
+    /// roles configured and both server roles off.
+    ///
+    /// IT CONFIGURES NOTHING YET. Nothing constructs an AutoNAT client,
+    /// a relay client or a DCUtR behaviour from this block: the owner
+    /// ruled on 2026-09-07 that they ship gated off with §14's protocol
+    /// isolation landing first, and this is the half deferred with it.
+    #[serde(default)]
+    pub transport: connectivity::TransportConfig,
     /// Broadcast channels.
     ///
     /// Defaulted, unlike `trust` and `endpoints`, and the difference is
@@ -1682,6 +1797,72 @@ pub enum ConfigError {
     DirectoryInflightOutOfRange {
         /// The configured value.
         got: u32,
+    },
+    /// A `transport.connectivity` value is outside the schema's range.
+    ///
+    /// One variant for every numeric field rather than thirty named
+    /// ones: the field is data here, which is what lets the check be
+    /// table-driven and keeps the shape from drifting between rows.
+    ConnectivityOutOfRange {
+        /// Dotted path of the field, from `connectivity` down.
+        field: &'static str,
+        /// The value supplied.
+        got: u64,
+        /// The inclusive range the schema allows.
+        allowed: (u64, u64),
+    },
+    /// A `transport.connectivity` value the schema pins was not its
+    /// one permitted value.
+    ///
+    /// Separate from a range because the message has to say something
+    /// different: a range invites a different number, and a literal
+    /// invites deleting the line.
+    ConnectivityLiteralViolated {
+        /// Dotted path of the field.
+        field: &'static str,
+    },
+    /// Two `transport.connectivity` values are in the wrong order.
+    ConnectivityOrderViolated {
+        /// The field the schema requires to be no greater.
+        lesser: &'static str,
+        /// What it held.
+        lesser_got: u64,
+        /// The field it must not exceed.
+        greater: &'static str,
+        /// What that held.
+        greater_got: u64,
+    },
+    /// A static reachability candidate names a peer the profile has not
+    /// authorized in either set.
+    ///
+    /// The schema requires every static relay or AutoNAT server PeerId to
+    /// be in `trust.allowed_peers` or in
+    /// `transport.connectivity.infrastructure.allowed_peers`.
+    StaticCandidateUnauthorized {
+        /// Which list.
+        role: &'static str,
+        /// The peer no set authorizes.
+        peer: TransportIdentity,
+    },
+    /// A static reachability candidate cannot be used as one.
+    ///
+    /// THREE REASONS, not one. The schema's type for these lists is
+    /// `multiaddr-with-peer-id`: without the peer half there is no
+    /// identity to authorize, which is where this started. It also
+    /// carries an address longer than a candidate address may be, and an
+    /// entry longer than a candidate entry may be — both of which ARE
+    /// peer-qualified, so the message says "not a usable static
+    /// candidate" rather than naming the grammar. The variant was called
+    /// `StaticCandidateNotPeerQualified` and named only the first of the
+    /// three; the name now says what the `Display` always said. Review
+    /// findings on PR #80.
+    StaticCandidateUnusable {
+        /// Which list.
+        role: &'static str,
+        /// The entry as configured.
+        entry: String,
+        /// Why it could not be read.
+        reason: &'static str,
     },
     /// `directory.cache_ttl` is outside the 10s..5m range.
     DirectoryCacheTtlOutOfRange {
@@ -1871,6 +2052,42 @@ impl core::fmt::Display for ConfigError {
                 f,
                 "directory.max_inflight_queries is {got}; the range is 1..={}",
                 interweave_transport_api::MAX_INFLIGHT_QUERIES
+            ),
+            Self::ConnectivityOutOfRange {
+                field,
+                got,
+                allowed,
+            } => write!(
+                f,
+                "{field} must be between {} and {}, got {got}",
+                allowed.0, allowed.1
+            ),
+            Self::ConnectivityLiteralViolated { field } => write!(
+                f,
+                "{field} is fixed by the schema and cannot be set to anything else"
+            ),
+            Self::ConnectivityOrderViolated {
+                lesser,
+                lesser_got,
+                greater,
+                greater_got,
+            } => write!(
+                f,
+                "{lesser} ({lesser_got}) must not exceed {greater} ({greater_got})"
+            ),
+            Self::StaticCandidateUnauthorized { role, peer } => write!(
+                f,
+                "connectivity.{role} names '{}', which is in neither trust.allowed_peers nor \
+                 connectivity.infrastructure.allowed_peers",
+                peer.as_str()
+            ),
+            Self::StaticCandidateUnusable {
+                role,
+                entry,
+                reason,
+            } => write!(
+                f,
+                "connectivity.{role} entry '{entry}' is not a usable static candidate: {reason}"
             ),
             Self::DirectoryCacheTtlOutOfRange { got_ms } => write!(
                 f,
@@ -2070,6 +2287,13 @@ impl ProfileConfig {
         if !(MIN_CACHE_TTL_MS..=MAX_CACHE_TTL_MS).contains(&cache_ttl) {
             errors.push(ConfigError::DirectoryCacheTtlOutOfRange { got_ms: cache_ttl });
         }
+
+        // THE REACHABILITY BLOCK, with the data-plane allowlist passed
+        // in: its static-candidate rule spans two sections of the
+        // document and the block cannot see the other one.
+        self.transport
+            .connectivity
+            .validate_into(&self.trust.allowed_peers, &mut errors);
 
         // Rule 7 — discovery composition. Each of these is a
         // configuration the runtime must refuse to start on rather than
@@ -2464,6 +2688,7 @@ mod tests {
     fn config(entries: Vec<EndpointConfig>) -> ProfileConfig {
         ProfileConfig {
             schema_version: 2,
+            transport: connectivity::TransportConfig::default(),
             trust: TrustConfig {
                 policy: TrustPolicyKind::StaticAllowlist,
                 allowed_peers: [peer(P1), peer(P2)].into_iter().collect(),

@@ -34,8 +34,15 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   2026-09-04, D3 on 2026-09-05); the harness reports zero divergences.**
   **`autonat`, `relay` and `dcutr` are now IN the workspace libp2p
   features**, added after step 2 in a change that constructs nothing —
-  no field in `SubstrateBehaviour`, no constructor, no configuration
-  path. That ends the era in which §3's promise was kept by the
+  no field in `SubstrateBehaviour` and no constructor. **A configuration
+  path now EXISTS and reaches nothing.** `profile-config` models and
+  validates the whole `transport.connectivity` block, and its
+  `infrastructure.allowed_peers` is the first production site that
+  builds an `InfrastructureSet`; no crate outside that one reads a
+  parsed value, so a profile setting `relay.client.enabled` constructs
+  no relay. The owner's 2026-09-07 ruling is why — the constructor ships
+  gated off — and so the validated config is a document shape, not a
+  switch. That ends the era in which §3's promise was kept by the
   compiler: a behaviour can now be switched on by writing code rather
   than by editing a manifest, so from here the guarantee is the outbound
   gate, the trust classification and their tests. **Two
