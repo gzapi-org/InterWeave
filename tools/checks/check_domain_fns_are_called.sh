@@ -316,7 +316,7 @@ for file in "${domain[@]}"; do
                 if [[ -n "${exempt_stage[$owner]:-}" ]]; then
                     seen_exempt["$owner"]=1
                     if (( exempt_stage[$owner] < open_stage )); then
-                        echo "check_domain_fns_are_called: $file: type \`$owner\` is exempt until stage ${exempt_stage[$owner]}, but stage $open_stage is open — the deadline passed." >&2
+                        echo "check_domain_fns_are_called: $file: type \`$owner\` is exempt until stage ${exempt_stage[$owner]} (${exempt_reason[$owner]:-no reason recorded}), but stage $open_stage is open — the deadline passed." >&2
                         problems=$((problems + 1))
                     fi
                 else

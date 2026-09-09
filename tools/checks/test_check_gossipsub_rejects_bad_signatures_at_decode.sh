@@ -76,14 +76,21 @@ RS
 RS
   # Pin the guard's expectation to THIS fixture, so every case below
   # exercises the real comparison rather than a copy of it.
-  export INTERWEAVE_REVIEWED_PROTOCOL_SHA256="$(
+  # ASSIGNED THEN EXPORTED, separately. `export X="$(...)"` returns
+  # `export`'s status, not the substitution's, so a pipeline that failed
+  # here would have exported an empty digest and every case below would
+  # then compare against nothing.
+  local protocol_sha behaviour_sha
+  protocol_sha=$(
     sed 's;//.*$;;' "$work/src/protocol.rs" \
       | sed 's/[[:space:]]\+/ /g;s/^ //;s/ $//' | grep -v '^$' | sha256sum | cut -d' ' -f1
-  )"
-  export INTERWEAVE_REVIEWED_BEHAVIOUR_SHA256="$(
+  )
+  behaviour_sha=$(
     sed 's;//.*$;;' "$work/src/behaviour.rs" \
       | sed 's/[[:space:]]\+/ /g;s/^ //;s/ $//' | grep -v '^$' | sha256sum | cut -d' ' -f1
-  )"
+  )
+  export INTERWEAVE_REVIEWED_PROTOCOL_SHA256="$protocol_sha"
+  export INTERWEAVE_REVIEWED_BEHAVIOUR_SHA256="$behaviour_sha"
 }
 
 run_guard() { INTERWEAVE_GOSSIPSUB_SRC="$work/src" bash "$GUARD" >/dev/null 2>&1; }
