@@ -270,6 +270,16 @@ pub struct ReachabilityManager {
     servers: BTreeMap<TransportIdentity, ServerRecord>,
     evidence: BTreeMap<(String, TransportIdentity), Evidence>,
     inflight: BTreeMap<(String, TransportIdentity), u64>,
+    /// When each address was last OFFERED to a server.
+    ///
+    /// The rotation key, and deliberately not "when it last produced
+    /// evidence": a `Failed` never becomes evidence, so under an
+    /// all-timeouts condition -- no reachable server, a firewall --
+    /// every address would stay at zero and the tie would break
+    /// lexicographically, retrying the same `max_candidates_per_cycle`
+    /// forever while the rest were never tried at all. Review finding
+    /// on PR #84.
+    last_attempted: BTreeMap<String, u64>,
     state: ReachabilityVerdict,
 }
 
@@ -301,6 +311,7 @@ impl ReachabilityManager {
             servers: BTreeMap::new(),
             evidence: BTreeMap::new(),
             inflight: BTreeMap::new(),
+            last_attempted: BTreeMap::new(),
             state: ReachabilityVerdict::Unknown,
         })
     }
@@ -367,6 +378,8 @@ impl ReachabilityManager {
             .retain(|(address, _), _| self.candidates.contains(address));
         self.evidence
             .retain(|(address, _), _| self.candidates.contains(address));
+        self.last_attempted
+            .retain(|address, _| self.candidates.contains(address));
         self.rederive(now_ms)
     }
 
@@ -454,21 +467,24 @@ impl ReachabilityManager {
         if room == 0 {
             return plans;
         }
-        // LEAST RECENTLY PROBED FIRST. `candidates` keeps the order the
-        // caller gave, which would otherwise mean the first few are
-        // probed forever and the rest never.
-        let mut order: Vec<(u64, &String)> = self
+        // LEAST RECENTLY ATTEMPTED FIRST. `candidates` keeps the order
+        // the caller gave, which would otherwise mean the first few are
+        // probed forever and the rest never. Keyed on when the address
+        // was last OFFERED rather than on its newest evidence: a
+        // `Failed` never becomes evidence, so an all-timeouts profile
+        // would otherwise leave every address at zero and rotate
+        // nowhere. It is also one lookup per candidate instead of a scan
+        // of the whole evidence map.
+        // AN `Option`, NOT A ZERO DEFAULT: `None` orders before every
+        // `Some`, so an address never offered goes first. Collapsing
+        // "never attempted" to 0 made it tie with an address attempted
+        // at t=0, and the tie broke lexicographically -- the first
+        // round's addresses won every subsequent round. The rotation
+        // test caught it.
+        let mut order: Vec<(Option<u64>, &String)> = self
             .candidates
             .iter()
-            .map(|address| {
-                let newest = self
-                    .evidence
-                    .iter()
-                    .filter(|((a, _), _)| a == address)
-                    .map(|(_, e)| e.observed_at_ms)
-                    .max();
-                (newest.unwrap_or(0), address)
-            })
+            .map(|address| (self.last_attempted.get(address).copied(), address))
             .collect();
         order.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(right.1)));
         let cycle: Vec<String> = order
@@ -517,6 +533,7 @@ impl ReachabilityManager {
         for plan in &plans {
             self.inflight
                 .insert((plan.address.clone(), plan.server.clone()), now_ms);
+            self.last_attempted.insert(plan.address.clone(), now_ms);
         }
         plans
     }
@@ -524,12 +541,19 @@ impl ReachabilityManager {
     /// Fold a probe's outcome in. Returns the state change, if any.
     ///
     /// An outcome for a pair that is not in flight is still recorded --
-    /// the behaviour may report one we did not plan. TWO conditions drop
-    /// it, and both return `None`: an address this manager does not
-    /// track, because `derive` reads only candidates so such evidence
-    /// could never count and would only grow the map; and a server we
-    /// do not know, so a stranger's report cannot reach
-    /// `verified_public`. FAILS CLOSED on both.
+    /// the behaviour may report one we did not plan. Two conditions stop
+    /// it becoming evidence, and they differ in what they return.
+    ///
+    /// A SERVER WE DO NOT KNOW is dropped whole and returns `None`: a
+    /// stranger's report must not reach `verified_public`, and nothing
+    /// is mutated, so there is no change to report.
+    ///
+    /// AN ADDRESS WE DO NOT TRACK records no evidence -- `derive` reads
+    /// only candidates, so it could never count and would only grow the
+    /// map -- but the server's own health is still recorded, and that
+    /// CAN change the verdict, so this path returns whatever `rederive`
+    /// says and may be `Some`. A `Reachable` there clears that server's
+    /// failure timestamp, which is a field `NotVerified` reports.
     ///
     /// The untracked-address case is the COMMON one, not an edge:
     /// `AUTONAT.md` §3's open note records that the pinned client probes
@@ -544,15 +568,15 @@ impl ReachabilityManager {
         let record = self.servers.get_mut(server)?;
         let key = (address.to_owned(), server.clone());
         self.inflight.remove(&key);
-        // THE SERVER ACCOUNTING BELOW IS NOT ADDRESS-SCOPED, so it runs
-        // for every outcome from a known server -- including the many
-        // whose address this manager does not track, since `AUTONAT.md`
-        // §3's open note records that the pinned client probes from
-        // libp2p's own candidate set rather than this one. Gating it on
-        // the address would have meant a server that times out on those
-        // probes never accumulates backoff and one that succeeds never
-        // clears it, which is health information about the SERVER thrown
-        // away for an address reason. Only the evidence insert is gated.
+        // THE SERVER ACCOUNTING BELOW IS MOSTLY NOT ADDRESS-SCOPED, so
+        // it runs for outcomes whose address this manager does not
+        // track -- the many of them, since `AUTONAT.md` §3's open note
+        // records that the pinned client probes from libp2p's own
+        // candidate set rather than this one. Gating all of it on the
+        // address meant a server that timed out on those probes never
+        // accumulated backoff and one that succeeded never cleared it,
+        // which is health information about the SERVER thrown away for
+        // an address reason. The exception is `Unreachable`, below.
         // Review findings on PR #84.
         let tracked = self.candidates.iter().any(|candidate| candidate == address);
         match outcome {
@@ -566,6 +590,20 @@ impl ReachabilityManager {
                 // what `NotVerified` reports. Review finding on PR #84.
                 record.last_failure_at_ms = None;
             }
+            // AN `Unreachable` FOR AN UNTRACKED ADDRESS IS NOT THE
+            // SERVER'S FAULT. It answered, correctly, about an address
+            // this manager does not track -- and under `AUTONAT.md` §3's
+            // open note that set is remote-influenced, since Identify
+            // pushes every address a peer CLAIMS to have observed into
+            // the candidate set the pinned client probes. Counting those
+            // refusals would let any connected peer drive our own servers
+            // to the five-minute backoff cap by naming addresses that
+            // cannot work -- and `due_probes` skips a backed-off server,
+            // so what gets suppressed is the probing of the addresses we
+            // DO track. `Failed` and `Reachable` stay ungated: those are
+            // about the server, whatever address they named.
+            // Review finding on PR #84.
+            ProbeOutcome::Unreachable if !tracked => {}
             ProbeOutcome::Unreachable | ProbeOutcome::Failed => {
                 record.consecutive_failures = record.consecutive_failures.saturating_add(1);
                 let shift = record.consecutive_failures.saturating_sub(1).min(16);
@@ -646,6 +684,7 @@ impl ReachabilityManager {
         let before = self.state.clone();
         self.evidence.clear();
         self.inflight.clear();
+        self.last_attempted.clear();
         for record in self.servers.values_mut() {
             record.consecutive_failures = 0;
             record.backoff_until_ms = 0;
@@ -1028,6 +1067,53 @@ mod tests {
     }
 
     #[test]
+    fn the_cycle_rotates_even_when_every_probe_times_out() {
+        // THE CASE THE EVIDENCE-KEYED ROTATION COULD NOT SERVE. A
+        // `Failed` never becomes evidence, so keying the order on the
+        // newest observation left every address at the same rank under
+        // an all-timeouts condition -- no reachable server, a firewall
+        // -- and the same `max_candidates_per_cycle` were retried
+        // forever while the rest were never tried at all. Keyed on when
+        // the address was last OFFERED, the rotation is unaffected by
+        // what came back. Review finding on PR #84.
+        let mut m = ReachabilityManager::new(ReachabilityConfig {
+            max_candidates_per_cycle: 2,
+            max_inflight_probes: 2,
+            ..ReachabilityConfig::default()
+        })
+        .expect("valid");
+        let many: Vec<String> = (1..=6)
+            .map(|i| format!("/ip4/8.8.{i}.{i}/tcp/4001"))
+            .collect();
+        m.set_candidates(many.clone(), 0);
+        m.add_server(peer(S1), ServerSource::Static);
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut now = 0;
+        for _ in 0..3 {
+            let plans = m.due_probes(now);
+            assert_eq!(plans.len(), 2, "two slots, two candidates per cycle");
+            for plan in &plans {
+                seen.insert(plan.address.clone());
+            }
+            // Every one of them times out, so no evidence is ever
+            // recorded and the server's backoff is cleared by hand to
+            // keep the rounds coming -- the question here is the
+            // ROTATION, not the backoff.
+            now += DEFAULT_PROBE_TIMEOUT_MS;
+            let _ = m.expire_inflight(now);
+            if let Some(record) = m.servers.get_mut(&peer(S1)) {
+                record.backoff_until_ms = 0;
+            }
+        }
+        assert!(m.evidence.is_empty(), "nothing succeeded, so no evidence");
+        assert_eq!(
+            seen.len(),
+            6,
+            "three rounds of two must reach all six, not retry the first two: {seen:?}"
+        );
+    }
+
+    #[test]
     fn the_cycle_ceiling_binds_when_the_in_flight_bound_does_not() {
         // WITH THE DEFAULTS THIS CEILING IS INVISIBLE: two in-flight
         // slots against four candidates per cycle, so the smaller bound
@@ -1162,9 +1248,10 @@ mod tests {
             ReachabilityVerdict::Unknown,
             "two successes for an address we do not track verify nothing"
         );
-        // THE LOAD-BEARING LINE. The three assertions above pass with the
-        // guard deleted too, because `derive` reads only candidates -- so
-        // this is the one that fails, and it is not to be simplified away.
+        // LOAD-BEARING. The three assertions above pass with the guard
+        // deleted too, because `derive` reads only candidates -- this
+        // one and its twin at the end of the test are what fail, and
+        // neither is to be simplified away.
         assert!(m.evidence.is_empty(), "and are not retained");
         // BUT THE SERVER'S HEALTH IS STILL RECORDED, because a probe that
         // failed says something about the server whatever address it
@@ -1172,11 +1259,34 @@ mod tests {
         // gating this on the address would have left backoff never
         // accumulating and never clearing. Review finding on PR #84.
         let untracked = "/ip4/9.9.9.9/tcp/4001";
-        let _ = m.record_outcome(untracked, &peer(S1), ProbeOutcome::Unreachable, 3);
+        // A TIMEOUT IS THE SERVER'S, whatever address it named.
+        assert!(
+            m.record_outcome(untracked, &peer(S1), ProbeOutcome::Failed, 3)
+                .is_none(),
+            "nothing verified before or after, so no change to report"
+        );
         let record = m.servers.get(&peer(S1)).expect("known");
         assert_eq!(record.consecutive_failures, 1, "the server backs off");
         assert!(record.backoff_until_ms > 3);
-        let _ = m.record_outcome(untracked, &peer(S1), ProbeOutcome::Reachable, 4);
+        // AN `Unreachable` IS NOT: the server answered correctly about an
+        // address we do not track. Counting it would let any peer that
+        // can inject a candidate drive our servers to the backoff cap and
+        // suppress the probes we care about.
+        let before = m
+            .servers
+            .get(&peer(S1))
+            .expect("known")
+            .consecutive_failures;
+        let _ = m.record_outcome(untracked, &peer(S1), ProbeOutcome::Unreachable, 4);
+        assert_eq!(
+            m.servers
+                .get(&peer(S1))
+                .expect("known")
+                .consecutive_failures,
+            before,
+            "an untracked address's refusal is not the server's fault"
+        );
+        let _ = m.record_outcome(untracked, &peer(S1), ProbeOutcome::Reachable, 5);
         let record = m.servers.get(&peer(S1)).expect("known");
         assert_eq!(record.backoff_until_ms, 0, "and a success clears it");
         assert!(
