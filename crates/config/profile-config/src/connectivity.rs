@@ -1984,7 +1984,29 @@ mod tests {
             "a list built in Rust must still be bounded: {errors:?}"
         );
 
-        // AND EACH ENTRY'S LENGTH, for the same reason.
+        // AND THE OTHER ROLE, because the label travels with the role
+        // and a role that is never over its ceiling in a test can carry
+        // the wrong field name forever. Only the relay row was asserted
+        // here, so the second entry of that list was covered by nothing.
+        // Review finding on PR #80.
+        let mut config = ConnectivityConfig::default();
+        config.autonat.client.static_servers = (0..MAX_STATIC_CANDIDATES + 1)
+            .map(|i| format!("/ip4/198.51.100.{}/tcp/4001/p2p/{P1}", i % 250))
+            .collect();
+        let mut errors = Vec::new();
+        config.validate_into(&BTreeSet::new(), &mut errors);
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ConfigError::ConnectivityOutOfRange { field, got, .. }
+                    if *field == "connectivity.autonat.client.static_servers"
+                        && *got as usize == MAX_STATIC_CANDIDATES + 1
+            )),
+            "the autonat list is bounded under its OWN name: {errors:?}"
+        );
+
+        // AND EACH ENTRY'S LENGTH, for the same reason -- with the role
+        // asserted too, for the same reason again.
         let mut config = ConnectivityConfig::default();
         config.autonat.client.static_servers =
             vec![format!("/dns4/{}/tcp/4001/p2p/{P1}", "a".repeat(600))];
@@ -1993,10 +2015,12 @@ mod tests {
         assert!(
             errors.iter().any(|e| matches!(
                 e,
-                ConfigError::StaticCandidateUnusable { reason, .. }
-                    if reason.contains("longer than a candidate entry")
+                ConfigError::StaticCandidateUnusable { role, reason, .. }
+                    if *role == "autonat.client.static_servers"
+                        && reason.contains("longer than a candidate entry")
             )),
-            "an over-long entry built in Rust must still be refused: {errors:?}"
+            "an over-long entry built in Rust must still be refused, \
+             under its own role: {errors:?}"
         );
 
         // THE CONTROL: a list at the ceiling draws neither complaint, so
