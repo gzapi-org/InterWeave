@@ -54,10 +54,11 @@
 #   0  every tracked shell script is clean at warning severity
 #   1  shellcheck reported at least one finding — read its output above
 #   2  the guard could not judge the tree: an argument was passed (it
-#      takes none), shellcheck is not installed, a temporary file could
-#      not be created, the tracked file list is empty or could not be
-#      read, shellcheck could not open a tracked file, or the severity
-#      was not one it accepts. Never a finding, and never a pass.
+#      takes none), the repository root could not be entered, shellcheck
+#      is not installed, a temporary file could not be created, the
+#      tracked file list is empty or could not be read, shellcheck could
+#      not open a tracked file, or the severity was not one it accepts.
+#      Never a finding, and never a pass.
 # <<< help
 set -uo pipefail
 
@@ -111,7 +112,8 @@ fi
 # linter would be handed the quoted spelling. None exists today.
 # (A COMMENT MUST NOT BEGIN WITH THE WORD "shellcheck": the linter reads
 # such a line as a directive and fails the file with SC1072/SC1073 at
-# error severity -- which this file did, on its first CI run, twice.)
+# error severity -- which this file did, in both required jobs, on the
+# run that first reached the linter.)
 # And the listing's own status is read: `git ls-files` failing — not a
 # repository, git absent — also yields an empty array, and "no tracked
 # files" would name the wrong cause. Review findings on PR #82.
@@ -128,10 +130,11 @@ listing=$(mktemp) || die "check_shell_scripts: could not create a temporary file
 trap 'rm -f "$listing"' EXIT
 # `--deduplicate`: a conflicted path is listed once per merge stage,
 # which would lint it three times and inflate the count the OK line
-# prints. And `scripts=()` first, so a redirection that fails on the
-# `mapfile` line -- the file removed underneath it -- reaches the
-# empty-set refusal below as exit 2, rather than tripping `set -u` on
-# `${#scripts[@]}` and exiting 1, the finding code.
+# prints. A redirection that fails on the `mapfile` line -- the file
+# removed underneath it -- is caught by its `|| die`, exit 2; the
+# `scripts=()` before it is belt-and-braces so `${#scripts[@]}` can
+# never trip `set -u` into exit 1, the finding code, whatever else
+# changes here.
 scripts=()
 if ! git ls-files -z --deduplicate '*.sh' > "$listing"; then
     die "check_shell_scripts: git ls-files failed, so the tracked set could not be read (exit 2, not a pass)."

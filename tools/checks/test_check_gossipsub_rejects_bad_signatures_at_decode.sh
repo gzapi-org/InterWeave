@@ -80,9 +80,10 @@ RS
   # `export`'s status, not the substitution's -- SC2155, a warning-level
   # finding the shell guard admits. The split does not by itself make a
   # failed pipeline fatal: this file runs without `set -e` and reads no
-  # status here, so an empty digest would still be exported. What
-  # catches that is the accepted-fixture case below, which fails loudly
-  # against an empty expectation rather than passing vacuously.
+  # status here, so a digest of NOTHING -- sha256 of empty input --
+  # would still be exported. What catches that is the accepted-fixture
+  # case below, which fails loudly against that expectation rather than
+  # passing vacuously.
   local protocol_sha behaviour_sha
   protocol_sha=$(
     sed 's;//.*$;;' "$work/src/protocol.rs" \
