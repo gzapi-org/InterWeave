@@ -1,0 +1,32 @@
+diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-autonat-0.15.0/src/v2/client/behaviour.rs third_party/libp2p-autonat/src/v2/client/behaviour.rs
+--- upstream/libp2p-autonat-0.15.0/src/v2/client/behaviour.rs	2006-07-24 03:21:28.000000000 +0200
++++ third_party/libp2p-autonat/src/v2/client/behaviour.rs	2026-09-09 18:11:54.620425631 +0200
+@@ -366,6 +366,28 @@
+             info.status = TestStatus::Received(self.rng.next_u64());
+         }
+     }
++
++    // INTERWEAVE PATCH (ADR-0051). Upstream tests a candidate once: a
++    // result leaves it `Received` or `Failed`, the tick sweeps only
++    // `Untested`, and no public path resets one -- so a second observer
++    // and a refresh are impossible. This returns a candidate to the
++    // sweep and leaves WHEN to do so to the caller.
++    /// Mark a candidate for re-testing on the next tick.
++    ///
++    /// Returns whether the status changed: an address that is unknown or
++    /// already untested answers `false`. A `Pending` candidate is reset
++    /// too; its in-flight nonce is orphaned, which the handlers already
++    /// tolerate -- a dial-back carrying an unknown nonce is refused, and a
++    /// late outcome for one finds nothing to reset.
++    pub fn retest(&mut self, addr: &Multiaddr) -> bool {
++        match self.address_candidates.get_mut(addr) {
++            Some(info) if info.status != TestStatus::Untested => {
++                info.status = TestStatus::Untested;
++                true
++            }
++            _ => false,
++        }
++    }
+ }
+ 
+ impl Default for Behaviour<OsRng> {

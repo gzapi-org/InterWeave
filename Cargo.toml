@@ -380,3 +380,14 @@ planned_test_packages = [
   "tests/android-e2e",
   "tests/interoperability",
 ]
+
+# ADR-0051. `libp2p-autonat` 0.15.0's v2 client tests a candidate address
+# once and never again: a result leaves it `Received` or `Failed`, the tick
+# sweeps only `Untested`, and no public path resets one. ADR-0035's two
+# distinct observers and AUTONAT.md §5's refresh therefore have no
+# mechanism in the crate as shipped, and upstream `master` is the same.
+# The vendored copy is the crates.io tarball plus `INTERWEAVE.patch`, one
+# method: `Behaviour::retest`. Drop this patch when a release carries an
+# equivalent; `tools/checks/license_exempt.txt` names the provenance.
+[patch.crates-io]
+libp2p-autonat = { path = "third_party/libp2p-autonat" }
