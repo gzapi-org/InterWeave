@@ -100,6 +100,13 @@ for port_name in PROBE_PORT PROBE_PORT_ALT ALT_SOURCE_PORT SRC_PORT; do
 done
 [ "$PROBE_PORT" -ne "$PROBE_PORT_ALT" ] \
   || { echo "PROBE_PORT and PROBE_PORT_ALT must be different ports, or SAME_ADDRESS is the control" >&2; exit 2; }
+# A PRE-CHECK ON THE NAMES; the check that holds is on the resolved
+# addresses, below, because `podman inspect` takes a name, a full ID or
+# a short ID for the same container, and two spellings of one container
+# pass a string comparison. The port half of this guard was fixed for the
+# same reason one commit earlier, and the address half kept comparing
+# spellings with the resolved value one variable away. Review finding on
+# PR #81.
 [ "$ALT_SOURCE" != "$PROBER" ] \
   || { echo "ALT_SOURCE and PROBER must differ, or OTHER_ADDRESS is the same address" >&2; exit 2; }
 
@@ -114,6 +121,13 @@ router_pub=$(addr_on "$ROUTER" "$NET_PUB")
 for pair in "prober:$prober" "alt:$alt" "peer:$peer_private" "router:$router_pub"; do
   [ -n "${pair#*:}" ] || { echo "no address for ${pair%%:*}" >&2; exit 1; }
 done
+# THE CHECK THE NAME COMPARISON ABOVE STANDS IN FOR. Two references to
+# one container resolve to one address, and OTHER_ADDRESS sent from the
+# prober's own address matches the address-restricted forward -- so
+# `adf` reads as `eif`, and on a `full-cone` row a broken observer reads
+# as a passing control.
+[ "$alt" != "$prober" ] \
+  || { echo "ALT_SOURCE ($ALT_SOURCE) and PROBER ($PROBER) resolve to the same address $alt, so OTHER_ADDRESS is not a different address" >&2; exit 2; }
 
 # LEARN THE MAPPED PORT FIRST, because under `eds` it is not the bound
 # one and the three probes have to be aimed somewhere real. The prober
