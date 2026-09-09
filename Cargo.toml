@@ -233,13 +233,16 @@ libp2p = { version = "0.56", default-features = false, features = [
     "gossipsub",
     # Stage 11 (ADR-0035). The CLIENT roles are what this stage builds
     # first, but the features are not role-split — `autonat` and `relay`
-    # compile their server halves too, which steps 4 and 6 own. Each
-    # originates
-    # autonomous dials — an AutoNAT probe, a reservation renewal, a hole
-    # punch — so all three arrive only now that the outbound gate
-    # attributes a dial to the behaviour that started it rather than
-    # assuming Kademlia, and now that the three ADR-0036 violations
-    # SPIKE-004 found in the admission path are fixed.
+    # compile their server halves too, which steps 4 and 6 own. Between
+    # them they originate autonomous dials — a reservation renewal, a
+    # hole punch, and an AutoNAT dial-BACK, which belongs to the SERVER:
+    # the v2 client emits no dial at all, because a probe is a request
+    # over an already-open connection (measured 2026-09-09; see
+    # CLAUDE.md §1 on step 3 reaching routes 2 and 3). So they arrive
+    # only now that the outbound gate attributes a dial to the behaviour
+    # that started it rather than assuming Kademlia, and now that the
+    # three ADR-0036 violations SPIKE-004 found in the admission path
+    # are fixed.
     #
     # COMPILED IS NOT CONSTRUCTED. None of the three has a field in
     # `SubstrateBehaviour`, a constructor, or a configuration path — the
