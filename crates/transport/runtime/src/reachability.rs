@@ -64,9 +64,11 @@
 //! saying it, or REVERSED, a fresh success now under a fresh failure --
 //! still make the threshold, at least one still says it, and fewer than
 //! two in total say unreachable. `evidence_until_ms` then reports when
-//! the published verdict next CHANGES -- per address, the earlier of the
-//! threshold-th newest success expiring and the last uncontradicted one
-//! expiring, minimised across the verified addresses. A DISSENTER that never said reachable
+//! an address currently verified LEAVES the set -- per address, the
+//! earlier of the threshold-th newest success expiring and the last
+//! uncontradicted one expiring, minimised across the verified
+//! addresses. It does not model an address JOINING, which a lapsing
+//! dissenter can cause sooner. A DISSENTER that never said reachable
 //! counts toward that two and toward nothing else. Three earlier versions
 //! each missed a piece: one let a failure overwrite the success it
 //! contradicted, so one report from a counting observer unverified the
@@ -180,23 +182,37 @@ pub enum ReachabilityVerdict {
     VerifiedPublic {
         /// Every address currently meeting the threshold.
         verified_addresses: Vec<String>,
-        /// The earliest moment the published verdict CHANGES if no
-        /// further evidence arrives -- not the moment it ends.
+        /// The earliest moment an address currently in
+        /// `verified_addresses` LEAVES it, if no further evidence
+        /// arrives.
         ///
         /// Per address it is the earlier of two things: the expiry of the
         /// threshold-th newest fresh success, and the expiry of the
         /// newest success from a server not contradicting itself. Across
         /// addresses it is the minimum, so when several are verified this
-        /// names the first one to drop out of `verified_addresses` while
-        /// the verdict itself continues on the others.
+        /// names the first to drop out while the verdict continues on the
+        /// others -- which is why it is not the end of the verdict, and
+        /// is the end only when one address is verified.
         ///
-        /// Three earlier versions were wrong in three ways: the earliest
-        /// expiry of any counted success, which understates whenever more
-        /// than the threshold agree; then the threshold-th newest alone,
-        /// which at a threshold of one overstated by up to a whole TTL
-        /// once a reversed server's success outlived the uncontradicted
-        /// one; and a doc line calling this the end of the verdict, which
-        /// two verified addresses falsify. Review findings on PR #84.
+        /// **IT DOES NOT MODEL AN ADDRESS JOINING.** Time only ever
+        /// expires evidence, and every term above shrinks as it does --
+        /// except `saying_unreachable.len() < 2`, which RELAXES. An
+        /// address held out of the set by two dissenters becomes verified
+        /// on successes it already holds the moment the older failure
+        /// lapses, and that can fall before this horizon. A caller that
+        /// slept until this value alone would publish a stale
+        /// `verified_addresses`, so this is a bound on when to look
+        /// again, not a substitute for the expiry tick.
+        /// `an_address_can_join_the_verified_set_before_the_published_horizon`
+        /// pins that direction. Review findings on PR #84.
+        ///
+        /// Two earlier versions got the leaving direction wrong in three
+        /// ways: the earliest expiry of any counted success, which
+        /// understates whenever more than the threshold agree; then the
+        /// threshold-th newest alone, which at a threshold of one
+        /// overstated by up to a whole TTL once a reversed server's
+        /// success outlived the uncontradicted one; and, in that same
+        /// version, a doc line calling this the end of the verdict.
         evidence_until_ms: u64,
     },
     /// Evidence is sufficient to say the threshold is not met.
@@ -581,9 +597,10 @@ impl ReachabilityManager {
     /// the retained success is read. It need not have been in the quorum
     /// that first verified the address; §4 says "the servers that said
     /// reachable", which is what this counts. An address is verified
-    /// when the reachable count meets the threshold, OR it was verified before and the servers that
-    /// said reachable -- still saying it, or reversed -- still make the
-    /// threshold with at least one still saying it; in either case fewer
+    /// when the reachable count meets the threshold, OR it was verified
+    /// before and the servers that said reachable -- still saying it, or
+    /// reversed -- still make the threshold with at least one still
+    /// saying it; in either case fewer
     /// than two say unreachable. A dissenter that never said reachable
     /// counts toward that two and toward nothing else: an earlier version
     /// let it make up the quorum, so removing a verifying server left the
@@ -665,6 +682,12 @@ impl ReachabilityManager {
                 // SAYING reachable, which a reversed server can never
                 // become again -- `Reachable` clears the failure, so a
                 // fresh failure always outlives the success beneath it.
+                //
+                // EXACTLY ONE TERM IS LIVE PER THRESHOLD, so a test can
+                // only ever exercise one: at a threshold of one the
+                // count is the maximum over every fresh success and the
+                // clamp always wins; at two or more the clamp is a
+                // no-op, per the paragraph below.
                 // Without this clamp a threshold of ONE published the
                 // reversed member's expiry, up to a whole TTL past the
                 // moment its own verdict ended. For a threshold of two or
@@ -1582,7 +1605,45 @@ mod tests {
     }
 
     #[test]
-    fn the_horizon_is_the_next_change_and_not_the_end_of_the_verdict() {
+    fn an_address_can_join_the_verified_set_before_the_published_horizon() {
+        // THE DIRECTION THE HORIZON DOES NOT MODEL, pinned so it is a
+        // recorded limitation rather than a surprise. Every term that
+        // decides a verdict shrinks as evidence expires, except
+        // `saying_unreachable.len() < 2`, which relaxes: A is held out by
+        // two dissenters while already holding two successes, so the
+        // moment the older failure lapses it joins the set -- before the
+        // horizon B published. Review finding on PR #84.
+        let mut m = manager_with(&[S1, S2, S3, S4]);
+        let _ = m.record_outcome(A, &peer(S3), ProbeOutcome::Unreachable, 0);
+        let _ = m.record_outcome(A, &peer(S4), ProbeOutcome::Unreachable, 50);
+        let _ = m.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 100);
+        let _ = m.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 100);
+        assert!(!verified(&m), "two dissenters hold A out");
+        let _ = m.record_outcome(B, &peer(S1), ProbeOutcome::Reachable, 200);
+        let _ = m.record_outcome(B, &peer(S2), ProbeOutcome::Reachable, 200);
+        let ReachabilityVerdict::VerifiedPublic {
+            evidence_until_ms,
+            verified_addresses,
+        } = m.state().clone()
+        else {
+            panic!("B is verified");
+        };
+        assert_eq!(verified_addresses, [B]);
+        assert_eq!(evidence_until_ms, 200 + TTL, "B's, the only one verified");
+        // S3's failure lapses first, and A joins -- strictly before the
+        // horizon above.
+        let change = m.expire_evidence(TTL).expect("A joins");
+        assert_eq!(
+            change.to.verified_addresses(),
+            [A, B],
+            "a lapsing dissenter admits an address the horizon said nothing about"
+        );
+        // And it happened strictly before the horizon B published.
+        assert!(TTL < evidence_until_ms);
+    }
+
+    #[test]
+    fn the_horizon_is_the_first_verified_address_to_leave() {
         // The field is one number for a verdict that can name several
         // addresses, so it is the minimum across them: the moment the
         // FIRST leaves `verified_addresses`, while the verdict itself
@@ -1615,6 +1676,8 @@ mod tests {
             },
             "the verdict continues on B, which is why this is not its end"
         );
+        // Never the sentinel, and never a moment already past.
+        assert!(evidence_until_ms > 0 && evidence_until_ms < u64::MAX);
         assert_eq!(
             m.expire_evidence(100 + TTL).map(|c| c.to),
             Some(ReachabilityVerdict::Unknown),
