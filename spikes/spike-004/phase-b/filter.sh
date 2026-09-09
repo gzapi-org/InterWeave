@@ -63,20 +63,39 @@ HOLD_SECONDS="${HOLD_SECONDS:-6}"
 # `PROBE_PORT=9001` is two strings and one UDP port, so a string
 # comparison admits it and SAME_ADDRESS becomes the control wearing
 # another name -- an `address-restricted` row would then match `adf` on
-# two packets from the same endpoint. The identical class bit
-# `profile-config`'s candidate list in the same week (`045000` against
-# `45000`), where `$((10#...))` is likewise the fix: base ten
-# EXPLICITLY, since `$((09001))` is an invalid octal literal and
-# `$((045000))` is a different number.
+# two packets from the same endpoint.
+#
+# `probe.sh` HAS THE SAME FIX for the same reason, at its `SRC_PORTS`
+# guard: `045000` and `45000` are two spellings of one tuple, and a
+# `sort -u` over spellings does not see it. Base ten EXPLICITLY in both,
+# because `$((045000))` is OCTAL -- 18944, a different port -- and
+# `$((09001))` is not a valid literal at all. An earlier version of this
+# comment cited `profile-config` instead; that crate is Rust, parses
+# ports with `parse::<u16>()`, and carries no such case, so the citation
+# pointed at nothing a reader could check.
 # Codex review on PR #81.
+# HOLD_SECONDS TOO, because it is the one number fed to arithmetic on the
+# HOST shell rather than to a container: `$((HOLD_SECONDS * 20 + 40))`
+# evaluates whatever it is handed. The guard that validated four ports
+# and not this was one variable short in the commit that added it.
+# Review finding on PR #81.
+case "${HOLD_SECONDS:-}" in
+  ''|*[!0-9]*) echo "HOLD_SECONDS holds '${HOLD_SECONDS:-}', which is not a number of seconds" >&2; exit 2 ;;
+esac
+HOLD_SECONDS=$((10#$HOLD_SECONDS))
+[ "$HOLD_SECONDS" -ge 1 ] && [ "$HOLD_SECONDS" -le 120 ] \
+  || { echo "HOLD_SECONDS holds '$HOLD_SECONDS'; the window must be 1-120 seconds" >&2; exit 2; }
+
 for port_name in PROBE_PORT PROBE_PORT_ALT ALT_SOURCE_PORT SRC_PORT; do
   eval "port_value=\$$port_name"
   case "$port_value" in
     ''|*[!0-9]*) echo "$port_name holds '$port_value', which is not a port number" >&2; exit 2 ;;
   esac
   port_value=$((10#$port_value))
+  # THE SPELLING THE CALLER TYPED, not the normalised value: reporting
+  # `070000` as "holds '70000'" names a number nobody wrote.
   [ "$port_value" -ge 1 ] && [ "$port_value" -le 65535 ] \
-    || { echo "$port_name holds '$port_value', which is not a port in 1-65535" >&2; exit 2; }
+    || { eval "echo \"$port_name holds '\$$port_name', which is not a port in 1-65535\" >&2"; exit 2; }
   eval "$port_name=$port_value"
 done
 [ "$PROBE_PORT" -ne "$PROBE_PORT_ALT" ] \
@@ -234,6 +253,15 @@ have CONTROL || {
   echo "VERDICT: NO CONTROL — the endpoint the peer addressed could not reach it, so nothing here is measured" >&2
   exit 1
 }
+
+# A DIFFERENT ADDRESS ADMITTED WHILE THE SAME ONE IS NOT is no RFC 4787
+# class, and reporting it as `eif` would be the upward misclassification
+# this script's guards exist to prevent -- the permissive answer for an
+# observation that supports none. Review finding on PR #81.
+if have OTHER_ADDRESS && ! have SAME_ADDRESS; then
+  echo "VERDICT: ANOMALOUS — a different address was admitted while the same address was not; that is no filtering class" >&2
+  exit 1
+fi
 
 if have OTHER_ADDRESS; then
   verdict="ENDPOINT-INDEPENDENT FILTERING (a full cone: any source reaches the mapping)"

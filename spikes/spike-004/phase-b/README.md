@@ -230,18 +230,31 @@ worth saying separately.
 
 **The summary carries the OBSERVED PORTS per domain**, one group per
 trial. They are the only part of that line which is not a restatement of
-the input: the peer names are literals, and the class cannot differ from
-the mode because a mismatch exits the run before the summary is reached.
+the input: the peer names are literals, and NEITHER class can differ from
+what was asked for — the mapping class is checked against `EXPECT` and
+the filtering class against `EXPECT_FILTER`, and either mismatch exits
+the run before the summary is reached.
 `45000,45000;45001,45001` is one external port per internal socket
-whatever the destination, twice over; `14321,50980;25387,21432` is a
+whatever the destination, twice over; `33565,10750;19983,50695` is a
 port per destination. Identical ports within a group are not a
 degenerate reading — they are the observation that makes a row `eim`.
 
-**The interface names are not a detail.** In the run above all four
-`snat on` lines say `eth0`, and that is a coincidence of this run rather
-than a guarantee: across runs the two routers land on different
-interfaces, and the same router lands on different ones in the two rows
-of a single run. Podman assigns them per container and per creation, and
+**The interface names are not a detail, and the run above shows why.**
+Three of its four `snat on` lines say `eth0` and the fourth says `eth1` —
+`natm-router` is on `eth0` in the `eim` row and `eth1` in the `eds` row,
+which is the same router on two interfaces twenty seconds apart. So the
+instability is visible in the record rather than asserted beside it: the
+two routers land on different interfaces across runs, and one router
+lands on different ones between the rows of a single run, because every
+row recreates every container.
+
+**This paragraph quotes the transcript, so re-recording it means
+re-checking this sentence.** An earlier version said all four lines read
+`eth0` — true of the run it was written against, false of the next one —
+and the numbers in the paragraph above have been stale for the same
+reason. Whichever interfaces a fresh capture shows, what the paragraph
+must end up claiming is that they are not stable, which is the property
+the per-container derivation exists for. Podman assigns them per container and per creation, and
 the topology recreates every container for every row. So a shared
 `configure_nat` deriving the interface from a hardcoded `natm-router`
 gave router B a rule matching its LAN side, translating nothing, while

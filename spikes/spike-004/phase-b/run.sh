@@ -58,7 +58,9 @@ NET_LAN_B="${NET_LAN_B:-natm-lan-b}"
 podman build -q -t "$IMAGE" -f "$here/Containerfile" "$here" >/dev/null
 
 # Leaked containers and networks otherwise outlive a failed row, and a
-# Ctrl-C leaves six containers behind. `up` calls `down` first, so a
+# Ctrl-C leaves every container behind -- seven once the filtering prober
+# joined them, and a number here is one more thing to falsify. `up` calls
+# `down` first, so a
 # later run self-heals -- but only a later run.
 trap '"$here/topology.sh" down >/dev/null 2>&1 || true' EXIT
 
@@ -155,9 +157,11 @@ for mode in "$@"; do
   probe_domain natm-peer-b natm-router-b "$NET_LAN_B" "$mode"
 done
 
-# THE OBSERVED PORTS, which is the only part of this line that is not a
-# restatement of the INPUT: the peer names are two literals written
-# here, and the class cannot differ from the mode -- the
+# THE OBSERVED PORTS, which are the only part of this line that is not a
+# restatement of the INPUT: the peer names are two literals written here,
+# and NEITHER class can differ from what was asked for -- the mapping
+# class is checked against `EXPECT` and the filtering class against
+# `EXPECT_FILTER`, both of which exit non-zero on a mismatch -- the
 # per-row assertion exits non-zero on any other value -- so a summary
 # carrying classes alone prints back its own input, which is what the
 # two tallies before it did in different words. The ports are

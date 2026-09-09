@@ -1347,8 +1347,12 @@ stage's own deferral discussion turns on.
 rows now exists at
 [`spikes/spike-004/phase-b/`](../../spikes/spike-004/phase-b/README.md) —
 containerised, two NAT domains, with BOTH halves of RFC 4787's
-classification configured and then measured — the mapping class, and the
-filtering class since `filter.sh`. It closes none of the six. The
+classification MEASURED — the mapping class, chosen with nftables, and
+the filtering class since `filter.sh`. Measured rather than configured
+for the filtering half's default row, where the absence of a rule IS the
+row: masquerade's own reverse path is already address-and-port-dependent,
+and the harness's two other filtering modes exist so the classifier has a
+positive control for each branch rather than one reachable answer. It closes none of the six. The
 question is whether the exit gate's NAT row can be satisfied by a
 containerised matrix with the population claim, the public VM and a
 carrier's CGNAT explicitly deferred — the filtering half was on that list
