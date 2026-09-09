@@ -3,7 +3,7 @@
 The repository now has two deliberately separate halves:
 
 - [`architecture/`](./architecture/README.md) is the frozen specification/source of truth.
-- `apps/`, `crates/`, `tests/`, `fixtures/`, `test-data/`, `packaging/`, `spikes/`, and `xtask/` are tracked implementation landing zones.
+- `apps/`, `crates/`, `tests/`, `fixtures/`, `test-data/`, `packaging/`, `spikes/`, and `xtask/` are tracked implementation landing zones. `third_party/` holds vendored dependency sources under their own licences (ADR-0051); it is not a landing zone for first-party code.
 
 There are production Rust crates under `crates/` and `tests/`, activated one canonical stage at a time. There is no application binary, Android Gradle project, installer, or service unit yet: `apps/` and `packaging/` stay empty until the stage that needs them opens.
 

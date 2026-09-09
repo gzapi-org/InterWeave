@@ -229,7 +229,21 @@ where
                 bytes_sent,
                 error,
             }) => {
-                self.reset_status_to(nonce, TestStatus::Failed);
+                // INTERWEAVE PATCH (ADR-0051), second half. This is the
+                // one arm that falls through to `GenerateEvent` rather
+                // than returning, so without this guard a late failure
+                // for a nonce `retest` abandoned is reported as the
+                // outcome of whichever probe replaced it. The other two
+                // error arms already return, and the success arm is
+                // guarded by `received_dial_back`.
+                if !self.reset_status_to(nonce, TestStatus::Failed) {
+                    tracing::debug!(
+                        %peer_id,
+                        %nonce,
+                        "Outcome for a candidate that was re-tested; not reported"
+                    );
+                    return;
+                }
 
                 ((address, bytes_sent), Err(error))
             }
@@ -347,16 +361,22 @@ where
         Some((*conn_id, info.peer_id))
     }
 
-    fn reset_status_to(&mut self, nonce: Nonce, new_status: TestStatus) {
+    // INTERWEAVE PATCH (ADR-0051), second half. Returns whether a
+    // candidate still held this nonce. `retest` can move one back to
+    // `Untested` while its probe is in flight, and the caller below uses
+    // this to decline reporting an outcome for a probe that was
+    // abandoned.
+    fn reset_status_to(&mut self, nonce: Nonce, new_status: TestStatus) -> bool {
         let Some((_, info)) = self
             .address_candidates
             .iter_mut()
             .find(|(_, i)| i.is_pending_with_nonce(nonce) || i.is_received_with_nonce(nonce))
         else {
-            return;
+            return false;
         };
 
         info.status = new_status;
+        true
     }
 
     // FIXME: We don't want test-only APIs in our public API.
@@ -375,10 +395,18 @@ where
     /// Mark a candidate for re-testing on the next tick.
     ///
     /// Returns whether the status changed: an address that is unknown or
-    /// already untested answers `false`. A `Pending` candidate is reset
-    /// too; its in-flight nonce is orphaned, which the handlers already
-    /// tolerate -- a dial-back carrying an unknown nonce is refused, and a
-    /// late outcome for one finds nothing to reset.
+    /// already untested answers `false`.
+    ///
+    /// A `Pending` candidate is reset too, which orphans its in-flight
+    /// nonce. Three paths can then carry a late outcome for it and none
+    /// reports one: a dial-back with an unknown nonce is refused by
+    /// `on_connection_handler_event`; `UnsupportedProtocol` and `Io`
+    /// return without emitting; a success is dropped by the
+    /// `received_dial_back` guard; and `AddressNotReachable` is declined
+    /// by the second half of this patch, in `reset_status_to`'s caller.
+    /// A probe this method abandons therefore produces no `Event` at all,
+    /// which is what lets a caller attribute every `Event` to the probe
+    /// it last started.
     pub fn retest(&mut self, addr: &Multiaddr) -> bool {
         match self.address_candidates.get_mut(addr) {
             Some(info) if info.status != TestStatus::Untested => {

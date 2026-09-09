@@ -6,6 +6,9 @@
 # >>> help
 # Does any first-party source call a yamux `Config` setter?
 #
+# `third_party/` is excluded: a vendored dependency's own muxer choice is
+# upstream's, and this guard asks what THIS repository selects (ADR-0051).
+#
 # It must not, and the reason is not style. `libp2p-yamux` 0.47 depends
 # on BOTH yamux 0.12.1 and the patched 0.13.10. `Config::default()`
 # returns `Either::Right(Config013)` — the patched one, which is what
@@ -69,7 +72,7 @@ SETTERS=(
 # TRACKED FILES ONLY, and only Rust: the vendored registry sources under
 # ~/.cargo contain these calls legitimately, and scanning them would fail
 # on libp2p's own code.
-mapfile -t sources < <(git ls-files '*.rs' 2>/dev/null)
+mapfile -t sources < <(git ls-files '*.rs' 2>/dev/null | grep -v '^third_party/')
 if [[ ${#sources[@]} -eq 0 ]]; then
     echo "check_yamux_muxer: no tracked Rust sources; nothing to check."
     exit 0

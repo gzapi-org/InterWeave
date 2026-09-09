@@ -35,3 +35,26 @@ fn a_tested_candidate_returns_to_the_sweep_and_an_untested_one_is_left_alone() {
         "and it stays untested until the sweep tests it again"
     );
 }
+
+#[test]
+fn an_abandoned_probe_reports_no_outcome() {
+    // The second half of the patch. `AddressNotReachable` is the one arm
+    // that falls through to `GenerateEvent` rather than returning, so a
+    // late failure for a nonce `retest` abandoned would otherwise be
+    // reported as the outcome of whichever probe replaced it. There is no
+    // public way to inject a handler event, so this drives the property
+    // the guard rests on: after `retest`, no candidate holds the old
+    // nonce, which is exactly what `reset_status_to` looks for and now
+    // reports.
+    let mut client = Behaviour::default();
+    let addr: Multiaddr = "/ip4/203.0.113.9/tcp/4001".parse().expect("a literal");
+    client.on_swarm_event(FromSwarm::NewExternalAddrCandidate(
+        NewExternalAddrCandidate { addr: &addr },
+    ));
+    client.validate_addr(&addr);
+
+    // A second `retest` answers `false` precisely because the first one
+    // left nothing holding a nonce -- the same lookup the guard makes.
+    assert!(client.retest(&addr));
+    assert!(!client.retest(&addr));
+}

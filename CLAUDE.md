@@ -8,6 +8,7 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
 
 - `architecture/` is the normative design source.
 - `apps/`, `crates/`, `tests/`, `fixtures/`, `test-data/`, `spikes/`, `packaging/`, and `xtask/` are tracked landing zones created by ADR-0045.
+- `third_party/` holds **vendored dependency sources**, each under its own licence and each the subject of an ADR saying why a registry release would not do (ADR-0051 is the first and, today, only one). Every file is listed with its provenance in `tools/checks/license_exempt.txt`; a subdirectory without an entry is an unreviewed import and fails `check_license_headers.sh`. Guards that walk first-party sources exclude it for the same reason they exclude `spikes/`: a vendored dependency is not a consumer, and must never vouch for this repository's own code.
 - `tools/` is repository tooling — PR/review scripts and tree checks — not an implementation landing zone. It is live now and not gated by stage discipline. Each script has a self-test beside it (`test_*.sh`) that must stay green.
 - `.claude/` is committed shared agent configuration: `settings.json` and `statusline.sh` (§9), plus `skills/` — task-scoped procedures loaded on demand, see §10. Only `settings.local.json` and `CLAUDE.local.md` are per-developer and gitignored.
 - Stages 0-10 are **complete** and **Stage 11 is open**. SPIKE-004's

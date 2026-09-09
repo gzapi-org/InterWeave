@@ -32,7 +32,7 @@
 # `pub(crate)` announces a narrower audience and is out of scope.
 #
 # WHAT COUNTS AS A CALLER. A mention of the name in a different tracked
-# PRODUCTION `.rs` file — `tests/` and `spikes/` are excluded wholesale
+# PRODUCTION `.rs` file — `tests/`, `spikes/` and `third_party/` are excluded wholesale
 # and `#[cfg(test)]` is stripped, because a unit test and an evidence
 # harness are each exactly as much "not a caller" as the other — and,
 # for a method, a mention of its enclosing type in
@@ -214,7 +214,16 @@ fi
 # and demanded its exemption be dropped. It has no production caller. A
 # spike is evidence, never a consumer; a harness vouching for a domain
 # function is the same false green a unit test would give.
-mapfile -t all_rs < <(git ls-files '*.rs' 2>/dev/null | grep -vE '(^|/)tests/|^spikes/')
+#
+# `third_party/` is excluded on the same reasoning, one step further out: a
+# vendored dependency did not choose this repository's names and cannot be
+# evidence that anything here has a consumer. It is measured rather than
+# assumed -- no owner type and no free function under `crates/api/` or
+# `crates/transport/runtime/` collides with an identifier in the vendored
+# tree today -- but the exclusion is what keeps a future collision from
+# silently satisfying a domain function nobody calls (ADR-0051).
+
+mapfile -t all_rs < <(git ls-files '*.rs' 2>/dev/null | grep -vE '(^|/)tests/|^spikes/|^third_party/')
 
 # The production half of every source file, stripped ONCE up front.
 #

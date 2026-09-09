@@ -10,12 +10,15 @@
 #
 # Format: one repository-relative path per line. `#` starts a comment.
 #
-# (empty — no third-party material is vendored into this repository yet)
 
 # --- third_party/libp2p-autonat -------------------------------------------
 # libp2p-autonat 0.15.0, MIT, Copyright 2017-2020 Parity Technologies (UK) Ltd.
-# Vendored from the crates.io tarball (sha256 fab5e25c49a7d48dac83d95d8f3bac0a290d8a5df717012f6e34ce9886396c0b)
-# under ADR-0051; the only first-party change is INTERWEAVE.patch.
+# Vendored from the crates.io tarball (sha256
+# fab5e25c49a7d48dac83d95d8f3bac0a290d8a5df717012f6e34ce9886396c0b) under
+# ADR-0051; the only first-party change is INTERWEAVE.patch. LICENSE is not in
+# the tarball and so not covered by that checksum -- it is the upstream
+# repository's, fetched verbatim.
+third_party/README.md
 third_party/libp2p-autonat/CHANGELOG.md
 third_party/libp2p-autonat/Cargo.toml
 third_party/libp2p-autonat/INTERWEAVE.patch
