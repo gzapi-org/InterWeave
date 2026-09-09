@@ -2527,15 +2527,21 @@ mod tests {
     fn a_peer_in_both_sets_is_data_plane_trusted() {
         // THE SCHEMA'S RULE, PINNED WHERE IT IS ENFORCED: "a PeerId in
         // both sets is treated as DataPlaneTrusted for protocol
-        // admission" is the branch order of `classify` -- the data-plane
-        // policy is asked before the infrastructure set -- and nothing
-        // read a peer listed in both until this test. Swapping the two
-        // branches passed every test in the workspace, and would hand
+        // admission" is the branch order of `TrustSources::classify` --
+        // the data-plane policy is asked before the infrastructure set
+        // -- and nothing asserted the CLASS of a peer listed in both
+        // until this test. Swapping the two branches passes every test
+        // in this crate (348 of them) and fails five in
+        // `libp2p/src/runtime/dialing.rs`, all of which reach the
+        // question sideways through `set_trust`'s revocation diff
+        // rather than by reading the class; this crate's own
+        // `a_widened_authorization_evicts_nothing` lists P1 in both sets
+        // and goes silently vacuous under the swap, because the
+        // promotion it names stops being one. The swap would hand
         // `ClassGated` a denying handler for a peer the operator listed
-        // in `trust.allowed_peers`. The local-identity test above puts
-        // P1 in both sets too, but P1 is the local peer there, so it
-        // exits on the first branch and never reaches this question.
-        // Review finding on PR #80.
+        // in `trust.allowed_peers`. (An earlier version of this comment
+        // said the swap passed every test in the WORKSPACE; it had been
+        // run against this crate alone. Both review findings on PR #80.)
         let mut m = untrusting(8);
         let _ = m.set_trust(trusting(&[P1], &[P1]), &[]);
         assert_eq!(
