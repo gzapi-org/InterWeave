@@ -88,7 +88,12 @@ attempts to state without overreaching in one direction or the other,
 so the counterexample stays: even `eds` on both sides does not entail
 failure, because an endpoint-independent filter on either side forwards
 the other peer's packet through the relay-created mapping whatever its
-source. The relay, the nodes and DCUtR arrive with steps 5, 6 and 8.
+source. **That pairing is stated from RFC 4787, not measured here** —
+the two control modes install a static forward and so need `NAT_MODE=eim`
+(`topology.sh` refuses anything else), so this harness cannot build an
+`eds` domain with an endpoint-independent filter, and the sentence is a
+reason the mapping rows cannot decide the question rather than a row
+of its own. The relay, the nodes and DCUtR arrive with steps 5, 6 and 8.
 
 Neither row rules an ATTEMPT out either: `DCUTR.md` §2 lists the
 eligibility conditions and NAT class is not among them, and §9 requires
