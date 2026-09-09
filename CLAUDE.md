@@ -92,13 +92,25 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
      asks under `DialOrigin::Manual` and so refuses this class outright.
      The feature list never guarded this either.
 
-  **Step 3 reaches routes 1 and 3**, which is why the restriction below
+  **Step 3 reaches routes 2 and 3**, which is why the restriction below
   had to land first — it has, so what remains is that step 3 keep it
-  true rather than precede it. It constructs an AutoNAT client and must
-  wrap it with a reachability classifier (route 1), and must relax the
-  inbound arm (route 3) because an AutoNAT v2 dial-back arrives as an
-  inbound connection from the infrastructure-only server and the CLIENT
-  has to serve `/libp2p/autonat/2/dial-back` on it. **A guard written as
+  true rather than precede it. It must relax the inbound arm (route 3)
+  because an AutoNAT v2 dial-back arrives as an inbound connection from
+  the infrastructure-only server and the CLIENT has to serve
+  `/libp2p/autonat/2/dial-back` on it; and reaching a static AutoNAT
+  server this profile is not yet connected to is an `attempt_dial`
+  carrying `AutonatProbe`, which is route 2.
+  **NOT route 1, and this was written down wrong until it was measured.**
+  The AutoNAT v2 CLIENT never dials: every `ToSwarm` it emits is
+  `ExternalAddrConfirmed`, `GenerateEvent` or `NotifyHandler`
+  (libp2p-autonat 0.15.0 `v2/client/behaviour.rs`, lines 202, 238 and
+  302), because a probe is a request over an ALREADY-OPEN connection.
+  The dial in AutoNAT v2 belongs to the SERVER — the dial-back at
+  `v2/server/behaviour.rs:124` — which is step 4's. So wrapping the
+  client in `Attributing` announces an origin for a dial that never
+  happens, and the outbound gate sees no probe traffic at all: whatever
+  enforces `AUTONAT.md` §3 and §6 sits where the CONNECTION is made,
+  not at the dial hook. **A guard written as
   a grep over `attempt_dial` call sites would see none of that.** Do not
   read the feature change as evidence those paths are live. The exposure
   `BOTTOM-UP-IMPLEMENTATION-PLAN.md` §14 names — every data-plane

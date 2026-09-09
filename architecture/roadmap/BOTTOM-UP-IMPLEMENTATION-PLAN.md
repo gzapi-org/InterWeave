@@ -1505,10 +1505,17 @@ else names them.
   exit gate had, where a shipping decision sat somewhere that could not
   enforce it. The restriction itself is §14's protocol-isolation
   invariant below; the commit it must precede is **step 3's**, not step
-  5's, because step 3 reaches routes 1 and 3 at once — it wraps a
-  constructed AutoNAT client with a reachability classifier and must
-  relax the inbound arm to serve a dial-back. A guard written as a grep
-  over `attempt_dial` call sites would see neither.
+  5's, because step 3 reaches routes 2 and 3 at once — it dials a static
+  AutoNAT server under `AutonatProbe` (route 2, an `attempt_dial` call
+  site of ours) and must relax the inbound arm to serve a dial-back
+  (route 3). **Route 1, not 2, is what this said until 2026-09-09, when
+  the pinned crate was read rather than assumed**: the AutoNAT v2 client
+  emits only `ExternalAddrConfirmed`, `GenerateEvent` and
+  `NotifyHandler`, so it never dials and there is no behaviour-originated
+  dial to classify; the dial-back is the SERVER's, and belongs to step 4.
+  A guard written as a grep over `attempt_dial` call sites would see
+  route 3 but not route 2 — and route 2 is exactly what a grep does see,
+  which is the reverse of what this paragraph used to claim.
 
 - **An accepted document describes an infrastructure-only state this
   build cannot hold, and step 3 owes the decision.**
