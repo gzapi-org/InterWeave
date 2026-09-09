@@ -119,6 +119,18 @@ value=5
   || { echo "out of range" >&2; exit 2; }
 echo "$value"'
 expect_status 0 "the deliberate A && B || { fail; } idiom passes at warning severity"
+#    AND THE SAME FIXTURE IS REFUSED AT `info` -- the half that makes
+#    this a test of the threshold rather than of an empty finding set.
+#    Exit 0 above is equally true if SC2015 never fires at all: a
+#    shellcheck release that stops flagging this shape, or a "simplified"
+#    fixture, would leave the case passing forever while asserting
+#    nothing. Exit 1 here proves the finding exists and that `warning`
+#    is what admits it. Review finding on PR #82.
+if ( cd "$SANDBOX" && INTERWEAVE_SHELLCHECK_SEVERITY=info bash tools/checks/check_shell_scripts.sh >/dev/null 2>&1 ); then
+    fail "the same idiom must be REFUSED at severity=info, or case 3 asserts an empty finding set"
+else
+    pass "and is refused at severity=info, so SC2015 fires and warning is the threshold that admits it"
+fi
 cleanup; SANDBOX=""
 
 # 4. A TARGETED DISABLE IS HONOURED, because the guard's own message
