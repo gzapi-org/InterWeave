@@ -24,7 +24,7 @@
 //! never issued and back a server off for it. Review finding on PR #84.
 //! That half is gone, and its concerns are held where the lever is:
 //!
-//! - **The tick and the per-sweep candidate ceiling** are the crate's own
+//! - **The tick and the per-cycle candidate ceiling** are the crate's own
 //!   two knobs, `with_probe_interval` and `with_max_candidates`; the
 //!   adapter sets them from `refresh_interval` and
 //!   `max_candidate_addresses_per_cycle`. The interval is NOT a refresh:
@@ -63,7 +63,9 @@
 //! verified stays verified while the servers that said reachable -- still
 //! saying it, or REVERSED, a fresh success now under a fresh failure --
 //! still make the threshold, at least one still says it, and fewer than
-//! two in total say unreachable. A DISSENTER that never said reachable
+//! two in total say unreachable. The verdict then ends when the
+//! threshold-th newest of those successes lapses, which is what
+//! `evidence_until_ms` reports. A DISSENTER that never said reachable
 //! counts toward that two and toward nothing else. Three earlier versions
 //! each missed a piece: one let a failure overwrite the success it
 //! contradicted, so one report from a counting observer unverified the
@@ -177,13 +179,18 @@ pub enum ReachabilityVerdict {
     VerifiedPublic {
         /// Every address currently meeting the threshold.
         verified_addresses: Vec<String>,
-        /// The earliest expiry among the successes currently counted.
+        /// When the verdict ends if no further evidence arrives: the
+        /// expiry of the threshold-th newest fresh success for the
+        /// address, since below that the quorum is short.
         ///
-        /// NOT a bound on the claim: with more than the threshold of
-        /// fresh successes the state survives this moment, because the
-        /// ones that remain still meet it. An earlier version of this
-        /// line said "and no later than then", which three successes and
-        /// a threshold of two falsify. Review finding on PR #84.
+        /// Contradicted members count, because their successes are what
+        /// hold the count up under the hysteresis. Two earlier versions
+        /// were wrong in opposite directions: one took the earliest
+        /// expiry of any counted success, which understates whenever more
+        /// than the threshold agree; the next kept that after a reversed
+        /// server's success had become load-bearing, which overstated by
+        /// up to a whole TTL -- publishing a horizon while the verdict
+        /// was about to end. Review findings on PR #84.
         evidence_until_ms: u64,
     },
     /// Evidence is sufficient to say the threshold is not met.
@@ -284,8 +291,8 @@ pub struct ConnectivityChanged {
 /// One server's word on one address. A success clears the failure it
 /// supersedes, so a present `failure_at_ms` is always the LATEST word;
 /// `success_at_ms` survives a later failure so `derive` can tell a
-/// REVERSED observer -- one that verified the address and now contradicts
-/// it -- from a dissenter that never said reachable.
+/// REVERSED observer -- one that said the address was reachable and now
+/// contradicts itself -- from a dissenter that never said reachable.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Evidence {
     success_at_ms: Option<u64>,
@@ -563,9 +570,11 @@ impl ReachabilityManager {
     /// For each candidate, each server with fresh evidence speaks once: a
     /// fresh failure makes it an observer saying unreachable, else a fresh
     /// success makes it one saying reachable. A server whose fresh success
-    /// sits under a fresh failure has REVERSED -- it verified the address
-    /// and now contradicts it -- and that is the one place the retained
-    /// success is read. An address is verified when the reachable count
+    /// sits under a fresh failure has REVERSED -- it said the address was
+    /// reachable and now contradicts itself -- and that is the one place
+    /// the retained success is read. It need not have been in the quorum
+    /// that first verified the address; §4 says "the servers that said
+    /// reachable", which is what this counts. An address is verified when the reachable count
     /// meets the threshold, OR it was verified before and the servers that
     /// said reachable -- still saying it, or reversed -- still make the
     /// threshold with at least one still saying it; in either case fewer
@@ -591,12 +600,19 @@ impl ReachabilityManager {
             let mut saying_reachable: BTreeSet<&TransportIdentity> = BTreeSet::new();
             let mut reversed: BTreeSet<&TransportIdentity> = BTreeSet::new();
             let mut saying_unreachable: BTreeSet<&TransportIdentity> = BTreeSet::new();
-            let mut earliest_success_expiry = u64::MAX;
+            // Every fresh success's expiry, contradicted members
+            // included: a reversed server's success is what holds the
+            // count at the threshold when the hold applies, so it ends
+            // the verdict when it lapses.
+            let mut quorum_expiries: Vec<u64> = Vec::new();
             for ((a, server), e) in &self.evidence {
                 if a != address {
                     continue;
                 }
                 let success = e.fresh_success(ttl, now_ms);
+                if let Some(at) = success {
+                    quorum_expiries.push(at.saturating_add(ttl));
+                }
                 match e.fresh_failure(ttl, now_ms) {
                     Some(at) => {
                         any_failure = true;
@@ -607,10 +623,8 @@ impl ReachabilityManager {
                         }
                     }
                     None => {
-                        if let Some(at) = success {
+                        if success.is_some() {
                             saying_reachable.insert(server);
-                            earliest_success_expiry =
-                                earliest_success_expiry.min(at.saturating_add(ttl));
                         }
                     }
                 }
@@ -625,7 +639,17 @@ impl ReachabilityManager {
                 && saying_reachable.len() + reversed.len() >= threshold;
             if (meets_threshold || holds) && saying_unreachable.len() < 2 {
                 verified.push(address.clone());
-                evidence_until = evidence_until.min(earliest_success_expiry);
+                // THE THRESHOLD-TH NEWEST, not the earliest: below it the
+                // quorum is short, and above it the members that remain
+                // still meet the threshold. Taking the earliest
+                // understated the horizon whenever more than the
+                // threshold agreed; taking it from the uncontradicted
+                // members alone OVERSTATED it by up to a whole TTL once a
+                // reversed server's success had become load-bearing.
+                // Review findings on PR #84.
+                quorum_expiries.sort_unstable();
+                let nth = threshold.min(quorum_expiries.len());
+                evidence_until = evidence_until.min(quorum_expiries[quorum_expiries.len() - nth]);
             }
         }
         if !verified.is_empty() {
@@ -1284,10 +1308,15 @@ mod tests {
         else {
             panic!("verified");
         };
-        assert_eq!(evidence_until_ms, TTL, "the earliest counted success");
+        // NOT the earliest success (`TTL`, S1's): with three agreeing and
+        // a threshold of two, the verdict survives S1 lapsing and ends
+        // when S2's success does. The horizon is the threshold-th newest,
+        // and the assertions below walk to it to prove the number is the
+        // moment rather than a guess.
+        assert_eq!(evidence_until_ms, 100 + TTL);
         assert!(
             m.expire_evidence(TTL).is_none(),
-            "S2 and S3 still meet the threshold"
+            "S1 lapsed; S2 and S3 still meet the threshold"
         );
         assert!(verified(&m));
         let ReachabilityVerdict::VerifiedPublic {
@@ -1296,7 +1325,54 @@ mod tests {
         else {
             panic!("verified");
         };
-        assert_eq!(evidence_until_ms, 100 + TTL, "and the horizon moved");
+        assert_eq!(evidence_until_ms, 100 + TTL, "unchanged: S2 still sets it");
+        assert!(
+            m.expire_evidence(100 + TTL - 1).is_none(),
+            "one millisecond short"
+        );
+        assert!(verified(&m));
+        assert_eq!(
+            m.expire_evidence(100 + TTL).map(|c| c.to),
+            Some(ReachabilityVerdict::Unknown),
+            "the verdict ends exactly at the horizon it published"
+        );
+    }
+
+    #[test]
+    fn the_horizon_counts_a_reversed_servers_success_because_the_quorum_rests_on_it() {
+        // S1 and S2 verify A; S2 refreshes late; S1 then contradicts
+        // itself while its own success is still fresh, so the hold
+        // applies and the quorum is S2 plus reversed S1. The verdict
+        // therefore ends when S1's SUCCESS lapses -- and an earlier
+        // version took the minimum over the uncontradicted members only,
+        // publishing S2's expiry, a whole TTL later than the verdict
+        // actually ended. Review finding on PR #84.
+        let mut m = manager_with(&[S1, S2]);
+        let _ = m.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0);
+        let _ = m.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 0);
+        let _ = m.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, TTL - 1);
+        assert!(
+            m.record_outcome(A, &peer(S1), ProbeOutcome::Unreachable, TTL - 1)
+                .is_none(),
+            "reversed while its success is fresh: the hold applies"
+        );
+        let ReachabilityVerdict::VerifiedPublic {
+            evidence_until_ms, ..
+        } = m.state().clone()
+        else {
+            panic!("verified");
+        };
+        assert_eq!(
+            evidence_until_ms, TTL,
+            "S1's success is the threshold-th newest, so it sets the horizon"
+        );
+        assert_eq!(
+            m.expire_evidence(TTL).map(|c| c.to),
+            Some(ReachabilityVerdict::NotVerified {
+                last_failure_at_ms: Some(TTL - 1)
+            }),
+            "and the verdict ends there, not at S2's expiry"
+        );
     }
 
     #[test]
@@ -1363,10 +1439,14 @@ mod tests {
     fn a_failure_at_the_expiry_instant_does_not_extend_the_verdict() {
         // S1 at 0 and S2 at 100 verify A with `evidence_until_ms == TTL`.
         // At exactly TTL, S1's success lapses and S3 says unreachable.
-        // The only new information is a failure, so the verdict must end
-        // -- and end the same way whether or not an expiry pass ran in
-        // between, or the manager has no well-defined answer for one
-        // evidence set. Review finding on PR #84.
+        // The only new information is a failure, so the verdict must
+        // end, and end the same way whether or not an expiry pass ran in
+        // between. That is this sequence, not a general property of the
+        // manager: the hold reads the previous verdict, so a rederive
+        // that has not run can leave one standing that a run would have
+        // ended. Narrowed from a claim about the manager to a claim about
+        // this case, which is what the test proves. Review findings on
+        // PR #84.
         let mut direct = manager_with(&[S1, S2, S3]);
         let _ = direct.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0);
         let _ = direct.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 100);
@@ -1389,7 +1469,7 @@ mod tests {
         assert_eq!(
             direct.state(),
             ticked.state(),
-            "the tick does not decide the verdict"
+            "a failure at the expiry instant ends the verdict either way"
         );
     }
 
