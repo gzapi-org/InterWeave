@@ -1,0 +1,1057 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Andrea Benetton
+//! Direct-inbound reachability evidence (AutoNAT v2 client policy).
+//!
+//! `AUTONAT.md` §2 splits the client in two: the Swarm owns the libp2p
+//! behaviour, and a `ReachabilityManager` owns POLICY and EVIDENCE. This
+//! is that manager. It decides which `(address, server)` pairs are due a
+//! probe, folds probe outcomes into evidence, and derives the
+//! `DirectInboundState` that `contracts/CONNECTIVITY.md` §5 and the
+//! `connectivity-summary` schema describe. It opens no socket and reads no
+//! clock: every method that can expire or schedule anything takes
+//! `now_ms`, so the transitions are testable by enumeration.
+//!
+//! # Evidence is keyed by `(address, server)`, and only DISTINCT servers count
+//!
+//! `AUTONAT.md` §4: "Do not count repeated probes from one server as
+//! distinct observers." A server that answers twice is one observer, and
+//! `verified_public` needs `required_distinct_successes` of them for ONE
+//! address with fresh evidence. The key makes that structural rather than
+//! a check: a second success from the same server overwrites the first.
+//!
+//! # A private address is never a candidate
+//!
+//! `AUTONAT.md` §6: "Private/LAN addresses are never promoted to
+//! Internet-public solely because they were configured or echoed by a
+//! peer." This module refuses them one step earlier -- they are not
+//! PROBED -- because sending a server a loopback or RFC 1918 address is
+//! the SSRF-shaped request `AUTONAT.md` §7 makes the server refuse, and a
+//! client that never sends one cannot be the reason a server had to.
+//! [`is_probeable_address`] is the rule, and it is literal-IP only.
+//!
+//! # Bounds are enforced here, not only by the configuration that names them
+//!
+//! `max_inflight_probes` and `max_candidate_addresses_per_cycle` are
+//! ceilings the configuration crate validates on the way in. They are
+//! also enforced at the point of use, because a caller building a
+//! [`ReachabilityConfig`] in Rust never passed that validation -- the same
+//! reasoning `profile-config` applies to its own candidate lists.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::net::{Ipv4Addr, Ipv6Addr};
+
+use interweave_transport_api::TransportIdentity;
+
+/// `AUTONAT.md` §4 defaults, the ones the schema pins as defaults too.
+pub const DEFAULT_REQUIRED_DISTINCT_SUCCESSES: u32 = 2;
+/// Success evidence lifetime: 15 minutes.
+pub const DEFAULT_SUCCESS_EVIDENCE_TTL_MS: u64 = 15 * 60 * 1000;
+/// Initial retry after a failed probe: 30 seconds.
+pub const DEFAULT_RETRY_INTERVAL_MS: u64 = 30 * 1000;
+/// Bounded backoff ceiling for retries: 5 minutes.
+pub const MAX_RETRY_BACKOFF_MS: u64 = 5 * 60 * 1000;
+/// Refresh interval for a verified address: 5 minutes.
+pub const DEFAULT_REFRESH_INTERVAL_MS: u64 = 5 * 60 * 1000;
+/// Probes in flight at once.
+pub const DEFAULT_MAX_INFLIGHT_PROBES: usize = 2;
+/// Candidate addresses offered per cycle.
+pub const DEFAULT_MAX_CANDIDATES_PER_CYCLE: usize = 4;
+/// Per-probe timeout: 15 seconds.
+pub const DEFAULT_PROBE_TIMEOUT_MS: u64 = 15 * 1000;
+
+/// The policy knobs `AUTONAT.md` §4 names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReachabilityConfig {
+    /// Distinct authorized servers that must agree before an address is
+    /// verified.
+    pub required_distinct_successes: u32,
+    /// How long one success stands.
+    pub success_evidence_ttl_ms: u64,
+    /// Delay before retrying a failed probe; doubles per consecutive
+    /// failure up to [`MAX_RETRY_BACKOFF_MS`].
+    pub retry_interval_ms: u64,
+    /// How often a verified address is re-probed while its evidence is
+    /// still fresh.
+    pub refresh_interval_ms: u64,
+    /// Probes in flight at once.
+    pub max_inflight_probes: usize,
+    /// Candidate addresses considered per cycle.
+    pub max_candidates_per_cycle: usize,
+    /// A probe older than this with no outcome is a failure.
+    pub probe_timeout_ms: u64,
+}
+
+impl Default for ReachabilityConfig {
+    fn default() -> Self {
+        Self {
+            required_distinct_successes: DEFAULT_REQUIRED_DISTINCT_SUCCESSES,
+            success_evidence_ttl_ms: DEFAULT_SUCCESS_EVIDENCE_TTL_MS,
+            retry_interval_ms: DEFAULT_RETRY_INTERVAL_MS,
+            refresh_interval_ms: DEFAULT_REFRESH_INTERVAL_MS,
+            max_inflight_probes: DEFAULT_MAX_INFLIGHT_PROBES,
+            max_candidates_per_cycle: DEFAULT_MAX_CANDIDATES_PER_CYCLE,
+            probe_timeout_ms: DEFAULT_PROBE_TIMEOUT_MS,
+        }
+    }
+}
+
+/// Why a [`ReachabilityConfig`] was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReachabilityError {
+    /// A zero where the policy needs at least one: the field is named.
+    ZeroBound(&'static str),
+}
+
+impl std::fmt::Display for ReachabilityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ZeroBound(field) => write!(f, "reachability: `{field}` must be at least 1"),
+        }
+    }
+}
+
+impl std::error::Error for ReachabilityError {}
+
+/// `contracts/CONNECTIVITY.md` §5's state.
+///
+/// `NotVerified` deliberately claims no NAT type: it means the current
+/// evidence does not verify direct inbound reachability.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DirectInboundState {
+    /// Startup, or insufficient or indeterminate evidence.
+    Unknown,
+    /// At least one address has fresh successes from enough distinct
+    /// servers.
+    VerifiedPublic {
+        /// Every address currently meeting the threshold.
+        verified_addresses: Vec<String>,
+        /// The earliest moment one of the counting observations expires --
+        /// the claim can lapse then, and no later than then.
+        evidence_until_ms: u64,
+    },
+    /// Evidence is sufficient to say the threshold is not met.
+    NotVerified {
+        /// The most recent failure observed, if any.
+        last_failure_at_ms: Option<u64>,
+    },
+}
+
+impl DirectInboundState {
+    /// The `connectivity-summary` schema's `direct_inbound` word.
+    #[must_use]
+    pub const fn summary_word(&self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::VerifiedPublic { .. } => "verified_public",
+            Self::NotVerified { .. } => "not_verified",
+        }
+    }
+}
+
+/// What one probe told us.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeOutcome {
+    /// The server dialled the address back and reached us.
+    Reachable,
+    /// The server tried and did not reach us.
+    Unreachable,
+    /// The probe did not complete: refused, timed out, or errored before
+    /// a dial-back was attempted. Says nothing about the address.
+    Failed,
+}
+
+/// Where a server came from (`AUTONAT.md` §3 gives static servers
+/// selection precedence).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ServerSource {
+    /// Configured in `autonat.client.static_servers`.
+    Static,
+    /// Learned through an authorized Identify exchange; only offered when
+    /// the operator opted in, which is the caller's decision, not this
+    /// module's.
+    Identify,
+}
+
+/// One probe the caller should start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbePlan {
+    /// The address to have tested.
+    pub address: String,
+    /// The server to ask.
+    pub server: TransportIdentity,
+}
+
+/// Emitted when the derived state changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectivityChanged {
+    /// The state before.
+    pub from: DirectInboundState,
+    /// The state now.
+    pub to: DirectInboundState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Evidence {
+    outcome: ProbeOutcome,
+    observed_at_ms: u64,
+    expires_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ServerRecord {
+    source: ServerSource,
+    consecutive_failures: u32,
+    backoff_until_ms: u64,
+}
+
+/// The manager. See the module note for what it owns and what it refuses.
+#[derive(Debug, Clone)]
+pub struct ReachabilityManager {
+    config: ReachabilityConfig,
+    candidates: Vec<String>,
+    rejected_candidates: usize,
+    servers: BTreeMap<TransportIdentity, ServerRecord>,
+    evidence: BTreeMap<(String, TransportIdentity), Evidence>,
+    inflight: BTreeMap<(String, TransportIdentity), u64>,
+    state: DirectInboundState,
+}
+
+impl ReachabilityManager {
+    /// Build a manager, refusing a configuration whose bounds are zero.
+    ///
+    /// The configuration crate refuses the same values on the way in; this
+    /// refuses them for a caller that never deserialized anything, so the
+    /// `bounded` claims below hold for every constructor.
+    pub fn new(config: ReachabilityConfig) -> Result<Self, ReachabilityError> {
+        if config.required_distinct_successes == 0 {
+            return Err(ReachabilityError::ZeroBound("required_distinct_successes"));
+        }
+        if config.max_inflight_probes == 0 {
+            return Err(ReachabilityError::ZeroBound("max_inflight_probes"));
+        }
+        if config.max_candidates_per_cycle == 0 {
+            return Err(ReachabilityError::ZeroBound(
+                "max_candidate_addresses_per_cycle",
+            ));
+        }
+        if config.probe_timeout_ms == 0 {
+            return Err(ReachabilityError::ZeroBound("probe_timeout_ms"));
+        }
+        Ok(Self {
+            config,
+            candidates: Vec::new(),
+            rejected_candidates: 0,
+            servers: BTreeMap::new(),
+            evidence: BTreeMap::new(),
+            inflight: BTreeMap::new(),
+            state: DirectInboundState::Unknown,
+        })
+    }
+
+    /// The current state.
+    #[must_use]
+    pub const fn state(&self) -> &DirectInboundState {
+        &self.state
+    }
+
+    /// Replace the candidate addresses, keeping only those a probe server
+    /// may legitimately be asked to dial.
+    ///
+    /// Returns how many were refused, so the caller can say so rather
+    /// than wonder why a LAN-only node never reaches `verified_public`.
+    /// The accepted list is ALSO bounded to `max_candidates_per_cycle`,
+    /// so an address registry handing over fifty listeners produces
+    /// four candidates and not fifty.
+    pub fn set_candidates<I, S>(&mut self, addresses: I) -> usize
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut accepted = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut rejected = 0;
+        for address in addresses {
+            let address = address.as_ref();
+            if !is_probeable_address(address) {
+                rejected += 1;
+                continue;
+            }
+            if seen.insert(address.to_owned())
+                && accepted.len() < self.config.max_candidates_per_cycle
+            {
+                accepted.push(address.to_owned());
+            }
+        }
+        self.rejected_candidates = rejected;
+        self.candidates = accepted;
+        self.inflight
+            .retain(|(address, _), _| self.candidates.contains(address));
+        rejected
+    }
+
+    /// Candidates refused by the last [`set_candidates`](Self::set_candidates).
+    #[must_use]
+    pub const fn rejected_candidates(&self) -> usize {
+        self.rejected_candidates
+    }
+
+    /// The addresses currently eligible for probing.
+    #[must_use]
+    pub fn candidates(&self) -> &[String] {
+        &self.candidates
+    }
+
+    /// Offer a server. Eligibility by class and by opt-in is the CALLER's
+    /// to decide before calling this (`AUTONAT.md` §3); this module orders
+    /// static servers before Identify-learned ones and tracks backoff.
+    pub fn add_server(&mut self, server: TransportIdentity, source: ServerSource) {
+        self.servers.entry(server).or_insert(ServerRecord {
+            source,
+            consecutive_failures: 0,
+            backoff_until_ms: 0,
+        });
+    }
+
+    /// Withdraw a server and every observation it contributed.
+    pub fn remove_server(
+        &mut self,
+        server: &TransportIdentity,
+        now_ms: u64,
+    ) -> Option<ConnectivityChanged> {
+        self.servers.remove(server);
+        self.evidence.retain(|(_, s), _| s != server);
+        self.inflight.retain(|(_, s), _| s != server);
+        self.rederive(now_ms)
+    }
+
+    /// Whether a probe to this server is outstanding.
+    ///
+    /// This is the input the inbound admission arm needs for route 3: a
+    /// dial-back from a server we asked is expected, and one from a server
+    /// we did not ask is not.
+    #[must_use]
+    pub fn has_outstanding_probe_to(&self, server: &TransportIdentity) -> bool {
+        self.inflight.keys().any(|(_, s)| s == server)
+    }
+
+    /// Probes to start now.
+    ///
+    /// BOUNDED: never more than `max_inflight_probes` in flight, and only
+    /// over the (already bounded) candidate list. A pair with fresh
+    /// success evidence is re-probed only once `refresh_interval_ms` has
+    /// passed since that success; a pair whose last outcome was a failure
+    /// waits out the server's backoff; a pair already in flight is not
+    /// offered twice. Static servers are offered before Identify-learned
+    /// ones, and for one server the candidates are offered in order.
+    pub fn due_probes(&mut self, now_ms: u64) -> Vec<ProbePlan> {
+        let mut plans = Vec::new();
+        let room = self
+            .config
+            .max_inflight_probes
+            .saturating_sub(self.inflight.len());
+        if room == 0 {
+            return plans;
+        }
+        let mut servers: Vec<(&TransportIdentity, &ServerRecord)> = self.servers.iter().collect();
+        servers.sort_by_key(|(_, record)| record.source);
+        for (server, record) in servers {
+            if record.backoff_until_ms > now_ms {
+                continue;
+            }
+            for address in &self.candidates {
+                if plans.len() >= room {
+                    break;
+                }
+                let key = (address.clone(), server.clone());
+                if self.inflight.contains_key(&key) {
+                    continue;
+                }
+                let due = match self.evidence.get(&key) {
+                    None => true,
+                    Some(evidence) => match evidence.outcome {
+                        ProbeOutcome::Reachable => {
+                            now_ms
+                                >= evidence
+                                    .observed_at_ms
+                                    .saturating_add(self.config.refresh_interval_ms)
+                                || now_ms >= evidence.expires_at_ms
+                        }
+                        ProbeOutcome::Unreachable | ProbeOutcome::Failed => true,
+                    },
+                };
+                if due {
+                    plans.push(ProbePlan {
+                        address: address.clone(),
+                        server: server.clone(),
+                    });
+                }
+            }
+            if plans.len() >= room {
+                break;
+            }
+        }
+        for plan in &plans {
+            self.inflight
+                .insert((plan.address.clone(), plan.server.clone()), now_ms);
+        }
+        plans
+    }
+
+    /// Fold a probe's outcome in. Returns the state change, if any.
+    ///
+    /// An outcome for a pair that is not in flight is still recorded --
+    /// the behaviour may report one we did not plan, and evidence is
+    /// evidence -- but only if the server is one we know, so a stranger's
+    /// report cannot count toward `verified_public`. FAILS CLOSED on an
+    /// unknown server: the report is dropped and `None` is returned.
+    pub fn record_outcome(
+        &mut self,
+        address: &str,
+        server: &TransportIdentity,
+        outcome: ProbeOutcome,
+        now_ms: u64,
+    ) -> Option<ConnectivityChanged> {
+        let record = self.servers.get_mut(server)?;
+        let key = (address.to_owned(), server.clone());
+        self.inflight.remove(&key);
+        match outcome {
+            ProbeOutcome::Reachable => {
+                record.consecutive_failures = 0;
+                record.backoff_until_ms = 0;
+            }
+            ProbeOutcome::Unreachable | ProbeOutcome::Failed => {
+                record.consecutive_failures = record.consecutive_failures.saturating_add(1);
+                let shift = record.consecutive_failures.saturating_sub(1).min(16);
+                let backoff = self
+                    .config
+                    .retry_interval_ms
+                    .saturating_mul(1_u64 << shift)
+                    .min(MAX_RETRY_BACKOFF_MS);
+                record.backoff_until_ms = now_ms.saturating_add(backoff);
+            }
+        }
+        let expires_at_ms = match outcome {
+            ProbeOutcome::Reachable => now_ms.saturating_add(self.config.success_evidence_ttl_ms),
+            // A failure is fresh for one retry interval: long enough to
+            // count toward invalidation, short enough not to pin
+            // `not_verified` after the condition has passed.
+            ProbeOutcome::Unreachable | ProbeOutcome::Failed => {
+                now_ms.saturating_add(self.config.retry_interval_ms)
+            }
+        };
+        self.evidence.insert(
+            key,
+            Evidence {
+                outcome,
+                observed_at_ms: now_ms,
+                expires_at_ms,
+            },
+        );
+        self.rederive(now_ms)
+    }
+
+    /// Time out probes that have been in flight too long, recording each
+    /// as [`ProbeOutcome::Failed`]. Returns the state change, if any.
+    pub fn expire_inflight(&mut self, now_ms: u64) -> Option<ConnectivityChanged> {
+        let stale: Vec<(String, TransportIdentity)> = self
+            .inflight
+            .iter()
+            .filter(|(_, started)| now_ms.saturating_sub(**started) >= self.config.probe_timeout_ms)
+            .map(|(key, _)| key.clone())
+            .collect();
+        let before = self.state.clone();
+        for (address, server) in stale {
+            let _ = self.record_outcome(&address, &server, ProbeOutcome::Failed, now_ms);
+        }
+        Self::change(before, &self.state)
+    }
+
+    /// Drop expired evidence and re-derive the state.
+    pub fn expire_evidence(&mut self, now_ms: u64) -> Option<ConnectivityChanged> {
+        self.rederive(now_ms)
+    }
+
+    /// The network changed: every observation is stale (`AUTONAT.md` §5,
+    /// "startup/network change -> unknown").
+    pub fn network_changed(&mut self) -> Option<ConnectivityChanged> {
+        let before = self.state.clone();
+        self.evidence.clear();
+        self.inflight.clear();
+        for record in self.servers.values_mut() {
+            record.consecutive_failures = 0;
+            record.backoff_until_ms = 0;
+        }
+        self.state = DirectInboundState::Unknown;
+        Self::change(before, &self.state)
+    }
+
+    fn rederive(&mut self, now_ms: u64) -> Option<ConnectivityChanged> {
+        self.evidence.retain(|_, e| e.expires_at_ms > now_ms);
+        let before = self.state.clone();
+        self.state = self.derive(now_ms);
+        Self::change(before, &self.state)
+    }
+
+    fn change(
+        before: DirectInboundState,
+        after: &DirectInboundState,
+    ) -> Option<ConnectivityChanged> {
+        if before == *after {
+            None
+        } else {
+            Some(ConnectivityChanged {
+                from: before,
+                to: after.clone(),
+            })
+        }
+    }
+
+    /// `AUTONAT.md` §5, computed from the fresh evidence alone.
+    ///
+    /// For each candidate: the distinct servers reporting `Reachable` and
+    /// the distinct servers reporting `Unreachable`. An address is
+    /// verified when the first count meets the threshold AND fewer than
+    /// two distinct servers currently contradict it -- "two fresh
+    /// independent failures may invalidate a previously verified address
+    /// before TTL". If any address is verified, `VerifiedPublic`; else if
+    /// any evidence at all exists, `NotVerified`; else `Unknown`.
+    fn derive(&self, now_ms: u64) -> DirectInboundState {
+        let mut verified = Vec::new();
+        let mut evidence_until = u64::MAX;
+        let mut any_evidence = false;
+        let mut last_failure = None;
+        for address in &self.candidates {
+            let mut reachable: BTreeSet<&TransportIdentity> = BTreeSet::new();
+            let mut unreachable: BTreeSet<&TransportIdentity> = BTreeSet::new();
+            let mut earliest_success_expiry = u64::MAX;
+            for ((a, server), e) in &self.evidence {
+                if a != address || e.expires_at_ms <= now_ms {
+                    continue;
+                }
+                any_evidence = true;
+                match e.outcome {
+                    ProbeOutcome::Reachable => {
+                        reachable.insert(server);
+                        earliest_success_expiry = earliest_success_expiry.min(e.expires_at_ms);
+                    }
+                    ProbeOutcome::Unreachable => {
+                        unreachable.insert(server);
+                        last_failure = Some(
+                            last_failure.map_or(e.observed_at_ms, |f: u64| f.max(e.observed_at_ms)),
+                        );
+                    }
+                    ProbeOutcome::Failed => {
+                        last_failure = Some(
+                            last_failure.map_or(e.observed_at_ms, |f: u64| f.max(e.observed_at_ms)),
+                        );
+                    }
+                }
+            }
+            let threshold =
+                usize::try_from(self.config.required_distinct_successes).unwrap_or(usize::MAX);
+            if reachable.len() >= threshold && unreachable.len() < 2 {
+                verified.push(address.clone());
+                evidence_until = evidence_until.min(earliest_success_expiry);
+            }
+        }
+        if !verified.is_empty() {
+            DirectInboundState::VerifiedPublic {
+                verified_addresses: verified,
+                evidence_until_ms: evidence_until,
+            }
+        } else if any_evidence {
+            DirectInboundState::NotVerified {
+                last_failure_at_ms: last_failure,
+            }
+        } else {
+            DirectInboundState::Unknown
+        }
+    }
+}
+
+/// Whether a probe server may legitimately be asked to dial this address.
+///
+/// LITERAL IP ONLY, and Internet-public only: the first component must be
+/// `/ip4/` or `/ip6/` with a parseable literal, and that literal must not
+/// be loopback, unspecified, private (RFC 1918), shared (RFC 6598),
+/// link-local, unique-local, multicast, broadcast, documentation or
+/// benchmarking space. A `/dns4/` candidate is refused -- the server
+/// would resolve it, which is a request on the server's behalf rather
+/// than a test of our address.
+#[must_use]
+pub fn is_probeable_address(address: &str) -> bool {
+    let mut parts = address.split('/');
+    if parts.next() != Some("") {
+        return false;
+    }
+    match (parts.next(), parts.next()) {
+        (Some("ip4"), Some(literal)) => literal.parse::<Ipv4Addr>().is_ok_and(is_public_v4),
+        (Some("ip6"), Some(literal)) => literal.parse::<Ipv6Addr>().is_ok_and(is_public_v6),
+        _ => false,
+    }
+}
+
+fn is_public_v4(ip: Ipv4Addr) -> bool {
+    let [a, b, _, _] = ip.octets();
+    let shared = a == 100 && (64..=127).contains(&b);
+    let benchmarking = a == 198 && (b == 18 || b == 19);
+    let reserved = a >= 240;
+    !(ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_multicast()
+        || ip.is_broadcast()
+        || ip.is_documentation()
+        || shared
+        || benchmarking
+        || reserved)
+}
+
+fn is_public_v6(ip: Ipv6Addr) -> bool {
+    let segments = ip.segments();
+    let unique_local = (segments[0] & 0xfe00) == 0xfc00;
+    let link_local = (segments[0] & 0xffc0) == 0xfe80;
+    let documentation = segments[0] == 0x2001 && segments[1] == 0x0db8;
+    let benchmarking = segments[0] == 0x2001 && segments[1] == 0x0002 && segments[2] == 0;
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        return is_public_v4(v4);
+    }
+    !(ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || unique_local
+        || link_local
+        || documentation
+        || benchmarking)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const S1: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+    const S2: &str = "12D3KooWHyNGMf9HTd3Zj6dStdkcc5ycsubW1rEgQSp6k6yfZBoy";
+    const S3: &str = "12D3KooWQYhTNQdmr3ArTeUHRYzFg94BKyTkoWBDWez9kSCVe2Xo";
+    const S4: &str = "12D3KooWL8ZMFsFZwpZ3vGSg1b5RSgVzmMMpr1HdXLzqtoprdzZA";
+    const PUBLIC_A: &str = "/ip4/203.0.113.7/tcp/4001";
+    const PUBLIC_B: &str = "/ip4/198.51.100.9/tcp/4001";
+
+    fn peer(s: &str) -> TransportIdentity {
+        TransportIdentity::parse(s).expect("a valid identity")
+    }
+
+    fn manager() -> ReachabilityManager {
+        let mut m =
+            ReachabilityManager::new(ReachabilityConfig::default()).expect("defaults are valid");
+        // 203.0.113.0/24 and 198.51.100.0/24 are documentation space and
+        // so NOT probeable; the tests use real-looking public literals
+        // through `public_manager` below. These two exist for the
+        // refusal test.
+        let _ = (PUBLIC_A, PUBLIC_B);
+        m.set_candidates(["/ip4/8.8.8.8/tcp/4001", "/ip4/1.1.1.1/tcp/4001"]);
+        m
+    }
+
+    fn verified(m: &ReachabilityManager) -> bool {
+        matches!(m.state(), DirectInboundState::VerifiedPublic { .. })
+    }
+
+    #[test]
+    fn a_zero_bound_is_refused_for_a_caller_that_never_deserialized() {
+        for (field, config) in [
+            (
+                "required_distinct_successes",
+                ReachabilityConfig {
+                    required_distinct_successes: 0,
+                    ..ReachabilityConfig::default()
+                },
+            ),
+            (
+                "max_inflight_probes",
+                ReachabilityConfig {
+                    max_inflight_probes: 0,
+                    ..ReachabilityConfig::default()
+                },
+            ),
+            (
+                "max_candidate_addresses_per_cycle",
+                ReachabilityConfig {
+                    max_candidates_per_cycle: 0,
+                    ..ReachabilityConfig::default()
+                },
+            ),
+            (
+                "probe_timeout_ms",
+                ReachabilityConfig {
+                    probe_timeout_ms: 0,
+                    ..ReachabilityConfig::default()
+                },
+            ),
+        ] {
+            assert_eq!(
+                ReachabilityManager::new(config).err(),
+                Some(ReachabilityError::ZeroBound(field)),
+                "{field}"
+            );
+        }
+        assert!(ReachabilityManager::new(ReachabilityConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn private_loopback_dns_and_documentation_addresses_are_never_candidates() {
+        // THE RULE, NOT THE LIST: each refused address is a class
+        // `AUTONAT.md` §6/§7 names, and one public address is the
+        // positive control so the test cannot pass by refusing everything.
+        let refused = [
+            "/ip4/127.0.0.1/tcp/4001",
+            "/ip4/10.1.2.3/tcp/4001",
+            "/ip4/172.16.0.9/tcp/4001",
+            "/ip4/192.168.1.2/tcp/4001",
+            "/ip4/169.254.1.1/tcp/4001",
+            "/ip4/100.64.0.1/tcp/4001",
+            "/ip4/0.0.0.0/tcp/4001",
+            "/ip4/224.0.0.1/tcp/4001",
+            "/ip4/255.255.255.255/tcp/4001",
+            "/ip4/203.0.113.7/tcp/4001",
+            "/ip4/198.18.0.1/tcp/4001",
+            "/ip4/240.0.0.1/tcp/4001",
+            "/ip6/::1/tcp/4001",
+            "/ip6/::/tcp/4001",
+            "/ip6/fe80::1/tcp/4001",
+            "/ip6/fc00::1/tcp/4001",
+            "/ip6/fd12::1/tcp/4001",
+            "/ip6/ff02::1/tcp/4001",
+            "/ip6/2001:db8::1/tcp/4001",
+            "/ip6/::ffff:10.0.0.1/tcp/4001",
+            "/dns4/relay.example.net/tcp/4001",
+            "/p2p-circuit",
+            "garbage",
+            "/ip4/not-an-ip/tcp/4001",
+            "",
+        ];
+        for address in refused {
+            assert!(!is_probeable_address(address), "must refuse {address:?}");
+        }
+        for address in [
+            "/ip4/8.8.8.8/tcp/4001",
+            "/ip6/2606:4700:4700::1111/tcp/4001",
+            "/ip4/1.1.1.1",
+        ] {
+            assert!(is_probeable_address(address), "must accept {address:?}");
+        }
+        let mut m = ReachabilityManager::new(ReachabilityConfig::default()).expect("valid");
+        let rejected = m.set_candidates([
+            "/ip4/127.0.0.1/tcp/4001",
+            "/ip4/8.8.8.8/tcp/4001",
+            "/dns4/x/tcp/1",
+        ]);
+        assert_eq!(rejected, 2);
+        assert_eq!(m.rejected_candidates(), 2);
+        assert_eq!(m.candidates(), ["/ip4/8.8.8.8/tcp/4001"]);
+    }
+
+    #[test]
+    fn the_candidate_list_is_bounded_per_cycle_and_deduplicated() {
+        let mut m = ReachabilityManager::new(ReachabilityConfig::default()).expect("valid");
+        let many: Vec<String> = (1..=50)
+            .map(|i| format!("/ip4/8.8.{i}.{i}/tcp/4001"))
+            .collect();
+        let rejected = m.set_candidates(many.iter().chain(many.iter()));
+        assert_eq!(rejected, 0, "all fifty are public");
+        assert_eq!(m.candidates().len(), DEFAULT_MAX_CANDIDATES_PER_CYCLE);
+        assert_eq!(m.candidates(), &many[..DEFAULT_MAX_CANDIDATES_PER_CYCLE]);
+    }
+
+    #[test]
+    fn in_flight_probes_are_bounded_and_not_offered_twice() {
+        let mut m = manager();
+        m.add_server(peer(S1), ServerSource::Static);
+        m.add_server(peer(S2), ServerSource::Static);
+        let first = m.due_probes(0);
+        assert_eq!(
+            first.len(),
+            DEFAULT_MAX_INFLIGHT_PROBES,
+            "two in flight, no more"
+        );
+        assert!(
+            m.due_probes(0).is_empty(),
+            "nothing more while both slots are taken"
+        );
+        assert!(m.has_outstanding_probe_to(&peer(S1)));
+        // One completes; exactly one slot reopens, and the completed pair
+        // is not re-offered while its success is fresh.
+        let done = &first[0];
+        let _ = m.record_outcome(&done.address, &done.server, ProbeOutcome::Reachable, 1);
+        let next = m.due_probes(1);
+        assert_eq!(next.len(), 1);
+        assert_ne!(
+            (&next[0].address, &next[0].server),
+            (&done.address, &done.server)
+        );
+    }
+
+    #[test]
+    fn static_servers_are_offered_before_identify_learned_ones() {
+        let mut m = manager();
+        m.add_server(peer(S2), ServerSource::Identify);
+        m.add_server(peer(S1), ServerSource::Static);
+        let plans = m.due_probes(0);
+        assert!(plans.iter().all(|p| p.server == peer(S1)), "{plans:?}");
+    }
+
+    #[test]
+    fn verified_needs_distinct_servers_and_one_server_twice_is_one_observer() {
+        let mut m = manager();
+        m.add_server(peer(S1), ServerSource::Static);
+        m.add_server(peer(S2), ServerSource::Static);
+        let a = "/ip4/8.8.8.8/tcp/4001";
+        assert_eq!(
+            m.record_outcome(a, &peer(S1), ProbeOutcome::Reachable, 10)
+                .map(|c| c.to),
+            Some(DirectInboundState::NotVerified {
+                last_failure_at_ms: None
+            })
+        );
+        // THE SAME SERVER AGAIN: still one observer.
+        assert!(
+            m.record_outcome(a, &peer(S1), ProbeOutcome::Reachable, 20)
+                .is_none()
+        );
+        assert!(!verified(&m), "one server twice is not two servers");
+        let change = m
+            .record_outcome(a, &peer(S2), ProbeOutcome::Reachable, 30)
+            .expect("second distinct server verifies");
+        assert_eq!(
+            change.to,
+            DirectInboundState::VerifiedPublic {
+                verified_addresses: vec![a.to_owned()],
+                evidence_until_ms: 20 + DEFAULT_SUCCESS_EVIDENCE_TTL_MS,
+            },
+            "evidence_until is the EARLIEST counting success's expiry"
+        );
+        assert_eq!(m.state().summary_word(), "verified_public");
+    }
+
+    #[test]
+    fn a_stranger_server_is_dropped_and_counts_toward_nothing() {
+        // FAILS CLOSED: a report from a server never offered is not
+        // evidence. Without this, any peer could report our address
+        // reachable and a threshold of two is two strangers.
+        let mut m = manager();
+        m.add_server(peer(S1), ServerSource::Static);
+        let a = "/ip4/8.8.8.8/tcp/4001";
+        assert!(
+            m.record_outcome(a, &peer(S2), ProbeOutcome::Reachable, 1)
+                .is_none()
+        );
+        assert!(
+            m.record_outcome(a, &peer(S3), ProbeOutcome::Reachable, 2)
+                .is_none()
+        );
+        assert_eq!(
+            *m.state(),
+            DirectInboundState::Unknown,
+            "two strangers verify nothing"
+        );
+    }
+
+    #[test]
+    fn verified_lapses_at_the_evidence_ttl_without_refresh() {
+        let mut m = manager();
+        m.add_server(peer(S1), ServerSource::Static);
+        m.add_server(peer(S2), ServerSource::Static);
+        let a = "/ip4/8.8.8.8/tcp/4001";
+        let _ = m.record_outcome(a, &peer(S1), ProbeOutcome::Reachable, 0);
+        let _ = m.record_outcome(a, &peer(S2), ProbeOutcome::Reachable, 0);
+        assert!(verified(&m));
+        assert!(
+            m.expire_evidence(DEFAULT_SUCCESS_EVIDENCE_TTL_MS - 1)
+                .is_none(),
+            "fresh until the TTL"
+        );
+        let change = m
+            .expire_evidence(DEFAULT_SUCCESS_EVIDENCE_TTL_MS)
+            .expect("lapses at the TTL");
+        assert_eq!(
+            change.to,
+            DirectInboundState::Unknown,
+            "no evidence left, so unknown rather than not_verified"
+        );
+    }
+
+    #[test]
+    fn two_fresh_independent_failures_invalidate_a_verified_address_before_ttl() {
+        // FOUR SERVERS, because the two contradicting reports must come
+        // from servers whose own successes are not being overwritten: a
+        // failure from S2 replaces S2's success under the same key and
+        // drops the count below threshold by itself. The first version
+        // of this test did that and passed with `unreachable.len() < 2`
+        // deleted -- it was testing the threshold, not the invalidation.
+        let mut m = manager();
+        for s in [S1, S2, S3, S4] {
+            m.add_server(peer(s), ServerSource::Static);
+        }
+        let a = "/ip4/8.8.8.8/tcp/4001";
+        let _ = m.record_outcome(a, &peer(S1), ProbeOutcome::Reachable, 0);
+        let _ = m.record_outcome(a, &peer(S2), ProbeOutcome::Reachable, 0);
+        assert!(verified(&m));
+        // One contradicting server is not enough.
+        assert!(
+            m.record_outcome(a, &peer(S3), ProbeOutcome::Unreachable, 5)
+                .is_none()
+        );
+        assert!(
+            verified(&m),
+            "one failure does not invalidate two successes"
+        );
+        // The second one, from a fourth server, does -- while both
+        // successes are still fresh and still counted.
+        let _ = m.record_outcome(a, &peer(S4), ProbeOutcome::Unreachable, 6);
+        assert_eq!(
+            *m.state(),
+            DirectInboundState::NotVerified {
+                last_failure_at_ms: Some(6)
+            },
+            "two fresh independent failures invalidate before TTL"
+        );
+    }
+
+    #[test]
+    fn a_failure_backs_off_the_server_bounded_and_a_success_resets_it() {
+        let mut m = manager();
+        m.add_server(peer(S1), ServerSource::Static);
+        let a = "/ip4/8.8.8.8/tcp/4001";
+        let mut now = 0;
+        let mut last_backoff = 0;
+        for i in 0..12 {
+            let _ = m.record_outcome(a, &peer(S1), ProbeOutcome::Failed, now);
+            let record = m.servers.get(&peer(S1)).expect("known");
+            let backoff = record.backoff_until_ms - now;
+            assert!(
+                backoff >= last_backoff,
+                "backoff never shrinks on failure (iteration {i})"
+            );
+            assert!(
+                backoff <= MAX_RETRY_BACKOFF_MS,
+                "and is BOUNDED at five minutes: {backoff}"
+            );
+            assert!(
+                m.due_probes(now).is_empty(),
+                "not offered while backing off"
+            );
+            assert!(
+                !m.due_probes(now + backoff).is_empty(),
+                "offered once the backoff passes"
+            );
+            m.inflight.clear();
+            last_backoff = backoff;
+            now += backoff;
+        }
+        assert_eq!(
+            last_backoff, MAX_RETRY_BACKOFF_MS,
+            "twelve doublings from 30s saturate at 5m"
+        );
+        let _ = m.record_outcome(a, &peer(S1), ProbeOutcome::Reachable, now);
+        assert_eq!(
+            m.servers.get(&peer(S1)).expect("known").backoff_until_ms,
+            0,
+            "a success resets the backoff"
+        );
+    }
+
+    #[test]
+    fn a_probe_with_no_outcome_times_out_as_a_failure() {
+        let mut m = manager();
+        m.add_server(peer(S1), ServerSource::Static);
+        let plans = m.due_probes(0);
+        assert!(!plans.is_empty());
+        assert!(
+            m.expire_inflight(DEFAULT_PROBE_TIMEOUT_MS - 1).is_none(),
+            "not yet"
+        );
+        assert!(m.has_outstanding_probe_to(&peer(S1)));
+        let change = m
+            .expire_inflight(DEFAULT_PROBE_TIMEOUT_MS)
+            .expect("times out");
+        assert!(
+            matches!(change.to, DirectInboundState::NotVerified { last_failure_at_ms: Some(t) } if t == DEFAULT_PROBE_TIMEOUT_MS)
+        );
+        assert!(
+            !m.has_outstanding_probe_to(&peer(S1)),
+            "and is no longer outstanding"
+        );
+    }
+
+    #[test]
+    fn a_verified_address_is_refreshed_after_the_refresh_interval_and_not_before() {
+        let mut m = manager();
+        m.add_server(peer(S1), ServerSource::Static);
+        m.set_candidates(["/ip4/8.8.8.8/tcp/4001"]);
+        let a = "/ip4/8.8.8.8/tcp/4001";
+        let _ = m.record_outcome(a, &peer(S1), ProbeOutcome::Reachable, 0);
+        assert!(
+            m.due_probes(DEFAULT_REFRESH_INTERVAL_MS - 1).is_empty(),
+            "fresh success is not re-probed"
+        );
+        assert_eq!(
+            m.due_probes(DEFAULT_REFRESH_INTERVAL_MS).len(),
+            1,
+            "refreshed at the interval"
+        );
+    }
+
+    #[test]
+    fn network_change_resets_to_unknown_and_clears_everything() {
+        let mut m = manager();
+        m.add_server(peer(S1), ServerSource::Static);
+        m.add_server(peer(S2), ServerSource::Static);
+        let a = "/ip4/8.8.8.8/tcp/4001";
+        let _ = m.record_outcome(a, &peer(S1), ProbeOutcome::Reachable, 0);
+        let _ = m.record_outcome(a, &peer(S2), ProbeOutcome::Reachable, 0);
+        let _ = m.due_probes(1);
+        assert!(verified(&m));
+        let change = m.network_changed().expect("a change");
+        assert_eq!(change.to, DirectInboundState::Unknown);
+        assert!(!m.has_outstanding_probe_to(&peer(S1)) && !m.has_outstanding_probe_to(&peer(S2)));
+        assert!(
+            m.network_changed().is_none(),
+            "unknown to unknown is no change"
+        );
+    }
+
+    #[test]
+    fn removing_a_server_withdraws_its_evidence() {
+        let mut m = manager();
+        m.add_server(peer(S1), ServerSource::Static);
+        m.add_server(peer(S2), ServerSource::Static);
+        let a = "/ip4/8.8.8.8/tcp/4001";
+        let _ = m.record_outcome(a, &peer(S1), ProbeOutcome::Reachable, 0);
+        let _ = m.record_outcome(a, &peer(S2), ProbeOutcome::Reachable, 0);
+        assert!(verified(&m));
+        let change = m
+            .remove_server(&peer(S2), 1)
+            .expect("losing an observer changes the state");
+        assert!(matches!(change.to, DirectInboundState::NotVerified { .. }));
+    }
+
+    #[test]
+    fn the_summary_words_are_the_schemas() {
+        assert_eq!(DirectInboundState::Unknown.summary_word(), "unknown");
+        assert_eq!(
+            DirectInboundState::VerifiedPublic {
+                verified_addresses: vec![],
+                evidence_until_ms: 0
+            }
+            .summary_word(),
+            "verified_public"
+        );
+        assert_eq!(
+            DirectInboundState::NotVerified {
+                last_failure_at_ms: None
+            }
+            .summary_word(),
+            "not_verified"
+        );
+    }
+}

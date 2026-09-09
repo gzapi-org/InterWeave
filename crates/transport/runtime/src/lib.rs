@@ -21,6 +21,7 @@ pub mod fingerprint;
 pub mod ingress;
 pub mod mesh_id;
 pub mod preauth;
+pub mod reachability;
 pub mod reply_token;
 pub mod session_queue;
 pub mod topic;
