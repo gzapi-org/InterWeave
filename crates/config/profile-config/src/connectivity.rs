@@ -1275,7 +1275,7 @@ mod tests {
         // ABSENT from the document is filled by `impl Default`; a nested
         // struct PRESENT but partially specified is filled field by
         // field from the `default_*` functions `#[serde(default = ...)]`
-        // names. Those were two separate copies of the same thirty
+        // names. Those were two separate copies of the same twenty-seven
         // schema constants, and
         // `the_defaults_are_the_schemas_defaults` reads only the first
         // -- so changing `default_max_candidates_per_cycle` to 3 passed

@@ -7,7 +7,7 @@
 //! is that manager. It decides which servers this profile DIALS and which
 //! addresses count as its own, folds the probe results the behaviour
 //! reports into evidence, and derives the [`ReachabilityVerdict`] that
-//! `contracts/CONNECTIVITY.md` §5 and the `connectivity-summary` schema
+//! `contracts/CONNECTIVITY.md` §3 and the `connectivity-summary` schema
 //! describe. It opens no socket and reads no clock: every method that can
 //! expire anything takes `now_ms`, so the transitions are testable by
 //! enumeration.
@@ -35,7 +35,7 @@
 //!   lands, that decision is this manager's, keyed on the evidence below.
 //! - **Backoff for a server that will not CONNECT** is the dial gate's:
 //!   `ConnectionManager::retry_delay_ms` is already `AUTONAT.md` §4's
-//!   "30 s, bounded exponential, 5 min", and `ConnectionPolicy` scopes it
+//!   30 s doubling to a 5-minute ceiling, and `ConnectionPolicy` scopes it
 //!   to the address before the peer. A static server is reached through
 //!   `attempt_dial`, so it inherits that for free. A server that connects
 //!   and then never ANSWERS is a different case: the crate maps a stream
@@ -44,6 +44,14 @@
 //!   handing the retry decision here. Review finding on PR #84.
 //! - **The inbound dial-back** is retained by the adapter on the basis
 //!   of which servers IT dialled, not of anything recorded here.
+//! - **Address normalization** is the adapter's. Every address here is
+//!   compared as a raw string, so `transport/libp2p/CONNECTIVITY.md`
+//!   §5's "that exact normalized address" holds only if what arrives is
+//!   already canonical -- two spellings of one address are two
+//!   candidates with two evidence rows, and neither reaches the
+//!   threshold. `Multiaddr`'s own `to_string` is canonical, so an
+//!   adapter that passes those through satisfies this by construction.
+//!   Review finding on PR #84.
 //!
 //! # Evidence is keyed by `(address, server)`, and only DISTINCT servers count
 //!
@@ -201,8 +209,13 @@ pub enum ReachabilityVerdict {
         /// on successes it already holds the moment the older failure
         /// lapses, and that can fall before this horizon. A caller that
         /// slept until this value alone would publish a stale
-        /// `verified_addresses`, so this is a bound on when to look
-        /// again, not a substitute for the expiry tick.
+        /// `verified_addresses` -- and worse than stale: a join and the
+        /// leave that follows it can both fall inside one sleep, so the
+        /// address is never announced at all and `change` reports
+        /// nothing, since both ends of the sleep look identical. It
+        /// errs toward under-advertising, never over-advertising. So
+        /// this is a bound on when to look again, not a substitute for
+        /// the expiry tick.
         /// `an_address_can_join_the_verified_set_before_the_published_horizon`
         /// pins that direction. Review findings on PR #84.
         ///
@@ -540,7 +553,17 @@ impl ReachabilityManager {
                 entry.failure_at_ms = None;
             }
             ProbeOutcome::Unreachable => {
-                entry.failure_at_ms = Some(now_ms);
+                // NEVER OLDER THAN THE SUCCESS IT CONTRADICTS. `derive`
+                // reads a fresh failure as this server's latest word, and
+                // that only holds if the failure outlives the success
+                // beneath it. A caller whose clock stepped backwards
+                // could otherwise file a failure that expired FIRST,
+                // returning a reversed server to the reachable quorum on
+                // a success it had already retracted. Monotonicity is the
+                // adapter's to provide and this does not depend on it.
+                // Review finding on PR #84.
+                let at = entry.success_at_ms.map_or(now_ms, |s| s.max(now_ms));
+                entry.failure_at_ms = Some(at);
             }
         }
         self.rederive(now_ms)
@@ -574,9 +597,15 @@ impl ReachabilityManager {
         before: ReachabilityVerdict,
         after: &ReachabilityVerdict,
     ) -> Option<ConnectivityChanged> {
-        if before.state() == after.state()
-            && before.verified_addresses() == after.verified_addresses()
-        {
+        // AS A SET. `verified_addresses` is built in candidate order,
+        // which `set_candidates` takes from the caller verbatim, so
+        // comparing the vectors made re-supplying the same addresses in a
+        // different order look like a change -- which an adapter feeding
+        // them out of a hash set would do on every refresh. Review
+        // finding on PR #84.
+        let before_set: BTreeSet<&String> = before.verified_addresses().iter().collect();
+        let after_set: BTreeSet<&String> = after.verified_addresses().iter().collect();
+        if before.state() == after.state() && before_set == after_set {
             None
         } else {
             Some(ConnectivityChanged {
@@ -874,9 +903,12 @@ mod tests {
     fn every_zero_bound_is_refused_for_a_caller_that_never_deserialized() {
         // EVERY field, not some: the previous version checked four of
         // seven and documented all seven as checked. The destructuring
-        // below is exhaustive, so a field added to the config without a
-        // row here fails to COMPILE rather than leaving a hand-kept list
-        // silently short. Review finding on PR #84.
+        // below is exhaustive, so a new field cannot be added without
+        // this test being EDITED -- which is weaker than it looks, since
+        // writing `new_field: _` compiles and leaves the rows below
+        // short. It buys a prompt at the right moment, not a guarantee;
+        // an earlier version of this comment claimed the guarantee.
+        // Review findings on PR #84.
         let ReachabilityConfig {
             required_distinct_successes: _,
             success_evidence_ttl_ms: _,
@@ -1716,6 +1748,60 @@ mod tests {
             100 + TTL,
             "the second-newest of three, at a threshold of two"
         );
+    }
+
+    #[test]
+    fn re_supplying_the_same_addresses_in_another_order_is_not_a_change() {
+        // `verified_addresses` follows candidate order, which comes from
+        // the caller. Comparing the vectors made a reordered but
+        // identical set look like a change -- which an adapter feeding
+        // listeners out of a hash set would emit on every refresh.
+        // Review finding on PR #84.
+        let mut m = manager_with(&[S1, S2]);
+        for addr in [A, B] {
+            let _ = m.record_outcome(addr, &peer(S1), ProbeOutcome::Reachable, 0);
+            let _ = m.record_outcome(addr, &peer(S2), ProbeOutcome::Reachable, 0);
+        }
+        assert_eq!(m.state().verified_addresses(), [A, B]);
+        assert!(
+            m.set_candidates([B, A], 1).is_none(),
+            "the same set in another order is not a change"
+        );
+        assert_eq!(
+            m.state().verified_addresses(),
+            [B, A],
+            "though the order it reports does follow the caller"
+        );
+        // A genuine withdrawal still is one.
+        assert!(m.set_candidates([B], 2).is_some());
+    }
+
+    #[test]
+    fn a_failure_is_never_filed_older_than_the_success_it_contradicts() {
+        // `derive` reads a fresh failure as the server's latest word, so
+        // a failure that expired FIRST would return a reversed server to
+        // the reachable quorum on a success it had already retracted.
+        // Reachable only from a clock that steps backwards, which is the
+        // adapter's to prevent -- and this no longer depends on it.
+        // Review finding on PR #84.
+        let mut m = ReachabilityManager::new(ReachabilityConfig {
+            required_distinct_successes: 1,
+            ..ReachabilityConfig::default()
+        })
+        .expect("valid");
+        let _ = m.set_candidates([A], 0);
+        m.add_server(peer(S1), ServerSource::Static);
+        let _ = m.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 1_000);
+        assert!(verified(&m));
+        // A backwards step: the failure is filed at 500, before the
+        // success it retracts.
+        let _ = m.record_outcome(A, &peer(S1), ProbeOutcome::Unreachable, 500);
+        assert!(!verified(&m));
+        assert!(
+            m.expire_evidence(500 + TTL).is_none(),
+            "and the success cannot outlive it back into the quorum"
+        );
+        assert!(!verified(&m));
     }
 
     #[test]
