@@ -34,6 +34,14 @@
 # `warning` the tree is clean, and every finding the threshold admits is
 # one shellcheck thinks is probably a bug.
 #
+# WHAT SHELLCHECK READS BESIDES THE FILES, and why it is switched off:
+# `SHELLCHECK_OPTS` in the environment and `.shellcheckrc` files (from
+# each checked file's directory upward, and under `$HOME`) both change
+# what is reported, silently. A developer with `-e SC2155` in either
+# would get the OK line below asserting a threshold that was not the one
+# applied. The guard unsets the variable and passes `--norc`, so a local
+# run and a CI run judge the same thing.
+#
 # Usage:
 #   bash tools/checks/check_shell_scripts.sh
 #
@@ -112,7 +120,10 @@ fi
 # less than everything" wearing the "found something" code, the exact
 # distinction the self-test's header argues is load-bearing.
 # Review finding on PR #82.
-shellcheck --severity="$SEVERITY" "${scripts[@]}"
+#
+# `SHELLCHECK_OPTS` and `.shellcheckrc` are neutralised — see the help.
+unset SHELLCHECK_OPTS
+shellcheck --norc --severity="$SEVERITY" "${scripts[@]}"
 rc=$?
 case $rc in
     0) ;;

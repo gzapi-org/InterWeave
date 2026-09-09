@@ -44,6 +44,9 @@ fi
 # `error` makes the two finding cases report clean. The hatch gets its
 # own case below instead. Review finding on PR #82.
 unset INTERWEAVE_SHELLCHECK_SEVERITY
+# And shellcheck's own hatch, for the same reason -- the guard unsets it
+# too, and case 8 below is what proves that rather than this line.
+unset SHELLCHECK_OPTS
 
 failures=0
 SANDBOX=""
@@ -164,6 +167,21 @@ sandbox_with '#!/usr/bin/env bash
 echo fine'
 rm "$SANDBOX/scripts/case.sh"
 expect_status 2 "a tracked file missing from the worktree is refused as COULD NOT JUDGE, not as a finding"
+cleanup; SANDBOX=""
+
+# 8. SHELLCHECK'S OWN HATCH IS NEUTRALISED. `SHELLCHECK_OPTS='-e SC2155'`
+#    in a developer's environment would otherwise suppress the class and
+#    print an OK line naming a threshold that was not applied. The guard
+#    unsets it, and this is the case that would fail if it stopped.
+#    Review finding on PR #82.
+sandbox_with '#!/usr/bin/env bash
+export THING="$(echo value)"
+echo "$THING"'
+if ( cd "$SANDBOX" && SHELLCHECK_OPTS='-e SC2155' bash tools/checks/check_shell_scripts.sh >/dev/null 2>&1 ); then
+    fail "SHELLCHECK_OPTS='-e SC2155' must not hide a finding from the guard"
+else
+    pass "an inherited SHELLCHECK_OPTS exclusion does not reach shellcheck"
+fi
 cleanup; SANDBOX=""
 
 if [[ $failures -gt 0 ]]; then
