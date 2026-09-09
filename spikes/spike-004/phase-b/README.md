@@ -9,8 +9,9 @@ behaviour is chosen rather than inherited, and proves the NAT is what it
 claims to be.
 
 ```
-./run.sh          # every row, both domains, mapping and filtering
-FILTER_MODE=full-cone MODES=eim ./run.sh   # a control for the classifier
+./run.sh          # every mapping row, both domains, plus the default filtering row
+FILTER_MODE=address-restricted MODES=eim ./run.sh   # a control for the classifier
+FILTER_MODE=full-cone MODES=eim ./run.sh            # and the other one
 
 # The manual path needs the image, which only run.sh builds -- without
 # this, `topology.sh up` tries to pull a tag that exists nowhere and
@@ -60,9 +61,17 @@ Both control rows are recorded, because a column headed "measured" owes a
 run for every row in it and only the `conntrack` one had one. **These two
 are EXCERPTS — the filtering lines only**, and are labelled as such
 because the complete run below is the standard this directory holds
-itself to; the rest of each is the same shape as that one:
+itself to; the rest of each is the same shape as that one. The two
+`forward on` lines are the only evidence in a transcript that the static
+forward landed on BOTH routers with the interface derived per container
+— the failure the `eth0`/`eth1` paragraph below is about, reachable
+through a second function since `configure_filtering` — and an earlier
+version of these excerpts left them out. Re-recorded 2026-09-09 from the
+scripts as committed; review finding on PR #81.
 
 ```
+  natm-router: address-restricted forward on eth0 for udp/45000
+  natm-router-b: address-restricted forward on eth0 for udp/45000
   filter  : address-restricted (both domains)
 peer received  : CONTROL SAME_ADDRESS
 VERDICT: ADDRESS-DEPENDENT FILTERING (an address-restricted cone: the address must match, the port need not)
@@ -72,6 +81,8 @@ measured and matched: natm-peer=eim(45000,45000;45001,45001)/adf natm-peer-b=eim
 ```
 
 ```
+  natm-router: full-cone forward on eth0 for udp/45000
+  natm-router-b: full-cone forward on eth0 for udp/45000
   filter  : full-cone (both domains)
 peer received  : CONTROL SAME_ADDRESS OTHER_ADDRESS
 VERDICT: ENDPOINT-INDEPENDENT FILTERING (a full cone: any source reaches the mapping)
@@ -247,7 +258,7 @@ degenerate reading — they are the observation that makes a row `eim`.
 **The interface names are not a detail, and the run above shows why.**
 Three of its four `snat on` lines say `eth0` and the fourth says `eth1` —
 `natm-router` is on `eth0` in the `eim` row and `eth1` in the `eds` row,
-which is the same router on two interfaces twenty seconds apart. So the
+which is the same router on two different interfaces within one run. So the
 instability is visible in the record rather than asserted beside it: the
 two routers land on different interfaces across runs, and one router
 lands on different ones between the rows of a single run, because every
