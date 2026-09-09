@@ -1282,7 +1282,7 @@ mod tests {
         //
         // Every shipped example takes the SECOND path: each writes
         // `autonat: {client: {enabled, static_servers, ...}}` and leaves
-        // the other seven fields out. The impls now delegate to the same
+        // the other five fields out. The impls now delegate to the same
         // functions, so there is one copy; this test is what fails if a
         // later edit re-splits them. Review finding on PR #80.
         //
