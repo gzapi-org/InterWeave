@@ -190,7 +190,7 @@ Default architecture targets:
 - evidence TTL: **15 min**, for a success and for a failure alike;
 - retry after a failure: **30 s**, exponentially/backoff bounded by **5 min** — the dial gate's constants, applied to a re-test rather than read from a configuration key (`AUTONAT.md` §4, Amendment 2026-09-09 (ii));
 - refresh cadence while verified: **5 min**;
-- max candidate addresses tested per sweep: **4**.
+- max candidate addresses tested per cycle: **4**.
 
 The client's in-flight bound and per-probe timeout are the pinned crate's own (10 and 10 s) and are not configurable; the 2 and 15 s an earlier revision of this list named were keys nothing could honour.
 

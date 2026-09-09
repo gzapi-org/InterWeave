@@ -122,25 +122,30 @@ bytes_sent class (diagnostic)
 **Each server speaks once, with its latest word**: a fresh failure makes
 it an observer saying unreachable, otherwise a fresh success makes it one
 saying reachable, never both. The success is kept under a later failure
-so the state table in §5 can tell a *contradicted* observer from a
-*silent* one — which is the whole of the hysteresis: an address verified
-by the threshold stays verified while those observers are still fresh and
-speaking, at least one still says reachable, and fewer than two say
-unreachable. One slot per key could not express this (one `Unreachable`
-from a counting observer dropped the address below the threshold on its
-own), and counting a server in both sets could not either (at a threshold
-of one, the address stayed verified for a full TTL while its only
-observer said unreachable). A success that merely ages out is silence,
-not contradiction, and a verdict short of its threshold lapses with it.
+so §5's hysteresis can tell a *reversed* observer — a fresh success now
+under a fresh failure — from a *dissenter* that never said reachable and
+from a *silent* one whose success aged out. An address verified by the
+threshold stays verified while the servers that said reachable, still
+saying it or reversed, still make the threshold, at least one still says
+it, and fewer than two in total say unreachable. A dissenter counts
+toward that two and toward nothing else. Three shapes that could not
+express this: one slot per key (one `Unreachable` from a counting
+observer dropped the address below the threshold on its own); a server
+counted in both sets (at a threshold of one the address stayed verified
+for a full TTL while its only observer said unreachable); and a quorum
+that admitted dissenters (removing a verifying server left the verdict
+standing on the word of the server calling the address unreachable). A
+success that merely ages out is silence, not contradiction, and a verdict
+short of its threshold lapses with it.
 
 Defaults:
 
 - required distinct successful servers: 2;
 - evidence TTL: 15 minutes — for a success and for a failure alike, since
   the two are weighed against each other;
-- refresh: 5 minutes — the interval at which an address with fresh
-  success evidence is re-tested; the client's own tick is not this, see
-  the amendment below;
+- refresh: 5 minutes — the cadence at which an address with fresh
+  success evidence will be re-tested once ADR-0051's `retest` lands; the
+  client's own tick is not this, see the amendment below;
 - max candidate addresses per cycle: 4.
 
 ### Amendment 2026-09-09 (ii) — three client knobs named a policy nothing here could apply

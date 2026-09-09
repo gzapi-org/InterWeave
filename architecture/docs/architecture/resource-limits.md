@@ -68,7 +68,7 @@ Broadcast local delivery may drop according to per-client bounded policy under o
 | address identity-mismatch quarantine | 30 min | 24 h | suppress poisoned address, not whole trusted peer |
 | connections per PeerId | 3 | 8 | refuse redundant new connection unless policy replaces one |
 | AutoNAT v2 client probes in flight | 10 per connection (crate-fixed) | — | not configurable; the crate's request map refuses past it |
-| AutoNAT addresses tested per sweep | 4 | 16 | bounded selection by report score; the server is the crate's random pick among dialled ones |
+| AutoNAT addresses tested per cycle | 4 | 16 | bounded selection by report score; the server is the crate's random pick among dialled ones |
 | AutoNAT server concurrent probes | 8 | 64 | reject/defer probe |
 | AutoNAT server probes per peer/min | 2 | 60 | rate-limit |
 | AutoNAT server probes global/min | 60 | 600 | rate-limit |

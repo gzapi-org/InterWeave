@@ -210,9 +210,10 @@ pub struct AutonatClientConfig {
     pub success_evidence_ttl_ms: u32,
     /// The pinned client's `Config::with_probe_interval`.
     ///
-    /// Its default is FIVE SECONDS, sixty times more often than
-    /// `AUTONAT.md` §4 allows, so an adapter that does not pass this
-    /// value floods every server it has dialled.
+    /// Its default is FIVE SECONDS. The tick sweeps only never-tested
+    /// candidates, so the interval bites when ADR-0051's `retest` puts
+    /// one back; pass this value so that cadence is `AUTONAT.md` §4's
+    /// and not the crate's.
     #[serde(
         rename = "refresh_interval",
         default = "default_refresh_ms",

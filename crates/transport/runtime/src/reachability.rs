@@ -60,15 +60,20 @@
 //! makes it one saying reachable, never both. `AUTONAT.md` §5 then gives
 //! the hysteresis: "Two fresh independent failures may invalidate a
 //! previously verified address before TTL." So an address that WAS
-//! verified stays verified while the observers that verified it are still
-//! fresh and speaking, at least one still says reachable, and fewer than
-//! two say unreachable. Two earlier versions each got half of this: one
-//! let a single failure overwrite the success it contradicted, so one
-//! report from a counting observer unverified the address; the next kept
-//! both and counted the server twice, so at a threshold of one the
-//! address stayed verified for a full TTL while its only observer said
-//! unreachable. Review findings on PR #84. Expiry is not a contradiction:
-//! a success that ages out leaves the observer silent, and a verdict
+//! verified stays verified while the servers that said reachable -- still
+//! saying it, or REVERSED, a fresh success now under a fresh failure --
+//! still make the threshold, at least one still says it, and fewer than
+//! two in total say unreachable. A DISSENTER that never said reachable
+//! counts toward that two and toward nothing else. Three earlier versions
+//! each missed a piece: one let a failure overwrite the success it
+//! contradicted, so one report from a counting observer unverified the
+//! address; the next counted the server in both sets, so at a threshold
+//! of one the address stayed verified for a full TTL while its only
+//! observer said unreachable; the third let a dissenter make up the
+//! quorum, so de-authorising a verifying server left the verdict standing
+//! on the word of the server calling the address unreachable. Review
+//! findings on PR #84. Expiry is not a contradiction: a success that ages
+//! out leaves the observer silent and out of the quorum, and a verdict
 //! short of its threshold lapses with it -- §5's "must not survive beyond
 //! its evidence TTL".
 //!
@@ -223,12 +228,14 @@ impl ReachabilityVerdict {
 /// (`v2/client/behaviour.rs:200-243`): `Ok(())`, and
 /// `Err(AddressNotReachable { .. })` after the server tried and failed to
 /// dial back. `Ok(())` is [`Reachable`](Self::Reachable) and
-/// `Err(AddressNotReachable)` is [`Unreachable`](Self::Unreachable). Three
+/// `Err(AddressNotReachable)` is [`Unreachable`](Self::Unreachable). Other
 /// paths produce NO event: `UnsupportedProtocol` and `Io` reset the
-/// candidate and return, and a server reporting success when no dial-back
-/// was received (`behaviour.rs:186-198`) warns and returns leaving the
-/// candidate `Pending` -- so an adapter must not wait on an outcome for
-/// every probe. This crate does not depend on the AutoNAT crate, so the
+/// candidate and return, a server reporting success when no dial-back
+/// was received (`behaviour.rs:186-198`) leaves the candidate `Pending`,
+/// and so does a request the handler dropped for want of a slot
+/// (`dial_request.rs:99-113`) -- so an adapter must not wait on an
+/// outcome for every probe, and ADR-0051's `retest` is how a stuck one is
+/// recovered. This crate does not depend on the AutoNAT crate, so the
 /// adapter's `match` on `Event.result` is where a third result would
 /// surface, not here. An earlier version carried a `Failed` for a probe
 /// that never came back; no such probe can be observed, so it is gone.
@@ -276,8 +283,9 @@ pub struct ConnectivityChanged {
 
 /// One server's word on one address. A success clears the failure it
 /// supersedes, so a present `failure_at_ms` is always the LATEST word;
-/// `success_at_ms` survives a later failure only so `derive` can tell a
-/// contradicted observer from a silent one.
+/// `success_at_ms` survives a later failure so `derive` can tell a
+/// REVERSED observer -- one that verified the address and now contradicts
+/// it -- from a dissenter that never said reachable.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Evidence {
     success_at_ms: Option<u64>,
@@ -554,18 +562,22 @@ impl ReachabilityManager {
     ///
     /// For each candidate, each server with fresh evidence speaks once: a
     /// fresh failure makes it an observer saying unreachable, else a fresh
-    /// success makes it one saying reachable. An address is verified when
-    /// the reachable count meets the threshold, OR it was verified before
-    /// and the observers that verified it are still fresh and speaking
-    /// with at least one still saying reachable -- and in either case
-    /// fewer than two say unreachable ("two fresh independent failures
-    /// may invalidate a previously verified address before TTL"). If any
-    /// address is verified, `VerifiedPublic`; else if any fresh failure
-    /// exists, `NotVerified`; else `Unknown` -- successes short of the
-    /// threshold are "insufficient evidence", which §4 and
-    /// `CONNECTIVITY.md` §5 both give to `unknown`. An earlier version
-    /// returned `NotVerified` for one success, contradicting both. Review
-    /// finding on PR #84.
+    /// success makes it one saying reachable. A server whose fresh success
+    /// sits under a fresh failure has REVERSED -- it verified the address
+    /// and now contradicts it -- and that is the one place the retained
+    /// success is read. An address is verified when the reachable count
+    /// meets the threshold, OR it was verified before and the servers that
+    /// said reachable -- still saying it, or reversed -- still make the
+    /// threshold with at least one still saying it; in either case fewer
+    /// than two say unreachable. A dissenter that never said reachable
+    /// counts toward that two and toward nothing else: an earlier version
+    /// let it make up the quorum, so removing a verifying server left the
+    /// verdict standing on the word of the server calling the address
+    /// unreachable. Review finding on PR #84. If any address is verified,
+    /// `VerifiedPublic`; else if any fresh failure exists, `NotVerified`;
+    /// else `Unknown` -- successes short of the threshold are
+    /// "insufficient evidence", which §4 and `CONNECTIVITY.md` §5 both
+    /// give to `unknown`.
     fn derive(&self, now_ms: u64) -> ReachabilityVerdict {
         let ttl = self.config.success_evidence_ttl_ms;
         let threshold =
@@ -577,28 +589,40 @@ impl ReachabilityManager {
         let mut last_failure: Option<u64> = None;
         for address in &self.candidates {
             let mut saying_reachable: BTreeSet<&TransportIdentity> = BTreeSet::new();
+            let mut reversed: BTreeSet<&TransportIdentity> = BTreeSet::new();
             let mut saying_unreachable: BTreeSet<&TransportIdentity> = BTreeSet::new();
             let mut earliest_success_expiry = u64::MAX;
             for ((a, server), e) in &self.evidence {
                 if a != address {
                     continue;
                 }
-                if let Some(at) = e.fresh_failure(ttl, now_ms) {
-                    any_failure = true;
-                    saying_unreachable.insert(server);
-                    last_failure = Some(last_failure.map_or(at, |f| f.max(at)));
-                } else if let Some(at) = e.fresh_success(ttl, now_ms) {
-                    saying_reachable.insert(server);
-                    earliest_success_expiry = earliest_success_expiry.min(at.saturating_add(ttl));
+                let success = e.fresh_success(ttl, now_ms);
+                match e.fresh_failure(ttl, now_ms) {
+                    Some(at) => {
+                        any_failure = true;
+                        saying_unreachable.insert(server);
+                        last_failure = Some(last_failure.map_or(at, |f| f.max(at)));
+                        if success.is_some() {
+                            reversed.insert(server);
+                        }
+                    }
+                    None => {
+                        if let Some(at) = success {
+                            saying_reachable.insert(server);
+                            earliest_success_expiry =
+                                earliest_success_expiry.min(at.saturating_add(ttl));
+                        }
+                    }
                 }
             }
             let meets_threshold = saying_reachable.len() >= threshold;
-            // THE HOLD: the same observers, one of them now disagreeing.
-            // Counted over fresh words only, so an observer whose success
-            // merely aged out is silent and does not sustain the verdict.
+            // THE HOLD: the observers that verified it, one of them now
+            // disagreeing. A success that aged out is silence and leaves
+            // the quorum; a failure from a server that never said
+            // reachable was never part of it.
             let holds = previously_verified.iter().any(|v| v == address)
                 && !saying_reachable.is_empty()
-                && saying_reachable.len() + saying_unreachable.len() >= threshold;
+                && saying_reachable.len() + reversed.len() >= threshold;
             if (meets_threshold || holds) && saying_unreachable.len() < 2 {
                 verified.push(address.clone());
                 evidence_until = evidence_until.min(earliest_success_expiry);
@@ -1306,6 +1330,105 @@ mod tests {
                 .is_none()
         );
         assert!(!verified(&m));
+    }
+
+    #[test]
+    fn a_dissenter_that_never_said_reachable_cannot_hold_the_verdict() {
+        // S1 and S2 verify A; S3 contradicts -- one contradiction, which
+        // holds nothing against two. Removing S1 leaves one fresh
+        // success and one fresh failure. An earlier hold counted S3
+        // toward the quorum and kept A verified on the word of the
+        // server calling it unreachable; de-authorising a verifying
+        // server must remove its influence. Review finding on PR #84.
+        let mut m = manager_with(&[S1, S2, S3]);
+        let _ = m.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0);
+        let _ = m.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 0);
+        assert!(
+            m.record_outcome(A, &peer(S3), ProbeOutcome::Unreachable, 1)
+                .is_none()
+        );
+        assert!(verified(&m));
+        let change = m
+            .remove_server(&peer(S1), 2)
+            .expect("the verifying quorum is gone");
+        assert_eq!(
+            change.to,
+            ReachabilityVerdict::NotVerified {
+                last_failure_at_ms: Some(1)
+            }
+        );
+    }
+
+    #[test]
+    fn a_failure_at_the_expiry_instant_does_not_extend_the_verdict() {
+        // S1 at 0 and S2 at 100 verify A with `evidence_until_ms == TTL`.
+        // At exactly TTL, S1's success lapses and S3 says unreachable.
+        // The only new information is a failure, so the verdict must end
+        // -- and end the same way whether or not an expiry pass ran in
+        // between, or the manager has no well-defined answer for one
+        // evidence set. Review finding on PR #84.
+        let mut direct = manager_with(&[S1, S2, S3]);
+        let _ = direct.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0);
+        let _ = direct.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 100);
+        assert!(verified(&direct));
+        let mut ticked = direct.clone();
+        let change = direct
+            .record_outcome(A, &peer(S3), ProbeOutcome::Unreachable, TTL)
+            .expect("verified ends");
+        assert_eq!(
+            change.to,
+            ReachabilityVerdict::NotVerified {
+                last_failure_at_ms: Some(TTL)
+            }
+        );
+        assert_eq!(
+            ticked.expire_evidence(TTL).map(|c| c.to),
+            Some(ReachabilityVerdict::Unknown)
+        );
+        let _ = ticked.record_outcome(A, &peer(S3), ProbeOutcome::Unreachable, TTL);
+        assert_eq!(
+            direct.state(),
+            ticked.state(),
+            "the tick does not decide the verdict"
+        );
+    }
+
+    #[test]
+    fn an_observer_whose_success_aged_out_is_a_dissenter_not_a_reversal() {
+        // S1 at 0 and S2 at 100 verify A. At TTL, S1's success has just
+        // lapsed; S1 now saying unreachable is a dissenter with no fresh
+        // success under its failure, so the quorum is S2 alone and the
+        // verdict ends. One millisecond earlier S1's success was fresh,
+        // S1 REVERSED, and the hold applied -- until the success lapsed.
+        let mut late = manager_with(&[S1, S2]);
+        let _ = late.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0);
+        let _ = late.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 100);
+        let change = late
+            .record_outcome(A, &peer(S1), ProbeOutcome::Unreachable, TTL)
+            .expect("aged out, then contradicting: no hold");
+        assert_eq!(
+            change.to,
+            ReachabilityVerdict::NotVerified {
+                last_failure_at_ms: Some(TTL)
+            }
+        );
+        let mut early = manager_with(&[S1, S2]);
+        let _ = early.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0);
+        let _ = early.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 100);
+        assert!(
+            early
+                .record_outcome(A, &peer(S1), ProbeOutcome::Unreachable, TTL - 1)
+                .is_none(),
+            "reversed while its success is fresh: the hold applies"
+        );
+        assert!(verified(&early));
+        assert_eq!(
+            early.expire_evidence(TTL).map(|c| c.to),
+            Some(ReachabilityVerdict::NotVerified {
+                last_failure_at_ms: Some(TTL - 1)
+            }),
+            "and lapses with the success it stood on"
+        );
     }
 
     #[test]
