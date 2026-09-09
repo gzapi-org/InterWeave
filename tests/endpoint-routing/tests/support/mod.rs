@@ -68,7 +68,7 @@ pub(crate) async fn claim_all(runtime: &SwarmRuntime, names: &[&str]) -> Leases 
 /// assembled here.
 pub(crate) fn profile_with(entries: Vec<EndpointConfig>, default: Option<&str>) -> ProfileConfig {
     ProfileConfig {
-        transport: Default::default(),
+        transport: interweave_profile_config::connectivity::TransportConfig::default(),
         schema_version: 2,
         trust: TrustConfig {
             policy: TrustPolicyKind::default(),
