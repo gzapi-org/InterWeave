@@ -110,7 +110,9 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   client in `Attributing` announces an origin for a dial that never
   happens, and the outbound gate sees no probe traffic at all: whatever
   enforces `AUTONAT.md` §3 and §6 sits where the CONNECTION is made,
-  not at the dial hook. **A guard written as
+  not at the dial hook — and specifically where the OUTBOUND connection
+  is made, since the client installs its dial-request handler only on a
+  connection this profile dialled. **A guard written as
   a grep over `attempt_dial` call sites would see none of that.** Do not
   read the feature change as evidence those paths are live. The exposure
   `BOTTOM-UP-IMPLEMENTATION-PLAN.md` §14 names — every data-plane

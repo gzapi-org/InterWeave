@@ -32,8 +32,9 @@
 //! # What this does NOT do: pick the probe server
 //!
 //! `AUTONAT.md`'s Amendment 2026-09-09 settled that the pinned client
-//! chooses its own server -- uniformly at random among connected peers
-//! advertising the protocol -- and exposes no hook to rank or veto one.
+//! chooses its own server -- uniformly at random among the connections
+//! this profile DIALLED whose remote advertises the protocol -- and
+//! exposes no hook to rank or veto one.
 //! So [`ReachabilityManager::due_probes`] is NOT what starts a probe. It
 //! is the schedule an adapter uses to decide **which servers to hold a
 //! connection to** and when a pair's evidence has gone stale enough to
@@ -200,8 +201,12 @@ pub enum ProbeOutcome {
     Failed,
 }
 
-/// Where a server came from (`AUTONAT.md` §3 gives static servers
-/// selection precedence).
+/// Where a server came from.
+///
+/// The ORDER is the connection preference `AUTONAT.md`'s Amendment
+/// 2026-09-09 leaves static configuration -- which servers this profile
+/// guarantees to connect to -- and not the §3 selection precedence that
+/// amendment removed, which the pinned client cannot express.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ServerSource {
     /// Configured in `autonat.client.static_servers`.

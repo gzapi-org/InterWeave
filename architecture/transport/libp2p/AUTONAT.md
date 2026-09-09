@@ -48,9 +48,15 @@ target". Per-server cooldown/backoff was removed as an eligibility
 clause for the same reason and survives as client-side policy (§4).
 
 **Why.** `libp2p-autonat` 0.15.0's v2 client chooses its probe server by
-`random_autonat_server()` — a uniformly random pick among CONNECTED
-peers whose Identify reported the dial-request protocol
-(`v2/client/behaviour.rs:340`). Its whole public surface is
+`random_autonat_server()` — a uniformly random pick among the
+CONNECTIONS this profile DIALLED whose remote advertised the
+dial-request protocol (`v2/client/behaviour.rs:340`). Dialled, not
+merely connected: the client installs the dial-request handler only in
+`handle_established_outbound_connection`, and `supports_autonat` is set
+only from that handler's `PeerHasServerSupport`, so a peer that dialled
+US is never a probe server. The pick is also over connections rather
+than peers, so a peer holding two outbound connections is drawn twice
+as often. Its whole public surface is
 `Config::with_max_candidates`, `Config::with_probe_interval`,
 `Behaviour::new` and `validate_addr`: there is no hook to rank servers,
 to prefer one source over another, or to veto a pick. Nor can the
@@ -61,8 +67,9 @@ gate never sees is a rule nothing enforces, and this repository has
 shipped that shape before — a comment that reads as settled while
 nothing fails when it stops being true.
 
-**What replaces it.** The eligible set is exactly the set of connected
-peers advertising the protocol, and every one of those is already
+**What replaces it.** The eligible set is exactly the set of peers this
+profile has DIALLED that advertise the protocol, and every one of those
+is already
 `DataPlaneTrusted` or `ConnectivityInfrastructureOnly` because no other
 class is retained. Static configuration keeps a weaker and enforceable
 meaning: a statically configured server is one this profile
@@ -74,14 +81,16 @@ Identify-learned server can only ever be a peer already connected for
 another reason.
 
 **What this gives up, stated rather than implied.** A
-`DataPlaneTrusted` peer connected for data-plane reasons that happens to
-advertise the AutoNAT server protocol IS an eligible probe server under
-the amended rule, and was not under the old one. It learns which of our
-addresses we are testing. It cannot forge a verdict — `verified_public`
-needs the configured number of DISTINCT servers, and the evidence key is
-`(address, server)` — but it is one of them. An operator who needs the
-narrower set gets it by not connecting to such peers, which is a trust
-decision rather than an AutoNAT one.
+`DataPlaneTrusted` peer this profile DIALLED for data-plane reasons that
+also advertises the AutoNAT server protocol IS an eligible probe server
+under the amended rule, and was not under the old one. It learns which
+of our addresses we are testing. It cannot forge a verdict —
+`verified_public` needs the configured number of DISTINCT servers, and
+the evidence key is `(address, server)` — but it is one of them. The
+narrower set is bought by not DIALLING such peers, which is a trust
+decision rather than an AutoNAT one; declining their inbound
+connections does not buy it, because an inbound connection was never
+eligible in the first place.
 
 **Still open, and not settled by this amendment**: §6's candidate scope
 has the same shape and a sharper edge. `libp2p-identify` pushes
