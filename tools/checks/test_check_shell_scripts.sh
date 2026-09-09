@@ -123,8 +123,8 @@ echo "test_check_shell_scripts: exercising the guard"
 #    on the guard's own copy being clean -- the sandbox tracks it -- so
 #    one warning in the guard would fail three cases with messages
 #    pointing at fixtures. This case names that dependency. And it reads
-#    the COUNT the OK line prints: the file-list read once handed
-#    shellcheck every path concatenated into one, which no case noticed
+#    the COUNT the OK line prints: the file-list read once handed the
+#    linter every path concatenated into one, which no case noticed
 #    because none read how many scripts were judged. Review findings on
 #    PR #82.
 sandbox_with '#!/usr/bin/env bash
@@ -166,7 +166,7 @@ expect_status 0 "the deliberate A && B || { fail; } idiom passes at warning seve
 #    AND THE SAME FIXTURE IS REFUSED AT `info` -- the half that makes
 #    this a test of the threshold rather than of an empty finding set.
 #    Exit 0 above is equally true if SC2015 never fires at all: a
-#    shellcheck release that stops flagging this shape, or a "simplified"
+#    linter release that stops flagging this shape, or a "simplified"
 #    fixture, would leave the case passing forever while asserting
 #    nothing. Exit 1 here proves the finding exists and that `warning`
 #    is what admits it. Review finding on PR #82.

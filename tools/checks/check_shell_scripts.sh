@@ -105,8 +105,11 @@ fi
 # have in the tree, so the set a guard judges would depend on whose
 # machine it ran on.
 # `-z` because `core.quotePath` (on by default) would otherwise emit a
-# path with a special character double-quoted and C-escaped, and
-# shellcheck would be handed the quoted spelling. None exists today.
+# path with a special character double-quoted and C-escaped, and the
+# linter would be handed the quoted spelling. None exists today.
+# (A COMMENT MUST NOT BEGIN WITH THE WORD "shellcheck": the linter reads
+# such a line as a directive and fails the file with SC1072/SC1073 at
+# error severity -- which this file did, on its first CI run, twice.)
 # And the listing's own status is read: `git ls-files` failing — not a
 # repository, git absent — also yields an empty array, and "no tracked
 # files" would name the wrong cause. Review findings on PR #82.
