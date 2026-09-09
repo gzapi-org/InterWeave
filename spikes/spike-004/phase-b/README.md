@@ -67,9 +67,12 @@ itself to; the rest of each is the same shape as that one. The two
 `forward on` lines say which mode `configure_filtering` installed on
 which router, and that it ran for both — an earlier version of these
 excerpts left them out. They are NOT the evidence that the forward
-landed correctly: two lines both reading `eth0` cannot show the
-interface was derived per container, as the `eth0`/`eth1` paragraph
-below says in as many words. What fails closed is the pair of per-domain
+landed correctly: two lines both reading `eth0`, as in the
+`address-restricted` excerpt, cannot show the interface was derived per
+container, as the `eth0`/`eth1` paragraph below says in as many words —
+the `full-cone` run recorded here happened to land router B on `eth1`,
+so that one does show it, by luck of podman's numbering rather than by
+design. What fails closed either way is the pair of per-domain
 verdicts beneath them — a forward on the wrong interface leaves domain B
 measuring `apdf` against an `adf` expectation, and the row exits
 non-zero. (A first version of this sentence called the two lines "the
@@ -90,7 +93,7 @@ measured and matched: natm-peer=eim(45000,45000;45001,45001)/adf natm-peer-b=eim
 
 ```
   natm-router: full-cone forward on eth0 for udp/45000
-  natm-router-b: full-cone forward on eth0 for udp/45000
+  natm-router-b: full-cone forward on eth1 for udp/45000
   filter  : full-cone (both domains)
 peer received  : CONTROL SAME_ADDRESS OTHER_ADDRESS
 VERDICT: ENDPOINT-INDEPENDENT FILTERING (a full cone: any source reaches the mapping)
@@ -448,9 +451,9 @@ can satisfy the exit gate's NAT row — with the population claim, the
 public VM and a carrier's CGNAT explicitly deferred, as Stage 9 deferred
 mDNS and Stage 10 the release gate — is the owner's decision and belongs
 in the plan, not here. (This is the third copy of that deferral list;
-`SPIKES.md` and the plan carry the other two, and this one was short by
-two items until the same round that removed "the filtering half" from
-the others.)
+`SPIKES.md` and the plan carry the other two. Those lost "the filtering
+half" when `filter.sh` landed and one commit later; this one was short
+by two items until the round after that.)
 
 ## Notes for whoever extends it
 
