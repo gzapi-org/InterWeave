@@ -2524,6 +2524,28 @@ mod tests {
     }
 
     #[test]
+    fn a_peer_in_both_sets_is_data_plane_trusted() {
+        // THE SCHEMA'S RULE, PINNED WHERE IT IS ENFORCED: "a PeerId in
+        // both sets is treated as DataPlaneTrusted for protocol
+        // admission" is the branch order of `classify` -- the data-plane
+        // policy is asked before the infrastructure set -- and nothing
+        // read a peer listed in both until this test. Swapping the two
+        // branches passed every test in the workspace, and would hand
+        // `ClassGated` a denying handler for a peer the operator listed
+        // in `trust.allowed_peers`. The local-identity test above puts
+        // P1 in both sets too, but P1 is the local peer there, so it
+        // exits on the first branch and never reaches this question.
+        // Review finding on PR #80.
+        let mut m = untrusting(8);
+        let _ = m.set_trust(trusting(&[P1], &[P1]), &[]);
+        assert_eq!(
+            m.classify(&peer(P1)),
+            ConnectionClass::DataPlaneTrusted,
+            "the data-plane policy answers for a peer in both sets"
+        );
+    }
+
+    #[test]
     fn a_later_trust_change_cannot_unbind_the_local_identity() {
         // The binding has to survive every update, not merely the
         // first: a caller supplies the two sets and cannot name the
