@@ -74,7 +74,10 @@ esac
 # before it exits 2. Late, but no longer destructive: by then the standing
 # topology is this run's own, so the trap tears down nothing the caller
 # built. Hoisting those checks would mean duplicating them; they stay
-# where the value is used. Review finding on PR #81.
+# where `filter.sh` and `probe.sh` use them. `topology.sh` reads
+# `SRC_PORT` earlier, unvalidated, into the control modes' nftables
+# rule, and relies on its rule read-back to fail closed -- a literal
+# `045000` against nft's normalised `45000`. Review findings on PR #81.
 if [ "$FILTER_MODE" != conntrack ]; then
   for mode in "$@"; do
     [ "$mode" = eim ] \
