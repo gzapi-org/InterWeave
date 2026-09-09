@@ -1576,9 +1576,9 @@ refuse it is configuration.
 
 It also supplies the **first production constructor of an
 `InfrastructureSet`** — ADR-0036's second class had been expressible in
-code since Stage 5 and in a profile document never, until this block — by making the
-`infrastructure` field that type rather than a parallel one, so the
-ceiling and the bounded-sequence guard are not duplicated. A profile
+code since Stage 5 and in a profile document never, until this block —
+by making the `infrastructure` field that type rather than a parallel
+one, so the ceiling and the bounded-sequence guard are not duplicated. A profile
 that says nothing about transport gets standard v1's client roles
 configured, both server roles off, and an empty infrastructure set. What
 it does NOT do is build a behaviour: the owner's 2026-09-07 ruling stands

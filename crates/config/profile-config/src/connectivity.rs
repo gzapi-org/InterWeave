@@ -968,8 +968,9 @@ impl ConnectivityConfig {
     /// enforced ELSEWHERE: "a PeerId in both sets is treated as
     /// DataPlaneTrusted for protocol admission" is
     /// `ConnectionManager::classify`'s order -- local peer, then
-    /// `PeerTrustPolicy`, then `InfrastructureSet` -- and needs no check
-    /// here. Stated rather than left to a reader who takes the doc line
+    /// `PeerTrustPolicy`, then `InfrastructureSet` -- pinned by
+    /// `a_peer_in_both_sets_is_data_plane_trusted` in the runtime crate,
+    /// and needs no check here. Stated rather than left to a reader who takes the doc line
     /// above for a claim of completeness. Review findings on PR #80.
     fn check_cross_fields(&self, errors: &mut Vec<ConfigError>) {
         let relay_client = &self.relay.client;
@@ -1356,12 +1357,19 @@ mod tests {
         // guard fails loudly when the type changes; a list in the
         // document failed silently, which was the whole point.
         // Review finding on PR #80.
-        let blocks: Vec<&str> = document
+        // SORTED BEFORE COMPARING, so this asserts a SET. `serde_json`'s
+        // `Map` is a `BTreeMap` in this workspace (no `preserve_order`),
+        // which already yields sorted keys -- but a crate anywhere in
+        // the graph enabling that feature would flip it to declaration
+        // order and fail this test with a message about the wrong
+        // thing. Review finding on PR #80.
+        let mut blocks: Vec<&str> = document
             .as_object()
             .expect("the block is an object")
             .keys()
             .map(String::as_str)
             .collect();
+        blocks.sort_unstable();
         assert_eq!(
             blocks,
             [
@@ -1377,12 +1385,13 @@ mod tests {
             ("autonat", ["client", "server"]),
             ("relay", ["client", "server"]),
         ] {
-            let got: Vec<&str> = document[parent]
+            let mut got: Vec<&str> = document[parent]
                 .as_object()
                 .expect("a sub-block is an object")
                 .keys()
                 .map(String::as_str)
                 .collect();
+            got.sort_unstable();
             assert_eq!(got, children, "`{parent}` must name exactly its two roles");
         }
         let every_block_named = profile_with(&document.to_string())
