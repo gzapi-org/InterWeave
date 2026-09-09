@@ -109,6 +109,16 @@ done
 # PR #81.
 [ "$ALT_SOURCE" != "$PROBER" ] \
   || { echo "ALT_SOURCE and PROBER must differ, or OTHER_ADDRESS is the same address" >&2; exit 2; }
+# AND NOT A PORT THE MAPPING PHASE USED AS A DESTINATION. `probe.sh` runs
+# first and sends peer -> observer:9000, which under `eim` leaves a
+# conntrack entry whose reply tuple is observer:9000 -> router:$SRC_PORT
+# -- the destination every probe here aims at. OTHER_ADDRESS sent from
+# that port is reverse-translated by the stale entry and arrives for a
+# reason that is not filtering, which reads as a full cone. 9000 is the
+# observers' listener port written into `topology.sh`, so it is refused
+# by value. Review finding on PR #81.
+[ "$ALT_SOURCE_PORT" -ne 9000 ] \
+  || { echo "ALT_SOURCE_PORT must not be 9000, the observers' listener port: a stale conntrack entry from the mapping phase would admit OTHER_ADDRESS for a reason that is not filtering" >&2; exit 2; }
 
 addr_on() {
   podman inspect "$1" --format "{{ (index .NetworkSettings.Networks \"$2\").IPAddress }}"
