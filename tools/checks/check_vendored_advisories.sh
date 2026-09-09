@@ -8,9 +8,12 @@
 #   tools/checks/check_vendored_advisories.sh
 #   tools/checks/check_vendored_advisories.sh --root <dir>
 #
-# Every crate the root manifest replaces through `[patch.crates-io]` with
-# a `path` source is checked against the RustSec database at the version
-# it was vendored from.
+# Every crate this workspace builds from a tree inside the repository
+# rather than from the registry -- a `[patch.crates-io]` path entry, or a
+# plain path dependency that is not a workspace member -- is checked
+# against the RustSec database at the version it was vendored from.
+# Advisories on that crate's own dependencies are NOT this guard's; they
+# belong to `check_dependencies.sh`, which judges the committed lockfile.
 #
 # WHY A BESPOKE CHECK RATHER THAN THE DEPENDENCY ONE. A path-patched
 # crate has no `source` and no `checksum` in `Cargo.lock`, and
@@ -78,15 +81,23 @@ cargo deny --version >/dev/null 2>&1 \
 [ -f deny.toml ] || die "no deny.toml at $ROOT"
 command -v python3 >/dev/null 2>&1 || die "python3 is not installed" 2
 
+# `--locked` WITH NO FALLBACK. Re-resolving would rewrite the
+# repository's `Cargo.lock`, which this guard promises not to do -- and a
+# lockfile that does not satisfy the manifest is a real problem, not
+# something to route around. Review finding on PR #85.
 metadata="$(cargo metadata --format-version 1 --locked 2>/dev/null)" \
-    || metadata="$(cargo metadata --format-version 1 2>/dev/null)" \
-    || die "cargo metadata failed at $ROOT" 2
+    || die "cargo metadata --locked failed at $ROOT; is Cargo.lock current?" 2
 
 # A package cargo resolved with no `source` and which is not a workspace
 # member is a vendored crate: `[patch.crates-io]` with a path, or a plain
 # path dependency outside the workspace. Both are trees this repository
 # ships and neither is covered by the advisory check.
-mapfile -t patched < <(printf '%s' "$metadata" | python3 -c '
+# CAPTURED FIRST, THEN SPLIT. `mapfile -t x < <(cmd)` exits 0 whatever
+# `cmd` did, so `mapfile ... || die` is dead code: a python that failed
+# left an empty array and this guard announced that nothing is vendored.
+# That is the same false pass the awk parser gave, one layer down, in the
+# guard whose exit table refuses exactly it. Review finding on PR #85.
+selected="$(printf '%s' "$metadata" | python3 -c '
 import json, os, sys
 meta = json.load(sys.stdin)
 members = set(meta.get("workspace_members", []))
@@ -98,7 +109,12 @@ for pkg in meta.get("packages", []):
     if not manifest.startswith(root + os.sep):
         continue
     print("\t".join((pkg["name"], pkg["version"], os.path.dirname(manifest))))
-') || die "cannot read the package graph" 2
+')" || die "cannot read the package graph" 2
+
+patched=()
+while IFS= read -r line; do
+    [ -n "$line" ] && patched+=("$line")
+done <<< "$selected"
 
 if [ "${#patched[@]}" -eq 0 ]; then
     echo "check_vendored_advisories: OK — no crate is vendored through [patch.crates-io]."
@@ -129,20 +145,48 @@ for entry in "${patched[@]}"; do
         die "$name $version: cannot resolve it from the registry" 2
     fi
 
-    out="$(cd "$probe" && cargo deny check advisories 2>&1)"
+    out="$(cd "$probe" && cargo deny --format json check advisories 2>&1)"
     status=$?
-    if [ "$status" -eq 0 ]; then
-        checked=$((checked + 1))
-        continue
-    fi
     # cargo-deny exits non-zero both for a real finding and for a
     # database it could not fetch. Only the first is this guard's answer.
-    if printf '%s' "$out" | grep -qiE 'unable to |failed to fetch|could not (fetch|update)|no such host'; then
+    if [ "$status" -ne 0 ] \
+        && printf '%s' "$out" | grep -qiE 'unable to |failed to fetch|could not (fetch|update)|no such host'; then
         printf '%s\n' "$out" >&2
         die "$name $version: the advisory database is unreachable" 2
     fi
+
+    # ONLY ADVISORIES NAMING THE VENDORED CRATE. The probe pins that crate
+    # and lets cargo resolve its dependencies fresh, so the graph it
+    # judges is not one any commit here contains -- a future advisory on
+    # a transitive dependency at latest would turn a required check red
+    # and name the wrong crate. Those belong to `check_dependencies.sh`,
+    # which reads the committed lockfile. Review finding on PR #85.
+    findings="$(printf '%s' "$out" | python3 -c '
+import json, sys
+name = sys.argv[1]
+for line in sys.stdin:
+    line = line.strip()
+    if not line.startswith("{"):
+        continue
+    try:
+        field = json.loads(line).get("fields", {})
+    except ValueError:
+        continue
+    if field.get("severity") != "error":
+        continue
+    if not any(g.get("Krate", {}).get("name") == name for g in field.get("graphs", [])):
+        continue
+    advisory = field.get("advisory", {})
+    print("    {}: {}".format(advisory.get("id", field.get("code", "?")),
+                              advisory.get("title", field.get("message", ""))))
+' "$name")" || die "$name $version: cannot read the advisory report" 2
+
+    if [ -z "$findings" ]; then
+        checked=$((checked + 1))
+        continue
+    fi
     printf 'check_vendored_advisories: %s %s (vendored at %s)\n' "$name" "$version" "$path" >&2
-    printf '%s\n' "$out" | sed 's/^/    /' >&2
+    printf '%s\n' "$findings" >&2
     violations=$((violations + 1))
 done
 

@@ -319,9 +319,15 @@ jobs:
           echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
           "${RUNNER_TEMP}/bin/shellcheck" --version
 
-      # The suites mock `gh` and `curl` on PATH, so no token and no
-      # network are used. They do need jq and coreutils `timeout`, both
-      # present on ubuntu-latest.
+      # The `gh` suites mock `gh` and `curl` on PATH, so no token is used.
+      # They do need jq and coreutils `timeout`, both present on
+      # ubuntu-latest. `test_check_vendored_advisories.sh` is the one
+      # suite that DOES reach the network -- it resolves fixtures from the
+      # registry and fetches the advisory database, because the guard it
+      # tests cannot be exercised without them. It skips rather than fails
+      # when either is unreachable, except under `CI`, where both are
+      # installed on purpose and a skip would mean the job stopped
+      # exercising the guard.
       - name: Run every self-test beside its script
         run: |
           set -uo pipefail

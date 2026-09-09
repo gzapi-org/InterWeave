@@ -10,9 +10,10 @@
 # RUSTSEC-2021-0145 and RUSTSEC-2024-0375, and path-patching it is what
 # made `cargo deny check advisories` fall silent.
 #
-# The sandbox's vendored directory is a manifest and nothing else: the
-# guard reads only a name and a version from it and then asks the
-# registry about that version, so no source is needed to exercise it.
+# Each sandbox is a real resolvable workspace: the guard asks
+# `cargo metadata --locked`, so a fixture needs a lockfile, and cargo
+# needs a target, so the vendored directory needs a source file even
+# though nothing compiles it.
 #
 # The guard checks for `cargo-deny` before it does anything else and
 # exits 2 without it, so EVERY case here needs it -- this self-test
@@ -31,10 +32,23 @@ bad()  { printf '  \xe2\x9c\x97 %s\n' "$1"; failures=$((failures + 1)); }
 SANDBOX="$(mktemp -d)" || { echo "cannot create a sandbox" >&2; exit 1; }
 trap 'rm -rf "$SANDBOX"' EXIT
 
-if ! cargo deny --version >/dev/null 2>&1; then
-    printf 'test_check_vendored_advisories: cargo-deny absent — skipped whole.\n'
-    printf 'The guard exits 2 in that state, which is what CI relies on.\n'
+# A SKIP IS A FAILURE IN CI. Locally, missing cargo-deny or an offline
+# registry is an ordinary state and skipping is right. In CI both are
+# installed on purpose, so a skip there means the job stopped exercising
+# the guard -- the shape `test_check_dependencies.sh`'s comment in
+# ci.yml exists to prevent. Review finding on PR #85.
+skip_or_fail() {
+    if [ -n "${CI:-}" ]; then
+        printf 'test_check_vendored_advisories: %s — and this is CI, where it\n' "$1" >&2
+        printf 'is installed on purpose, so the suite is not exercising the guard.\n' >&2
+        exit 1
+    fi
+    printf 'test_check_vendored_advisories: %s — skipped whole.\n' "$1"
     exit 0
+}
+
+if ! cargo deny --version >/dev/null 2>&1; then
+    skip_or_fail "cargo-deny is absent"
 fi
 
 # Is the advisory database reachable at all? Everything below distinguishes
@@ -55,13 +69,10 @@ echo 'fn main() {}' > "$SANDBOX/baseline/src/main.rs"
 cp "$ROOT/deny.toml" "$SANDBOX/baseline/deny.toml"
 if (cd "$SANDBOX/baseline" && cargo generate-lockfile >/dev/null 2>&1); then
     if (cd "$SANDBOX/baseline" && cargo deny check advisories >/dev/null 2>&1); then
-        printf 'test_check_vendored_advisories: the fixture crate reports no advisory —\n'
-        printf 'either the database is stale or atty 0.2.14 was cleared. Skipped.\n'
-        exit 0
+        skip_or_fail "atty 0.2.14 reports no advisory, so the database is stale or it was cleared"
     fi
 else
-    printf 'test_check_vendored_advisories: the registry is unreachable — skipped.\n'
-    exit 0
+    skip_or_fail "the registry is unreachable"
 fi
 
 # A workspace with no [patch.crates-io] block at all.
@@ -74,6 +85,8 @@ edition = "2021"
 EOF
 echo 'fn main() {}' > "$SANDBOX/none/src/main.rs"
 cp "$ROOT/deny.toml" "$SANDBOX/none/deny.toml"
+(cd "$SANDBOX/none" && cargo generate-lockfile >/dev/null 2>&1) \
+    || { echo "cannot resolve the empty fixture" >&2; exit 1; }
 
 if bash "$GUARD" --root "$SANDBOX/none" >/dev/null 2>&1; then
     ok "a workspace vendoring nothing passes"
@@ -100,6 +113,8 @@ build_vendored() {
         > "$dir/third_party/$crate/Cargo.toml"
     echo '' > "$dir/third_party/$crate/src/lib.rs"
     cp "$ROOT/deny.toml" "$dir/deny.toml"
+    (cd "$dir" && cargo generate-lockfile >/dev/null 2>&1) \
+        || { echo "cannot resolve the $1 fixture" >&2; exit 1; }
 }
 
 # Run the guard and classify. Exit 2 is only ever an environment problem,
@@ -121,6 +136,22 @@ expect_finding() {
         bad "  $id must appear in the output"
     fi
 }
+
+# A LOCKFILE THAT DOES NOT SATISFY THE MANIFEST is exit 2, not a silent
+# re-resolve: the guard promises to leave the working tree alone, and an
+# earlier version's `--locked` fallback rewrote `Cargo.lock`.
+build_vendored stale atty 0.2.14 inline
+rm -f "$SANDBOX/stale/Cargo.lock"
+bash "$GUARD" --root "$SANDBOX/stale" >/dev/null 2>&1
+case $? in
+    2) ok "a lockfile that cannot be used is exit 2" ;;
+    *) bad "a missing lockfile must exit 2" ;;
+esac
+if [ -f "$SANDBOX/stale/Cargo.lock" ]; then
+    bad "the guard must not write a lockfile into the tree it checks"
+else
+    ok "  and no lockfile is written behind it"
+fi
 
 # THE POSITIVE CASE.
 build_vendored vulnerable atty 0.2.14 inline

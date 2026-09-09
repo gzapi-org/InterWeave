@@ -2,7 +2,8 @@
 // Copyright 2026 Andrea Benetton
 //! The vendored AutoNAT v2 client's `retest`, which upstream lacks.
 //!
-//! `third_party/libp2p-autonat/INTERWEAVE.patch` adds one method, and
+//! `third_party/libp2p-autonat/INTERWEAVE.patch` adds one method and a
+//! guard beside it, and
 //! this is the test that fails if the patch is dropped or the method
 //! stops returning a candidate to the sweep (ADR-0051). It drives the
 //! behaviour directly rather than through a Swarm: the transition it
