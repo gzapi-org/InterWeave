@@ -109,10 +109,21 @@ fi
 # And the listing's own status is read: `git ls-files` failing — not a
 # repository, git absent — also yields an empty array, and "no tracked
 # files" would name the wrong cause. Review findings on PR #82.
-if ! listing=$(git ls-files -z '*.sh'); then
+#
+# THROUGH A FILE, NOT A VARIABLE. Bash command substitution cannot hold
+# a NUL byte -- it drops them -- so `listing=$(git ls-files -z ...)`
+# concatenated every path into one, `mapfile` made a one-element array,
+# and shellcheck was asked to open a path that does not exist. That
+# version turned both required jobs red on its first CI run, which is
+# the correct outcome for a guard that could not read its own input,
+# and the automated reviewer named the cause. A file keeps the NULs and
+# `git`'s own exit status stays readable. Review finding on PR #82.
+listing=$(mktemp) || die "check_shell_scripts: could not create a temporary file for the tracked set."
+trap 'rm -f "$listing"' EXIT
+if ! git ls-files -z '*.sh' > "$listing"; then
     die "check_shell_scripts: git ls-files failed, so the tracked set could not be read (exit 2, not a pass)."
 fi
-mapfile -d '' -t scripts < <(printf '%s' "$listing")
+mapfile -d '' -t scripts < "$listing"
 
 if [[ ${#scripts[@]} -eq 0 ]]; then
     echo "check_shell_scripts: no tracked *.sh files found — the guard would pass by looking at nothing." >&2
