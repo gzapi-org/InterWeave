@@ -1559,6 +1559,30 @@ were absent, and several of them cited that absence as the reason a rule
 could not be violated. Those reasons are spent: from here the guarantee
 is the outbound gate, the trust classification and their tests.
 
+**A second unnumbered change sits beside it: the profile document now has
+a `transport.connectivity` block.** Unnumbered for the same reason — it
+constructs nothing. `profile-config` models the whole section the schema
+defines, enforces every range, the seven cross-field rules and the two
+pinned-literal classes, and refuses a static relay or AutoNAT server
+whose PeerId is in neither `trust.allowed_peers` nor
+`transport.connectivity.infrastructure.allowed_peers`. **That last rule
+is why the block landed before anything reads it**: SPIKE-004 measured
+that a gate refusal of a behaviour-originated dial surfaces as nothing at
+all, so an unauthorized configured relay would be a relay that never
+connects with no diagnostic anywhere, and the only legible place to
+refuse it is configuration.
+
+It also supplies the **first production constructor of an
+`InfrastructureSet`** — ADR-0036's second class has been expressible in
+code since Stage 5 and in a profile document never — by making the
+`infrastructure` field that type rather than a parallel one, so the
+ceiling and the bounded-sequence guard are not duplicated. A profile
+that says nothing about transport gets standard v1's client roles
+configured, both server roles off, and an empty infrastructure set. What
+it does NOT do is build a behaviour: the owner's 2026-09-07 ruling stands
+and nothing constructs an AutoNAT client, a relay client or DCUtR from
+this block.
+
 1. **dial attribution**: every behaviour-originated dial reaches the
    root gate under its own `DialOrigin`, and the map that carries it
    drops a note for a dial the Swarm refuses before the pending hook;
