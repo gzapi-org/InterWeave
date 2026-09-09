@@ -240,9 +240,19 @@ impl Default for AutonatClientConfig {
     }
 }
 
+/// `config.schema.yaml`: `required_distinct_successes: integer[1..4] = 2`.
+///
+/// Mirrored rather than imported, like `CACHE_MAX_PEERS`: the
+/// reachability manager is a runtime implementation and a configuration
+/// crate must not depend on it to learn a number. A test asserts this
+/// equals `interweave_transport_runtime::reachability::
+/// DEFAULT_REQUIRED_DISTINCT_SUCCESSES` through a dev-dependency, so the
+/// mirror cannot drift silently. Review finding on PR #84.
 const fn default_required_successes() -> u32 {
     2
 }
+/// `config.schema.yaml`: `success_evidence_ttl: duration[1m..1h] = 15m`.
+/// Mirrored and drift-checked like the constant above.
 const fn default_evidence_ttl_ms() -> u32 {
     15 * 60_000
 }
@@ -1231,6 +1241,26 @@ mod tests {
             config.is_valid(),
             "the defaults must satisfy every rule they are checked against: {:?}",
             config.validate()
+        );
+    }
+
+    #[test]
+    fn the_mirrored_autonat_defaults_match_the_reachability_manager() {
+        // The drift check that makes mirroring these two honest. Both
+        // crates declare them from `config.schema.yaml`, and nothing
+        // compared them until this test -- so a change to one would have
+        // left an operator configured differently from the state machine
+        // that reads the evidence. Review finding on PR #84.
+        use interweave_transport_runtime::reachability;
+        assert_eq!(
+            default_required_successes(),
+            reachability::DEFAULT_REQUIRED_DISTINCT_SUCCESSES,
+            "the mirrored observer threshold must equal the manager's"
+        );
+        assert_eq!(
+            u64::from(default_evidence_ttl_ms()),
+            reachability::DEFAULT_SUCCESS_EVIDENCE_TTL_MS,
+            "the mirrored evidence TTL must equal the manager's"
         );
     }
 

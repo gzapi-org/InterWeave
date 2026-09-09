@@ -166,7 +166,7 @@ impl std::fmt::Display for ReachabilityError {
 
 impl std::error::Error for ReachabilityError {}
 
-/// `contracts/CONNECTIVITY.md` §5's state, with the evidence behind it.
+/// `contracts/CONNECTIVITY.md` §3's state, with the evidence behind it.
 ///
 /// NOT the wire type. `interweave_transport_api::DirectInboundState` is
 /// the neutral three-word enum the `connectivity-summary` schema pins
@@ -231,6 +231,12 @@ pub enum ReachabilityVerdict {
     /// Evidence is sufficient to say the threshold is not met.
     NotVerified {
         /// The most recent fresh failure, if any.
+        ///
+        /// NOT necessarily an observation time: `record_outcome` files a
+        /// failure no older than the success it contradicts, so under a
+        /// caller whose clock stepped backwards this can name a moment
+        /// later than the `now_ms` that produced it. Subtract from it
+        /// only with saturation. Review finding on PR #84.
         last_failure_at_ms: Option<u64>,
     },
 }
@@ -470,6 +476,15 @@ impl ReachabilityManager {
     /// to decide before calling this (`AUTONAT.md` §3); this module only
     /// remembers where it came from.
     ///
+    /// UNBOUNDED HERE, AND BOUNDED BY THE CALLER. `evidence` is keyed
+    /// `(address, server)`, so its size is [`MAX_TRACKED_CANDIDATES`]
+    /// times the number of servers, and only the first factor is this
+    /// module's. Eligibility is the caller's (`AUTONAT.md` §3) and so is
+    /// the ceiling: every server must be in one of the two authorization
+    /// sets, and `InfrastructureSet` caps those. Stated here because the
+    /// bound is real but lives entirely outside this file. Review
+    /// finding on PR #84.
+    ///
     /// A KNOWN SERVER TAKES THE STRONGER SOURCE: `or_insert` left a peer
     /// first seen through Identify recorded as `Identify` when it was
     /// later added as a configured one, which under the 2026-09-09
@@ -637,7 +652,8 @@ impl ReachabilityManager {
     /// unreachable. Review finding on PR #84. If any address is verified,
     /// `VerifiedPublic`; else if any fresh failure exists, `NotVerified`;
     /// else `Unknown` -- successes short of the threshold are
-    /// "insufficient evidence", which §4 and `CONNECTIVITY.md` §5 both
+    /// "insufficient evidence", which `AUTONAT.md` §4 and
+    /// `transport/libp2p/CONNECTIVITY.md` §5 both
     /// give to `unknown`.
     fn derive(&self, now_ms: u64) -> ReachabilityVerdict {
         let ttl = self.config.success_evidence_ttl_ms;
@@ -1077,7 +1093,7 @@ mod tests {
     fn verified_needs_distinct_servers_and_one_server_twice_is_one_observer() {
         let mut m = manager_with(&[S1, S2]);
         // ONE SUCCESS IS `Unknown`: insufficient evidence, which §4 and
-        // `CONNECTIVITY.md` §5 both give to that word and not to
+        // `transport/libp2p/CONNECTIVITY.md` §5 both give to that word and not to
         // `not_verified`. An earlier version said `NotVerified` here and
         // a test froze it. Review finding on PR #84.
         assert!(
@@ -1793,10 +1809,17 @@ mod tests {
         m.add_server(peer(S1), ServerSource::Static);
         let _ = m.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 1_000);
         assert!(verified(&m));
-        // A backwards step: the failure is filed at 500, before the
-        // success it retracts.
+        // A backwards step. The failure is FILED at 1_000, not at the
+        // 500 it was reported with -- the clamp itself, rather than only
+        // its effect, and why the field's doc warns that it is not an
+        // observation time.
         let _ = m.record_outcome(A, &peer(S1), ProbeOutcome::Unreachable, 500);
-        assert!(!verified(&m));
+        assert_eq!(
+            *m.state(),
+            ReachabilityVerdict::NotVerified {
+                last_failure_at_ms: Some(1_000)
+            }
+        );
         assert!(
             m.expire_evidence(500 + TTL).is_none(),
             "and the success cannot outlive it back into the quorum"
