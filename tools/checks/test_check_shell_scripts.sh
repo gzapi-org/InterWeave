@@ -99,7 +99,12 @@ sandbox_with() {
 # usage: guard_run [VAR=value ...] [-- guard-argument ...]
 guard_run() {
     local -a envs=()
-    while [[ $# -gt 0 && "$1" != "--" ]]; do envs+=("$1"); shift; done
+    while [[ $# -gt 0 && "$1" != "--" ]]; do
+        # A forgotten `--` would make `env` treat a path as the COMMAND,
+        # exit 126, and blame the guard. Refused here, by name.
+        [[ "$1" == *=* ]] || { echo "guard_run: '$1' is not VAR=value; guard arguments go after --" >&2; return 64; }
+        envs+=("$1"); shift
+    done
     [[ "${1:-}" == "--" ]] && shift
     GUARD_OUTPUT=$( cd "$SANDBOX" && env "${envs[@]}" bash tools/checks/check_shell_scripts.sh "$@" 2>&1 )
     GUARD_STATUS=$?
@@ -134,6 +139,15 @@ if [[ "$GUARD_OUTPUT" == *"OK — 2 tracked shell scripts"* ]]; then
     pass "and the OK line counts exactly the two scripts the sandbox tracks"
 else
     fail "the OK line must count 2 scripts (the fixture and the guard's copy), got: $GUARD_OUTPUT"
+fi
+#    AND NAMES THE RELEASE. The guard's comment calls the version "part
+#    of the result"; if `shellcheck --version` stopped printing a
+#    `version:` line the OK line would degrade to `()` and nothing would
+#    notice. Review finding on PR #82.
+if [[ "$GUARD_OUTPUT" == *"(shellcheck "* ]]; then
+    pass "and the OK line names the shellcheck release it judged with"
+else
+    fail "the OK line must name the shellcheck release, got: $GUARD_OUTPUT"
 fi
 cleanup; SANDBOX=""
 
@@ -205,6 +219,13 @@ export THING="$(echo value)"
 echo "$THING"'
 expect_status 0 "severity=error hides a warning-level finding, so the hatch relaxes rather than tightens" \
     INTERWEAVE_SHELLCHECK_SEVERITY=error
+#    AND SAYS SO: a relaxed run is only visible if the OK line names the
+#    severity it actually applied. Review finding on PR #82.
+if [[ "$GUARD_OUTPUT" == *"clean at severity 'error'"* ]]; then
+    pass "and the OK line names the relaxed severity, so the relaxation is visible"
+else
+    fail "the OK line must name severity 'error', got: $GUARD_OUTPUT"
+fi
 cleanup; SANDBOX=""
 
 # 7. A TRACKED FILE THE WORKTREE DOES NOT HAVE IS "LOOKED AT LESS THAN
