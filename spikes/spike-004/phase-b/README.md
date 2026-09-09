@@ -2,7 +2,10 @@
 # SPIKE-004 phase B — the NAT matrix, in containers
 
 Phase A ran on one machine over loopback, so the exit gate's
-NAT/relay/hole-punch matrix is unmet and **Stage 11 cannot close**. This
+NAT/relay/hole-punch matrix was unmet — the NAT row has since been ruled
+satisfied by this environment (2026-09-09, three deferrals; see the end
+of this file), the relay and hole-punch rows have not — and **Stage 11
+cannot close**. This
 directory is the environment that matrix needs, built with rootless
 podman, and nothing more than the environment: it makes a real NAT whose
 behaviour is chosen rather than inherited, and proves the NAT is what it
