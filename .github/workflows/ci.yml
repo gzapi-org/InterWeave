@@ -155,6 +155,14 @@ jobs:
       - name: No first-party source selects the vulnerable yamux muxer
         run: bash tools/checks/check_yamux_muxer.sh
 
+      # Shell got the reviewer's eye and no check at all until this, while
+      # Rust gets `clippy -D warnings`. `ubuntu-latest` ships shellcheck,
+      # so there is nothing to install; the guard exits 2 rather than 0
+      # when it is absent, which is a developer-machine state and never a
+      # silent skip here.
+      - name: Every tracked shell script passes shellcheck
+        run: bash tools/checks/check_shell_scripts.sh
+
       # Also outside cargo-deny's reach: this is a property of a
       # dependency's internals, which no version pin describes.
       - name: GossipSub still refuses invalid signatures during decode
