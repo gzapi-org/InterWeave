@@ -82,6 +82,20 @@ HOLD_SECONDS="${HOLD_SECONDS:-6}"
 case "${HOLD_SECONDS:-}" in
   ''|*[!0-9]*) echo "HOLD_SECONDS holds '${HOLD_SECONDS:-}', which is not a number of seconds" >&2; exit 2 ;;
 esac
+# MAGNITUDE BEFORE ARITHMETIC, here and for the four ports below. The
+# shell's integers are 64-bit and wrap: `$((10#18446744073709551617))`
+# is 1, which passes a 1-65535 check and measures port 1 while the
+# caller wrote something else. A range check after the arithmetic
+# cannot see that. Leading zeros are stripped and the DIGIT COUNT is
+# bounded first -- three for seconds, five for a port -- so nothing
+# that reaches `$((...))` can wrap. Automated review finding on PR #81.
+digits_of() {
+  stripped="$1"
+  while [ "${stripped#0}" != "$stripped" ]; do stripped="${stripped#0}"; done
+  printf '%s' "${#stripped}"
+}
+[ "$(digits_of "$HOLD_SECONDS")" -le 3 ] \
+  || { echo "HOLD_SECONDS holds '$HOLD_SECONDS', which has too many digits to be a number of seconds in 1-120" >&2; exit 2; }
 HOLD_SECONDS=$((10#$HOLD_SECONDS))
 [ "$HOLD_SECONDS" -ge 1 ] && [ "$HOLD_SECONDS" -le 120 ] \
   || { echo "HOLD_SECONDS holds '$HOLD_SECONDS'; the window must be 1-120 seconds" >&2; exit 2; }
@@ -91,6 +105,8 @@ for port_name in PROBE_PORT PROBE_PORT_ALT ALT_SOURCE_PORT SRC_PORT; do
   case "$port_value" in
     ''|*[!0-9]*) echo "$port_name holds '$port_value', which is not a port number" >&2; exit 2 ;;
   esac
+  [ "$(digits_of "$port_value")" -le 5 ] \
+    || { echo "$port_name holds '$port_value', which has too many digits to be a port" >&2; exit 2; }
   port_value=$((10#$port_value))
   # THE SPELLING THE CALLER TYPED, not the normalised value: reporting
   # `070000` as "holds '70000'" names a number nobody wrote.

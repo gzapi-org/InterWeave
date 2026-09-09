@@ -135,13 +135,22 @@ for src in "$@"; do
   # produced a different port. Caught by the mutation check for the
   # duplicate guard, which accepted `45000 045000` and printed
   # `45000 18944`.
+  # AND THE DIGIT COUNT BEFORE THE ARITHMETIC. A twenty-digit token does
+  # not reliably wrap to "something negative", as an earlier version of
+  # this comment claimed: `$((10#18446744073709551617))` is 1, which
+  # passes the range check below and measures port 1. Leading zeros are
+  # stripped and five digits is the most a port can have, so nothing
+  # that reaches `$((...))` can wrap. Automated review finding on PR #81.
+  stripped="$src"
+  while [ "${stripped#0}" != "$stripped" ]; do stripped="${stripped#0}"; done
+  [ "${#stripped}" -le 5 ] \
+    || { echo "SRC_PORTS holds '$src', which has too many digits to be a port" >&2; exit 2; }
   port=$((10#$src))
-  # A PORT, NOT MERELY DIGITS. `*[!0-9]*` admits `0`, `70000` and a
-  # twenty-digit token that wraps to something negative in 64-bit
-  # arithmetic. `70000` and the wrapped one reach `socat`, fail to bind,
-  # are swallowed by the `|| true` on the send, and surface as NO DATA --
-  # the misdiagnosis this guard's own comment says it exists to prevent,
-  # with an error message already claiming "not a port number".
+  # A PORT, NOT MERELY DIGITS. `*[!0-9]*` admits `0` and `70000`.
+  # `70000` reaches `socat`, fails to bind, is swallowed by the
+  # `|| true` on the send, and surfaces as NO DATA -- the misdiagnosis
+  # this guard's own comment says it exists to prevent, with an error
+  # message already claiming "not a port number".
   # `0` is worse than a failure: `bind=:0` binds ANY port, so the two
   # sequential sockets get two different ones, the "one internal tuple"
   # premise the comparison rests on is gone, and a correct `eim`
