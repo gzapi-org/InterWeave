@@ -215,13 +215,17 @@ impl ReachabilityVerdict {
 ///   by [`ReachabilityManager::expire_inflight`] for a probe this
 ///   manager planned that never came back.
 ///
-/// **Mapping `Err(_)` wholesale to `Failed` would defeat the
-/// address-scoping below.** `Unreachable` is deliberately not counted
-/// against a server when it names an address this manager does not
-/// track, precisely because that set is remote-influenced; `Failed`
-/// is counted, because it is about the server. An adapter that
-/// collapsed the two would hand a peer the suppression path that gate
-/// exists to close. Review finding on PR #84.
+/// **Get the mapping right anyway, though collapsing it is no longer
+/// dangerous.** NEITHER failure outcome counts against a server when it
+/// names an address this manager does not track -- that set is
+/// remote-influenced -- so an adapter that mapped `Err(_)` wholesale to
+/// `Failed` could not reopen the suppression path. The enforcement
+/// lives in the match arm, not in this paragraph; an earlier version of
+/// it said `Failed` is counted "because it is about the server", which
+/// the arm has since made false. What the distinction still buys is an
+/// honest record: `Unreachable` is a verdict about an ADDRESS and
+/// becomes evidence, `Failed` is a fact about an EXCHANGE and never
+/// does. Review findings on PR #84.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeOutcome {
     /// The server dialled the address back and reached us.
@@ -658,14 +662,25 @@ impl ReachabilityManager {
         // which `AUTONAT.md` §5 gives only to TWO fresh independent
         // failures. The variant's own doc says it "says nothing about the
         // address"; this is what makes that true. It still counts against
-        // the SERVER: the backoff above, and the timestamp here, which is
-        // what `NotVerified` reports. Review finding on PR #84.
+        // the SERVER when the address is one we track: the backoff above,
+        // and the timestamp below. Review findings on PR #84.
         if matches!(outcome, ProbeOutcome::Failed) {
-            record.last_failure_at_ms = Some(
-                record
-                    .last_failure_at_ms
-                    .map_or(now_ms, |previous| previous.max(now_ms)),
-            );
+            // GATED FOR THE SAME REASON AS THE BACKOFF. An earlier
+            // version left this write ungated while the comment above
+            // claimed no failure for an untracked address counts against
+            // the server -- so a remote-influenced address could still
+            // put an attacker-chosen timestamp on the record, and since
+            // `change` compares whole verdicts, bumping it while already
+            // `NotVerified` emitted a `ConnectivityChanged` whose
+            // normalized state had not changed. Review findings on
+            // PR #84.
+            if tracked {
+                record.last_failure_at_ms = Some(
+                    record
+                        .last_failure_at_ms
+                        .map_or(now_ms, |previous| previous.max(now_ms)),
+                );
+            }
             return self.rederive(now_ms);
         }
         if !tracked {
@@ -1288,11 +1303,12 @@ mod tests {
         // one and its twin at the end of the test are what fail, and
         // neither is to be simplified away.
         assert!(m.evidence.is_empty(), "and are not retained");
-        // BUT THE SERVER'S HEALTH IS STILL RECORDED, because a probe that
-        // failed says something about the server whatever address it
-        // named. The pinned client probes mostly untracked addresses, so
-        // gating this on the address would have left backoff never
-        // accumulating and never clearing. Review finding on PR #84.
+        // THE SERVER'S HEALTH IS RECORDED ONLY FROM WHAT WE ASKED FOR.
+        // An earlier version of this paragraph said the opposite -- that
+        // a failed probe says something about the server whatever
+        // address it named -- and that is why the gate below took three
+        // rounds to get right. What survives of it is `Reachable`, which
+        // only ever clears. Review findings on PR #84.
         // NEITHER FAILURE OUTCOME COUNTS AGAINST THE SERVER when the
         // address is one we never asked about. Which outcome fires is
         // the injector's choice -- a closed port gives `Unreachable`, a
@@ -1307,6 +1323,16 @@ mod tests {
                 "{outcome:?} for an untracked address must not back the server off"
             );
             assert_eq!(record.backoff_until_ms, 0);
+            // THE THIRD FIELD, which the first version of this test left
+            // unasserted while the comment above it claimed no failure
+            // counts: the timestamp write was still ungated, so a
+            // remote-influenced address put an attacker-chosen value on
+            // the record and `NotVerified` reported it. Review finding
+            // on PR #84.
+            assert_eq!(
+                record.last_failure_at_ms, None,
+                "{outcome:?} for an untracked address must not stamp the server either"
+            );
         }
         // OUR OWN TIMEOUTS STILL COUNT, because `expire_inflight`
         // synthesises `Failed` only for pairs it planned and those are
