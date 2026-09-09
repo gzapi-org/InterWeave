@@ -144,8 +144,13 @@ pub enum DirectInboundState {
     VerifiedPublic {
         /// Every address currently meeting the threshold.
         verified_addresses: Vec<String>,
-        /// The earliest moment one of the counting observations expires --
-        /// the claim can lapse then, and no later than then.
+        /// The earliest expiry among the successes currently counted.
+        ///
+        /// NOT a bound on the claim: with more than the threshold of
+        /// fresh successes the state survives this moment, because the
+        /// ones that remain still meet it. An earlier version of this
+        /// line said "and no later than then", which three successes and
+        /// a threshold of two falsify. Review finding on PR #84.
         evidence_until_ms: u64,
     },
     /// Evidence is sufficient to say the threshold is not met.
@@ -328,12 +333,27 @@ impl ReachabilityManager {
     /// to decide before calling this (`AUTONAT.md` §3); this module orders
     /// static servers before Identify-learned ones and tracks backoff.
     pub fn add_server(&mut self, server: TransportIdentity, source: ServerSource) {
-        self.servers.entry(server).or_insert(ServerRecord {
-            source,
-            consecutive_failures: 0,
-            backoff_until_ms: 0,
-            last_failure_at_ms: None,
-        });
+        match self.servers.entry(server) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(ServerRecord {
+                    source,
+                    consecutive_failures: 0,
+                    backoff_until_ms: 0,
+                    last_failure_at_ms: None,
+                });
+            }
+            // A KNOWN SERVER KEEPS ITS BACKOFF but takes the stronger
+            // source: `or_insert` left a peer first seen through Identify
+            // recorded as `Identify` when it was later added as a
+            // configured one, which under the 2026-09-09 amendment is a
+            // silent downgrade of the connection guarantee static
+            // configuration buys. Review finding on PR #84.
+            std::collections::btree_map::Entry::Occupied(mut slot) => {
+                if source < slot.get().source {
+                    slot.get_mut().source = source;
+                }
+            }
+        }
     }
 
     /// Withdraw a server and every observation it contributed.
@@ -895,9 +915,13 @@ mod tests {
         let _ = m.record_outcome(&done.address, &done.server, ProbeOutcome::Reachable, 1);
         let next = m.due_probes(1);
         assert_eq!(next.len(), 1);
-        assert_ne!(
-            (&next[0].address, &next[0].server),
-            (&done.address, &done.server)
+        // ON THE SET, not on inequality with the one that completed:
+        // deleting the `inflight.contains_key` guard re-offers the pair
+        // still in flight, which is a DIFFERENT pair from `done` and so
+        // passed an `assert_ne!` against it. Review finding on PR #84.
+        assert!(
+            !next.iter().any(|plan| first.contains(plan)),
+            "a pair already in flight must not be offered twice: {next:?} against {first:?}"
         );
     }
 
@@ -1168,6 +1192,129 @@ mod tests {
             m.due_probes(DEFAULT_REFRESH_INTERVAL_MS).len(),
             1,
             "refreshed at the interval"
+        );
+    }
+
+    #[test]
+    fn a_static_addition_upgrades_a_server_first_seen_through_identify() {
+        let mut m = manager();
+        m.add_server(peer(S1), ServerSource::Identify);
+        m.add_server(peer(S2), ServerSource::Static);
+        // Re-adding the Identify one as configured must change which is
+        // preferred for connection; `or_insert` left it Identify.
+        m.add_server(peer(S1), ServerSource::Static);
+        let plans = m.due_probes(0);
+        assert!(
+            plans.iter().any(|p| p.server == peer(S1)),
+            "the upgraded server is now preferred alongside the static one: {plans:?}"
+        );
+        // And it does not go the other way.
+        m.add_server(peer(S2), ServerSource::Identify);
+        assert_eq!(
+            m.servers.get(&peer(S2)).expect("known").source,
+            ServerSource::Static,
+            "a later Identify sighting must not downgrade a configured server"
+        );
+    }
+
+    #[test]
+    fn a_verified_address_outlives_the_earliest_success_when_more_than_the_threshold_agree() {
+        // `evidence_until_ms` is the earliest COUNTING success's expiry
+        // and NOT a bound on the claim: a third fresh success keeps the
+        // threshold met after the first lapses. The doc said "no later
+        // than then" until this test was written for it.
+        // Review finding on PR #84.
+        let mut m = manager();
+        m.set_candidates(["/ip4/8.8.8.8/tcp/4001"]);
+        for server in [S1, S2, S3] {
+            m.add_server(peer(server), ServerSource::Static);
+        }
+        let a = "/ip4/8.8.8.8/tcp/4001";
+        let _ = m.record_outcome(a, &peer(S1), ProbeOutcome::Reachable, 0);
+        let _ = m.record_outcome(a, &peer(S2), ProbeOutcome::Reachable, 10);
+        let _ = m.record_outcome(a, &peer(S3), ProbeOutcome::Reachable, 20);
+        let DirectInboundState::VerifiedPublic {
+            evidence_until_ms, ..
+        } = m.state().clone()
+        else {
+            panic!("three successes verify: {:?}", m.state())
+        };
+        assert_eq!(evidence_until_ms, DEFAULT_SUCCESS_EVIDENCE_TTL_MS);
+        // A CHANGE IS REPORTED, and it is not a lapse: `VerifiedPublic`
+        // carries `evidence_until_ms`, so `ConnectivityChanged` fires
+        // when the earliest counting success rolls forward even though
+        // the WORD is unchanged. A consumer that only forwards the
+        // summary word must compare words, not `Option::is_some`.
+        let change = m
+            .expire_evidence(evidence_until_ms)
+            .expect("the earliest counting expiry rolls forward");
+        assert_eq!(
+            change.from.summary_word(),
+            change.to.summary_word(),
+            "the word does not change: {change:?}"
+        );
+        assert!(verified(&m), "so the claim OUTLIVES evidence_until_ms");
+        let DirectInboundState::VerifiedPublic {
+            evidence_until_ms: now_until,
+            ..
+        } = m.state().clone()
+        else {
+            panic!("still verified")
+        };
+        assert_eq!(now_until, 10 + DEFAULT_SUCCESS_EVIDENCE_TTL_MS);
+        // It ends when the second one goes: S3's success is still
+        // fresh, so this is `not_verified` -- evidence sufficient to say
+        // the threshold is not met -- and not `unknown`.
+        let change = m
+            .expire_evidence(10 + DEFAULT_SUCCESS_EVIDENCE_TTL_MS)
+            .expect("now the threshold is not met");
+        assert_eq!(
+            change.to,
+            DirectInboundState::NotVerified {
+                last_failure_at_ms: None
+            },
+            "one fresh success left, and no failure to report"
+        );
+    }
+
+    #[test]
+    fn the_backoff_shift_is_capped_before_it_can_overflow() {
+        // `1_u64 << shift` panics at shift 64, and the `.min(16)` is
+        // what stops it. Twelve failures never reach the cap, so the
+        // clamp was untested; twenty do. Review finding on PR #84.
+        let mut m = manager();
+        m.add_server(peer(S1), ServerSource::Static);
+        let a = "/ip4/8.8.8.8/tcp/4001";
+        for i in 0..20 {
+            let _ = m.record_outcome(a, &peer(S1), ProbeOutcome::Unreachable, i);
+        }
+        let record = m.servers.get(&peer(S1)).expect("known");
+        assert_eq!(record.consecutive_failures, 20);
+        assert!(
+            record.backoff_until_ms.saturating_sub(19) <= MAX_RETRY_BACKOFF_MS,
+            "still bounded at five minutes after twenty failures"
+        );
+    }
+
+    #[test]
+    fn dropping_a_candidate_frees_the_probe_slot_it_held() {
+        // `set_candidates` retains only in-flight pairs whose address
+        // survived. Without it a withdrawn listener's probe would hold
+        // one of the two slots until the process ended, and nothing
+        // would say so. Review finding on PR #84.
+        let mut m = manager();
+        m.add_server(peer(S1), ServerSource::Static);
+        let first = m.due_probes(0);
+        assert_eq!(first.len(), DEFAULT_MAX_INFLIGHT_PROBES);
+        m.set_candidates(["/ip4/9.9.9.9/tcp/4001"]);
+        assert!(
+            !m.has_outstanding_probe_to(&peer(S1)),
+            "the in-flight pairs named addresses that are gone"
+        );
+        assert_eq!(
+            m.due_probes(1).len(),
+            1,
+            "and the slots are free for the new candidate"
         );
     }
 
