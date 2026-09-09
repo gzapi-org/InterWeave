@@ -52,10 +52,11 @@
 # Exit codes:
 #   0  every tracked shell script is clean at warning severity
 #   1  shellcheck reported at least one finding — read its output above
-#   2  the guard could not judge the tree: shellcheck is not installed,
-#      the tracked file list is empty or could not be read, shellcheck
-#      could not open a tracked file, or the severity was not one it
-#      accepts. Never a finding, and never a pass.
+#   2  the guard could not judge the tree: an argument was passed (it
+#      takes none), shellcheck is not installed, a temporary file could
+#      not be created, the tracked file list is empty or could not be
+#      read, shellcheck could not open a tracked file, or the severity
+#      was not one it accepts. Never a finding, and never a pass.
 # <<< help
 set -uo pipefail
 
@@ -148,8 +149,9 @@ fi
 # arrived. Review findings on PR #82.
 #
 # AND SHELLCHECK'S OWN EXIT CODE IS READ, not collapsed: 1 is findings,
-# 2 is "some files could not be processed", 3 is a syntax error in a
-# checked file, 4 is a bad option. The first version turned all of them
+# 2 is "some files could not be processed", 3 is shellcheck invoked with
+# bad syntax, 4 is a bad option. (A syntax error IN A CHECKED FILE is a
+# finding -- SC1072/SC1073 at error severity, exit 1 -- not exit 3.) The first version turned all of them
 # into this guard's exit 1 with the findings message, so a tracked file
 # missing from the worktree — mid-rebase, `git rm --cached` — or a typo
 # in the severity read as "add a targeted disable". That is "looked at
@@ -184,8 +186,8 @@ MISSING
 check_shell_scripts: shellcheck could not judge the tracked set (its exit $rc; above).
 
 That is not a finding and not a pass: a tracked *.sh it could not open,
-a syntax error it could not parse past, or a severity it does not
-accept ('$SEVERITY' — it takes error, warning, info, style).
+or an invocation it did not accept -- most likely the severity
+('$SEVERITY'; it takes error, warning, info, style).
 COULDNOT
         exit 2
         ;;
