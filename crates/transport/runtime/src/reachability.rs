@@ -548,6 +548,10 @@ impl ReachabilityManager {
                                     .saturating_add(self.config.refresh_interval_ms)
                                 || now_ms >= evidence.expires_at_ms
                         }
+                        // `Failed` never enters `evidence`, so this arm
+                        // is reachable only through `Unreachable` -- the
+                        // sibling match in `record_outcome` says the same
+                        // of its own. Review finding on PR #84.
                         ProbeOutcome::Unreachable | ProbeOutcome::Failed => true,
                     },
                 };
@@ -582,10 +586,12 @@ impl ReachabilityManager {
     ///
     /// AN ADDRESS WE DO NOT TRACK records no evidence -- `derive` reads
     /// only candidates, so it could never count and would only grow the
-    /// map -- but the server's own health is still recorded, and that
-    /// CAN change the verdict, so this path returns whatever `rederive`
-    /// says and may be `Some`. A `Reachable` there clears that server's
-    /// failure timestamp, which is a field `NotVerified` reports.
+    /// map -- and no FAILURE against the server either, because that
+    /// address set is remote-influenced. What still lands is a
+    /// `Reachable`, which only ever clears: a dial-back that reached us
+    /// proves the server answered whatever address it named. That
+    /// clearing can change the verdict, so this path returns whatever
+    /// `rederive` says and may be `Some`.
     ///
     /// The untracked-address case is the COMMON one, not an edge:
     /// `AUTONAT.md` §3's open note records that the pinned client probes
