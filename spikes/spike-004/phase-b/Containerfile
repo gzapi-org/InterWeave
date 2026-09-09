@@ -4,7 +4,10 @@
 # One image for every role in the matrix — router, peer and observer —
 # because the roles differ by what they are TOLD to do, not by what they
 # carry. A per-role image would let a probe fail for want of a tool and
-# read as a NAT behaviour.
+# read as a NAT behaviour. `filter.sh` also leans on `pgrep` and `pkill`,
+# which come from the base image's busybox rather than from the packages
+# below; the digest pin covers them, and both call sites fail loudly if
+# an applet were missing rather than reading as a class.
 #
 # Pinned by digest rather than by tag: this harness's whole output is a
 # claim about what a NAT did, and a tag that moves under it invalidates
