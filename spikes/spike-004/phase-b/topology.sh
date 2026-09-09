@@ -7,10 +7,17 @@
 # See README.md for what this does and does not establish. The short
 # version: it builds a real kernel NAT whose MAPPING BEHAVIOUR is chosen
 # rather than inherited, because that behaviour is one of the two things
-# deciding whether a hole punch SUCCEEDS — filtering is the other, and is
-# neither configured nor measured here. Neither gates the attempt: under
-# `eds` a punch is attempted and fails, which is what the row is for.
-# Phase A, on loopback, had no NAT at all.
+# deciding whether a hole punch succeeds — filtering is the other, and is
+# neither configured nor measured here.
+#
+# NO PUNCH IS ATTEMPTED HERE. `run.sh` builds the topology and runs UDP
+# mapping probes; the relay, the nodes and DCUtR arrive with steps 5, 6
+# and 8. A comment saying the `eds` row attempts a punch and fails made
+# this look like NAT-induced-failure evidence when it is mapping
+# evidence. Nor would `eds` on both sides entail failure if it did: an
+# endpoint-independent FILTER on either side forwards the other peer's
+# packet through the relay-created mapping whatever its source.
+# Codex review on PR #79. Phase A, on loopback, had no NAT at all.
 set -euo pipefail
 
 NET_PUB="${NET_PUB:-natm-pub}"
@@ -44,8 +51,11 @@ IMAGE="${IMAGE:-interweave-natmatrix:1}"
 # Those are the two mapping classes, and mapping is one of the two
 # things deciding whether a punch succeeds -- filtering is the other and
 # is not measured here -- which is why these are the two rows this
-# harness builds. This said "the two rows that decide a hole punch" for
-# ten review rounds, thirty lines below the header that retracts it.
+# harness builds. This said "the two rows that decide a hole punch"
+# unchanged from the branch's first commit through ten review rounds --
+# though only for the last two of them was it CONTRADICTING the header
+# thirty lines above, which said the same thing until that was
+# corrected.
 NAT_MODE="${NAT_MODE:-eim}"
 
 log() { printf '  %s\n' "$*" >&2; }
