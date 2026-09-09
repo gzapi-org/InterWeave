@@ -18,8 +18,9 @@
 //! Two things it deliberately does NOT do. It does not judge the
 //! node-level sections (`runtime`, `identity`, `ipc`, `profile`) that no
 //! Rust type models yet — nor the sub-blocks of `transport` other than
-//! `connectivity`, for the same reason one level down — a profile document is wider than this crate,
-//! and asserting on shapes nothing parses would be inventing a contract.
+//! `connectivity`, for the same reason one level down — a profile
+//! document is wider than this crate, and asserting on shapes nothing
+//! parses would be inventing a contract.
 //! And it does not resolve DNS or reach a network: placeholders become
 //! syntactically valid identities, because the question is whether the
 //! FORM an operator is shown is one the code accepts.

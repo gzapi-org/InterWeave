@@ -950,7 +950,18 @@ impl ConnectivityConfig {
         }
     }
 
-    /// The schema's own "Cross-field validation" list.
+    /// The schema's own "Cross-field validation" list for this block.
+    ///
+    /// ONE SCHEMA RULE OVER `connectivity` IS NOT HERE AND CANNOT BE.
+    /// `# Runtime cross-field validation` says
+    /// `runtime.deployment=embedded-android => connectivity AutoNAT/relay
+    /// server roles are false and Kademlia mode is client`. Its
+    /// antecedent lives in `runtime`, which no Rust type models, so this
+    /// block cannot see it — an android profile enabling a relay server
+    /// is refused by nothing today. Stated rather than left to a reader
+    /// who takes the doc line above for a claim of completeness; the
+    /// check belongs wherever `runtime` first gets a type, not here.
+    /// Review finding on PR #80.
     fn check_cross_fields(&self, errors: &mut Vec<ConfigError>) {
         let relay_client = &self.relay.client;
         let relay_server = &self.relay.server;
@@ -1888,10 +1899,11 @@ mod tests {
         );
 
         // THE ADDRESS HALF IS STILL BOUNDED. A 253-byte host is the
-        // longest the grammar allows, giving a 268-byte address -- over
-        // the 256 limit, and leaving the entry at 325, well under the
-        // 517-byte ceiling. So only a per-half check refuses it, which is
-        // exactly the slack the entry ceiling alone leaves open.
+        // longest the grammar allows, giving a 268-byte address at this
+        // fixture's four-digit port -- over the 256 limit, and leaving
+        // the entry at 325, well under the 517-byte ceiling. So only a
+        // per-half check refuses it, which is exactly the slack the entry
+        // ceiling alone leaves open.
         let over_address = dns_address(253);
         assert!(
             over_address.len() > MAX_ADDRESS_BYTES,
@@ -1936,9 +1948,13 @@ mod tests {
         // And the entry ceiling still bites above its own bound, while
         // reading.
         // An entry over the ceiling cannot be built from a legal DNS
-        // address -- 268 is the grammatical maximum -- but the entry
-        // length is checked while READING, before anything parses it, so
-        // a long junk host reaches that check first.
+        // address -- 269 bytes is the grammatical maximum, a 253-byte
+        // host with a five-digit port, so the longest legal entry is 326
+        // against a 517-byte ceiling -- but the entry length is checked
+        // while READING, before anything parses it, so a long junk host
+        // reaches that check first.
+        // Review finding on PR #80: the number here was the fixture's
+        // 268 rather than the grammar's 269.
         let over_entry = format!("/dns4/{}/tcp/4001/p2p/{P1}", "a".repeat(600));
         let body = format!(r#"{{"relay":{{"client":{{"static_relays":["{over_entry}"]}}}}}}"#);
         let err = profile_with(&body).expect_err("an over-ceiling entry is refused");
