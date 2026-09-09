@@ -16,12 +16,19 @@
 #   * whether the mapping is endpoint-independent — the same external
 #     port to both observers — or per-destination, which is ONE of the
 #     two variables deciding whether a hole punch succeeds. Filtering is
-#     the other, and this harness neither configures nor measures it, so
-#     a row licenses a claim about the mapping a punch would face and NO
-#     claim about a punch: not that one would succeed, and not that one
-#     would fail. Even `eds` on both sides does not entail failure -- if
-#     either side's filtering is endpoint-independent the packet is
-#     forwarded through the relay-created mapping whatever its source.
+#     the other, and `FILTER_MODE` configures it while `filter.sh`
+#     measures it -- so both NAT inputs are observed here now. A row
+#     still licenses NO claim about a punch, and the reason is no longer
+#     filtering: the third input is the implementation, DCUtR's address
+#     exchange and its timing, and no node runs here. Even `eds` on both
+#     sides does not entail failure -- if either side's filtering is
+#     endpoint-independent the packet is forwarded through the
+#     relay-created mapping whatever its source. That pairing is stated
+#     from RFC 4787, not measured: the control filtering modes install a
+#     static forward and so need `NAT_MODE=eim`, which `topology.sh`
+#     refuses to combine with `eds`. `filter.sh` measures the filtering
+#     half of each row `topology.sh` CAN build; this sentence is why the
+#     mapping rows cannot decide a punch, not a row of its own.
 #     Mapping does not gate the ATTEMPT either: `DCUTR.md` §2's
 #     eligibility list does not mention NAT class. Codex review, PR #79.
 set -euo pipefail
@@ -118,7 +125,7 @@ SRC_PORTS="${SRC_PORTS:-45000 45001}"
 # be replaced by matching filenames in the working directory.
 # Review findings on PR #78.
 set -f
-# shellcheck disable=SC2086
+# shellcheck disable=SC2086 # word splitting is the point: SRC_PORTS is a list, and set -f keeps globs out of it
 set -- $SRC_PORTS
 [ "$#" -ge 2 ] \
   || { echo "SRC_PORTS named $# trial(s); eim cannot be observed from fewer than two" >&2; exit 2; }
@@ -132,13 +139,22 @@ for src in "$@"; do
   # produced a different port. Caught by the mutation check for the
   # duplicate guard, which accepted `45000 045000` and printed
   # `45000 18944`.
+  # AND THE DIGIT COUNT BEFORE THE ARITHMETIC. A twenty-digit token does
+  # not reliably wrap to "something negative", as an earlier version of
+  # this comment claimed: `$((10#18446744073709551617))` is 1, which
+  # passes the range check below and measures port 1. Leading zeros are
+  # stripped and five digits is the most a port can have, so nothing
+  # that reaches `$((...))` can wrap. Automated review finding on PR #81.
+  stripped="$src"
+  while [ "${stripped#0}" != "$stripped" ]; do stripped="${stripped#0}"; done
+  [ "${#stripped}" -le 5 ] \
+    || { echo "SRC_PORTS holds '$src', which has too many digits to be a port" >&2; exit 2; }
   port=$((10#$src))
-  # A PORT, NOT MERELY DIGITS. `*[!0-9]*` admits `0`, `70000` and a
-  # twenty-digit token that wraps to something negative in 64-bit
-  # arithmetic. `70000` and the wrapped one reach `socat`, fail to bind,
-  # are swallowed by the `|| true` on the send, and surface as NO DATA --
-  # the misdiagnosis this guard's own comment says it exists to prevent,
-  # with an error message already claiming "not a port number".
+  # A PORT, NOT MERELY DIGITS. `*[!0-9]*` admits `0` and `70000`.
+  # `70000` reaches `socat`, fails to bind, is swallowed by the
+  # `|| true` on the send, and surfaces as NO DATA -- the misdiagnosis
+  # this guard's own comment says it exists to prevent, with an error
+  # message already claiming "not a port number".
   # `0` is worse than a failure: `bind=:0` binds ANY port, so the two
   # sequential sockets get two different ones, the "one internal tuple"
   # premise the comparison rests on is gone, and a correct `eim`
@@ -147,7 +163,7 @@ for src in "$@"; do
     || { echo "SRC_PORTS holds '$src', which is not a port in 1-65535" >&2; exit 2; }
   normalised="$normalised $port"
 done
-# shellcheck disable=SC2086
+# shellcheck disable=SC2086 # word splitting is the point: normalised is the same list with each port in one spelling
 set -- $normalised
 # `set -f` COVERS BOTH SPLITS. The second one expands only arithmetic
 # results today, so leaving it unprotected made its safety depend on the

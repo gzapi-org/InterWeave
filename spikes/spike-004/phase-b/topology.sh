@@ -7,8 +7,11 @@
 # See README.md for what this does and does not establish. The short
 # version: it builds a real kernel NAT whose MAPPING BEHAVIOUR is chosen
 # rather than inherited, because that behaviour is one of the two things
-# deciding whether a hole punch succeeds — filtering is the other, and is
-# neither configured nor measured here.
+# deciding whether a hole punch succeeds — and `FILTER_MODE` chooses the
+# other, which `filter.sh` then measures. Both halves of RFC 4787's
+# classification are built and observed here; what is still missing is
+# the implementation, which is why a row says what a punch would face
+# rather than what it would do.
 #
 # NO PUNCH IS ATTEMPTED HERE. `run.sh` builds the topology and runs UDP
 # mapping probes; the relay, the nodes and DCUtR arrive with steps 5, 6
@@ -32,9 +35,10 @@ NET_LAN="${NET_LAN:-natm-lan}"
 # environment a punch needs, which was false. Review finding on PR #78.
 NET_LAN_B="${NET_LAN_B:-natm-lan-b}"
 
-# THE ROUTER LIST, IN ONE PLACE. `record_environment` and `down` read it
-# from here instead of each carrying their own copy, so adding a third
-# NAT domain means remembering one site rather than two.
+# THE ROUTER LIST, IN ONE PLACE. `record_environment`, `down` and the
+# `PROBER` guard below read it from here instead of each carrying their
+# own copy, so adding a third NAT domain means remembering one site
+# rather than three.
 #
 # THAT IS ALL IT IS. It is not a check and catches nothing: `up()` still
 # names each router at its `podman run`, and nothing verifies that those
@@ -44,14 +48,80 @@ NET_LAN_B="${NET_LAN_B:-natm-lan-b}"
 # The previous version of this comment said a single site was what
 # catches that. Review finding on PR #78.
 ROUTERS="natm-router natm-router-b"
+
+# THE FILTERING PROBER, and it is a separate container for one reason:
+# every port on it must be free to bind. An observer runs
+# `socat UDP-RECVFROM:9000` and therefore cannot send FROM 9000, which is
+# exactly the packet the filtering control has to send -- the reply from
+# the endpoint the peer addressed. Discovered as `bind(5, 0.0.0.0:9000):
+# Address in use` while the control failed and looked like strict
+# filtering.
+# OVERRIDABLE HERE BECAUSE IT IS OVERRIDABLE IN `filter.sh`. Hardcoded
+# here and `${PROBER:-natm-filt}` there, `PROBER=natm-obs1 ./run.sh` built
+# and authorised `natm-filt` while `filter.sh` probed from -- and then
+# `pkill`ed socat in -- an observer. The same hazard the comment below
+# names for the ports, in the other direction: an override that looks
+# live and is ignored. Review finding on PR #81.
+PROBER="${PROBER:-natm-filt}"
+# AND GUARDED HERE, because this is the file that runs `podman rm -f` on
+# the name -- `up` calls `down` first -- so a `PROBER` naming a container
+# standing from other work would be removed silently, before the topology
+# is up and before any output the caller would read. (An earlier version
+# of this sentence said "before the image build finished"; the build
+# always precedes `up`, so that ordering never happens.) `filter.sh`'s
+# guard covers the observers, two minutes later; every other destructive
+# use in that file sits behind address resolution and fails first. This
+# one does not. The refused set is every CONTAINER this file creates --
+# the routers read from `$ROUTERS`, so a third domain added THERE cannot
+# slip past here (one forgotten there slips past everything, as the
+# `ROUTERS` comment above says) -- plus a prefix rule that keeps `down`
+# off anything outside this harness's `natm-` namespace. A container
+# named `natm-something` from other work is NOT protected by it; the
+# prefix is a namespace, not an inventory. Review findings on PR #81.
+# shellcheck disable=SC2086 # word splitting is the point: ROUTERS is a list
+for created in natm-obs1 natm-obs2 natm-peer natm-peer-b $ROUTERS; do
+  [ "$PROBER" != "$created" ] \
+    || { echo "PROBER must not be a container this topology creates ($PROBER): up would create that name twice, and down would remove it whatever it holds" >&2; exit 2; }
+done
+case "$PROBER" in
+  natm-*) ;;
+  *) echo "PROBER must be named natm-* ($PROBER): this file force-removes it on down, and the prefix keeps that inside this harness's namespace" >&2; exit 2 ;;
+esac
+
+# The ports `filter.sh` uses are declared THERE, not here: this file
+# never reads them, and declaring them in both places made
+# `PROBE_PORT=9005 ./topology.sh up` look like it configured something
+# while changing nothing. Review finding on PR #81.
+
+# The FILTERING behaviour to build, which is independent of the mapping
+# one and is the other half of RFC 4787's classification.
+#
+#   conntrack          -- what masquerade alone gives: only the endpoint
+#                         the peer addressed reaches the mapping. A
+#                         port-restricted cone.
+#   address-restricted -- a forward admitting any port at the prober's
+#                         ADDRESS.
+#   full-cone          -- a forward admitting any source at all.
+#
+# THE TWO FORWARDS EXIST TO MAKE THE CLASSIFIER DISCRIMINATING. With
+# conntrack alone `filter.sh` can only ever answer one way, and a
+# classifier with two unreachable branches is indistinguishable from a
+# constant. These are the positive controls for the other two.
+FILTER_MODE="${FILTER_MODE:-conntrack}"
+
+# The peer port the filtering forwards name. Under `eim` this is also the
+# mapped external port, which is what makes a static forward possible;
+# `filter.sh` binds the same port and learns the mapping rather than
+# assuming it.
+SRC_PORT="${SRC_PORT:-45000}"
 IMAGE="${IMAGE:-interweave-natmatrix:1}"
 
 # The NAT class to build. `eim` gives one external port per internal
 # socket whatever the destination; `eds` allocates per destination.
 # Those are the two mapping classes, and mapping is one of the two
-# things deciding whether a punch succeeds -- filtering is the other and
-# is not measured here -- which is why these are the two rows this
-# harness builds. This said "the two rows that decide a hole punch"
+# things deciding whether a punch succeeds -- `FILTER_MODE` builds the
+# other and `filter.sh` measures it -- which is why these are the two
+# MAPPING rows this harness builds. This said "the two rows that decide a hole punch"
 # unchanged from the branch's first commit through ten review rounds --
 # though only for the last two of them was it CONTRADICTING the header
 # thirty lines above, which said the same thing until that was
@@ -77,6 +147,12 @@ up() {
   done
   await_listener natm-obs1
   await_listener natm-obs2
+
+  # NO LISTENER OF ITS OWN while the topology is up: `filter.sh` starts
+  # one on its probe port to learn the mapping, then stops it so the same
+  # port is free to send the control from.
+  podman run -d --name "$PROBER" --network "$NET_PUB" \
+    --entrypoint /bin/sh "$IMAGE" -c 'sleep infinity' >/dev/null
 
   podman run -d --name natm-router --network "$NET_PUB" --network "$NET_LAN" \
     --cap-add=NET_ADMIN --sysctl net.ipv4.ip_forward=1 \
@@ -118,8 +194,12 @@ up() {
   route_through natm-peer-b "$router_b_lan"
   configure_nat natm-router-b "$NET_PUB"
 
+  configure_filtering natm-router "$NET_PUB" natm-peer "$NET_LAN"
+  configure_filtering natm-router-b "$NET_PUB" natm-peer-b "$NET_LAN_B"
+
   log "NAT mode: $NAT_MODE (both domains)"
-  # shellcheck disable=SC2086
+  log "filter  : $FILTER_MODE (both domains)"
+  # shellcheck disable=SC2086 # word splitting is the point: ROUTERS is a list
   record_environment $ROUTERS
 }
 
@@ -377,9 +457,60 @@ NFT
   log "$ctr: snat on $oif using: $rule"
 }
 
+# Build the FILTERING behaviour on one router.
+#
+# `conntrack` installs nothing: masquerade's own reverse path is already
+# address-and-port-dependent, so the absence of a rule IS the row. The
+# other two add a forward for the peer's bound port, which is the mapped
+# port under `eim` -- stated as a restriction rather than papered over,
+# since under `eds` the mapped port is chosen per flow and a static
+# forward cannot name it.
+configure_filtering() {
+  local router="$1" pub="$2" peer="$3" lan="$4"
+  case "$FILTER_MODE" in
+    conntrack) return 0 ;;
+    full-cone | address-restricted) ;;
+    *) echo "unknown FILTER_MODE: $FILTER_MODE" >&2; exit 2 ;;
+  esac
+  if [ "$NAT_MODE" != eim ]; then
+    echo "FILTER_MODE=$FILTER_MODE needs NAT_MODE=eim: a static forward cannot name a per-flow mapped port" >&2
+    exit 2
+  fi
+  local peer_addr oif saddr=""
+  peer_addr=$(addr_on "$peer" "$lan")
+  [ -n "$peer_addr" ] || { echo "no address for $peer on $lan" >&2; return 1; }
+  oif=$(iface_on "$router" "$pub")
+  if [ "$FILTER_MODE" = address-restricted ]; then
+    local prober_addr
+    prober_addr=$(addr_on "$PROBER" "$pub")
+    [ -n "$prober_addr" ] || { echo "no address for $PROBER on $pub" >&2; return 1; }
+    saddr="ip saddr $prober_addr "
+  fi
+  # `dnat ip`, not `dnat`: an `inet` table serves both families, so nft
+  # refuses the ambiguous form with "specify `dnat ip' or `dnat ip6'".
+  local rule="iifname \"$oif\" ${saddr}udp dport $SRC_PORT dnat ip to $peer_addr:$SRC_PORT"
+  podman exec -i "$router" nft -f - <<NFT
+table inet filtering
+flush table inet filtering
+table inet filtering {
+  chain prerouting {
+    type nat hook prerouting priority dstnat; policy accept;
+    $rule
+  }
+}
+NFT
+  local installed
+  installed=$(podman exec "$router" nft list chain inet filtering prerouting) \
+    || { echo "$router: could not read back the filtering chain" >&2; return 1; }
+  installed=$(printf '%s\n' "$installed" | sed -n 's/^[[:space:]]*\(iifname .*\)$/\1/p')
+  [ "$installed" = "$rule" ] \
+    || { echo "$router: filtering chain holds [$installed], expected [$rule]" >&2; return 1; }
+  log "$router: $FILTER_MODE forward on $oif for udp/$SRC_PORT"
+}
+
 down() {
-  # shellcheck disable=SC2086
-  podman rm -f natm-obs1 natm-obs2 natm-peer natm-peer-b $ROUTERS \
+  # shellcheck disable=SC2086 # word splitting is the point: ROUTERS is a list
+  podman rm -f natm-obs1 natm-obs2 natm-peer natm-peer-b "$PROBER" $ROUTERS \
     >/dev/null 2>&1 || true
   podman network rm -f "$NET_PUB" "$NET_LAN" "$NET_LAN_B" >/dev/null 2>&1 || true
 }

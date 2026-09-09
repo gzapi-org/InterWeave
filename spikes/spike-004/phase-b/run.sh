@@ -16,15 +16,13 @@ IMAGE="${IMAGE:-interweave-natmatrix:1}"
 
 MODES="${MODES:-eim eds}"
 
-# THE ROW SET IS VALIDATED BEFORE ANYTHING RUNS, and it is the only
-# check on this script's INPUT -- everything else here fails the run by
-# failing: the build, `topology.sh up`, and each probe. There is one
-# other assertion written in this file, on `$ports` in `probe_domain`,
-# and the sentence that used to say this was the only one was made false
-# by the commit that added it. Before that it said "the only check that
-# can fail", which read as though a failing probe would be tolerated.
-# Two rounds of review, two corrections, both to a claim about how many
-# things this file checks.
+# THE ROW SET IS VALIDATED BEFORE ANYTHING RUNS. It is not the only such
+# check and this comment has now been wrong about that THREE times --
+# "the only check that can fail", then "the only check on this script's
+# INPUT", each falsified by the next commit to add one. So it stops
+# counting: `FILTER_MODE` is validated below, `$ports` and `$filtering`
+# are asserted in `probe_domain`, and everything else here fails the run
+# by failing -- the build, `topology.sh up`, each probe.
 # `MODES` is a caller-supplied filter, so
 # `MODES=" "` is set and non-null -- `:-` does not substitute, the loop
 # runs zero times, and every after-the-fact tally then agrees with
@@ -41,10 +39,52 @@ MODES="${MODES:-eim eds}"
 # replaced by matching filenames in the working directory rather than
 # reaching `topology.sh`'s unknown-mode arm. Review finding on PR #78.
 set -f
-# shellcheck disable=SC2086
+# shellcheck disable=SC2086 # word splitting is the point: MODES is a list, and set -f keeps globs out of it
 set -- $MODES
 set +f
 [ "$#" -ge 1 ] || { echo "MODES named no rows, so nothing would be measured" >&2; exit 2; }
+
+# THE FILTERING CLASS EACH ROW IS BUILT FOR, and `conntrack` is the
+# honest default: it is what masquerade alone gives, and it is the row a
+# deployment actually meets. `address-restricted` and `full-cone` exist
+# so the classifier has a positive control for every branch -- with
+# conntrack alone it can only answer one way, which is indistinguishable
+# from a constant. They need `NAT_MODE=eim`, since a static forward
+# cannot name a per-flow mapped port.
+FILTER_MODE="${FILTER_MODE:-conntrack}"
+case "$FILTER_MODE" in
+  conntrack) EXPECT_FILTER=apdf ;;
+  address-restricted) EXPECT_FILTER=adf ;;
+  full-cone) EXPECT_FILTER=eif ;;
+  *) echo "unknown FILTER_MODE: $FILTER_MODE" >&2; exit 2 ;;
+esac
+# AND AGAINST THE ROW SET, here rather than inside `topology.sh`: the
+# control modes install a static forward and so need `eim`, and checking
+# that only when the row is built meant `FILTER_MODE=full-cone ./run.sh`
+# measured the whole `eim` row before aborting on `eds`. Loud, but late.
+# AND BEFORE THE BUILD AND THE TRAP, with the `MODES` check: this block
+# sat seventy lines down, after `podman build` and after the EXIT trap
+# was armed, so a typo in `FILTER_MODE` paid for a build and then tore
+# down a topology the caller had standing from `topology.sh up`. Nothing
+# in it depends on the build. Review finding on PR #81.
+# WHAT THIS DOES AND DOES NOT MOVE: only `run.sh`'s OWN input is checked
+# here. The ports and `HOLD_SECONDS` are validated by `filter.sh` and
+# `SRC_PORTS` by `probe.sh`, each when it runs -- so `ALT_SOURCE_PORT=9000
+# ./run.sh` still pays for the build, a topology and domain A's mapping
+# before it exits 2. Late, but no longer destructive: by then the standing
+# topology is this run's own, so the trap tears down nothing the caller
+# built. Hoisting those checks would mean duplicating them; they stay
+# where `filter.sh` and `probe.sh` use them. `topology.sh` reads
+# `SRC_PORT` earlier, unvalidated, into the control modes' nftables
+# rule, and relies on its rule read-back to fail closed -- a literal
+# `045000` against nft's normalised `45000`. Review findings on PR #81.
+if [ "$FILTER_MODE" != conntrack ]; then
+  for mode in "$@"; do
+    [ "$mode" = eim ] \
+      || { echo "FILTER_MODE=$FILTER_MODE needs MODES=eim; a static forward cannot name a per-flow mapped port (got '$mode')" >&2; exit 2; }
+  done
+fi
+export FILTER_MODE
 
 # The two LANs the two NAT domains sit on, named the same way
 # `topology.sh` names them so a caller overriding one overrides both.
@@ -60,7 +100,9 @@ NET_LAN_B="${NET_LAN_B:-natm-lan-b}"
 podman build -q -t "$IMAGE" -f "$here/Containerfile" "$here" >/dev/null
 
 # Leaked containers and networks otherwise outlive a failed row, and a
-# Ctrl-C leaves six containers behind. `up` calls `down` first, so a
+# Ctrl-C leaves every container behind -- seven once the filtering prober
+# joined them, and a number here is one more thing to falsify. `up` calls
+# `down` first, so a
 # later run self-heals -- but only a later run.
 trap '"$here/topology.sh" down >/dev/null 2>&1 || true' EXIT
 
@@ -95,7 +137,7 @@ measured=""
 # the same shape as the row set that measured nothing. Review finding on
 # PR #78.
 probe_domain() {
-  local peer="$1" router="$2" lan="$3" expect="$4" reported class ports
+  local peer="$1" router="$2" lan="$3" expect="$4" reported class ports filtering
   printf -- '-- %s behind %s --\n' "$peer" "$router"
   reported=$(PEER="$peer" ROUTER="$router" LAN="$lan" EXPECT="$expect" \
     "$here/probe.sh")
@@ -103,11 +145,22 @@ probe_domain() {
   ports=$(printf '%s\n' "$reported" | sed -n 's/^PORTS=//p')
   [ -n "$ports" ] \
     || { echo "$peer: probe.sh reported no ports beside its class" >&2; return 1; }
-  measured="$measured $peer=$class($ports)"
+
+  # BOTH HALVES OF RFC 4787, measured on the same domain. Mapping alone
+  # says nothing about whether a punch succeeds -- filtering is the other
+  # input -- and the harness reported one and called the other a
+  # non-goal until `filter.sh` existed.
+  reported=$(PEER="$peer" ROUTER="$router" LAN="$lan" \
+    EXPECT_FILTER="$EXPECT_FILTER" "$here/filter.sh")
+  filtering=$(printf '%s\n' "$reported" | sed -n 's/^FILTER=//p')
+  [ -n "$filtering" ] \
+    || { echo "$peer: filter.sh reported no class" >&2; return 1; }
+
+  measured="$measured $peer=$class($ports)/$filtering"
 }
 
 for mode in "$@"; do
-  printf '\n== NAT_MODE=%s ==\n' "$mode"
+  printf '\n== NAT_MODE=%s FILTER_MODE=%s ==\n' "$mode" "$FILTER_MODE"
   NAT_MODE="$mode" "$here/topology.sh" up
   # BOTH DOMAINS ARE MEASURED, and the second one is why. A hole punch
   # needs two peers each behind their OWN translation, so the topology
@@ -120,9 +173,11 @@ for mode in "$@"; do
   probe_domain natm-peer-b natm-router-b "$NET_LAN_B" "$mode"
 done
 
-# THE OBSERVED PORTS, which is the only part of this line that is not a
-# restatement of the INPUT: the peer names are two literals written
-# here, and the class cannot differ from the mode -- the
+# THE OBSERVED PORTS, which are the only part of this line that is not a
+# restatement of the INPUT: the peer names are two literals written here,
+# and NEITHER class can differ from what was asked for -- the mapping
+# class is checked against `EXPECT` and the filtering class against
+# `EXPECT_FILTER`, both of which exit non-zero on a mismatch -- the
 # per-row assertion exits non-zero on any other value -- so a summary
 # carrying classes alone prints back its own input, which is what the
 # two tallies before it did in different words. The ports are
