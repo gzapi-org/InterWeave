@@ -1227,6 +1227,22 @@ mod tests {
         assert!(connectivity.autonat.client.enabled);
         assert!(connectivity.relay.client.enabled);
         assert!(connectivity.dcutr.enabled);
+        // THE TWO BOOLEANS THAT ARE A TRUST DECISION, pinned. Neither is a
+        // schema literal, so `check_literals` never sees them, and the
+        // defaults test lists numbers only -- so one coherent edit
+        // (`default_true` on the attribute and `true` in the impl) passed
+        // every test in the workspace while promoting an Identify
+        // assertion to an infrastructure authorization by default, which
+        // the field's own doc says must be an explicit opt-in.
+        // Review finding on PR #80.
+        assert!(
+            !connectivity.autonat.client.use_authorized_identify_servers,
+            "Identify-learned AutoNAT servers are an explicit opt-in"
+        );
+        assert!(
+            !connectivity.relay.client.use_authorized_identify_relays,
+            "Identify-learned relays are an explicit opt-in"
+        );
         assert!(
             !connectivity.autonat.server.enabled,
             "the AutoNAT server role is opt-in"
