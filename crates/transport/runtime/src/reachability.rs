@@ -198,14 +198,40 @@ impl ReachabilityVerdict {
 }
 
 /// What one probe told us.
+///
+/// # The adapter's mapping, and the one it must not make
+///
+/// The pinned client emits `Event` for exactly TWO results (measured in
+/// `libp2p-autonat-0.15.0` `v2/client/behaviour.rs:200-243`): `Ok(())`,
+/// and `Err(AddressNotReachable { .. })` after the server tried and
+/// failed to dial back. For `UnsupportedProtocol` and `Io` it emits
+/// **no event at all** -- it resets the candidate to `Untested` and
+/// returns, marking the connection as not supporting AutoNAT in the
+/// first case. So:
+///
+/// - `Ok(())` is [`Reachable`](Self::Reachable);
+/// - `Err(AddressNotReachable)` is [`Unreachable`](Self::Unreachable);
+/// - nothing else arrives, and [`Failed`](Self::Failed) is produced HERE
+///   by [`ReachabilityManager::expire_inflight`] for a probe this
+///   manager planned that never came back.
+///
+/// **Mapping `Err(_)` wholesale to `Failed` would defeat the
+/// address-scoping below.** `Unreachable` is deliberately not counted
+/// against a server when it names an address this manager does not
+/// track, precisely because that set is remote-influenced; `Failed`
+/// is counted, because it is about the server. An adapter that
+/// collapsed the two would hand a peer the suppression path that gate
+/// exists to close. Review finding on PR #84.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeOutcome {
     /// The server dialled the address back and reached us.
     Reachable,
-    /// The server tried and did not reach us.
+    /// The server tried and did not reach us. An ADDRESS result from a
+    /// server that answered correctly.
     Unreachable,
-    /// The probe did not complete: refused, timed out, or errored before
-    /// a dial-back was attempted. Says nothing about the address.
+    /// The probe did not complete, so it says nothing about the address
+    /// and everything about the exchange. Produced by
+    /// [`ReachabilityManager::expire_inflight`], not by the behaviour.
     Failed,
 }
 
