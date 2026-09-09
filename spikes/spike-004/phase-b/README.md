@@ -379,8 +379,9 @@ exactly that reason, one of them a count of the loop it was written
 over. What `run.sh` does check is its INPUT: `MODES` is a caller-supplied
 row filter, and `MODES=" "` is set and non-null, so it used to run zero
 rows and still print a passing summary. That check runs before the build.
-It is not the only one — `FILTER_MODE` is validated beside it, and the
-summary's ports and filtering class are asserted per domain — and the
+It is not the only one — `FILTER_MODE` is validated beside it, also
+before the build, and the summary's ports and filtering class are
+asserted per domain — and the
 comment in `run.sh` stops counting, because three successive versions of
 that sentence were each falsified by the next commit to add a check.
 

@@ -44,6 +44,37 @@ set -- $MODES
 set +f
 [ "$#" -ge 1 ] || { echo "MODES named no rows, so nothing would be measured" >&2; exit 2; }
 
+# THE FILTERING CLASS EACH ROW IS BUILT FOR, and `conntrack` is the
+# honest default: it is what masquerade alone gives, and it is the row a
+# deployment actually meets. `address-restricted` and `full-cone` exist
+# so the classifier has a positive control for every branch -- with
+# conntrack alone it can only answer one way, which is indistinguishable
+# from a constant. They need `NAT_MODE=eim`, since a static forward
+# cannot name a per-flow mapped port.
+FILTER_MODE="${FILTER_MODE:-conntrack}"
+case "$FILTER_MODE" in
+  conntrack) EXPECT_FILTER=apdf ;;
+  address-restricted) EXPECT_FILTER=adf ;;
+  full-cone) EXPECT_FILTER=eif ;;
+  *) echo "unknown FILTER_MODE: $FILTER_MODE" >&2; exit 2 ;;
+esac
+# AND AGAINST THE ROW SET, here rather than inside `topology.sh`: the
+# control modes install a static forward and so need `eim`, and checking
+# that only when the row is built meant `FILTER_MODE=full-cone ./run.sh`
+# measured the whole `eim` row before aborting on `eds`. Loud, but late.
+# AND BEFORE THE BUILD AND THE TRAP, with the `MODES` check: this block
+# sat seventy lines down, after `podman build` and after the EXIT trap
+# was armed, so a typo in `FILTER_MODE` paid for a build and then tore
+# down a topology the caller had standing from `topology.sh up`. Nothing
+# in it depends on the build. Review finding on PR #81.
+if [ "$FILTER_MODE" != conntrack ]; then
+  for mode in "$@"; do
+    [ "$mode" = eim ] \
+      || { echo "FILTER_MODE=$FILTER_MODE needs MODES=eim; a static forward cannot name a per-flow mapped port (got '$mode')" >&2; exit 2; }
+  done
+fi
+export FILTER_MODE
+
 # The two LANs the two NAT domains sit on, named the same way
 # `topology.sh` names them so a caller overriding one overrides both.
 NET_LAN="${NET_LAN:-natm-lan}"
@@ -116,32 +147,6 @@ probe_domain() {
 
   measured="$measured $peer=$class($ports)/$filtering"
 }
-
-# THE FILTERING CLASS EACH ROW IS BUILT FOR, and `conntrack` is the
-# honest default: it is what masquerade alone gives, and it is the row a
-# deployment actually meets. `address-restricted` and `full-cone` exist
-# so the classifier has a positive control for every branch -- with
-# conntrack alone it can only answer one way, which is indistinguishable
-# from a constant. They need `NAT_MODE=eim`, since a static forward
-# cannot name a per-flow mapped port.
-FILTER_MODE="${FILTER_MODE:-conntrack}"
-case "$FILTER_MODE" in
-  conntrack) EXPECT_FILTER=apdf ;;
-  address-restricted) EXPECT_FILTER=adf ;;
-  full-cone) EXPECT_FILTER=eif ;;
-  *) echo "unknown FILTER_MODE: $FILTER_MODE" >&2; exit 2 ;;
-esac
-# AND AGAINST THE ROW SET, here rather than inside `topology.sh`: the
-# control modes install a static forward and so need `eim`, and checking
-# that only when the row is built meant `FILTER_MODE=full-cone ./run.sh`
-# measured the whole `eim` row before aborting on `eds`. Loud, but late.
-if [ "$FILTER_MODE" != conntrack ]; then
-  for mode in "$@"; do
-    [ "$mode" = eim ] \
-      || { echo "FILTER_MODE=$FILTER_MODE needs MODES=eim; a static forward cannot name a per-flow mapped port (got '$mode')" >&2; exit 2; }
-  done
-fi
-export FILTER_MODE
 
 for mode in "$@"; do
   printf '\n== NAT_MODE=%s FILTER_MODE=%s ==\n' "$mode" "$FILTER_MODE"
