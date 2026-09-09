@@ -125,10 +125,17 @@ fi
 # `git`'s own exit status stays readable. Review finding on PR #82.
 listing=$(mktemp) || die "check_shell_scripts: could not create a temporary file for the tracked set."
 trap 'rm -f "$listing"' EXIT
-if ! git ls-files -z '*.sh' > "$listing"; then
+# `--deduplicate`: a conflicted path is listed once per merge stage,
+# which would lint it three times and inflate the count the OK line
+# prints. And `scripts=()` first, so a redirection that fails on the
+# `mapfile` line -- the file removed underneath it -- reaches the
+# empty-set refusal below as exit 2, rather than tripping `set -u` on
+# `${#scripts[@]}` and exiting 1, the finding code.
+scripts=()
+if ! git ls-files -z --deduplicate '*.sh' > "$listing"; then
     die "check_shell_scripts: git ls-files failed, so the tracked set could not be read (exit 2, not a pass)."
 fi
-mapfile -d '' -t scripts < "$listing"
+mapfile -d '' -t scripts < "$listing" || die "check_shell_scripts: could not read the tracked set back (exit 2, not a pass)."
 
 if [[ ${#scripts[@]} -eq 0 ]]; then
     echo "check_shell_scripts: no tracked *.sh files found — the guard would pass by looking at nothing." >&2
