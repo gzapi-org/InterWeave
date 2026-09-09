@@ -45,7 +45,8 @@ server must be "configured statically, or (only when
 already-authorized Identify/control connection", and that "static
 servers have selection precedence until they cannot meet the observer
 target". Per-server cooldown/backoff was removed as an eligibility
-clause for the same reason and survives as client-side policy (§4).
+clause for the same reason. It survives as the DIAL GATE's, not as this
+client's: see §4's Amendment 2026-09-09 (ii).
 
 **Why.** `libp2p-autonat` 0.15.0's v2 client chooses its probe server by
 `random_autonat_server()` — a uniformly random pick among the
@@ -107,25 +108,72 @@ comment that says §6 holds.
 
 ## 4. Evidence model
 
-Evidence is keyed at least by `(tested_address, server_peer)` and contains:
+Evidence is keyed at least by `(tested_address, server_peer)` and holds
+that server's LATEST SUCCESS AND LATEST FAILURE SIDE BY SIDE, each with
+its own observation time:
 
 ```text
-outcome
-observed_at
-expires_at
+success_observed_at   (absent until one succeeds)
+failure_observed_at   (absent until one fails; cleared by a later success)
 probe_id/correlation
 bytes_sent class (diagnostic)
 ```
 
+One outcome per key is NOT sufficient, and that is what §5's two-failure
+rule requires: with a single slot, one `Unreachable` from a server whose
+success is being counted overwrites that success and drops the address
+below the threshold on its own — an invalidation §5 gives only to two
+fresh independent failures. A later success is the newer word on the same
+question and clears that server's failure; a failure never erases a
+success.
+
 Defaults:
 
 - required distinct successful servers: 2;
-- success TTL: 15 minutes;
+- evidence TTL: 15 minutes — for a success and for a failure alike, since
+  the two are weighed against each other;
 - refresh: 5 minutes;
-- initial retry: 30 seconds, bounded exponential backoff up to 5 minutes;
-- max probes in flight: 2;
-- max candidate addresses per cycle: 4;
-- probe timeout: 15 seconds.
+- max candidate addresses per cycle: 4.
+
+### Amendment 2026-09-09 (ii) — three client knobs named a policy nothing here could apply
+
+**What changed.** `initial retry: 30 seconds, bounded exponential backoff
+up to 5 minutes`, `max probes in flight: 2` and `probe timeout: 15
+seconds` were removed from this client list, and the success TTL was
+widened to cover failures. `refresh` and `max candidate addresses per
+cycle` stay, and are now stated as what the client actually sets.
+
+**Why.** After the §3 amendment above, this profile does not issue
+probes: `libp2p-autonat` 0.15.0 picks the address, picks the server and
+picks the moment. Its whole client surface is `Config::
+with_probe_interval` and `Config::with_max_candidates`, which are exactly
+`refresh` and `max candidate addresses per cycle` — and its DEFAULT
+interval is five seconds, so an adapter that does not set it probes sixty
+times more often than this section says. The other three had no
+mechanism:
+
+- **in-flight probes** — the client caps its own outbound dial-requests
+  in a `FuturesMap` built at `v2/client/handler/dial_request.rs:94`, with
+  no setter. The bound in force is **10 per connection**;
+- **probe timeout** — the same line hard-codes **10 seconds**. This
+  section said 15, and nothing could make it so. §7's server-side timeout
+  is unaffected: that one is ours to enforce;
+- **retry backoff** — a probe is a request on a connection already open,
+  so what a failure should slow down is the DIAL of a server that will
+  not answer. That is the root dial gate's, where
+  `ConnectionManager::retry_delay_ms` is already 30 s doubling to a
+  5-minute ceiling — this section's own numbers — and
+  `ConnectionPolicy` scopes it to the address before the peer, so one bad
+  address does not suppress a server's working route. A second copy in
+  the client had no way to act: it could not tell the crate which server
+  to skip.
+
+**What an implementer now does differently.** Set the crate's two knobs
+from configuration. Do not build a probe scheduler, a per-probe timeout,
+or a per-server backoff table in the AutoNAT client; a server that will
+not connect is slowed by the dial gate. The three removed keys are gone
+from `config.schema.yaml` too, since a key nothing can honour is a
+promise the file should not make.
 
 `verified_public` requires fresh successful evidence from the configured number of **distinct authorized servers** for at least one advertised direct address.
 
