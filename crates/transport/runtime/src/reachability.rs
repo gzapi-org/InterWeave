@@ -221,6 +221,10 @@ struct ServerRecord {
     source: ServerSource,
     consecutive_failures: u32,
     backoff_until_ms: u64,
+    /// When this server last failed to COMPLETE a probe. Kept here and
+    /// not in `evidence`, because a `Failed` says nothing about the
+    /// address it was testing -- see `record_outcome`.
+    last_failure_at_ms: Option<u64>,
 }
 
 /// The manager. See the module note for what it owns and what it refuses.
@@ -328,6 +332,7 @@ impl ReachabilityManager {
             source,
             consecutive_failures: 0,
             backoff_until_ms: 0,
+            last_failure_at_ms: None,
         });
     }
 
@@ -449,11 +454,29 @@ impl ReachabilityManager {
                 record.backoff_until_ms = now_ms.saturating_add(backoff);
             }
         }
+        // A `Failed` IS NOT ADDRESS EVIDENCE, and must not displace any.
+        // `evidence` is keyed `(address, server)` and an insert replaces,
+        // so recording a timeout here destroyed that server's still-fresh
+        // `Reachable` for the same address -- and one refresh that timed
+        // out dropped a verified address below the threshold on its own,
+        // which `AUTONAT.md` §5 gives only to TWO fresh independent
+        // failures. The variant's own doc says it "says nothing about the
+        // address"; this is what makes that true. It still counts against
+        // the SERVER: the backoff above, and the timestamp here, which is
+        // what `NotVerified` reports. Review finding on PR #84.
+        if matches!(outcome, ProbeOutcome::Failed) {
+            record.last_failure_at_ms = Some(
+                record
+                    .last_failure_at_ms
+                    .map_or(now_ms, |previous| previous.max(now_ms)),
+            );
+            return self.rederive(now_ms);
+        }
         let expires_at_ms = match outcome {
             ProbeOutcome::Reachable => now_ms.saturating_add(self.config.success_evidence_ttl_ms),
-            // A failure is fresh for one retry interval: long enough to
-            // count toward invalidation, short enough not to pin
-            // `not_verified` after the condition has passed.
+            // An `Unreachable` is fresh for one retry interval: long
+            // enough to count toward invalidation, short enough not to
+            // pin `not_verified` after the condition has passed.
             ProbeOutcome::Unreachable | ProbeOutcome::Failed => {
                 now_ms.saturating_add(self.config.retry_interval_ms)
             }
@@ -499,6 +522,7 @@ impl ReachabilityManager {
         for record in self.servers.values_mut() {
             record.consecutive_failures = 0;
             record.backoff_until_ms = 0;
+            record.last_failure_at_ms = None;
         }
         self.state = DirectInboundState::Unknown;
         Self::change(before, &self.state)
@@ -559,11 +583,9 @@ impl ReachabilityManager {
                             last_failure.map_or(e.observed_at_ms, |f: u64| f.max(e.observed_at_ms)),
                         );
                     }
-                    ProbeOutcome::Failed => {
-                        last_failure = Some(
-                            last_failure.map_or(e.observed_at_ms, |f: u64| f.max(e.observed_at_ms)),
-                        );
-                    }
+                    // A `Failed` never reaches `evidence`; see
+                    // `record_outcome`.
+                    ProbeOutcome::Failed => {}
                 }
             }
             let threshold =
@@ -573,6 +595,13 @@ impl ReachabilityManager {
                 evidence_until = evidence_until.min(earliest_success_expiry);
             }
         }
+        // THE MOST RECENT INCOMPLETE PROBE, read from the server records
+        // -- reported by `NotVerified`, but never a reason to BE it.
+        let last_incomplete = self
+            .servers
+            .values()
+            .filter_map(|record| record.last_failure_at_ms)
+            .max();
         if !verified.is_empty() {
             DirectInboundState::VerifiedPublic {
                 verified_addresses: verified,
@@ -580,9 +609,16 @@ impl ReachabilityManager {
             }
         } else if any_evidence {
             DirectInboundState::NotVerified {
-                last_failure_at_ms: last_failure,
+                last_failure_at_ms: match (last_failure, last_incomplete) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    (a, b) => a.or(b),
+                },
             }
         } else {
+            // Timeouts and refusals ALONE are indeterminate: §5 gives
+            // `not_verified` to evidence "sufficient to say the proof
+            // threshold is not currently satisfied", and a probe that
+            // never completed is not that.
             DirectInboundState::Unknown
         }
     }
@@ -986,7 +1022,12 @@ mod tests {
     }
 
     #[test]
-    fn a_probe_with_no_outcome_times_out_as_a_failure() {
+    fn a_probe_with_no_outcome_times_out_and_leaves_the_state_indeterminate() {
+        // A TIMEOUT IS NOT A VERDICT. §5 gives `not_verified` to evidence
+        // "sufficient to say the proof threshold is not currently
+        // satisfied"; a probe that never completed is not that, so the
+        // state stays `unknown` and the timestamp is carried for the
+        // report rather than being a reason to leave `unknown`.
         let mut m = manager();
         m.add_server(peer(S1), ServerSource::Static);
         let plans = m.due_probes(0);
@@ -996,15 +1037,64 @@ mod tests {
             "not yet"
         );
         assert!(m.has_outstanding_probe_to(&peer(S1)));
-        let change = m
-            .expire_inflight(DEFAULT_PROBE_TIMEOUT_MS)
-            .expect("times out");
         assert!(
-            matches!(change.to, DirectInboundState::NotVerified { last_failure_at_ms: Some(t) } if t == DEFAULT_PROBE_TIMEOUT_MS)
+            m.expire_inflight(DEFAULT_PROBE_TIMEOUT_MS).is_none(),
+            "indeterminate: unknown to unknown is no change"
         );
+        assert_eq!(*m.state(), DirectInboundState::Unknown);
         assert!(
             !m.has_outstanding_probe_to(&peer(S1)),
             "and is no longer outstanding"
+        );
+        // But once an address HAS a verdict, the timeout is reported
+        // beside it rather than lost.
+        let a = "/ip4/8.8.8.8/tcp/4001";
+        let _ = m.record_outcome(a, &peer(S1), ProbeOutcome::Unreachable, 20_000);
+        assert_eq!(
+            *m.state(),
+            DirectInboundState::NotVerified {
+                last_failure_at_ms: Some(20_000)
+            }
+        );
+    }
+
+    #[test]
+    fn one_timed_out_refresh_does_not_unverify_an_address_two_servers_verified() {
+        // THE DEFECT THIS EXISTS FOR: evidence is keyed
+        // `(address, server)` and an insert replaces, so recording a
+        // timeout as evidence destroyed that server's still-fresh
+        // success and dropped the address below the threshold -- on ONE
+        // event that says nothing about the address, where §5 requires
+        // two fresh independent failures. Reachable on the ordinary
+        // refresh path, which is what makes it worth a test rather than
+        // a comment. Review finding on PR #84.
+        let mut m = manager();
+        m.set_candidates(["/ip4/8.8.8.8/tcp/4001"]);
+        m.add_server(peer(S1), ServerSource::Static);
+        m.add_server(peer(S2), ServerSource::Static);
+        let a = "/ip4/8.8.8.8/tcp/4001";
+        let _ = m.record_outcome(a, &peer(S1), ProbeOutcome::Reachable, 0);
+        let _ = m.record_outcome(a, &peer(S2), ProbeOutcome::Reachable, 0);
+        assert!(verified(&m));
+        // The refresh falls due, is issued, and never completes.
+        let refresh = m.due_probes(DEFAULT_REFRESH_INTERVAL_MS);
+        assert!(
+            refresh.iter().any(|p| p.address == a),
+            "the refresh must actually be planned, or this proves nothing: {refresh:?}"
+        );
+        let _ = m.expire_inflight(DEFAULT_REFRESH_INTERVAL_MS + DEFAULT_PROBE_TIMEOUT_MS);
+        assert!(
+            verified(&m),
+            "a timed-out refresh must not unverify: {:?}",
+            m.state()
+        );
+        // And the server it timed out against is still backed off, so
+        // the failure was not simply discarded.
+        assert!(
+            m.due_probes(DEFAULT_REFRESH_INTERVAL_MS + DEFAULT_PROBE_TIMEOUT_MS)
+                .iter()
+                .all(|p| p.server != refresh[0].server),
+            "the timed-out server backs off"
         );
     }
 
