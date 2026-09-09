@@ -29,6 +29,25 @@
 //! client that never sends one cannot be the reason a server had to.
 //! [`is_probeable_address`] is the rule, and it is literal-IP only.
 //!
+//! # What this does NOT do: pick the probe server
+//!
+//! `AUTONAT.md`'s Amendment 2026-09-09 settled that the pinned client
+//! chooses its own server -- uniformly at random among connected peers
+//! advertising the protocol -- and exposes no hook to rank or veto one.
+//! So [`ReachabilityManager::due_probes`] is NOT what starts a probe. It
+//! is the schedule an adapter uses to decide **which servers to hold a
+//! connection to** and when a pair's evidence has gone stale enough to
+//! be worth another round: the amendment gives static configuration
+//! exactly that weaker meaning, a server this profile guarantees to be
+//! CONNECTED to. [`ServerSource`] orders that connection preference, not
+//! a selection among peers already connected.
+//!
+//! The crate also reports no event when a probe STARTS -- only
+//! `Event { tested_addr, server, result }` on completion -- so
+//! [`ReachabilityManager::has_outstanding_probe_to`] answers for probes
+//! this manager planned, and an adapter must not read it as "the crate
+//! is probing that server right now".
+//!
 //! # Bounds are enforced here, not only by the configuration that names them
 //!
 //! `max_inflight_probes` and `max_candidate_addresses_per_cycle` are
@@ -792,7 +811,13 @@ mod tests {
     }
 
     #[test]
-    fn static_servers_are_offered_before_identify_learned_ones() {
+    fn static_servers_are_preferred_for_connection_before_identify_learned_ones() {
+        // CONNECTION PREFERENCE, not selection among connected peers:
+        // `AUTONAT.md`'s Amendment 2026-09-09 removed the selection-order
+        // rule because the pinned client cannot express one. What
+        // survives is that a static server is one this profile
+        // guarantees to be connected to, and this ordering is what an
+        // adapter reads to honour that.
         let mut m = manager();
         m.add_server(peer(S2), ServerSource::Identify);
         m.add_server(peer(S1), ServerSource::Static);
