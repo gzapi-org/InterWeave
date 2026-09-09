@@ -483,6 +483,12 @@ impl ReachabilityManager {
             ProbeOutcome::Reachable => {
                 record.consecutive_failures = 0;
                 record.backoff_until_ms = 0;
+                // AND THE INCOMPLETE-PROBE TIMESTAMP, which otherwise
+                // ages without bound: the evidence half it is merged
+                // with expires after `retry_interval_ms`, so a timeout
+                // from a server that has since worked would go on being
+                // what `NotVerified` reports. Review finding on PR #84.
+                record.last_failure_at_ms = None;
             }
             ProbeOutcome::Unreachable | ProbeOutcome::Failed => {
                 record.consecutive_failures = record.consecutive_failures.saturating_add(1);
@@ -518,6 +524,7 @@ impl ReachabilityManager {
             // An `Unreachable` is fresh for one retry interval: long
             // enough to count toward invalidation, short enough not to
             // pin `not_verified` after the condition has passed.
+            // `Failed` returned above and cannot reach here.
             ProbeOutcome::Unreachable | ProbeOutcome::Failed => {
                 now_ms.saturating_add(self.config.retry_interval_ms)
             }
@@ -1146,8 +1153,13 @@ mod tests {
             !m.has_outstanding_probe_to(&peer(S1)),
             "and is no longer outstanding"
         );
-        // But once an address HAS a verdict, the timeout is reported
-        // beside it rather than lost.
+        // AND ONCE AN ADDRESS HAS A VERDICT, the timeout is reported
+        // beside it rather than lost -- with the LATER of the two being
+        // the timeout, which is what makes this a test of the merge.
+        // The first version put the timeout first, so `max` returned the
+        // evidence timestamp either way and dropping the server-record
+        // half was invisible; the commit message claimed it was proved.
+        // Review finding on PR #84.
         let a = "/ip4/8.8.8.8/tcp/4001";
         let _ = m.record_outcome(a, &peer(S1), ProbeOutcome::Unreachable, 20_000);
         assert_eq!(
@@ -1155,6 +1167,53 @@ mod tests {
             ReachabilityVerdict::NotVerified {
                 last_failure_at_ms: Some(20_000)
             }
+        );
+        // A later probe to a SECOND server times out while that
+        // `Unreachable` is still fresh -- it expires at 20_000 + 30_000,
+        // and the timeout lands at 45_000, so the state is still
+        // `NotVerified` and the question is which timestamp it carries.
+        m.add_server(peer(S2), ServerSource::Static);
+        let planned = m.due_probes(30_000);
+        assert!(
+            planned.iter().any(|plan| plan.server == peer(S2)),
+            "the second server must actually be probed: {planned:?}"
+        );
+        let _ = m.expire_inflight(30_000 + DEFAULT_PROBE_TIMEOUT_MS);
+        assert_eq!(
+            *m.state(),
+            ReachabilityVerdict::NotVerified {
+                last_failure_at_ms: Some(30_000 + DEFAULT_PROBE_TIMEOUT_MS)
+            },
+            "the incomplete probe is newer than the evidence, so it is what is reported"
+        );
+    }
+
+    #[test]
+    fn a_success_clears_the_servers_incomplete_probe_timestamp() {
+        // Otherwise the value `NotVerified` reports ages without bound:
+        // the evidence half it is merged with expires after
+        // `retry_interval_ms`, so a timeout from a server that has since
+        // WORKED would go on being reported as the last failure.
+        // Review finding on PR #84.
+        let mut m = manager();
+        m.add_server(peer(S1), ServerSource::Static);
+        let a = "/ip4/8.8.8.8/tcp/4001";
+        let _ = m.due_probes(0);
+        let _ = m.expire_inflight(DEFAULT_PROBE_TIMEOUT_MS);
+        assert_eq!(
+            m.servers.get(&peer(S1)).expect("known").last_failure_at_ms,
+            Some(DEFAULT_PROBE_TIMEOUT_MS)
+        );
+        let _ = m.record_outcome(a, &peer(S1), ProbeOutcome::Reachable, 20_000);
+        // One fresh success against a threshold of two, so the state is
+        // `NotVerified` -- and it must carry NO failure, because the only
+        // one on record belongs to a server that has since answered.
+        assert_eq!(
+            *m.state(),
+            ReachabilityVerdict::NotVerified {
+                last_failure_at_ms: None
+            },
+            "a success clears the timeout that preceded it"
         );
     }
 
@@ -1224,10 +1283,10 @@ mod tests {
         // Re-adding the Identify one as configured must change which is
         // preferred for connection; `or_insert` left it Identify.
         m.add_server(peer(S1), ServerSource::Static);
-        let plans = m.due_probes(0);
-        assert!(
-            plans.iter().any(|p| p.server == peer(S1)),
-            "the upgraded server is now preferred alongside the static one: {plans:?}"
+        assert_eq!(
+            m.servers.get(&peer(S1)).expect("known").source,
+            ServerSource::Static,
+            "the upgraded server is now configured, not Identify-learned"
         );
         // And it does not go the other way.
         m.add_server(peer(S2), ServerSource::Identify);
