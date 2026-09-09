@@ -476,7 +476,9 @@ impl ReachabilityManager {
     /// more than `max_candidates_per_cycle` distinct addresses offered
     /// in one call -- the per-cycle ceiling `AUTONAT.md` §4 names,
     /// applied here because this is where a cycle exists. Addresses are
-    /// considered LEAST-RECENTLY-PROBED FIRST, so a profile with more
+    /// considered LEAST-RECENTLY-OFFERED FIRST -- offered, not
+    /// answered, since a probe that never came back must still move the
+    /// address to the back -- so a profile with more
     /// listeners than the ceiling rotates through them instead of
     /// probing the first few forever. A pair with fresh
     /// success evidence is re-probed only once `refresh_interval_ms` has
@@ -594,15 +596,12 @@ impl ReachabilityManager {
         let record = self.servers.get_mut(server)?;
         let key = (address.to_owned(), server.clone());
         self.inflight.remove(&key);
-        // THE SERVER ACCOUNTING BELOW IS MOSTLY NOT ADDRESS-SCOPED, so
-        // it runs for outcomes whose address this manager does not
-        // track -- the many of them, since `AUTONAT.md` §3's open note
-        // records that the pinned client probes from libp2p's own
-        // candidate set rather than this one. Gating all of it on the
-        // address meant a server that timed out on those probes never
-        // accumulated backoff and one that succeeded never cleared it,
-        // which is health information about the SERVER thrown away for
-        // an address reason. The exception is `Unreachable`, below.
+        // A `Reachable` COUNTS WHATEVER ADDRESS IT NAMED, because it
+        // only ever CLEARS the server's backoff and failure timestamp:
+        // gating it meant a server that succeeded on the many probes
+        // whose address this manager does not track never cleared its
+        // backoff, which is health information thrown away for an
+        // address reason. The failure outcomes are gated, below.
         // Review findings on PR #84.
         let tracked = self.candidates.iter().any(|candidate| candidate == address);
         match outcome {
@@ -616,20 +615,30 @@ impl ReachabilityManager {
                 // what `NotVerified` reports. Review finding on PR #84.
                 record.last_failure_at_ms = None;
             }
-            // AN `Unreachable` FOR AN UNTRACKED ADDRESS IS NOT THE
-            // SERVER'S FAULT. It answered, correctly, about an address
-            // this manager does not track -- and under `AUTONAT.md` §3's
-            // open note that set is remote-influenced, since Identify
-            // pushes every address a peer CLAIMS to have observed into
-            // the candidate set the pinned client probes. Counting those
-            // refusals would let any connected peer drive our own servers
-            // to the five-minute backoff cap by naming addresses that
-            // cannot work -- and `due_probes` skips a backed-off server,
-            // so what gets suppressed is the probing of the addresses we
-            // DO track. `Failed` and `Reachable` stay ungated: those are
-            // about the server, whatever address they named.
-            // Review finding on PR #84.
-            ProbeOutcome::Unreachable if !tracked => {}
+            // NO FAILURE FOR AN UNTRACKED ADDRESS COUNTS AGAINST THE
+            // SERVER. Under `AUTONAT.md` §3's open note that address set
+            // is remote-influenced -- Identify pushes every address a
+            // peer CLAIMS to have observed into the set the pinned client
+            // probes -- so counting failures there lets any connected
+            // peer drive our own servers to the five-minute cap by naming
+            // addresses that cannot work, and `due_probes` skips a
+            // backed-off server: what stops is the probing of the
+            // addresses we DO track.
+            //
+            // BOTH failure outcomes, not just `Unreachable`. An earlier
+            // version gated only that one, reasoning that a `Failed` is
+            // about the exchange rather than the address -- but which
+            // outcome fires is the injector's choice (a closed port gives
+            // `Unreachable`, a blackholed one gives a timeout), so a
+            // one-sided gate is not a boundary. And it costs nothing:
+            // `expire_inflight` synthesises `Failed` only for pairs it
+            // planned, and those are tracked by construction, so our own
+            // timeouts still accumulate backoff exactly as before. What
+            // this drops is an ADAPTER-reported failure for an address we
+            // never asked about -- precisely the attacker-influenced set.
+            // `Reachable` stays ungated because it only ever clears.
+            // Review findings on PR #84.
+            ProbeOutcome::Unreachable | ProbeOutcome::Failed if !tracked => {}
             ProbeOutcome::Unreachable | ProbeOutcome::Failed => {
                 record.consecutive_failures = record.consecutive_failures.saturating_add(1);
                 let shift = record.consecutive_failures.saturating_sub(1).min(16);
@@ -1284,37 +1293,38 @@ mod tests {
         // named. The pinned client probes mostly untracked addresses, so
         // gating this on the address would have left backoff never
         // accumulating and never clearing. Review finding on PR #84.
+        // NEITHER FAILURE OUTCOME COUNTS AGAINST THE SERVER when the
+        // address is one we never asked about. Which outcome fires is
+        // the injector's choice -- a closed port gives `Unreachable`, a
+        // blackholed one gives a timeout -- so gating one and not the
+        // other is not a boundary.
         let untracked = "/ip4/9.9.9.9/tcp/4001";
-        // A TIMEOUT IS THE SERVER'S, whatever address it named.
-        assert!(
-            m.record_outcome(untracked, &peer(S1), ProbeOutcome::Failed, 3)
-                .is_none(),
-            "nothing verified before or after, so no change to report"
-        );
+        for outcome in [ProbeOutcome::Unreachable, ProbeOutcome::Failed] {
+            let _ = m.record_outcome(untracked, &peer(S1), outcome, 3);
+            let record = m.servers.get(&peer(S1)).expect("known");
+            assert_eq!(
+                record.consecutive_failures, 0,
+                "{outcome:?} for an untracked address must not back the server off"
+            );
+            assert_eq!(record.backoff_until_ms, 0);
+        }
+        // OUR OWN TIMEOUTS STILL COUNT, because `expire_inflight`
+        // synthesises `Failed` only for pairs it planned and those are
+        // tracked by construction -- which is why gating both costs
+        // nothing real.
+        let planned = m.due_probes(4);
+        assert!(!planned.is_empty());
+        let _ = m.expire_inflight(4 + DEFAULT_PROBE_TIMEOUT_MS);
         let record = m.servers.get(&peer(S1)).expect("known");
-        assert_eq!(record.consecutive_failures, 1, "the server backs off");
-        assert!(record.backoff_until_ms > 3);
-        // AN `Unreachable` IS NOT: the server answered correctly about an
-        // address we do not track. Counting it would let any peer that
-        // can inject a candidate drive our servers to the backoff cap and
-        // suppress the probes we care about.
-        let before = m
-            .servers
-            .get(&peer(S1))
-            .expect("known")
-            .consecutive_failures;
-        let _ = m.record_outcome(untracked, &peer(S1), ProbeOutcome::Unreachable, 4);
-        assert_eq!(
-            m.servers
-                .get(&peer(S1))
-                .expect("known")
-                .consecutive_failures,
-            before,
-            "an untracked address's refusal is not the server's fault"
+        assert!(
+            record.consecutive_failures > 0,
+            "a timeout on a tracked probe still backs the server off"
         );
-        let _ = m.record_outcome(untracked, &peer(S1), ProbeOutcome::Reachable, 5);
+        // And a success clears it, whatever address it named.
+        let _ = m.record_outcome(untracked, &peer(S1), ProbeOutcome::Reachable, 99_000);
         let record = m.servers.get(&peer(S1)).expect("known");
         assert_eq!(record.backoff_until_ms, 0, "and a success clears it");
+        assert_eq!(record.consecutive_failures, 0);
         assert!(
             m.evidence.is_empty(),
             "still no evidence for an untracked address"
