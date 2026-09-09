@@ -6,12 +6,13 @@
 # >>> help
 # Every tracked shell script passes shellcheck at warning severity.
 #
-# WHY THIS EXISTS. Every shell script the repository owns — the tree
-# checks and their self-tests under `tools/`, and the spike harnesses
-# under `spikes/` — went unread by any check until this guard. The count
-# is deliberately not written here: the success line below prints what
-# was actually judged, and a number in prose is one more thing to
-# falsify. Rust gets
+# WHY THIS EXISTS. Every shell script the repository owns — everything
+# `git ls-files '*.sh'` returns, which today means the tree checks and
+# their self-tests under `tools/`, the spike harnesses under `spikes/`,
+# and the status line under `.claude/` — went unread by any check until
+# this guard. The count is deliberately not written here: the success
+# line below prints what was actually judged, and a number in prose is
+# one more thing to falsify. Rust gets
 # `clippy -D warnings`, Python gets its own checks, and shell got the
 # reviewer's eye and nothing else. Three of the four review rounds on
 # SPIKE-004 phase B found defects in shell that no automated check
@@ -26,13 +27,16 @@
 # a variable holds. That one needed the review.
 #
 # SEVERITY IS `warning`, NOT `style` OR `info`, and the threshold is a
-# judgement rather than a default. At `info` the tree reports 207
-# findings, 159 of them SC2015 on the `A && B || { fail; }` idiom this
-# repository uses deliberately and correctly — C runs when B is false,
-# which is the intent every time. Gating on that would mean rewriting 39
-# scripts to satisfy a note about a construct they use on purpose. At
-# `warning` the tree is clean, and every finding the threshold admits is
-# one shellcheck thinks is probably a bug.
+# judgement rather than a default. At `info` the bulk of what the tree
+# reports is SC2015 on the `A && B || { fail; }` idiom this repository
+# uses deliberately and correctly — C runs when B is false, which is the
+# intent every time — so gating there would mean rewriting most of the
+# tree to satisfy a note about a construct it uses on purpose. (The
+# counts that used to sit here were one shellcheck release's answer
+# about one day's tree, so they are not restated; the self-test pins the
+# judgement instead, at both ends.) At `warning` the tree is clean, and
+# every finding the threshold admits is one shellcheck thinks is
+# probably a bug.
 #
 # WHAT SHELLCHECK READS BESIDES THE FILES, and why it is switched off:
 # `SHELLCHECK_OPTS` in the environment and `.shellcheckrc` files (from
