@@ -12,10 +12,12 @@
 # being visible.
 #
 # The negative cases exist so the guard is not refused for crying wolf:
-# the idiom this repository uses deliberately (`A && B || { fail; }`,
-# SC2015 at info) must NOT fail it, or the guard would demand rewriting
-# most of the tree to satisfy a note about a construct it uses on
-# purpose.
+# the two `A && B || C` shapes this repository uses deliberately -- the
+# `[ A ] && [ B ] || { fail; }` guard, which SC2015 exempts, and the
+# `cond && pass || fail` assertion every self-test here is built from,
+# which SC2015 flags at info -- must NOT fail it at `warning`, or the
+# guard would demand rewriting most of the tree to satisfy a note about
+# constructs it uses on purpose.
 #
 # Each case runs the guard against a SANDBOX git repository rather than
 # the real tree, because the guard takes its file list from `git ls-files`
@@ -175,36 +177,41 @@ echo done'
 expect_status 1 "an unused assignment (SC2034) is refused as a FINDING"
 cleanup; SANDBOX=""
 
-# 3. THE NEGATIVE CONTROL: the `A && B || { ...; exit N; }` idiom this
-#    repository uses deliberately must pass -- and on 0.11.0 it passes at
-#    EVERY severity, because SC2015 exempts a fail arm that exits. Two
-#    earlier versions of this case asserted it was refused at `info`; the
-#    first passed only because an unrelated directive-parse error fired
-#    at every severity, and the second failed in CI the moment that
-#    error was fixed. The idiom is not what `info` reports, and this case
-#    now says so at both ends. Review findings on PR #82.
+# 3. THE NEGATIVE CONTROL: the `[ A ] && [ B ] || { ...; exit N; }`
+#    guard idiom this repository uses deliberately must pass -- and on
+#    0.11.0 it passes at EVERY severity, because SC2015 exempts a chain
+#    whose middle command is itself a test: `[ ]`/`[[ ]]` can only fail
+#    as a condition, so the chain reads as if-then-else. (Two earlier
+#    versions asserted the reason was the fail arm exiting; a fixture
+#    with `|| touch` was exempt too, which settled it. Three versions
+#    asserted this fixture is refused at `info`; the first passed only
+#    because an unrelated directive-parse error fired at every severity,
+#    and the next two failed in CI.) Review findings on PR #82.
 sandbox_with '#!/usr/bin/env bash
 value=5
 [ "$value" -ge 1 ] && [ "$value" -le 10 ] \
   || { echo "out of range" >&2; exit 2; }
 echo "$value"'
 expect_status 0 "the deliberate A && B || { ...; exit N; } idiom passes at warning severity"
-expect_status 0 "and at info too: a fail arm that exits is exempt from SC2015" \
+expect_status 0 "and at info too: a chain whose middle command is a test is exempt from SC2015" \
     INTERWEAVE_SHELLCHECK_SEVERITY=info
 cleanup; SANDBOX=""
 
-# 3b. THE THRESHOLD, pinned at both ends BY CONTENT. A fixture whose
-#    fail arm does NOT exit -- so C runs when A is true, which is what
-#    SC2015 warns about -- is refused at `info` with SC2015 named in the
-#    output against the fixture's path, and admitted at `warning`. The
-#    content assertion is what makes this a test of that finding rather
-#    than of any finding anywhere in the sandbox, the guard's own tracked
-#    copy included. Review finding on PR #82.
+# 3b. THE THRESHOLD, pinned at both ends BY CONTENT. A chain whose
+#    middle command is an ACTION -- `cond && cp || rm`, the shape where
+#    C running after a failed B is the bug SC2015 describes, and the
+#    `cond && pass || fail` shape every self-test in this directory uses
+#    -- is refused at `info` with SC2015 named in the output against
+#    the fixture's path, and admitted at `warning`. The content
+#    assertion is what makes this a test of that finding rather than of
+#    any finding anywhere in the sandbox, the guard's own tracked copy
+#    included. Verified on the pinned 0.11.0 before it was written, this
+#    time. Review findings on PR #82.
 sandbox_with '#!/usr/bin/env bash
 value=5
-[ "$value" -ge 1 ] && [ "$value" -le 10 ] || touch /tmp/out-of-range
+[ -n "$value" ] && cp "$value" backup || rm -f backup
 echo "$value"'
-expect_status 1 "a fail arm that continues is refused at severity=info" \
+expect_status 1 "a chain with an action as its middle command is refused at severity=info" \
     INTERWEAVE_SHELLCHECK_SEVERITY=info
 if [[ "$GUARD_OUTPUT" == *"SC2015"* && "$GUARD_OUTPUT" == *"scripts/case.sh"* ]]; then
     pass "and the finding named is SC2015, on the fixture"

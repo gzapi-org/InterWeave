@@ -29,15 +29,19 @@
 # SEVERITY IS `warning`, NOT `style` OR `info`, and the threshold is a
 # judgement rather than a default: `info` and `style` are advisory
 # notes, and `warning` is where shellcheck starts saying "probably a
-# bug". At `warning` the tree is clean. An earlier version of this
-# paragraph justified the choice by SC2015 on the `A && B || { ...;
-# exit N; }` idiom this repository uses on purpose, with counts -- and
-# the self-test then showed that on the pinned 0.11.0 that idiom is
-# EXEMPT from SC2015 at every severity, because the fail arm exits. So
-# what the tree reports at `info` was not the reason, and it has not
-# been measured on the pinned release; the self-test pins the threshold
-# at both ends with a fixture that does fire SC2015 (a fail arm that
-# continues), and the judgement stands on its own.
+# bug". MEASURED on the pinned 0.11.0, 2026-09-09, over this tree's 45
+# tracked scripts: at `warning` it is clean; at `info` it reports 158
+# SC2015, 20 SC2016, 8 SC2329 and 3 SC2086. The SC2015 sites are the
+# `cond && pass || fail` assertion shape every self-test under `tools/`
+# is built from -- `A && B || C` with an ACTION as B -- used on purpose
+# and correctly, so gating at `info` would mean rewriting the suites to
+# satisfy a note. (The `[ A ] && [ B ] || { fail; }` guard idiom is a
+# different shape: SC2015 exempts a chain whose B is itself a test, and
+# an earlier version of this paragraph, having measured only that
+# shape, wrongly concluded the idiom was exempt altogether.) The numbers
+# are one release's answer about one day's tree, dated and versioned
+# for that reason; the self-test pins the threshold at both ends with
+# fixtures of both shapes.
 #
 # WHAT SHELLCHECK READS BESIDES THE FILES, and why it is switched off:
 # `SHELLCHECK_OPTS` in the environment and `.shellcheckrc` files (from
