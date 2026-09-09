@@ -92,6 +92,7 @@ fn entry(name: &str) -> EndpointConfig {
 
 fn profile(desired: &[&str]) -> ProfileConfig {
     ProfileConfig {
+        transport: Default::default(),
         schema_version: 2,
         trust: TrustConfig {
             policy: TrustPolicyKind::default(),
