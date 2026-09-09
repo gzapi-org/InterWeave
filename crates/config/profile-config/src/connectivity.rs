@@ -953,20 +953,24 @@ impl ConnectivityConfig {
 
     /// The schema's own "Cross-field validation" list for this block.
     ///
-    /// TWO SCHEMA RULES OVER `connectivity` ARE NOT HERE AND CANNOT BE.
-    /// `# Runtime cross-field validation` says
-    /// `runtime.deployment=embedded-android => connectivity AutoNAT/relay
-    /// server roles are false and Kademlia mode is client`. Its
-    /// antecedent lives in `runtime`, which no Rust type models, so this
-    /// block cannot see it — an android profile enabling a relay server
-    /// is refused by nothing today; the check belongs wherever `runtime`
-    /// first gets a type. And the block's own list ends with "static
-    /// configured candidates have selection precedence until their
-    /// target cannot be met", which is a runtime selection rule with no
-    /// configuration-time shape — its first half, Identify-learned
+    /// THREE SCHEMA RULES OVER `connectivity` ARE NOT IN THIS BLOCK, and
+    /// they are named rather than counted, because the count here has
+    /// been wrong twice. Two are enforced nowhere: `# Runtime cross-field
+    /// validation`'s `runtime.deployment=embedded-android => connectivity
+    /// AutoNAT/relay server roles are false and Kademlia mode is client`,
+    /// whose antecedent lives in `runtime`, which no Rust type models, so
+    /// an android profile enabling a relay server is refused by nothing
+    /// today; and "static configured candidates have selection precedence
+    /// until their target cannot be met", a runtime selection rule with
+    /// no configuration-time shape (its first half, Identify-learned
     /// candidates off by default, IS here as the two `use_authorized_*`
-    /// defaults. Stated rather than left to a reader who takes the doc
-    /// line above for a claim of completeness. Review findings on PR #80.
+    /// defaults, pinned by the no-transport-block test). The third is
+    /// enforced ELSEWHERE: "a PeerId in both sets is treated as
+    /// DataPlaneTrusted for protocol admission" is
+    /// `ConnectionManager::classify`'s order -- local peer, then
+    /// `PeerTrustPolicy`, then `InfrastructureSet` -- and needs no check
+    /// here. Stated rather than left to a reader who takes the doc line
+    /// above for a claim of completeness. Review findings on PR #80.
     fn check_cross_fields(&self, errors: &mut Vec<ConfigError>) {
         let relay_client = &self.relay.client;
         let relay_server = &self.relay.server;
@@ -1324,8 +1328,9 @@ mod tests {
         // it from `impl Default` on both sides, the two agree for free,
         // and the per-field path goes untested in silence. That is the
         // shape `shipped_examples.rs` closed twice. Serializing the
-        // default and hollowing every object to `{}` names exactly the
-        // blocks the type has, whatever they are. Review finding on
+        // default and hollowing every object to `{}` names every block
+        // that serializes as an object -- true of this type, and pinned
+        // by the exact list below rather than assumed. Review finding on
         // PR #80.
         fn hollow(value: serde_json::Value) -> serde_json::Value {
             match value {
@@ -1335,25 +1340,51 @@ mod tests {
                         .map(|(k, v)| (k, hollow(v)))
                         .collect(),
                 ),
-                _ => unreachable!("only objects are kept by the filter above"),
+                _ => unreachable!(
+                    "the first call is `to_value` of a struct and every later one passed `is_object`"
+                ),
             }
         }
         let document = hollow(
             serde_json::to_value(ConnectivityConfig::default()).expect("the default serializes"),
         );
-        let blocks: Vec<&String> = document
+        // THE GUARD IS THE HAND-MAINTAINED LIST, not the document. A block
+        // that serialized as something other than an object, or carried
+        // `skip_serializing_if`, would be dropped by `hollow` exactly as a
+        // literal would have omitted it -- and `>= 5` was satisfied by a
+        // document that lost one block and gained another. A list in the
+        // guard fails loudly when the type changes; a list in the
+        // document failed silently, which was the whole point.
+        // Review finding on PR #80.
+        let blocks: Vec<&str> = document
             .as_object()
             .expect("the block is an object")
             .keys()
+            .map(String::as_str)
             .collect();
-        assert!(
-            blocks.len() >= 5,
-            "the derived document must name the nested blocks, or it tests nothing: {blocks:?}"
+        assert_eq!(
+            blocks,
+            [
+                "address_advertisement",
+                "autonat",
+                "dcutr",
+                "infrastructure",
+                "relay"
+            ],
+            "the derived document must name exactly the nested blocks the type has"
         );
-        assert!(
-            blocks.iter().any(|k| k.as_str() == "infrastructure"),
-            "and `infrastructure` is one of them -- a hand-written list left it out: {blocks:?}"
-        );
+        for (parent, children) in [
+            ("autonat", ["client", "server"]),
+            ("relay", ["client", "server"]),
+        ] {
+            let got: Vec<&str> = document[parent]
+                .as_object()
+                .expect("a sub-block is an object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(got, children, "`{parent}` must name exactly its two roles");
+        }
         let every_block_named = profile_with(&document.to_string())
             .expect("naming a block without its fields is legal")
             .transport

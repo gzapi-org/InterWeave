@@ -1575,8 +1575,8 @@ connects with no diagnostic anywhere, and the only legible place to
 refuse it is configuration.
 
 It also supplies the **first production constructor of an
-`InfrastructureSet`** — ADR-0036's second class has been expressible in
-code since Stage 5 and in a profile document never — by making the
+`InfrastructureSet`** — ADR-0036's second class had been expressible in
+code since Stage 5 and in a profile document never, until this block — by making the
 `infrastructure` field that type rather than a parallel one, so the
 ceiling and the bounded-sequence guard are not duplicated. A profile
 that says nothing about transport gets standard v1's client roles
