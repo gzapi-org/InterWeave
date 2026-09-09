@@ -386,10 +386,15 @@ the one that fires when the topology is up and nothing traversed it.)
 `probe.sh` validates its own trial list the same way, and for the same
 reason: `class` starts at `eim` and only a disagreeing trial moves it,
 so a list naming nothing would report ENDPOINT-INDEPENDENT and exit 0
-having measured nothing. It requires at least two tokens; each numeric and in
-1–65535, because `*[!0-9]*` admits `0`, `70000` and a token that wraps
-negative, and `bind=:0` binds ANY port, which breaks the premise that
-both sockets share one internal tuple and measures a correct `eim`
+having measured nothing. It requires at least two tokens; each numeric,
+with no more than five digits once leading zeros are stripped — checked
+BEFORE the arithmetic, because a twenty-digit token wraps under
+`$((10#…))` and `18446744073709551617` wraps to 1, which a range check
+after the arithmetic admits (an earlier version of this sentence said
+such a token "wraps negative" and credited the range check with
+refusing it; it does not) — and in 1–65535, because `*[!0-9]*` admits
+`0` and `70000`, and `bind=:0` binds ANY port, which breaks the premise
+that both sockets share one internal tuple and measures a correct `eim`
 topology as `eds`; and
 distinct once normalised, since `45000` and `045000` are two spellings
 of one tuple and one trial re-opens the coincidence the trials exist to
