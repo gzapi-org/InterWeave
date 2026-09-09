@@ -1334,7 +1334,9 @@ loopback, so the exit gate's NAT/relay/hole-punch matrix was unmet (the
 NAT row has since been ruled satisfied; see the 2026-09-09 ruling below,
 and the relay and hole-punch rows remain unmet) and
 **phase B is required before stage closure**: a public VM and
-home/symmetric/carrier NAT, two independently operated relay/probe
+home/symmetric/carrier NAT (the NAT row of this item is the one ruled
+satisfied below; the public VM and the carrier's CGNAT are its
+deferrals), two independently operated relay/probe
 services, **relay loss and capacity denial**, interface change,
 hole-punch success rates, measured resource cost against the default
 budgets. That is six items,
@@ -1364,10 +1366,11 @@ shape Stage 9 used for mDNS and Stage 10 for the release gate.
 the exit gate is satisfied by that matrix, measured in both halves RFC
 4787 defines. The three deferrals are what was carved OUT of that row and
 carried forward as named limits rather than discharged: the public VM
-and a carrier's CGNAT are the two halves of item 1 above that a
-container is not, and hole-punch success rates against NAT as deployed
-are item 5, which the row never claimed. **So the ruling settles item 1
-and no other**: two independently operated relay and probe services,
+and a carrier's CGNAT are the parts of item 1 above that the same item
+also names and a container is not, and hole-punch success rates against
+NAT as deployed are item 5, which the row never claimed. **So the ruling
+satisfies the NAT row of item 1 and touches no other item**: two
+independently operated relay and probe services,
 relay loss and capacity denial, network-interface change, success rates
 and resource cost against the default budgets are all still phase B —
 success rates appearing both as a deferral out of the NAT row and as an
