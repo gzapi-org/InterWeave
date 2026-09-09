@@ -14,8 +14,9 @@
 # The negative cases exist so the guard is not refused for crying wolf:
 # the two `A && B || C` shapes this repository uses deliberately -- the
 # `[ A ] && [ B ] || { fail; }` guard, which SC2015 exempts, and the
-# `cond && pass || fail` assertion most self-tests here are built from,
-# which SC2015 flags at info -- must NOT fail it at `warning`, or the
+# `cond && pass || fail` assertion most self-tests under `tools/checks/`
+# are built from, which SC2015 flags at info -- must NOT fail it at
+# `warning`, or the
 # guard would demand rewriting most of the tree to satisfy a note about
 # constructs it uses on purpose.
 #
@@ -184,11 +185,13 @@ cleanup; SANDBOX=""
 #    as a condition, so the chain reads as if-then-else. (Two earlier
 #    versions asserted the reason was the fail arm exiting; a fixture
 #    with `|| touch` was exempt too, which settled it. Two CI runs
-#    passed an assertion that this fixture is refused at `info`, both
-#    only because an unrelated directive-parse error fired at every
-#    severity; the run after that error was fixed failed it; the `||
-#    touch` fixture then failed a run of its own.) Review findings on
-#    PR #82.
+#    passed an assertion that this fixture is refused at `info`, each
+#    for a reason that was not SC2015: the first because the
+#    NUL-truncated file list made the guard exit 2 at every severity,
+#    the second because an unrelated directive-parse error fired at
+#    every severity; the run after that error was fixed failed it; the
+#    `|| touch` fixture then failed a run of its own.) Review findings
+#    on PR #82.
 sandbox_with '#!/usr/bin/env bash
 value=5
 [ "$value" -ge 1 ] && [ "$value" -le 10 ] \

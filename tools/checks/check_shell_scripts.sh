@@ -33,7 +33,8 @@
 # tracked scripts (the OK line prints how many): at `warning` it is
 # clean; at `info` it reports 158 SC2015, 20 SC2016, 8 SC2329 and 3
 # SC2086. The SC2015 sites are the `cond && pass || fail` assertion
-# shape most self-tests under `tools/` are built from -- `A && B || C`
+# shape most self-tests under `tools/checks/` are built from (ten of
+# the twenty-two under `tools/` in all; the rest use if/else) -- `A && B || C`
 # with an ACTION as B -- used on purpose
 # and correctly, so gating at `info` would mean rewriting the suites to
 # satisfy a note. (The `[ A ] && [ B ] || { fail; }` guard idiom is a
