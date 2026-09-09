@@ -967,11 +967,13 @@ impl ConnectivityConfig {
     /// defaults, pinned by the no-transport-block test). The third is
     /// enforced ELSEWHERE: "a PeerId in both sets is treated as
     /// DataPlaneTrusted for protocol admission" is
-    /// `ConnectionManager::classify`'s order -- local peer, then
+    /// `TrustSources::classify`'s order (reached through
+    /// `ConnectionManager::classify`) -- local peer, then
     /// `PeerTrustPolicy`, then `InfrastructureSet` -- pinned by
     /// `a_peer_in_both_sets_is_data_plane_trusted` in the runtime crate,
-    /// and needs no check here. Stated rather than left to a reader who takes the doc line
-    /// above for a claim of completeness. Review findings on PR #80.
+    /// and needs no check here. Stated rather than left to a reader who
+    /// takes the doc line above for a claim of completeness. Review
+    /// findings on PR #80.
     fn check_cross_fields(&self, errors: &mut Vec<ConfigError>) {
         let relay_client = &self.relay.client;
         let relay_server = &self.relay.server;
