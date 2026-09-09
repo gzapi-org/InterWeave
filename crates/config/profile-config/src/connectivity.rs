@@ -34,6 +34,8 @@ use interweave_transport_api::TransportIdentity;
 use interweave_trust_api::InfrastructureSet;
 use serde::{Deserialize, Serialize};
 
+use interweave_discovery_api::MAX_ADDRESS_BYTES;
+
 use crate::{
     ConfigError, MAX_STATIC_PEER_BYTES, de_bytes, de_duration_ms, default_true, ser_bytes,
     ser_duration_ms, split_peer_multiaddr,
@@ -599,8 +601,11 @@ const fn default_stability_ms() -> u32 {
 /// mistake this crate already fixed once for
 /// `discovery.providers.*.peers` and documented above
 /// `MAX_STATIC_PEER_BYTES`. It was reintroduced here and caught in
-/// review on PR #80. The address half is checked by
-/// `check_static_candidate_trust`, which has already split the entry.
+/// review on PR #80, and the address half was then claimed to be checked
+/// by `check_static_candidate_trust` when that function only split the
+/// entry and read its grammar — so the slack between the two ceilings,
+/// 460 bytes of address under a 517-byte entry, went unbounded. It
+/// checks the length now.
 ///
 /// JUDGED AS IT ARRIVES, not after collecting. `Vec::<String>::deserialize`
 /// parses and allocates the entire input first, so the count check
@@ -694,6 +699,7 @@ impl ConnectivityConfig {
         self.check_literals(errors);
         self.check_ranges(errors);
         self.check_cross_fields(errors);
+        self.check_candidate_bounds(errors);
         self.check_static_candidate_trust(trusted, errors);
     }
 
@@ -1023,6 +1029,55 @@ impl ConnectivityConfig {
         }
     }
 
+    /// The candidate list's COUNT and each entry's LENGTH, checked here
+    /// as well as while reading.
+    ///
+    /// THESE FIELDS ARE PUBLIC AND THESE STRUCTS ARE CONSTRUCTIBLE IN
+    /// RUST. Every other bound in this block is enforced by `validate`,
+    /// while the candidate bounds lived only in the deserializer — so a
+    /// caller building a `RelayClientConfig` directly could hold five
+    /// hundred candidates, or one of any length, and pass
+    /// `ProfileConfig::validate()`. Stage 12's composition root is
+    /// exactly such a caller. Codex review on PR #80.
+    ///
+    /// Not a duplicate of the deserializer's guard but a different
+    /// question: that one bounds what is READ, before the input is
+    /// allocated, and this one bounds what is HELD, whatever built it.
+    fn check_candidate_bounds(&self, errors: &mut Vec<ConfigError>) {
+        for (role, candidates) in [
+            (
+                "autonat.client.static_servers",
+                &self.autonat.client.static_servers,
+            ),
+            (
+                "relay.client.static_relays",
+                &self.relay.client.static_relays,
+            ),
+        ] {
+            if candidates.len() > MAX_STATIC_CANDIDATES {
+                errors.push(ConfigError::ConnectivityOutOfRange {
+                    field: match role {
+                        "autonat.client.static_servers" => {
+                            "connectivity.autonat.client.static_servers"
+                        }
+                        _ => "connectivity.relay.client.static_relays",
+                    },
+                    got: candidates.len() as u64,
+                    allowed: (0, MAX_STATIC_CANDIDATES as u64),
+                });
+            }
+            for candidate in candidates {
+                if candidate.len() > MAX_STATIC_PEER_BYTES {
+                    errors.push(ConfigError::StaticCandidateNotPeerQualified {
+                        role,
+                        entry: candidate.clone(),
+                        reason: "the entry is longer than a candidate entry may be",
+                    });
+                }
+            }
+        }
+    }
+
     /// Every static candidate must be peer-qualified and authorized.
     ///
     /// The schema's rule: a static relay or AutoNAT server PeerId is in
@@ -1071,6 +1126,22 @@ impl ConnectivityConfig {
                         entry: candidate.clone(),
                         reason,
                     }),
+                    // EACH HALF AGAINST ITS OWN LIMIT, which is what
+                    // `MAX_STATIC_PEER_BYTES`'s own doc comment says
+                    // happens and what the static-bootstrap consumer
+                    // does. The entry ceiling is the SUM of the parts,
+                    // so on its own it accepts an address of up to 460
+                    // bytes -- a PeerId is 52, not the 256 the sum
+                    // reserves for it -- and `split_peer_multiaddr`
+                    // checks the address's GRAMMAR, never its length.
+                    // Review finding on PR #80.
+                    Ok((address, _)) if address.len() > MAX_ADDRESS_BYTES => {
+                        errors.push(ConfigError::StaticCandidateNotPeerQualified {
+                            role,
+                            entry: candidate.clone(),
+                            reason: "the address is longer than a candidate address may be",
+                        });
+                    }
                     Ok((_, peer)) => {
                         if !trusted.contains(&peer)
                             && !self.infrastructure.permits_control_connection(&peer)
@@ -1086,8 +1157,6 @@ impl ConnectivityConfig {
 
 #[cfg(test)]
 mod tests {
-    use interweave_discovery_api::MAX_ADDRESS_BYTES;
-
     use super::*;
     use crate::ProfileConfig;
 
@@ -1258,19 +1327,19 @@ mod tests {
         // check gained without a row here would be untested, and the
         // pairing is visible when both are lists.
         //
-        // 22 ROWS AGAINST THE CHECK'S 28, and the six absences are
-        // deliberate rather than the coverage gap this comment used to
-        // paper over. `target_reservations_*` and the two
-        // `*_per_peer` ceilings are exercised by the cross-field test,
-        // which drives them past their partners; `autonat.version` and
-        // `dcutr.max_inflight_per_peer` are exercised by the literal
-        // test, which is where a pinned number's refusal belongs. An
-        // earlier version had eight rows and claimed the pairing anyway.
-        // Review finding on PR #80.
+        // ONE ROW PER ROW THE CHECK HAS: 28 against 28, which is what
+        // makes the pairing above a fact rather than an aspiration. It
+        // took three tries. Eight rows claimed the pairing outright; 22
+        // excused the six absences with an accounting that named two
+        // fields the check does not even hold (`autonat.version` and
+        // `dcutr.max_inflight_per_peer` come from `check_literals`) and
+        // quietly left `retry_min`/`retry_max` with no range coverage at
+        // all -- the cross-field case that reverses them uses two
+        // IN-RANGE values. Review findings on PR #80.
         //
         // Each row is (json body template, field, below, inside, above).
         // `{}` is where the value goes, so one row exercises all three.
-        let rows: [(&str, &str, i64, i64, i64); 22] = [
+        let rows: [(&str, &str, i64, i64, i64); 28] = [
             (
                 r#"{"autonat":{"client":{"required_distinct_successes":{}}}}"#,
                 "connectivity.autonat.client.required_distinct_successes",
@@ -1429,6 +1498,49 @@ mod tests {
                 999,
                 120000,
                 120001,
+            ),
+            // THE SIX THE ACCOUNTING USED TO EXCUSE.
+            (
+                r#"{"relay":{"client":{"retry_min":{}}}}"#,
+                "connectivity.relay.client.retry_min",
+                999,
+                60000,
+                60001,
+            ),
+            (
+                r#"{"relay":{"client":{"retry_max":{}}}}"#,
+                "connectivity.relay.client.retry_max",
+                29999,
+                1800000,
+                1800001,
+            ),
+            (
+                r#"{"relay":{"client":{"target_reservations_private_or_unknown":{}}}}"#,
+                "connectivity.relay.client.target_reservations_private_or_unknown",
+                0,
+                4,
+                5,
+            ),
+            (
+                r#"{"relay":{"client":{"target_reservations_public":{}}}}"#,
+                "connectivity.relay.client.target_reservations_public",
+                NO_LOWER_EDGE,
+                4,
+                5,
+            ),
+            (
+                r#"{"relay":{"server":{"max_reservations_per_peer":{}}}}"#,
+                "connectivity.relay.server.max_reservations_per_peer",
+                0,
+                4,
+                5,
+            ),
+            (
+                r#"{"relay":{"server":{"max_circuits_per_peer":{}}}}"#,
+                "connectivity.relay.server.max_circuits_per_peer",
+                0,
+                16,
+                17,
             ),
         ];
         for (template, field, below, inside, above) in rows {
@@ -1694,18 +1806,39 @@ mod tests {
         );
     }
 
+    /// A grammatically legal `/dns4/<host>/tcp/4001` whose host is
+    /// exactly `host_bytes` long.
+    ///
+    /// TWO GRAMMAR BOUNDS TO RESPECT, both in
+    /// `validate_address_grammar`: no label over 63 bytes, and no host
+    /// over 253. A single `"a".repeat(200)` host violates the first and a
+    /// 300-byte host the second, so both of this test's first two
+    /// fixtures were illegal addresses refused for a reason the
+    /// assertions were not looking at. Review finding on PR #80.
+    fn dns_address(host_bytes: usize) -> String {
+        let mut host = String::new();
+        while host.len() < host_bytes {
+            if !host.is_empty() {
+                host.push('.');
+            }
+            let room = host_bytes - host.len();
+            host.push_str(&"a".repeat(room.min(50)));
+        }
+        assert_eq!(host.len(), host_bytes, "the fixture must be exact");
+        format!("/dns4/{host}/tcp/4001")
+    }
+
     #[test]
     fn a_static_candidate_entry_is_bounded_by_the_entry_ceiling_not_the_address_one() {
-        // THE ENTRY IS LONGER THAN THE ADDRESS IT CONTAINS. A 220-byte
+        // THE ENTRY IS LONGER THAN THE ADDRESS IT CONTAINS. A 218-byte
         // address plus `/p2p/` plus a 52-byte PeerId is a legal entry and
         // was refused while the address limit was applied to the whole
         // thing -- a limit contradicting the API it feeds, which this
         // crate had already fixed once for the static provider's peers.
-        // Review finding on PR #80.
-        let long_address = format!("/dns4/{}/tcp/4001", "a".repeat(200));
+        let long_address = dns_address(200);
         assert!(
-            long_address.len() > 200 && long_address.len() <= MAX_ADDRESS_BYTES,
-            "the fixture must be a legal address: {}",
+            long_address.len() > MAX_ADDRESS_BYTES / 2 && long_address.len() <= MAX_ADDRESS_BYTES,
+            "the fixture must be a legal address within the address limit: {}",
             long_address.len()
         );
         let entry = format!("{long_address}/p2p/{P1}");
@@ -1719,25 +1852,123 @@ mod tests {
                  "relay":{{"client":{{"static_relays":["{entry}"]}}}}}}"#
         );
         let config = profile_with(&body).expect("a legal address with its peer suffix parses");
+        // NO `StaticCandidate*` ERROR AT ALL, not merely no
+        // `Unauthorized` one: filtering for a single variant is how the
+        // first version of this assertion passed while the grammar check
+        // was rejecting the entry.
+        let errors = config.validate();
         assert!(
-            !config
-                .validate()
-                .iter()
-                .any(|e| matches!(e, ConfigError::StaticCandidateUnauthorized { .. })),
-            "and it is authorized, so nothing else refuses it"
+            !errors.iter().any(|e| matches!(
+                e,
+                ConfigError::StaticCandidateUnauthorized { .. }
+                    | ConfigError::StaticCandidateNotPeerQualified { .. }
+            )),
+            "a legal entry under the entry ceiling must draw no candidate complaint: {errors:?}"
         );
 
-        // The entry ceiling still bites above its own bound.
-        let over = format!(
-            "/dns4/{}/tcp/4001/p2p/{P1}",
-            "a".repeat(MAX_STATIC_PEER_BYTES)
+        // THE ADDRESS HALF IS STILL BOUNDED. A 253-byte host is the
+        // longest the grammar allows, giving a 268-byte address -- over
+        // the 256 limit, and leaving the entry at 325, well under the
+        // 517-byte ceiling. So only a per-half check refuses it, which is
+        // exactly the slack the entry ceiling alone leaves open.
+        let over_address = dns_address(253);
+        assert!(
+            over_address.len() > MAX_ADDRESS_BYTES,
+            "the fixture must exceed the address limit: {}",
+            over_address.len()
         );
-        let body = format!(r#"{{"relay":{{"client":{{"static_relays":["{over}"]}}}}}}"#);
+        let entry = format!("{over_address}/p2p/{P1}");
+        assert!(
+            entry.len() < MAX_STATIC_PEER_BYTES,
+            "and stay under the ENTRY limit, or the entry ceiling would catch it: {}",
+            entry.len()
+        );
+        let body = format!(
+            r#"{{"infrastructure":{{"allowed_peers":["{P1}"]}},
+                 "relay":{{"client":{{"static_relays":["{entry}"]}}}}}}"#
+        );
+        let errors = profile_with(&body)
+            .expect("it is under the entry ceiling, so it parses")
+            .validate();
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ConfigError::StaticCandidateNotPeerQualified { reason, .. }
+                    if reason.contains("longer than a candidate address")
+            )),
+            "an over-long address half must be refused: {errors:?}"
+        );
+
+        // And the entry ceiling still bites above its own bound, while
+        // reading.
+        // An entry over the ceiling cannot be built from a legal DNS
+        // address -- 268 is the grammatical maximum -- but the entry
+        // length is checked while READING, before anything parses it, so
+        // a long junk host reaches that check first.
+        let over_entry = format!("/dns4/{}/tcp/4001/p2p/{P1}", "a".repeat(600));
+        let body = format!(r#"{{"relay":{{"client":{{"static_relays":["{over_entry}"]}}}}}}"#);
         let err = profile_with(&body).expect_err("an over-ceiling entry is refused");
         assert!(
             err.to_string().contains("at most"),
             "the refusal must name the ceiling: {err}"
         );
+    }
+
+    #[test]
+    fn the_candidate_bounds_hold_for_a_caller_that_never_deserialized() {
+        // THE DESERIALIZER IS NOT THE ONLY DOOR. These fields are public
+        // and these structs are constructible, so a Rust caller -- Stage
+        // 12's composition root, say -- reaches `validate()` without
+        // passing the sequence guard at all. Every other bound in the
+        // block was enforced there and these two were not.
+        // Codex review on PR #80.
+        let mut config = ConnectivityConfig::default();
+        config.relay.client.static_relays = (0..MAX_STATIC_CANDIDATES + 1)
+            .map(|i| format!("/ip4/203.0.113.{}/tcp/4001/p2p/{P1}", i % 250))
+            .collect();
+        let mut errors = Vec::new();
+        config.validate_into(&BTreeSet::new(), &mut errors);
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ConfigError::ConnectivityOutOfRange { field, got, .. }
+                    if *field == "connectivity.relay.client.static_relays"
+                        && *got as usize == MAX_STATIC_CANDIDATES + 1
+            )),
+            "a list built in Rust must still be bounded: {errors:?}"
+        );
+
+        // AND EACH ENTRY'S LENGTH, for the same reason.
+        let mut config = ConnectivityConfig::default();
+        config.autonat.client.static_servers =
+            vec![format!("/dns4/{}/tcp/4001/p2p/{P1}", "a".repeat(600))];
+        let mut errors = Vec::new();
+        config.validate_into(&BTreeSet::new(), &mut errors);
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ConfigError::StaticCandidateNotPeerQualified { reason, .. }
+                    if reason.contains("longer than a candidate entry")
+            )),
+            "an over-long entry built in Rust must still be refused: {errors:?}"
+        );
+
+        // THE CONTROL: a list at the ceiling draws neither complaint, so
+        // the checks above are not refusing everything.
+        let mut config = ConnectivityConfig::default();
+        config.relay.client.static_relays = (0..MAX_STATIC_CANDIDATES)
+            .map(|i| format!("/ip4/203.0.113.{i}/tcp/4001/p2p/{P1}"))
+            .collect();
+        let mut errors = Vec::new();
+        config.validate_into(&[peer_id(P1)].into_iter().collect(), &mut errors);
+        assert!(
+            errors.is_empty(),
+            "exactly the ceiling, all authorized, must pass: {errors:?}"
+        );
+    }
+
+    fn peer_id(s: &str) -> TransportIdentity {
+        TransportIdentity::parse(s).expect("a valid identity")
     }
 
     #[test]
@@ -1756,6 +1987,12 @@ mod tests {
         assert!(
             text.contains(r#""retry_interval":"45s""#),
             "a duration must be written back in its own unit: {text}"
+        );
+        // AND THE BYTE SIZE, which the round trip alone does not pin: a
+        // `ser_bytes` that emitted the bare count would still re-parse.
+        assert!(
+            text.contains(r#""max_circuit_bytes":"64MiB""#),
+            "a byte size must be written back in its largest exact unit: {text}"
         );
         let again = serde_json::from_str::<ProfileConfig>(&text).expect("re-parses");
         assert_eq!(

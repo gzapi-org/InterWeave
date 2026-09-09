@@ -111,6 +111,12 @@ fn examples() -> Result<Vec<PathBuf>, String> {
 /// Serialization is the oracle: every field of `ProfileConfig` is
 /// serialized, so the keys of a round-tripped value ARE the sections this
 /// crate models. A new section therefore fails here until it is listed.
+///
+/// TRUE OF THIS TYPE, NOT BY CONSTRUCTION. A future field carrying
+/// `skip_serializing_if` would be modelled, absent from a minimal
+/// profile's serialization, and projected away with this test still
+/// green. No field carries one today and the assertion is
+/// two-directional, which is as far as serialization can take it.
 #[test]
 fn the_modelled_list_names_every_section_the_type_models() {
     let minimal: ProfileConfig = serde_norway::from_str(
@@ -133,6 +139,34 @@ fn the_modelled_list_names_every_section_the_type_models() {
         modelled.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
         "MODELLED and the sections ProfileConfig serializes must agree; \
          a section missing from MODELLED is projected away and silently untested"
+    );
+}
+
+/// The deeper projection must keep every sub-block `TransportConfig`
+/// models, for the same reason `MODELLED` must name every section.
+///
+/// THE COMMIT THAT CLOSED THE STALENESS AT LEVEL ONE OPENED IT AT LEVEL
+/// TWO. `transport` is projected down to `connectivity` alone, so a
+/// second sub-block — `limits`, `pre_auth` — would be stripped from all
+/// ten examples and nothing would fail: invisible by construction, which
+/// is the phrase the sibling test's own doc uses. Review finding on
+/// PR #80.
+#[test]
+fn the_deeper_projection_keeps_every_transport_sub_block_the_type_models() {
+    let value =
+        serde_norway::to_value(interweave_profile_config::connectivity::TransportConfig::default())
+            .expect("the transport block serializes");
+    let keys: Vec<String> = value
+        .as_mapping()
+        .expect("the transport block is a mapping")
+        .keys()
+        .map(|k| k.as_str().expect("a sub-block key is a string").to_owned())
+        .collect();
+    assert_eq!(
+        keys,
+        vec!["connectivity".to_owned()],
+        "the projection below keeps only `connectivity`; a sub-block this type gained \
+         would be stripped from every example and silently untested"
     );
 }
 

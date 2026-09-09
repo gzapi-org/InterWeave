@@ -803,7 +803,11 @@ pub fn split_peer_multiaddr(entry: &str) -> Result<(&str, TransportIdentity), &'
 ///
 /// Each half is also checked against its own limit after the split, so
 /// this bound stops an oversized entry from being read and the halves
-/// decide what is actually well-formed.
+/// decide what is actually well-formed. BOTH consumers do that: the
+/// static provider's `peers` and, since PR #80,
+/// `connectivity`'s static candidates — which for one commit had the
+/// entry ceiling and no address check, leaving 460 bytes of address
+/// legal under a 517-byte entry.
 pub const MAX_STATIC_PEER_BYTES: usize =
     MAX_ADDRESS_BYTES + "/p2p/".len() + TransportIdentity::MAX_BYTES;
 /// Maximum advertised endpoints the directory may hold.

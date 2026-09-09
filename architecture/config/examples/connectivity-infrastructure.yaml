@@ -14,7 +14,7 @@ transport:
       # Clients served by this project-scoped relay/probe deployment are
       # explicitly authorized; this is illustrative placeholder data.
       allowed_peers:
-        - <CLIENT_A>
+        - "<CLIENT_A>"
     address_advertisement:
       advertise_unverified_public_direct: false
       advertise_active_relay_addresses: true
