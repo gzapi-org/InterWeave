@@ -174,7 +174,7 @@ up() {
 
   log "NAT mode: $NAT_MODE (both domains)"
   log "filter  : $FILTER_MODE (both domains)"
-  # shellcheck disable=SC2086
+  # shellcheck disable=SC2086 # word splitting is the point: ROUTERS is a list
   record_environment $ROUTERS
 }
 
@@ -484,7 +484,7 @@ NFT
 }
 
 down() {
-  # shellcheck disable=SC2086
+  # shellcheck disable=SC2086 # word splitting is the point: ROUTERS is a list
   podman rm -f natm-obs1 natm-obs2 natm-peer natm-peer-b "$PROBER" $ROUTERS \
     >/dev/null 2>&1 || true
   podman network rm -f "$NET_PUB" "$NET_LAN" "$NET_LAN_B" >/dev/null 2>&1 || true

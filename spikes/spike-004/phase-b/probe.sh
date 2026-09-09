@@ -121,7 +121,7 @@ SRC_PORTS="${SRC_PORTS:-45000 45001}"
 # be replaced by matching filenames in the working directory.
 # Review findings on PR #78.
 set -f
-# shellcheck disable=SC2086
+# shellcheck disable=SC2086 # word splitting is the point: SRC_PORTS is a list, and set -f keeps globs out of it
 set -- $SRC_PORTS
 [ "$#" -ge 2 ] \
   || { echo "SRC_PORTS named $# trial(s); eim cannot be observed from fewer than two" >&2; exit 2; }
@@ -159,7 +159,7 @@ for src in "$@"; do
     || { echo "SRC_PORTS holds '$src', which is not a port in 1-65535" >&2; exit 2; }
   normalised="$normalised $port"
 done
-# shellcheck disable=SC2086
+# shellcheck disable=SC2086 # word splitting is the point: normalised is the same list with each port in one spelling
 set -- $normalised
 # `set -f` COVERS BOTH SPLITS. The second one expands only arithmetic
 # results today, so leaving it unprotected made its safety depend on the

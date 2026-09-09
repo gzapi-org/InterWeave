@@ -39,7 +39,7 @@ MODES="${MODES:-eim eds}"
 # replaced by matching filenames in the working directory rather than
 # reaching `topology.sh`'s unknown-mode arm. Review finding on PR #78.
 set -f
-# shellcheck disable=SC2086
+# shellcheck disable=SC2086 # word splitting is the point: MODES is a list, and set -f keeps globs out of it
 set -- $MODES
 set +f
 [ "$#" -ge 1 ] || { echo "MODES named no rows, so nothing would be measured" >&2; exit 2; }
