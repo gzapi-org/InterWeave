@@ -1342,8 +1342,8 @@ who counted here got five, and the first item read "real and carrier
 NAT" — dropping the public VM, which is the half of that item this
 stage's own deferral discussion turns on.
 
-**AN OWNER DECISION IS OPEN, and it is recorded here because
-`SPIKES.md` points at this section for it.** The ENVIRONMENT for the NAT
+**AN OWNER DECISION WAS TAKEN ON 2026-09-09, and it is recorded here
+because `SPIKES.md` points at this section for it.** The ENVIRONMENT for the NAT
 rows now exists at
 [`spikes/spike-004/phase-b/`](../../spikes/spike-004/phase-b/README.md) —
 containerised, two NAT domains, with BOTH halves of RFC 4787's
@@ -1352,13 +1352,26 @@ the filtering class since `filter.sh`. Measured rather than configured
 for the filtering half's default row, where the absence of a rule IS the
 row: masquerade's own reverse path is already address-and-port-dependent,
 and the harness's two other filtering modes exist so the classifier has a
-positive control for each branch rather than one reachable answer. It closes none of the six. The
-question is whether the exit gate's NAT row can be satisfied by a
-containerised matrix with the population claim, the public VM and a
-carrier's CGNAT explicitly deferred — the filtering half was on that list
-and is not any more — the shape Stage 9 used for mDNS and
-Stage 10 for the release gate. **Nothing here answers it, and no row is
-marked met on the strength of that environment.**
+positive control for each branch rather than one reachable answer. It
+closes none of the six by itself. The question put to the owner was
+whether the exit gate's NAT row can be satisfied by a containerised matrix
+with the population claim, the public VM and a carrier's CGNAT explicitly
+deferred — the filtering half was on that list and is not any more — the
+shape Stage 9 used for mDNS and Stage 10 for the release gate.
+**The ruling: yes, with those three deferrals recorded.** The NAT row of
+the exit gate is satisfied by that matrix, measured in both halves RFC
+4787 defines, and the three deferrals are carried forward as named limits
+rather than discharged — hole-punch success rates against NAT as deployed
+remain a claim about the population, a public VM and a carrier's CGNAT
+remain hardware this matrix does not have. **The ruling settles ONE of the
+six items above and no other**: two independently operated relay and
+probe services, relay loss and capacity denial, network-interface change,
+success rates and resource cost against the default budgets are all still
+phase B, so the stage still cannot close on this evidence alone. It can
+close on it once steps 3 through 10 land and the remaining five are met
+or deferred with the owner's explicit go-ahead, which is a separate
+decision and is NOT taken here. No row other than the NAT one is marked
+met.
 
 The verdict and its binding findings are in
 [`SPIKES.md`](./SPIKES.md); the record is
