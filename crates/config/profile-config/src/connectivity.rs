@@ -110,7 +110,7 @@ pub struct ConnectivityConfig {
 impl Default for ConnectivityConfig {
     fn default() -> Self {
         Self {
-            required: true,
+            required: default_true(),
             infrastructure: InfrastructureSet::default(),
             address_advertisement: AddressAdvertisementConfig::default(),
             autonat: AutonatConfig::default(),
@@ -138,7 +138,7 @@ impl Default for AddressAdvertisementConfig {
     fn default() -> Self {
         Self {
             advertise_unverified_public_direct: false,
-            advertise_active_relay_addresses: true,
+            advertise_active_relay_addresses: default_true(),
         }
     }
 }
@@ -161,7 +161,7 @@ pub struct AutonatConfig {
 impl Default for AutonatConfig {
     fn default() -> Self {
         Self {
-            version: AUTONAT_VERSION,
+            version: default_autonat_version(),
             client: AutonatClientConfig::default(),
             server: AutonatServerConfig::default(),
         }
@@ -240,16 +240,16 @@ pub struct AutonatClientConfig {
 impl Default for AutonatClientConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: default_true(),
             static_servers: Vec::new(),
             use_authorized_identify_servers: false,
-            required_distinct_successes: 2,
-            success_evidence_ttl_ms: 15 * 60_000,
-            retry_interval_ms: 30_000,
-            refresh_interval_ms: 5 * 60_000,
-            max_inflight_probes: 2,
-            max_candidate_addresses_per_cycle: 4,
-            timeout_ms: 15_000,
+            required_distinct_successes: default_required_successes(),
+            success_evidence_ttl_ms: default_evidence_ttl_ms(),
+            retry_interval_ms: default_autonat_retry_ms(),
+            refresh_interval_ms: default_refresh_ms(),
+            max_inflight_probes: default_max_inflight_probes(),
+            max_candidate_addresses_per_cycle: default_max_candidates_per_cycle(),
+            timeout_ms: default_probe_timeout_ms(),
         }
     }
 }
@@ -306,10 +306,10 @@ impl Default for AutonatServerConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            max_concurrent_probes: 8,
-            max_probes_per_peer_per_minute: 2,
-            max_probes_global_per_minute: 60,
-            timeout_ms: 15_000,
+            max_concurrent_probes: default_server_concurrent(),
+            max_probes_per_peer_per_minute: default_per_client_per_minute(),
+            max_probes_global_per_minute: default_global_per_minute(),
+            timeout_ms: default_probe_timeout_ms(),
         }
     }
 }
@@ -393,15 +393,15 @@ pub struct RelayClientConfig {
 impl Default for RelayClientConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: default_true(),
             static_relays: Vec::new(),
             use_authorized_identify_relays: false,
-            target_reservations_private_or_unknown: 2,
-            target_reservations_public: 1,
-            max_reservations: 4,
-            retry_min_ms: 5_000,
-            retry_max_ms: 5 * 60_000,
-            direct_head_start_ms: 750,
+            target_reservations_private_or_unknown: default_targets_private(),
+            target_reservations_public: default_targets_public(),
+            max_reservations: default_max_reservations(),
+            retry_min_ms: default_relay_retry_min_ms(),
+            retry_max_ms: default_relay_retry_max_ms(),
+            direct_head_start_ms: default_head_start_ms(),
         }
     }
 }
@@ -494,14 +494,14 @@ impl Default for RelayServerConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            max_reservations: 64,
-            max_reservations_per_peer: 1,
-            reservation_duration_ms: 60 * 60_000,
-            max_circuits: 128,
-            max_circuits_per_peer: 4,
-            max_circuit_duration_ms: 60 * 60_000,
-            max_circuit_bytes: 64 * 1024 * 1024,
-            max_pending_control: 64,
+            max_reservations: default_server_reservations(),
+            max_reservations_per_peer: default_server_reservations_per_peer(),
+            reservation_duration_ms: default_reservation_duration_ms(),
+            max_circuits: default_max_circuits(),
+            max_circuits_per_peer: default_max_circuits_per_peer(),
+            max_circuit_duration_ms: default_circuit_duration_ms(),
+            max_circuit_bytes: default_circuit_bytes(),
+            max_pending_control: default_max_pending_control(),
         }
     }
 }
@@ -565,11 +565,11 @@ pub struct DcutrConfig {
 impl Default for DcutrConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
-            max_inflight: 4,
-            max_inflight_per_peer: DCUTR_INFLIGHT_PER_PEER,
-            retry_cooldown_ms: 5 * 60_000,
-            direct_stability_period_ms: 10_000,
+            enabled: default_true(),
+            max_inflight: default_dcutr_inflight(),
+            max_inflight_per_peer: default_dcutr_inflight_per_peer(),
+            retry_cooldown_ms: default_cooldown_ms(),
+            direct_stability_period_ms: default_stability_ms(),
         }
     }
 }
@@ -1266,6 +1266,38 @@ mod tests {
         assert_eq!(c.dcutr.direct_stability_period_ms, 10_000);
     }
 
+    #[test]
+    fn a_partly_written_block_gets_the_same_defaults_as_an_absent_one() {
+        // TWO DEFAULT PATHS, AND ONLY ONE WAS EVER READ. A nested struct
+        // ABSENT from the document is filled by `impl Default`; a nested
+        // struct PRESENT but partially specified is filled field by
+        // field from the `default_*` functions `#[serde(default = ...)]`
+        // names. Those were two separate copies of the same thirty
+        // schema constants, and
+        // `the_defaults_are_the_schemas_defaults` reads only the first
+        // -- so changing `default_max_inflight_probes` to 3 passed every
+        // test in this file while handing an operator 3.
+        //
+        // Every shipped example takes the SECOND path: each writes
+        // `autonat: {client: {enabled, static_servers, ...}}` and leaves
+        // the other seven fields out. The impls now delegate to the same
+        // functions, so there is one copy; this test is what fails if a
+        // later edit re-splits them. Review finding on PR #80.
+        let every_block_named = profile_with(
+            r#"{"address_advertisement":{},
+                 "autonat":{"client":{},"server":{}},
+                 "relay":{"client":{},"server":{}},
+                 "dcutr":{}}"#,
+        )
+        .expect("naming a block without its fields is legal")
+        .transport
+        .connectivity;
+        assert_eq!(
+            every_block_named,
+            ConnectivityConfig::default(),
+            "the per-field defaults must agree with the whole-struct ones"
+        );
+    }
     #[test]
     fn every_pinned_value_is_refused_when_a_profile_changes_it() {
         // The SIX booleans and the two numbers the schema pins. Each is
