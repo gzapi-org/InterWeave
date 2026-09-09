@@ -80,6 +80,12 @@ pub const DEFAULT_MAX_INFLIGHT_PROBES: usize = 2;
 pub const DEFAULT_MAX_CANDIDATES_PER_CYCLE: usize = 4;
 /// Per-probe timeout: 15 seconds.
 pub const DEFAULT_PROBE_TIMEOUT_MS: u64 = 15 * 1000;
+/// How many probeable addresses the manager will TRACK.
+///
+/// Distinct from `max_candidates_per_cycle`, which bounds how many are
+/// offered in one cycle. This bounds memory: the evidence map is keyed
+/// by address, and the address registry is not this module's to trust.
+pub const MAX_TRACKED_CANDIDATES: usize = 32;
 
 /// The policy knobs `AUTONAT.md` §4 names.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,7 +211,7 @@ pub enum ProbeOutcome {
 
 /// Where a server came from.
 ///
-/// The ORDER is the connection preference `AUTONAT.md`'s Amendment
+/// The ORDER is the dialling preference `AUTONAT.md`'s Amendment
 /// 2026-09-09 leaves static configuration -- which servers this profile
 /// guarantees to dial -- and not the §3 selection precedence that
 /// amendment removed, which the pinned client cannot express.
@@ -308,7 +314,8 @@ impl ReachabilityManager {
     /// Replace the candidate addresses, keeping only those a probe server
     /// may legitimately be asked to dial.
     ///
-    /// Returns the state change, like every other mutator here, so a
+    /// Returns the state change, like the other mutators that can cause
+    /// one, so a
     /// caller can honour `lifecycle.md`'s "emit `ConnectivityChanged`
     /// whenever the normalized state changes" without snapshotting
     /// around the call: withdrawing a verified listener ends the
@@ -318,9 +325,15 @@ impl ReachabilityManager {
     /// can still say why a LAN-only node never reaches
     /// `verified_public`. Review finding on PR #84.
     ///
-    /// The accepted list is ALSO bounded to `max_candidates_per_cycle`,
-    /// so an address registry handing over fifty listeners produces
-    /// four candidates and not fifty. EVIDENCE FOR A WITHDRAWN ADDRESS
+    /// The accepted list is bounded to [`MAX_TRACKED_CANDIDATES`], which
+    /// is NOT `max_candidates_per_cycle`: the schema and `AUTONAT.md`
+    /// §4 call that one a per-CYCLE ceiling, and applying it here made
+    /// it a permanent truncation -- a profile with five listeners would
+    /// never probe the fifth, and with evidence pruned by candidacy a
+    /// registry whose iteration order varied would drop and re-gather
+    /// evidence for whichever address rotated out. The cycle ceiling is
+    /// applied where a cycle exists, in [`due_probes`].
+    /// EVIDENCE FOR A WITHDRAWN ADDRESS
     /// IS DROPPED: keeping it left the map unbounded in the address
     /// dimension while `candidates` is bounded, and re-adding an address
     /// inside the TTL would have re-verified it from evidence gathered
@@ -344,9 +357,7 @@ impl ReachabilityManager {
                 rejected += 1;
                 continue;
             }
-            if seen.insert(address.to_owned())
-                && accepted.len() < self.config.max_candidates_per_cycle
-            {
+            if seen.insert(address.to_owned()) && accepted.len() < MAX_TRACKED_CANDIDATES {
                 accepted.push(address.to_owned());
             }
         }
@@ -388,7 +399,7 @@ impl ReachabilityManager {
             // source: `or_insert` left a peer first seen through Identify
             // recorded as `Identify` when it was later added as a
             // configured one, which under the 2026-09-09 amendment is a
-            // silent downgrade of the connection guarantee static
+            // silent downgrade of the dialling guarantee static
             // configuration buys. Review finding on PR #84.
             std::collections::btree_map::Entry::Occupied(mut slot) => {
                 if source < slot.get().source {
@@ -422,8 +433,13 @@ impl ReachabilityManager {
 
     /// Probes to start now.
     ///
-    /// BOUNDED: never more than `max_inflight_probes` in flight, and only
-    /// over the (already bounded) candidate list. A pair with fresh
+    /// BOUNDED: never more than `max_inflight_probes` in flight, and no
+    /// more than `max_candidates_per_cycle` distinct addresses offered
+    /// in one call -- the per-cycle ceiling `AUTONAT.md` §4 names,
+    /// applied here because this is where a cycle exists. Addresses are
+    /// considered LEAST-RECENTLY-PROBED FIRST, so a profile with more
+    /// listeners than the ceiling rotates through them instead of
+    /// probing the first few forever. A pair with fresh
     /// success evidence is re-probed only once `refresh_interval_ms` has
     /// passed since that success; a pair whose last outcome was a failure
     /// waits out the server's backoff; a pair already in flight is not
@@ -438,13 +454,35 @@ impl ReachabilityManager {
         if room == 0 {
             return plans;
         }
+        // LEAST RECENTLY PROBED FIRST. `candidates` keeps the order the
+        // caller gave, which would otherwise mean the first few are
+        // probed forever and the rest never.
+        let mut order: Vec<(u64, &String)> = self
+            .candidates
+            .iter()
+            .map(|address| {
+                let newest = self
+                    .evidence
+                    .iter()
+                    .filter(|((a, _), _)| a == address)
+                    .map(|(_, e)| e.observed_at_ms)
+                    .max();
+                (newest.unwrap_or(0), address)
+            })
+            .collect();
+        order.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(right.1)));
+        let cycle: Vec<String> = order
+            .into_iter()
+            .take(self.config.max_candidates_per_cycle)
+            .map(|(_, address)| address.clone())
+            .collect();
         let mut servers: Vec<(&TransportIdentity, &ServerRecord)> = self.servers.iter().collect();
         servers.sort_by_key(|(_, record)| record.source);
         for (server, record) in servers {
             if record.backoff_until_ms > now_ms {
                 continue;
             }
-            for address in &self.candidates {
+            for address in &cycle {
                 if plans.len() >= room {
                     break;
                 }
@@ -497,6 +535,16 @@ impl ReachabilityManager {
         outcome: ProbeOutcome,
         now_ms: u64,
     ) -> Option<ConnectivityChanged> {
+        // AND FOR AN ADDRESS WE TRACK. The behaviour reports whatever
+        // the swarm handed it, which is not this manager's candidate
+        // list; `derive` iterates candidates, so evidence for anything
+        // else could never be counted and would only grow the map
+        // between `set_candidates` calls -- unbounded in the address
+        // dimension, which is the thing that prune was added to stop.
+        // Review finding on PR #84.
+        if !self.candidates.iter().any(|candidate| candidate == address) {
+            return None;
+        }
         let record = self.servers.get_mut(server)?;
         let key = (address.to_owned(), server.clone());
         self.inflight.remove(&key);
@@ -933,15 +981,70 @@ mod tests {
     }
 
     #[test]
-    fn the_candidate_list_is_bounded_per_cycle_and_deduplicated() {
+    fn the_tracked_list_is_bounded_and_deduplicated_and_the_cycle_rotates() {
         let mut m = ReachabilityManager::new(ReachabilityConfig::default()).expect("valid");
         let many: Vec<String> = (1..=50)
             .map(|i| format!("/ip4/8.8.{i}.{i}/tcp/4001"))
             .collect();
         m.set_candidates(many.iter().chain(many.iter()), 0);
         assert_eq!(m.rejected_candidates(), 0, "all fifty are public");
-        assert_eq!(m.candidates().len(), DEFAULT_MAX_CANDIDATES_PER_CYCLE);
-        assert_eq!(m.candidates(), &many[..DEFAULT_MAX_CANDIDATES_PER_CYCLE]);
+        // TRACKED is bounded by MAX_TRACKED_CANDIDATES, not by the
+        // per-cycle ceiling: applying the cycle ceiling here made it a
+        // permanent truncation, so a fifth listener was never probed at
+        // all. Review finding on PR #84.
+        assert_eq!(m.candidates().len(), MAX_TRACKED_CANDIDATES);
+        assert_eq!(m.candidates(), &many[..MAX_TRACKED_CANDIDATES]);
+
+        // AND THE CYCLE ROTATES. Each round offers `max_inflight_probes`
+        // addresses; the ones already probed go to the back, so a later
+        // round reaches addresses the first never touched.
+        m.add_server(peer(S1), ServerSource::Static);
+        let first = m.due_probes(0);
+        assert_eq!(first.len(), DEFAULT_MAX_INFLIGHT_PROBES);
+        for plan in &first {
+            let _ = m.record_outcome(&plan.address, &plan.server, ProbeOutcome::Unreachable, 1);
+        }
+        // S1 backs off after two failures, so a second server keeps the
+        // cycle moving.
+        m.add_server(peer(S2), ServerSource::Static);
+        let second = m.due_probes(2);
+        assert_eq!(second.len(), DEFAULT_MAX_INFLIGHT_PROBES);
+        assert!(
+            second
+                .iter()
+                .all(|plan| !first.iter().any(|earlier| earlier.address == plan.address)),
+            "the second cycle must reach addresses the first did not: {first:?} then {second:?}"
+        );
+    }
+
+    #[test]
+    fn the_cycle_ceiling_binds_when_the_in_flight_bound_does_not() {
+        // WITH THE DEFAULTS THIS CEILING IS INVISIBLE: two in-flight
+        // slots against four candidates per cycle, so the smaller bound
+        // always decides and deleting the `take` changed nothing any
+        // test could see. Here the ceiling is two and the slots are
+        // eight, so it is the only thing limiting the round.
+        // Review finding on PR #84.
+        let mut m = ReachabilityManager::new(ReachabilityConfig {
+            max_candidates_per_cycle: 2,
+            max_inflight_probes: 8,
+            ..ReachabilityConfig::default()
+        })
+        .expect("valid");
+        m.set_candidates(
+            (1..=5)
+                .map(|i| format!("/ip4/8.8.{i}.{i}/tcp/4001"))
+                .collect::<Vec<_>>(),
+            0,
+        );
+        m.add_server(peer(S1), ServerSource::Static);
+        let plans = m.due_probes(0);
+        let addresses: BTreeSet<&String> = plans.iter().map(|plan| &plan.address).collect();
+        assert_eq!(
+            addresses.len(),
+            2,
+            "at most `max_candidates_per_cycle` distinct addresses in one cycle: {plans:?}"
+        );
     }
 
     #[test]
@@ -977,7 +1080,7 @@ mod tests {
     }
 
     #[test]
-    fn static_servers_are_preferred_for_connection_before_identify_learned_ones() {
+    fn static_servers_are_preferred_for_dialling_before_identify_learned_ones() {
         // DIALLING PREFERENCE, not selection among connected peers:
         // `AUTONAT.md`'s Amendment 2026-09-09 removed the selection-order
         // rule because the pinned client cannot express one. What
@@ -1022,6 +1125,34 @@ mod tests {
             "evidence_until is the EARLIEST counting success's expiry"
         );
         assert_eq!(m.state().state(), DirectInboundState::VerifiedPublic);
+    }
+
+    #[test]
+    fn an_outcome_for_an_untracked_address_is_dropped() {
+        // The behaviour reports whatever the swarm handed it, and
+        // `derive` iterates candidates -- so evidence for an address we
+        // do not track could never be counted, and keeping it would grow
+        // the map between `set_candidates` calls. Review finding on
+        // PR #84.
+        let mut m = manager();
+        m.add_server(peer(S1), ServerSource::Static);
+        m.add_server(peer(S2), ServerSource::Static);
+        let stranger = "/ip4/9.9.9.9/tcp/4001";
+        assert!(!m.candidates().iter().any(|c| c == stranger));
+        assert!(
+            m.record_outcome(stranger, &peer(S1), ProbeOutcome::Reachable, 1)
+                .is_none()
+        );
+        assert!(
+            m.record_outcome(stranger, &peer(S2), ProbeOutcome::Reachable, 2)
+                .is_none()
+        );
+        assert_eq!(
+            *m.state(),
+            ReachabilityVerdict::Unknown,
+            "two successes for an address we do not track verify nothing"
+        );
+        assert!(m.evidence.is_empty(), "and are not retained");
     }
 
     #[test]
@@ -1228,6 +1359,10 @@ mod tests {
         let change = m
             .set_candidates(["/ip4/1.1.1.1/tcp/4001"], 1)
             .expect("withdrawing the verified address is a state change");
+        assert!(
+            matches!(change.from, ReachabilityVerdict::VerifiedPublic { .. }),
+            "and the edge reports where it came from: {change:?}"
+        );
         assert_eq!(
             change.to,
             ReachabilityVerdict::Unknown,
@@ -1337,7 +1472,7 @@ mod tests {
         m.add_server(peer(S1), ServerSource::Identify);
         m.add_server(peer(S2), ServerSource::Static);
         // Re-adding the Identify one as configured must change which is
-        // preferred for connection; `or_insert` left it Identify.
+        // preferred for dialling; `or_insert` left it Identify.
         m.add_server(peer(S1), ServerSource::Static);
         assert_eq!(
             m.servers.get(&peer(S1)).expect("known").source,

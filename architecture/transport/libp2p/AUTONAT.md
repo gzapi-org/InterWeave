@@ -32,7 +32,7 @@ A server is eligible only when all are true:
 
 - its PeerId is `DataPlaneTrusted` or `ConnectivityInfrastructureOnly`;
 - it advertises/negotiates the required AutoNAT-v2 server protocol on fresh evidence;
-- **this profile holds a connection to it**;
+- **this profile DIALLED it and holds that outbound connection**;
 - global probe/resource budgets permit work.
 
 Discovery of a peer or protocol support never authorizes it.
