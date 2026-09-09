@@ -14,7 +14,8 @@
 # The negative cases exist so the guard is not refused for crying wolf:
 # the idiom this repository uses deliberately (`A && B || { fail; }`,
 # SC2015 at info) must NOT fail it, or the guard would demand rewriting
-# 39 scripts to satisfy a note about a construct they use on purpose.
+# most of the tree to satisfy a note about a construct it uses on
+# purpose.
 #
 # Each case runs the guard against a SANDBOX git repository rather than
 # the real tree, because the guard takes its file list from `git ls-files`
@@ -86,14 +87,28 @@ sandbox_with() {
 # failing case reporting `(expected exit 1, got 2)` and nothing about
 # why, which from a CI log is a number with no cause. Review finding on
 # PR #82.
+#
+# AND EVERY CASE READS AN EXACT CODE, including the ones that set an
+# environment variable or pass an argument -- which is what the
+# `VAR=value` and `-- argument` forms below are for. Three cases used to
+# read only non-zero, and when a broken file-list read made the guard
+# exit 2 for everything, all three passed while five others failed:
+# exactly the collapse the paragraph above describes. Review finding on
+# PR #82.
+#
+# usage: guard_run [VAR=value ...] [-- guard-argument ...]
 guard_run() {
-    GUARD_OUTPUT=$( cd "$SANDBOX" && bash tools/checks/check_shell_scripts.sh 2>&1 )
+    local -a envs=()
+    while [[ $# -gt 0 && "$1" != "--" ]]; do envs+=("$1"); shift; done
+    [[ "${1:-}" == "--" ]] && shift
+    GUARD_OUTPUT=$( cd "$SANDBOX" && env "${envs[@]}" bash tools/checks/check_shell_scripts.sh "$@" 2>&1 )
     GUARD_STATUS=$?
 }
 
 expect_status() {
     local want="$1" label="$2"
-    guard_run
+    shift 2
+    guard_run "$@"
     if [[ "$GUARD_STATUS" == "$want" ]]; then
         pass "$label"
     else
@@ -103,6 +118,24 @@ expect_status() {
 }
 
 echo "test_check_shell_scripts: exercising the guard"
+
+# 0. THE BASELINE, and the count. Every exit-0 case below also depends
+#    on the guard's own copy being clean -- the sandbox tracks it -- so
+#    one warning in the guard would fail three cases with messages
+#    pointing at fixtures. This case names that dependency. And it reads
+#    the COUNT the OK line prints: the file-list read once handed
+#    shellcheck every path concatenated into one, which no case noticed
+#    because none read how many scripts were judged. Review findings on
+#    PR #82.
+sandbox_with '#!/usr/bin/env bash
+echo fine'
+expect_status 0 "the guard's own copy plus one clean script is exit 0"
+if [[ "$GUARD_OUTPUT" == *"OK — 2 tracked shell scripts"* ]]; then
+    pass "and the OK line counts exactly the two scripts the sandbox tracks"
+else
+    fail "the OK line must count 2 scripts (the fixture and the guard's copy), got: $GUARD_OUTPUT"
+fi
+cleanup; SANDBOX=""
 
 # 1. THE POSITIVE CASE. SC2155: `export X="$(...)"` masks the
 #    substitution's status, which is the class the guard found in the real
@@ -137,11 +170,8 @@ expect_status 0 "the deliberate A && B || { fail; } idiom passes at warning seve
 #    fixture, would leave the case passing forever while asserting
 #    nothing. Exit 1 here proves the finding exists and that `warning`
 #    is what admits it. Review finding on PR #82.
-if ( cd "$SANDBOX" && INTERWEAVE_SHELLCHECK_SEVERITY=info bash tools/checks/check_shell_scripts.sh >/dev/null 2>&1 ); then
-    fail "the same idiom must be REFUSED at severity=info, or case 3 asserts an empty finding set"
-else
-    pass "and is refused at severity=info, so SC2015 fires and warning is the threshold that admits it"
-fi
+expect_status 1 "and is refused at severity=info, so SC2015 fires and warning is the threshold that admits it" \
+    INTERWEAVE_SHELLCHECK_SEVERITY=info
 cleanup; SANDBOX=""
 
 # 4. A TARGETED DISABLE IS HONOURED, because the guard's own message
@@ -173,11 +203,8 @@ cleanup; SANDBOX=""
 sandbox_with '#!/usr/bin/env bash
 export THING="$(echo value)"
 echo "$THING"'
-if ( cd "$SANDBOX" && INTERWEAVE_SHELLCHECK_SEVERITY=error bash tools/checks/check_shell_scripts.sh >/dev/null 2>&1 ); then
-    pass "severity=error hides a warning-level finding, so the hatch relaxes rather than tightens"
-else
-    fail "severity=error should report less, not more"
-fi
+expect_status 0 "severity=error hides a warning-level finding, so the hatch relaxes rather than tightens" \
+    INTERWEAVE_SHELLCHECK_SEVERITY=error
 cleanup; SANDBOX=""
 
 # 7. A TRACKED FILE THE WORKTREE DOES NOT HAVE IS "LOOKED AT LESS THAN
@@ -200,11 +227,8 @@ cleanup; SANDBOX=""
 sandbox_with '#!/usr/bin/env bash
 export THING="$(echo value)"
 echo "$THING"'
-if ( cd "$SANDBOX" && SHELLCHECK_OPTS='-e SC2155' bash tools/checks/check_shell_scripts.sh >/dev/null 2>&1 ); then
-    fail "SHELLCHECK_OPTS='-e SC2155' must not hide a finding from the guard"
-else
-    pass "an inherited SHELLCHECK_OPTS exclusion does not reach shellcheck"
-fi
+expect_status 1 "an inherited SHELLCHECK_OPTS exclusion does not reach shellcheck" \
+    SHELLCHECK_OPTS='-e SC2155'
 cleanup; SANDBOX=""
 
 # 9. AN UNKNOWN ARGUMENT IS REFUSED, exit 2, rather than ignored. The
@@ -213,11 +237,7 @@ cleanup; SANDBOX=""
 #    worst reading available. Review finding on PR #82.
 sandbox_with '#!/usr/bin/env bash
 echo fine'
-if ( cd "$SANDBOX" && bash tools/checks/check_shell_scripts.sh scripts/case.sh >/dev/null 2>&1 ); then
-    fail "a path argument must be refused, not silently ignored"
-else
-    pass "an unexpected argument is refused rather than ignored"
-fi
+expect_status 2 "an unexpected argument is refused rather than ignored" -- scripts/case.sh
 cleanup; SANDBOX=""
 
 if [[ $failures -gt 0 ]]; then
