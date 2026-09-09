@@ -102,7 +102,14 @@ guard_run() {
     while [[ $# -gt 0 && "$1" != "--" ]]; do
         # A forgotten `--` would make `env` treat a path as the COMMAND,
         # exit 126, and blame the guard. Refused here, by name.
-        [[ "$1" == *=* ]] || { echo "guard_run: '$1' is not VAR=value; guard arguments go after --" >&2; return 64; }
+        [[ "$1" == *=* ]] || {
+            # Set BEFORE returning, or `expect_status` judges the previous
+            # case's status and a forgotten `--` reads as a pass.
+            GUARD_OUTPUT="guard_run: '$1' is not VAR=value; guard arguments go after --"
+            GUARD_STATUS=64
+            echo "$GUARD_OUTPUT" >&2
+            return 64
+        }
         envs+=("$1"); shift
     done
     [[ "${1:-}" == "--" ]] && shift
