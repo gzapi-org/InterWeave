@@ -1754,7 +1754,7 @@ this block.
   **Step 3 must not regress this.** It reaches an infrastructure-only connection two ways at once — it constructs an AutoNAT client, which is the wrapped-behaviour route to a reachability origin, and it must relax the inbound arm so the client can serve `/libp2p/autonat/2/dial-back`. Both produce a RETAINED infrastructure-only connection, which is the state this invariant now governs and which nothing before step 3 could produce. CLAUDE.md §1 enumerates the three routes to such an origin; the ordering constraint they were written for is discharged, and what remains is that step 3 keep the restriction true rather than land before it.
 
 - AutoNAT server dial-back candidate is literal IP, matches requester observed source IP, and rejects prohibited address classes;
-- statically configured infrastructure is preferred; Identify-learned relay/probe promotion remains explicit opt-in;
+- statically configured infrastructure is preferred for RELAY, and is what the profile guarantees to CONNECT to for AutoNAT (ADR-0035's Amendment 2026-09-09: the client can be given no server order); Identify-learned relay/probe promotion remains explicit opt-in for both;
 - relayed pre-Noise accounting is charged to authenticated relay connection/PeerId plus global limits when original IP is unavailable;
 - relayed destination trust is evaluated against the authenticated end PeerId, not the relay;
 - a Relay v2 circuit or a DCUtR hole punch whose far end IS an

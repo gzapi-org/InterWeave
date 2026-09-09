@@ -241,7 +241,7 @@ A candidate is eligible only when:
 - it is not in relay retry backoff;
 - adding it does not exceed reservation/connection/resource limits.
 
-Fresh Identify evidence supersedes cached capability observations. `use_authorized_identify_servers` likewise defaults **false**; static AutoNAT observer configuration is preferred and Identify-learned authorized servers are considered only after explicit opt-in and only when static observer targets cannot be met. Advisory capability observations may be cached with bounded freshness using the existing peer-cache capability mechanism, but capability does not imply availability or infrastructure consent.
+Fresh Identify evidence supersedes cached capability observations. `use_authorized_identify_servers` likewise defaults **false**, and since `AUTONAT.md`'s Amendment 2026-09-09 it governs which servers this profile CONNECTS to rather than an order among peers already connected: static AutoNAT observer configuration is what the profile guarantees to connect to, Identify-learned authorized servers are connected only after explicit opt-in, and the client picks freely among whatever connections result — there is no preference it can be asked to honour. Advisory capability observations may be cached with bounded freshness using the existing peer-cache capability mechanism, but capability does not imply availability or infrastructure consent.
 
 ## 8. Relay reservation lifecycle
 
