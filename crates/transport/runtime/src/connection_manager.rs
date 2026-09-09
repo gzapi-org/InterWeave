@@ -2529,8 +2529,10 @@ mod tests {
         // both sets is treated as DataPlaneTrusted for protocol
         // admission" is the branch order of `TrustSources::classify` --
         // the data-plane policy is asked before the infrastructure set
-        // -- and nothing asserted the CLASS of a peer listed in both
-        // until this test. Swapping the two branches passes every test
+        // -- and nothing asserted the CLASS of a NON-LOCAL peer listed
+        // in both until this test (the local-identity test above lists
+        // P1 in both, but P1 is the local peer there and exits on the
+        // first branch). Swapping the two branches passes every test
         // in this crate (348 of them) and fails five in
         // `libp2p/src/runtime/dialing.rs`, all of which reach the
         // question sideways through `set_trust`'s revocation diff
