@@ -64,7 +64,7 @@ HELP_RE = re.compile(r"^# >>> help$(.*?)^# <<< help$", re.M | re.S)
 # Build output, vendored dependencies, agent worktrees. `.claude` holds
 # committed configuration but also `.claude/worktrees/`, which is a second
 # checkout of this same tree — scanning it would double every report.
-SKIP_DIRS = {".git", "target", "node_modules", ".claude"}
+SKIP_DIRS = {".git", "target", "node_modules", ".claude", "third_party"}
 
 FENCE_RE = re.compile(r"^```.*?^```", re.M | re.S)
 YAML_FENCE_RE = re.compile(r"^```ya?ml[^\n]*\n(.*?)^```", re.M | re.S)

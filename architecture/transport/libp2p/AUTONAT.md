@@ -133,6 +133,7 @@ Required diagnostics:
 
 ```text
 autonat_probes_total{outcome}
+autonat_probes_inflight
 autonat_retests_total{reason}   (refresh | second_observer | retry)
 autonat_distinct_success_observers
 autonat_verified_address_count

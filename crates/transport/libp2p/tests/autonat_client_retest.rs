@@ -37,15 +37,16 @@ fn a_tested_candidate_returns_to_the_sweep_and_an_untested_one_is_left_alone() {
 }
 
 #[test]
-fn an_abandoned_probe_reports_no_outcome() {
-    // The second half of the patch. `AddressNotReachable` is the one arm
-    // that falls through to `GenerateEvent` rather than returning, so a
-    // late failure for a nonce `retest` abandoned would otherwise be
-    // reported as the outcome of whichever probe replaced it. There is no
-    // public way to inject a handler event, so this drives the property
-    // the guard rests on: after `retest`, no candidate holds the old
-    // nonce, which is exactly what `reset_status_to` looks for and now
-    // reports.
+fn retest_leaves_no_candidate_holding_the_old_nonce() {
+    // The PRECONDITION the patch's second half rests on, and not the
+    // half itself: `reset_status_to` declines to report an outcome when
+    // no candidate still holds the nonce, and this shows `retest` is what
+    // puts it in that state. The decline itself is NOT tested here --
+    // nothing outside the crate can inject a handler event or reach
+    // `Pending`, so proving it needs the two-Swarm harness the vendored
+    // crate ships and this workspace does not run. Named for what it
+    // observes; an earlier name claimed the outcome case. Review finding
+    // on PR #85.
     let mut client = Behaviour::default();
     let addr: Multiaddr = "/ip4/203.0.113.9/tcp/4001".parse().expect("a literal");
     client.on_swarm_event(FromSwarm::NewExternalAddrCandidate(

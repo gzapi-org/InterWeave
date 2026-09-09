@@ -44,13 +44,15 @@ run_against() {
     mkdir -p "$SANDBOX/tools/checks" \
              "$SANDBOX/crates/transport/runtime/src" \
              "$SANDBOX/crates/transport/libp2p/src" \
-             "$SANDBOX/spikes/spike-000/harness/src"
+             "$SANDBOX/spikes/spike-000/harness/src" \
+             "$SANDBOX/third_party/vendored-crate/src"
     cp "$UNDER_TEST" "$SANDBOX/tools/checks/"
     printf '%s\n' "$1" > "$SANDBOX/crates/transport/runtime/src/lib.rs"
     printf '%s\n' "$2" > "$SANDBOX/crates/transport/libp2p/src/lib.rs"
     printf '%s\n' "$3" > "$SANDBOX/tools/checks/domain_fn_exempt.txt"
     printf 'status = "%s"\n' "${4:-stage-6-direct-v2}" > "$SANDBOX/Cargo.toml"
     printf '%s\n' "${5:-}" > "$SANDBOX/spikes/spike-000/harness/src/main.rs"
+    printf '%s\n' "${6:-}" > "$SANDBOX/third_party/vendored-crate/src/lib.rs"
     git -C "$SANDBOX" init -q
     git -C "$SANDBOX" add -A
     RUN_OUT="$(cd "$SANDBOX" && bash tools/checks/check_domain_fns_are_called.sh 2>&1)"
@@ -297,6 +299,22 @@ assert_says "  and the function is still reported" 'authorize_outbound'
 
 run_against "$UNCALLED" 'fn go() { let _ = authorize_outbound(1); }' "" "" \
     'fn evidence() { let _ = authorize_outbound(1); }'
+assert_rc   "CONTROL: a real production caller in the same shape passes" 0
+
+# --- a vendored dependency is not a caller either ----------------------
+#
+# `third_party/` holds crates this repository compiles but did not write
+# (ADR-0051). A vendored file that happens to use one of our names must
+# not vouch for it — and the collision is real rather than theoretical:
+# `libp2p-autonat` declares its own `DialRequest`, which is also a domain
+# type here. Review finding on PR #85.
+run_against "$UNCALLED" "$BACKEND_IDLE" "" "" "" \
+    'fn upstream() { let _ = authorize_outbound(1); }'
+assert_rc   "a vendored dependency is not a production caller" 1
+assert_says "  and the function is still reported" 'authorize_outbound'
+
+run_against "$UNCALLED" 'fn go() { let _ = authorize_outbound(1); }' "" "" "" \
+    'fn upstream() { let _ = authorize_outbound(1); }'
 assert_rc   "CONTROL: a real production caller in the same shape passes" 0
 
 # --- comments and blank lines are not entries -------------------------

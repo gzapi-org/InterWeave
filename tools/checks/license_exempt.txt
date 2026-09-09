@@ -18,7 +18,6 @@
 # ADR-0051; the only first-party change is INTERWEAVE.patch. LICENSE is not in
 # the tarball and so not covered by that checksum -- it is the upstream
 # repository's, fetched verbatim.
-third_party/README.md
 third_party/libp2p-autonat/CHANGELOG.md
 third_party/libp2p-autonat/Cargo.toml
 third_party/libp2p-autonat/INTERWEAVE.patch

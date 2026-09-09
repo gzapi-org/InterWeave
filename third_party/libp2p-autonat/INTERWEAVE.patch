@@ -1,6 +1,6 @@
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-autonat-0.15.0/src/v2/client/behaviour.rs third_party/libp2p-autonat/src/v2/client/behaviour.rs
 --- upstream/libp2p-autonat-0.15.0/src/v2/client/behaviour.rs	2006-07-24 03:21:28.000000000 +0200
-+++ third_party/libp2p-autonat/src/v2/client/behaviour.rs	2026-09-09 18:44:36.794957885 +0200
++++ third_party/libp2p-autonat/src/v2/client/behaviour.rs	2026-09-09 19:30:50.206831507 +0200
 @@ -229,7 +229,21 @@
                  bytes_sent,
                  error,
@@ -49,7 +49,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
      }
  
      // FIXME: We don't want test-only APIs in our public API.
-@@ -366,6 +386,36 @@
+@@ -366,6 +386,43 @@
              info.status = TestStatus::Received(self.rng.next_u64());
          }
      }
@@ -64,16 +64,23 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 +    /// Returns whether the status changed: an address that is unknown or
 +    /// already untested answers `false`.
 +    ///
-+    /// A `Pending` candidate is reset too, which orphans its in-flight
-+    /// nonce. Three paths can then carry a late outcome for it and none
-+    /// reports one: a dial-back with an unknown nonce is refused by
-+    /// `on_connection_handler_event`; `UnsupportedProtocol` and `Io`
-+    /// return without emitting; a success is dropped by the
-+    /// `received_dial_back` guard; and `AddressNotReachable` is declined
-+    /// by the second half of this patch, in `reset_status_to`'s caller.
-+    /// A probe this method abandons therefore produces no `Event` at all,
-+    /// which is what lets a caller attribute every `Event` to the probe
-+    /// it last started.
++    /// A candidate still in flight is reset too -- `Pending`, and
++    /// `Received`, whose dial-back has landed but whose server outcome
++    /// has not -- which orphans its nonce. Five paths can then carry a
++    /// late outcome for it and none reports one: a dial-back with an
++    /// unknown nonce is refused by `on_connection_handler_event`;
++    /// `UnsupportedProtocol` and `Io` return without emitting; a success
++    /// is dropped by the `received_dial_back` guard; and
++    /// `AddressNotReachable` is declined by the second half of this
++    /// patch, in `reset_status_to`'s caller. A probe this method abandons
++    /// therefore produces no `Event` at all, which is what lets a caller
++    /// attribute every `Event` to the probe it last started.
++    ///
++    /// The converse holds with one exception: no LIVE outcome is
++    /// declined, because only `retest` and `validate_addr` overwrite a
++    /// nonce, and `validate_addr` is `#[doc(hidden)]` and upstream's own
++    /// test-only hook. Calling it on a pending candidate would swallow
++    /// that probe's genuine failure.
 +    pub fn retest(&mut self, addr: &Multiaddr) -> bool {
 +        match self.address_candidates.get_mut(addr) {
 +            Some(info) if info.status != TestStatus::Untested => {

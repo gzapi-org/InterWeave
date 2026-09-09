@@ -217,11 +217,14 @@ fi
 #
 # `third_party/` is excluded on the same reasoning, one step further out: a
 # vendored dependency did not choose this repository's names and cannot be
-# evidence that anything here has a consumer. It is measured rather than
-# assumed -- no owner type and no free function under `crates/api/` or
-# `crates/transport/runtime/` collides with an identifier in the vendored
-# tree today -- but the exclusion is what keeps a future collision from
-# silently satisfying a domain function nobody calls (ADR-0051).
+# evidence that anything here has a consumer. This is NOT hypothetical --
+# two owner types collide with the vendored tree today, `DialRequest`
+# (connection_policy.rs, and `libp2p-autonat`'s own v1 type) and `Outcome`
+# (direct_inbound.rs, and a local in the v2 client) -- so without the
+# exclusion a vendored file could satisfy `owner_is_wired` for a domain
+# type nothing here calls. An earlier revision of this comment claimed
+# the measurement showed no collisions at all; it showed these two.
+# Review finding on PR #85 (ADR-0051).
 
 mapfile -t all_rs < <(git ls-files '*.rs' 2>/dev/null | grep -vE '(^|/)tests/|^spikes/|^third_party/')
 

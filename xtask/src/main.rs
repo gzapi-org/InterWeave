@@ -127,6 +127,11 @@ fn tree_checks() -> Vec<Task> {
             &["tools/checks/check_dependencies.sh"],
         ),
         Task::new(
+            "RustSec advisories for vendored crates",
+            "bash",
+            &["tools/checks/check_vendored_advisories.sh"],
+        ),
+        Task::new(
             "wire contracts — schema, manifest, provenance",
             "python3",
             &["tools/checks/validate_contracts.py"],

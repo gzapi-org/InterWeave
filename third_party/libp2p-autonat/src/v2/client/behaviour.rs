@@ -397,16 +397,23 @@ where
     /// Returns whether the status changed: an address that is unknown or
     /// already untested answers `false`.
     ///
-    /// A `Pending` candidate is reset too, which orphans its in-flight
-    /// nonce. Three paths can then carry a late outcome for it and none
-    /// reports one: a dial-back with an unknown nonce is refused by
-    /// `on_connection_handler_event`; `UnsupportedProtocol` and `Io`
-    /// return without emitting; a success is dropped by the
-    /// `received_dial_back` guard; and `AddressNotReachable` is declined
-    /// by the second half of this patch, in `reset_status_to`'s caller.
-    /// A probe this method abandons therefore produces no `Event` at all,
-    /// which is what lets a caller attribute every `Event` to the probe
-    /// it last started.
+    /// A candidate still in flight is reset too -- `Pending`, and
+    /// `Received`, whose dial-back has landed but whose server outcome
+    /// has not -- which orphans its nonce. Five paths can then carry a
+    /// late outcome for it and none reports one: a dial-back with an
+    /// unknown nonce is refused by `on_connection_handler_event`;
+    /// `UnsupportedProtocol` and `Io` return without emitting; a success
+    /// is dropped by the `received_dial_back` guard; and
+    /// `AddressNotReachable` is declined by the second half of this
+    /// patch, in `reset_status_to`'s caller. A probe this method abandons
+    /// therefore produces no `Event` at all, which is what lets a caller
+    /// attribute every `Event` to the probe it last started.
+    ///
+    /// The converse holds with one exception: no LIVE outcome is
+    /// declined, because only `retest` and `validate_addr` overwrite a
+    /// nonce, and `validate_addr` is `#[doc(hidden)]` and upstream's own
+    /// test-only hook. Calling it on a pending candidate would swallow
+    /// that probe's genuine failure.
     pub fn retest(&mut self, addr: &Multiaddr) -> bool {
         match self.address_candidates.get_mut(addr) {
             Some(info) if info.status != TestStatus::Untested => {

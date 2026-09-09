@@ -233,6 +233,11 @@ jobs:
       - name: Dependency policy — advisories, licences, bans, sources
         run: bash tools/checks/check_dependencies.sh
 
+      # Must follow the step above: it needs the same cargo-deny, and it
+      # covers the crates that one structurally cannot see (ADR-0051).
+      - name: RustSec advisories for vendored crates
+        run: bash tools/checks/check_vendored_advisories.sh
+
       - name: Wire contracts — schema, manifest, provenance
         run: python3 tools/checks/validate_contracts.py
 
