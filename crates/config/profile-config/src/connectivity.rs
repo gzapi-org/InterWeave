@@ -1032,8 +1032,11 @@ impl ConnectivityConfig {
     /// as well as while reading.
     ///
     /// THESE FIELDS ARE PUBLIC AND THESE STRUCTS ARE CONSTRUCTIBLE IN
-    /// RUST. Every other bound in this block is enforced by `validate`,
-    /// while the candidate bounds lived only in the deserializer — so a
+    /// RUST. Every other bound in this block is enforced either by
+    /// `validate` or — for `infrastructure`, the one exception — by a
+    /// type whose field is private and whose constructor is checked,
+    /// which is stronger. The candidate bounds lived only in the
+    /// deserializer, which is neither — so a
     /// caller building a `RelayClientConfig` directly could hold five
     /// hundred candidates, or one of any length, and pass
     /// `ProfileConfig::validate()`. Stage 12's composition root is
@@ -1106,6 +1109,16 @@ impl ConnectivityConfig {
     /// bootstrap provider's entries go through, with the same grammar
     /// check, because a candidate that cannot be dialled is a
     /// configuration fault either way.
+    ///
+    /// AND THE REUSE NARROWS THE SCHEMA'S TYPE, which is worth saying
+    /// where the widening commit will look. The schema says
+    /// `multiaddr-with-peer-id`; `validate_address_grammar` accepts
+    /// `ip4|ip6|dns4|dns6` plus `tcp` and exactly four components, so a
+    /// relay published as `/dns/relay.example.net/tcp/4001/p2p/<id>` —
+    /// the bare `/dns` form, which this substrate could dial — or over
+    /// QUIC is refused here. Defensible while the substrate is TCP-only,
+    /// but the narrowing now has TWO consumers, and widening it is one
+    /// change for both. Review finding on PR #80.
     fn check_static_candidate_trust(
         &self,
         trusted: &BTreeSet<TransportIdentity>,

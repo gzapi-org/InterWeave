@@ -1464,7 +1464,7 @@ pub(crate) fn de_duration_ms<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u
     }
 }
 
-/// Write a duration back as the shortest exact unit.
+/// Write a duration back as the largest exact unit.
 pub(crate) fn ser_duration_ms<S: serde::Serializer>(ms: &u32, s: S) -> Result<S::Ok, S::Error> {
     let ms = *ms;
     if ms != 0 && ms.is_multiple_of(3_600_000) {
