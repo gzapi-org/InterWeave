@@ -116,6 +116,17 @@ for port_name in PROBE_PORT PROBE_PORT_ALT ALT_SOURCE_PORT SRC_PORT; do
 done
 [ "$PROBE_PORT" -ne "$PROBE_PORT_ALT" ] \
   || { echo "PROBE_PORT and PROBE_PORT_ALT must be different ports, or SAME_ADDRESS is the control" >&2; exit 2; }
+# NOT AN OBSERVER, because `filter.sh` runs `pkill socat` in the
+# prober to free its listener, and an observer's socat IS its
+# `UDP-RECVFROM:9000` listener. `PROBER=natm-obs1` would kill it, and
+# the next domain's `probe.sh` would report `NO DATA` -- its most
+# alarming verdict -- for a cause in this file. `topology.sh` now
+# honours the same override, so the name is live in both places.
+# Review finding on PR #81.
+case "$PROBER" in
+  natm-obs1|natm-obs2)
+    echo "PROBER must not be an observer ($PROBER): freeing the prober's port kills the observer's listener" >&2; exit 2 ;;
+esac
 # A PRE-CHECK ON THE NAMES; the check that holds is on the resolved
 # addresses, below, because `podman inspect` takes a name, a full ID or
 # a short ID for the same container, and two spellings of one container

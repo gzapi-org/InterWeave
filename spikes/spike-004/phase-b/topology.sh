@@ -55,7 +55,13 @@ ROUTERS="natm-router natm-router-b"
 # the endpoint the peer addressed. Discovered as `bind(5, 0.0.0.0:9000):
 # Address in use` while the control failed and looked like strict
 # filtering.
-PROBER="natm-filt"
+# OVERRIDABLE HERE BECAUSE IT IS OVERRIDABLE IN `filter.sh`. Hardcoded
+# here and `${PROBER:-natm-filt}` there, `PROBER=natm-obs1 ./run.sh` built
+# and authorised `natm-filt` while `filter.sh` probed from -- and then
+# `pkill`ed socat in -- an observer. The same hazard the comment below
+# names for the ports, in the other direction: an override that looks
+# live and is ignored. Review finding on PR #81.
+PROBER="${PROBER:-natm-filt}"
 
 # The ports `filter.sh` uses are declared THERE, not here: this file
 # never reads them, and declaring them in both places made
