@@ -1553,7 +1553,9 @@ else names them.
 **Between step 2 and step 3 sits a change with no number: `autonat`,
 `relay` and `dcutr` entered the libp2p feature list.** It is unnumbered
 because it constructs nothing and therefore proves nothing — no field, no
-constructor, no configuration — so it is not a step anyone can be at. It
+constructor, and at the time no configuration either — so it is not a step
+anyone can be at. The configuration half is spent: the paragraph below is
+the change that supplied it. It
 is recorded here because the steps below were written when those features
 were absent, and several of them cited that absence as the reason a rule
 could not be violated. Those reasons are spent: from here the guarantee
