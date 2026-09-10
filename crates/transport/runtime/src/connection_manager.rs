@@ -3122,8 +3122,10 @@ mod tests {
         // THE PREMISE `interweave-transport-libp2p`'s CANONICALIZATION GUARD
         // RESTS ON, pinned in the crate that can actually break it.
         //
-        // That guard counts production calls to `learn_address` and to the
-        // six methods named in the table below, because `learn_route`
+        // That guard counts production calls to `learn_address` and to every
+        // other method named in the table below -- no count in this sentence,
+        // because it said "six" from when the table held six and the table has
+        // since grown twice -- because `learn_route`
         // canonicalizes the address and a path that skips it splits the
         // `(peer, address)` key between the address book and the quarantine
         // map. Its route table is hand-maintained, in another crate, against
@@ -3226,10 +3228,21 @@ mod tests {
             production.push_str(before);
             // AN OUT-OF-LINE TEST MODULE IS REFUSED. `#[cfg(test)] mod tests;`
             // has no `{`, so the rest of the file would be swallowed as test
-            // code. Here that can only LOWER a count and every expectation
-            // below is non-zero, so it fails loudly rather than passing --
-            // but this guard was the last of the four without the check, for
-            // no reason a reader could reconstruct. Review finding on PR #86.
+            // code.
+            //
+            // AND THAT IS A SILENT PASS, not the loud failure an earlier
+            // version of this comment claimed on the reasoning that dropping
+            // text can only lower a count. It cannot lower THESE counts: the
+            // declaration sits where the test module sits, near the end, so
+            // every existing call is in the text before it and every
+            // expectation still matches. What the drop hides is whatever a
+            // later commit adds BELOW the declaration -- measured, by
+            // planting the out-of-line form plus a new method whose body is
+            // `self.book.get_mut(peer)`, `known.remove(address)` and
+            // `self.policy.record_address_failure(..)`: all nine counts
+            // unchanged, guard green, a raw caller string reaching both the
+            // book and the quarantine. This assertion is what closes that.
+            // Review findings on PR #86.
             let head: &str = after.split_once('{').map_or(after, |(h, _)| h);
             assert!(
                 !head.contains(';'),
@@ -3296,9 +3309,11 @@ mod tests {
                  (interweave-transport-libp2p) and raise the number here, or the \
                  address book and the quarantine map will key one route two ways. \
                  If it FELL, a route was removed or renamed: drop its expectation \
-                 there and lower it here. `.book` is the one pattern here without a \
-                 trailing `(`, so a PRODUCTION doc comment mentioning the field matches \
-                 it too: write the field name without the dot there."
+                 there and lower it here. If this is a TEST call, the guard failed to \
+                 cut its module. If it is a production DOC COMMENT, write the name \
+                 without the parenthesis -- and for `.book`, which is the one pattern \
+                 here that has no parenthesis to drop, write the field name without \
+                 the dot."
             );
         }
     }
