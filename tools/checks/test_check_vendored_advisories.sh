@@ -342,6 +342,99 @@ cp "$ROOT/deny.toml" "$cfgpatch/deny.toml"
     || { echo "cannot resolve the cfgpatch fixture" >&2; exit 1; }
 expect_unexplained cfgpatch "a patch declared in .cargo/config.toml is not missed"
 
+# THE LEGACY SPELLING, `.cargo/config` without the extension, which cargo
+# still reads and which the commit that added config support also added --
+# untested until a reviewer said so. Review finding on PR #85.
+oldcfg="$SANDBOX/oldcfg"
+mkdir -p "$oldcfg/src" "$oldcfg/vendor/atty/src" "$oldcfg/.cargo"
+printf '[package]\nname = "oldcfg-probe"\nversion = "0.0.0"\nedition = "2021"\n' \
+    > "$oldcfg/Cargo.toml"
+printf '[patch.crates-io]\natty = { path = "vendor/atty" }\n' > "$oldcfg/.cargo/config"
+echo 'fn main() {}' > "$oldcfg/src/main.rs"
+printf '[package]\nname = "atty"\nversion = "0.2.14"\nedition = "2018"\n' \
+    > "$oldcfg/vendor/atty/Cargo.toml"
+echo '' > "$oldcfg/vendor/atty/src/lib.rs"
+cp "$ROOT/deny.toml" "$oldcfg/deny.toml"
+(cd "$oldcfg" && cargo generate-lockfile >/dev/null 2>&1) \
+    || { echo "cannot resolve the oldcfg fixture" >&2; exit 1; }
+expect_unexplained oldcfg "the legacy .cargo/config spelling is not missed"
+
+# A CONFIG CARGO READS AND `tomllib` WOULD NOT: a UTF-8 BOM. The failure
+# was unobservable, because a non-zero exit inside a process substitution
+# is swallowed by `mapfile` -- so the patch table went unread while the
+# graph still resolved. Both halves are fixed: the BOM is tolerated, and a
+# table that genuinely cannot be read is exit 2. Review finding on PR #85.
+bomcfg="$SANDBOX/bomcfg"
+mkdir -p "$bomcfg/src" "$bomcfg/vendor/atty/src" "$bomcfg/.cargo"
+printf '[package]\nname = "bomcfg-probe"\nversion = "0.0.0"\nedition = "2021"\n' \
+    > "$bomcfg/Cargo.toml"
+printf '\xef\xbb\xbf[patch.crates-io]\natty = { path = "vendor/atty" }\n' \
+    > "$bomcfg/.cargo/config.toml"
+echo 'fn main() {}' > "$bomcfg/src/main.rs"
+printf '[package]\nname = "atty"\nversion = "0.2.14"\nedition = "2018"\n' \
+    > "$bomcfg/vendor/atty/Cargo.toml"
+echo '' > "$bomcfg/vendor/atty/src/lib.rs"
+cp "$ROOT/deny.toml" "$bomcfg/deny.toml"
+(cd "$bomcfg" && cargo generate-lockfile >/dev/null 2>&1) \
+    || { echo "cannot resolve the bomcfg fixture" >&2; exit 1; }
+expect_unexplained bomcfg "a config carrying a BOM is read rather than silently skipped"
+
+# A TREE WITH NO REGISTRY RELEASE is an INCOMPLETE sweep, not a clean one:
+# it passes the graph floor, so the guard reaches it and cannot ask about
+# it. `deny.toml` bars git dependencies, so vendoring is the sanctioned
+# answer for such a crate and this path is reachable by design -- and it
+# was reached by no fixture. Review finding on PR #85.
+norelease="$SANDBOX/norelease"
+mkdir -p "$norelease/src" "$norelease/third_party/interweave-not-published/src"
+cat > "$norelease/Cargo.toml" <<'NORELEASE'
+[package]
+name = "norelease-probe"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+interweave-not-published = { path = "third_party/interweave-not-published" }
+NORELEASE
+echo 'fn main() {}' > "$norelease/src/main.rs"
+printf '[package]\nname = "interweave-not-published"\nversion = "0.0.0"\nedition = "2021"\n' \
+    > "$norelease/third_party/interweave-not-published/Cargo.toml"
+echo '' > "$norelease/third_party/interweave-not-published/src/lib.rs"
+cp "$ROOT/deny.toml" "$norelease/deny.toml"
+(cd "$norelease" && cargo generate-lockfile >/dev/null 2>&1) \
+    || { echo "cannot resolve the norelease fixture" >&2; exit 1; }
+out="$(bash "$GUARD" --root "$norelease" 2>&1)"
+case $? in
+    2) ok "a tree with no registry release makes the sweep incomplete, not clean" ;;
+    0) bad "an unaskable tree must not report success" ;;
+    *) bad "an unaskable tree must exit 2" ;;
+esac
+if printf '%s' "$out" | grep -q 'could not be resolved from the'; then
+    ok "  and says it could not ask rather than naming a cause it does not know"
+else
+    bad "  the summary must say the tree could not be resolved"
+fi
+
+# AN ADVISORY THE POLICY DOWNGRADES TO A WARNING must still be reported:
+# for a registry crate a warning reaches a human through
+# `check_dependencies.sh`, but for a vendored one this guard is the only
+# report there is. Untested until a reviewer said so. Review finding on
+# PR #85.
+warned="$SANDBOX/warned"
+build_vendored warned atty 0.2.14 inline
+printf '[advisories]\nversion = 2\nunmaintained = "workspace"\nyanked = "warn"\nignore = ["RUSTSEC-2021-0145"]\n' \
+    > "$warned/deny.toml"
+out="$(bash "$GUARD" --root "$warned" 2>&1)"
+status=$?
+if printf '%s' "$out" | grep -q 'RUSTSEC-2024-0375'; then
+    ok "the remaining advisory is still reported when another is ignored"
+else
+    bad "an advisory outside the ignore list must still be reported"
+fi
+case $status in
+    1) ok "  and the crate still fails" ;;
+    *) bad "  a vendored crate with a live advisory must exit 1" ;;
+esac
+
 # `--root` ON A MISSING DIRECTORY must say so and stop. `cd "$ROOT" || die`
 # ran while `die` was still undefined, and with no `set -e` the script
 # carried on in the caller's directory -- which could report a verdict for

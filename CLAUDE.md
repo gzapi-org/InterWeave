@@ -426,6 +426,16 @@ cannot see it and reports clean — accurately, for the question it asks.
 Treat Dependabot as a second, non-overlapping source rather than a
 duplicate of the dependency check.
 
+**A second gap is structural rather than a database's omission.** A crate
+vendored into `third_party/` and selected by `[patch.crates-io]` has no
+`source` and no `checksum` in `Cargo.lock`, and `cargo-deny` SKIPS it —
+measured, not assumed, with `atty 0.2.14`: as an ordinary dependency the
+advisories check fails on it, path-patched to a copy of the same source it
+prints `advisories ok`. Dependabot cannot see it either, so
+`tools/checks/check_vendored_advisories.sh` is the only warning a vendored
+tree will ever get, and ADR-0051 records the decision that created the
+need. The licence check is unaffected and still covers such a crate.
+
 That gap is live: **`yamux`** has no RustSec advisory, and every `Config`
 tuning setter silently moves the muxer onto a version with a remote-panic
 DoS. Bounding stream counts is exactly what §6 pushes toward, so the

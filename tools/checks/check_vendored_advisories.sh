@@ -14,9 +14,10 @@
 # others miss: the package graph (what cargo builds from a local tree,
 # wherever it lives), every manifest under `third_party/` at any depth
 # (what this repository ships), and every `path` a `[patch.*]` table
-# declares in the manifest OR in `.cargo/config.toml` (which catches a
-# patch cargo omitted from the graph for being unused, wherever it was
-# declared). They must account for each other -- a shipped tree the graph
+# declares in the manifest, `.cargo/config.toml` or the legacy
+# `.cargo/config` (which catches a patch cargo omitted from the graph for
+# being unused, wherever it was declared). A `path` outside the workspace
+# root is the one shape none of the three can ask about, and it is exit 2. They must account for each other -- a shipped tree the graph
 # does not name, or a local crate with no registry release, is exit 2
 # rather than a pass. Advisories on a
 # vendored crate's own dependencies are NOT this guard's; they belong to
@@ -82,7 +83,10 @@
 #
 # Exit codes:
 #   0  every vendored crate is free of RustSec advisories at its version
-#   1  an advisory applies to a vendored crate
+#   1  an advisory applies to a vendored crate -- or the arguments were
+#      not understood, which is a usage error rather than a finding; they
+#      share a code because a caller that mistyped a flag has not asked
+#      the question either
 #   2  the check could not be RUN: cargo-deny absent, the lockfile
 #      unusable, or cargo-deny stopping before it produced a summary — an
 #      unreachable database, a config it cannot read, a crash. Success is
@@ -117,7 +121,11 @@ cd "$ROOT" || die "cannot enter $ROOT" 2
 
 command -v cargo-deny >/dev/null 2>&1 || command -v cargo >/dev/null 2>&1 \
     || die "cargo is not installed" 2
-cargo deny --version >/dev/null 2>&1 \
+# RUN FROM OUTSIDE THE ROOT, because `cargo deny` reads the local
+# `.cargo/config*` and a malformed one makes this fail -- which was then
+# reported as "cargo-deny is not installed", telling an operator to
+# install a tool that is installed. Review finding on PR #85.
+(cd / && cargo deny --version >/dev/null 2>&1) \
     || die "cargo-deny is not installed (CI installs a pinned build before this step)" 2
 
 [ -f Cargo.toml ] || die "no Cargo.toml at $ROOT" 2
@@ -158,34 +166,43 @@ metadata="$(cargo metadata --format-version 1 --locked --all-features 2>/dev/nul
 # Review findings on PR #85.
 # WHAT THIS REPOSITORY SHIPS, from two places that each see what the
 # other misses: every manifest under `third_party/`, and every `path` a
-# `[patch.*]` table declares. The patch table is needed because cargo
-# omits an UNUSED patch from the graph entirely -- so a patch pointing
-# outside `third_party/` that nothing currently depends on was in neither
-# the graph nor the disk scan, and the guard announced that nothing is
-# built from a local tree. The tree still ships, and a dependency bump
-# re-arms it. Read with `tomllib` rather than matched, because hand-parsing
-# this table is what the first version of this guard got wrong.
-# Review finding on PR #85.
-mapfile -t shipped < <(
-    find third_party -name Cargo.toml -type f 2>/dev/null
-    python3 - Cargo.toml .cargo/config.toml .cargo/config <<'PATCHPATHS'
+# `[patch.*]` table declares -- in the manifest, in `.cargo/config.toml`,
+# or in the legacy `.cargo/config`. The patch table is needed because
+# cargo omits an UNUSED patch from the graph entirely, wherever it was
+# declared, so such a patch was in neither the graph nor the disk scan and
+# the guard announced that nothing is built from a local tree. The tree
+# still ships and a dependency bump re-arms it. Read with `tomllib` rather
+# than matched, because hand-parsing this table is what the first version
+# of this guard got wrong.
+#
+# CAPTURED RATHER THAN INLINED into the process substitution below: a
+# non-zero exit inside one is unobservable, since `mapfile` reports its
+# own success. That is the dead failure path `mapfile ... || die` had, in
+# a new place, and it has a live trigger -- cargo accepts a UTF-8 BOM in a
+# config file and `tomllib` refuses it, so a tree declared only there
+# would have gone unread while the graph still resolved. The BOM is
+# tolerated AND the failure is now reported. Review findings on PR #85.
+declared="$(python3 - Cargo.toml .cargo/config.toml .cargo/config <<'PATCHPATHS'
 import os, sys, tomllib
 
-# A `[patch]` table lives in the manifest OR in Cargo's own configuration
-# -- the Cargo reference says so in as many words -- and cargo omits an
-# unused patch from the graph wherever it was declared. Reading only the
-# manifest left a config-declared patch invisible, which a reviewer
-# constructed. Relative paths in both resolve against the directory
-# holding the file's parent, which is this working directory for all
-# three, since the caller has already entered the root.
+# Relative paths in all three resolve against this working directory,
+# which the caller has already entered.
 for source in sys.argv[1:]:
     try:
         with open(source, "rb") as handle:
-            document = tomllib.load(handle)
+            raw = handle.read()
     except FileNotFoundError:
         continue
-    except (OSError, tomllib.TOMLDecodeError) as exc:
+    except OSError as exc:
         sys.stderr.write("cannot read {}: {}\n".format(source, exc))
+        raise SystemExit(5)
+    try:
+        # `utf-8-sig` because cargo accepts a BOM here and `tomllib`
+        # does not; refusing what cargo reads would leave a declared
+        # tree unaccounted for.
+        document = tomllib.loads(raw.decode("utf-8-sig"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        sys.stderr.write("cannot parse {}: {}\n".format(source, exc))
         raise SystemExit(5)
     for table in document.get("patch", {}).values():
         if not isinstance(table, dict):
@@ -195,11 +212,12 @@ for source in sys.argv[1:]:
             if path:
                 print(os.path.join(os.path.realpath(path), "Cargo.toml"))
 PATCHPATHS
+)" || die "cannot read a Cargo patch table" 2
+
+mapfile -t shipped < <(
+    find third_party -name Cargo.toml -type f 2>/dev/null
+    [ -n "$declared" ] && printf '%s\n' "$declared"
 )
-# FILTERED AND DEDUPLICATED. `printf '%s\n' "${arr[@]}"` on an EMPTY
-# array prints one blank line, which `sort -u` keeps -- and a blank
-# "manifest" has the workspace root as its directory, so a repository
-# vendoring nothing reported the root itself as an unaccounted tree.
 mapfile -t shipped < <(
     for manifest in ${shipped[@]+"${shipped[@]}"}; do
         [ -n "$manifest" ] && printf '%s\n' "$manifest"
@@ -238,7 +256,7 @@ sys.stdout.write("".join(r + "\n" for r in (rows[k] for k in sorted(rows))))
 case $? in
     0) ;;
     4)
-        die "a vendored tree this repository ships is absent from the package graph — behind a disabled feature, patched but unused, or a manifest that is a workspace root rather than a package. None of those is a reason to report success" 2
+        die "a vendored tree this repository ships is absent from the package graph — behind a disabled feature, patched but unused, a manifest that is a workspace root rather than a package, or a path outside this workspace root, which is the one shape this guard cannot ask about. None of those is a reason to report success" 2
         ;;
     *) die "cannot read the package graph" 2 ;;
 esac
@@ -288,6 +306,10 @@ for entry in "${patched[@]}"; do
     # never reached, under a message that reads like a broken runner.
     # Review findings on PR #85.
     if ! (cd "$probe" && cargo generate-lockfile >/dev/null 2>&1); then
+        # Usually no registry release -- the sanctioned case, since
+        # `deny.toml` bars git dependencies -- but a network failure or an
+        # unsatisfiable requirement lands here too, which is why the
+        # summary says "could not be resolved" rather than naming a cause.
         unaskable+=("$name $version ($path)")
         continue
     fi
@@ -384,9 +406,11 @@ sys.stdout.write("".join(f + "\n" for f in found))
 done
 
 if [ "${#unaskable[@]}" -gt 0 ]; then
-    printf '\ncheck_vendored_advisories: %d tree(s) have no registry release, so their\n' \
+    printf '\ncheck_vendored_advisories: %d tree(s) could not be resolved from the\n' \
         "${#unaskable[@]}" >&2
-    printf 'advisories cannot be asked about:\n' >&2
+    printf 'registry, so their advisories cannot be asked about. Usually that means\n' >&2
+    printf 'no published release, which vendoring is the sanctioned answer to;\n' >&2
+    printf 'a network failure looks the same from here:\n' >&2
     printf '    %s\n' "${unaskable[@]}" >&2
 fi
 
