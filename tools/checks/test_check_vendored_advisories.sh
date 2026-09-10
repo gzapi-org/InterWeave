@@ -712,7 +712,7 @@ fi
 # TWO VENDORED TREES OF ONE NAME are both named by the accounting floor.
 #
 # NOT the per-row probe directory, which this header claimed and the body
-# eighteen lines down already denies: `third_party/b` is on disk and named
+# body comment below already denies: `third_party/b` is on disk and named
 # by no dependency, so `shipped - rows` is non-empty and the guard refuses
 # before `WORK` is created. Nothing in this suite reaches the probe loop
 # with two rows at all, which is why the guard's own comment records the
@@ -748,8 +748,9 @@ if (cd "$twins" && cargo generate-lockfile >/dev/null 2>&1); then
         bad "a second tree of the same name must not be folded into the first: $out"
     fi
     case "$status" in
-        1 | 2) ok "  and the sweep refuses rather than reporting a clean pass" ;;
-        *) bad "  expected exit 1 or 2 for an unaccounted tree, got $status" ;;
+        2) ok "  and the sweep refuses rather than reporting a clean pass" ;;
+        1) bad "  exit 1 is an advisory finding, not a refusal -- one tree stood in for two" ;;
+        *) bad "  expected exit 2 for an unaccounted tree, got $status" ;;
     esac
 else
     skip_or_fail "the twins fixture cannot resolve"
