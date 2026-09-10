@@ -52,10 +52,19 @@ fn retesting_one_candidate_leaves_the_others_where_they_were() {
     //
     // STILL NOT TESTED HERE, and named rather than implied: the patch's
     // second half, where `reset_status_to` declines to report an outcome
-    // for a candidate that no longer holds the nonce. Reaching it needs a
-    // probe in flight, which nothing outside the crate can create, so it
-    // rests on review of the recorded diff -- as ADR-0051 Decision 3 says
-    // in as many words.
+    // for a candidate that no longer holds the nonce.
+    //
+    // IT IS NOT UNTESTABLE, which an earlier version of this comment said.
+    // A probe in flight cannot be SYNTHESISED -- `handler` is private and
+    // `dial_request` is `pub(crate)`, so `ToBehaviour::PeerHasServerSupport`
+    // cannot be injected and the server pick returns `None` without it. But
+    // it can be CAUSED: the vendored crate ships `v2::server::Behaviour`,
+    // reachable as `libp2p::autonat::v2::server`, so a two-Swarm test over
+    // real sockets would negotiate a real dial request and reach a genuine
+    // `Pending`. That test is owed by the step that constructs these
+    // behaviours; this PR constructs nothing, which is why it is not here.
+    // Calling it impossible would have told that step not to try. Review
+    // finding on PR #85.
     let mut client = Behaviour::default();
     let one: Multiaddr = "/ip4/203.0.113.9/tcp/4001".parse().expect("a literal");
     let two: Multiaddr = "/ip4/203.0.113.10/tcp/4001".parse().expect("a literal");
