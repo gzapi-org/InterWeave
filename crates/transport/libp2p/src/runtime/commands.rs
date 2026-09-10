@@ -142,6 +142,25 @@ pub(super) fn handle_command(
                     // SUBSCRIBE AFTER the registry accepted the set, so a
                     // refused configuration leaves the mesh untouched
                     // rather than half-applied.
+                    // NOT REACHABLE IN A SHIPPED BUILD TODAY, and the
+                    // whole refusal story below should be read that way.
+                    // `subscribe_topic` reaches `gossipsub::Behaviour::
+                    // subscribe`, whose only `Err` is
+                    // `SubscriptionError::NotAllowed` from
+                    // `subscription_filter.can_subscribe`. The installed
+                    // filter is the default
+                    // `MaxCountSubscriptionFilter<AllowAllSubscriptionFilter>`
+                    // -- `behaviour.rs` calls plain `Behaviour::new` -- and
+                    // its `can_subscribe` delegates to
+                    // `AllowAllSubscriptionFilter`, which answers `true`
+                    // unconditionally; the max count gates only INCOMING
+                    // subscriptions. Measured against
+                    // `libp2p-gossipsub-0.49.5`, not assumed. So the
+                    // partial-application handling is correctness for a
+                    // path a future filter would open, not a fix for a
+                    // live defect. Review finding on PR #86, which asked
+                    // for this to be said rather than implied.
+                    //
                     // PARTIAL BY CONTRACT, AND REPORTED. A refused
                     // subscription cannot be rolled back across the whole
                     // set without unsubscribing channels live sessions
@@ -149,14 +168,76 @@ pub(super) fn handle_command(
                     // as the backend allows and the caller is told which
                     // channel failed. Silence here reported a
                     // configuration that the mesh had not accepted.
-                    let mut refused: Option<interweave_transport_api::ChannelId> = None;
-                    for channel in &config.desired {
+                    //
+                    // EVERY CHANNEL IS TRIED, and the loop no longer stops
+                    // at the first refusal. Stopping made `applied` mean
+                    // "the channels before the failure", so the narrowing
+                    // below dropped channels the mesh was still happily
+                    // carrying and the sweep then unsubscribed them --
+                    // deciding which working subscriptions to tear down by
+                    // the caller's array order. A refusal is per-topic, so
+                    // continuing is what "as far as the backend allows"
+                    // actually means. Review finding on PR #86.
+                    let (applied, refused) = apply_desired(&config.desired, |channel| {
                         let topic = broadcast_state.remember(channel);
                         if swarm.subscribe_topic(&topic).is_err() {
-                            broadcast_state.forget(channel);
-                            refused = Some(channel.clone());
-                            break;
+                            // THE MAPPING IS DROPPED ONLY IF NOBODY HOLDS
+                            // THE CHANNEL, and the decision lives in
+                            // `BroadcastState::forget_if_unheld` rather than
+                            // here. Inline, the ONLY was unenforceable: the
+                            // arm needs a live Swarm and a GossipSub filter
+                            // that refuses a topic, the installed filter
+                            // never refuses, and this comment said so
+                            // instead of pointing at a test -- which is the
+                            // shape CLAUDE.md section 4 exists to stop. As a
+                            // method it is reachable, and
+                            // `only_an_unheld_channel_loses_its_mapping_on_refusal`
+                            // fails if the condition goes. THAT TEST DOES
+                            // NOT COVER THIS LINE -- it calls the method,
+                            // so swapping this back to a bare `forget`
+                            // leaves it green, which a reviewer measured.
+                            // `the_refusal_arm_still_asks_whether_anybody_holds_the_channel`
+                            // below is what holds the call site.
+                            //
+                            // Pre-existing, and WIDENED by the change above:
+                            // stopping at the first refusal reached at most
+                            // one channel per command, and continuing
+                            // reaches every refused one. Fixed here rather
+                            // than deferred, because this commit is what
+                            // made it matter. Review finding on PR #86.
+                            broadcast_state.forget_if_unheld(channel);
+                            return false;
                         }
+                        true
+                    });
+
+                    // THE REGISTRY HOLDS WHAT WAS APPLIED, NOT WHAT WAS
+                    // ASKED FOR. `set_desired` above committed the whole
+                    // new set before any of it reached the mesh -- so a
+                    // set of four whose third channel is refused left the
+                    // registry desiring all four while the backend held
+                    // three. That matters beyond the reply, because
+                    // `backend_should_subscribe` answers from `desired`:
+                    // the ONE that never subscribed read as held, so the
+                    // sweep below would not notice it and a later
+                    // reconfiguration would not resubscribe it either.
+                    // The reply names every refused channel and says the
+                    // rest is applied; this makes the registry agree with
+                    // it. Review finding.
+                    //
+                    // (The count and the reply were both described wrong
+                    // here for one commit: this said "the two that never
+                    // subscribed" and "applied only up to the refusal",
+                    // which were true of the version that STOPPED at the
+                    // first refusal. Continuing past it leaves exactly one
+                    // unsubscribed and reports them all.)
+                    if !refused.is_empty() {
+                        // Narrowing cannot be denied: dropping a channel
+                        // from `desired` either moves it into the
+                        // joined-elsewhere count or removes it entirely,
+                        // and neither raises the total the wider set
+                        // already passed.
+                        let _ = broadcast_state.subs.set_desired(applied);
                     }
 
                     // AND DROP WHAT IS NO LONGER HELD. Subscribing to the
@@ -185,11 +266,26 @@ pub(super) fn handle_command(
                             let _ = swarm.unsubscribe_topic(&topic);
                         }
                     }
-                    let _ = match refused {
-                        Some(channel) => reply.send(Err(format!(
-                            "the mesh refused {channel:?}; the configuration is applied only up to it"
-                        ))),
-                        None => reply.send(Ok(())),
+                    let _ = if refused.is_empty() {
+                        reply.send(Ok(()))
+                    } else {
+                        // NAMED, NOT `Debug`-PRINTED. This string reaches an
+                        // operator through `SubstrateError::Transport`, and
+                        // `{refused:?}` renders
+                        // `[ChannelId("b"), ChannelId("c")]` where the
+                        // single-channel version it replaced rendered
+                        // `ChannelId("b")`. Deduplicated because
+                        // `config.desired` is a slice: a channel listed
+                        // twice and refused twice was named twice. Review
+                        // finding on PR #86.
+                        let mut names: Vec<&str> = refused.iter().map(|c| c.as_str()).collect();
+                        names.sort_unstable();
+                        names.dedup();
+                        reply.send(Err(format!(
+                            "the mesh refused {}; every other channel in the \
+                             configuration is applied",
+                            names.join(", ")
+                        )))
                     };
                 }
                 Err(denial) => {
@@ -389,7 +485,12 @@ pub(super) fn handle_command(
             address,
             reply,
         } => {
-            let _ = reply.send(manager.learn_address(&peer, &address.to_string(), now_ms));
+            // A bootstrap multiaddr is conventionally written WITH its
+            // peer suffix, so this is the expected input rather than an
+            // edge case, and the book must key it the way the quarantine
+            // and the ticket will.
+            let answer = super::dialing::learn_route(manager, &peer, &address.to_string(), now_ms);
+            let _ = reply.send(answer);
         }
         SwarmCommand::DialPeer { peer, reply } => {
             // KNOWN-GOOD FIRST, and every candidate still admitted
@@ -969,6 +1070,43 @@ struct LocalOutcome {
     source_peer: interweave_transport_api::TransportIdentity,
 }
 
+/// Try every requested channel and report what stuck.
+///
+/// EVERY ONE, which is the fix. An earlier version broke out of this loop
+/// at the first refusal, so the applied set meant "the channels before the
+/// failure" -- and the caller's narrowing then dropped channels the mesh
+/// was still carrying, after which the sweep unsubscribed them. A previous
+/// configuration of C and D, both working, followed by a request for
+/// A, B, C, D with B refused, tore down C and D. Which working
+/// subscriptions died was decided by the caller's array order. A refusal
+/// is per-topic, so continuing is what "applied as far as the backend
+/// allows" actually means. Review finding on PR #86.
+///
+/// `subscribe` reports whether the channel is now held; it owns its own
+/// rollback for the refused case, because what to undo is the caller's
+/// business and not this function's.
+fn apply_desired<F>(
+    requested: &[interweave_transport_api::ChannelId],
+    mut subscribe: F,
+) -> (
+    std::collections::BTreeSet<interweave_transport_api::ChannelId>,
+    Vec<interweave_transport_api::ChannelId>,
+)
+where
+    F: FnMut(&interweave_transport_api::ChannelId) -> bool,
+{
+    let mut applied = std::collections::BTreeSet::new();
+    let mut refused = Vec::new();
+    for channel in requested {
+        if subscribe(channel) {
+            applied.insert(channel.clone());
+        } else {
+            refused.push(channel.clone());
+        }
+    }
+    (applied, refused)
+}
+
 pub(super) fn forget_address(
     active: &mut ActiveListeners,
     listener: ListenerId,
@@ -1208,10 +1346,10 @@ fn buffer_kademlia_event(
 }
 
 #[cfg(test)]
-mod expired_address_tests {
+mod command_helper_tests {
     use super::{
-        ActiveListeners, SwarmEvent, TransportIdentity, VecDeque, buffer_kademlia_event,
-        buffer_revocation_events, forget_address,
+        ActiveListeners, SwarmEvent, TransportIdentity, VecDeque, apply_desired,
+        buffer_kademlia_event, buffer_revocation_events, forget_address,
     };
     use interweave_kademlia_control_api::QueryHandle;
     use libp2p::Multiaddr;
@@ -1221,6 +1359,117 @@ mod expired_address_tests {
         format!("/ip4/127.0.0.1/tcp/{port}")
             .parse()
             .expect("valid multiaddr")
+    }
+
+    #[test]
+    fn the_refusal_arm_still_asks_whether_anybody_holds_the_channel() {
+        // THE CALL SITE, not the condition. `BroadcastState::forget_if_unheld`
+        // carries the condition and its own test pins it -- but that test
+        // CALLS the method, so it says nothing about whether this file's
+        // subscribe-refusal arm still goes through it. A reviewer measured
+        // the gap: swapping that arm back to a bare `forget` leaves both
+        // broadcast tests AND clippy green, because the method is still
+        // reached from a test module so nothing is dead. The runtime effect
+        // is the defect the condition exists to prevent -- the
+        // `wire -> ChannelId` entry dropped for a channel a live session
+        // still joins, leaving its inbound traffic unattributable and
+        // invisible to the sweep, which iterates the same map.
+        //
+        // STRUCTURAL BECAUSE NOTHING ELSE CAN BE. Reaching the arm needs a
+        // live Swarm and a GossipSub filter that refuses a topic, and the
+        // installed filter never refuses, so a behavioural test is not
+        // available. This counts instead: the refusal arm is the ONE
+        // `forget_if_unheld` call, and the three bare `forget` calls are the
+        // `ConfigureBroadcast` sweep, the `Join` rollback and `Leave`.
+        //
+        // THE ENUMERATION WAS WRONG IN BOTH HALVES. It said "the sweep,
+        // `Leave` and `Unsubscribe`" -- there is no `Unsubscribe` command,
+        // and the site it missed is the `Join` rollback. And it said "none of
+        // them conditional", which is backwards: all three sit behind
+        // `backend_should_subscribe`. The real contrast is WHICH hold test
+        // each asks. `backend_should_subscribe` is joined OR desired, so a
+        // channel the profile desires with no local join keeps its mapping;
+        // `forget_if_unheld` asks `subscribers(..).is_empty()`, joined only,
+        // so it drops the mapping for a desired-but-unjoined channel. That
+        // is narrower, and deliberately so -- a refused subscribe means the
+        // mesh never accepted the topic, so there is nothing for the sweep
+        // to unsubscribe later. Review findings on PR #86.
+        //
+        // The two patterns are independent: `forget_if_unheld(` does not
+        // contain `forget(`, because `_if_unheld` breaks the contiguity, and
+        // `forget_address(` matches neither. Verified by counting both
+        // before and after the plant.
+        let source = include_str!("commands.rs");
+        let mut production = String::new();
+        let mut rest = source;
+        while let Some((before, after)) = rest.split_once("\n#[cfg(test)]\nmod ") {
+            production.push_str(before);
+            // AN OUT-OF-LINE TEST MODULE IS REFUSED, not guessed at:
+            // `#[cfg(test)] mod tests;` has no `{`, so everything after it
+            // would be swallowed as test code -- and that is a SILENT PASS,
+            // not the loud failure an earlier version of this said. Dropping
+            // text cannot lower these counts, because the declaration sits
+            // where the test module sits and every existing call is above it;
+            // what the drop hides is a call a later commit adds BELOW it.
+            // Measured in `connection_manager.rs`, which carries the same
+            // check and the same note. All four guards now carry this one.
+            // Review findings on PR #86.
+            let head: &str = after.split_once('{').map_or(after, |(h, _)| h);
+            assert!(
+                !head.contains(';'),
+                "`#[cfg(test)] mod <name>;` declares its tests in another file, and this \
+                 guard cannot tell where they end -- so it refuses. Use an inline \
+                 `mod tests {{ ... }}`, or extend this guard to follow the file."
+            );
+            match after.split_once("\n}") {
+                // `"\n}"` rather than `"\n}\n"`: the surviving newline is the
+                // separator the next search needs.
+                Some((_, tail)) => rest = tail,
+                None => {
+                    assert!(
+                        after.trim_end().ends_with('}'),
+                        "a `#[cfg(test)] mod` here neither closes at column zero nor ends \
+                         the file, so this guard cannot tell tests from production and \
+                         refuses rather than guessing"
+                    );
+                    rest = "";
+                }
+            }
+        }
+        production.push_str(rest);
+        // AND EVERY column-zero `#[cfg(test)]` must be a module, checked per
+        // occurrence rather than once for the file. This file has exactly one
+        // and it is the test module. `connection_manager.rs` is the one guard
+        // of the four that deliberately omits THIS check -- only this one, it
+        // carries the other two -- because it has two column-zero
+        // `#[cfg(test)]` non-module items (a `thread_local!` and a function)
+        // that stay counted as production and call none of its patterns.
+        // Nothing over there holds that shape, so if those two ever move
+        // inside the test module this sentence goes stale silently.
+        for (i, _) in source.match_indices("\n#[cfg(test)]") {
+            let after = &source[i + "\n#[cfg(test)]".len()..];
+            assert!(
+                after.starts_with("\nmod "),
+                "a column-zero `#[cfg(test)]` that is not immediately followed by `mod ` \
+                 -- this guard cannot tell where the test code ends, so it refuses rather \
+                 than reading past it. Move a test-only `use`, `const` or `fn` inside the \
+                 test module."
+            );
+        }
+
+        for (pattern, expected) in [("forget_if_unheld(", 1usize), (".forget(", 3)] {
+            let calls = production.matches(pattern).count();
+            assert_eq!(
+                calls, expected,
+                "commands.rs holds `{pattern}` {calls} time(s), expected {expected}. The \
+                 subscribe-refusal arm must call `forget_if_unheld`, which drops a refused \
+                 channel's wire mapping ONLY when no session holds it; a bare `forget` \
+                 there loses the mapping for a live subscription, and the sweep then \
+                 cannot see the channel to unsubscribe it either. If a legitimate \
+                 `forget` call was added or removed elsewhere in this file, update the \
+                 count here and say which site it is."
+            );
+        }
     }
 
     #[test]
@@ -1414,5 +1663,60 @@ mod expired_address_tests {
             1,
             "a command whose query was never recorded still earns its own slot"
         );
+    }
+    fn channel(name: &str) -> interweave_transport_api::ChannelId {
+        interweave_transport_api::ChannelId::parse(name).expect("a valid test channel")
+    }
+
+    #[test]
+    fn a_refused_channel_does_not_take_the_ones_after_it_down_with_it() {
+        // THE DEFECT: this loop broke at the first refusal, so the applied
+        // set held only the channels BEFORE it. The caller narrows the
+        // registry to that set and then unsubscribes whatever the registry
+        // no longer wants -- so a previous configuration of c and d, both
+        // subscribed and working, was torn down because b failed and b
+        // happened to sort first.
+        let a = channel("a");
+        let b = channel("b");
+        let c = channel("c");
+        let d = channel("d");
+        let requested = vec![a.clone(), b.clone(), c.clone(), d.clone()];
+
+        let mut tried = Vec::new();
+        let (applied, refused) = apply_desired(&requested, |ch| {
+            tried.push(ch.clone());
+            ch != &b
+        });
+
+        assert_eq!(
+            tried, requested,
+            "every requested channel is tried, not just those up to the refusal"
+        );
+        assert!(
+            applied.contains(&c) && applied.contains(&d),
+            "a channel after the refused one is still applied: {applied:?}"
+        );
+        assert!(applied.contains(&a), "and so is one before it");
+        assert!(!applied.contains(&b), "the refused channel is not applied");
+        assert_eq!(refused, vec![b], "and it is the one reported");
+    }
+
+    #[test]
+    fn nothing_refused_applies_everything_and_reports_no_failure() {
+        // The control. A bound that refuses the ordinary case is not a fix.
+        let requested = vec![channel("a"), channel("b")];
+        let (applied, refused) = apply_desired(&requested, |_| true);
+        assert_eq!(applied.len(), 2);
+        assert!(refused.is_empty());
+    }
+
+    #[test]
+    fn every_channel_refused_applies_nothing_and_reports_all_of_them() {
+        // The far edge: the narrowing that follows must be able to empty
+        // the desired set, because the mesh is holding none of it.
+        let requested = vec![channel("a"), channel("b")];
+        let (applied, refused) = apply_desired(&requested, |_| false);
+        assert!(applied.is_empty());
+        assert_eq!(refused.len(), 2, "each one is named, not just the first");
     }
 }

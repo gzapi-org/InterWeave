@@ -255,38 +255,22 @@ pub fn parse_inbound(
         // the same as it would be under the ceiling. Answering
         // `too_large` for all of them told a sender to shrink a payload
         // that was already legal.
-        let reason = match declared_payload_len(bytes) {
-            Some(declared) if declared > max_payload_bytes => DirectRejectReason::TooLarge,
+        // ONE PARSER, in `transport-api` beside `decode`. A second walk
+        // here read each length byte without checking it against its
+        // ceiling, so it stepped over a field `decode` would have
+        // refused -- a 200-byte source endpoint, say, past
+        // `EndpointId::MAX_BYTES` -- and could land on a plausible
+        // `payload_len` further in. That reported `too_large` for a frame
+        // whose framing was wrong, telling a sender to shrink a payload
+        // that was not the problem. Review finding.
+        let reason = match DirectMessageV2::declared_payload_len(bytes) {
+            Ok(declared) if declared > max_payload_bytes => DirectRejectReason::TooLarge,
             _ => DirectRejectReason::Malformed,
         };
         return Err((recover_id(bytes), reason));
     }
     DirectMessageV2::decode(bytes, max_payload_bytes)
         .map_err(|error| (recover_id(bytes), error.to_wire()))
-}
-
-/// The payload length a frame DECLARES, read from its header.
-///
-/// Needed only for an over-ceiling frame, where the body cannot be
-/// decoded but the header is intact: the fields before `payload_len`
-/// are bounded at 287 bytes in total, so they are always inside a buffer
-/// that overran the request ceiling.
-///
-/// Walks the variable-length fields rather than indexing a fixed offset,
-/// because the source, destination and media-type labels each carry
-/// their own length byte. `None` when the header itself is truncated —
-/// then nothing is declared and `malformed` is the honest answer.
-fn declared_payload_len(bytes: &[u8]) -> Option<usize> {
-    // message_id + sent_at_ms
-    let mut at = MessageId::LEN + 8;
-    // source, destination and media type, each a length byte then bytes
-    for _ in 0..3 {
-        let len = *bytes.get(at)? as usize;
-        at = at.checked_add(1)?.checked_add(len)?;
-    }
-    let raw = bytes.get(at..at.checked_add(4)?)?;
-    let declared = u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]);
-    Some(declared as usize)
 }
 
 /// The message id, when enough of the frame arrived to carry one.
@@ -662,6 +646,46 @@ mod tests {
             Err((Some(message_id()), DirectRejectReason::Malformed)),
             "and a bad field is malformed, not too_large"
         );
+    }
+
+    #[tokio::test]
+    async fn an_oversize_frame_with_a_bad_header_field_is_malformed_not_too_large() {
+        // THE TWO-PARSER DEFECT, on the path only an OVERSIZE frame takes.
+        // `a_bad_field_reads_back_as_malformed` above covers the same bad
+        // field under the ceiling, where canonical decoding catches it --
+        // but over the ceiling the body cannot be decoded, and the
+        // shortcut that read the header instead walked each length byte
+        // WITHOUT checking it against its ceiling. So a 200-byte source
+        // endpoint, which `EndpointId::MAX_BYTES` forbids, was stepped
+        // over and whatever four bytes followed were read as
+        // `payload_len`. Made huge here, so the old shortcut answered
+        // `too_large` and told a sender to shrink a payload that was not
+        // the problem. Review finding.
+        // LAID OUT FOR THE UNCHECKED WALK, so the fixture discriminates:
+        // the big `payload_len` sits exactly where a walk that trusts the
+        // length byte would look for it, and nowhere a checked parser
+        // would. 200 is past `EndpointId::MAX_BYTES`, so the checked
+        // parser stops at the field; the unchecked one steps over all 200
+        // bytes, reads two zero length bytes, and lands on `u32::MAX`.
+        let mut frame = vec![0u8; MessageId::LEN + 8];
+        frame.push(200);
+        frame.extend(std::iter::repeat_n(b'a', 200));
+        frame.push(0); // destination_endpoint_len, where the walk lands
+        frame.push(0); // media_type_len
+        frame.extend_from_slice(&u32::MAX.to_be_bytes());
+        // Past the request ceiling, so the read reports oversize.
+        frame.extend(std::iter::repeat_n(0u8, MAX_REQUEST_BYTES));
+
+        let (bytes, oversize) = read_one_request(&frame).await.expect("read");
+        assert!(oversize, "the fixture must exercise the oversize path");
+        let (id, reason) = parse_inbound(&bytes, oversize, MAX_PAYLOAD_BYTES)
+            .expect_err("a 200-byte source endpoint cannot decode");
+        assert_eq!(
+            reason,
+            DirectRejectReason::Malformed,
+            "a header field past its ceiling is malformed, whatever follows it reads as"
+        );
+        assert!(id.is_some(), "and the id is still echoable");
     }
 
     /// TOO SHORT TO ANSWER. A response must echo the id it answers, so a

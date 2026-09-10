@@ -58,6 +58,12 @@ mod broadcast;
 mod commands;
 mod config;
 mod dialing;
+/// The one `(peer, address)` key, for the outbound gate.
+///
+/// Re-exported rather than duplicated: the gate's established hook writes
+/// this key into the ticket, so it must be the same function the admission
+/// and the address book use. Review finding on PR #86.
+pub(crate) use dialing::canonical_for_peer;
 mod direct;
 mod endpoints;
 mod handle;

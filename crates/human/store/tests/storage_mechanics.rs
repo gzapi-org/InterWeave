@@ -15,7 +15,7 @@ use std::os::unix::fs::PermissionsExt;
 use interweave_human_core::retention::{StorageHealth, TerminalCause};
 use interweave_human_store::{
     AppMessageId, HumanStore, InboundOrigin, NewInbound, NewOutbound, OutboundDestination,
-    PageLimits, StoreError, StoreOptions,
+    PageLimits, PageLimitsError, StoreError, StoreOptions,
 };
 use interweave_transport_api::{DirectDestination, EndpointId, MediaType, TransportIdentity};
 
@@ -83,6 +83,85 @@ fn inbound(id: &str, payload: Vec<u8>) -> NewInbound {
 
 fn memory() -> HumanStore {
     HumanStore::open_in_memory(StoreOptions::default()).expect("in-memory store opens")
+}
+
+#[test]
+fn a_timestamp_the_store_cannot_represent_is_refused_not_saturated() {
+    // Every public timestamp crossed into SQL as
+    // `i64::try_from(v).unwrap_or(i64::MAX)`, so `i64::MAX`, `i64::MAX + 1`
+    // and `u64::MAX` all stored the same value -- distinct accepted inputs
+    // collapsing into one, which is a public invariant broken quietly
+    // rather than a limit enforced. No clock reaches it, so a caller who
+    // does is a bug or a hostile input and is better told. Review finding.
+    let mut store = memory();
+    let mut new = inbound("00000000000000000000000000000001", vec![1]);
+    new.received_at = u64::MAX;
+    match store.commit_unread_inbound(&new) {
+        Err(StoreError::TimestampOutOfRange { field, got }) => {
+            assert_eq!(field, "received_at");
+            assert_eq!(got, u64::MAX);
+        }
+        other => panic!("an unrepresentable timestamp must be refused: {other:?}"),
+    }
+    assert!(
+        store.unread_inbound().expect("read").is_empty(),
+        "and nothing is stored under a saturated value"
+    );
+
+    // The largest value that IS representable still works, so the refusal
+    // is a ceiling and not an off-by-one.
+    let mut edge = inbound("00000000000000000000000000000002", vec![2]);
+    edge.received_at = u64::try_from(i64::MAX).expect("i64::MAX fits in u64");
+    store
+        .commit_unread_inbound(&edge)
+        .expect("the largest representable timestamp is accepted");
+    assert_eq!(store.unread_inbound().expect("read").len(), 1);
+}
+
+#[test]
+fn a_zero_record_ceiling_is_refused_rather_than_ending_the_enumeration() {
+    // It did not page, it TERMINATED. The query fetches `max_records + 1`
+    // to tell a full page from a finished one, so a zero ceiling fetched
+    // one row; the first row of a page is emitted unconditionally, so it
+    // went out; no second row was ever seen, so the page reported no
+    // continuation. A backup walker reads that as "this table is done"
+    // and moves on -- emitting the first unread record and silently
+    // skipping every record after it. Durable-data omission with no
+    // error anywhere, which is why the constructor refuses it rather
+    // than the use sites clamping. Review finding.
+    assert_eq!(
+        PageLimits::new(0, 1024 * 1024),
+        Err(PageLimitsError::ZeroRecords),
+        "a zero record ceiling cannot page"
+    );
+    assert_eq!(
+        PageLimits::new(256, 0),
+        Err(PageLimitsError::ZeroBytes),
+        "nor can a zero byte ceiling"
+    );
+    assert!(PageLimits::new(1, 1).is_ok(), "one of each is a page");
+
+    // And the smallest legal ceiling really does walk every record
+    // rather than stopping after the first -- which is the behaviour the
+    // refused value only looked like.
+    let mut store = memory();
+    for i in 0..5u8 {
+        store
+            .commit_unread_inbound(&inbound(&format!("{i:032x}"), vec![i]))
+            .expect("record");
+    }
+    let one = PageLimits::new(1, 1024 * 1024).expect("a paging budget");
+    let mut seen = 0usize;
+    let mut cursor = None;
+    for _ in 0..32 {
+        let page = store.unread_inbound_page(cursor, one).expect("page");
+        seen += page.items.len();
+        match page.next {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(seen, 5, "every record is reached one page at a time");
 }
 
 #[test]
@@ -790,10 +869,7 @@ fn bulk_reads_are_paged_with_record_and_byte_ceilings() {
     }
 
     // A record ceiling.
-    let limits = PageLimits {
-        max_records: 5,
-        max_bytes: 1024 * 1024,
-    };
+    let limits = PageLimits::new(5, 1024 * 1024).expect("a paging budget");
     let mut seen = Vec::new();
     let mut cursor = None;
     loop {
@@ -817,10 +893,7 @@ fn bulk_reads_are_paged_with_record_and_byte_ceilings() {
     assert_eq!(unique.len(), 12, "and none is visited twice");
 
     // A byte ceiling, small enough that it binds before the record one.
-    let tight = PageLimits {
-        max_records: 100,
-        max_bytes: 2048,
-    };
+    let tight = PageLimits::new(100, 2048).expect("a paging budget");
     let page = store.unread_inbound_page(None, tight).expect("page");
     assert!(
         page.items.len() <= 3,
@@ -831,10 +904,7 @@ fn bulk_reads_are_paged_with_record_and_byte_ceilings() {
 
     // A single payload over the whole budget still makes progress: the
     // first row of a page is always emitted, or the walk stalls forever.
-    let stingy = PageLimits {
-        max_records: 100,
-        max_bytes: 1,
-    };
+    let stingy = PageLimits::new(100, 1).expect("a paging budget");
     let page = store.unread_inbound_page(None, stingy).expect("page");
     assert_eq!(page.items.len(), 1, "always at least one row");
 
@@ -871,10 +941,7 @@ fn a_backup_walk_covers_both_tables_exactly_once() {
         }
     }
 
-    let limits = PageLimits {
-        max_records: 2,
-        max_bytes: 1024 * 1024,
-    };
+    let limits = PageLimits::new(2, 1024 * 1024).expect("a paging budget");
     let mut seen = Vec::new();
     let mut cursor = None;
     for _ in 0..64 {
@@ -1446,5 +1513,126 @@ fn a_symlinked_database_path_is_refused_not_followed() {
     assert!(
         matches!(opened, Err(StoreError::NotAFile { .. })),
         "a symlinked database path is refused: {opened:?}"
+    );
+}
+
+#[test]
+fn a_nonsense_read_timestamp_is_refused_before_the_unread_row_is_destroyed() {
+    // THE ONE PLACE REFUSING COULD LOSE DATA. `mark_read` deletes the
+    // durable unread row and hands back a `ReadEphemeral` carrying the
+    // caller's `at_ms`. With no check here, `keep` then refused on
+    // `read_at` -- and `ReadEphemeral`'s fields are crate-private, so the
+    // caller could neither repair the value nor get the row back. The
+    // message became permanently unkeepable, which is the retention
+    // contract violated by a fix meant to tighten it.
+    let mut store = memory();
+    let new = inbound("00000000000000000000000000000003", vec![3]);
+    store.commit_unread_inbound(&new).expect("committed");
+    let row = store.unread_inbound().expect("read")[0].row_id;
+
+    match store.mark_read(row, u64::MAX) {
+        Err(StoreError::TimestampOutOfRange { field, got }) => {
+            assert_eq!(field, "read_at");
+            assert_eq!(got, u64::MAX);
+        }
+        other => panic!("an unrepresentable read time must be refused: {other:?}"),
+    }
+
+    // THE POINT: the row survived the refusal, so the caller can retry
+    // with a sane clock and the message is still keepable.
+    assert_eq!(
+        store.unread_inbound().expect("read").len(),
+        1,
+        "the durable unread copy must survive a refused read"
+    );
+    let held = store
+        .mark_read(row, 1_000)
+        .expect("a sane read time is accepted");
+    store
+        .keep(&held, 2_000)
+        .expect("and the message is keepable");
+}
+
+#[test]
+fn the_three_remaining_reachable_timestamp_sites_refuse_rather_than_saturating() {
+    // The refusal was tested at ONE of its sites, so reverting the others
+    // left the whole suite green. A review found that.
+    //
+    // EIGHT CALL SITES, FIVE OF THEM REACHABLE from outside the crate, and
+    // THIS TEST COVERS THREE -- `created_at`, `record_attempt`'s `at_ms`,
+    // and `keep`'s `at_ms`. The other two reachable sites are pinned by the
+    // two tests NAMED below rather than located, because an earlier version
+    // said "directly above" and only one of them is:
+    // `a_timestamp_the_store_cannot_represent_is_refused_not_saturated`
+    // for `commit_unread_inbound`'s `received_at`, near the TOP of this
+    // file, and
+    // `a_nonsense_read_timestamp_is_refused_before_the_unread_row_is_destroyed`
+    // for `mark_read`'s `read_at`, which is the one directly above.
+    //
+    // The remaining three take a value the store itself produced: `keep`'s
+    // `held.received_at` and `held.read_at` come from a `ReadEphemeral`
+    // whose fields are crate-private, and both were already refused on the
+    // way in -- by `commit_unread_inbound` and by `mark_read` -- so they
+    // are fail-closed guards on inputs that can no longer arrive, not
+    // untested paths. `cursor_bounds` is the same: a `Cursor` is only ever
+    // handed back by a previous page.
+    //
+    // AND THE NAME NOW SAYS THREE, because a test name is read on its own.
+    // It was `every_reachable_timestamp_site_…`, which claimed five; the
+    // comment conceding that the name overclaims "unless the two siblings
+    // are read with it" was asking a reader to carry a footnote into a
+    // `cargo test` listing, where only the name appears. Review finding on
+    // PR #86.
+    //
+    // THE EARLIER ACCOUNTING SAID "three of the six", which is wrong twice:
+    // `sql_timestamp` has eight call sites, not six, and five are reachable,
+    // not three. It reached its number by omitting the two the sibling tests
+    // cover and counting `cursor_bounds` inside the total. Counted rather
+    // than remembered. Review finding on PR #86.
+    let mut store = memory();
+
+    // 1. `created_at`, through the outbound commit.
+    let mut out = outbound("0000000000000000000000000000000a", vec![1]);
+    out.created_at = u64::MAX;
+    match store.commit_pending_outbound(&out) {
+        Err(StoreError::TimestampOutOfRange { field, got }) => {
+            assert_eq!(field, "created_at");
+            assert_eq!(got, u64::MAX);
+        }
+        other => panic!("an unrepresentable created_at must be refused: {other:?}"),
+    }
+    assert!(
+        store.pending_outbound().expect("read").is_empty(),
+        "and nothing is stored under a saturated value"
+    );
+
+    // 2. `at_ms`, through the attempt counter.
+    let sane = outbound("0000000000000000000000000000000b", vec![2]);
+    let row = store.commit_pending_outbound(&sane).expect("committed");
+    match store.record_attempt(row, u64::MAX) {
+        Err(StoreError::TimestampOutOfRange { field, got }) => {
+            assert_eq!(field, "at_ms");
+            assert_eq!(got, u64::MAX);
+        }
+        other => panic!("an unrepresentable attempt time must be refused: {other:?}"),
+    }
+
+    // 3. `at_ms`, through `keep`.
+    let held_src = inbound("0000000000000000000000000000000c", vec![3]);
+    store.commit_unread_inbound(&held_src).expect("committed");
+    let unread = store.unread_inbound().expect("read");
+    let held = store
+        .mark_read(unread[0].row_id, 1_000)
+        .expect("read at a sane time");
+    match store.keep(&held, u64::MAX) {
+        Err(StoreError::TimestampOutOfRange { field, got }) => {
+            assert_eq!(field, "at_ms");
+            assert_eq!(got, u64::MAX);
+        }
+        other => panic!("an unrepresentable keep time must be refused: {other:?}"),
+    }
+    assert!(
+        store.kept_inbound().expect("read").is_empty(),
+        "and nothing is kept under a saturated value"
     );
 }

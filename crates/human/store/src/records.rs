@@ -393,17 +393,94 @@ pub struct Page<T, C = Cursor> {
 /// Two ceilings because either alone is escapable: a record count says
 /// nothing about 48 KiB payloads, and a byte budget alone lets a corpus
 /// of empty messages return unboundedly many rows.
+///
+/// # A zero record ceiling is not constructible, and that is the point
+///
+/// `max_records: 0` did not page — it TERMINATED. The query fetches
+/// `max_records + 1` to tell a full page from a finished one, so a zero
+/// ceiling fetched one row; the first row of a page is emitted
+/// unconditionally, so it went out; no second row was ever seen, so the
+/// page reported no continuation. A caller walking a backup then took
+/// "no continuation" for "this table is done" and moved to the next one,
+/// emitting the first unread record and silently skipping every record
+/// after it.
+///
+/// That is durable-data omission with no error anywhere, which is why
+/// the fields are private and [`PageLimits::new`] refuses zero rather
+/// than the use sites clamping it. Clamping would repair the caller's
+/// mistake invisibly; refusing makes them fix it. Review finding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageLimits {
-    /// Most rows in one page.
-    pub max_records: usize,
+    max_records: usize,
+    max_bytes: usize,
+}
+
+/// Why a [`PageLimits`] was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageLimitsError {
+    /// A zero record ceiling ends an enumeration instead of paging it.
+    ZeroRecords,
+    /// A zero byte ceiling is REFUSED, like a zero record ceiling.
+    ///
+    /// Harmless on its own -- the first row of a page is emitted before
+    /// the byte budget is consulted, so a zero budget still returns one
+    /// row and pages rather than terminating. Refused anyway, because a
+    /// caller passing both ceilings from configuration gets one rule for
+    /// both instead of a silent asymmetry. The doc here said "accepted",
+    /// which was the opposite of what `PageLimits::new` does. Review
+    /// finding on PR #86.
+    ZeroBytes,
+}
+
+impl std::fmt::Display for PageLimitsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ZeroRecords => f.write_str(
+                "max_records must be at least 1: a zero ceiling reports no continuation and \
+                 silently ends the enumeration",
+            ),
+            Self::ZeroBytes => f.write_str("max_bytes must be at least 1"),
+        }
+    }
+}
+
+impl std::error::Error for PageLimitsError {}
+
+impl PageLimits {
+    /// Build a page budget, refusing a ceiling that cannot page.
+    ///
+    /// # Errors
+    /// Returns [`PageLimitsError::ZeroRecords`] or
+    /// [`PageLimitsError::ZeroBytes`] for a zero ceiling.
+    pub const fn new(max_records: usize, max_bytes: usize) -> Result<Self, PageLimitsError> {
+        if max_records == 0 {
+            return Err(PageLimitsError::ZeroRecords);
+        }
+        if max_bytes == 0 {
+            return Err(PageLimitsError::ZeroBytes);
+        }
+        Ok(Self {
+            max_records,
+            max_bytes,
+        })
+    }
+
+    /// Most rows in one page; never zero.
+    #[must_use]
+    pub const fn max_records(&self) -> usize {
+        self.max_records
+    }
+
     /// Most payload bytes in one page, past the first row.
     ///
     /// The first row of a page is always emitted even if it exceeds this
     /// on its own. Otherwise a single large message would stall the
     /// enumeration at that row forever, which is worse than one page
     /// being one message too big.
-    pub max_bytes: usize,
+    #[must_use]
+    pub const fn max_bytes(&self) -> usize {
+        self.max_bytes
+    }
 }
 
 impl Default for PageLimits {

@@ -173,6 +173,21 @@ pub struct DirectMessageV2 {
     pub payload: Payload,
 }
 
+/// The header fields of a direct v2 frame, checked.
+///
+/// Private: it exists so the two callers that need the header —
+/// [`DirectMessageV2::decode`] and
+/// [`DirectMessageV2::declared_payload_len`] — share one parser rather
+/// than two that can disagree about the same bytes.
+struct DirectHeaderV2 {
+    message_id: MessageId,
+    sent_at_ms: u64,
+    source_endpoint: EndpointId,
+    destination_endpoint: Option<EndpointId>,
+    media_type: Option<MediaType>,
+    declared_payload_len: usize,
+}
+
 impl DirectMessageV2 {
     /// Encode to the frozen layout.
     ///
@@ -223,21 +238,43 @@ impl DirectMessageV2 {
         out
     }
 
-    /// Decode from the frozen layout.
+    /// The payload length a frame DECLARES, parsed with the same
+    /// ceilings [`Self::decode`] applies to the fields before it.
     ///
-    /// **Every declared length is checked against its ceiling before the
-    /// bytes it describes are read**, so a hostile frame claiming a 4 GiB
-    /// payload is refused at the length field rather than at the
-    /// allocation. `limit` is the profile's effective
-    /// `max_payload_bytes`, clamped to [`MAX_PAYLOAD_BYTES`] so a
-    /// configuration cannot widen a frozen ceiling.
+    /// For an over-ceiling frame the body cannot be decoded but the
+    /// header is intact, and a caller has to tell "the payload is too
+    /// large" from "the framing is wrong" — the first is `too_large` on
+    /// the wire and the second is `malformed`. Answering that question
+    /// needs the header parsed, and parsing it TWICE is how the two
+    /// answers diverge: a second walk that reads each length byte without
+    /// checking it against its ceiling steps over a field `decode` would
+    /// have refused, and can land on a plausible-looking `payload_len`
+    /// further in. A frame declaring a 200-byte source endpoint is
+    /// malformed — `EndpointId::MAX_BYTES` says so — and must not be
+    /// reportable as `too_large` because the bytes after it happened to
+    /// read as a big number.
+    ///
+    /// So this is the one parser, and `decode` calls it too.
+    ///
+    /// THE RETURNED LENGTH IS THE SENDER'S CLAIM and the payload ceiling
+    /// is deliberately NOT applied to it -- reporting a value above the
+    /// ceiling is the entire reason this is public. So do not size an
+    /// allocation from it: that is an instruction to the next caller, not
+    /// an invariant anything here enforces, and no guard counts the call
+    /// sites. The only correct use is comparing it against a ceiling the
+    /// caller owns, which is what `parse_inbound` does; the bytes
+    /// themselves come from `decode`, which does enforce the limit. One
+    /// caller today, `direct_codec.rs`'s `reason`, and it compares.
     ///
     /// # Errors
-    /// Returns [`FrameError`] naming the field that failed; all of them
-    /// collapse to a coarse code via [`FrameError::to_wire`].
-    pub fn decode(buffer: &[u8], limit: usize) -> Result<Self, FrameError> {
-        let mut cursor = Cursor::new(buffer);
+    /// Returns the [`FrameError`] naming the first field that fails,
+    /// exactly as `decode` would.
+    pub fn declared_payload_len(buffer: &[u8]) -> Result<usize, FrameError> {
+        Self::parse_header(&mut Cursor::new(buffer)).map(|header| header.declared_payload_len)
+    }
 
+    /// The header fields, checked, with the cursor left at the payload.
+    fn parse_header(cursor: &mut Cursor<'_>) -> Result<DirectHeaderV2, FrameError> {
         let message_id = MessageId::from_bytes(cursor.take_array::<16>("message_id")?);
         let sent_at_ms = u64::from_be_bytes(cursor.take_array::<8>("sent_at_ms")?);
 
@@ -280,9 +317,35 @@ impl DirectMessageV2 {
             }
         };
 
+        let declared = u32::from_be_bytes(cursor.take_array::<4>("payload_len")?);
+        Ok(DirectHeaderV2 {
+            message_id,
+            sent_at_ms,
+            source_endpoint,
+            destination_endpoint,
+            media_type,
+            declared_payload_len: usize::try_from(declared).unwrap_or(usize::MAX),
+        })
+    }
+
+    /// Decode from the frozen layout.
+    ///
+    /// **Every declared length is checked against its ceiling before the
+    /// bytes it describes are read**, so a hostile frame claiming a 4 GiB
+    /// payload is refused at the length field rather than at the
+    /// allocation. `limit` is the profile's effective
+    /// `max_payload_bytes`, clamped to [`MAX_PAYLOAD_BYTES`] so a
+    /// configuration cannot widen a frozen ceiling.
+    ///
+    /// # Errors
+    /// Returns [`FrameError`] naming the field that failed; all of them
+    /// collapse to a coarse code via [`FrameError::to_wire`].
+    pub fn decode(buffer: &[u8], limit: usize) -> Result<Self, FrameError> {
+        let mut cursor = Cursor::new(buffer);
+        let header = Self::parse_header(&mut cursor)?;
+
         let payload = {
-            let declared = u32::from_be_bytes(cursor.take_array::<4>("payload_len")?);
-            let len = usize::try_from(declared).unwrap_or(usize::MAX);
+            let len = header.declared_payload_len;
             // BEFORE the read, so an enormous declared length costs a
             // comparison rather than an allocation.
             let max = limit.min(MAX_PAYLOAD_BYTES);
@@ -290,8 +353,12 @@ impl DirectMessageV2 {
                 return Err(FrameError::PayloadTooLarge { got: len, max });
             }
             let bytes = cursor.take("payload", len)?.to_vec();
-            Payload::new(media_type, bytes, limit).map_err(FrameError::Media)?
+            Payload::new(header.media_type, bytes, limit).map_err(FrameError::Media)?
         };
+        let message_id = header.message_id;
+        let sent_at_ms = header.sent_at_ms;
+        let source_endpoint = header.source_endpoint;
+        let destination_endpoint = header.destination_endpoint;
 
         let extra = cursor.remaining();
         if extra > 0 {

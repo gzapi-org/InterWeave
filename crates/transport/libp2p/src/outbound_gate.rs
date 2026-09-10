@@ -106,6 +106,7 @@ use interweave_transport_runtime::{
 
 use crate::attribution::DialAttribution;
 use crate::refusals::{DialRefusals, Refusal};
+use crate::runtime::canonical_for_peer;
 
 /// What a refused behaviour dial is told when it names no peer.
 const NO_PEER: &str = "a behaviour dial that names no peer cannot be classified";
@@ -241,33 +242,62 @@ impl InFlightTickets {
 /// A behaviour dial's address arrives with the peer appended — a query
 /// result carries it — while the address book and the quarantine map
 /// are keyed by whatever the ticket carries. Passing the suffixed form
-/// to the policy looks up an address it has never seen, so every
-/// quarantine silently misses.
+/// to the policy LOOKED UP an address it had never seen, so every
+/// quarantine silently MISSED.
+///
+/// PAST TENSE DELIBERATELY, and it is the third stale sentence found in
+/// this one doc comment. It described F10 in the present tense in the
+/// same doc comment as the `**FIXED.**` paragraph below, which says no
+/// production path can hand the policy a suffixed form any more —
+/// `attempt_dial` and `learn_route` both canonicalize and the established
+/// hook uses `canonical_for_peer` — so a reader who stopped here took it for a
+/// description of today's code. CLAUDE.md §7 names exactly this: "X is
+/// answered Y" is false as soon as it is fixed, often in the same commit
+/// series. Review finding on PR #86.
 ///
 /// **`AdmittedDial` does NOT bind the bare address**, and this comment
 /// said it did until PR #74's review. It binds `ticket.address()`
-/// verbatim, and `attempt_dial` copies the caller's string into the
-/// `DialRequest` unchanged. The BEHAVIOUR path is stripped by
-/// [`strip_own_suffix`] at its call site below — NOT by this function,
-/// whose only PRODUCTION call site is `settle_failed_dial`'s peerless
-/// arm (the tests below call it directly), itself unreachable through
-/// admission: a ticket naming no peer is refused
+/// verbatim. `attempt_dial` USED to copy the caller's string into the
+/// `DialRequest` unchanged; since PR #86 it canonicalizes first, so the
+/// sentence that followed here was false for two commits.
+///
+/// The BEHAVIOUR path is canonicalized at the established hook below by
+/// `runtime::dialing::canonical_for_peer`, which wraps
+/// [`strip_own_suffix`] and adds the empty-result arm — NOT by this
+/// function, whose only PRODUCTION call site is `settle_failed_dial`'s
+/// peerless arm (the tests below call it directly), itself unreachable
+/// through admission: a ticket naming no peer is refused
 /// (`a_dial_that_names_no_peer_is_never_admitted`) and a named one
 /// always parses
 /// (`every_identity_the_neutral_grammar_accepts_libp2p_accepts`). So
 /// this function runs in no production path at all today — those two
 /// tests are what would say so if either premise stopped holding.
 ///
-/// The COMMAND and SCHEDULER paths are stripped by neither.
-/// One physical route reached both ways therefore occupies two
-/// `(peer, address)` entries: a quarantine earned on one does not
-/// suppress the other, and both spend `max_addresses` in a map whose
-/// bound is the point. That is F10's failure mode on the command path.
+/// That paragraph said `strip_own_suffix` was called "at its call site
+/// below" until a SECOND review of this same paragraph. The established
+/// hook stopped calling it directly two commits earlier — it calls
+/// `canonical_for_peer` now — so `strip_own_suffix` has no call site in
+/// this file at all and is reached only through that wrapper. One
+/// paragraph, corrected twice, for two different stale sentences: the
+/// §7 shape is that the reasoning is right in the file you are editing
+/// and its counterpart is a line you did not re-read. Review finding on
+/// PR #86.
 ///
-/// **Not fixed here, and not this PR's to fix**: stripping in
-/// `attempt_dial` would change what admission and quarantine are keyed
-/// by, which is a security boundary and a different change from
-/// resolving D1/D2/D3. Recorded rather than left for rediscovery.
+/// The COMMAND and SCHEDULER paths USED to be stripped by neither, so
+/// one physical route reached both ways occupied two `(peer, address)`
+/// entries: a quarantine earned on one did not suppress the other, and
+/// both spent `max_addresses` in a map whose bound is the point. That
+/// was F10's failure mode on the command path, recorded on PR #74 as a
+/// deferred follow-up because stripping in `attempt_dial` changes what
+/// admission and quarantine are keyed by -- a security boundary, and a
+/// different change from resolving D1/D2/D3.
+///
+/// **FIXED.** `attempt_dial` now canonicalizes before it builds the
+/// `DialRequest`, so all three paths agree on the key; see
+/// `runtime::dialing::canonical_dial_address` for what it strips and
+/// the four things it deliberately leaves alone. Every `attempt_dial`
+/// caller goes through it, which is why that is the boundary rather
+/// than each call site.
 #[must_use]
 pub fn strip_peer_suffix(address: &Multiaddr) -> String {
     let mut parts: Vec<_> = address.iter().collect();
@@ -520,7 +550,15 @@ impl NetworkBehaviour for OutboundAdmission {
         _role_override: Endpoint,
         _port_use: PortUse,
     ) -> Result<THandler<Self>, ConnectionDenied> {
-        let used = strip_own_suffix(addr, &peer);
+        // THROUGH THE SHARED KEY, not the raw helper. This was a third
+        // implementation of the `(peer, address)` key -- the string it
+        // produces is written into the ticket by `rebind_placeholder` and
+        // is then the key for every settlement and for `learn_route` --
+        // and it differed from `canonical_for_peer` on the one input the
+        // other two had already been reconciled over. A review found it
+        // while checking the claim that there was only one
+        // implementation. Review finding on PR #86.
+        let used = canonical_for_peer(addr, &peer);
         let Some(peer) = self.in_flight.rebind_placeholder(connection_id, &used) else {
             return Ok(dummy::ConnectionHandler);
         };
@@ -648,6 +686,103 @@ mod tests {
             Endpoint::Dialer,
             PortUse::Reuse,
         )
+    }
+
+    #[test]
+    fn the_established_hook_still_canonicalizes_the_rebound_address() {
+        // THE SECOND TICKET ORIGIN, and the one the runtime module's guard
+        // cannot see.
+        //
+        // `attempt_dial` canonicalizes with `canonical_dial_address`, and
+        // `no_production_path_learns_an_address_without_canonicalizing`
+        // counts that. But EVERY behaviour-originated dial is admitted with
+        // the F9 placeholder instead and gets its address here, at the
+        // established hook, from `canonical_for_peer` -- so this file is the
+        // origin of most of the tickets the settlement recorders receive, and
+        // it is not in that guard's scan, which covers `src/runtime/` only.
+        //
+        // An audit measured what happens without this: reverting the hook to
+        // the raw `strip_own_suffix` leaves all 202 lib tests passing. Clippy
+        // does catch it today, but only incidentally -- `canonical_for_peer`
+        // becomes an unused import -- and that evaporates the moment anything
+        // else in this file uses it. An incidental lint is not a guard.
+        //
+        // IT CUTS AT EVERY FILE-LEVEL TEST MODULE, not the first, and refuses
+        // the two shapes it cannot read. A first version of this guard was a
+        // bare `split_once`, which a review measured as a silent pass of its
+        // own: Rust's conventional layout puts new code BELOW the test
+        // module, and a second production `canonical_for_peer(` written there
+        // is not in `production` at all, so the count stays 1 and the guard
+        // agrees. The three protections are the sibling guard's, which was
+        // fixed for each of them in turn -- an out-of-line
+        // `#[cfg(test)] mod tests;` swallowing the rest of the file, a module
+        // that runs to the end of the file with no column-zero closing brace,
+        // and a column-zero `#[cfg(test)]` on something that is not a module.
+        //
+        // THE SECOND IS NARROWER THAN IT SOUNDS, said here rather than left
+        // to be discovered: the assertion fires only when NO `"\n}"` follows
+        // the module at all. A module closing at an indent with any later
+        // column-zero `}` takes the other branch and cuts at that brace
+        // instead, dropping whatever lies between -- production code
+        // included -- with nothing raised. rustfmt does not produce that
+        // shape, which is why it is a stated limit and not a fourth check.
+        //
+        // Reads this file's own source, so it cannot see a call built by a
+        // macro, and it checks the count rather than the argument. Review
+        // findings on PR #86.
+        let source = include_str!("outbound_gate.rs");
+        let mut production = String::new();
+        let mut rest = source;
+        while let Some((before, after)) = rest.split_once("\n#[cfg(test)]\nmod ") {
+            production.push_str(before);
+            let head: &str = after.split_once('{').map_or(after, |(h, _)| h);
+            assert!(
+                !head.contains(';'),
+                "`#[cfg(test)] mod <name>;` declares its tests in another file, and this \
+                 guard cannot tell where they end -- so it refuses. Use an inline \
+                 `mod tests {{ ... }}`, or extend this guard to follow the file."
+            );
+            // `"\n}"` and not `"\n}\n"`: the surviving newline is the
+            // separator the next search needs.
+            match after.split_once("\n}") {
+                Some((_, tail)) => rest = tail,
+                None => {
+                    assert!(
+                        after.trim_end().ends_with('}'),
+                        "a `#[cfg(test)] mod` here neither closes at column zero nor ends \
+                         the file, so this guard cannot tell tests from production and \
+                         refuses rather than guessing"
+                    );
+                    rest = "";
+                }
+            }
+        }
+        production.push_str(rest);
+        for (i, _) in source.match_indices("\n#[cfg(test)]") {
+            let after = &source[i + "\n#[cfg(test)]".len()..];
+            assert!(
+                after.starts_with("\nmod "),
+                "a column-zero `#[cfg(test)]` that is not immediately followed by `mod ` \
+                 -- this guard cannot tell where the test code ends, so it refuses rather \
+                 than reading past it. Move a test-only `use`, `const` or `fn` inside the \
+                 test module."
+            );
+        }
+        assert_eq!(
+            production.matches("canonical_for_peer(").count(),
+            1,
+            "the established hook must key the ticket through \
+             `canonical_for_peer`, which is the shared spelling the book, \
+             the quarantine and the ticket agree on. A raw `strip_own_suffix` \
+             here answers `\"\"` for an address that is only the peer's own \
+             suffix, and an empty replacement is one `rebind_address` refuses \
+             -- so `rebind_placeholder` answers `None` and the hook returns a \
+             handler BEFORE the `address_dialable` check, skipping the \
+             quarantine lookup this hook exists for. `record_failure`'s own \
+             early return on an empty address is the second-order effect, not \
+             the first. If a second legitimate call site was added, raise this \
+             count and say which."
+        );
     }
 
     #[test]

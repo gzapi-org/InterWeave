@@ -111,6 +111,36 @@ impl BroadcastState {
         self.channels.remove(&wire);
         gossipsub::IdentTopic::new(wire)
     }
+
+    /// Forget a REFUSED channel's wire mapping, ONLY if no session holds it.
+    ///
+    /// The decision the subscribe-refusal arm makes, lifted out of the
+    /// command closure so that a test can reach it. `forget` removes the
+    /// `wire -> ChannelId` entry `channel_of` uses to attribute inbound
+    /// GossipSub traffic, so dropping it for a channel a live session
+    /// still joins loses the attribution while the subscription itself
+    /// survives -- and the sweep cannot see the channel to unsubscribe it
+    /// either, because it iterates this same map.
+    ///
+    /// Inline in that closure, the ONLY was a claim nothing could fail on:
+    /// reaching the arm needs a live Swarm and a GossipSub filter that
+    /// refuses a topic, and the installed filter never refuses, so the
+    /// comment said in as many words that no test covered it.
+    ///
+    /// TWO MECHANISMS, BECAUSE ONE WAS NOT ENOUGH, and the first version of
+    /// this sentence claimed otherwise. The CONDITION here is pinned by
+    /// `only_an_unheld_channel_loses_its_mapping_on_refusal`, which calls
+    /// this method. That says nothing about whether the refusal arm still
+    /// goes THROUGH it: a reviewer measured that swapping the call site back
+    /// to a bare `forget` leaves that test, its sibling and clippy all
+    /// green. The arm's use of it is pinned structurally instead, by
+    /// `the_refusal_arm_still_asks_whether_anybody_holds_the_channel` in
+    /// `commands.rs`. Review findings on PR #86.
+    pub(super) fn forget_if_unheld(&mut self, channel: &ChannelId) {
+        if self.subs.subscribers(channel).is_empty() {
+            self.forget(channel);
+        }
+    }
 }
 
 /// The profile's broadcast configuration, validated.
@@ -462,6 +492,111 @@ mod tests {
             state.channel_of(&topic.hash()),
             None,
             "forgetting a channel forgets its topic"
+        );
+    }
+
+    #[test]
+    fn a_refused_channel_a_session_holds_keeps_its_mapping() {
+        // `forget` removes the entry `channel_of` needs to attribute
+        // inbound traffic, so dropping it for a channel a live session
+        // still joins loses the attribution while the subscription itself
+        // survives -- and the sweep cannot see the channel to unsubscribe
+        // it either, because it iterates the same map. The rule the refusal
+        // arm applies is `subscribers(channel).is_empty()`, and this is
+        // that rule against the mapping it protects.
+        //
+        // NOT THE COMMAND ARM ITSELF, which needs a live Swarm and a
+        // GossipSub filter that refuses a topic -- and the installed filter
+        // never does, so the arm is unreachable in a shipped build. What is
+        // assertable HERE is the predicate and the mapping together, and
+        // the limit is worth stating precisely: reverting that arm to an
+        // unconditional `forget` leaves THIS TEST GREEN. Measured. So this
+        // pins the rule, not its application.
+        //
+        // The DECISION became assertable later, as
+        // `BroadcastState::forget_if_unheld`, and its own test sits below.
+        // The arm's use of that method is a third thing again, pinned
+        // structurally in `commands.rs`. This sentence said "the predicate
+        // and the mapping" were all that could be asserted, which stopped
+        // being true in the commit that extracted the method -- the pair
+        // went stale in the commit that created it. Review finding on
+        // PR #86.
+        let sources = TrustSources::default();
+        let mut state = BroadcastState::new(&sources);
+        let channel = ChannelId::parse("general").expect("valid channel");
+        let topic = state.remember(&channel);
+
+        // Nobody holds it: the rule says drop, and dropping is correct.
+        assert!(
+            state.subs.subscribers(&channel).is_empty(),
+            "no session has joined yet"
+        );
+        state.forget(&channel);
+        assert_eq!(
+            state.channel_of(&topic.hash()),
+            None,
+            "a channel nobody holds may lose its mapping"
+        );
+
+        // A session holds it: the rule says keep, and the mapping must
+        // survive or inbound traffic on a live subscription is unattributable.
+        let topic = state.remember(&channel);
+        state
+            .subs
+            .join(channel.clone(), String::from("session-a"))
+            .expect("a session may join");
+        assert!(
+            !state.subs.subscribers(&channel).is_empty(),
+            "the rule must see the live join"
+        );
+        assert_eq!(
+            state.channel_of(&topic.hash()),
+            Some(&channel),
+            "and the mapping is still there to attribute its traffic"
+        );
+    }
+
+    #[test]
+    fn only_an_unheld_channel_loses_its_mapping_on_refusal() {
+        // THE DECISION, which the sibling test above cannot reach. That one
+        // pins `subscribers(channel).is_empty()` and the mapping the rule
+        // protects; this one calls the method that applies them, so
+        // removing the condition from `forget_if_unheld` fails here and not
+        // there. Measured both ways.
+        //
+        // NOT THE ARM'S USE OF IT. An earlier version of this comment
+        // claimed the mutation it names -- reverting the refusal arm to a
+        // bare `forget` -- fails here. It does not: this test calls the
+        // method directly and never reads the call site, so that swap leaves
+        // this test, its sibling and clippy green. A reviewer measured it.
+        // `the_refusal_arm_still_asks_whether_anybody_holds_the_channel` in
+        // `commands.rs` is what covers the call site. Review findings on
+        // PR #86.
+        let sources = TrustSources::default();
+        let mut state = BroadcastState::new(&sources);
+        let channel = ChannelId::parse("general").expect("valid channel");
+
+        // A live session holds it: a refusal must not drop the mapping.
+        let topic = state.remember(&channel);
+        state
+            .subs
+            .join(channel.clone(), String::from("session-a"))
+            .expect("a session may join");
+        state.forget_if_unheld(&channel);
+        assert_eq!(
+            state.channel_of(&topic.hash()),
+            Some(&channel),
+            "a channel a session still holds keeps its mapping through a refusal"
+        );
+
+        // Nobody holds it: a refusal drops the mapping, which is the half
+        // that makes the condition a condition rather than a no-op.
+        state.subs.leave(&channel, "session-a");
+        state.forget_if_unheld(&channel);
+        assert_eq!(
+            state.channel_of(&topic.hash()),
+            None,
+            "a channel nobody holds loses its mapping on refusal"
         );
     }
 
