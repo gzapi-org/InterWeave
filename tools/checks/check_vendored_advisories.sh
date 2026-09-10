@@ -83,12 +83,18 @@
 #
 # Exit codes:
 #   0  every vendored crate is free of RustSec advisories at its version
-#   1  an advisory applies to a vendored crate -- or the arguments were
-#      not understood, which is a usage error rather than a finding; they
+#   1  an advisory applies to a vendored crate -- or a flag was not
+#      RECOGNISED, which is a usage error rather than a finding; they
 #      share a code because a caller that mistyped a flag has not asked
 #      the question either
 #   2  the check could not be RUN: cargo-deny absent, the lockfile
-#      unusable, or cargo-deny stopping before it produced a summary — an
+#      unusable, cargo-deny stopping before it produced a summary, or a
+#      recognised flag given without its VALUE. The last one is here
+#      rather than with the unknown flag above because nothing was asked
+#      and nothing could be: `--root` with no directory names no tree to
+#      sweep, which is the same state as an unusable lockfile and not the
+#      same as a typo. Review finding on PR #85 -- this table documented
+#      one argument error while the script had two — an
 #      unreachable database, a config it cannot read, a crash. Success is
 #      proved by that summary and never inferred from an absence of
 #      findings, because a guard that passes because it could not run is
@@ -170,13 +176,16 @@ command -v python3 >/dev/null 2>&1 || die "python3 is not installed" 2
 metadata="$(cargo metadata --format-version 1 --locked --all-features 2>/dev/null)" \
     || die "cargo metadata --locked failed at $ROOT; is Cargo.lock current?" 2
 
-# TWO SOURCES OF TRUTH, EACH CHECKING THE OTHER. Neither alone is
+# THREE SOURCES OF TRUTH, EACH CHECKING THE OTHERS. None alone is
 # enough, and choosing between them has now failed twice in opposite
 # directions.
 #
 # THE GRAPH says what cargo actually builds from a local tree: a package
-# with no `source`, under the workspace root, that is either not a
-# workspace member or lives under a vendored root. That is authoritative
+# with no `source`, under the workspace root, that is NOT both in a
+# first-party landing zone and a workspace member. Membership alone and
+# location alone have each been the rule here and each opened a hole --
+# the selection below carries which, and why both conditions are needed.
+# That is authoritative
 # and it catches a `[patch.crates-io]` path anywhere, not only under
 # `third_party/` -- which ADR-0051 Decision 7 promises. Scoping to disk
 # alone missed exactly that, and missed a tree nested deeper than one
@@ -258,25 +267,48 @@ import json, os, sys
 shipped = {os.path.realpath(os.path.dirname(p)) for p in sys.argv[1:]}
 meta = json.load(sys.stdin)
 root = os.path.realpath(meta.get("workspace_root", "."))
+members = set(meta.get("workspace_members", []))
 
-# FIRST-PARTY IS A LOCATION, NOT A MEMBERSHIP. This asked
-# `pkg["id"] in members` and skipped anything that answered yes -- but
-# cargo promotes every path dependency living inside the workspace
-# directory to a member automatically, so a crate vendored at `vendor/foo/`
-# and reached by path WAS a member, was not under `third_party/`, and was
-# skipped. The disk scan walks `third_party/` only and the patch table is
-# not involved, so it appeared in none of the three sources: the guard
-# printed "nothing is built from a local tree" and exited 0 with a
-# vulnerable crate compiled into the binary. That is the one shape this
-# guard exists to refuse. Review finding on PR #85.
+# FIRST-PARTY IS A LOCATION **AND** A MEMBERSHIP, and each condition alone
+# has been the bug here.
 #
-# The landing zones are the ones ADR-0045 enumerates, a list this
-# repository owns and cargo cannot redefine. Anything else built from a
-# local path is
-# treated as vendored and asked about, which is the safe direction to be
-# wrong in: a misplaced first-party crate costs a registry probe and a
-# refusal, while a missed vendored one costs the coverage.
-FIRST_PARTY = ("apps", "crates", "tests", "xtask", "spikes", "packaging")
+# Membership alone was the original, and cargo falsifies it: a workspace
+# root promotes every path dependency to a member whether or not `members`
+# lists it, so a crate vendored at `vendor/foo/` and reached by path was a
+# member, was not under `third_party/`, and was skipped. The disk scan
+# walks `third_party/` only and the patch table was not involved, so it
+# appeared in none of the three sources and the guard printed "nothing is
+# built from a local tree" and exited 0 with a vulnerable crate compiled
+# in.
+#
+# Location alone replaced it and opened the mirror image, which a second
+# review found: `[workspace] exclude` is the documented way to keep a path
+# dependency inside the workspace directory OUT of `members`, so a tree
+# vendored at `crates/vendored-atty/` and excluded is not a member, sits
+# under a landing zone, and was skipped by the location test -- the same
+# exit-0 verdict moved one directory over. The old rule had probed it.
+#
+# Requiring both closes both: a vendored tree is skipped only if it is
+# somewhere first-party code lives AND cargo agrees it is part of this
+# workspace. The residual error is a first-party crate that is excluded
+# from the workspace, which is probed, fails to resolve and exits 2 --
+# noisy rather than silent, which is the direction to be wrong in.
+#
+# The zones are the ones ADR-0045 enumerates, plus `tools/`, which
+# CLAUDE.md calls first-party repository tooling. Stated in full rather
+# than by the subset that happens to hold packages today: an incomplete
+# list spuriously probes a first-party crate and reds a required context.
+FIRST_PARTY = (
+    "apps",
+    "crates",
+    "fixtures",
+    "packaging",
+    "spikes",
+    "test-data",
+    "tests",
+    "tools",
+    "xtask",
+)
 first_party_roots = tuple(os.path.join(root, d) for d in FIRST_PARTY)
 
 rows = {}
@@ -286,13 +318,10 @@ for pkg in meta.get("packages", []):
     directory = os.path.realpath(os.path.dirname(pkg["manifest_path"]))
     if directory != root and not directory.startswith(root + os.sep):
         continue
-    # The virtual workspace manifest itself is not a package, but a
-    # single-crate root would be, and it is first-party.
-    if directory == root:
-        continue
-    if any(
+    in_zone = directory == root or any(
         directory == z or directory.startswith(z + os.sep) for z in first_party_roots
-    ):
+    )
+    if in_zone and pkg["id"] in members:
         continue
     rows[directory] = "\t".join((pkg["name"], pkg["version"], directory))
 

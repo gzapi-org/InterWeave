@@ -506,13 +506,16 @@ fi
 # ones `members` does not list, which is the real repository layout and the
 # shape the finding was about.
 elsewhere="$SANDBOX/elsewhere"
-mkdir -p "$elsewhere/app/src" "$elsewhere/vendor/atty/src"
-printf '[workspace]\nmembers = ["app"]\nresolver = "2"\n' > "$elsewhere/Cargo.toml"
+# `apps`, not `app`: the scaffolding package must sit in a real landing
+# zone, or it is itself selected as vendored and the assertion below passes
+# for a second reason. Review finding on PR #85.
+mkdir -p "$elsewhere/apps/probe/src" "$elsewhere/vendor/atty/src"
+printf '[workspace]\nmembers = ["apps/probe"]\nresolver = "2"\n' > "$elsewhere/Cargo.toml"
 {
     printf '[package]\nname = "elsewhere-probe"\nversion = "0.0.0"\nedition = "2021"\n\n'
-    printf '[dependencies]\natty = { path = "../vendor/atty" }\n'
-} > "$elsewhere/app/Cargo.toml"
-echo 'fn main() {}' > "$elsewhere/app/src/main.rs"
+    printf '[dependencies]\natty = { path = "../../vendor/atty" }\n'
+} > "$elsewhere/apps/probe/Cargo.toml"
+echo 'fn main() {}' > "$elsewhere/apps/probe/src/main.rs"
 printf '[package]\nname = "atty"\nversion = "0.2.14"\nedition = "2018"\n' \
     > "$elsewhere/vendor/atty/Cargo.toml"
 echo '' > "$elsewhere/vendor/atty/src/lib.rs"
@@ -578,6 +581,75 @@ if printf '%s' "$out" | grep -q 'check_vendored_advisories: --root needs a direc
     ok "  and the guard names itself"
 else
     bad "  the diagnostic must come from the guard, not from bash: $out"
+fi
+
+# AND A TREE EXCLUDED FROM THE WORKSPACE IS STILL VENDORED. `exclude` is
+# the documented way to keep a path dependency inside the workspace
+# directory out of `members`, so a location-only test skipped a tree
+# vendored under a landing zone -- the same exit-0 verdict as the
+# membership-only test, one directory over. Review finding on PR #85.
+excluded="$SANDBOX/excluded"
+mkdir -p "$excluded/apps/probe/src" "$excluded/crates/vendored-atty/src"
+printf '[workspace]\nmembers = ["apps/probe"]\nexclude = ["crates/vendored-atty"]\nresolver = "2"\n' \
+    > "$excluded/Cargo.toml"
+{
+    printf '[package]\nname = "excluded-probe"\nversion = "0.0.0"\nedition = "2021"\n\n'
+    printf '[dependencies]\natty = { path = "../../crates/vendored-atty" }\n'
+} > "$excluded/apps/probe/Cargo.toml"
+echo 'fn main() {}' > "$excluded/apps/probe/src/main.rs"
+printf '[package]\nname = "atty"\nversion = "0.2.14"\nedition = "2018"\n' \
+    > "$excluded/crates/vendored-atty/Cargo.toml"
+echo '' > "$excluded/crates/vendored-atty/src/lib.rs"
+cp "$ROOT/deny.toml" "$excluded/deny.toml"
+if (cd "$excluded" && cargo generate-lockfile >/dev/null 2>&1); then
+    out="$(bash "$GUARD" --root "$excluded" 2>&1)"; status=$?
+    case "$status" in
+        1) ok "a tree excluded from the workspace is still asked about" ;;
+        0) bad "an excluded vendored tree under a landing zone was skipped — exit 0" ;;
+        *) bad "an excluded vendored tree — expected exit 1, got $status" ;;
+    esac
+    if printf '%s' "$out" | grep -q 'RUSTSEC-2021-0145'; then
+        ok "  and its advisory is reported"
+    else
+        bad "  the advisory of an excluded vendored tree must be reported"
+    fi
+else
+    skip_or_fail "the excluded fixture cannot resolve"
+fi
+
+# TWO VENDORED TREES OF ONE NAME each get their own probe directory, which
+# is what the row numbering is for.
+twins="$SANDBOX/twins"
+mkdir -p "$twins/apps/probe/src" "$twins/third_party/a/src" "$twins/third_party/b/src"
+printf '[workspace]\nmembers = ["apps/probe"]\nresolver = "2"\n' > "$twins/Cargo.toml"
+{
+    printf '[package]\nname = "twins-probe"\nversion = "0.0.0"\nedition = "2021"\n\n'
+    printf '[dependencies]\natty = { path = "../../third_party/a" }\n'
+} > "$twins/apps/probe/Cargo.toml"
+echo 'fn main() {}' > "$twins/apps/probe/src/main.rs"
+for leaf in a b; do
+    printf '[package]\nname = "atty"\nversion = "0.2.14"\nedition = "2018"\n' \
+        > "$twins/third_party/$leaf/Cargo.toml"
+    echo '' > "$twins/third_party/$leaf/src/lib.rs"
+done
+cp "$ROOT/deny.toml" "$twins/deny.toml"
+if (cd "$twins" && cargo generate-lockfile >/dev/null 2>&1); then
+    out="$(bash "$GUARD" --root "$twins" 2>&1)"; status=$?
+    # `b` is shipped but unreachable from the graph, so the mutual
+    # accounting floor refuses -- which is the documented behaviour and is
+    # exit 2. What this pins is that BOTH trees are named, so neither was
+    # silently folded into the other by a shared probe directory.
+    if printf '%s' "$out" | grep -q 'third_party/b'; then
+        ok "two vendored trees of one name are accounted separately"
+    else
+        bad "a second tree of the same name must not be folded into the first: $out"
+    fi
+    case "$status" in
+        1 | 2) ok "  and the sweep refuses rather than reporting a clean pass" ;;
+        *) bad "  expected exit 1 or 2 for an unaccounted tree, got $status" ;;
+    esac
+else
+    skip_or_fail "the twins fixture cannot resolve"
 fi
 
 if [ "$failures" -gt 0 ]; then
