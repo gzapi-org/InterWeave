@@ -208,9 +208,12 @@ build_vendored() {
 # failed, so cargo-deny is never reached. "A yank is the ONE way a pinned
 # release stops resolving" was the replacement, contradicted two sentences
 # up by this paragraph's own "yanked, or withdrawn". What the assertion
-# below needs is only that the cause is a supply-chain signal rather than an
-# environment one. Review findings on PR #85. It is a SUPPLY-CHAIN signal and not an
-# environment one: re-pin the fixture, do not relax the assertion.
+# below needs is only that a re-pin, and not a re-run, is the answer when
+# the probe cannot resolve a pinned version: re-pin the fixture, do not
+# relax the assertion. An earlier revision kept the flat "it is a
+# supply-chain signal and not an environment one" beside that hedge, which
+# this paragraph's own next-but-one sentence contradicts -- a network
+# failure lands on the same branch. Review findings on PR #85.
 #
 # Otherwise exit 2 here is an environment failure, and the baseline above
 # proved the environment works -- so it is a FAILURE and not a skip. Without
@@ -684,19 +687,23 @@ if (cd "$SANDBOX/vulnerable" && cargo generate-lockfile >/dev/null 2>&1); then
     # AND IT IS A TRADE, not pure gain. If cargo-deny ever did start reporting
     # path-patched crates under a renumbered or third atty id, this branch now
     # falls to `skip_or_fail` and says nothing -- and `skip_or_fail` EXITS, so
-    # every fixture after this point is abandoned (locally with 0, in CI as a
-    # failure). Against a false alarm that fires on any unrelated non-zero
+    # every fixture after this point is abandoned -- in CI as a failure, and
+    # locally with 0 UNLESS a `✗` was already recorded, which `skip_or_fail`
+    # checks for exactly this reason and which ~40 assertions above make
+    # likely. Against a false alarm that fires on any unrelated non-zero
     # exit, that is the better side; it is not a free one.
     #
-    # A BARE `RUSTSEC-` MATCHES ON EVERY RUN. `build_vendored` copies the
+    # A BARE `RUSTSEC-` WOULD MATCH ON EVERY RUN -- past tense for the
+    # pattern, which this branch replaced; the mechanism is still live.
+    # `build_vendored` copies the
     # repository's `deny.toml` into the fixture, `paste` is not in this
     # fixture's two-crate graph, and cargo-deny then warns that the ignore
     # entry for it was never encountered -- rendering the config line, and so
     # the literal id, into the output. Measured: the blob carries
-    # `RUSTSEC-2024-0436` with status 0. Only the status-0 arm above keeps the
-    # broad pattern from firing today, so a future non-zero exit for any
-    # unrelated reason would print "cargo-deny now reports path-patched
-    # crates" and invite someone to delete this guard.
+    # `RUSTSEC-2024-0436` with status 0. While the pattern was bare, only the
+    # status-0 arm above kept it from firing, so a non-zero exit for any
+    # unrelated reason would have printed "cargo-deny now reports path-patched
+    # crates" and invited someone to delete this guard.
     #
     # This is the mechanism the baseline's own comment names, one screen up,
     # and the broad match here was written without applying it. Review

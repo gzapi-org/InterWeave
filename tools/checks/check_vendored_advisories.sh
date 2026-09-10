@@ -158,8 +158,11 @@
 # The self-test's FOUR advisory ids across three crates are
 # version-dated fixtures, not invariants: `atty 0.2.14`
 # (RUSTSEC-2021-0145 and RUSTSEC-2024-0375 -- the second is
-# grep-pinned on its own in TWO places, the ignore-list case and the
-# `cargo-deny alone` control), `rand 0.9.0`
+# grep-pinned in TWO places of OPPOSITE polarity: the ignore-list case,
+# where a withdrawal reds, and the `cargo-deny alone` control, where the
+# id sits in a negative assertion as one of two alternatives -- so a
+# withdrawal there reds nothing and silently narrows the guard instead.
+# A renumber needs both edited), `rand 0.9.0`
 # (RUSTSEC-2026-0097) and `time 0.1.45` (RUSTSEC-2020-0071). An
 # earlier version said three while listing four, which would send an
 # operator to the ids asserted by `expect_finding` and not to the grep
@@ -180,9 +183,11 @@
 # 1.0.0`, asserted to carry NO advisory, which is what pins the
 # guard's success path and its checked count. An advisory published
 # against it reds `tool self-tests` on a guard that is working, as all
-# four above do IN CI -- RUSTSEC-2021-0145 differs only locally, where
-# its withdrawal skips the suite rather than redding it, because a skip
-# is a hard failure in CI and nothing else. An earlier version of this
+# four above do IN CI -- RUSTSEC-2021-0145 reds there too, but not the
+# same way: its withdrawal aborts at the BASELINE, so the job fails with
+# "the database is stale, cleared, renumbered or unreachable" and no `✗`
+# anywhere, where the other three red as ordinary failed assertions after
+# the suite has run. Locally that same abort is a skip and exits 0. An earlier version of this
 # clause said that id "skips instead", full stop, contradicting the
 # paragraph above it. It is named here
 # because this paragraph is where an operator looks. Same remedy:
