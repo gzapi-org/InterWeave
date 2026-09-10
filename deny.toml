@@ -96,14 +96,18 @@ allow = [
     # it would have meant adding one licence to avoid another. It is on the
     # list now, added with the libp2p substrate the same day, so the trade
     # today is the copied asset and its provenance against nothing. The
-    # decision stands on the first three costs either way.
+    # decision stands on the first three costs either way. Swapping to
+    # `tiny-bip39` would avoid the copied asset as well, but choosing a
+    # less-maintained fork of a crypto-adjacent crate to keep a list short is
+    # optimising the wrong thing.
     #
     # An earlier wording said "a SIXTH licence to avoid a fifth" -- stale but
     # anchored to that date. Replacing it with an unqualified "ANOTHER
     # licence on this list" turned a stale count into a false present-tense
-    # claim, which is worse. Review findings on PR #85. Swapping to `tiny-bip39` would avoid the
-    # edit, but choosing a less-maintained fork of a crypto-adjacent crate to
-    # keep a list short is optimising the wrong thing.
+    # claim, which is worse. The `tiny-bip39` sentence was then left stranded
+    # at the end of this history note, where "the edit" had no antecedent left
+    # -- the licence edit it meant is the cost the paragraph above had just
+    # stopped claiming. Review findings on PR #85.
     #
     # Recorded cost, since it is real: `bip39` brings `bitcoin_hashes` for a
     # SHA-256 this workspace already has in `sha2`. Worth revisiting if the
