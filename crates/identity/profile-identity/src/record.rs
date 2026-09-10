@@ -133,6 +133,13 @@ where
 /// the other. An earlier version of this said `validate` was "the only
 /// place", which is the same over-claim in a smaller font.
 ///
+/// BOTH halves are pinned by
+/// `a_record_with_four_words_deserializes_and_is_refused_by_both_downstream_checks`,
+/// which asserts `validate` separately from `restore` -- asserting only
+/// `restore` would have left the first check's removal invisible, since
+/// `parse` refuses the joined string on its own. Until that test was
+/// written this paragraph was an unenforced claim; a review said so.
+///
 /// This title also said "Exactly" while the `expecting` string further down
 /// this same function had already been corrected to "at most", with a
 /// comment saying in as many words that exactness is a claim this function

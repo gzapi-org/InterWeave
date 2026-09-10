@@ -1121,6 +1121,43 @@ fn a_record_with_twenty_five_words_is_refused() {
 }
 
 #[test]
+fn a_record_with_four_words_deserializes_and_is_refused_by_both_downstream_checks() {
+    // THE SHORT DIRECTION, which nothing covered. The deserializer's bound
+    // is AT MOST 24, so a four-word array gets past it by design -- the
+    // count is settled downstream, and `RecoveryRecord`'s doc comment
+    // claims TWO independent equality checks do it. This asserts both,
+    // because each is a separate mutation:
+    //
+    //   - delete `validate`'s `self.words.len() != PHRASE_WORDS` block and
+    //     the first assertion fails;
+    //   - delete it AND `RecoveryPhrase::parse`'s own check and the second
+    //     fails too. With only `restore` asserted, the first mutation is
+    //     invisible, because `parse` refuses the joined string anyway.
+    //
+    // Review finding on PR #86: the doc comment said "fail-closed even if
+    // `validate` is called without the other", and no test went red when
+    // `validate`'s half was removed.
+    let text = record_json_with_words(SHORT_WORDS_IN_TEST);
+    let record = serde_json::from_str::<interweave_profile_identity::RecoveryRecord>(&text)
+        .expect("four words deserializes -- the bound is a ceiling, not an equality");
+    assert!(
+        matches!(
+            record.validate(),
+            Err(interweave_profile_identity::IdentityError::WrongWordCount {
+                got: SHORT_WORDS_IN_TEST,
+                want: PHRASE_WORDS_IN_TEST
+            })
+        ),
+        "validate must refuse a short phrase by count: {:?}",
+        record.validate()
+    );
+    assert!(
+        record.restore().is_err(),
+        "restore stays fail-closed for a short phrase"
+    );
+}
+
+#[test]
 fn a_record_with_exactly_twenty_four_words_still_deserializes() {
     // The control. A bound that refuses the legitimate document is not a
     // fix, and a recovery record is read by someone who has already lost
@@ -1198,6 +1235,10 @@ fn a_record_label_longer_than_any_legal_value_is_refused() {
 /// `PHRASE_WORDS` is crate-private, and an integration test asserting a
 /// boundary should not take the boundary from the code it is checking.
 const PHRASE_WORDS_IN_TEST: usize = 24;
+
+/// A word count far enough below the ceiling that no off-by-one reading of
+/// the bound could accept it.
+const SHORT_WORDS_IN_TEST: usize = 4;
 
 #[test]
 fn an_oversized_expected_peer_id_is_refused_before_it_is_kept() {
