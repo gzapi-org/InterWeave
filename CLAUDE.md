@@ -440,7 +440,7 @@ term the allow-list does not carry makes `cargo deny check licenses`
 fail and name the crate. Measured rather than reasoned because the
 intuitive answer was wrong for advisories in the same breath.
 
-That gap is live: **`yamux`** has no RustSec advisory, and every `Config`
+THE RUSTSEC/GHSA GAP is live: **`yamux`** has no RustSec advisory, and every `Config`
 tuning setter silently moves the muxer onto a version with a remote-panic
 DoS. Bounding stream counts is exactly what §6 pushes toward, so the
 natural next change reintroduces it with every check green.
