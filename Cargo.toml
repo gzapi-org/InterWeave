@@ -386,9 +386,13 @@ planned_test_packages = [
 # sweeps only `Untested`, and no public path resets one. ADR-0035's two
 # distinct observers and AUTONAT.md §5's refresh therefore have no
 # mechanism in the crate as shipped, and upstream `master` is the same.
-# The vendored copy is the crates.io tarball plus `INTERWEAVE.patch`: one
-# method, `Behaviour::retest`, and the guard that stops an abandoned
-# probe reporting an outcome. Drop this patch when a release carries an
+# The vendored copy is the crates.io tarball MINUS its packaging files
+# (`.cargo_vcs_info.json`, `Cargo.toml.orig`, `Cargo.lock`), PLUS the
+# upstream `LICENSE` and `INTERWEAVE.patch`: one method,
+# `Behaviour::retest`, and the guard that stops an abandoned probe
+# reporting an outcome. ADR-0051 Decision 2 is the authority on that
+# list; this comment said "the tarball plus `INTERWEAVE.patch`" and was
+# the last place still saying it. Drop this patch when a release carries an
 # equivalent; `tools/checks/license_exempt.txt` names the provenance.
 [patch.crates-io]
 libp2p-autonat = { path = "third_party/libp2p-autonat" }
