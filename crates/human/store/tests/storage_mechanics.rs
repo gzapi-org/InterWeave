@@ -1561,11 +1561,13 @@ fn the_three_remaining_reachable_timestamp_sites_refuse_rather_than_saturating()
     // EIGHT CALL SITES, FIVE OF THEM REACHABLE from outside the crate, and
     // THIS TEST COVERS THREE -- `created_at`, `record_attempt`'s `at_ms`,
     // and `keep`'s `at_ms`. The other two reachable sites are pinned by the
-    // two tests directly above:
+    // two tests NAMED below rather than located, because an earlier version
+    // said "directly above" and only one of them is:
     // `a_timestamp_the_store_cannot_represent_is_refused_not_saturated`
-    // for `commit_unread_inbound`'s `received_at`, and
+    // for `commit_unread_inbound`'s `received_at`, near the TOP of this
+    // file, and
     // `a_nonsense_read_timestamp_is_refused_before_the_unread_row_is_destroyed`
-    // for `mark_read`'s `read_at`.
+    // for `mark_read`'s `read_at`, which is the one directly above.
     //
     // The remaining three take a value the store itself produced: `keep`'s
     // `held.received_at` and `held.read_at` come from a `ReadEphemeral`
