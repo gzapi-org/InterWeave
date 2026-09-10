@@ -246,11 +246,11 @@ impl InFlightTickets {
 /// quarantine silently MISSED.
 ///
 /// PAST TENSE DELIBERATELY, and it is the third stale sentence found in
-/// this one doc comment. It described F10 in the present tense twenty
-/// lines above the `**FIXED.**` paragraph that says no production path can
-/// hand the policy a suffixed form any more — `attempt_dial` and
-/// `learn_route` both canonicalize and the established hook uses
-/// `canonical_for_peer` — so a reader who stopped here took it for a
+/// this one doc comment. It described F10 in the present tense in the
+/// same doc comment as the `**FIXED.**` paragraph below, which says no
+/// production path can hand the policy a suffixed form any more —
+/// `attempt_dial` and `learn_route` both canonicalize and the established
+/// hook uses `canonical_for_peer` — so a reader who stopped here took it for a
 /// description of today's code. CLAUDE.md §7 names exactly this: "X is
 /// answered Y" is false as soon as it is fixed, often in the same commit
 /// series. Review finding on PR #86.
@@ -606,45 +606,6 @@ mod tests {
     #![allow(clippy::expect_used, clippy::panic)]
 
     use super::*;
-
-    #[test]
-    fn the_established_hook_still_canonicalizes_the_rebound_address() {
-        // THE SECOND TICKET ORIGIN, and the one the runtime module's guard
-        // cannot see.
-        //
-        // `attempt_dial` canonicalizes with `canonical_dial_address`, and
-        // `no_production_path_learns_an_address_without_canonicalizing`
-        // counts that. But EVERY behaviour-originated dial is admitted with
-        // the F9 placeholder instead and gets its address here, at the
-        // established hook, from `canonical_for_peer` -- so this file is the
-        // origin of most of the tickets the settlement recorders receive, and
-        // it is not in that guard's scan, which covers `src/runtime/` only.
-        //
-        // An audit measured what happens without this: reverting the hook to
-        // the raw `strip_own_suffix` leaves all 202 lib tests passing. Clippy
-        // does catch it today, but only incidentally -- `canonical_for_peer`
-        // becomes an unused import -- and that evaporates the moment anything
-        // else in this file uses it. An incidental lint is not a guard.
-        //
-        // Reads this file's own source, so it cannot see a call built by a
-        // macro, and it checks the count rather than the argument. Review
-        // finding on PR #86.
-        let source = include_str!("outbound_gate.rs");
-        let production = source
-            .split_once("\n#[cfg(test)]\nmod ")
-            .map_or(source, |(before, _)| before);
-        assert_eq!(
-            production.matches("canonical_for_peer(").count(),
-            1,
-            "the established hook must key the ticket through \
-             `canonical_for_peer`, which is the shared spelling the book, \
-             the quarantine and the ticket agree on. A raw `strip_own_suffix` \
-             here answers `\"\"` for an address that is only the peer's own \
-             suffix, and `record_failure` then early-returns on the empty \
-             address and scores the failure against nothing. If a second \
-             legitimate call site was added, raise this count and say which."
-        );
-    }
     use crate::refusals::RECENT_CAPACITY;
     use interweave_transport_runtime::{ConnectionManager, ConnectionPolicy, TrustSources};
     use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
@@ -725,6 +686,95 @@ mod tests {
             Endpoint::Dialer,
             PortUse::Reuse,
         )
+    }
+
+    #[test]
+    fn the_established_hook_still_canonicalizes_the_rebound_address() {
+        // THE SECOND TICKET ORIGIN, and the one the runtime module's guard
+        // cannot see.
+        //
+        // `attempt_dial` canonicalizes with `canonical_dial_address`, and
+        // `no_production_path_learns_an_address_without_canonicalizing`
+        // counts that. But EVERY behaviour-originated dial is admitted with
+        // the F9 placeholder instead and gets its address here, at the
+        // established hook, from `canonical_for_peer` -- so this file is the
+        // origin of most of the tickets the settlement recorders receive, and
+        // it is not in that guard's scan, which covers `src/runtime/` only.
+        //
+        // An audit measured what happens without this: reverting the hook to
+        // the raw `strip_own_suffix` leaves all 202 lib tests passing. Clippy
+        // does catch it today, but only incidentally -- `canonical_for_peer`
+        // becomes an unused import -- and that evaporates the moment anything
+        // else in this file uses it. An incidental lint is not a guard.
+        //
+        // IT CUTS AT EVERY FILE-LEVEL TEST MODULE, not the first, and refuses
+        // the two shapes it cannot read. A first version of this guard was a
+        // bare `split_once`, which a review measured as a silent pass of its
+        // own: Rust's conventional layout puts new code BELOW the test
+        // module, and a second production `canonical_for_peer(` written there
+        // is not in `production` at all, so the count stays 1 and the guard
+        // agrees. The three protections are the sibling guard's, which was
+        // fixed for each of them in turn -- an out-of-line
+        // `#[cfg(test)] mod tests;` swallowing the rest of the file, a module
+        // whose closing brace is not at column zero, and a column-zero
+        // `#[cfg(test)]` on something that is not a module.
+        //
+        // Reads this file's own source, so it cannot see a call built by a
+        // macro, and it checks the count rather than the argument. Review
+        // findings on PR #86.
+        let source = include_str!("outbound_gate.rs");
+        let mut production = String::new();
+        let mut rest = source;
+        while let Some((before, after)) = rest.split_once("\n#[cfg(test)]\nmod ") {
+            production.push_str(before);
+            let head: &str = after.split_once('{').map_or(after, |(h, _)| h);
+            assert!(
+                !head.contains(';'),
+                "`#[cfg(test)] mod <name>;` declares its tests in another file, and this \
+                 guard cannot tell where they end -- so it refuses. Use an inline \
+                 `mod tests {{ ... }}`, or extend this guard to follow the file."
+            );
+            // `"\n}"` and not `"\n}\n"`: the surviving newline is the
+            // separator the next search needs.
+            match after.split_once("\n}") {
+                Some((_, tail)) => rest = tail,
+                None => {
+                    assert!(
+                        after.trim_end().ends_with('}'),
+                        "a `#[cfg(test)] mod` here neither closes at column zero nor ends \
+                         the file, so this guard cannot tell tests from production and \
+                         refuses rather than guessing"
+                    );
+                    rest = "";
+                }
+            }
+        }
+        production.push_str(rest);
+        for (i, _) in source.match_indices("\n#[cfg(test)]") {
+            let after = &source[i + "\n#[cfg(test)]".len()..];
+            assert!(
+                after.starts_with("\nmod "),
+                "a column-zero `#[cfg(test)]` that is not immediately followed by `mod ` \
+                 -- this guard cannot tell where the test code ends, so it refuses rather \
+                 than reading past it. Move a test-only `use`, `const` or `fn` inside the \
+                 test module."
+            );
+        }
+        assert_eq!(
+            production.matches("canonical_for_peer(").count(),
+            1,
+            "the established hook must key the ticket through \
+             `canonical_for_peer`, which is the shared spelling the book, \
+             the quarantine and the ticket agree on. A raw `strip_own_suffix` \
+             here answers `\"\"` for an address that is only the peer's own \
+             suffix, and an empty replacement is one `rebind_address` refuses \
+             -- so `rebind_placeholder` answers `None` and the hook returns a \
+             handler BEFORE the `address_dialable` check, skipping the \
+             quarantine lookup this hook exists for. `record_failure`'s own \
+             early return on an empty address is the second-order effect, not \
+             the first. If a second legitimate call site was added, raise this \
+             count and say which."
+        );
     }
 
     #[test]
