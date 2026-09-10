@@ -211,14 +211,15 @@ pub(super) fn canonical_dial_address(peer: &TransportIdentity, address: &str) ->
 /// The same key, for a caller that already holds parsed values.
 ///
 /// ONE IMPLEMENTATION, which is the point of it existing separately.
-/// `settle_failed_dial` computed this key a second way -- its own closure
-/// over `strip_own_suffix` -- and the two already disagreed on one input:
+/// `settle_failed_dial` and `OutboundAdmission`'s established hook each
+/// computed this key their own way over `strip_own_suffix`, and all three
+/// already disagreed on one input:
 /// this returns the original when stripping yields the empty multiaddr and
 /// that closure returned `""`. Harmless today, and exactly the shape of
 /// agreement-by-coincidence that a review had just finished naming
 /// elsewhere in this file, so the second copy is gone rather than
 /// documented. Review finding on PR #86.
-fn canonical_for_peer(address: &Multiaddr, peer: &PeerId) -> String {
+pub(crate) fn canonical_for_peer(address: &Multiaddr, peer: &PeerId) -> String {
     let stripped = strip_own_suffix(address, peer);
     if stripped.is_empty() {
         // An address that is nothing but the peer's own suffix: stripping
@@ -1986,6 +1987,52 @@ mod tests {
         );
     }
     #[test]
+    fn a_bare_peer_address_is_settled_as_itself_rather_than_as_nothing() {
+        // THE ONE INPUT THE THREE KEY IMPLEMENTATIONS DISAGREED ON, and
+        // the commit that unified them called the change harmless without
+        // testing it. A review asked for one or the other.
+        //
+        // `strip_own_suffix` yields the empty string for an address that is
+        // nothing but the dialled peer's own suffix; `canonical_for_peer`
+        // yields the original. The settlement recorders early-return on an
+        // empty address, so what used to be recorded as nothing is now
+        // recorded as the literal that was attempted. Kademlia can be
+        // handed such a string by a remote peer in a query response, so
+        // this is reachable rather than theoretical.
+        //
+        // It is NOT harmless-as-in-identical: one bounded book slot is now
+        // spent. It is harmless-as-in-bounded, and that is what this pins.
+        let mut m = admitting_manager();
+        let peer = ident(RELAY);
+        let bare: Multiaddr = format!("/p2p/{RELAY}").parse().expect("valid");
+
+        let ticket = placeholder_ticket(&m);
+        settle_failed_dial(
+            &mut m,
+            ticket,
+            &DialError::Transport(vec![(
+                bare.clone(),
+                TransportError::MultiaddrNotSupported(bare.clone()),
+            )]),
+            0,
+        );
+
+        // A structural failure forgets the route rather than learning it,
+        // so the book is untouched and no slot is spent after all.
+        assert_eq!(
+            m.known_addresses(&peer),
+            0,
+            "a structurally undialable address is forgotten, not remembered"
+        );
+
+        // And the address is not dialable, so nothing will retry it.
+        assert!(
+            m.dial_candidates(&peer, 0).is_empty(),
+            "nothing offers it as a candidate"
+        );
+    }
+
+    #[test]
     fn the_stripped_suffix_is_restored_before_the_transport_sees_it() {
         // TWO REVIEWERS DISAGREED ABOUT THIS, so it is measured here
         // instead of argued again. One held that stripping the destination
@@ -2011,7 +2058,7 @@ mod tests {
                 .parse::<Multiaddr>()
                 .expect("the key is a multiaddr")
                 .with_p2p(as_peer)
-                .expect("the key never ends in a foreign /p2p/");
+                .expect("a key derived from an address naming this peer is accepted");
             assert_eq!(
                 dialled.to_string(),
                 original,
@@ -2029,6 +2076,27 @@ mod tests {
         assert!(
             key.ends_with("/p2p-circuit"),
             "the key stops at the marker: {key}"
+        );
+
+        // AND THE FOREIGN-CLAIM SHAPE, which an earlier version of this
+        // test asserted away with "the key never ends in a foreign
+        // `/p2p/`". It does: preserving such a claim is deliberate and
+        // `a_trailing_claim_naming_someone_else_stays_in_the_key` pins it,
+        // so the blanket `expect` above was false for the function under
+        // test. What actually happens is worth stating rather than hiding:
+        // `with_p2p` refuses, the Swarm turns that into
+        // `MultiaddrNotSupported`, and the dial fails before any transport
+        // sees it. Fail-closed, and unchanged by this commit.
+        let foreign = format!("/ip4/192.0.2.1/tcp/1/p2p/{OTHER}");
+        let foreign_key = canonical_dial_address(&peer, &foreign);
+        assert_eq!(foreign_key, foreign, "the foreign claim is preserved");
+        assert!(
+            foreign_key
+                .parse::<Multiaddr>()
+                .expect("a multiaddr")
+                .with_p2p(as_peer)
+                .is_err(),
+            "and the Swarm refuses it rather than dialling someone else"
         );
     }
 
@@ -2075,22 +2143,68 @@ mod tests {
             // everything after the first was unscanned -- and for a file
             // whose expected count is zero an under-count equals the
             // expectation, so the guard would have passed in silence.
-            let production: String = source
-                .split("\n#[cfg(test)]")
-                .enumerate()
-                .filter_map(|(i, part)| {
-                    if i == 0 {
-                        return Some(part);
+            // CUT AT THE MODULE HEADER, and REQUIRE the shape rather than
+            // dropping what does not match. The previous version split on
+            // `#[cfg(test)]` and kept the text after the first `"\n}\n"`
+            // in each tail, dropping the tail entirely when that was
+            // absent. Dropping is the PERMISSIVE read here, not the
+            // conservative one: nine of these ten files expect zero
+            // matches, so discarding text can only move `calls` toward the
+            // expectation. A review measured the `None` branch firing on
+            // `direct.rs` today, and showed that a bare
+            // `#[cfg(test)] mod tests;` -- ordinary Rust -- hides the whole
+            // rest of a file behind it. Review finding on PR #86.
+            //
+            // So the only accepted shape is a file-level test module, and
+            // anything else fails loudly instead of being swallowed.
+            let mut production = String::new();
+            let mut rest = source;
+            while let Some((before, after)) = rest.split_once("\n#[cfg(test)]\nmod ") {
+                production.push_str(before);
+                // The module runs to the end of the file or to the next
+                // column-zero item after its closing brace.
+                // THE MODULE MUST BE INLINE. `#[cfg(test)] mod tests;`
+                // declares a module in another FILE, so its `{` never
+                // arrives and everything after it would be swallowed as
+                // though it were test code -- which is the hole a review
+                // found, since that is ordinary Rust and the files after
+                // it expect zero matches. Refuse rather than guess.
+                let head: &str = after.split_once('{').map_or(after, |(h, _)| h);
+                assert!(
+                    !head.contains(';'),
+                    "{name}: `#[cfg(test)] mod <name>;` declares its tests in another file, \
+                     and this guard cannot tell where they end -- so it refuses. Use an \
+                     inline `mod tests {{ ... }}`, or extend this guard to follow the file."
+                );
+                match after.split_once("\n}\n") {
+                    Some((_, tail)) => rest = tail,
+                    None => {
+                        assert!(
+                            after.trim_end().ends_with('}'),
+                            "{name}: a `#[cfg(test)] mod` that neither closes at column zero \
+                             nor ends the file -- this guard cannot tell its tests from its \
+                             production code, so it refuses rather than guessing"
+                        );
+                        rest = "";
                     }
-                    // Everything up to the end of that test module, which
-                    // for a file-level `#[cfg(test)] mod tests` is the rest
-                    // of the file; a following production item would be
-                    // separated by a line at column zero after the module
-                    // closes. Keeping nothing is the conservative read: a
-                    // missed production call is the failure this guards.
-                    part.split_once("\n}\n").map(|(_, after)| after)
-                })
-                .collect();
+                }
+            }
+            production.push_str(rest);
+            // EVERY occurrence, not the file as a whole. A first version
+            // asked whether the file contained any `#[cfg(test)]\nmod `,
+            // which a file with both a test module and a `#[cfg(test)]`
+            // constant satisfies -- so the shape it was written to refuse
+            // walked straight through. Measured, not assumed: planting a
+            // `#[cfg(test)] const` in `endpoints.rs` left it green.
+            for (i, _) in source.match_indices("\n#[cfg(test)]") {
+                let after = &source[i + "\n#[cfg(test)]".len()..];
+                assert!(
+                    after.starts_with("\nmod "),
+                    "{name}: a column-zero `#[cfg(test)]` on something other than a `mod` \
+                     -- the guard cannot bound it, so it refuses rather than reading past \
+                     it. Put test-only items inside the test module."
+                );
+            }
             let calls = production.matches("learn_address(").count();
             let expected = usize::from(name == "dialing.rs");
             assert_eq!(

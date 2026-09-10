@@ -106,6 +106,7 @@ use interweave_transport_runtime::{
 
 use crate::attribution::DialAttribution;
 use crate::refusals::{DialRefusals, Refusal};
+use crate::runtime::canonical_for_peer;
 
 /// What a refused behaviour dial is told when it names no peer.
 const NO_PEER: &str = "a behaviour dial that names no peer cannot be classified";
@@ -527,7 +528,15 @@ impl NetworkBehaviour for OutboundAdmission {
         _role_override: Endpoint,
         _port_use: PortUse,
     ) -> Result<THandler<Self>, ConnectionDenied> {
-        let used = strip_own_suffix(addr, &peer);
+        // THROUGH THE SHARED KEY, not the raw helper. This was a third
+        // implementation of the `(peer, address)` key -- the string it
+        // produces is written into the ticket by `rebind_placeholder` and
+        // is then the key for every settlement and for `learn_route` --
+        // and it differed from `canonical_for_peer` on the one input the
+        // other two had already been reconciled over. A review found it
+        // while checking the claim that there was only one
+        // implementation. Review finding on PR #86.
+        let used = canonical_for_peer(addr, &peer);
         let Some(peer) = self.in_flight.rebind_placeholder(connection_id, &used) else {
             return Ok(dummy::ConnectionHandler);
         };
