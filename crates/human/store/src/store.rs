@@ -293,8 +293,9 @@ impl HumanStore {
     ///
     /// # Errors
     /// Returns [`StoreError::Degraded`] while storage is degraded,
-    /// [`StoreError::PayloadTooLarge`] above the transport ceiling, or a
-    /// storage error.
+    /// [`StoreError::PayloadTooLarge`] above the transport ceiling,
+    /// [`StoreError::TimestampOutOfRange`] if `created_at` cannot be
+    /// represented, or a storage error.
     pub fn commit_pending_outbound(&mut self, new: &NewOutbound) -> Result<RowId, StoreError> {
         self.reject_if_degraded()?;
         check_payload(&new.payload)?;
@@ -340,7 +341,8 @@ impl HumanStore {
     /// a failed attempt is exactly the case the durable copy exists for.
     ///
     /// # Errors
-    /// Returns a storage error.
+    /// Returns [`StoreError::TimestampOutOfRange`] if `at_ms` cannot be
+    /// represented, or a storage error.
     pub fn record_attempt(&mut self, row_id: RowId, at_ms: u64) -> Result<(), StoreError> {
         let result = self.conn.execute(
             "UPDATE pending_outbound
@@ -420,8 +422,10 @@ impl HumanStore {
     /// One page of pending outbound, resuming after `after`.
     ///
     /// # Errors
-    /// Returns a storage error, or [`StoreError::Corrupt`] if a stored
-    /// row no longer parses.
+    /// Returns a storage error, [`StoreError::Corrupt`] if a stored row
+    /// no longer parses, or [`StoreError::TimestampOutOfRange`] if the
+    /// cursor carries a sort key this store cannot represent -- which a
+    /// cursor this store handed out never does.
     pub fn pending_outbound_page(
         &self,
         after: Option<Cursor>,
@@ -517,7 +521,9 @@ impl HumanStore {
     /// # Errors
     /// Returns [`StoreError::Degraded`] while storage cannot hold unread
     /// content — the caller must then degrade the human endpoint rather
-    /// than keep accepting a stream it cannot retain.
+    /// than keep accepting a stream it cannot retain — or
+    /// [`StoreError::TimestampOutOfRange`] if `received_at` cannot be
+    /// represented.
     pub fn commit_unread_inbound(&mut self, new: &NewInbound) -> Result<RowId, StoreError> {
         self.reject_if_degraded()?;
         check_payload(&new.payload)?;
@@ -555,8 +561,10 @@ impl HumanStore {
     /// read receipt, and it does not prove a human perceived anything.
     ///
     /// # Errors
-    /// Returns [`StoreError::NoSuchRow`] if the row is not unread, or a
-    /// storage error.
+    /// Returns [`StoreError::NoSuchRow`] if the row is not unread,
+    /// [`StoreError::TimestampOutOfRange`] if `at_ms` cannot be
+    /// represented -- refused BEFORE the durable row is deleted, so the
+    /// caller may retry with a usable clock -- or a storage error.
     pub fn mark_read(&mut self, row_id: RowId, at_ms: u64) -> Result<ReadEphemeral, StoreError> {
         // BEFORE THE DELETE, because this value leaves here inside the
         // `ReadEphemeral` and `keep` refuses it there. Unchecked, a
@@ -651,7 +659,10 @@ impl HumanStore {
     ///
     /// # Errors
     /// Returns [`StoreError::Degraded`], [`StoreError::KeepRefused`] if
-    /// the state machine refuses, or a storage error.
+    /// the state machine refuses, [`StoreError::TimestampOutOfRange`] if
+    /// `at_ms` cannot be represented, or a storage error. The two
+    /// timestamps carried by `held` were refused on the way in, so they
+    /// cannot fail here.
     pub fn keep(&mut self, held: &ReadEphemeral, at_ms: u64) -> Result<RowId, StoreError> {
         self.reject_if_degraded()?;
 
@@ -788,8 +799,10 @@ impl HumanStore {
     /// One page of kept inbound, resuming after `after`.
     ///
     /// # Errors
-    /// Returns a storage error, or [`StoreError::Corrupt`] for an
-    /// unparseable stored row.
+    /// Returns a storage error, [`StoreError::Corrupt`] for an
+    /// unparseable stored row, or [`StoreError::TimestampOutOfRange`] if the
+    /// cursor carries a sort key this store cannot represent -- which a
+    /// cursor this store handed out never does.
     pub fn kept_inbound_page(
         &self,
         after: Option<Cursor>,
