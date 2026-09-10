@@ -149,25 +149,31 @@ pub(super) fn handle_command(
                     // as the backend allows and the caller is told which
                     // channel failed. Silence here reported a
                     // configuration that the mesh had not accepted.
-                    let mut refused: Option<interweave_transport_api::ChannelId> = None;
-                    let mut applied: std::collections::BTreeSet<_> =
-                        std::collections::BTreeSet::new();
-                    for channel in &config.desired {
+                    //
+                    // EVERY CHANNEL IS TRIED, and the loop no longer stops
+                    // at the first refusal. Stopping made `applied` mean
+                    // "the channels before the failure", so the narrowing
+                    // below dropped channels the mesh was still happily
+                    // carrying and the sweep then unsubscribed them --
+                    // deciding which working subscriptions to tear down by
+                    // the caller's array order. A refusal is per-topic, so
+                    // continuing is what "as far as the backend allows"
+                    // actually means. Review finding on PR #86.
+                    let (applied, refused) = apply_desired(&config.desired, |channel| {
                         let topic = broadcast_state.remember(channel);
                         if swarm.subscribe_topic(&topic).is_err() {
                             broadcast_state.forget(channel);
-                            refused = Some(channel.clone());
-                            break;
+                            return false;
                         }
-                        applied.insert(channel.clone());
-                    }
+                        true
+                    });
 
                     // THE REGISTRY HOLDS WHAT WAS APPLIED, NOT WHAT WAS
                     // ASKED FOR. `set_desired` above committed the whole
-                    // new set before any of it reached the mesh, and the
-                    // loop stops at the first refusal -- so a set of four
-                    // whose third channel is refused left the registry
-                    // desiring all four while the backend held two. That
+                    // new set before any of it reached the mesh -- so a
+                    // set of four whose third channel is refused left the
+                    // registry desiring all four while the backend held
+                    // three. That
                     // matters beyond the reply, because
                     // `backend_should_subscribe` answers from `desired`:
                     // the two that never subscribed read as held, so the
@@ -176,7 +182,7 @@ pub(super) fn handle_command(
                     // The reply already says the configuration is applied
                     // only up to the refusal; this makes the registry
                     // agree with it. Review finding.
-                    if refused.is_some() {
+                    if !refused.is_empty() {
                         // Narrowing cannot be denied: dropping a channel
                         // from `desired` either moves it into the
                         // joined-elsewhere count or removes it entirely,
@@ -211,11 +217,13 @@ pub(super) fn handle_command(
                             let _ = swarm.unsubscribe_topic(&topic);
                         }
                     }
-                    let _ = match refused {
-                        Some(channel) => reply.send(Err(format!(
-                            "the mesh refused {channel:?}; the configuration is applied only up to it"
-                        ))),
-                        None => reply.send(Ok(())),
+                    let _ = if refused.is_empty() {
+                        reply.send(Ok(()))
+                    } else {
+                        reply.send(Err(format!(
+                            "the mesh refused {refused:?}; every other channel in the \
+                             configuration is applied"
+                        )))
                     };
                 }
                 Err(denial) => {
@@ -1000,6 +1008,43 @@ struct LocalOutcome {
     source_peer: interweave_transport_api::TransportIdentity,
 }
 
+/// Try every requested channel and report what stuck.
+///
+/// EVERY ONE, which is the fix. An earlier version broke out of this loop
+/// at the first refusal, so the applied set meant "the channels before the
+/// failure" -- and the caller's narrowing then dropped channels the mesh
+/// was still carrying, after which the sweep unsubscribed them. A previous
+/// configuration of C and D, both working, followed by a request for
+/// A, B, C, D with B refused, tore down C and D. Which working
+/// subscriptions died was decided by the caller's array order. A refusal
+/// is per-topic, so continuing is what "applied as far as the backend
+/// allows" actually means. Review finding on PR #86.
+///
+/// `subscribe` reports whether the channel is now held; it owns its own
+/// rollback for the refused case, because what to undo is the caller's
+/// business and not this function's.
+fn apply_desired<F>(
+    requested: &[interweave_transport_api::ChannelId],
+    mut subscribe: F,
+) -> (
+    std::collections::BTreeSet<interweave_transport_api::ChannelId>,
+    Vec<interweave_transport_api::ChannelId>,
+)
+where
+    F: FnMut(&interweave_transport_api::ChannelId) -> bool,
+{
+    let mut applied = std::collections::BTreeSet::new();
+    let mut refused = Vec::new();
+    for channel in requested {
+        if subscribe(channel) {
+            applied.insert(channel.clone());
+        } else {
+            refused.push(channel.clone());
+        }
+    }
+    (applied, refused)
+}
+
 pub(super) fn forget_address(
     active: &mut ActiveListeners,
     listener: ListenerId,
@@ -1239,10 +1284,10 @@ fn buffer_kademlia_event(
 }
 
 #[cfg(test)]
-mod expired_address_tests {
+mod command_helper_tests {
     use super::{
-        ActiveListeners, SwarmEvent, TransportIdentity, VecDeque, buffer_kademlia_event,
-        buffer_revocation_events, forget_address,
+        ActiveListeners, SwarmEvent, TransportIdentity, VecDeque, apply_desired,
+        buffer_kademlia_event, buffer_revocation_events, forget_address,
     };
     use interweave_kademlia_control_api::QueryHandle;
     use libp2p::Multiaddr;
@@ -1445,5 +1490,60 @@ mod expired_address_tests {
             1,
             "a command whose query was never recorded still earns its own slot"
         );
+    }
+    fn channel(name: &str) -> interweave_transport_api::ChannelId {
+        interweave_transport_api::ChannelId::parse(name).expect("a valid test channel")
+    }
+
+    #[test]
+    fn a_refused_channel_does_not_take_the_ones_after_it_down_with_it() {
+        // THE DEFECT: this loop broke at the first refusal, so the applied
+        // set held only the channels BEFORE it. The caller narrows the
+        // registry to that set and then unsubscribes whatever the registry
+        // no longer wants -- so a previous configuration of c and d, both
+        // subscribed and working, was torn down because b failed and b
+        // happened to sort first.
+        let a = channel("a");
+        let b = channel("b");
+        let c = channel("c");
+        let d = channel("d");
+        let requested = vec![a.clone(), b.clone(), c.clone(), d.clone()];
+
+        let mut tried = Vec::new();
+        let (applied, refused) = apply_desired(&requested, |ch| {
+            tried.push(ch.clone());
+            ch != &b
+        });
+
+        assert_eq!(
+            tried, requested,
+            "every requested channel is tried, not just those up to the refusal"
+        );
+        assert!(
+            applied.contains(&c) && applied.contains(&d),
+            "a channel after the refused one is still applied: {applied:?}"
+        );
+        assert!(applied.contains(&a), "and so is one before it");
+        assert!(!applied.contains(&b), "the refused channel is not applied");
+        assert_eq!(refused, vec![b], "and it is the one reported");
+    }
+
+    #[test]
+    fn nothing_refused_applies_everything_and_reports_no_failure() {
+        // The control. A bound that refuses the ordinary case is not a fix.
+        let requested = vec![channel("a"), channel("b")];
+        let (applied, refused) = apply_desired(&requested, |_| true);
+        assert_eq!(applied.len(), 2);
+        assert!(refused.is_empty());
+    }
+
+    #[test]
+    fn every_channel_refused_applies_nothing_and_reports_all_of_them() {
+        // The far edge: the narrowing that follows must be able to empty
+        // the desired set, because the mesh is holding none of it.
+        let requested = vec![channel("a"), channel("b")];
+        let (applied, refused) = apply_desired(&requested, |_| false);
+        assert!(applied.is_empty());
+        assert_eq!(refused.len(), 2, "each one is named, not just the first");
     }
 }
