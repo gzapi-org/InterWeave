@@ -587,7 +587,10 @@ impl ProfileIdentity {
     /// restore holds the marker, [`IdentityError::Corrupt`] if the stored
     /// identity cannot be decoded -- reachable through the `load` this
     /// performs to check the file really is `replacing`, and the case the
-    /// paragraph above is entirely about -- or
+    /// paragraph above is entirely about -- and for the same reason
+    /// [`IdentityError::NotAFile`] and [`IdentityError::PermissionsTooOpen`],
+    /// which that `load` applies to the stored identity exactly as it does
+    /// to a direct one -- or
     /// [`IdentityError::Storage`] if the write fails.
     pub fn restore_replace(
         path: &Path,

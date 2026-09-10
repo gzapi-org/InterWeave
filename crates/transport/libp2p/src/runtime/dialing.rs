@@ -2120,36 +2120,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn no_production_path_learns_an_address_without_canonicalizing() {
-        // THE WIRING, not the helper. Every test above could pass with the
-        // production call sites reverted, because they all reach
-        // `learn_route` themselves -- which is exactly the
-        // passes-for-the-wrong-reason shape a reviewer named on PR #86.
-        // The Identify arm cannot be unit-tested (`SwarmEvent` is
-        // `#[non_exhaustive]`) and the command arm needs a live Swarm, so
-        // the enforceable claim is structural: `learn_address` is reached
-        // through ONE wrapper, and this fails if a second path appears.
-        //
-        // Reads the source rather than the binary, which is the weakness
-        // worth stating: it cannot see a call built by a macro, it cannot
-        // see an indented `#[cfg(test)]` on an item inside an `impl` (such
-        // a block counts as production, which fails loudly rather than
-        // quietly), and it checks this crate's runtime module only.
-        // `ConnectionManager` is reachable from outside that module, so a
-        // new `learn_address` caller elsewhere in the crate would pass.
-        // EVERY FILE IN THE MODULE, not the three I had edited. The first
-        // version scanned `dialing.rs`, `commands.rs` and `mod.rs`, which
-        // left `kademlia_driver.rs` and `endpoints.rs` unscanned -- and the
-        // driver is the most likely future home for an address-learning
-        // call. A review named it.
-        // THE TABLE BELOW IS CHECKED AGAINST THE MODULE, because a
-        // hardcoded list is how this guard lost two files the first time.
-        // Stage 11's next step adds a connectivity adapter to this module,
-        // and an unscanned file contributes zero matches to an expectation
-        // of zero -- the silent pass, one step later. Review finding on
-        // PR #86.
-        let declared: Vec<String> = include_str!("mod.rs")
+    /// The file modules `source` declares, as filenames.
+    ///
+    /// EXTRACTED SO IT HAS A TEST. Three versions of this parser have now
+    /// been wrong, each in a way that PASSED: the first matched three
+    /// literal prefixes, the second truncated a `pub mod` line at the first
+    /// `)` anywhere on it. Both were found by hand-mutating `mod.rs`,
+    /// because the only thing exercising the parser was `mod.rs` itself --
+    /// which contains none of the shapes that break it. Review finding on
+    /// PR #86.
+    fn declared_modules(source: &str) -> Vec<String> {
+        source
             .lines()
             .filter_map(|line| {
                 // TRIMMED, AND THE VISIBILITY STRIPPED GENERICALLY. A first
@@ -2161,7 +2142,16 @@ mod tests {
                 // is the silent pass this guard exists to refuse, and
                 // `pub(super) mod connectivity;` is a plausible next line in
                 // this module. Review finding on PR #86.
-                let line = line.trim();
+                // THE COMMENT GOES FIRST, before anything looks for a
+                // paren. `split_once(')')` below searches the whole rest of
+                // the line, not the visibility's own parentheses -- so
+                // `pub mod x; // driven by poll()` had its declaration
+                // discarded at that `)` and vanished silently. Third
+                // iteration of this same silent-pass shape in this one
+                // parser, which is why the sample test below now exists
+                // rather than the fix standing alone. Review finding on
+                // PR #86.
+                let line = line.split("//").next().unwrap_or(line).trim();
                 let rest = line.strip_prefix("pub").map_or(line, |after| {
                     // `pub mod`, `pub(crate) mod`, `pub(super) mod`,
                     // `pub(in crate::x) mod`.
@@ -2176,19 +2166,137 @@ mod tests {
                 // skipping it is correct rather than a gap -- `mod.rs` has
                 // five of them, all test modules. Checked BEFORE the name, so
                 // an inline declaration is recognised rather than refused.
-                let head = rest.split('{').next()?;
+                // `next()` on a `split` is always `Some`, so this is an
+                // unwrap with a name rather than a guard; the real filters
+                // are the `;` test and the identifier test below.
+                let head = rest.split('{').next().unwrap_or(rest);
                 if !head.contains(';') {
                     return None;
                 }
-                // CUT AT THE FIRST `;`, not the last character, so a
-                // trailing comment does not hide the declaration.
-                let name = head.split(';').next()?.trim();
+                // CUT AT THE FIRST `;`, not the last character. With the
+                // comment already stripped above, this is what keeps
+                // `mod x ;` and a block comment after the semicolon from
+                // hiding the declaration.
+                let name = head.split(';').next().unwrap_or(head).trim();
                 if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
                     return None;
                 }
                 Some(format!("{name}.rs"))
             })
+            .collect()
+    }
+
+    #[test]
+    fn every_module_spelling_rust_allows_is_recognised() {
+        // A LITERAL SAMPLE, not `mod.rs`. The real file has `mod x;`, one
+        // `pub mod x;` and five inline `mod x {`, so it exercises none of
+        // the spellings that have actually broken this parser.
+        //
+        // EVERY LINE IS INDENTED, deliberately. A sample containing a `}`
+        // at column zero ends the guard's own test-module cut early and
+        // spills the rest of this module into the text it scans -- which is
+        // not hypothetical: writing this test unindented is what produced
+        // that failure, and it is the raw-string hazard a reviewer had
+        // already predicted. The parser trims, so indentation changes
+        // nothing it sees.
+        let sample = "\
+    mod a;
+    pub mod b;
+    pub(crate) mod c;
+    pub(super) mod d;
+    pub(in crate::runtime) mod e;
+        mod f;
+    mod g; // a trailing comment
+    pub mod h; // driven by poll()
+    mod i ;
+    // mod commented_out;
+    /// mod in_a_doc_comment;
+    pub(crate) use dialing::canonical_for_peer;
+";
+        let want: Vec<String> = "a b c d e f g h i"
+            .split(' ')
+            .map(|n| format!("{n}.rs"))
             .collect();
+        assert_eq!(
+            declared_modules(sample),
+            want,
+            "every `mod x;` spelling must be seen, and nothing else"
+        );
+    }
+
+    #[test]
+    fn an_inline_module_declares_no_file_and_is_skipped() {
+        // Correct rather than a gap: there is no file for the table to
+        // cover. `mod.rs` has five of these and the first version of this
+        // parser refused them, which was a red build for a valid shape.
+        assert!(declared_modules("    mod inline {").is_empty());
+        assert!(declared_modules("    pub(crate) mod inline {").is_empty());
+    }
+
+    #[test]
+    fn a_nested_declaration_is_claimed_rather_than_ignored() {
+        // THE ONE FALSE POSITIVE, recorded because it is the safe
+        // direction. The parser is line-based, so a `mod x;` nested inside
+        // an inline module reads as a file module -- and the `visited`
+        // assertion then demands a table entry for a file that does not
+        // exist, which fails LOUDLY. Over-claiming costs a build; missing a
+        // declaration costs the coverage, which is the failure this whole
+        // check exists to prevent.
+        assert_eq!(
+            declared_modules("        mod nested_inside_an_inline_module;"),
+            vec![String::from("nested_inside_an_inline_module.rs")]
+        );
+    }
+
+    #[test]
+    fn a_commented_paren_does_not_swallow_a_pub_module() {
+        // THE P3 THIS TEST EXISTS FOR. `split_once(')')` searched the whole
+        // remainder of the line, so the `)` in a trailing comment ended the
+        // visibility strip and the declaration after it was discarded --
+        // silently, which for a file whose expected count is zero means the
+        // guard goes on passing while the file is never scanned.
+        assert_eq!(
+            declared_modules("pub mod connectivity; // driven by poll()"),
+            vec![String::from("connectivity.rs")]
+        );
+        assert_eq!(
+            declared_modules("pub(crate) mod relaying; // reserves ) here"),
+            vec![String::from("relaying.rs")]
+        );
+    }
+
+    #[test]
+    fn no_production_path_learns_an_address_without_canonicalizing() {
+        // THE WIRING, not the helper. Every test above could pass with the
+        // production call sites reverted, because they all reach
+        // `learn_route` themselves -- which is exactly the
+        // passes-for-the-wrong-reason shape a reviewer named on PR #86.
+        // The Identify arm cannot be unit-tested (`SwarmEvent` is
+        // `#[non_exhaustive]`) and the command arm needs a live Swarm, so
+        // the enforceable claim is structural: `learn_address` is reached
+        // through ONE wrapper, and this fails if a second path appears.
+        //
+        // Reads the source rather than the binary, which is the weakness
+        // worth stating: it cannot see a call built by a macro, it cannot
+        // see an indented `#[cfg(test)]` on an item inside an `impl` (such
+        // a block counts as production, which fails loudly if it calls
+        // `learn_address` and is otherwise a silent pass -- the same
+        // conditional as `#[cfg(all(test, ...))]` below), and it checks this
+        // crate's runtime module only.
+        // `ConnectionManager` is reachable from outside that module, so a
+        // new `learn_address` caller elsewhere in the crate would pass.
+        // EVERY FILE IN THE MODULE, not the three I had edited. The first
+        // version scanned `dialing.rs`, `commands.rs` and `mod.rs`, which
+        // left `kademlia_driver.rs` and `endpoints.rs` unscanned -- and the
+        // driver is the most likely future home for an address-learning
+        // call. A review named it.
+        // THE TABLE BELOW IS CHECKED AGAINST THE MODULE, because a
+        // hardcoded list is how this guard lost two files the first time.
+        // Stage 11's next step adds a connectivity adapter to this module,
+        // and an unscanned file contributes zero matches to an expectation
+        // of zero -- the silent pass, one step later. Review finding on
+        // PR #86.
+        let declared: Vec<String> = declared_modules(include_str!("mod.rs"));
         assert!(
             !declared.is_empty(),
             "the module declarations could not be read out of mod.rs, so this \
@@ -2298,8 +2406,11 @@ mod tests {
                      attribute first. If it is `pub mod` or `pub(crate) mod`, drop the \
                      visibility -- a test module needs none. (`#[cfg(all(test, ...))]` \
                      does NOT reach here: it is not matched at all, so its module is \
-                     counted as production and fails the count assertion below \
-                     instead. Measured.)"
+                     counted as production -- which fails the count assertion below \
+                     only IF it calls `learn_address`, and is otherwise a silent \
+                     pass. Measured both ways.) If the attribute and the `mod` are \
+                     on ONE line, put the attribute on its own line: this check \
+                     wants a newline between them."
                 );
             }
             let calls = production.matches("learn_address(").count();

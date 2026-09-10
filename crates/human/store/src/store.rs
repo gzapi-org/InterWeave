@@ -664,8 +664,8 @@ impl HumanStore {
     /// Returns [`StoreError::Degraded`], [`StoreError::KeepRefused`] if
     /// the state machine refuses, [`StoreError::TimestampOutOfRange`] if
     /// `at_ms` cannot be represented, [`StoreError::IdentityConflict`] if
-    /// the upsert matches no row because another identity already holds
-    /// that message id -- the security-relevant outcome of this
+    /// the upsert matches no row because THIS peer already used that
+    /// `app_message_id` for different content -- the outcome of this
     /// statement's `WHERE` clause, and absent from this block before --
     /// or a storage error. The two timestamps carried by `held` were
     /// refused on the way in, so they cannot fail here.
