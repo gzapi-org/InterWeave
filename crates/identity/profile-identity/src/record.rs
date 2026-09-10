@@ -128,17 +128,22 @@ where
 /// Not "exactly": a SHORT phrase deserializes here and is refused later, by
 /// [`RecoveryRecord::validate`] and -- independently -- by
 /// `RecoveryPhrase::parse`, which `restore` reaches through
-/// `self.words.join(" ")`. So there are TWO equality checks downstream, not
-/// one, and `restore` stays fail-closed even if `validate` is called without
-/// the other. An earlier version of this said `validate` was "the only
-/// place", which is the same over-claim in a smaller font.
+/// `self.words.join(" ")`. An earlier version of this said `validate` was
+/// "the only place", which is an over-claim in a smaller font.
 ///
-/// BOTH halves are pinned by
-/// `a_record_with_four_words_deserializes_and_is_refused_by_both_downstream_checks`,
-/// which asserts `validate` separately from `restore` -- asserting only
-/// `restore` would have left the first check's removal invisible, since
-/// `parse` refuses the joined string on its own. Until that test was
-/// written this paragraph was an unenforced claim; a review said so.
+/// THERE ARE THREE ENFORCERS DOWNSTREAM, not the two a correction of that
+/// over-claim then named: `validate`'s length check, `parse`'s
+/// `word_count()` check, and -- reached before either of them on this input
+/// -- `bip39`'s own `is_invalid_word_count`, whose floor is twelve words.
+///
+/// `a_record_with_four_words_deserializes_and_is_refused_by_both_downstream_checks`
+/// pins the FIRST of those and asserts the outcome of the other two. The
+/// distinction is the point: deleting `validate`'s check turns that test
+/// red, while deleting both InterWeave checks does not, because the
+/// dependency refuses a four-word string on its own. So `restore` being
+/// fail-closed for a short phrase is a floor this crate inherits rather
+/// than an invariant it holds. Two reviews were needed to get this
+/// paragraph to say that.
 ///
 /// This title also said "Exactly" while the `expecting` string further down
 /// this same function had already been corrected to "at most", with a

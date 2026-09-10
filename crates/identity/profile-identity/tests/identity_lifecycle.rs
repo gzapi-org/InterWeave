@@ -1124,19 +1124,28 @@ fn a_record_with_twenty_five_words_is_refused() {
 fn a_record_with_four_words_deserializes_and_is_refused_by_both_downstream_checks() {
     // THE SHORT DIRECTION, which nothing covered. The deserializer's bound
     // is AT MOST 24, so a four-word array gets past it by design -- the
-    // count is settled downstream, and `RecoveryRecord`'s doc comment
-    // claims TWO independent equality checks do it. This asserts both,
-    // because each is a separate mutation:
+    // count is settled downstream, by THREE enforcers and not the two an
+    // earlier version of this comment claimed:
     //
-    //   - delete `validate`'s `self.words.len() != PHRASE_WORDS` block and
-    //     the first assertion fails;
-    //   - delete it AND `RecoveryPhrase::parse`'s own check and the second
-    //     fails too. With only `restore` asserted, the first mutation is
-    //     invisible, because `parse` refuses the joined string anyway.
+    //   1. `RecoveryRecord::validate`'s `self.words.len() != PHRASE_WORDS`;
+    //   2. `RecoveryPhrase::parse`'s own `inner.word_count()` check;
+    //   3. `bip39` itself, which `parse` reaches FIRST -- a four-word string
+    //      fails `is_invalid_word_count` (`MIN_NB_WORDS` is 12) before any
+    //      InterWeave code looks at the count.
     //
-    // Review finding on PR #86: the doc comment said "fail-closed even if
-    // `validate` is called without the other", and no test went red when
-    // `validate`'s half was removed.
+    // WHICH ASSERTION IS LOAD-BEARING, stated exactly because the first
+    // version of this comment got it wrong: the `validate` assertion is, and
+    // deleting enforcer 1 turns it red. The `restore` assertion is NOT
+    // pinned by anything in this repository -- delete enforcers 1 and 2 and
+    // `restore` still errs, because 3 is a dependency's floor. It is
+    // asserted rather than pinned, and it is still worth asserting: it is
+    // the behaviour callers depend on, and it would go red if `restore` ever
+    // stopped consulting either path.
+    //
+    // Review findings on PR #86: the doc comment said "fail-closed even if
+    // `validate` is called without the other" and no test went red when
+    // `validate`'s half was removed; then this comment named a mutation for
+    // the second assertion that no in-tree change can produce.
     let text = record_json_with_words(SHORT_WORDS_IN_TEST);
     let record = serde_json::from_str::<interweave_profile_identity::RecoveryRecord>(&text)
         .expect("four words deserializes -- the bound is a ceiling, not an equality");
@@ -1153,7 +1162,8 @@ fn a_record_with_four_words_deserializes_and_is_refused_by_both_downstream_check
     );
     assert!(
         record.restore().is_err(),
-        "restore stays fail-closed for a short phrase"
+        "restore stays fail-closed for a short phrase -- held by `bip39` even \
+         with both InterWeave checks removed, so this is a floor and not a pin"
     );
 }
 
