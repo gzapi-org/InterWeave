@@ -150,6 +150,8 @@ pub(super) fn handle_command(
                     // channel failed. Silence here reported a
                     // configuration that the mesh had not accepted.
                     let mut refused: Option<interweave_transport_api::ChannelId> = None;
+                    let mut applied: std::collections::BTreeSet<_> =
+                        std::collections::BTreeSet::new();
                     for channel in &config.desired {
                         let topic = broadcast_state.remember(channel);
                         if swarm.subscribe_topic(&topic).is_err() {
@@ -157,6 +159,30 @@ pub(super) fn handle_command(
                             refused = Some(channel.clone());
                             break;
                         }
+                        applied.insert(channel.clone());
+                    }
+
+                    // THE REGISTRY HOLDS WHAT WAS APPLIED, NOT WHAT WAS
+                    // ASKED FOR. `set_desired` above committed the whole
+                    // new set before any of it reached the mesh, and the
+                    // loop stops at the first refusal -- so a set of four
+                    // whose third channel is refused left the registry
+                    // desiring all four while the backend held two. That
+                    // matters beyond the reply, because
+                    // `backend_should_subscribe` answers from `desired`:
+                    // the two that never subscribed read as held, so the
+                    // sweep below would not notice them and a later
+                    // reconfiguration would not resubscribe them either.
+                    // The reply already says the configuration is applied
+                    // only up to the refusal; this makes the registry
+                    // agree with it. Review finding.
+                    if refused.is_some() {
+                        // Narrowing cannot be denied: dropping a channel
+                        // from `desired` either moves it into the
+                        // joined-elsewhere count or removes it entirely,
+                        // and neither raises the total the wider set
+                        // already passed.
+                        let _ = broadcast_state.subs.set_desired(applied);
                     }
 
                     // AND DROP WHAT IS NO LONGER HELD. Subscribing to the
