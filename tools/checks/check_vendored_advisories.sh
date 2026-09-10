@@ -158,16 +158,17 @@
 # The self-test's FOUR advisory ids across three crates are
 # version-dated fixtures, not invariants: `atty 0.2.14`
 # (RUSTSEC-2021-0145 and RUSTSEC-2024-0375 -- the second is
-# grep-pinned in TWO places of OPPOSITE polarity: the ignore-list case,
-# where a withdrawal reds, and the `cargo-deny alone` control, where the
-# id sits in a negative assertion as one of two alternatives -- so a
-# withdrawal there reds nothing and silently narrows the guard instead.
-# A renumber needs both edited), `rand 0.9.0`
+# grep-pinned in two places, see below), `rand 0.9.0`
 # (RUSTSEC-2026-0097) and `time 0.1.45` (RUSTSEC-2020-0071). An
 # earlier version said three while listing four, which would send an
 # operator to the ids asserted by `expect_finding` and not to the grep
-# that actually reds. If RustSec withdraws or renumbers one of the
-# OTHER THREE, or cargo-deny changes which classes it reports, the
+# that actually reds -- and for RUSTSEC-2024-0375 that is ONE of its two
+# grep sites, not both: the ignore-list case reds on a withdrawal, while
+# the `cargo-deny alone` control names it in a negative assertion as one
+# of two alternatives, where a withdrawal reds nothing and silently
+# narrows the guard instead. A renumber needs both edited.
+#
+# If RustSec withdraws or renumbers one of the OTHER THREE, or cargo-deny changes which classes it reports, the
 # self-test goes red on a guard that is working. Update the fixture; do
 # not relax the assertion. The fourth, RUSTSEC-2021-0145, has a
 # different shape -- next paragraph.

@@ -182,43 +182,24 @@ build_vendored() {
 # Run the guard and classify. These fixtures are well-formed, so the guard's
 # tree-SHAPE refusals cannot fire here: the package graph names the patched
 # tree, it sits inside the workspace root, the path is a directory with no
-# tab, and there is no `.cargo/config*` to misread.
+# tab, and there is no `.cargo/config*` to misread. So exit 2 here is treated
+# as a FAILURE and not a skip -- the baseline above proved the environment
+# works, and without that a mutation misclassifying findings as unreachable
+# would report success.
 #
-# NO COUNT AND NO LIST. Two versions of this comment tried one. The first
-# said exit 2 is "only ever an environment problem", which is false of the
-# guard. The second named "four structural causes, as its help lists" -- the
-# help lists seven bullets; of those four, TWO are reached by no fixture here
-# (a vendored path that is not a directory or carries a tab, and a
-# `.cargo/config*` this guard cannot read, which `bomcfg` asserts is NOT
-# taken rather than reaching); and the enumeration missed the one structural
-# cause these fixtures CAN reach.
+# ONE STRUCTURAL CAUSE IS STILL REACHABLE, and the assertion below cannot
+# tell it from an environment failure: if a fixture's pinned version stops
+# resolving, the probe's `cargo generate-lockfile` fails and the tree lands
+# in `unaskable`. The guard's own message for that branch says THREE causes
+# look identical from there -- no published release, a registry or network
+# failure, and a yank -- so this comment names no cause and prescribes no
+# remedy. Read the guard's output, which the `2)` arm now prints.
 #
-# THAT ONE IS `unaskable`. A pinned version that no longer resolves from the
-# registry -- yanked, or withdrawn -- makes the probe's own
-# `cargo generate-lockfile` fail, and the guard then exits 2 on a sweep it
-# could not complete. Every fixture here pins an exact version, so a yank is
-# enough to make this reachable rather than theoretical -- and it is not the
-# only way in: the guard's own comment at that branch says a network failure
-# or an unsatisfiable requirement lands there too, which is why its summary
-# says "could not be resolved" rather than naming a cause.
-#
-# NO MECHANISM CLAIM BEYOND THAT. Two have been written here and both were
-# wrong. `deny.toml`'s `yanked = "deny"` judges a yanked crate already
-# present in a resolved lockfile, and on this path the resolution is what
-# failed, so cargo-deny is never reached. "A yank is the ONE way a pinned
-# release stops resolving" was the replacement, contradicted two sentences
-# up by this paragraph's own "yanked, or withdrawn". What the assertion
-# below needs is only that a re-pin, and not a re-run, is the answer when
-# the probe cannot resolve a pinned version: re-pin the fixture, do not
-# relax the assertion. An earlier revision kept the flat "it is a
-# supply-chain signal and not an environment one" beside that hedge, which
-# this paragraph's own next-but-one sentence contradicts -- a network
-# failure lands on the same branch. Review findings on PR #85.
-#
-# Otherwise exit 2 here is an environment failure, and the baseline above
-# proved the environment works -- so it is a FAILURE and not a skip. Without
-# that, a mutation misclassifying findings as unreachable would report
-# success. Review findings on PR #85.
+# FIVE REVISIONS OF A PARAGRAPH THAT USED TO STAND HERE ARE GONE WITH IT, and
+# that is the finding worth keeping: each one replaced a flat claim about this
+# branch with a different flat claim, and a review caught every one. The
+# branch is documented as indistinguishable in the guard itself; a sentence
+# here that resolves it is wrong by construction. Review findings on PR #85.
 expect_finding() {
     local dir="$1" label="$2" id="$3"
     local out status
@@ -689,8 +670,9 @@ if (cd "$SANDBOX/vulnerable" && cargo generate-lockfile >/dev/null 2>&1); then
     # falls to `skip_or_fail` and says nothing -- and `skip_or_fail` EXITS, so
     # every fixture after this point is abandoned -- in CI as a failure, and
     # locally with 0 UNLESS a `✗` was already recorded, which `skip_or_fail`
-    # checks for exactly this reason and which ~40 assertions above make
-    # likely. Against a false alarm that fires on any unrelated non-zero
+    # checks for exactly this reason and which the thirty-eight assertions
+    # above make possible -- not likely, since on a healthy tree they all
+    # pass and the local exit is 0. Against a false alarm that fires on any unrelated non-zero
     # exit, that is the better side; it is not a free one.
     #
     # A BARE `RUSTSEC-` WOULD MATCH ON EVERY RUN -- past tense for the
