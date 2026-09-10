@@ -162,7 +162,26 @@ pub(super) fn handle_command(
                     let (applied, refused) = apply_desired(&config.desired, |channel| {
                         let topic = broadcast_state.remember(channel);
                         if swarm.subscribe_topic(&topic).is_err() {
-                            broadcast_state.forget(channel);
+                            // THE MAPPING IS ONLY DROPPED IF NOBODY HOLDS
+                            // THE CHANNEL. `forget` removes the
+                            // `wire -> ChannelId` entry `channel_of` uses
+                            // to attribute inbound GossipSub traffic, so
+                            // dropping it for a channel a live session
+                            // still joins loses the attribution while the
+                            // subscription itself stays -- and the sweep
+                            // below cannot see the channel to unsubscribe
+                            // it either, because it iterates the same map.
+                            //
+                            // Pre-existing, and WIDENED by the change
+                            // above: stopping at the first refusal could
+                            // reach at most one channel per command, and
+                            // continuing reaches every refused one. Fixing
+                            // it here rather than deferring it, because
+                            // this commit is what made it matter. Review
+                            // finding on PR #86.
+                            if broadcast_state.subs.subscribers(channel).is_empty() {
+                                broadcast_state.forget(channel);
+                            }
                             return false;
                         }
                         true
@@ -173,15 +192,21 @@ pub(super) fn handle_command(
                     // new set before any of it reached the mesh -- so a
                     // set of four whose third channel is refused left the
                     // registry desiring all four while the backend held
-                    // three. That
-                    // matters beyond the reply, because
+                    // three. That matters beyond the reply, because
                     // `backend_should_subscribe` answers from `desired`:
-                    // the two that never subscribed read as held, so the
-                    // sweep below would not notice them and a later
-                    // reconfiguration would not resubscribe them either.
-                    // The reply already says the configuration is applied
-                    // only up to the refusal; this makes the registry
-                    // agree with it. Review finding.
+                    // the ONE that never subscribed read as held, so the
+                    // sweep below would not notice it and a later
+                    // reconfiguration would not resubscribe it either.
+                    // The reply names every refused channel and says the
+                    // rest is applied; this makes the registry agree with
+                    // it. Review finding.
+                    //
+                    // (The count and the reply were both described wrong
+                    // here for one commit: this said "the two that never
+                    // subscribed" and "applied only up to the refusal",
+                    // which were true of the version that STOPPED at the
+                    // first refusal. Continuing past it leaves exactly one
+                    // unsubscribed and reports them all.)
                     if !refused.is_empty() {
                         // Narrowing cannot be denied: dropping a channel
                         // from `desired` either moves it into the
