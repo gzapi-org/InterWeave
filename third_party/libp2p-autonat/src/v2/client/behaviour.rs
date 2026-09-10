@@ -230,12 +230,12 @@ where
                 error,
             }) => {
                 // INTERWEAVE PATCH (ADR-0051), second half. This is the
-                // one arm that falls through to `GenerateEvent` rather
-                // than returning, so without this guard a late failure
-                // for a nonce `retest` abandoned is reported as the
-                // outcome of whichever probe replaced it. The other two
-                // error arms already return, and the success arm is
-                // guarded by `received_dial_back`.
+                // only arm that falls through to `GenerateEvent`
+                // UNGUARDED, so without it a late failure for a nonce
+                // `retest` abandoned is reported as the outcome of
+                // whichever probe replaced it. The other two error arms
+                // return early; the success arm falls through too, behind
+                // its `received_dial_back` check.
                 if !self.reset_status_to(nonce, TestStatus::Failed) {
                     tracing::debug!(
                         %peer_id,
