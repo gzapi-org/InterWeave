@@ -716,8 +716,16 @@ mod tests {
         // agrees. The three protections are the sibling guard's, which was
         // fixed for each of them in turn -- an out-of-line
         // `#[cfg(test)] mod tests;` swallowing the rest of the file, a module
-        // whose closing brace is not at column zero, and a column-zero
-        // `#[cfg(test)]` on something that is not a module.
+        // that runs to the end of the file with no column-zero closing brace,
+        // and a column-zero `#[cfg(test)]` on something that is not a module.
+        //
+        // THE SECOND IS NARROWER THAN IT SOUNDS, said here rather than left
+        // to be discovered: the assertion fires only when NO `"\n}"` follows
+        // the module at all. A module closing at an indent with any later
+        // column-zero `}` takes the other branch and cuts at that brace
+        // instead, dropping whatever lies between -- production code
+        // included -- with nothing raised. rustfmt does not produce that
+        // shape, which is why it is a stated limit and not a fourth check.
         //
         // Reads this file's own source, so it cannot see a call built by a
         // macro, and it checks the count rather than the argument. Review

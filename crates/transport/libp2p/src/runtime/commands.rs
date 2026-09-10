@@ -1438,9 +1438,13 @@ mod command_helper_tests {
         production.push_str(rest);
         // AND EVERY column-zero `#[cfg(test)]` must be a module, checked per
         // occurrence rather than once for the file. This file has exactly one
-        // and it is the test module; `connection_manager.rs` deliberately
-        // does NOT carry this check, because it has two `#[cfg(test)]`
-        // non-module items that stay counted as production.
+        // and it is the test module. `connection_manager.rs` is the one guard
+        // of the four that deliberately omits THIS check -- only this one, it
+        // carries the other two -- because it has two column-zero
+        // `#[cfg(test)]` non-module items (a `thread_local!` and a function)
+        // that stay counted as production and call none of its patterns.
+        // Nothing over there holds that shape, so if those two ever move
+        // inside the test module this sentence goes stale silently.
         for (i, _) in source.match_indices("\n#[cfg(test)]") {
             let after = &source[i + "\n#[cfg(test)]".len()..];
             assert!(

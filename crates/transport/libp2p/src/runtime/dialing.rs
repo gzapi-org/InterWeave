@@ -225,8 +225,9 @@ pub(super) fn canonical_dial_address(peer: &TransportIdentity, address: &str) ->
 /// duplicate COMPUTATIONS are gone rather than documented, in two commits:
 /// `settle_failed_dial`'s closure still exists and is one of the three
 /// counted call sites, but it delegates here instead of walking the
-/// components itself, and the established hook's raw call was replaced. This said "the second copy",
-/// singular, from when only the first had been removed, and the correction
+/// components itself, and the established hook's raw call was replaced.
+/// This said "the second copy", singular, from when only the first had been
+/// removed, and the correction
 /// to the sentence above it left that three lines down untouched. Review
 /// findings on PR #86.
 pub(crate) fn canonical_for_peer(address: &Multiaddr, peer: &PeerId) -> String {
@@ -2397,8 +2398,11 @@ mod tests {
         // `ConnectionManager` itself, fails if a new method there keys the
         // book or the quarantine -- reaching `learn_address` directly, or by
         // delegating to one of the two that do, or by writing the quarantine
-        // through `policy.record_address_failure`, or by touching
-        // `self.book` at all -- and names this table as the thing to update.
+        // through `policy.record_address_failure`, or by touching the `book`
+        // field at all -- that guard counts `.book` and NOT `self.book`,
+        // because rustfmt wraps a long chain between the receiver and the
+        // field and one access is already written that way -- and names this
+        // table as the thing to update.
         // Review finding on PR #86.
         //
         // FOUR VERSIONS OF THIS SENTENCE WERE WRONG ABOUT THE CODE. It
