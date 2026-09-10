@@ -1404,6 +1404,22 @@ mod command_helper_tests {
         let mut rest = source;
         while let Some((before, after)) = rest.split_once("\n#[cfg(test)]\nmod ") {
             production.push_str(before);
+            // AN OUT-OF-LINE TEST MODULE IS REFUSED, not guessed at:
+            // `#[cfg(test)] mod tests;` has no `{`, so everything after it
+            // would be swallowed as test code. Here that can only LOWER a
+            // count and so fails loudly rather than passing -- both
+            // expectations below are non-zero -- but the sibling guards in
+            // `dialing.rs` and `outbound_gate.rs` carry the same three
+            // protections, and a guard that differs from its siblings for
+            // reasons a reader has to reconstruct is the next stale
+            // comment. Review finding on PR #86.
+            let head: &str = after.split_once('{').map_or(after, |(h, _)| h);
+            assert!(
+                !head.contains(';'),
+                "`#[cfg(test)] mod <name>;` declares its tests in another file, and this \
+                 guard cannot tell where they end -- so it refuses. Use an inline \
+                 `mod tests {{ ... }}`, or extend this guard to follow the file."
+            );
             match after.split_once("\n}") {
                 // `"\n}"` rather than `"\n}\n"`: the surviving newline is the
                 // separator the next search needs.
@@ -1420,6 +1436,21 @@ mod command_helper_tests {
             }
         }
         production.push_str(rest);
+        // AND EVERY column-zero `#[cfg(test)]` must be a module, checked per
+        // occurrence rather than once for the file. This file has exactly one
+        // and it is the test module; `connection_manager.rs` deliberately
+        // does NOT carry this check, because it has two `#[cfg(test)]`
+        // non-module items that stay counted as production.
+        for (i, _) in source.match_indices("\n#[cfg(test)]") {
+            let after = &source[i + "\n#[cfg(test)]".len()..];
+            assert!(
+                after.starts_with("\nmod "),
+                "a column-zero `#[cfg(test)]` that is not immediately followed by `mod ` \
+                 -- this guard cannot tell where the test code ends, so it refuses rather \
+                 than reading past it. Move a test-only `use`, `const` or `fn` inside the \
+                 test module."
+            );
+        }
 
         for (pattern, expected) in [("forget_if_unheld(", 1usize), (".forget(", 3)] {
             let calls = production.matches(pattern).count();
