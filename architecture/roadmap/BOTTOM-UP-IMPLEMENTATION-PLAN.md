@@ -1735,12 +1735,15 @@ this block.
    configured number describes nothing. **`max_inflight_probes` and
    `timeout` are therefore owed a removal from `AutonatClientConfig`,
    `config.schema.yaml` and `examples/connectivity-infrastructure.yaml`,
-   and this step is where that happens**; §4's two client rows, `CONNECTIVITY.md` §22's and
-   `docs/architecture/resource-limits.md`'s client row carry the annotation
-   until it does — three restatements, and §7's identically worded server
-   timeout is not one of them. Leaving
-   them would be the "config the schema documents but nothing read"
-   defect this repository has already shipped once;
+   and this step is where that happens**; §4's two client rows,
+   `CONNECTIVITY.md` §22's and `docs/architecture/resource-limits.md`'s
+   client row carry the annotation until it does — three restatements.
+   THREE SERVER LOOK-ALIKES must survive: `AUTONAT.md` §7's,
+   `CONNECTIVITY.md` §6's, and the `autonat.server` timeout in the
+   schema and the example profile, which sits six lines below the client
+   key and is byte-identical. Disambiguate by the block, never by the
+   string. Leaving them would be the "config the schema documents but
+   nothing read" defect this repository has already shipped once;
 4. AutoNAT v2 server role — including `AUTONAT.md` §7's dial-back
    restriction, which the crate does not implement, at the PENDING hook
    because the established one runs after the target is contacted;
