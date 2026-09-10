@@ -20,8 +20,18 @@
 # the tarball at all -- it is the upstream repository's, fetched verbatim --
 # and INTERWEAVE.patch is FIRST-PARTY Apache-2.0, this repository's own record
 # of the change. The provenance line above does not apply to it; it is listed
-# only so the directory enumeration is complete, and the entry is inert either
-# way because `.patch` is not in `check_license_headers.sh`'s extension list.
+# only so the directory enumeration is complete.
+#
+# THE ENTRY IS NOT INERT FOR THE REASON AN EARLIER VERSION OF THIS GAVE.
+# `.patch` being outside `HEADER_EXTENSIONS` silences the MISSING-header
+# check only; the foreign-terms scans run on every tracked file with no
+# extension test, as this file's own header six lines up says. What keeps it
+# quiet today is that the patch text happens to carry no SPDX line and no
+# proprietary wording -- and the SPDX pattern matches a diff CONTEXT line,
+# so an upstream SPDX header near a patched hunk would put a foreign
+# declaration inside this file's subject on the next re-vendor, which
+# Decision 8 makes a recurring event. The exemption is what covers that, so
+# do not prune it as dead. Review findings on PR #85.
 # An audit found the MIT/Parity attribution reaching a first-party file.
 # Review finding on PR #85.
 third_party/libp2p-autonat/CHANGELOG.md
