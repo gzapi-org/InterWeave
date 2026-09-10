@@ -220,16 +220,31 @@ fi
 # evidence that anything here has a consumer.
 #
 # The exclusion is DEFENSIVE rather than load-bearing today, and saying so
-# took three attempts. Measured the way this script measures -- owner types
-# come from top-level `impl` lines, not from `struct`/`enum` declarations --
-# no owner type in `crates/api/` or `crates/transport/runtime/` appears in
-# the vendored tree, so nothing there can satisfy `owner_is_wired` now.
-# Nineteen METHOD names collide (`sweep`, `candidates`, `drain`, `parse`,
-# `insert`, ...), but a method also needs its owner named in the same
-# file, and no free domain function collides at all. Two earlier revisions
-# of this comment claimed first no collisions and then two owner-type
-# collisions; the second was grepped for `struct X`/`enum X`, which is not
-# what this script reads. Review findings on PR #85 (ADR-0051).
+# took four attempts. Measured the way this script measures -- owner types
+# come from top-level `impl` lines and not from `struct`/`enum`
+# declarations, and identifiers are indexed AFTER `sed 's,//.*,,'` has
+# stripped comments:
+#
+#   - No owner type in the domain set appears in any vendored file this
+#     script READS. One does appear in the vendored tree: `TransportError`,
+#     in `third_party/libp2p-autonat/tests/autonatv2.rs`. That is a
+#     `tests/` path, which the PRE-EXISTING clause above already drops --
+#     so `^third_party/` is inert because of that older clause rather than
+#     because the name is absent, and a re-vendor that moved such a type
+#     into `src/`, or a vendored crate shipping no `tests/` directory,
+#     would change that.
+#   - Method names DO collide -- `candidates`, `drain`, `parse` and
+#     `insert` among them -- but a method also needs its owner named in the
+#     same file, and no free domain function collides at all.
+#
+# NO COUNT HERE, deliberately. Three earlier revisions each stated one and
+# each was wrong: first "no collisions"; then "two owner-type collisions",
+# grepped for `struct X`/`enum X`, which is not what this script reads;
+# then "nineteen METHOD names", which was the comments-KEPT number and
+# whose two lead examples (`sweep`, `holds`) occur in the vendored tree
+# only inside comments this repository's own patch added -- so they are not
+# collisions under this script's reading at all. Review findings on PR #85
+# (ADR-0051).
 
 mapfile -t all_rs < <(git ls-files '*.rs' 2>/dev/null | grep -vE '(^|/)tests/|^spikes/|^third_party/')
 
