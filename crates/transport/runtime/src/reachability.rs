@@ -850,61 +850,52 @@ fn is_public_v4(ip: Ipv4Addr) -> bool {
 }
 
 fn is_public_v6(ip: Ipv6Addr) -> bool {
-    let segments = ip.segments();
-    let unique_local = (segments[0] & 0xfe00) == 0xfc00;
-    let link_local = (segments[0] & 0xffc0) == 0xfe80;
-    // Deprecated by RFC 3879 and still routed by some stacks; neither
-    // `unique_local`'s nor `link_local`'s mask covers `fec0::/10`.
-    let site_local = (segments[0] & 0xffc0) == 0xfec0;
-    // RFC 3849's `2001:db8::/32` and RFC 9637's `3fff::/20`. An earlier
-    // mask, `segments[0] & 0xfff0 == 0x3ff0`, was `3ff0::/12` -- 256 times
-    // the prefix the comment named, refusing `3ff0::`-`3ffe::` with no
-    // test on that axis. Review finding on PR #84.
-    let documentation = (segments[0] == 0x2001 && segments[1] == 0x0db8)
-        || (segments[0] == 0x3fff && (segments[1] & 0xf000) == 0);
-    let benchmarking = segments[0] == 0x2001 && segments[1] == 0x0002 && segments[2] == 0;
-    // 6to4 and Teredo carry an embedded IPv4 address whose reachability
-    // is the tunnel's, not ours.
-    let six_to_four = segments[0] == 0x2002;
-    let teredo = segments[0] == 0x2001 && segments[1] == 0;
-    // RFC 6666's discard-only `100::/64`: a black hole that parses as
-    // global unicast. RFC 7343's ORCHIDv2 `2001:20::/28`: identifiers,
-    // not locators, and never routed. Review finding on PR #84.
-    let discard_only = segments[0] == 0x0100 && segments[1..4].iter().all(|s| *s == 0);
-    // BOTH ORCHID generations: RFC 7343's v2 `2001:20::/28` and RFC
-    // 4843's deprecated v1 `2001:10::/28`. Two masks rather than one,
-    // because the ranges are adjacent /28s and not a single prefix. An
-    // earlier version covered v2 only, which left v1 probeable -- the
-    // same allow-by-default gap as the four ranges before it. Review
-    // finding on PR #84.
-    let orchid = segments[0] == 0x2001 && matches!(segments[1] & 0xfff0, 0x0010 | 0x0020);
-    // NAT64's well-known `64:ff9b::/96` (RFC 6052) and local-use
-    // `64:ff9b:1::/48` (RFC 8215): a v4 address wearing a v6 prefix,
-    // whose reachability is the translator's.
-    let nat64 = segments[0] == 0x0064
-        && segments[1] == 0xff9b
-        && (segments[2..6].iter().all(|s| *s == 0) || segments[2] == 1);
-    // `to_ipv4_mapped` covers `::ffff:a.b.c.d` only, so the deprecated
-    // IPv4-COMPATIBLE form `::a.b.c.d` needs its own arm -- it is
-    // otherwise a public-looking address with a private v4 inside.
-    let ipv4_compatible = segments[..6].iter().all(|s| *s == 0) && !ip.is_unspecified();
+    // A V4-MAPPED ADDRESS IS JUDGED BY THE V4 RULES, before anything
+    // else: `::ffff:a.b.c.d` is outside global unicast as a v6 prefix but
+    // names a v4 address whose own reachability is the question.
     if let Some(v4) = ip.to_ipv4_mapped() {
         return is_public_v4(v4);
     }
-    !(ip.is_loopback()
-        || ip.is_unspecified()
-        || ip.is_multicast()
-        || unique_local
-        || link_local
-        || site_local
-        || documentation
-        || benchmarking
-        || six_to_four
-        || teredo
-        || discard_only
-        || orchid
-        || nat64
-        || ipv4_compatible)
+
+    let segments = ip.segments();
+
+    // ALLOCATED SPACE ONLY, which inverts what this predicate used to do.
+    //
+    // IANA has allocated exactly `2000::/3` for global unicast; every
+    // other v6 address is reserved, special-use, or unassigned. Listing
+    // the exclusions instead meant the default was ACCEPT, and six
+    // ranges reached an AutoNAT server through it before this changed --
+    // `fec0::/10`, 6to4, Teredo, `100::/64`, both ORCHID generations,
+    // `3fff::/20` -- each found by review rather than by a test, and the
+    // last of them (`0100::/8`, of which `100::/64` is one slice) was a
+    // vector this module's own test had explicitly ACCEPTED. A deny-list
+    // is only ever as good as its last audit; requiring allocation makes
+    // an unassigned range refused by default, which is the answer that
+    // does not need auditing. `Ipv6Addr::is_global` would say this in one
+    // call and is unstable on the pinned 1.97.1 toolchain. Review
+    // findings on PR #84.
+    if segments[0] & 0xe000 != 0x2000 {
+        return false;
+    }
+
+    // And the special-use ranges that sit INSIDE `2000::/3`, which
+    // allocation alone does not exclude.
+    //
+    // RFC 3849 documentation `2001:db8::/32`, and RFC 9637's `3fff::/20`.
+    let documentation = (segments[0] == 0x2001 && segments[1] == 0x0db8)
+        || (segments[0] == 0x3fff && (segments[1] & 0xf000) == 0);
+    // RFC 5180 benchmarking `2001:2::/48`.
+    let benchmarking = segments[0] == 0x2001 && segments[1] == 0x0002 && segments[2] == 0;
+    // 6to4 (RFC 3056) and Teredo (RFC 4380) carry an embedded IPv4
+    // address whose reachability is the tunnel's, not ours.
+    let six_to_four = segments[0] == 0x2002;
+    let teredo = segments[0] == 0x2001 && segments[1] == 0;
+    // ORCHID, both generations: RFC 7343's v2 `2001:20::/28` and RFC
+    // 4843's deprecated v1 `2001:10::/28`. Two masks rather than one,
+    // because the ranges are adjacent /28s and not a single prefix.
+    let orchid = segments[0] == 0x2001 && matches!(segments[1] & 0xfff0, 0x0010 | 0x0020);
+
+    !(documentation || benchmarking || six_to_four || teredo || orchid)
 }
 
 #[cfg(test)]
@@ -1031,6 +1022,16 @@ mod tests {
             "/ip6/2001:1f::1/tcp/4001",
             "/ip6/64:ff9b::808:808/tcp/4001",
             "/ip6/64:ff9b:1::808:808/tcp/4001",
+            // Outside `2000::/3`, so refused by allocation rather than
+            // by a range of its own -- `0100::/8` reserved (of which
+            // `100::/64` is one slice), NAT64's local-use space, and
+            // every unassigned block there is.
+            "/ip6/101::1/tcp/4001",
+            "/ip6/64:ff9b:2::1/tcp/4001",
+            "/ip6/0100:1::1/tcp/4001",
+            "/ip6/4000::1/tcp/4001",
+            "/ip6/8000::1/tcp/4001",
+            "/ip6/1000::1/tcp/4001",
             "/ip6/::ffff:10.0.0.1/tcp/4001",
             "/ip6/::10.0.0.1/tcp/4001",
         ];
@@ -1046,8 +1047,6 @@ mod tests {
             "/ip6/3fff:1000::1/tcp/4001",
             "/ip6/2001:30::1/tcp/4001",
             "/ip6/2001:f::1/tcp/4001",
-            "/ip6/101::1/tcp/4001",
-            "/ip6/64:ff9b:2::1/tcp/4001",
             "/ip6/::ffff:8.8.8.8/tcp/4001",
         ];
         for address in accepted {
