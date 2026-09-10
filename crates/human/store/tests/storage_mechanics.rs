@@ -1555,17 +1555,32 @@ fn a_nonsense_read_timestamp_is_refused_before_the_unread_row_is_destroyed() {
 
 #[test]
 fn every_reachable_timestamp_site_refuses_rather_than_saturating() {
-    // The refusal was tested at ONE of its sites, so reverting five of the
-    // six conversions left the whole suite green. A review found that.
+    // The refusal was tested at ONE of its sites, so reverting the others
+    // left the whole suite green. A review found that.
     //
-    // THREE OF THE SIX ARE REACHABLE from outside the crate. The other
-    // three take a value the store itself produced: `keep`'s
+    // EIGHT CALL SITES, FIVE OF THEM REACHABLE from outside the crate, and
+    // THIS TEST COVERS THREE -- `created_at`, `record_attempt`'s `at_ms`,
+    // and `keep`'s `at_ms`. The other two reachable sites are pinned by the
+    // two tests directly above:
+    // `a_timestamp_the_store_cannot_represent_is_refused_not_saturated`
+    // for `commit_unread_inbound`'s `received_at`, and
+    // `a_nonsense_read_timestamp_is_refused_before_the_unread_row_is_destroyed`
+    // for `mark_read`'s `read_at`.
+    //
+    // The remaining three take a value the store itself produced: `keep`'s
     // `held.received_at` and `held.read_at` come from a `ReadEphemeral`
     // whose fields are crate-private, and both were already refused on the
     // way in -- by `commit_unread_inbound` and by `mark_read` -- so they
     // are fail-closed guards on inputs that can no longer arrive, not
     // untested paths. `cursor_bounds` is the same: a `Cursor` is only ever
     // handed back by a previous page.
+    //
+    // THE EARLIER ACCOUNTING SAID "three of the six", which is wrong twice:
+    // `sql_timestamp` has eight call sites, not six, and five are reachable,
+    // not three. It reached its number by omitting the two the sibling tests
+    // cover and counting `cursor_bounds` inside the total -- so the name of
+    // THIS test overclaims unless the two siblings are read with it. Counted
+    // rather than remembered. Review finding on PR #86.
     let mut store = memory();
 
     // 1. `created_at`, through the outbound commit.
