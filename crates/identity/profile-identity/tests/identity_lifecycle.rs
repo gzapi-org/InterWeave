@@ -1121,31 +1121,31 @@ fn a_record_with_twenty_five_words_is_refused() {
 }
 
 #[test]
-fn a_record_with_four_words_deserializes_and_is_refused_by_both_downstream_checks() {
-    // THE SHORT DIRECTION, which nothing covered. The deserializer's bound
-    // is AT MOST 24, so a four-word array gets past it by design -- the
-    // count is settled downstream, by THREE enforcers and not the two an
-    // earlier version of this comment claimed:
+fn a_four_word_record_deserializes_and_validate_refuses_it_by_count() {
+    // THE SHORT DIRECTION, which nothing covered. The deserializer's bound is
+    // AT MOST 24, so a four-word array gets past it by design and the count is
+    // settled downstream.
     //
-    //   1. `RecoveryRecord::validate`'s `self.words.len() != PHRASE_WORDS`;
-    //   2. `RecoveryPhrase::parse`'s own `inner.word_count()` check;
-    //   3. `bip39` itself, which `parse` reaches FIRST -- a four-word string
-    //      fails `is_invalid_word_count` (`MIN_NB_WORDS` is 12) before any
-    //      InterWeave code looks at the count.
+    // WHAT THIS PINS is `RecoveryRecord::validate`'s own length check:
+    // deleting that block makes the first assertion fail. Measured.
     //
-    // WHICH ASSERTION IS LOAD-BEARING, stated exactly because the first
-    // version of this comment got it wrong: the `validate` assertion is, and
-    // deleting enforcer 1 turns it red. The `restore` assertion is NOT
-    // pinned by anything in this repository -- delete enforcers 1 and 2 and
-    // `restore` still errs, because 3 is a dependency's floor. It is
-    // asserted rather than pinned, and it is still worth asserting: it is
-    // the behaviour callers depend on, and it would go red if `restore` ever
-    // stopped consulting either path.
+    // WHAT IT ONLY ASSERTS is the `restore` outcome. For a FOUR-word phrase
+    // `bip39` refuses the joined string inside `RecoveryPhrase::parse` before
+    // `parse`'s own count check is reached, so `restore` still errs with
+    // either in-tree check removed -- so nothing here pins it, and the
+    // assertion stands as a statement of the behaviour callers get rather
+    // than as a guard. `parse`'s check is pinned by
+    // `a_phrase_of_the_wrong_length_is_refused`, which feeds twelve words: a
+    // count `bip39` accepts.
     //
-    // Review findings on PR #86: the doc comment said "fail-closed even if
-    // `validate` is called without the other" and no test went red when
-    // `validate`'s half was removed; then this comment named a mutation for
-    // the second assertion that no in-tree change can produce.
+    // Three reviews were needed for this paragraph, each correcting the last:
+    // the doc claimed "fail-closed even if `validate` is called without the
+    // other" with no test at all; then this comment named a mutation for the
+    // `restore` assertion that no in-tree change can produce; then it said
+    // that assertion would go red if `restore` stopped consulting either
+    // path, which is false for either path taken on its own. The claims here
+    // are now the two that were measured, and no more. Review findings on
+    // PR #86.
     let text = record_json_with_words(SHORT_WORDS_IN_TEST);
     let record = serde_json::from_str::<interweave_profile_identity::RecoveryRecord>(&text)
         .expect("four words deserializes -- the bound is a ceiling, not an equality");

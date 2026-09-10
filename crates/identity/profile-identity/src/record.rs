@@ -133,17 +133,17 @@ where
 ///
 /// THERE ARE THREE ENFORCERS DOWNSTREAM, not the two a correction of that
 /// over-claim then named: `validate`'s length check, `parse`'s
-/// `word_count()` check, and -- reached before either of them on this input
-/// -- `bip39`'s own `is_invalid_word_count`, whose floor is twelve words.
+/// `word_count()` check, and -- inside `parse`, before its own check --
+/// `bip39`'s `is_invalid_word_count`, whose floor is twelve words.
 ///
-/// `a_record_with_four_words_deserializes_and_is_refused_by_both_downstream_checks`
-/// pins the FIRST of those and asserts the outcome of the other two. The
-/// distinction is the point: deleting `validate`'s check turns that test
-/// red, while deleting both InterWeave checks does not, because the
-/// dependency refuses a four-word string on its own. So `restore` being
-/// fail-closed for a short phrase is a floor this crate inherits rather
-/// than an invariant it holds. Two reviews were needed to get this
-/// paragraph to say that.
+/// Which test holds which:
+/// `a_four_word_record_deserializes_and_validate_refuses_it_by_count` pins
+/// the first, and `a_phrase_of_the_wrong_length_is_refused` pins the second
+/// by feeding twelve words, a count `bip39` accepts. The third is a
+/// dependency's floor and nothing here pins it. A four-word phrase never
+/// reaches the second at all, so `restore` being fail-closed for one is
+/// inherited rather than held by this crate. Three reviews were needed to
+/// get this paragraph down to claims that were measured.
 ///
 /// This title also said "Exactly" while the `expecting` string further down
 /// this same function had already been corrected to "at most", with a
