@@ -1554,7 +1554,7 @@ fn a_nonsense_read_timestamp_is_refused_before_the_unread_row_is_destroyed() {
 }
 
 #[test]
-fn every_reachable_timestamp_site_refuses_rather_than_saturating() {
+fn the_three_remaining_reachable_timestamp_sites_refuse_rather_than_saturating() {
     // The refusal was tested at ONE of its sites, so reverting the others
     // left the whole suite green. A review found that.
     //
@@ -1575,12 +1575,18 @@ fn every_reachable_timestamp_site_refuses_rather_than_saturating() {
     // untested paths. `cursor_bounds` is the same: a `Cursor` is only ever
     // handed back by a previous page.
     //
+    // AND THE NAME NOW SAYS THREE, because a test name is read on its own.
+    // It was `every_reachable_timestamp_site_…`, which claimed five; the
+    // comment conceding that the name overclaims "unless the two siblings
+    // are read with it" was asking a reader to carry a footnote into a
+    // `cargo test` listing, where only the name appears. Review finding on
+    // PR #86.
+    //
     // THE EARLIER ACCOUNTING SAID "three of the six", which is wrong twice:
     // `sql_timestamp` has eight call sites, not six, and five are reachable,
     // not three. It reached its number by omitting the two the sibling tests
-    // cover and counting `cursor_bounds` inside the total -- so the name of
-    // THIS test overclaims unless the two siblings are read with it. Counted
-    // rather than remembered. Review finding on PR #86.
+    // cover and counting `cursor_bounds` inside the total. Counted rather
+    // than remembered. Review finding on PR #86.
     let mut store = memory();
 
     // 1. `created_at`, through the outbound commit.
