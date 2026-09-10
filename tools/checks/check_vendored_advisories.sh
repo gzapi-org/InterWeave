@@ -96,10 +96,10 @@
 # also vendored wants a note saying so.
 #
 # This also asks about the version the vendored manifest DECLARES, not
-# about the bytes: a tree whose
-# version string does not match the release it was taken from redirects
-# the question to a different release. Tying the bytes to the tarball is
-# ADR-0051's named follow-up.
+# about the bytes: a tree whose version string does not match the
+# release it was taken from redirects the question to a different
+# release. Tying the bytes to the tarball is ADR-0051's named
+# follow-up.
 #
 # Exit codes:
 #   0  every vendored crate is free of RustSec advisories at its version
@@ -155,17 +155,17 @@
 # an environment red, not a finding. Re-run it. If it persists, check
 # crates.io and the advisory database before looking at the branch.
 #
-# The self-test's FOUR advisory ids across three crates are version-dated
-# fixtures, not invariants: `atty 0.2.14` (RUSTSEC-2021-0145 and
-# RUSTSEC-2024-0375 -- the second is grep-pinned on its own, in the
-# ignore-list case), `rand 0.9.0` (RUSTSEC-2026-0097) and `time 0.1.45`
-# (RUSTSEC-2020-0071). An earlier version said three while listing four,
-# which would send an operator to the three `expect_finding` calls and not
-# to the assertion that actually reds.
-# If RustSec withdraws or renumbers one, or cargo-deny changes which
-# classes it reports, the self-test goes red on a guard that is working.
-# Update the fixture; do not relax the assertion.
-# <<< help
+# The self-test's FOUR advisory ids across three crates are
+# version-dated fixtures, not invariants: `atty 0.2.14`
+# (RUSTSEC-2021-0145 and RUSTSEC-2024-0375 -- the second is
+# grep-pinned on its own, in the ignore-list case), `rand 0.9.0`
+# (RUSTSEC-2026-0097) and `time 0.1.45` (RUSTSEC-2020-0071). An
+# earlier version said three while listing four, which would send an
+# operator to the ids asserted by `expect_finding` and not to the grep
+# that actually reds. If RustSec withdraws or renumbers one, or
+# cargo-deny changes which classes it reports, the self-test goes red
+# on a guard that is working. Update the fixture; do not relax the
+# assertion. <<< help
 
 set -uo pipefail
 

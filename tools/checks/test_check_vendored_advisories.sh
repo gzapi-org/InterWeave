@@ -762,12 +762,13 @@ else
     skip_or_fail "the outpatch fixture cannot resolve"
 fi
 
-# A PATCH TABLE POINTING INTO A LANDING ZONE, AT A LISTED MEMBER, reaches
-# the exit-4 cause that
-# the `die` message names fourth: the path lands in the shipped set from the
-# patch reader, the selection then skips it because it is in a landing zone
-# AND a workspace member, so it is absent from the rows and the accounting
-# floor fires. That clause was itself an earlier finding and nothing held it.
+# A PATCH TABLE POINTING INTO A LANDING ZONE, AT A LISTED MEMBER,
+# reaches the exit-4 cause that the `die` message names fourth: the
+# path lands in the shipped set from the patch reader, the selection
+# then skips it because it is in a landing zone AND a workspace
+# member, so it is absent from the rows and the accounting floor
+# fires. That clause was itself an earlier finding and nothing held
+# it.
 #
 # BOTH HALVES ARE NEEDED and the first attempt had only one: a patch target
 # is NOT auto-promoted to a member, so without the explicit `members` entry
@@ -775,12 +776,12 @@ fi
 # rather than 2 on the floor. Measured, which is the only reason this
 # fixture reaches the clause it names.
 #
-# ASSERTED BY BEHAVIOUR, NOT BY WORDING, which is the discriminator a
-# reviewer set and it is worth writing down: grep a clause of a diagnostic
-# only where no fixture can reach its cause. Clause five qualifies -- an
-# unused out-of-root patch never enters the graph, so the selection's stderr
-# fires before the `die` and only the wording distinguishes them. This one
-# does not, so it gets a fixture instead of a fifth grep.
+# ASSERTED BY BEHAVIOUR **AND** BY WORDING. The rule this was first written
+# under -- grep a clause only where no fixture can reach its cause -- does
+# not separate these two clauses: a later reviewer measured that this fixture
+# and the out-of-root one are observationally identical, so the cause is held
+# by behaviour in both and the wording is held by nothing in either unless it
+# is grepped. Both now are.
 zonepatch="$SANDBOX/zonepatch"
 mkdir -p "$zonepatch/apps/probe/src" "$zonepatch/crates/atty/src"
 cat > "$zonepatch/Cargo.toml" <<'ZONEPATCH'
@@ -811,6 +812,19 @@ if (cd "$zonepatch" && cargo generate-lockfile >/dev/null 2>&1); then
         ok "  and the accounting floor is what refuses it"
     else
         bad "  expected the shipped-tree reconciliation to fire: $out"
+    fi
+    # AND THE CLAUSE, because the rule this fixture was written under was
+    # wrong. A reviewer measured that this fixture and the out-of-root one
+    # produce observationally IDENTICAL output -- same exit code, same
+    # selection stderr, same `die` -- so a fixture distinguishes neither from
+    # the other, and only the wording does. Deleting this clause left all 51
+    # assertions passing. Both clauses get a grep; the discriminator offered
+    # instead ("grep only where no fixture can reach the cause") does not
+    # separate them. Review finding on PR #85.
+    if printf '%s' "$out" | grep -q 'landing zone AND is a workspace member'; then
+        ok "  and the refusal still names this cause"
+    else
+        bad "  the exit-4 message must name the first-party-skip cause: $out"
     fi
 else
     skip_or_fail "the zonepatch fixture cannot resolve"
