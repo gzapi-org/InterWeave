@@ -2351,9 +2351,10 @@ mod tests {
         // against code in another. An earlier version of this sentence said
         // it "fails if a further path appears", which it does not. That half
         // is pinned where it can actually break:
-        // `only_two_methods_here_reach_learn_address`, beside
-        // `ConnectionManager` itself, fails if a third method there calls
-        // `learn_address` and names this table as the thing to update.
+        // `no_new_route_here_reaches_learn_address_unseen`, beside
+        // `ConnectionManager` itself, fails if a new method there reaches
+        // `learn_address` -- directly OR by delegating to one of the two that
+        // do -- and names this table as the thing to update.
         // Review finding on PR #86.
         //
         // THREE VERSIONS OF THIS SENTENCE WERE WRONG ABOUT THE CODE. It
@@ -2506,7 +2507,7 @@ mod tests {
             // was measured, and the count is now enforced rather than
             // asserted: exactly two methods on `ConnectionManager` reach it,
             // `record_failure` and `record_address_failure_unadmitted`, and
-            // `only_two_methods_here_reach_learn_address` in
+            // `no_new_route_here_reaches_learn_address_unseen` in
             // `interweave-transport-runtime` is what fails if a third
             // appears. No line numbers here -- they drift silently, and the
             // earlier ones cited call sites rather than declarations.
