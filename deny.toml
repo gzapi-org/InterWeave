@@ -56,11 +56,18 @@ version = 2
 # Everything not listed is DENIED. These are the terms compatible with
 # shipping an Apache-2.0 project, and each was observed in the current
 # graph rather than added speculatively.
-# Exactly the six the current graph resolves to, and no more. An
-# aspirational entry is worse than a missing one: it makes the next
-# dependency slip in without anyone deciding, which is the whole failure
-# an allow-list exists to prevent. Adding a seventh should cost a commit
-# and a sentence about why those terms are acceptable.
+# Exactly the terms the current graph resolves to, and no more -- nine of
+# them as this is written, each with its own note below saying when and for
+# what it was added. An aspirational entry is worse than a missing one: it
+# makes the next dependency slip in without anyone deciding, which is the
+# whole failure an allow-list exists to prevent. Adding one more should
+# cost a commit and a sentence about why those terms are acceptable.
+#
+# NO ORDINAL HERE, deliberately. This said "the six" and "a seventh" while
+# the list held nine: the wording was left behind by the very additions
+# whose own notes record them as the sixth and then three more, so the
+# paragraph disagreed with the twenty lines under it. A count in prose
+# beside the list it counts is a pair that goes stale silently.
 allow = [
     "Apache-2.0",
     "MIT",
