@@ -860,7 +860,8 @@ mod tests {
         // either: a previous version did, and it went stale against
         // another comment in this same file.
         //
-        // `ConnectionManager::learn_address` stores whatever arrives,
+        // `ConnectionManager::learn_address` stores whatever arrives
+        // (`runtime::learn_route` is what canonicalizes before it),
         // verbatim, so a widened guard here would refuse a good address
         // as "a relay circuit", and `settle_undialable` routes that to
         // `record_permanent_failure`, which FORGETS it. A live route

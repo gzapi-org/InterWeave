@@ -232,9 +232,14 @@ pub(crate) fn canonical_for_peer(address: &Multiaddr, peer: &PeerId) -> String {
 
 /// Remember a route, under the one spelling everything else keys by.
 ///
-/// THE ONLY PLACE THIS CRATE CALLS `learn_address` outside its own tests,
+/// THE ONLY PLACE THIS MODULE CALLS `learn_address` outside its own tests,
 /// and `no_production_path_learns_an_address_without_canonicalizing` is
-/// what keeps that true. The first version of PR #86's fix canonicalized
+/// what keeps that true. THE MODULE, not the crate: that guard reads the
+/// files `runtime/mod.rs` declares and nothing else, so a call appearing in
+/// `outbound_gate.rs` or `gated_swarm.rs` would pass unseen. It is true of
+/// the crate today -- nothing outside this module calls it -- but the test
+/// is not what holds that, and an earlier version of this sentence said it
+/// was. Review finding on PR #86. The first version of PR #86's fix canonicalized
 /// at `attempt_dial` and left two learn sites raw, which is how a
 /// half-applied key rule got shipped; one wrapper means the rule cannot be
 /// applied to some callers and not others.
@@ -1987,24 +1992,39 @@ mod tests {
         );
     }
     #[test]
-    fn a_bare_peer_address_is_settled_as_itself_rather_than_as_nothing() {
-        // THE ONE INPUT THE THREE KEY IMPLEMENTATIONS DISAGREED ON, and
-        // the commit that unified them called the change harmless without
-        // testing it. A review asked for one or the other.
-        //
+    fn a_bare_peer_address_is_forgotten_rather_than_held_forever() {
+        // THE ONE INPUT THE THREE KEY IMPLEMENTATIONS DISAGREED ON.
         // `strip_own_suffix` yields the empty string for an address that is
         // nothing but the dialled peer's own suffix; `canonical_for_peer`
-        // yields the original. The settlement recorders early-return on an
-        // empty address, so what used to be recorded as nothing is now
-        // recorded as the literal that was attempted. Kademlia can be
-        // handed such a string by a remote peer in a query response, so
-        // this is reachable rather than theoretical.
+        // yields the original. `record_permanent_failure` then removes
+        // `ticket.address()` from the book -- so with the empty string it
+        // removed nothing and the entry was held forever, which is the
+        // QUIC-on-TCP defect this branch's own prose describes.
         //
-        // It is NOT harmless-as-in-identical: one bounded book slot is now
-        // spent. It is harmless-as-in-bounded, and that is what this pins.
+        // AN EARLIER VERSION OF THIS TEST PASSED IN BOTH WORLDS, because it
+        // settled against an empty book: `known.remove` found nothing to
+        // miss. A reviewer traced that. The route has to be IN the book
+        // first, which is what makes the removal observable.
+        //
+        // THE MUTATION IT DIES ON, stated because the obvious one is not it:
+        // making `canonical_for_peer` return the empty strip keeps the book
+        // and the ticket CONSISTENTLY empty, so the removal still succeeds
+        // and this test passes. What it catches is the two keying
+        // DIFFERENTLY -- reverting `settle_failed_dial` to the raw
+        // `strip_own_suffix` while the book keeps the canonical form, which
+        // is the divergence `canonical_for_peer` exists to prevent.
         let mut m = admitting_manager();
         let peer = ident(RELAY);
-        let bare: Multiaddr = format!("/p2p/{RELAY}").parse().expect("valid");
+        let bare_text = format!("/p2p/{RELAY}");
+        let bare: Multiaddr = bare_text.parse().expect("valid");
+
+        // `canonical_dial_address` returns this shape unchanged, pinned by
+        // `an_address_that_is_only_the_peers_own_suffix_is_left_alone`.
+        assert!(
+            learn_route(&mut m, &peer, &bare_text, 0),
+            "the route is in the book"
+        );
+        assert_eq!(m.known_addresses(&peer), 1, "precondition: one entry");
 
         let ticket = placeholder_ticket(&m);
         settle_failed_dial(
@@ -2017,18 +2037,17 @@ mod tests {
             0,
         );
 
-        // A structural failure forgets the route rather than learning it,
-        // so the book is untouched and no slot is spent after all.
+        // THE ASSERTION. A structurally undialable route is forgotten, so
+        // it stops spending one of the eight per-peer slots. Under the old
+        // empty-string key the removal missed and this stayed at 1.
         assert_eq!(
             m.known_addresses(&peer),
             0,
-            "a structurally undialable address is forgotten, not remembered"
+            "a structurally undialable address is forgotten, not held"
         );
-
-        // And the address is not dialable, so nothing will retry it.
         assert!(
             m.dial_candidates(&peer, 0).is_empty(),
-            "nothing offers it as a candidate"
+            "and nothing offers it as a candidate"
         );
     }
 
@@ -2123,6 +2142,29 @@ mod tests {
         // left `kademlia_driver.rs` and `endpoints.rs` unscanned -- and the
         // driver is the most likely future home for an address-learning
         // call. A review named it.
+        // THE TABLE BELOW IS CHECKED AGAINST THE MODULE, because a
+        // hardcoded list is how this guard lost two files the first time.
+        // Stage 11's next step adds a connectivity adapter to this module,
+        // and an unscanned file contributes zero matches to an expectation
+        // of zero -- the silent pass, one step later. Review finding on
+        // PR #86.
+        let declared: Vec<String> = include_str!("mod.rs")
+            .lines()
+            .filter_map(|line| {
+                let rest = line
+                    .strip_prefix("mod ")
+                    .or_else(|| line.strip_prefix("pub mod "))
+                    .or_else(|| line.strip_prefix("pub(crate) mod "))?;
+                rest.strip_suffix(';').map(|m| format!("{m}.rs"))
+            })
+            .collect();
+        assert!(
+            !declared.is_empty(),
+            "the module declarations could not be read out of mod.rs, so this \
+             guard cannot tell what it is supposed to cover"
+        );
+
+        let mut visited: Vec<&str> = Vec::new();
         for (name, source) in [
             ("broadcast.rs", include_str!("broadcast.rs")),
             ("commands.rs", include_str!("commands.rs")),
@@ -2176,7 +2218,24 @@ mod tests {
                      and this guard cannot tell where they end -- so it refuses. Use an \
                      inline `mod tests {{ ... }}`, or extend this guard to follow the file."
                 );
-                match after.split_once("\n}\n") {
+                // THE LEADING NEWLINE IS KEPT. `split_once` consumes the
+                // separator, so `rest` used to begin at the character
+                // AFTER `}\n` -- and the loop then looks for
+                // `"\n#[cfg(test)]\nmod "` WITH a leading newline, so a
+                // second test module sitting immediately after the first
+                // with no blank line between them was never cut. `direct.rs`
+                // is exactly that shape, so its `waiter_tests` module was
+                // being counted as production: the comment claiming every
+                // module is cut was false for one of the ten files, and a
+                // test in there calling the manager directly -- which this
+                // guard explicitly permits -- would have failed the build
+                // with a message about production key domains. Measured by
+                // a reviewer, not inferred. Review finding on PR #86.
+                match after.split_once("\n}") {
+                    // `tail` has lost the newline that `"\n}\n"` carried,
+                    // so the next search is given one back. Done by
+                    // splitting on `"\n}"` instead of `"\n}\n"` -- the
+                    // surviving `\n` is the separator the next match needs.
                     Some((_, tail)) => rest = tail,
                     None => {
                         assert!(
@@ -2200,18 +2259,35 @@ mod tests {
                 let after = &source[i + "\n#[cfg(test)]".len()..];
                 assert!(
                     after.starts_with("\nmod "),
-                    "{name}: a column-zero `#[cfg(test)]` on something other than a `mod` \
-                     -- the guard cannot bound it, so it refuses rather than reading past \
-                     it. Put test-only items inside the test module."
+                    "{name}: a column-zero `#[cfg(test)]` that is not immediately \
+                     followed by `mod` -- the guard cannot tell where the test code \
+                     ends, so it refuses rather than reading past it. If this is a \
+                     test-only `use`, `const` or `fn`, move it inside the test module. \
+                     If it is an attribute between `#[cfg(test)]` and `mod`, put the \
+                     attribute first. If it is `#[cfg(all(test, ...))]`, this guard \
+                     does not recognise it and needs extending."
                 );
             }
             let calls = production.matches("learn_address(").count();
             let expected = usize::from(name == "dialing.rs");
             assert_eq!(
                 calls, expected,
-                "{name} reaches `learn_address` {calls} time(s); only \
-                 `learn_route` in dialing.rs may, or a route is remembered \
-                 under a spelling the quarantine will not match"
+                "{name} reaches `learn_address` {calls} time(s), expected \
+                 {expected}. Call `learn_route` instead: it canonicalizes the \
+                 address so the book, the quarantine and the ticket agree. If \
+                 this is a TEST call, the guard failed to cut its module -- see \
+                 the shapes it accepts above. If it is a doc comment, write the \
+                 name without the parenthesis."
+            );
+            visited.push(name);
+        }
+
+        for file in &declared {
+            assert!(
+                visited.contains(&file.as_str()),
+                "mod.rs declares {file} and this guard does not scan it -- add it \
+                 to the table above, or a production `learn_address` call there \
+                 passes unseen"
             );
         }
     }
