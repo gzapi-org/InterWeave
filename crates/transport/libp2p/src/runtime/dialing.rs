@@ -2344,7 +2344,17 @@ mod tests {
         // through ONE wrapper for the DIRECT name, plus the two manager
         // methods that reach it internally -- `record_failure` and
         // `record_address_failure_unadmitted` -- and this fails if a
-        // further path appears or an existing one moves.
+        // further CALL SITE of one of those three appears in this module.
+        //
+        // IT CANNOT SEE A NEW MANAGER METHOD that reaches `learn_address`,
+        // because the route table below is hand-maintained in this crate
+        // against code in another. An earlier version of this sentence said
+        // it "fails if a further path appears", which it does not. That half
+        // is pinned where it can actually break:
+        // `only_two_methods_here_reach_learn_address`, beside
+        // `ConnectionManager` itself, fails if a third method there calls
+        // `learn_address` and names this table as the thing to update.
+        // Review finding on PR #86.
         //
         // THREE VERSIONS OF THIS SENTENCE WERE WRONG ABOUT THE CODE. It
         // said "ONE wrapper" and stopped, which missed both; then it named
@@ -2493,9 +2503,13 @@ mod tests {
             // EVERY ROUTE THAT REACHES `learn_address`, ASSERTED ONE BY ONE.
             //
             // WHICH routes those are was wrong in both directions until it
-            // was measured. Exactly two methods on `ConnectionManager`
-            // reach it: `record_failure` (connection_manager.rs:1046) and
-            // `record_address_failure_unadmitted` (:1094).
+            // was measured, and the count is now enforced rather than
+            // asserted: exactly two methods on `ConnectionManager` reach it,
+            // `record_failure` and `record_address_failure_unadmitted`, and
+            // `only_two_methods_here_reach_learn_address` in
+            // `interweave-transport-runtime` is what fails if a third
+            // appears. No line numbers here -- they drift silently, and the
+            // earlier ones cited call sites rather than declarations.
             // `record_permanent_address_failure_unadmitted` reaches NOTHING
             // -- its whole body removes the route and publishes -- so
             // counting it was spurious, while `record_failure` is real and

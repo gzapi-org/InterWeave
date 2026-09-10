@@ -3117,4 +3117,41 @@ mod tests {
         m.record_permanent_address_failure_unadmitted(&p, "");
         assert_eq!(m.known_addresses(&p), 1, "an empty address is a no-op");
     }
+    #[test]
+    fn only_two_methods_here_reach_learn_address() {
+        // THE PREMISE `interweave-transport-libp2p`'s CANONICALIZATION GUARD
+        // RESTS ON, pinned in the crate that can actually break it.
+        //
+        // That guard counts production calls to `learn_address` and to the
+        // two methods below, because `learn_route` canonicalizes the address
+        // and a path that skips it splits the `(peer, address)` key between
+        // the address book and the quarantine map. Its route table is
+        // hand-maintained, in another crate, against a comment -- so a NEW
+        // method added HERE that calls `learn_address` is invisible to it,
+        // and the guard would go on passing while a caller wrote a raw
+        // address into the book. Three rounds of review found that table
+        // wrong in one direction or another; this is what makes the premise
+        // enforced rather than asserted. Review finding on PR #86.
+        //
+        // Reads this file's own source, so it cannot see a call built by a
+        // macro. It cuts at a file-level `#[cfg(test)] mod`, which leaves the
+        // two `#[cfg(test)]` non-module items above counted as production --
+        // they call nothing, and over-counting fails loudly.
+        let source = include_str!("connection_manager.rs");
+        let production = source
+            .split_once("\n#[cfg(test)]\nmod ")
+            .map_or(source, |(before, _)| before);
+        let calls = production.matches("learn_address(").count();
+        assert_eq!(
+            calls, 3,
+            "this file reaches `learn_address` {calls} time(s), expected 3: the \
+             declaration, `record_failure`, and \
+             `record_address_failure_unadmitted`. A new method here that calls \
+             it is INVISIBLE to \
+             `no_production_path_learns_an_address_without_canonicalizing` in \
+             interweave-transport-libp2p -- add the new method to that test's \
+             route table, and raise the count here, or the address book and the \
+             quarantine map will key one route two ways."
+        );
+    }
 }

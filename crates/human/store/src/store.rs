@@ -664,16 +664,24 @@ impl HumanStore {
     /// Returns [`StoreError::Degraded`], [`StoreError::KeepRefused`] if
     /// the state machine refuses, [`StoreError::TimestampOutOfRange`] if
     /// `at_ms` cannot be represented, [`StoreError::IdentityConflict`] if
-    /// the upsert matches no row because this peer, ON THIS ENDPOINT,
-    /// already used that `app_message_id` for different content -- the
-    /// conflict target is three columns, so the same peer reusing the id on
-    /// a different endpoint is two rows and no conflict. That second part is
-    /// structural rather than tested through THIS method: the only test of
-    /// it goes through `commit_unread_inbound`. The collision itself is the
-    /// outcome of this statement's `WHERE` clause, and was absent from this
-    /// block before --
-    /// or a storage error. The two timestamps carried by `held` were
-    /// refused on the way in, so they cannot fail here.
+    /// the upsert matches no row because this peer, on this endpoint,
+    /// already used that `app_message_id` for different content, or a
+    /// storage error.
+    ///
+    /// The two timestamps carried by `held` were refused on the way in, so
+    /// they cannot fail here.
+    ///
+    /// The conflict target is three columns, so the same peer reusing the id
+    /// on a DIFFERENT endpoint is two rows and no conflict -- structural
+    /// rather than tested through this method, since the only test of it
+    /// goes through `commit_unread_inbound`. The collision itself is the
+    /// outcome of this statement's `WHERE` clause.
+    ///
+    /// An earlier version of this block put all of that inside an em-dash
+    /// pair, which left "or a storage error" attached to the wrong clause
+    /// five lines from the list it belongs to -- the same displaced-structure
+    /// defect as the sibling block, reintroduced here by the commit that
+    /// fixed it there. Review findings on PR #86.
     pub fn keep(&mut self, held: &ReadEphemeral, at_ms: u64) -> Result<RowId, StoreError> {
         self.reject_if_degraded()?;
 

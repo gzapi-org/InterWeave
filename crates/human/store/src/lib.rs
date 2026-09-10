@@ -146,9 +146,10 @@ pub enum StoreError {
     /// part of the identity, so it cannot differ while the identity
     /// repeats: the same id on a second endpoint is a second row, which
     /// `commit_unread_inbound` pins in
-    /// `two_endpoints_on_one_peer_may_use_the_same_application_id` (that
-    /// test covers the commit path, not `keep`). An
-    /// earlier version of this paragraph listed endpoint as a collision,
+    /// `two_endpoints_on_one_peer_may_use_the_same_application_id`; that
+    /// test covers the commit path, not `keep`.
+    ///
+    /// An earlier version of this paragraph listed endpoint as a collision,
     /// three lines under the tuple that contradicts it, and the
     /// correction left the sentence above without its subject. Review
     /// findings on PR #86.
