@@ -204,9 +204,45 @@ expect_unexplained() {
 build_vendored unused atty 0.2.14 inline '# nothing depends on it'
 expect_unexplained unused "a patch nothing uses is not 'nothing is vendored'"
 
-build_vendored amember atty 0.2.14 inline '' '[workspace]
+# A VENDORED CRATE LISTED AS A WORKSPACE MEMBER is CHECKED, not merely
+# refused: CLAUDE.md §3 instructs adding vendored paths to members, so
+# following the repository's own rule must not turn this guard off. An
+# earlier selection keyed on "not a workspace member" and skipped it
+# outright. Review finding on PR #85.
+build_vendored amember atty 0.2.14 inline '[dependencies]
+atty = "=0.2.14"' '[workspace]
 members = ["third_party/atty"]'
-expect_unexplained amember "a vendored crate listed as a workspace member is not skipped"
+expect_finding amember "a vendored crate listed as a workspace member is still checked" RUSTSEC-2021-0145
+
+# EVERY TREE ACCOUNTED FOR BY PATH, not by count. A resolved path crate
+# elsewhere in the workspace must not stand in for a vendored tree the
+# graph never named -- with a count comparison the floor passed and the
+# shipped crate went unchecked. Review finding on PR #85.
+offset="$SANDBOX/offset"
+mkdir -p "$offset/src" "$offset/third_party/atty/src" "$offset/elsewhere/helper/src"
+cat > "$offset/Cargo.toml" <<'OFFSET'
+[package]
+name = "offset-probe"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+helper = { path = "elsewhere/helper" }
+
+[patch.crates-io]
+atty = { path = "third_party/atty" }
+OFFSET
+echo 'fn main() {}' > "$offset/src/main.rs"
+printf '[package]\nname = "atty"\nversion = "0.2.14"\nedition = "2018"\n' \
+    > "$offset/third_party/atty/Cargo.toml"
+echo '' > "$offset/third_party/atty/src/lib.rs"
+printf '[package]\nname = "helper"\nversion = "0.0.0"\nedition = "2021"\n' \
+    > "$offset/elsewhere/helper/Cargo.toml"
+echo '' > "$offset/elsewhere/helper/src/lib.rs"
+cp "$ROOT/deny.toml" "$offset/deny.toml"
+(cd "$offset" && cargo generate-lockfile >/dev/null 2>&1) \
+    || { echo "cannot resolve the offset fixture" >&2; exit 1; }
+expect_unexplained offset "a path crate elsewhere cannot stand in for a vendored tree"
 
 # A CRATE BEHIND AN OPTIONAL FEATURE is resolved, because `--all-features`
 # is what `deny.toml` itself uses, and CLAUDE.md §1 records that the

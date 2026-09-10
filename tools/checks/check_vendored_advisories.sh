@@ -8,12 +8,13 @@
 #   tools/checks/check_vendored_advisories.sh
 #   tools/checks/check_vendored_advisories.sh --root <dir>
 #
-# Every crate this workspace builds from a tree inside the repository
-# rather than from the registry -- a `[patch.crates-io]` path entry, or a
-# plain path dependency that is not a workspace member -- is checked
-# against the RustSec database at the version it was vendored from.
-# Advisories on that crate's own dependencies are NOT this guard's; they
-# belong to `check_dependencies.sh`, which judges the committed lockfile.
+# Every vendored tree -- a directory under `third_party/` with its own
+# manifest -- is checked against the RustSec database at the version it
+# declares. The trees ON DISK are the question; the package graph is only
+# how their versions are learned, and a tree the graph does not account
+# for is exit 2 rather than a pass. Advisories on a vendored crate's own
+# dependencies are NOT this guard's; they belong to
+# `check_dependencies.sh`, which judges the committed lockfile.
 #
 # WHY A BESPOKE CHECK RATHER THAN THE DEPENDENCY ONE. A path-patched
 # crate has no `source` and no `checksum` in `Cargo.lock`, and
@@ -30,17 +31,25 @@
 # for the question it asks, the question just stops covering us, so the
 # gap gets its own guard rather than a sentence in a document.
 #
-# HOW. The vendored set comes from `cargo metadata`, not from reading
-# Cargo.toml: a patched crate is exactly a package cargo resolved with no
-# `source` that is not a workspace member. An earlier version parsed the
+# HOW. The vendored trees are enumerated from DISK -- `third_party/*/`
+# with a manifest -- and `cargo metadata` supplies each one's version, so
+# a rename or a workspace inheritance is cargo's problem rather than this
+# script's. Every tree must appear in the graph individually, compared by
+# path: a tree the graph does not account for is exit 2.
+#
+# Both halves were learned the hard way. An early version parsed the
 # `[patch.crates-io]` table with awk and was blind to the equally valid
 # `[patch.crates-io.<crate>]` sub-table form -- it found nothing, said so,
-# and exited 0, which is a false pass in a guard whose whole job is to be
-# the only warning there is. Asking cargo removes that family of bug
-# whole: sub-tables, comments, `package = ` renames, quoted keys and CRLF
-# are all cargo's problem and it has already solved them.
+# and exited 0. Asking cargo removed that family whole. But scoping the
+# QUESTION to what cargo resolved was wrong in both directions: it pulled
+# in ordinary local path crates that were never published, where asking
+# the registry fails; and it missed a vendored tree cargo had not
+# resolved -- behind a disabled feature, listed as a workspace member,
+# reached through a symlink, or patched but unused -- each of which
+# printed a confident "nothing is vendored". Comparing COUNTS rather than
+# paths then let a path crate elsewhere stand in for a missing tree.
 #
-# For each such crate a throwaway workspace is generated in a temporary
+# For each tree a throwaway workspace is generated in a temporary
 # directory depending on it at that exact version FROM THE REGISTRY, and
 # `cargo deny check advisories` runs there under this repository's own
 # `deny.toml`, so any documented ignore still applies. Nothing in the
@@ -98,10 +107,6 @@ cargo deny --version >/dev/null 2>&1 \
 [ -f deny.toml ] || die "no deny.toml at $ROOT"
 command -v python3 >/dev/null 2>&1 || die "python3 is not installed" 2
 
-# `--locked` WITH NO FALLBACK. Re-resolving would rewrite the
-# repository's `Cargo.lock`, which this guard promises not to do -- and a
-# lockfile that does not satisfy the manifest is a real problem, not
-# something to route around. Review finding on PR #85.
 # `--all-features`, for the reason `deny.toml` gives for its own
 # `all-features = true`: a dependency that appears only under a
 # non-default feature is still governed. Without it, vendoring a crate
@@ -112,59 +117,60 @@ command -v python3 >/dev/null 2>&1 || die "python3 is not installed" 2
 metadata="$(cargo metadata --format-version 1 --locked --all-features 2>/dev/null)" \
     || die "cargo metadata --locked failed at $ROOT; is Cargo.lock current?" 2
 
-# A package cargo resolved with no `source` and which is not a workspace
-# member is a vendored crate: `[patch.crates-io]` with a path, or a plain
-# path dependency outside the workspace. Both are trees this repository
-# ships and neither is covered by the advisory check.
-# CAPTURED FIRST, THEN SPLIT. `mapfile -t x < <(cmd)` exits 0 whatever
-# `cmd` did, so `mapfile ... || die` is dead code: a python that failed
-# left an empty array and this guard announced that nothing is vendored.
-# That is the same false pass the awk parser gave, one layer down, in the
-# guard whose exit table refuses exactly it. Review finding on PR #85.
+# THE TREES ON DISK ARE THE QUESTION, and the graph is only how their
+# versions are learned. Scoping it the other way round -- every package
+# cargo resolved without a `source` -- was both too wide and too narrow:
+# it pulled in ordinary local path crates that were never published, and
+# asking the registry about those fails; and it missed a vendored tree
+# cargo did not resolve, which is most of the ways this guard has
+# reported success it had not earned.
+mapfile -t roots < <(
+    for manifest in third_party/*/Cargo.toml; do
+        [ -f "$manifest" ] && printf '%s\n' "$(cd "$(dirname "$manifest")" && pwd -P)"
+    done
+)
+
+if [ "${#roots[@]}" -eq 0 ]; then
+    echo "check_vendored_advisories: OK — nothing is vendored."
+    exit 0
+fi
+
+# EVERY TREE ACCOUNTED FOR INDIVIDUALLY, by path. Comparing counts let a
+# resolved path crate elsewhere in the workspace stand in for a vendored
+# tree the graph never named, so the floor passed while the shipped crate
+# went unchecked. Review finding on PR #85.
 selected="$(printf '%s' "$metadata" | python3 -c '
 import json, os, sys
-meta = json.load(sys.stdin)
-members = set(meta.get("workspace_members", []))
-root = os.path.realpath(meta.get("workspace_root", "."))
-for pkg in meta.get("packages", []):
-    if pkg.get("source") is not None or pkg["id"] in members:
+
+roots = {os.path.realpath(r) for r in sys.argv[1:]}
+seen = set()
+rows = []
+for pkg in json.load(sys.stdin).get("packages", []):
+    directory = os.path.realpath(os.path.dirname(pkg["manifest_path"]))
+    if directory not in roots:
         continue
-    manifest = os.path.realpath(pkg["manifest_path"])
-    if not manifest.startswith(root + os.sep):
-        continue
-    print("\t".join((pkg["name"], pkg["version"], os.path.dirname(manifest))))
-')" || die "cannot read the package graph" 2
+    seen.add(directory)
+    rows.append("\t".join((pkg["name"], pkg["version"], directory)))
+missing = sorted(roots - seen)
+if missing:
+    sys.stderr.write("".join("unaccounted: " + m + "\n" for m in missing))
+    sys.exit(4)
+sys.stdout.write("".join(r + "\n" for r in rows))
+' "${roots[@]}")"
+case $? in
+    0) ;;
+    4)
+        die "a vendored tree is not in the package graph — a disabled feature, a symlink, or a patch nothing uses would each do this, and none of them is a reason to report success" 2
+        ;;
+    *) die "cannot read the package graph" 2 ;;
+esac
 
 patched=()
 while IFS= read -r line; do
     [ -n "$line" ] && patched+=("$line")
 done <<< "$selected"
 
-# THE FLOOR. "The graph named nothing" and "nothing is vendored" are
-# different claims, and conflating them is how this guard reported
-# success twice before. A directory under a vendored root with its own
-# manifest is a tree this repository ships, so if one exists and the
-# graph did not account for it, something is wrong with the question --
-# the crate is behind a disabled feature, or listed as a workspace
-# member, or reached through a symlink, or patched but unused. Every one
-# of those produced a confident "nothing is vendored" and exit 0.
-# Review findings on PR #85.
-shipped=0
-for manifest in third_party/*/Cargo.toml; do
-    [ -f "$manifest" ] && shipped=$((shipped + 1))
-done
-
-if [ "${#patched[@]}" -eq 0 ]; then
-    if [ "$shipped" -gt 0 ]; then
-        die "third_party/ holds $shipped vendored crate(s) but the package graph names none -- a disabled feature, a workspace member, a symlink, or an unused patch would each do this, and none of them is a reason to report success" 2
-    fi
-    echo "check_vendored_advisories: OK — nothing is vendored."
-    exit 0
-fi
-
-if [ "${#patched[@]}" -lt "$shipped" ]; then
-    die "third_party/ holds $shipped vendored crate(s) and the package graph names only ${#patched[@]}" 2
-fi
+[ "${#patched[@]}" -gt 0 ] || die "no vendored package was resolved" 2
 
 WORK="$(mktemp -d)" || die "cannot create a temporary directory"
 trap 'rm -rf "$WORK"' EXIT
