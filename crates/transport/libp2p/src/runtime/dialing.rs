@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use libp2p::core::transport::{ListenerId, TransportError};
 use libp2p::swarm::DialError;
 use libp2p::swarm::SwarmEvent as Libp2pSwarmEvent;
-use libp2p::{Multiaddr, identify};
+use libp2p::{Multiaddr, PeerId, identify};
 use tokio::sync::oneshot;
 
 use interweave_transport_api::TransportIdentity;
@@ -47,7 +47,13 @@ pub(super) fn attempt_dial(
 ) -> Result<(), DialRefusal> {
     let request = DialRequest {
         peer: Some(peer.clone()),
-        address: address.to_owned(),
+        // CANONICAL BEFORE ADMISSION, so one physical route cannot hold
+        // two quarantine entries. A caller reaching the same socket as
+        // `/ip4/A/tcp/P` and as `/ip4/A/tcp/P/p2p/<dest>` used to earn a
+        // quarantine on one spelling and keep dialling the other, and
+        // both spent a slot in a map whose bound is the point. See
+        // [`canonical_dial_address`] for what is and is not stripped.
+        address: canonical_dial_address(peer, address),
         origin,
     };
     // ADMITTED BEFORE A SOCKET IS OPENED. A quarantined address costs
@@ -99,6 +105,63 @@ pub(super) fn attempt_dial(
             Err(DialRefusal::Backend(e.to_string()))
         }
     }
+}
+
+/// The spelling a dial is admitted, scored and quarantined under.
+///
+/// Strips a trailing `/p2p/<peer>` when it names the peer being dialled,
+/// and nothing else. The suffix is redundant there -- the dial already
+/// names the peer through its own argument, which is what the gate
+/// classifies on -- so two spellings of one route collapse to one key.
+///
+/// THREE THINGS ARE DELIBERATELY LEFT ALONE, and each is a different
+/// reason:
+///
+/// - **A `/p2p/<relay>` BEFORE a `/p2p-circuit`.** That component is
+///   part of the route, not a claim about the destination: it says which
+///   relay carries the circuit, and a different relay is a different
+///   path that can fail and be quarantined on its own. Stripping it
+///   would collapse every relay into one key, so a single bad relay
+///   would suppress the destination through all of them.
+///   [`strip_own_suffix`] cannot reach it -- it pops only TRAILING
+///   `P2p` components, and a circuit's relay sits behind the
+///   `/p2p-circuit` marker -- but the property is the reason this
+///   function is allowed to call it, so it is tested rather than
+///   inferred from the helper's shape.
+/// - **A trailing claim naming someone ELSE.** The address is then
+///   contradicting the dial, and stripping it would launder the
+///   contradiction into the bare route: the policy would score and
+///   quarantine a string the caller never actually asked for. The
+///   foreign claim stays in the key, so whatever is recorded is
+///   recorded against the literal that lied. This is
+///   [`strip_own_suffix`]'s own rule and the reason the peerless
+///   [`strip_peer_suffix`] is not used here.
+/// - **Anything that does not parse.** A non-multiaddr address and a
+///   non-`PeerId` peer are returned unchanged so they reach
+///   [`AdmittedDial::from_ticket`] intact and settle through
+///   [`settle_undialable`] exactly as before. Canonicalizing is not the
+///   place to change how a malformed value is classified.
+///
+/// An address that is nothing BUT the peer's own suffix is also returned
+/// unchanged, because stripping it yields the empty multiaddr -- which
+/// no longer parses, and would convert an undialable address into a
+/// different failure than the one it had.
+///
+/// Review finding, recorded as a deferred follow-up on PR #74 because
+/// this is a keying change to a security boundary: it decides what the
+/// quarantine map and the address book agree about.
+fn canonical_dial_address(peer: &TransportIdentity, address: &str) -> String {
+    let Ok(parsed) = address.parse::<Multiaddr>() else {
+        return address.to_owned();
+    };
+    let Ok(expected) = peer.as_str().parse::<PeerId>() else {
+        return address.to_owned();
+    };
+    let stripped = strip_own_suffix(&parsed, &expected);
+    if stripped.is_empty() {
+        return address.to_owned();
+    }
+    stripped
 }
 
 /// Settle an admission that could not be turned into a dial, and say why.
@@ -706,8 +769,8 @@ pub(super) type ActiveListeners = HashMap<ListenerId, Vec<Multiaddr>>;
 #[cfg(test)]
 mod tests {
     use super::{
-        connections_to_close, is_permanent_dial_error, settle_established_outbound,
-        settle_failed_dial, settle_undialable,
+        canonical_dial_address, connections_to_close, is_permanent_dial_error,
+        settle_established_outbound, settle_failed_dial, settle_undialable,
     };
     use crate::gated_swarm::AdmittedDial;
     use interweave_transport_api::TransportIdentity;
@@ -1601,6 +1664,144 @@ mod tests {
             m.dial_candidates(&peer, 1)
                 .contains(&"/ip4/192.0.2.2/tcp/2".to_owned()),
             "and it is the network-refused one, not the structural one"
+        );
+    }
+    /// A second trusted peer, so a foreign trailing claim has a name.
+    const OTHER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTA";
+
+    #[test]
+    fn the_peers_own_trailing_suffix_is_stripped_from_the_dial_key() {
+        // F10's failure mode on the command path. One socket reached as
+        // the bare route and as the suffixed route earned a quarantine on
+        // one spelling and went on being dialled under the other, and
+        // both spent a slot in `max_addresses`.
+        assert_eq!(
+            canonical_dial_address(&ident(RELAY), &format!("/ip4/192.0.2.1/tcp/1/p2p/{RELAY}")),
+            "/ip4/192.0.2.1/tcp/1",
+            "the suffix names the peer the dial already names"
+        );
+        assert_eq!(
+            canonical_dial_address(&ident(RELAY), "/ip4/192.0.2.1/tcp/1"),
+            "/ip4/192.0.2.1/tcp/1",
+            "and the bare form is already canonical"
+        );
+    }
+
+    #[test]
+    fn a_circuits_relay_is_part_of_the_route_and_is_never_stripped() {
+        // THE ONE THAT MUST NOT REGRESS. `/p2p/<relay>` before a
+        // `/p2p-circuit` says which relay carries the circuit. Collapsing
+        // it would key every relay to one entry, so one bad relay would
+        // quarantine the destination through all of them.
+        let via_relay = format!("/ip4/192.0.2.1/tcp/4001/p2p/{RELAY}/p2p-circuit/p2p/{OTHER}");
+        assert_eq!(
+            canonical_dial_address(&ident(OTHER), &via_relay),
+            format!("/ip4/192.0.2.1/tcp/4001/p2p/{RELAY}/p2p-circuit"),
+            "the destination's own trailing claim goes; the relay stays"
+        );
+
+        // And the same destination through a DIFFERENT relay keys
+        // differently, which is the property the paragraph above is about.
+        let via_other_relay =
+            format!("/ip4/192.0.2.9/tcp/4001/p2p/{OTHER}/p2p-circuit/p2p/{RELAY}");
+        assert_ne!(
+            canonical_dial_address(&ident(RELAY), &via_other_relay),
+            canonical_dial_address(&ident(OTHER), &via_relay),
+            "two relays to two destinations are two routes"
+        );
+    }
+
+    #[test]
+    fn a_trailing_claim_naming_someone_else_stays_in_the_key() {
+        // Stripping it would launder the contradiction into the bare
+        // route: the policy would then score and quarantine a string the
+        // caller never asked for.
+        let foreign = format!("/ip4/192.0.2.1/tcp/1/p2p/{OTHER}");
+        assert_eq!(
+            canonical_dial_address(&ident(RELAY), &foreign),
+            foreign,
+            "a foreign claim is the address contradicting the dial, not a suffix"
+        );
+    }
+
+    #[test]
+    fn an_unparseable_address_reaches_the_undialable_path_unchanged() {
+        // Canonicalizing is not where a malformed value's classification
+        // changes. `from_ticket` must still see the original so
+        // `settle_undialable` reports what the caller actually supplied.
+        assert_eq!(
+            canonical_dial_address(&ident(RELAY), "not-a-multiaddr"),
+            "not-a-multiaddr"
+        );
+        assert_eq!(
+            canonical_dial_address(&ident(RELAY), ""),
+            "",
+            "and the placeholder the outbound gate mints is untouched"
+        );
+    }
+
+    #[test]
+    fn an_address_that_is_only_the_peers_own_suffix_is_left_alone() {
+        // Stripping yields the empty multiaddr, which does not parse --
+        // so the address would arrive at `from_ticket` as a DIFFERENT
+        // failure than the one it has. It is undialable either way; this
+        // keeps which undialable it is.
+        let bare = format!("/p2p/{RELAY}");
+        assert_eq!(canonical_dial_address(&ident(RELAY), &bare), bare);
+    }
+
+    #[test]
+    fn one_route_two_spellings_is_one_quarantine_entry() {
+        // The end of the chain, through the real gate. A dial earns a
+        // quarantine on the route, and the SAME route spelled the other
+        // way is then refused -- which is what `attempt_dial` did not do
+        // before, because `admit` keys on `(peer, request.address)`
+        // verbatim and the command path handed it the caller's string.
+        let mut m = admitting_manager();
+        let peer = ident(RELAY);
+        let bare = "/ip4/192.0.2.1/tcp/1";
+        let suffixed = format!("{bare}/p2p/{RELAY}");
+
+        // Earned the way the settlement path earns it: an address that
+        // authenticated as somebody else goes into quarantine.
+        let ticket = placeholder_ticket(&m);
+        let used: Multiaddr = suffixed.parse().expect("valid");
+        settle_failed_dial(
+            &mut m,
+            ticket,
+            &DialError::WrongPeerId {
+                obtained: libp2p::PeerId::random(),
+                address: used,
+            },
+            0,
+        );
+        assert!(
+            !m.handle().load().address_dialable(&peer, bare, 0),
+            "precondition: the settlement bound the quarantine to the bare route"
+        );
+
+        // THE FIX. Before it, this admitted: the suffixed string was a
+        // key the quarantine had never seen.
+        let request = DialRequest {
+            peer: Some(peer.clone()),
+            address: canonical_dial_address(&peer, &suffixed),
+            origin: DialOrigin::Manual,
+        };
+        assert!(
+            m.handle().admit(&request, 0).is_err(),
+            "the suffixed spelling is suppressed by the quarantine the bare one earned"
+        );
+
+        // The control: a genuinely different route is still dialable, so
+        // the test is not passing because everything is refused.
+        let elsewhere = DialRequest {
+            peer: Some(peer.clone()),
+            address: canonical_dial_address(&peer, &format!("/ip4/192.0.2.9/tcp/1/p2p/{RELAY}")),
+            origin: DialOrigin::Manual,
+        };
+        assert!(
+            m.handle().admit(&elsewhere, 0).is_ok(),
+            "and a different route is unaffected"
         );
     }
 }

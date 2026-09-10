@@ -258,16 +258,21 @@ impl InFlightTickets {
 /// this function runs in no production path at all today — those two
 /// tests are what would say so if either premise stopped holding.
 ///
-/// The COMMAND and SCHEDULER paths are stripped by neither.
-/// One physical route reached both ways therefore occupies two
-/// `(peer, address)` entries: a quarantine earned on one does not
-/// suppress the other, and both spend `max_addresses` in a map whose
-/// bound is the point. That is F10's failure mode on the command path.
+/// The COMMAND and SCHEDULER paths USED to be stripped by neither, so
+/// one physical route reached both ways occupied two `(peer, address)`
+/// entries: a quarantine earned on one did not suppress the other, and
+/// both spent `max_addresses` in a map whose bound is the point. That
+/// was F10's failure mode on the command path, recorded on PR #74 as a
+/// deferred follow-up because stripping in `attempt_dial` changes what
+/// admission and quarantine are keyed by -- a security boundary, and a
+/// different change from resolving D1/D2/D3.
 ///
-/// **Not fixed here, and not this PR's to fix**: stripping in
-/// `attempt_dial` would change what admission and quarantine are keyed
-/// by, which is a security boundary and a different change from
-/// resolving D1/D2/D3. Recorded rather than left for rediscovery.
+/// **FIXED.** `attempt_dial` now canonicalizes before it builds the
+/// `DialRequest`, so all three paths agree on the key; see
+/// `runtime::dialing::canonical_dial_address` for what it strips and
+/// the three things it deliberately leaves alone. Every `attempt_dial`
+/// caller goes through it, which is why that is the boundary rather
+/// than each call site.
 #[must_use]
 pub fn strip_peer_suffix(address: &Multiaddr) -> String {
     let mut parts: Vec<_> = address.iter().collect();
