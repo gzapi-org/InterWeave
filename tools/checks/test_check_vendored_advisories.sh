@@ -155,10 +155,7 @@ expect_finding() {
     fi
 }
 
-# A LOCKFILE THAT DOES NOT SATISFY THE MANIFEST is exit 2, not a silent
-# re-resolve: the guard promises to leave the working tree alone, and an
-# earlier version's `--locked` fallback rewrote `Cargo.lock`.
-# AND A VENDORED CRATE THAT IS ACTUALLY CLEAN PASSES THROUGH THE PROBE.
+# A VENDORED CRATE THAT IS ACTUALLY CLEAN PASSES THROUGH THE PROBE.
 #
 # Every other exit-0 assertion in this suite BYPASSES the probe loop: the
 # `none` fixture above vendors nothing, and `ours` is skipped as
@@ -170,7 +167,13 @@ expect_finding() {
 #
 # `cfg-if` because it is tiny, stable and carries no RustSec advisory at
 # 1.0.0; if that ever stops being true this fixture fails LOUDLY with the
-# advisory named, which is the right way round.
+# advisory named, which is the right way round -- and it is a
+# VERSION-DATED FIXTURE in the opposite polarity to the four advisory ids
+# the guard's help lists, which is why that paragraph names it too.
+#
+# This block used to sit between the stale-lockfile paragraph below and the
+# code that paragraph describes, joined by an "AND" that made two unrelated
+# cases read as one. Moved above it instead. Review findings on PR #85.
 build_vendored clean cfg-if 1.0.0 inline
 out="$(bash "$GUARD" --root "$SANDBOX/clean" 2>&1)"; status=$?
 case $status in
@@ -186,6 +189,9 @@ else
     bad "  the success summary must report one checked tree: $out"
 fi
 
+# A LOCKFILE THAT DOES NOT SATISFY THE MANIFEST is exit 2, not a silent
+# re-resolve: the guard promises to leave the working tree alone, and an
+# earlier version's `--locked` fallback rewrote `Cargo.lock`.
 build_vendored stale atty 0.2.14 inline
 rm -f "$SANDBOX/stale/Cargo.lock"
 bash "$GUARD" --root "$SANDBOX/stale" >/dev/null 2>&1
@@ -880,10 +886,15 @@ if (cd "$zonepatch" && cargo generate-lockfile >/dev/null 2>&1); then
     # wrong. A reviewer measured that this fixture and the out-of-root one
     # produce observationally IDENTICAL output -- same exit code, same
     # selection stderr, same `die` -- so a fixture distinguishes neither from
-    # the other, and only the wording does. Deleting this clause left all 51
-    # assertions passing. Both clauses get a grep; the discriminator offered
-    # instead ("grep only where no fixture can reach the cause") does not
-    # separate them. Review finding on PR #85.
+    # the other, and only the wording does. Deleting this clause left EVERY
+    # assertion passing. (It said "all 51" -- correct when measured, stale
+    # as soon as assertions were added; the suite is larger now. A count in
+    # prose beside the thing it counts goes stale silently, which is the
+    # lesson `deny.toml` was corrected for twice in this same series.)
+    #
+    # Both clauses get a grep; the discriminator offered instead ("grep only
+    # where no fixture can reach the cause") does not separate them. Review
+    # findings on PR #85.
     if printf '%s' "$out" | grep -q 'landing zone AND is a workspace member'; then
         ok "  and the refusal still names this cause"
     else
@@ -895,14 +906,27 @@ fi
 
 # A VENDORED MANIFEST THAT IS A WORKSPACE ROOT RATHER THAN A PACKAGE.
 #
-# The fifth clause of the exit-4 message, and the one the suite's own rule
-# -- a fixture AND a grep per clause -- had neither for. Deleting it left
-# every assertion green. It is not hypothetical: it is the shape you get
-# from vendoring a multi-crate upstream, where `third_party/<up>/Cargo.toml`
-# is a virtual `[workspace]` and the real packages sit under it. The disk
-# scan enumerates every manifest under a vendored root, a virtual root is
-# never a package in the graph, and so it lands at the accounting floor.
-# Same argument that earned `norelease` a fixture. Review finding on PR #85.
+# The THIRD clause of the exit-4 message -- counted. An earlier version of
+# this comment called it the fifth, which put it AFTER the landing-zone
+# clause that the comment twelve lines up correctly calls the fourth, so the
+# two contradicted each other.
+#
+# Deleting the clause left every assertion green, which is why it gets a
+# fixture and a grep. THAT RULE IS NOT YET SATISFIED EVERYWHERE, and the
+# earlier version of this comment implied it was -- that this clause was the
+# last gap. Measured, clause by clause: (1) "behind a disabled feature" has
+# neither a fixture nor a grep, and `--all-features` has since narrowed it
+# to a patch reached only through a DEPENDENCY's non-default feature, which
+# nothing here constructs; (2) "patched but unused" has five fixtures and no
+# grep; (3) this one, now both; (4) the landing-zone clause, both; (5) the
+# out-of-root clause, both. Three of five.
+#
+# It is not hypothetical: it is the shape you get from vendoring a
+# multi-crate upstream, where `third_party/<up>/Cargo.toml` is a virtual
+# `[workspace]` and the real packages sit under it. The disk scan enumerates
+# every manifest under a vendored root, a virtual root is never a package in
+# the graph, and so it lands at the accounting floor. Same argument that
+# earned `norelease` a fixture. Review findings on PR #85.
 virtualroot="$SANDBOX/virtualroot"
 mkdir -p "$virtualroot/src" "$virtualroot/third_party/upstream/atty/src"
 {
