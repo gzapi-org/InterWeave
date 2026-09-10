@@ -71,7 +71,18 @@
 # `deny.toml` bars git dependencies, so vendoring is the sanctioned route
 # for such a crate and the case is reachable by design.
 #
-# TWO THINGS IT STILL CANNOT SEE, both recorded rather than papered over.
+# THREE THINGS IT STILL CANNOT SEE, all recorded rather than papered over.
+# A crate vendored INSIDE a first-party landing zone and left a workspace
+# member is skipped, and if it is reached as a plain path dependency --
+# neither under `third_party/` nor named by a patch table -- it is in none
+# of the three sources. That is inherent to a name-based rule rather than a
+# bug in it: `crates/vendored-atty/` listed in `[workspace].members` is
+# where cargo itself tells someone to put it. ADR-0051 Decision 6 and
+# `third_party/README.md` are the convention that prevents it, and
+# `license_exempt.txt` plus `check_license_headers.sh` are the only
+# mechanism standing there. An earlier version of this block said the
+# residual error was the noisy one, which read as "no silent hole remains".
+# Review finding on PR #85.
 # An `ignore` entry in `deny.toml` silences an advisory here as well, and
 # one added because a REGISTRY dependency carries it also removes the
 # vendored crate's only coverage -- so an ignore touching a crate that is
@@ -87,24 +98,41 @@
 #      RECOGNISED, which is a usage error rather than a finding; they
 #      share a code because a caller that mistyped a flag has not asked
 #      the question either
-#   2  the check could not be RUN: cargo-deny absent, the lockfile
-#      unusable, cargo-deny stopping before it produced a summary, or a
-#      recognised flag given without its VALUE. The last one is here
-#      rather than with the unknown flag above because nothing was asked
-#      and nothing could be: `--root` with no directory names no tree to
-#      sweep, which is the same state as an unusable lockfile and not the
-#      same as a typo. Review finding on PR #85 -- this table documented
-#      one argument error while the script had two — an
-#      unreachable database, a config it cannot read, a crash. Success is
-#      proved by that summary and never inferred from an absence of
-#      findings, because a guard that passes because it could not run is
-#      the shape this repository refuses — and this script has done it
-#      three times.
+#   2  the check could not be RUN, or could not ASK. Every cause, because
+#      an earlier version of this table listed three of them and a later
+#      edit orphaned half a sentence into the middle of the list:
+#        - cargo or cargo-deny absent;
+#        - the lockfile unusable, or a `.cargo/config*` cargo reads and
+#          `tomllib` cannot;
+#        - cargo-deny stopping before it produced a summary — an
+#          unreachable database, a config it cannot read, a crash;
+#        - a vendored tree the package graph does not name, or a local
+#          crate with no registry release at its declared version;
+#        - a vendored path that is not a directory, or one carrying a tab,
+#          which the row protocol cannot represent;
+#        - a local tree OUTSIDE this workspace root, which none of the
+#          three sources can reach;
+#        - a recognised flag given without its VALUE. This is here rather
+#          than with the unknown flag above because nothing was asked and
+#          nothing could be: `--root` with no directory names no tree to
+#          sweep, which is the unusable-lockfile state and not a typo.
+#      Success is proved by cargo-deny's own summary record and never
+#      inferred from an absence of findings, because a guard that passes
+#      because it could not run is the shape this repository refuses — and
+#      this script has done it three times.
 #
 # EXIT 2 IS AN ENVIRONMENT VERDICT, AND IT REDS A REQUIRED CONTEXT.
-# This guard and its self-test are the only checks in this repository
-# whose answer depends on a third-party service being reachable AND on
-# the current contents of the RustSec database. So a crates.io outage
+# WHAT IS NEW HERE IS THE CRATES.IO RESOLUTION, not the advisory database.
+# `check_dependencies.sh` already fetches RustSec and already treats a
+# fetch failure as an environment problem, and it runs in this same job
+# immediately above -- so on a RustSec outage that step reds FIRST and an
+# operator told to look here would be looking at the wrong one. An earlier
+# version of this paragraph claimed to be the only such check, which was
+# false about its own neighbour. Review finding on PR #85.
+#
+# The dependence this guard adds is `cargo generate-lockfile` per probe,
+# which needs the crates.io INDEX. `check_dependencies.sh` does not have
+# that, because it reads the committed lockfile. So a crates.io outage
 # makes `tree checks` and `tool self-tests` both fail on every pull
 # request in an ALLGREEN merge queue, with nothing in any diff to explain
 # it. That is deliberate -- a guard that passes because it could not ask
@@ -312,11 +340,21 @@ FIRST_PARTY = (
 first_party_roots = tuple(os.path.join(root, d) for d in FIRST_PARTY)
 
 rows = {}
+# COLLECTED, NOT DROPPED. A local-tree crate whose directory is outside the
+# workspace root used to `continue` silently -- so unless a patch table
+# happened to name it, it appeared in none of the three sources and the
+# guard printed "nothing is built from a local tree" and exited 0 with a
+# vulnerable crate compiled in. The help already said that shape is exit 2;
+# it was exit 0 whenever the path arrived as a plain dependency rather than
+# a patch. Fourth instance of this class, so it is collected and refused
+# rather than narrowed again. Review finding on PR #85.
+outside = []
 for pkg in meta.get("packages", []):
     if pkg.get("source") is not None:
         continue
     directory = os.path.realpath(os.path.dirname(pkg["manifest_path"]))
     if directory != root and not directory.startswith(root + os.sep):
+        outside.append(directory)
         continue
     in_zone = directory == root or any(
         directory == z or directory.startswith(z + os.sep) for z in first_party_roots
@@ -324,6 +362,15 @@ for pkg in meta.get("packages", []):
     if in_zone and pkg["id"] in members:
         continue
     rows[directory] = "\t".join((pkg["name"], pkg["version"], directory))
+
+if outside:
+    sys.stderr.write(
+        "".join("    outside the workspace root: " + o + "\n" for o in sorted(set(outside)))
+    )
+    # 6, not 5: the patch-table reader above uses 5 for an unreadable
+    # manifest, and the two are separate invocations whose codes should not
+    # look related.
+    sys.exit(6)
 
 unaccounted = sorted(shipped - rows.keys())
 if unaccounted:
@@ -334,7 +381,10 @@ sys.stdout.write("".join(r + "\n" for r in (rows[k] for k in sorted(rows))))
 case $? in
     0) ;;
     4)
-        die "a vendored tree this repository ships is absent from the package graph — behind a disabled feature, patched but unused, a manifest that is a workspace root rather than a package, or a path outside this workspace root, which is the one shape this guard cannot ask about. None of those is a reason to report success" 2
+        die "a vendored tree this repository ships is absent from the package graph — behind a disabled feature, patched but unused, a manifest that is a workspace root rather than a package, or classified first-party and skipped because it sits in a landing zone AND is a workspace member. None of those is a reason to report success" 2
+        ;;
+    6)
+        die "this workspace builds a crate from a local tree OUTSIDE its own root, so neither the registry probe nor the disk scan can reach it — vendor it under third_party/ instead, which is where Decision 6 of ADR-0051 puts it" 2
         ;;
     *) die "cannot read the package graph" 2 ;;
 esac
@@ -355,8 +405,18 @@ trap 'rm -rf "$WORK"' EXIT
 violations=0
 checked=0
 # Distinct from `checked`, which counts trees that COMPLETED a sweep. This
-# only numbers probe directories, so two vendored crates of the same name
-# cannot share one.
+# numbers probe directories so two vendored crates of the same name cannot
+# share one and leave each other a stale `Cargo.lock`.
+#
+# NO FIXTURE REACHES THIS, and saying so rather than claiming enforcement.
+# The `twins` case in the self-test puts two same-named trees in the tree,
+# but the second is unaccounted, so the mutual-accounting floor refuses
+# before the probe loop is entered -- reverting to a name-keyed directory
+# survives every fixture in the suite. Constructing a case that both
+# reaches the loop twice with one name AND observes the difference needs
+# two resolvable releases of one crate reached from two members, which is
+# more fixture than the hazard is worth. It is defence in depth against a
+# row-identity slip, not a tested invariant. Review finding on PR #85.
 row=0
 unaskable=()
 
