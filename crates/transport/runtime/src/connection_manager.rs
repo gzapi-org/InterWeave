@@ -3123,13 +3123,13 @@ mod tests {
         // RESTS ON, pinned in the crate that can actually break it.
         //
         // That guard counts production calls to `learn_address` and to the
-        // two methods named in the table below, because `learn_route`
+        // three methods named in the table below, because `learn_route`
         // canonicalizes the address and a path that skips it splits the
         // `(peer, address)` key between the address book and the quarantine
         // map. Its route table is hand-maintained, in another crate, against
         // a comment -- so a NEW method added HERE is invisible to it, and it
         // would go on passing while a caller wrote a raw address into the
-        // book. Three rounds of review found that table wrong in one
+        // book. Four rounds of review found that table wrong in one
         // direction or another. Review finding on PR #86.
         //
         // THE DELEGATION PATTERNS ARE COUNTED TOO, which a reviewer measured
@@ -3139,6 +3139,21 @@ mod tests {
         // name left that invisible in both guards at once. Each of those two
         // appears exactly once here, as its own declaration, so a second
         // occurrence is a new caller.
+        //
+        // A ROUTE THAT ONLY REMOVES IS STILL A ROUTE, which is the fourth
+        // round's finding. `record_permanent_address_failure_unadmitted`
+        // reaches `learn_address` through nothing, so describing this set as
+        // "what reaches `learn_address`" excluded it -- and it was dropped
+        // from both tables on exactly that reasoning. But its body is
+        // `self.book.get_mut(peer)` and then `known.remove(address)`: a BOOK
+        // lookup keyed by the caller's string. These guards exist so the book
+        // and the quarantine map key one route ONE way, and a raw address
+        // handed to that method does not mis-insert -- it fails to remove,
+        // and the undialable route then holds one of `max_addresses_per_peer`
+        // slots for the life of the process. So the set both guards enforce
+        // is every method that keys the book or the quarantine from a
+        // caller-supplied address, which is WIDER than the set that reaches
+        // `learn_address`. Review finding on PR #86.
         //
         // Reads this file's own source, so it cannot see a call built by a
         // macro or reached through a trait object. It cuts at EVERY
@@ -3177,13 +3192,16 @@ mod tests {
             // a second occurrence is a new transitive route.
             ("record_failure(", 1),
             ("record_address_failure_unadmitted(", 1),
+            // Declaration only; reaches `learn_address` through nothing and
+            // keys the book by removing from it instead.
+            ("record_permanent_address_failure_unadmitted(", 1),
         ] {
             let calls = production.matches(pattern).count();
             assert_eq!(
                 calls, expected,
                 "this file holds `{pattern}` {calls} time(s), expected {expected}. \
-                 If the count ROSE, a new path here reaches `learn_address`: add it \
-                 to the route table in \
+                 If the count ROSE, a new path here keys the book or the quarantine \
+                 from a caller-supplied address: add it to the route table in \
                  `no_production_path_learns_an_address_without_canonicalizing` \
                  (interweave-transport-libp2p) and raise the number here, or the \
                  address book and the quarantine map will key one route two ways. \
