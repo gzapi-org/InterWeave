@@ -187,16 +187,23 @@ build_vendored() {
 # NO COUNT AND NO LIST. Two versions of this comment tried one. The first
 # said exit 2 is "only ever an environment problem", which is false of the
 # guard. The second named "four structural causes, as its help lists" -- the
-# help lists seven bullets, one of those four is asserted by no fixture at
-# all, and the enumeration missed the one structural cause these fixtures CAN
-# reach.
+# help lists seven bullets; of those four, TWO are reached by no fixture here
+# (a vendored path that is not a directory or carries a tab, and a
+# `.cargo/config*` this guard cannot read, which `bomcfg` asserts is NOT
+# taken rather than reaching); and the enumeration missed the one structural
+# cause these fixtures CAN reach.
 #
 # THAT ONE IS `unaskable`. A pinned version that no longer resolves from the
 # registry -- yanked, or withdrawn -- makes the probe's own
 # `cargo generate-lockfile` fail, and the guard then exits 2 on a sweep it
-# could not complete. Every fixture here pins an exact version and
-# `deny.toml` sets `yanked = "deny"` because yanks happen, so this is
-# reachable rather than theoretical. It is a SUPPLY-CHAIN signal and not an
+# could not complete. Every fixture here pins an exact version, and
+# `deny.toml` bars git dependencies, so a yank is the one way a pinned
+# registry release stops resolving -- which is what makes this reachable
+# rather than theoretical. `deny.toml`'s own `yanked = "deny"` is NOT part of
+# the mechanism and was cited here as though it were: that setting judges a
+# yanked crate already present in a resolved lockfile, and on this path the
+# resolution that would have produced the lockfile is what failed, so
+# cargo-deny is never reached. It is a SUPPLY-CHAIN signal and not an
 # environment one: re-pin the fixture, do not relax the assertion.
 #
 # Otherwise exit 2 here is an environment failure, and the baseline above
@@ -211,13 +218,13 @@ expect_finding() {
         1) ok "$label" ;;
         2) bad "$label — exit 2. The baseline reached the database, so this is \
 either an environment failure since then or a version that no longer resolves \
-(yanked or withdrawn), which is a supply-chain signal: read the output above" ;;
+(yanked or withdrawn), which is a supply-chain signal. The guard said: $out" ;;
         *) bad "$label — expected exit 1, got $status" ;;
     esac
     if [[ "$out" == *"$id"* ]]; then
         ok "  and $id is reported"
     else
-        bad "  $id must appear in the output"
+        bad "  $id must appear in the output, which was: $out"
     fi
 }
 
@@ -659,15 +666,25 @@ if (cd "$SANDBOX/vulnerable" && cargo generate-lockfile >/dev/null 2>&1); then
     alone_status=$?
     if [ "$alone_status" -eq 0 ]; then
         ok "cargo-deny alone still misses a path-patched crate"
-    # BROAD HERE, deliberately, where the baseline above is narrow. The
-    # baseline pins one id because its `atty` is a REGISTRY dependency, so an
-    # advisory on anything beneath it would satisfy a loose match through the
-    # inclusion graph. This fixture's `atty` is a path stub with no
-    # dependencies, so there is nothing beneath it to mis-match -- and the
-    # question this branch asks is whether cargo-deny named ANY advisory for a
-    # path-patched crate, so pinning one id would discard the signal if it
-    # named the other. Review finding on PR #85.
-    elif [[ "$alone_out" == *RUSTSEC-* ]]; then
+    # EITHER ATTY ID, and not a bare `RUSTSEC-`. The question this branch asks
+    # is whether cargo-deny named an advisory FOR THE PATCHED CRATE, so it must
+    # accept both of atty's -- pinning one would discard the signal if
+    # cargo-deny named the other -- and it must accept nothing else.
+    #
+    # A BARE `RUSTSEC-` MATCHES ON EVERY RUN. `build_vendored` copies the
+    # repository's `deny.toml` into the fixture, `paste` is not in this
+    # fixture's two-crate graph, and cargo-deny then warns that the ignore
+    # entry for it was never encountered -- rendering the config line, and so
+    # the literal id, into the output. Measured: the blob carries
+    # `RUSTSEC-2024-0436` with status 0. Only the status-0 arm above keeps the
+    # broad pattern from firing today, so a future non-zero exit for any
+    # unrelated reason would print "cargo-deny now reports path-patched
+    # crates" and invite someone to delete this guard.
+    #
+    # This is the mechanism the baseline's own comment names, one screen up,
+    # and the broad match here was written without applying it. Review
+    # findings on PR #85.
+    elif [[ "$alone_out" == *RUSTSEC-2021-0145* || "$alone_out" == *RUSTSEC-2024-0375* ]]; then
         bad "cargo-deny now reports path-patched crates — check before deleting this guard"
     else
         skip_or_fail "cargo-deny failed on the vulnerable fixture without naming an advisory, so this says nothing about whether it still misses one"
