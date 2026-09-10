@@ -3122,17 +3122,20 @@ mod tests {
         // THE PREMISE `interweave-transport-libp2p`'s CANONICALIZATION GUARD
         // RESTS ON, pinned in the crate that can actually break it.
         //
-        // That guard counts production calls to `learn_address` and to most
-        // of the other methods named in the table below. NOT ALL OF THEM, and
-        // the two sentences this has had were both wrong about it -- one gave
-        // a count that went stale, the next said "every other method", which
-        // is false for `record_address_failure`: that one is the POLICY's
-        // method rather than this type's, and it was in no sibling table at
-        // all. A review found the hole behind the sentence -- `mod.rs` builds
-        // a `ConnectionPolicy` in production, so a direct call over there
-        // would have been counted by neither guard -- and it is now in the
-        // sibling table with an expectation of zero for every file. `.book`
-        // is not a method and is counted only here. Because `learn_route`
+        // That guard counts production calls to `learn_address` and to every
+        // other METHOD named in the table below -- including, since the commit
+        // that wrote this sentence, `record_address_failure` at an expectation
+        // of zero. That one is the POLICY's method rather than this type's and
+        // was in no sibling table at all: `mod.rs` builds a `ConnectionPolicy`
+        // in production, so a direct call over there was counted by neither
+        // guard, which a review found behind an earlier version of this
+        // sentence claiming otherwise. `.book` is the one entry below that the
+        // sibling does not count, and it is a field rather than a method.
+        //
+        // No count in this sentence. The first version gave one and it went
+        // stale; the second said "every other method" while the exception was
+        // live; the third said "NOT ALL OF THEM" in the same commit that
+        // removed the exception. Because `learn_route`
         // canonicalizes the address and a path that skips it splits the
         // `(peer, address)` key between the address book and the quarantine
         // map. Its route table is hand-maintained, in another crate, against
@@ -3255,8 +3258,12 @@ mod tests {
             // test in the tree goes red -- the measurement above was a planted
             // tree, not a suite. `dialing.rs` has meta-tests for its module
             // parser; there is no equivalent for this refusal in any of the
-            // four guards, and saying so beats implying one. Review findings
-            // on PR #86.
+            // four guards, and saying so beats implying one.
+            //
+            // ONE CAVEAT, since the point is precision: deleting the `assert!`
+            // alone leaves `head` bound and unused, which CI's
+            // `clippy -- -D warnings` rejects. Deleting both lines is what
+            // nothing catches. Review findings on PR #86.
             let head: &str = after.split_once('{').map_or(after, |(h, _)| h);
             assert!(
                 !head.contains(';'),
