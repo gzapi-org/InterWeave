@@ -123,7 +123,17 @@ where
     deserializer.deserialize_str(Visitor)
 }
 
-/// Exactly the words a phrase may have, refused as they arrive.
+/// AT MOST the words a phrase may have, refused as they arrive.
+///
+/// Not "exactly": a SHORT phrase deserializes here and is refused by
+/// [`RecoveryRecord::validate`], which is the only place the count is
+/// checked for equality. This title said "Exactly" while the `expecting`
+/// string forty-four lines below had already been corrected to "at most",
+/// with a comment saying in as many words that exactness is a claim this
+/// function does not make -- the pair went stale inside one function.
+/// What this deserializer holds is the UPPER bound, which is what keeps a
+/// hostile document from allocating: the lower bound is a validation
+/// concern and has no attacker value. Review finding on PR #86.
 fn bounded_words<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
