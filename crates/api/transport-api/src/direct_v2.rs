@@ -258,10 +258,13 @@ impl DirectMessageV2 {
     ///
     /// THE RETURNED LENGTH IS THE SENDER'S CLAIM and the payload ceiling
     /// is deliberately NOT applied to it -- reporting a value above the
-    /// ceiling is the entire reason this is public. So never size an
-    /// allocation from it. The only correct use is comparing it against a
-    /// ceiling the caller owns, which is what `parse_inbound` does; the
-    /// bytes themselves come from `decode`, which does enforce the limit.
+    /// ceiling is the entire reason this is public. So do not size an
+    /// allocation from it: that is an instruction to the next caller, not
+    /// an invariant anything here enforces, and no guard counts the call
+    /// sites. The only correct use is comparing it against a ceiling the
+    /// caller owns, which is what `parse_inbound` does; the bytes
+    /// themselves come from `decode`, which does enforce the limit. One
+    /// caller today, `direct_codec.rs`'s `reason`, and it compares.
     ///
     /// # Errors
     /// Returns the [`FrameError`] naming the first field that fails,
